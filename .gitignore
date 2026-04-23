@@ -25,6 +25,9 @@ apps/jetbrains-plugin/.intellijPlatform/
 # VS Code plugin build artifacts
 apps/vsc-plugin/*.vsix
 
+# CLI build artifacts
+apps/cli/*.tgz
+
 # Logs
 *.log
 npm-debug.log*
