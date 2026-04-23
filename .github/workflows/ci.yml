@@ -9,6 +9,11 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  # Opt into Node.js 24 runtime for GitHub JavaScript actions — silences the
+  # deprecation warning for actions/checkout@v4, actions/setup-node@v4 etc.
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   commitlint:
     name: Lint PR commit messages
