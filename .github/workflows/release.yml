@@ -26,6 +26,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Extract version from tag
         id: version
@@ -134,26 +136,61 @@ jobs:
           ZIP=$(ls apps/jetbrains-plugin/build/distributions/*.zip | head -n 1)
           echo "zip=$ZIP" >> "$GITHUB_OUTPUT"
 
+      # --- Auto-generate the changelog from conventional commits -------------
+
+      - name: Generate release notes from commits (git-cliff)
+        uses: orhun/git-cliff-action@v4
+        with:
+          config: cliff.toml
+          args: --current --strip all
+        env:
+          OUTPUT: RELEASE_NOTES.md
+
+      - name: Prepend release notes to each app's CHANGELOG.md on main
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.version.outputs.version }}"
+
+          if [ ! -s RELEASE_NOTES.md ]; then
+            echo "git-cliff produced no release notes (no conventional commits between tags). Skipping CHANGELOG commit-back."
+            exit 0
+          fi
+
+          # Drop the in-flight version bumps so we can switch to main cleanly.
+          git restore .
+          git fetch origin main
+          git checkout main
+
+          for APP in cli vsc-plugin jetbrains-plugin; do
+            FILE="apps/$APP/CHANGELOG.md"
+            awk -v notes_file="RELEASE_NOTES.md" '
+              BEGIN { inserted = 0 }
+              /^## \[/ && !inserted {
+                while ((getline line < notes_file) > 0) print line
+                print ""
+                inserted = 1
+              }
+              { print }
+            ' "$FILE" > "$FILE.new"
+            mv "$FILE.new" "$FILE"
+          done
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add apps/*/CHANGELOG.md
+          if git diff --cached --quiet; then
+            echo "Nothing new to add to CHANGELOGs — maybe all commits between tags were skippable chores."
+            exit 0
+          fi
+          git commit -m "chore(changelog): notes for v$VERSION [skip ci]"
+          git push origin main
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           name: v${{ steps.version.outputs.version }}
-          generate_release_notes: true
-          body: |
-            CodeAgent Mobile clients **v${{ steps.version.outputs.version }}**.
-
-            ### Registries
-
-            - npm: https://www.npmjs.com/package/codeam-cli/v/${{ steps.version.outputs.version }}
-            - VS Code Marketplace: https://marketplace.visualstudio.com/items?itemName=CodeAgentMobile.codeagent-mobile
-            - Open VSX: https://open-vsx.org/extension/CodeAgentMobile/codeagent-mobile
-            - JetBrains Marketplace: https://plugins.jetbrains.com/plugin/30697-codeagent-mobile *(uploaded manually)*
-
-            ### Changelogs
-
-            - [codeam-cli](https://github.com/edgar-durand/codeagent-mobile-clients/blob/v${{ steps.version.outputs.version }}/apps/cli/CHANGELOG.md)
-            - [VS Code plugin](https://github.com/edgar-durand/codeagent-mobile-clients/blob/v${{ steps.version.outputs.version }}/apps/vsc-plugin/CHANGELOG.md)
-            - [JetBrains plugin](https://github.com/edgar-durand/codeagent-mobile-clients/blob/v${{ steps.version.outputs.version }}/apps/jetbrains-plugin/CHANGELOG.md)
+          body_path: RELEASE_NOTES.md
+          append_body: true
           files: |
             apps/cli/codeam-cli-${{ steps.version.outputs.version }}.tgz
             apps/vsc-plugin/codeagent-mobile-${{ steps.version.outputs.version }}.vsix

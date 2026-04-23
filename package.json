@@ -25,6 +25,12 @@
     "build:cli": "cd apps/cli && npm run build",
     "dev:cli": "cd apps/cli && npm run dev",
     "test:cli": "cd apps/cli && npm run test",
-    "publish:cli": "cd apps/cli && npm publish"
+    "publish:cli": "cd apps/cli && npm publish",
+    "commitlint": "commitlint --edit",
+    "use-commit-template": "git config commit.template .gitmessage && echo 'Configured commit.template = .gitmessage for this repo. Run: git commit (without -m) to see it.'"
+  },
+  "devDependencies": {
+    "@commitlint/cli": "^19.5.0",
+    "@commitlint/config-conventional": "^19.5.0"
   }
 }

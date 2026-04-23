@@ -1,0 +1,53 @@
+# <type>(<scope>): <short summary>
+#
+# │       │             │
+# │       │             └─⫸ Imperative, lowercase. "add foo", not "added foo".
+# │       │
+# │       └─⫸ Scope (optional). One of:
+# │             cli | vsc-plugin | jetbrains-plugin | shared | workflow | meta | deps
+# │
+# └─⫸ Type (required). One of:
+#       feat      → ✨  Added section of the changelog
+#       fix       → 🐛  Fixed section
+#       refactor  → 🔧  Changed section
+#       perf      → ⚡  Performance section
+#       docs      → 📝  Documentation section
+#       build     → 🔨  Build section
+#       ci        → 🤖  CI section
+#       test      → 🧪  Tests section
+#       chore     → 🧹  Chore section
+#       style     → 🎨  skipped from changelog (formatting only)
+#
+# Append "!" for breaking changes: feat(cli)!: drop Node 18 support
+# Or add "BREAKING CHANGE: …" in the footer.
+#
+# <empty line>
+#
+# <body — optional>
+# Explain *why* this change is needed, not *what* it does.
+# Wrap at 72 chars. Leave a blank line between summary and body.
+#
+# <empty line>
+#
+# <footer — optional>
+# BREAKING CHANGE: <short description of incompatible change>
+# Fixes: #<issue>
+# Refs: #<issue>
+#
+# ── Examples ────────────────────────────────────────────────────────
+#
+#   feat(cli): add --skip-pair flag to start without a prior pair step
+#
+#   fix(vsc-plugin): prevent duplicate terminal after auto-update
+#
+#   refactor(shared): collapse MODEL_PRICING tables into @codeagent/shared
+#
+#   feat(cli)!: drop Node 18 support
+#
+#       The npm tarball still works on Node 18 at runtime but the test
+#       suite and build tools now require Node 20. Users on Node 18
+#       should upgrade before installing this release.
+#
+#       BREAKING CHANGE: minimum Node version raised to 20.
+#
+# ────────────────────────────────────────────────────────────────────

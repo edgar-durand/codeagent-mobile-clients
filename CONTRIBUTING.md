@@ -48,19 +48,54 @@ cd codeagent-mobile-clients
 
 Prereqs: Node ≥ 18, JDK 17 for the JetBrains plugin, and Python 3 on macOS / Linux for the CLI's PTY helper.
 
+## Commit message convention
+
+This repo uses [Conventional Commits](https://www.conventionalcommits.org/). Every commit message must look like:
+
+```
+<type>(<scope>): <short summary>
+```
+
+**Allowed types:** `feat`, `fix`, `refactor`, `perf`, `docs`, `build`, `ci`, `test`, `chore`, `style`, `revert`.
+
+**Allowed scopes:** `cli`, `vsc-plugin`, `jetbrains-plugin`, `shared`, `workflow`, `meta`, `deps`, `release`, `changelog`.
+
+**Breaking changes:** add `!` after the type or scope (e.g., `feat(cli)!: drop Node 18 support`) **or** include a `BREAKING CHANGE:` footer.
+
+The message type drives the [automated changelog](#releases) — `feat` → *Added*, `fix` → *Fixed*, `refactor` → *Changed*, `perf` → *Performance*, `docs` → *Documentation*, `build`/`ci` → *Build*/*CI*, `style` is skipped, and any commit marked breaking gets a `⚠️ BREAKING CHANGE` tag.
+
+**Set up the commit template locally** so `git commit` shows the full reference:
+
+```bash
+npm run use-commit-template
+```
+
+This runs `git config commit.template .gitmessage` inside this repo only. Every PR is gated by `commitlint` in CI — non-conforming commit messages will fail the lint check.
+
 ## Pull request checklist
 
-- [ ] PR title follows the convention: `<type>(<scope>): <short description>` — types: `feat`, `fix`, `chore`, `docs`, `refactor`, `build`, `test`; scopes: `cli`, `vsc-plugin`, `jetbrains-plugin`, `workflow`, `meta`.
-- [ ] CHANGELOG updated for the affected app(s).
+- [ ] Every commit follows the convention above (enforced by CI).
 - [ ] `npm run test` (CLI) passes, and builds succeed for any touched app.
 - [ ] No secrets or personal tokens committed. Never commit `.env`.
 - [ ] If the PR changes wire-protocol shapes (chunks, commands), the other clients still work with the old shape or are updated in the same PR.
 
+> You do **not** need to update `CHANGELOG.md` by hand — the release pipeline auto-generates entries from commit messages.
+
 ## Releases
 
-Releases are tag-triggered. Pushing a tag `vX.Y.Z` publishes `codeam-cli@X.Y.Z` to npm and `CodeAgentMobile.codeagent-mobile@X.Y.Z` to the VS Code Marketplace + Open VSX. The JetBrains plugin is currently released manually from the built `.zip` artifact.
+Releases are tag-triggered. Pushing a tag `vX.Y.Z`:
 
-See [.github/workflows/release.yml](.github/workflows/release.yml) for the full pipeline. Only maintainers with access to the publishing secrets can cut releases.
+1. Patches the version across every package manifest (CLI `package.json`, VS Code `package.json`, JetBrains `build.gradle.kts` + `plugin.xml`).
+2. Runs the CLI test suite.
+3. Builds and packages all three clients.
+4. Publishes `codeam-cli@X.Y.Z` to npm, and `CodeAgentMobile.codeagent-mobile@X.Y.Z` to both the VS Code Marketplace and Open VSX.
+5. Runs [git-cliff](https://git-cliff.org/) against the commits between the previous tag and this one to produce a Keep-a-Changelog section.
+6. Prepends that section to each app's `CHANGELOG.md` and commits the update back to `main` with `[skip ci]`.
+7. Creates a GitHub Release using the same generated notes, with the `.tgz`, `.vsix`, and JetBrains `.zip` attached.
+
+The JetBrains plugin is built and attached to the GitHub Release, but the upload to the JetBrains Marketplace stays manual for now.
+
+See [.github/workflows/release.yml](.github/workflows/release.yml) for the full pipeline. Only maintainers with access to the publishing secrets (`NPM_TOKEN`, `VSCE_PAT`, `OVSX_TOKEN`) can cut releases.
 
 ## Code of conduct
 
