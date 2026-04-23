@@ -37,10 +37,13 @@ describe('makeConfig', () => {
     expect(cfg.getConfig().activeSessionId).toBe('s1');
   });
 
-  it('addSession does not overwrite an existing activeSessionId', () => {
+  it('addSession promotes the newly paired session to active', () => {
+    // Rationale: pair → start should use the most recently paired session's
+    // pluginId, so each addSession takes over as the active one (see
+    // src/config.ts:addSession).
     cfg.addSession({ id: 's1', userName: 'A', userEmail: 'a@a.com', plan: 'FREE', pairedAt: 1000 });
     cfg.addSession({ id: 's2', userName: 'B', userEmail: 'b@b.com', plan: 'PRO', pairedAt: 2000 });
-    expect(cfg.getConfig().activeSessionId).toBe('s1');
+    expect(cfg.getConfig().activeSessionId).toBe('s2');
   });
 
   it('removeSession deletes the session and promotes next as active', () => {
