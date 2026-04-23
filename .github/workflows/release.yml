@@ -1,0 +1,160 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+# Tag vX.Y.Z → publishes codeam-cli@X.Y.Z to npm and the VS Code extension
+# X.Y.Z to the VS Code Marketplace and Open VSX, and drafts a GitHub Release
+# with both artifacts attached. The JetBrains plugin is built here for
+# archival attachment to the Release but is uploaded to the JetBrains
+# Marketplace manually for now.
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Build, publish, and draft release
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Extract version from tag
+        id: version
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::Tag ${GITHUB_REF_NAME} does not match vMAJOR.MINOR.PATCH[-prerelease]"
+            exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Publishing version: $VERSION"
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 18
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Setup Java (for JetBrains plugin archive build)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      # --- Sync version across all package manifests -------------------------
+
+      - name: Patch CLI version
+        working-directory: apps/cli
+        run: npm version "${{ steps.version.outputs.version }}" --no-git-tag-version --allow-same-version
+
+      - name: Patch VS Code plugin version
+        working-directory: apps/vsc-plugin
+        run: npm version "${{ steps.version.outputs.version }}" --no-git-tag-version --allow-same-version
+
+      - name: Patch JetBrains plugin version
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          sed -i -E "s/^version = \"[^\"]+\"/version = \"$VERSION\"/" apps/jetbrains-plugin/build.gradle.kts
+          sed -i -E "s|<version>[^<]+</version>|<version>$VERSION</version>|" apps/jetbrains-plugin/src/main/resources/META-INF/plugin.xml
+
+      # --- Install + typecheck + test ---------------------------------------
+
+      - name: Install workspace dependencies
+        run: npm ci
+
+      - name: CLI typecheck
+        working-directory: apps/cli
+        run: npm run typecheck
+
+      - name: CLI tests
+        working-directory: apps/cli
+        run: npm run test
+
+      # --- Build + package --------------------------------------------------
+
+      - name: Build CLI
+        working-directory: apps/cli
+        run: npm run build
+
+      - name: Build VS Code plugin
+        working-directory: apps/vsc-plugin
+        run: npm run build
+
+      - name: Package VS Code plugin (.vsix)
+        working-directory: apps/vsc-plugin
+        run: |
+          npx @vscode/vsce package --no-dependencies --out "codeagent-mobile-${{ steps.version.outputs.version }}.vsix"
+
+      - name: Pack CLI tarball (for GitHub Release artifact)
+        working-directory: apps/cli
+        run: npm pack
+
+      - name: Build JetBrains plugin (archive only)
+        working-directory: apps/jetbrains-plugin
+        run: ./gradlew clean buildPlugin
+
+      # --- Publish ----------------------------------------------------------
+
+      - name: Publish CLI to npm
+        working-directory: apps/cli
+        run: npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Publish VS Code plugin to Marketplace
+        working-directory: apps/vsc-plugin
+        run: |
+          npx @vscode/vsce publish --no-dependencies --pat "$VSCE_PAT" \
+            --packagePath "codeagent-mobile-${{ steps.version.outputs.version }}.vsix"
+        env:
+          VSCE_PAT: ${{ secrets.VSCE_PAT }}
+
+      - name: Publish VS Code plugin to Open VSX
+        working-directory: apps/vsc-plugin
+        run: |
+          npx ovsx publish --no-dependencies --pat "$OVSX_TOKEN" \
+            "codeagent-mobile-${{ steps.version.outputs.version }}.vsix"
+        env:
+          OVSX_TOKEN: ${{ secrets.OVSX_TOKEN }}
+
+      # --- GitHub Release ---------------------------------------------------
+
+      - name: Locate JetBrains plugin archive
+        id: jb
+        run: |
+          ZIP=$(ls apps/jetbrains-plugin/build/distributions/*.zip | head -n 1)
+          echo "zip=$ZIP" >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: v${{ steps.version.outputs.version }}
+          generate_release_notes: true
+          body: |
+            CodeAgent Mobile clients **v${{ steps.version.outputs.version }}**.
+
+            ### Registries
+
+            - npm: https://www.npmjs.com/package/codeam-cli/v/${{ steps.version.outputs.version }}
+            - VS Code Marketplace: https://marketplace.visualstudio.com/items?itemName=CodeAgentMobile.codeagent-mobile
+            - Open VSX: https://open-vsx.org/extension/CodeAgentMobile/codeagent-mobile
+            - JetBrains Marketplace: https://plugins.jetbrains.com/plugin/30697-codeagent-mobile *(uploaded manually)*
+
+            ### Changelogs
+
+            - [codeam-cli](https://github.com/edgar-durand/codeagent-mobile-clients/blob/v${{ steps.version.outputs.version }}/apps/cli/CHANGELOG.md)
+            - [VS Code plugin](https://github.com/edgar-durand/codeagent-mobile-clients/blob/v${{ steps.version.outputs.version }}/apps/vsc-plugin/CHANGELOG.md)
+            - [JetBrains plugin](https://github.com/edgar-durand/codeagent-mobile-clients/blob/v${{ steps.version.outputs.version }}/apps/jetbrains-plugin/CHANGELOG.md)
+          files: |
+            apps/cli/codeam-cli-${{ steps.version.outputs.version }}.tgz
+            apps/vsc-plugin/codeagent-mobile-${{ steps.version.outputs.version }}.vsix
+            ${{ steps.jb.outputs.zip }}

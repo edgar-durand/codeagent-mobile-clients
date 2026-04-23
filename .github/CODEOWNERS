@@ -1,0 +1,7 @@
+# Default reviewer for everything
+* @edgar-durand
+
+# Release pipeline + governance require maintainer review
+/.github/ @edgar-durand
+/LICENSE @edgar-durand
+/SECURITY.md @edgar-durand

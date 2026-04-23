@@ -1,0 +1,42 @@
+name: Feature request
+description: Suggest a capability or improvement for one of the clients.
+labels: [enhancement]
+body:
+  - type: dropdown
+    id: app
+    attributes:
+      label: Which client would this affect?
+      options:
+        - codeam-cli
+        - VS Code / Cursor / Windsurf extension
+        - JetBrains plugin
+        - All of the above
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem are you trying to solve?
+      description: Describe the user pain or missing capability. Avoid jumping straight to an implementation.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: What would you like to see change? Rough sketches, mockups, or CLI signatures all welcome.
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Final checks
+      options:
+        - label: I searched existing issues and discussions for this idea
+          required: true

@@ -1,0 +1,79 @@
+name: Bug report
+description: Something is broken in the CLI or one of the IDE plugins.
+labels: [bug]
+body:
+  - type: dropdown
+    id: app
+    attributes:
+      label: Which client is affected?
+      options:
+        - codeam-cli
+        - VS Code / Cursor / Windsurf extension
+        - JetBrains plugin
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Run `codeam --version` or check the extension/plugin page.
+      placeholder: 2.0.0
+    validations:
+      required: true
+
+  - type: input
+    id: os
+    attributes:
+      label: Operating system
+      placeholder: "macOS 14.4 / Ubuntu 22.04 / Windows 11"
+    validations:
+      required: true
+
+  - type: input
+    id: ide
+    attributes:
+      label: IDE version (plugin bugs only)
+      placeholder: "VS Code 1.95 / IntelliJ IDEA 2024.1 / Cursor 0.42"
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Run `codeam pair`
+        2. Enter the code in the mobile app
+        3. Send "hello" from the phone
+        4. …
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect to happen?
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: What actually happened?
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs (CLI stderr, VS Code "CodeAgent Mobile" output channel, or IDE log)
+      render: shell
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Final checks
+      options:
+        - label: I searched existing issues and could not find a duplicate
+          required: true
+        - label: I am on the latest version of the affected client
+          required: true

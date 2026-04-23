@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/edgar-durand/codeagent-mobile-clients/security/advisories/new
+    about: Please report security issues privately, not as a public issue.
+  - name: Account / backend / mobile-app support
+    url: https://www.codeagent-mobile.com
+    about: Login problems, billing, and mobile-app bugs are handled through the in-app Help & FAQ, not this repo.
