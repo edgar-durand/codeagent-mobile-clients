@@ -110,7 +110,12 @@ npm run use-commit-template      # one-time: configure git to use .gitmessage
 `packages/shared/src/` owns the *protocol* code — anything the CLI and the VS Code extension must agree on byte-for-byte:
 
 - `protocol/parseChrome.ts` — detects TUI chrome lines (spinners, bullets, tree connectors, status lines) and converts them into `ChromeStep` chunks.
+- `protocol/renderToLines.ts` — virtual terminal that turns raw PTY / shell-integration bytes into a clean array of screen lines. Handles CSI cursor moves, erase, alternate-screen, CR/LF quirks. Feeds every downstream parser.
+- `protocol/selector.ts` — `detectSelector` (numbered `❯ 1.` style) and `detectListSelector` (`  ❯ label` list style) for Claude's interactive prompts. Both operate on the output of `renderToLines`.
+- `protocol/filterChrome.ts` — strips TUI chrome (spinners, status bars, thinking frames, user-echo lines) so only Claude's conversation text reaches the mobile/web client.
 - `models/pricing.ts` — Anthropic `MODEL_PRICING` and `MODEL_CONTEXT_WINDOW` tables plus `getPricing()` / `getContextWindow()` lookup helpers.
+
+Tests live next to the modules in `packages/shared/__tests__/` and run via `(cd packages/shared && npm run test)` or are picked up by the CI job automatically.
 
 **Critical rule:** when you touch parsing logic, pricing, or anything shared, change it *only* in `packages/shared`. Both consumers import through `@codeagent/shared`. tsup (CLI) and esbuild (VS Code) inline the imports at build time so runtime consumers don't have a separate dependency.
 

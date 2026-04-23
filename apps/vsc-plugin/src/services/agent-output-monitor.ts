@@ -218,8 +218,9 @@ export class AgentOutputMonitor {
   var promptTimer = null;
   var failCount = 0;
 
-  window.__codeagent = { version: "${version}", loaded: true, serverReady: false, chatFound: false, editorFound: false, ide: "unknown" };
-  console.error(TAG, "Observer v${version} LOADED");
+  // Debug state is exposed on window.__codeagent for inspection from DevTools.
+  // No console logs — the extension host's OutputChannel is the canonical log.
+  window.__codeagent = { version: "${version}", loaded: true, serverReady: false, chatFound: false, editorFound: false, ide: "unknown", lastError: null };
 
   // Multi-IDE editor selectors (order matters: most specific first)
   var EDITOR_SELECTORS = [
@@ -258,15 +259,17 @@ export class AgentOutputMonitor {
     if (failCount > 3 && serverReady) {
       serverReady = false;
       window.__codeagent.serverReady = false;
-      console.error(TAG, "Server disconnected, waiting for reconnect...");
+      window.__codeagent.lastError = "disconnected";
       beginWaitForServer();
     }
   }
 
   function submitPrompt(text) {
-    console.warn(TAG, "submitPrompt:", text.substring(0, 60));
     var editor = findEditor();
-    if (!editor) { console.error(TAG, "No editor found!"); return false; }
+    if (!editor) {
+      window.__codeagent.lastError = "no-editor-found";
+      return false;
+    }
     editor.focus();
 
     var sel = window.getSelection();
@@ -299,7 +302,6 @@ export class AgentOutputMonitor {
       .then(function(data) {
         if (data.prompt) {
           failCount = 0;
-          console.warn(TAG, "Got prompt:", data.prompt.substring(0, 40));
           submitPrompt(data.prompt);
         }
       })
@@ -322,7 +324,7 @@ export class AgentOutputMonitor {
           waitingForServer = false;
           failCount = 0;
           window.__codeagent.serverReady = true;
-          console.error(TAG, "Server CONNECTED on port " + PORT);
+          window.__codeagent.lastError = null;
           if (chatEl) { captureTimer = setInterval(sendCapture, 2000); }
           promptTimer = setInterval(pollPrompts, 500);
           if (chatEl) { sendCapture(); }
@@ -359,7 +361,6 @@ export class AgentOutputMonitor {
 
     window.__codeagent.chatFound = !!chatEl;
     window.__codeagent.editorFound = hasEditor;
-    console.error(TAG, "IDE=" + ide + " chat=" + !!chatEl + " editor=" + hasEditor);
 
     if (chatEl) {
       if (obs) { try { obs.disconnect(); } catch(e) {} }

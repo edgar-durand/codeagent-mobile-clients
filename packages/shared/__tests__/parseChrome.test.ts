@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { isChromeLine, parseChromeLine } from '../src/services/parseChrome';
+import { isChromeLine, parseChromeLine } from '../src';
 
 describe('isChromeLine', () => {
   it('returns true for spinner-prefixed lines', () => {
