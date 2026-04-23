@@ -96,15 +96,21 @@ npm run build:jetbrains-plugin
 
 ---
 
-## Releasing
+## Releases & changelogs
 
-Each app ships independently and keeps its own version number:
+Each app ships independently and keeps its own version number and changelog:
 
-| App | Version file | Registry |
-|---|---|---|
-| CLI | `apps/cli/package.json` | [npm](https://www.npmjs.com/package/codeam-cli) |
-| VS Code plugin | `apps/vsc-plugin/package.json` | [VS Code Marketplace](https://marketplace.visualstudio.com/) + [Open VSX](https://open-vsx.org/) |
-| JetBrains plugin | `apps/jetbrains-plugin/build.gradle.kts` (`version = …`) + `plugin.xml` (`<version>`) | [JetBrains Marketplace](https://plugins.jetbrains.com/) |
+| App | Current | Changelog | Registry |
+|---|---|---|---|
+| `codeam-cli` | **1.4.58** | [apps/cli/CHANGELOG.md](apps/cli/CHANGELOG.md) | [npm](https://www.npmjs.com/package/codeam-cli) |
+| VS Code plugin | **1.4.21** | [apps/vsc-plugin/CHANGELOG.md](apps/vsc-plugin/CHANGELOG.md) | [VS Code Marketplace](https://marketplace.visualstudio.com/items?itemName=CodeAgentMobile.codeagent-mobile) · [Open VSX](https://open-vsx.org/extension/CodeAgentMobile/codeagent-mobile) |
+| JetBrains plugin | **1.0.7** | [apps/jetbrains-plugin/CHANGELOG.md](apps/jetbrains-plugin/CHANGELOG.md) | [JetBrains Marketplace](https://plugins.jetbrains.com/plugin/30697-codeagent-mobile) |
+
+Tagged releases — one per app, prefixed to avoid collisions — live in the [Releases page](https://github.com/edgar-durand/codeagent-mobile-clients/releases). Tag format:
+
+- `cli-vX.Y.Z` for `codeam-cli`
+- `vsc-plugin-vX.Y.Z` for the VS Code extension
+- `jetbrains-plugin-vX.Y.Z` for the IntelliJ plugin
 
 Publishing secrets (`PAT`, `OVSX_TOKEN`, `CERTIFICATE_CHAIN`, `PRIVATE_KEY`, `PRIVATE_KEY_PASSWORD`, `PUBLISH_TOKEN`) live in local `.env` files and are gitignored — they never land in this repo.
 
