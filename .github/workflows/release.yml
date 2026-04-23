@@ -13,10 +13,16 @@ on:
 
 permissions:
   contents: write
+  pull-requests: write
 
 concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
+
+env:
+  # Opt into Node.js 24 runtime for GitHub JavaScript actions (silences the
+  # deprecation warning from Node 20 default — will be removed 2026-09-16).
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
   release:
@@ -197,6 +203,10 @@ jobs:
             apps/*/CHANGELOG.md
 
       - name: Create GitHub Release
+        # Run even if the changelog PR step failed — the registries already
+        # received the release, so we always want the GitHub Release to exist
+        # with the built artifacts attached.
+        if: always() && steps.version.outputs.version != ''
         uses: softprops/action-gh-release@v2
         with:
           name: v${{ steps.version.outputs.version }}
