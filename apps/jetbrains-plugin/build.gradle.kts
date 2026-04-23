@@ -2,6 +2,7 @@ plugins {
     id("java")
     id("org.jetbrains.kotlin.jvm") version "2.0.21"
     id("org.jetbrains.intellij.platform") version "2.2.1"
+    id("org.jetbrains.changelog") version "2.2.1"
 }
 
 group = "com.codeagent.mobile"
@@ -36,6 +37,17 @@ intellijPlatform {
             sinceBuild = "241"
             untilBuild = "261.*"
         }
+
+        changeNotes = provider {
+            with(changelog) {
+                renderItem(
+                    (getOrNull(project.version.toString()) ?: getLatest())
+                        .withHeader(false)
+                        .withEmptySections(false),
+                    org.jetbrains.changelog.Changelog.OutputType.HTML,
+                )
+            }
+        }
     }
 
     signing {
@@ -47,6 +59,13 @@ intellijPlatform {
     publishing {
         token = System.getenv("PUBLISH_TOKEN") ?: ""
     }
+}
+
+changelog {
+    version = project.version.toString()
+    path = file("CHANGELOG.md").canonicalPath
+    headerParserRegex = """(\d+\.\d+\.\d+)""".toRegex()
+    groups = emptyList()
 }
 
 kotlin {
