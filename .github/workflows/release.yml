@@ -53,7 +53,7 @@ jobs:
           registry-url: 'https://registry.npmjs.org'
 
       - name: Setup Java (for JetBrains plugin archive build)
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: 17
