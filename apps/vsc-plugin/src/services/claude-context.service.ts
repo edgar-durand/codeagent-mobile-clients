@@ -3,6 +3,7 @@ import * as os from 'os';
 import * as path from 'path';
 import * as vscode from 'vscode';
 import { OutputChannel } from 'vscode';
+import { getContextWindow, getPricing } from '@codeagent/shared';
 
 /**
  * Claude Code context + usage snapshot — mirrors the shape codeam-cli
@@ -35,37 +36,6 @@ export interface ClaudeModelInfo {
   family: string;
   vendor: string;
   isDefault?: boolean;
-}
-
-const MODEL_PRICING: Record<string, { input: number; output: number; cacheRead: number; cacheWrite: number }> = {
-  'claude-sonnet-4': { input: 3, output: 15, cacheRead: 0.30, cacheWrite: 3.75 },
-  'claude-opus-4':   { input: 15, output: 75, cacheRead: 1.50, cacheWrite: 18.75 },
-  'claude-3-5-sonnet': { input: 3, output: 15, cacheRead: 0.30, cacheWrite: 3.75 },
-  'claude-3-5-haiku':  { input: 0.80, output: 4, cacheRead: 0.08, cacheWrite: 1 },
-  'claude-3-haiku':    { input: 0.25, output: 1.25, cacheRead: 0.03, cacheWrite: 0.30 },
-};
-
-const MODEL_CONTEXT_WINDOW: Record<string, number> = {
-  'claude-opus-4':     1_000_000,
-  'claude-sonnet-4':   1_000_000,
-  'claude-3-5-sonnet':   200_000,
-  'claude-3-5-haiku':    200_000,
-  'claude-3-haiku':      200_000,
-};
-
-function getPricing(model: string) {
-  for (const [prefix, pricing] of Object.entries(MODEL_PRICING)) {
-    if (model.startsWith(prefix)) return pricing;
-  }
-  return MODEL_PRICING['claude-sonnet-4'];
-}
-
-function getContextWindow(model: string | null): number {
-  if (!model) return 200_000;
-  for (const [prefix, size] of Object.entries(MODEL_CONTEXT_WINDOW)) {
-    if (model.startsWith(prefix)) return size;
-  }
-  return 200_000;
 }
 
 function encodeCwd(cwd: string): string {
