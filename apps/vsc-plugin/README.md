@@ -29,17 +29,15 @@ Control your AI coding agents remotely from your mobile device.
 
 ### 1. Install the Plugin
 
-#### From VS Code / Cursor Marketplace
+#### From VS Code Marketplace
 
 1. Open the Extensions view (`Ctrl+Shift+X`)
 2. Search for **"CodeAgent Mobile"**
 3. Click **Install**
 
-#### From VSIX file
+#### From Open VSX (Cursor / Windsurf)
 
-1. Download `codeagent-mobile-vscode.vsix` from the [homepage](https://www.codeagent-mobile.com)
-2. In VS Code / Cursor: `Ctrl+Shift+P` → "Install from VSIX..."
-3. Select the downloaded file
+The extension is also published to [Open VSX](https://open-vsx.org/extension/CodeAgentMobile/codeagent-mobile) so Cursor and Windsurf can install it directly from their Extensions view.
 
 ### 2. Get the Mobile App or Use the Web Dashboard
 

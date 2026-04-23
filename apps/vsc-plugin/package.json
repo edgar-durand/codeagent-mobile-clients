@@ -2,20 +2,58 @@
   "name": "codeagent-mobile",
   "displayName": "CodeAgent Mobile",
   "description": "Control your AI coding agents remotely from your mobile device",
-  "version": "1.4.21",
+  "version": "2.0.0",
   "publisher": "CodeAgentMobile",
   "icon": "resources/icon.png",
+  "galleryBanner": {
+    "color": "#A78BFA",
+    "theme": "dark"
+  },
+  "preview": false,
   "engines": {
     "vscode": "^1.93.0"
   },
   "categories": [
+    "AI",
+    "Chat",
     "Other"
   ],
+  "keywords": [
+    "ai",
+    "claude",
+    "claude-code",
+    "copilot",
+    "cursor",
+    "windsurf",
+    "mobile",
+    "remote-control",
+    "pair-programming",
+    "mcp"
+  ],
   "homepage": "https://www.codeagent-mobile.com",
+  "bugs": {
+    "url": "https://github.com/edgar-durand/codeagent-mobile-clients/issues"
+  },
   "repository": {
     "type": "git",
     "url": "https://github.com/edgar-durand/codeagent-mobile-clients"
   },
+  "badges": [
+    {
+      "url": "https://img.shields.io/visual-studio-marketplace/v/CodeAgentMobile.codeagent-mobile?color=A78BFA&label=VS%20Code%20Marketplace",
+      "href": "https://marketplace.visualstudio.com/items?itemName=CodeAgentMobile.codeagent-mobile",
+      "description": "VS Code Marketplace version"
+    },
+    {
+      "url": "https://img.shields.io/open-vsx/v/CodeAgentMobile/codeagent-mobile?color=A78BFA&label=Open%20VSX",
+      "href": "https://open-vsx.org/extension/CodeAgentMobile/codeagent-mobile",
+      "description": "Open VSX version"
+    }
+  ],
+  "sponsor": {
+    "url": "https://github.com/sponsors/edgar-durand"
+  },
+  "qna": "https://github.com/edgar-durand/codeagent-mobile-clients/issues",
   "license": "MIT",
   "activationEvents": [
     "onStartupFinished"
@@ -88,6 +126,7 @@
     "package": "npx @vscode/vsce package --no-dependencies"
   },
   "devDependencies": {
+    "@codeagent/shared": "*",
     "@types/node": "^20.11.0",
     "@types/vscode": "^1.93.0",
     "@types/ws": "^8.5.10",

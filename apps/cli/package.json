@@ -1,6 +1,6 @@
 {
   "name": "codeam-cli",
-  "version": "1.4.58",
+  "version": "2.0.0",
   "description": "Remote control Claude Code (and other AI coding agents) from your mobile phone. Pair your device, send prompts, stream responses in real-time, and approve commands — from anywhere.",
   "main": "dist/index.js",
   "bin": {
@@ -9,7 +9,8 @@
   "files": [
     "dist",
     "README.md",
-    "CHANGELOG.md"
+    "CHANGELOG.md",
+    "LICENSE"
   ],
   "scripts": {
     "build": "tsup",
@@ -48,14 +49,21 @@
   ],
   "homepage": "https://codeagent-mobile.com",
   "bugs": {
-    "url": "https://github.com/edgardurand/codeagent-mobile/issues"
+    "url": "https://github.com/edgar-durand/codeagent-mobile-clients/issues"
   },
   "author": "Edgar Durand",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/edgardurand/codeagent-mobile.git"
+    "url": "git+https://github.com/edgar-durand/codeagent-mobile-clients.git"
   },
   "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  },
+  "funding": {
+    "type": "github",
+    "url": "https://github.com/sponsors/edgar-durand"
+  },
   "engines": {
     "node": ">=18.0.0"
   },
@@ -66,6 +74,7 @@
     "ws": "^8.18.0"
   },
   "devDependencies": {
+    "@codeagent/shared": "*",
     "@types/node": "^22.0.0",
     "@types/qrcode-terminal": "^0.12.0",
     "@types/ws": "^8.5.0",

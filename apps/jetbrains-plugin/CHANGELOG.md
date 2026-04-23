@@ -4,6 +4,14 @@ All notable changes to the CodeAgent-Mobile JetBrains plugin are documented here
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.0] — 2026-04-23
+
+### Added
+- Plugin icon on the JetBrains Marketplace listing — the same `</>`-in-rounded-square mark that ships with the CodeAgent Mobile mobile app.
+
+### Changed
+- **Version alignment** — all three CodeAgent Mobile clients now share a single version line starting at `2.0.0`. Going forward, a single `vX.Y.Z` git tag releases all of them together (the JetBrains plugin is uploaded manually for now while signing configuration is finalized).
+
 ## [1.0.7] — 2026-04-13
 
 ### Added

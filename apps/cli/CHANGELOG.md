@@ -4,6 +4,12 @@ All notable changes to `codeam-cli` are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.0] — 2026-04-23
+
+### Changed
+- **Version alignment** — all three CodeAgent Mobile clients (`codeam-cli`, the VS Code extension, and the JetBrains plugin) now share a single version line starting at `2.0.0`. Going forward, a single `vX.Y.Z` git tag releases all of them together via the automated pipeline.
+- First release built from the public source repository at [`edgar-durand/codeagent-mobile-clients`](https://github.com/edgar-durand/codeagent-mobile-clients).
+
 ## [1.4.58] — 2026-04-23
 
 ### Changed

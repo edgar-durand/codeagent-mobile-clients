@@ -26,13 +26,11 @@ codeam        # starts Claude Code with mobile control
 ### VS Code / Cursor / Windsurf
 
 - **VS Code Marketplace** → search for *CodeAgent Mobile*  ·  [listing](https://marketplace.visualstudio.com/items?itemName=CodeAgentMobile.codeagent-mobile)
-- **Cursor / Open VSX** → available via [Open VSX](https://open-vsx.org/)
-- **Manual**: download the `.vsix` and `Install from VSIX…`
+- **Cursor / Open VSX** → [CodeAgentMobile/codeagent-mobile](https://open-vsx.org/extension/CodeAgentMobile/codeagent-mobile)
 
 ### JetBrains
 
 - **JetBrains Marketplace** → [CodeAgent-Mobile](https://plugins.jetbrains.com/plugin/30697-codeagent-mobile)
-- **Manual**: install the `.zip` via *Settings → Plugins → ⚙ → Install Plugin from Disk…*
 
 ---
 
@@ -44,13 +42,19 @@ codeagent-mobile-clients/
 │   ├── cli/                 # codeam-cli (TypeScript · tsup · Node ≥ 18)
 │   ├── vsc-plugin/          # VS Code extension (TypeScript · esbuild)
 │   └── jetbrains-plugin/    # IntelliJ plugin (Kotlin · Gradle · JDK 17)
-├── package.json             # root scripts (wrappers for each app)
-├── .eslintrc.json           # shared lint config (CLI + VSC plugin)
+├── packages/
+│   └── shared/              # @codeagent/shared — chrome parser +
+│                            # model pricing tables, bundled into CLI
+│                            # and the VS Code extension at build time
+├── package.json             # npm workspaces + root scripts
+├── .github/workflows/       # CI (PRs) + Release (tag-triggered publish)
+├── .eslintrc.json           # shared lint config (CLI + VS Code plugin)
 ├── .prettierrc              # shared formatter config
-└── .gitignore
+├── .editorconfig            # editor defaults
+└── .nvmrc                   # Node version pin
 ```
 
-Each app is self-contained — they don't depend on each other, and none of them pulls from a shared workspace package.
+The CLI and VS Code extension share a small TypeScript package (`packages/shared`) that holds the chunk-protocol parser and the model-pricing tables. At build time `tsup` (CLI) and `esbuild` (VS Code) inline it into each consumer's bundle, so neither published artifact depends on a separate package at runtime. The JetBrains plugin is Kotlin and does not consume the shared package.
 
 ---
 
@@ -102,15 +106,11 @@ Each app ships independently and keeps its own version number and changelog:
 
 | App | Current | Changelog | Registry |
 |---|---|---|---|
-| `codeam-cli` | **1.4.58** | [apps/cli/CHANGELOG.md](apps/cli/CHANGELOG.md) | [npm](https://www.npmjs.com/package/codeam-cli) |
-| VS Code plugin | **1.4.21** | [apps/vsc-plugin/CHANGELOG.md](apps/vsc-plugin/CHANGELOG.md) | [VS Code Marketplace](https://marketplace.visualstudio.com/items?itemName=CodeAgentMobile.codeagent-mobile) · [Open VSX](https://open-vsx.org/extension/CodeAgentMobile/codeagent-mobile) |
-| JetBrains plugin | **1.0.7** | [apps/jetbrains-plugin/CHANGELOG.md](apps/jetbrains-plugin/CHANGELOG.md) | [JetBrains Marketplace](https://plugins.jetbrains.com/plugin/30697-codeagent-mobile) |
+| `codeam-cli` | **2.0.0** | [apps/cli/CHANGELOG.md](apps/cli/CHANGELOG.md) | [npm](https://www.npmjs.com/package/codeam-cli) |
+| VS Code plugin | **2.0.0** | [apps/vsc-plugin/CHANGELOG.md](apps/vsc-plugin/CHANGELOG.md) | [VS Code Marketplace](https://marketplace.visualstudio.com/items?itemName=CodeAgentMobile.codeagent-mobile) · [Open VSX](https://open-vsx.org/extension/CodeAgentMobile/codeagent-mobile) |
+| JetBrains plugin | **2.0.0** | [apps/jetbrains-plugin/CHANGELOG.md](apps/jetbrains-plugin/CHANGELOG.md) | [JetBrains Marketplace](https://plugins.jetbrains.com/plugin/30697-codeagent-mobile) |
 
-Tagged releases — one per app, prefixed to avoid collisions — live in the [Releases page](https://github.com/edgar-durand/codeagent-mobile-clients/releases). Tag format:
-
-- `cli-vX.Y.Z` for `codeam-cli`
-- `vsc-plugin-vX.Y.Z` for the VS Code extension
-- `jetbrains-plugin-vX.Y.Z` for the IntelliJ plugin
+From **2.0.0 onwards all three clients ship under the same version line.** Pushing a single tag `vX.Y.Z` releases `codeam-cli@X.Y.Z` to npm and the VS Code extension `X.Y.Z` to both the VS Code Marketplace and Open VSX via the automated [release workflow](.github/workflows/release.yml). The JetBrains plugin is versioned together but currently uploaded manually to the JetBrains Marketplace.
 
 Publishing secrets (`PAT`, `OVSX_TOKEN`, `CERTIFICATE_CHAIN`, `PRIVATE_KEY`, `PRIVATE_KEY_PASSWORD`, `PUBLISH_TOKEN`) live in local `.env` files and are gitignored — they never land in this repo.
 
