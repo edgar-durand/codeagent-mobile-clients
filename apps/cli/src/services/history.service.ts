@@ -4,6 +4,7 @@ import * as os from 'os';
 import * as https from 'https';
 import * as http from 'http';
 import { getContextWindow, getPricing } from '@codeagent/shared';
+import { log } from './logger';
 
 const API_BASE = process.env.CODEAM_API_URL ?? 'https://codeagent-mobile-api.vercel.app';
 
@@ -45,7 +46,12 @@ function parseJsonl(filePath: string): ClaudeHistoryMessage[] {
   let raw: string;
   try {
     raw = fs.readFileSync(filePath, 'utf8');
-  } catch {
+  } catch (err) {
+    // ENOENT is expected (file was deleted between scan and read); anything
+    // else — permission errors, I/O errors — is worth a breadcrumb.
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+      log.warn('history:parseJsonl', `read failed for ${filePath}`, err);
+    }
     return messages;
   }
   const lines = raw.split('\n').filter(Boolean);
@@ -97,11 +103,17 @@ function post(endpoint: string, body: Record<string, unknown>): Promise<boolean>
       },
       (res) => {
         res.resume(); // drain response body
-        resolve(res.statusCode !== undefined && res.statusCode >= 200 && res.statusCode < 300);
+        const ok = res.statusCode !== undefined && res.statusCode >= 200 && res.statusCode < 300;
+        if (!ok) log.warn('history:post', `${endpoint} → HTTP ${res.statusCode}`);
+        resolve(ok);
       },
     );
-    req.on('error', () => resolve(false));
+    req.on('error', (err) => {
+      log.warn('history:post', `${endpoint} network error`, err);
+      resolve(false);
+    });
     req.on('timeout', () => {
+      log.warn('history:post', `${endpoint} timeout after 15s`);
       req.destroy();
       resolve(false);
     });

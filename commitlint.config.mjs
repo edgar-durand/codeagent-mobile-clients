@@ -1,7 +1,7 @@
 // Enforces Conventional Commits so the release pipeline can auto-generate
 // CHANGELOG entries from commit messages. See .gitmessage for the template
 // that contributors use locally, and CONTRIBUTING.md for the convention.
-module.exports = {
+export default {
   extends: ['@commitlint/config-conventional'],
   rules: {
     'type-enum': [
