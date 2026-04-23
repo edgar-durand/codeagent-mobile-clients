@@ -1,0 +1,22 @@
+{
+  "name": "codeagent-mobile-clients",
+  "version": "1.0.0",
+  "private": true,
+  "description": "CodeAgent Mobile clients — VS Code / Cursor / Windsurf extension, JetBrains plugin, and codeam-cli",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/edgar-durand/codeagent-mobile-clients.git"
+  },
+  "license": "MIT",
+  "scripts": {
+    "build:jetbrains-plugin": "cd apps/jetbrains-plugin && JAVA_HOME=/opt/homebrew/Cellar/openjdk@17/17.0.18/libexec/openjdk.jdk/Contents/Home ./gradlew clean buildPlugin",
+    "build:vsc-plugin": "cd apps/vsc-plugin && npm run build && npx @vscode/vsce package --no-dependencies",
+    "publish:vsc-plugin": "cd apps/vsc-plugin && source .env && npx @vscode/vsce publish --no-dependencies --pat $PAT",
+    "publish:vsc-plugin:cursor": "cd apps/vsc-plugin && source .env && npx ovsx publish --no-dependencies --pat $OVSX_TOKEN",
+    "reinstall:jetbrains-plugin": "bash apps/jetbrains-plugin/reinstall.sh",
+    "build:cli": "cd apps/cli && npm run build",
+    "dev:cli": "cd apps/cli && npm run dev",
+    "test:cli": "cd apps/cli && npm run test",
+    "publish:cli": "cd apps/cli && npm publish"
+  }
+}

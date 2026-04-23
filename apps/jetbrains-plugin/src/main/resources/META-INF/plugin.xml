@@ -1,0 +1,83 @@
+<idea-plugin>
+    <id>com.codeagent.mobile</id>
+    <name>CodeAgent-Mobile</name>
+    <version>1.0.5</version>
+    <vendor email="support@codeagent-mobile.com" url="https://www.codeagent-mobile.com">
+        CodeAgent-Mobile
+    </vendor>
+
+    <description><![CDATA[
+    Control AI coding agents from your mobile device. Pair your phone with your IDE
+    to start, stop, and monitor AI coding sessions remotely.
+
+    <br/><br/>
+    <b>Homepage:</b> <a href="https://www.codeagent-mobile.com">https://www.codeagent-mobile.com</a>
+
+    <br/><br/>
+    <b>Features:</b>
+    <ul>
+        <li>Secure device pairing via 6-digit code</li>
+        <li>Real-time agent status monitoring</li>
+        <li>Remote task control (start, stop, approve, reject)</li>
+        <li>WebSocket-based live communication</li>
+        <li>Multi-session support</li>
+        <li>MCP server configuration</li>
+    </ul>
+
+    <b>Get the Companion App:</b>
+    <ul>
+        <li><b>Mobile App</b> (recommended) — Download from the App Store or Play Store</li>
+        <li><b>Web Dashboard</b> — Use the browser-based dashboard at <a href="https://www.codeagent-mobile.com/dashboard">codeagent-mobile.com/dashboard</a> (no install required)</li>
+    </ul>
+    ]]></description>
+
+    <depends>com.intellij.modules.platform</depends>
+    <depends optional="true" config-file="terminal-support.xml">org.jetbrains.plugins.terminal</depends>
+
+    <extensions defaultExtensionNs="com.intellij">
+        <toolWindow id="CodeAgent-Mobile"
+                    secondary="true"
+                    icon="/icons/windsurf.svg"
+                    anchor="right"
+                    factoryClass="com.windsurf.controller.ui.ControllerToolWindowFactory"/>
+        <applicationService
+                serviceImplementation="com.windsurf.controller.services.SettingsService"/>
+        <applicationService
+                serviceImplementation="com.windsurf.controller.services.WebSocketService"/>
+        <applicationService
+                serviceImplementation="com.windsurf.controller.services.PairingService"/>
+        <applicationService
+                serviceImplementation="com.windsurf.controller.services.CommandRelayService"/>
+        <applicationService
+                serviceImplementation="com.windsurf.controller.services.IdeIntegrationService"/>
+        <applicationService
+                serviceImplementation="com.windsurf.controller.services.AgentOutputMonitor"/>
+        <applicationService
+                serviceImplementation="com.windsurf.controller.services.TerminalAgentService"/>
+        <applicationService
+                serviceImplementation="com.windsurf.controller.services.McpConfigWriterService"/>
+        <applicationConfigurable
+                parentId="tools"
+                instance="com.windsurf.controller.settings.ControllerConfigurable"
+                id="com.codeagent.mobile.settings"
+                displayName="CodeAgent-Mobile"/>
+        <notificationGroup id="CodeAgent-Mobile"
+                           displayType="BALLOON"/>
+    </extensions>
+
+    <actions>
+        <group id="WindsurfController.ActionGroup"
+               text="CodeAgent-Mobile"
+               description="CodeAgent-Mobile actions">
+            <action id="WindsurfController.ShowPairingCode"
+                    class="com.windsurf.controller.actions.ShowPairingCodeAction"
+                    text="Show Pairing Code"
+                    description="Display a pairing code for mobile device connection"
+                    icon="/icons/pair.svg"/>
+            <action id="WindsurfController.Disconnect"
+                    class="com.windsurf.controller.actions.DisconnectAction"
+                    text="Disconnect Mobile"
+                    description="Disconnect the paired mobile device"/>
+        </group>
+    </actions>
+</idea-plugin>

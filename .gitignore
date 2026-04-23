@@ -1,0 +1,33 @@
+node_modules/
+dist/
+*.tsbuildinfo
+
+# Environment / secrets
+.env
+.env.local
+.env.*.local
+
+# IDE
+.idea/
+*.iml
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# JetBrains plugin build
+apps/jetbrains-plugin/build/
+apps/jetbrains-plugin/.gradle/
+apps/jetbrains-plugin/.kotlin/
+apps/jetbrains-plugin/.intellijPlatform/
+
+# VS Code plugin build artifacts
+apps/vsc-plugin/*.vsix
+
+# Logs
+*.log
+npm-debug.log*
+
+# Coverage
+coverage/
