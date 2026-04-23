@@ -6,8 +6,6 @@ Public source for the **client-side pieces** of [CodeAgent Mobile](https://www.c
 - [`apps/vsc-plugin`](apps/vsc-plugin) — extension for **VS Code**, **Cursor**, and **Windsurf**
 - [`apps/jetbrains-plugin`](apps/jetbrains-plugin) — plugin for the **IntelliJ** family (IntelliJ IDEA, WebStorm, PyCharm, Rider, GoLand, etc.)
 
-The backend, mobile app (iOS/Android), and web dashboard are maintained in a private repository. Only the clients live here.
-
 > **What is CodeAgent Mobile?**
 > It lets you drive AI coding agents (Claude Code, Copilot, Cursor, JetBrains AI, etc.) from your phone. Pair your device once, then send prompts, stream responses, and approve interactive commands — from anywhere. See [codeagent-mobile.com](https://www.codeagent-mobile.com).
 
@@ -117,7 +115,7 @@ Publishing secrets (`PAT`, `OVSX_TOKEN`, `CERTIFICATE_CHAIN`, `PRIVATE_KEY`, `PR
 ```
 ┌─────────────────────┐   REST + WebSocket   ┌────────────────────┐
 │  Mobile app / Web   │  ───────────────────▶│ CodeAgent backend  │
-│  dashboard          │                       │  (private repo)    │
+│  dashboard          │                       │                    │
 └─────────────────────┘                       └─────────┬──────────┘
                                                         │ WebSocket / HTTP poll
                                                         ▼
