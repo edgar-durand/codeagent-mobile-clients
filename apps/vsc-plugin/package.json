@@ -4,6 +4,7 @@
   "description": "Control your AI coding agents remotely from your mobile device",
   "version": "1.4.21",
   "publisher": "CodeAgentMobile",
+  "icon": "resources/icon.png",
   "engines": {
     "vscode": "^1.93.0"
   },
