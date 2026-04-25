@@ -32,6 +32,7 @@ export default {
         'workflow',
         'meta',
         'deps',
+        'deps-dev',
         'release',
         'changelog',
       ],
