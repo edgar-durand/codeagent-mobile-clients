@@ -10,6 +10,14 @@ export interface SavedSession {
   userEmail: string;
   plan: string;
   pairedAt: number;
+  /**
+   * Plugin auth token returned by /api/pairing/status. Persisted so subsequent
+   * POSTs to /api/commands/output can replay it as `X-Plugin-Auth-Token`.
+   * Optional — sessions paired before this field existed (or with older
+   * backends that did not yet emit the token) keep working via the rolling
+   * legacy fallback on the server (sunset 2026-05-25).
+   */
+  pluginAuthToken?: string;
 }
 
 export interface CliConfig {

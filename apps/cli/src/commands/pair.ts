@@ -51,6 +51,7 @@ export async function pair(): Promise<void> {
           userEmail: info.userEmail,
           plan: info.plan,
           pairedAt: Date.now(),
+          pluginAuthToken: info.pluginAuthToken,
         });
         showSuccess(`Paired with ${info.userName} (${info.plan})`);
         console.log('');

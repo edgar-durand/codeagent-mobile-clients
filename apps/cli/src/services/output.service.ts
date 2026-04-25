@@ -54,6 +54,14 @@ export class OutputService {
     onRateLimitDetected?: (reset: string) => void,
     onTurnComplete?: () => void,
     onTerminalTurnDetected?: () => void,
+    /**
+     * Per-pairing token captured from `/api/pairing/status`. When present,
+     * forwarded as `X-Plugin-Auth-Token` on every POST to
+     * `/api/commands/output`. Undefined for sessions paired before this CLI
+     * version (or against an older backend) — those keep working via the
+     * server's rolling legacy fallback (sunset 2026-05-25).
+     */
+    private readonly pluginAuthToken?: string,
   ) {
     this.onSessionIdDetected = onSessionIdDetected;
     this.onRateLimitDetected = onRateLimitDetected;
@@ -292,58 +300,86 @@ export class OutputService {
       ...body,
     });
 
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+    };
+    // Forward the per-pairing token when present. Sessions paired before
+    // this field existed simply omit the header and rely on the server's
+    // rolling legacy fallback (sunset 2026-05-25).
+    if (this.pluginAuthToken) {
+      headers['X-Plugin-Auth-Token'] = this.pluginAuthToken;
+    }
+
     return new Promise((resolve) => {
       const attempt = (attemptsLeft: number) => {
-        let settled = false;
-
-        const u = new URL(`${API_BASE}/api/commands/output`);
-        const transport = u.protocol === 'https:' ? https : http;
-        const req = transport.request(
-          {
-            hostname: u.hostname,
-            port: u.port || (u.protocol === 'https:' ? 443 : 80),
-            path: u.pathname,
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              'Content-Length': Buffer.byteLength(payload),
-            },
-            timeout: 8000,
-          },
-          (res) => {
-            let resData = '';
-            res.on('data', (c: Buffer) => { resData += c.toString(); });
-            res.on('end', () => {
-              if (settled) return;
-              settled = true;
-              if (res.statusCode && res.statusCode >= 400) {
-                process.stderr.write(`[codeam] output API error ${res.statusCode}: ${resData}\n`);
-              }
-              resolve();
-            });
-          },
-        );
-
-        req.on('error', () => {
-          if (settled) return;
-          settled = true;
-          if (attemptsLeft > 0) {
-            // Linear back-off: 200 ms, 400 ms, 600 ms between attempts.
-            const delay = 200 * (maxRetries - attemptsLeft + 1);
-            setTimeout(() => attempt(attemptsLeft - 1), delay);
-          } else {
+        // Call through _transport so tests can vi.spyOn it.
+        _transport.sendOutputChunk(`${API_BASE}/api/commands/output`, headers, payload)
+          .then(({ statusCode, body: resBody }) => {
+            if (statusCode >= 400) {
+              process.stderr.write(`[codeam] output API error ${statusCode}: ${resBody}\n`);
+            }
             resolve();
-          }
-        });
-
-        // Timeout: destroy the socket — the error handler above will fire and
-        // either schedule a retry or resolve.
-        req.on('timeout', () => { req.destroy(); });
-        req.write(payload);
-        req.end();
+          })
+          .catch(() => {
+            if (attemptsLeft > 0) {
+              const delay = 200 * (maxRetries - attemptsLeft + 1);
+              setTimeout(() => attempt(attemptsLeft - 1), delay);
+            } else {
+              resolve();
+            }
+          });
       };
 
       attempt(maxRetries);
     });
   }
+}
+
+// Exported transport object — allows tests to spy on the HTTP send without
+// trying to monkey-patch the built-in `http` module (whose exports are
+// non-configurable). Mirrors the pattern used in pairing.service.ts.
+export const _transport = {
+  sendOutputChunk: _sendOutputChunk,
+};
+
+export function _sendOutputChunk(
+  url: string,
+  headers: Record<string, string>,
+  payload: string,
+): Promise<{ statusCode: number; body: string }> {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const u = new URL(url);
+    const transport = u.protocol === 'https:' ? https : http;
+    const req = transport.request(
+      {
+        hostname: u.hostname,
+        port: u.port || (u.protocol === 'https:' ? 443 : 80),
+        path: u.pathname,
+        method: 'POST',
+        headers: {
+          ...headers,
+          'Content-Length': Buffer.byteLength(payload),
+        },
+        timeout: 8000,
+      },
+      (res) => {
+        let resData = '';
+        res.on('data', (c: Buffer) => { resData += c.toString(); });
+        res.on('end', () => {
+          if (settled) return;
+          settled = true;
+          resolve({ statusCode: res.statusCode ?? 0, body: resData });
+        });
+      },
+    );
+    req.on('error', (err) => {
+      if (settled) return;
+      settled = true;
+      reject(err);
+    });
+    req.on('timeout', () => { req.destroy(); });
+    req.write(payload);
+    req.end();
+  });
 }

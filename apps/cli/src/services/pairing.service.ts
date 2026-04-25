@@ -11,6 +11,14 @@ export interface PairedUserInfo {
   userName: string;
   userEmail: string;
   plan: string;
+  /**
+   * Per-pairing token returned by the backend (`/api/pairing/status` response
+   * once `paired: true`). Replayed as `X-Plugin-Auth-Token` on subsequent
+   * `/api/commands/output` POSTs so the server can authenticate the CLI
+   * after the legacy fallback expires (2026-05-25). Undefined if the backend
+   * is older than the rolling-token rollout.
+   */
+  pluginAuthToken?: string;
 }
 
 export async function requestCode(
@@ -53,11 +61,13 @@ export function pollStatus(
       if (data?.paired) {
         stop();
         const user = (data.user as Record<string, unknown>) ?? {};
+        const rawToken = data.pluginAuthToken;
         onPaired({
           sessionId: data.sessionId as string,
           userName: (user.name as string) || '',
           userEmail: (user.email as string) || '',
           plan: (user.plan as string) || 'FREE',
+          pluginAuthToken: typeof rawToken === 'string' && rawToken.length > 0 ? rawToken : undefined,
         });
         return;
       }

@@ -166,7 +166,7 @@ except Exception:sys.exit(0)
     historySvc.waitForNewUserMessage(prevCount)
       .then((userText) => outputSvc.startTerminalTurn(userText ?? undefined))
       .catch(() => outputSvc.startTerminalTurn(undefined));
-  });
+  }, session.pluginAuthToken);
 
   /** Dispatch a prompt to Claude and signal the mobile app that a new turn started. */
   function sendPrompt(prompt: string): void {
