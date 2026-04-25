@@ -130,7 +130,7 @@
   },
   "devDependencies": {
     "@codeagent/shared": "*",
-    "@types/node": "^20.11.0",
+    "@types/node": "^25.6.0",
     "@types/vscode": "^1.93.0",
     "@types/ws": "^8.5.10",
     "esbuild": "^0.25.12",
