@@ -10,10 +10,15 @@ on:
 # Marketplace (stable channel). Drafts a GitHub Release with all three
 # artifacts attached. Pre-release tags (vX.Y.Z-rc.N) skip the JetBrains
 # marketplace push.
+#
+# Topology: `setup` runs first to validate the tag and expose the version
+# as a job output, then `publish-cli` / `publish-vsc` / `publish-jetbrains`
+# fan out in parallel. The final `release` job waits for all three, prepends
+# git-cliff notes to each app's CHANGELOG.md, and creates the GitHub Release
+# with every artifact attached.
 
 permissions:
-  contents: write
-  pull-requests: write
+  contents: read
 
 concurrency:
   group: release-${{ github.ref }}
@@ -25,16 +30,15 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
-  release:
-    name: Build, publish, and draft release
+  setup:
+    name: Validate tag and expose version
     runs-on: ubuntu-latest
-
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      is_prerelease: ${{ steps.version.outputs.is_prerelease }}
     steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-        with:
-          fetch-depth: 0
-
       - name: Extract version from tag
         id: version
         run: |
@@ -44,7 +48,22 @@ jobs:
             exit 1
           fi
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          if [[ "$VERSION" == *-* ]]; then
+            echo "is_prerelease=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "is_prerelease=false" >> "$GITHUB_OUTPUT"
+          fi
           echo "Publishing version: $VERSION"
+
+  publish-cli:
+    name: Publish CLI to npm
+    needs: setup
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
 
       - name: Setup Node.js
         uses: actions/setup-node@v6
@@ -52,29 +71,9 @@ jobs:
           node-version: 20
           registry-url: 'https://registry.npmjs.org'
 
-      - name: Setup Java (for JetBrains plugin archive build)
-        uses: actions/setup-java@v5
-        with:
-          distribution: temurin
-          java-version: 17
-
-      # --- Sync version across all package manifests -------------------------
-
       - name: Patch CLI version
         working-directory: apps/cli
-        run: npm version "${{ steps.version.outputs.version }}" --no-git-tag-version --allow-same-version
-
-      - name: Patch VS Code plugin version
-        working-directory: apps/vsc-plugin
-        run: npm version "${{ steps.version.outputs.version }}" --no-git-tag-version --allow-same-version
-
-      - name: Patch JetBrains plugin version
-        run: |
-          VERSION="${{ steps.version.outputs.version }}"
-          sed -i -E "s/^version = \"[^\"]+\"/version = \"$VERSION\"/" apps/jetbrains-plugin/build.gradle.kts
-          sed -i -E "s|<version>[^<]+</version>|<version>$VERSION</version>|" apps/jetbrains-plugin/src/main/resources/META-INF/plugin.xml
-
-      # --- Install + typecheck + test ---------------------------------------
+        run: npm version "${{ needs.setup.outputs.version }}" --no-git-tag-version --allow-same-version
 
       - name: Install workspace dependencies
         run: npm ci
@@ -87,11 +86,49 @@ jobs:
         working-directory: apps/cli
         run: npm run test
 
-      # --- Build + package --------------------------------------------------
-
       - name: Build CLI
         working-directory: apps/cli
         run: npm run build
+
+      - name: Pack CLI tarball (for GitHub Release artifact)
+        working-directory: apps/cli
+        run: npm pack
+
+      - name: Publish CLI to npm
+        working-directory: apps/cli
+        run: npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Upload CLI tarball artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: cli-tgz
+          path: apps/cli/codeam-cli-${{ needs.setup.outputs.version }}.tgz
+          if-no-files-found: error
+
+  publish-vsc:
+    name: Publish VS Code plugin
+    needs: setup
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 20
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Patch VS Code plugin version
+        working-directory: apps/vsc-plugin
+        run: npm version "${{ needs.setup.outputs.version }}" --no-git-tag-version --allow-same-version
+
+      - name: Install workspace dependencies
+        run: npm ci
 
       - name: Build VS Code plugin
         working-directory: apps/vsc-plugin
@@ -100,11 +137,53 @@ jobs:
       - name: Package VS Code plugin (.vsix)
         working-directory: apps/vsc-plugin
         run: |
-          npx @vscode/vsce package --no-dependencies --out "codeagent-mobile-${{ steps.version.outputs.version }}.vsix"
+          npx @vscode/vsce package --no-dependencies --out "codeagent-mobile-${{ needs.setup.outputs.version }}.vsix"
 
-      - name: Pack CLI tarball (for GitHub Release artifact)
-        working-directory: apps/cli
-        run: npm pack
+      - name: Publish VS Code plugin to Marketplace
+        working-directory: apps/vsc-plugin
+        run: |
+          npx @vscode/vsce publish --no-dependencies --pat "$VSCE_PAT" \
+            --packagePath "codeagent-mobile-${{ needs.setup.outputs.version }}.vsix"
+        env:
+          VSCE_PAT: ${{ secrets.VSCE_PAT }}
+
+      - name: Publish VS Code plugin to Open VSX
+        working-directory: apps/vsc-plugin
+        run: |
+          npx ovsx publish --no-dependencies --pat "$OVSX_TOKEN" \
+            "codeagent-mobile-${{ needs.setup.outputs.version }}.vsix"
+        env:
+          OVSX_TOKEN: ${{ secrets.OVSX_TOKEN }}
+
+      - name: Upload VSIX artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: vsc-vsix
+          path: apps/vsc-plugin/codeagent-mobile-${{ needs.setup.outputs.version }}.vsix
+          if-no-files-found: error
+
+  publish-jetbrains:
+    name: Publish JetBrains plugin
+    needs: setup
+    if: ${{ !contains(needs.setup.outputs.version, '-') }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Patch JetBrains plugin version
+        run: |
+          VERSION="${{ needs.setup.outputs.version }}"
+          sed -i -E "s/^version = \"[^\"]+\"/version = \"$VERSION\"/" apps/jetbrains-plugin/build.gradle.kts
+          sed -i -E "s|<version>[^<]+</version>|<version>$VERSION</version>|" apps/jetbrains-plugin/src/main/resources/META-INF/plugin.xml
 
       - name: Build JetBrains plugin
         working-directory: apps/jetbrains-plugin
@@ -115,37 +194,10 @@ jobs:
         run: ./gradlew verifyPlugin
 
       - name: Publish JetBrains plugin to Marketplace
-        if: ${{ !contains(steps.version.outputs.version, '-') }}
         working-directory: apps/jetbrains-plugin
         run: ./gradlew publishPlugin
         env:
           PUBLISH_TOKEN: ${{ secrets.JETBRAINS_MARKETPLACE_TOKEN }}
-
-      # --- Publish ----------------------------------------------------------
-
-      - name: Publish CLI to npm
-        working-directory: apps/cli
-        run: npm publish --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-
-      - name: Publish VS Code plugin to Marketplace
-        working-directory: apps/vsc-plugin
-        run: |
-          npx @vscode/vsce publish --no-dependencies --pat "$VSCE_PAT" \
-            --packagePath "codeagent-mobile-${{ steps.version.outputs.version }}.vsix"
-        env:
-          VSCE_PAT: ${{ secrets.VSCE_PAT }}
-
-      - name: Publish VS Code plugin to Open VSX
-        working-directory: apps/vsc-plugin
-        run: |
-          npx ovsx publish --no-dependencies --pat "$OVSX_TOKEN" \
-            "codeagent-mobile-${{ steps.version.outputs.version }}.vsix"
-        env:
-          OVSX_TOKEN: ${{ secrets.OVSX_TOKEN }}
-
-      # --- GitHub Release ---------------------------------------------------
 
       - name: Locate JetBrains plugin archive
         id: jb
@@ -153,7 +205,56 @@ jobs:
           ZIP=$(ls apps/jetbrains-plugin/build/distributions/*.zip | head -n 1)
           echo "zip=$ZIP" >> "$GITHUB_OUTPUT"
 
-      # --- Auto-generate the changelog from conventional commits -------------
+      - name: Upload JetBrains plugin archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: jb-zip
+          path: ${{ steps.jb.outputs.zip }}
+          if-no-files-found: error
+
+  release:
+    name: Draft GitHub Release + commit changelog
+    needs: [setup, publish-cli, publish-vsc, publish-jetbrains]
+    if: |
+      always() &&
+      needs.publish-cli.result == 'success' &&
+      needs.publish-vsc.result == 'success' &&
+      (needs.publish-jetbrains.result == 'success' || needs.publish-jetbrains.result == 'skipped')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Checkout (full history for git-cliff)
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Download CLI tarball
+        uses: actions/download-artifact@v4
+        with:
+          name: cli-tgz
+          path: dist/cli
+
+      - name: Download VSIX
+        uses: actions/download-artifact@v4
+        with:
+          name: vsc-vsix
+          path: dist/vsc
+
+      - name: Download JetBrains plugin archive
+        if: ${{ needs.publish-jetbrains.result == 'success' }}
+        uses: actions/download-artifact@v4
+        with:
+          name: jb-zip
+          path: dist/jb
+
+      - name: Resolve JetBrains plugin archive path
+        id: jb
+        if: ${{ needs.publish-jetbrains.result == 'success' }}
+        run: |
+          ZIP=$(ls dist/jb/*.zip | head -n 1)
+          echo "zip=$ZIP" >> "$GITHUB_OUTPUT"
 
       - name: Generate release notes from commits (git-cliff)
         uses: orhun/git-cliff-action@v4
@@ -172,9 +273,8 @@ jobs:
             exit 0
           fi
 
-          # The tag checkout has in-flight version bumps; drop them so we can
-          # switch to main cleanly.
-          git restore .
+          # The tag checkout has no in-flight version bumps in this job (those
+          # happen in publish-* jobs which don't push). Switch to main cleanly.
           git fetch origin main
           git checkout main
 
@@ -199,20 +299,20 @@ jobs:
             echo "Nothing new to add to CHANGELOGs — maybe all commits between tags were skippable chores."
             exit 0
           fi
-          git commit -m "chore(changelog): notes for v${{ steps.version.outputs.version }} [skip ci]"
+          git commit -m "chore(changelog): notes for v${{ needs.setup.outputs.version }} [skip ci]"
           git push origin main
 
       - name: Create GitHub Release
-        # Run even if the changelog PR step failed — the registries already
+        # Run even if the changelog commit step failed — the registries already
         # received the release, so we always want the GitHub Release to exist
         # with the built artifacts attached.
-        if: always() && steps.version.outputs.version != ''
+        if: always() && needs.setup.outputs.version != ''
         uses: softprops/action-gh-release@v2
         with:
-          name: v${{ steps.version.outputs.version }}
+          name: v${{ needs.setup.outputs.version }}
           body_path: RELEASE_NOTES.md
           append_body: true
           files: |
-            apps/cli/codeam-cli-${{ steps.version.outputs.version }}.tgz
-            apps/vsc-plugin/codeagent-mobile-${{ steps.version.outputs.version }}.vsix
+            dist/cli/codeam-cli-${{ needs.setup.outputs.version }}.tgz
+            dist/vsc/codeagent-mobile-${{ needs.setup.outputs.version }}.vsix
             ${{ steps.jb.outputs.zip }}
