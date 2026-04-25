@@ -221,6 +221,17 @@ Dependabot runs weekly for npm (per app), Gradle (jetbrains-plugin), and GitHub 
 - **EditorConfig** — LF line endings; 4-space indent for Kotlin/Gradle, 2-space for everything else.
 - **Node** — `.nvmrc` pins Node 20 (required by `@vscode/vsce@2.32+`). The CLI's runtime `engines.node` remains `>=18` — end users can still run Node 18; 20 is a build-time requirement only.
 
+### Typing rules — non-negotiable
+
+Types must be **correct and implicit**. Workarounds (`as unknown as X`, `as Record<string, unknown>`, casting through `any`) are not acceptable for hiding type errors. If TypeScript complains, fix the **source** of the error, not the symptom:
+
+- **Third-party type is wrong/incomplete** → fix it where it crosses the boundary: define a local interface that captures the fields you actually use, or augment the third-party module via `declare module '<pkg>' { ... }`. Don't sprinkle assertions at every call site.
+- **Polymorphic API response** (e.g., a chunk-protocol payload, a generic command result) → write a proper **type guard** (`function isFoo(v: unknown): v is Foo`) and use it. The guard does the runtime check; TypeScript narrows naturally with no cast at the call site. For the chunk parser, prefer Zod schemas in `packages/shared/src/protocol/`.
+- **Defensive double-lookup** (`x.foo ?? (x as Cast).foo`) → if the first lookup is correctly typed, the second branch is dead code and must be removed.
+- **`as` is allowed only at validated boundaries** (output of `JSON.parse` you just zod-validated, narrowing inside a type guard you just wrote, vitest mock casts for `vi.fn()`). Anywhere else, fix the type.
+
+Do not commit code that requires `as unknown as` to compile. Do not silence TS errors with casts when the underlying type is fixable.
+
 ## Testing
 
 The only app with an automated test suite is `apps/cli`. Framework: **Vitest** with `globals: true` and Node environment. Tests live in `apps/cli/__tests__/`.
