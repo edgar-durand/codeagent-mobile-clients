@@ -38,7 +38,7 @@ export class WebSocketService {
         this.reconnectAttempts = 0;
         this.client!.send(JSON.stringify({
           type: 'auth',
-          payload: { token: null, sessionId: this.sessionId, pluginId: this.pluginId },
+          payload: { sessionId: this.sessionId, pluginId: this.pluginId },
           timestamp: Date.now(),
         }));
         this.startHeartbeat();
