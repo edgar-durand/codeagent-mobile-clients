@@ -101,7 +101,6 @@ export class UnixPtyStrategy implements IPtyStrategy {
       return;
     }
 
-    const shell = process.env.SHELL || '/bin/sh';
     const cols = process.stdout.columns || 220;
     const rows = process.stdout.rows || 50;
 
@@ -109,8 +108,13 @@ export class UnixPtyStrategy implements IPtyStrategy {
     this.helperPath = path.join(os.tmpdir(), 'codeam-pty-helper.py');
     fs.writeFileSync(this.helperPath, PYTHON_PTY_HELPER, { mode: 0o644 });
 
-    const fullCmd = args.length > 0 ? `${cmd} ${args.join(' ')}` : cmd;
-    this.proc = spawn(python, [this.helperPath, shell, '-c', `exec ${fullCmd}`], {
+    // Pass the command and its args as discrete argv elements — never as a
+    // single concatenated string. The Python helper does
+    // `os.execvp(sys.argv[1], sys.argv[1:])`, so it execs `cmd` directly with
+    // each arg as a separate argv slot. No shell parsing → shell metacharacters
+    // (`;`, `$()`, backticks, `&&`, `|`) in a session id, file path, etc.
+    // cannot be interpreted as shell syntax.
+    this.proc = spawn(python, [this.helperPath, cmd, ...args], {
       stdio: ['pipe', 'pipe', 'inherit'],
       cwd,
       env: {
@@ -119,6 +123,7 @@ export class UnixPtyStrategy implements IPtyStrategy {
         COLUMNS: String(cols),
         LINES: String(rows),
       },
+      shell: false,
     });
 
     this.proc.on('error', (err) => {
@@ -152,13 +157,17 @@ export class UnixPtyStrategy implements IPtyStrategy {
   /**
    * Python-unavailable fallback: direct spawn without PTY.
    * Mobile command injection is limited (no real TTY for Claude).
+   *
+   * `shell: false` so args are passed as discrete argv elements — shell
+   * metacharacters in user-supplied args (e.g. session ids on `--resume`)
+   * are NOT interpreted by /bin/sh.
    */
   private spawnDirect(cmd: string, cwd: string, args: string[] = []): void {
     this.proc = spawn(cmd, args, {
       stdio: ['pipe', 'inherit', 'inherit'],
       cwd,
       env: process.env,
-      shell: true,
+      shell: false,
     });
 
     this.proc.on('error', (err) => {
