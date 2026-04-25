@@ -21,8 +21,13 @@ describe('requestCode', () => {
 });
 
 describe('pollStatus', () => {
-  beforeEach(() => { vi.useFakeTimers(); });
-  afterEach(() => { vi.useRealTimers(); vi.clearAllMocks(); });
+  const realRandom = Math.random;
+  beforeEach(() => {
+    vi.useFakeTimers();
+    // Deterministic jitter (mid-range): exp * (0.9 + 0.5 * 0.2) = exp * 1.0
+    Math.random = () => 0.5;
+  });
+  afterEach(() => { vi.useRealTimers(); vi.clearAllMocks(); Math.random = realRandom; });
 
   it('calls onPaired when server returns paired:true', async () => {
     vi.spyOn(pairing._transport, 'getJson').mockResolvedValue({

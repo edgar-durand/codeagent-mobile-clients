@@ -2,6 +2,7 @@ import * as https from 'https';
 import * as http from 'http';
 import * as os from 'os';
 import pkg from '../../package.json';
+import { computePollDelay } from '../lib/poll-delay';
 
 const API_BASE = process.env.CODEAM_API_URL ?? 'https://codeagent-mobile-api.vercel.app';
 
@@ -37,14 +38,17 @@ export function pollStatus(
   onTimeout: () => void,
 ): () => void {
   let stopped = false;
+  let pollTimer: NodeJS.Timeout | null = null;
+  let consecutiveFailures = 0;
 
-  const interval = setInterval(async () => {
+  const tick = async (): Promise<void> => {
     if (stopped) return;
     try {
       // Call through _transport so vi.spyOn can intercept in tests
       const result = await _transport.getJson(
         `${API_BASE}/api/pairing/status?pluginId=${pluginId}`,
       );
+      consecutiveFailures = 0;
       const data = result?.data as Record<string, unknown> | undefined;
       if (data?.paired) {
         stop();
@@ -55,9 +59,18 @@ export function pollStatus(
           userEmail: (user.email as string) || '',
           plan: (user.plan as string) || 'FREE',
         });
+        return;
       }
-    } catch { /* silent */ }
-  }, 3000);
+    } catch {
+      consecutiveFailures += 1;
+    }
+    if (stopped) return;
+    const delay = computePollDelay({ baseMs: 3000, failures: consecutiveFailures });
+    pollTimer = setTimeout(() => { void tick(); }, delay);
+  };
+
+  const initialDelay = computePollDelay({ baseMs: 3000, failures: 0 });
+  pollTimer = setTimeout(() => { void tick(); }, initialDelay);
 
   const timeout = setTimeout(() => {
     stop();
@@ -66,7 +79,7 @@ export function pollStatus(
 
   function stop() {
     stopped = true;
-    clearInterval(interval);
+    if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; }
     clearTimeout(timeout);
   }
 

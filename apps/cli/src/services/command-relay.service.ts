@@ -1,4 +1,5 @@
 import { _postJson, _getJson } from './pairing.service';
+import { computePollDelay } from '../lib/poll-delay';
 
 const API_BASE = process.env.CODEAM_API_URL ?? 'https://codeagent-mobile-api.vercel.app';
 
@@ -13,6 +14,7 @@ export class CommandRelayService {
   private _running = false;
   private pollTimer: NodeJS.Timeout | null = null;
   private heartbeatTimer: NodeJS.Timeout | null = null;
+  private consecutiveFailures = 0;
 
   constructor(
     private readonly pluginId: string,
@@ -51,7 +53,11 @@ export class CommandRelayService {
     if (!this._running) return;
     await this.poll();
     if (this._running) {
-      this.pollTimer = setTimeout(() => this.pollLoop(), 2000);
+      const delay = computePollDelay({
+        baseMs: 2000,
+        failures: this.consecutiveFailures,
+      });
+      this.pollTimer = setTimeout(() => this.pollLoop(), delay);
     }
   }
 
@@ -61,6 +67,8 @@ export class CommandRelayService {
         `${API_BASE}/api/commands/pending?pluginId=${this.pluginId}`,
       );
       const commands = data?.data as Array<Record<string, unknown>> | undefined;
+      // Successful poll (HTTP+JSON parse OK) — reset backoff regardless of payload shape
+      this.consecutiveFailures = 0;
       if (!Array.isArray(commands)) return;
       for (const obj of commands) {
         try {
@@ -72,7 +80,9 @@ export class CommandRelayService {
           });
         } catch { /* command handler error – continue with next */ }
       }
-    } catch { /* silent */ }
+    } catch {
+      this.consecutiveFailures += 1;
+    }
   }
 
   private async sendHeartbeat(online: boolean): Promise<void> {

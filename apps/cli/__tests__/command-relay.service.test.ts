@@ -9,8 +9,13 @@ vi.mock('../src/services/pairing.service', () => ({
 import { CommandRelayService } from '../src/services/command-relay.service';
 
 describe('CommandRelayService', () => {
-  beforeEach(() => { vi.useFakeTimers(); });
-  afterEach(() => { vi.useRealTimers(); vi.clearAllMocks(); });
+  const realRandom = Math.random;
+  beforeEach(() => {
+    vi.useFakeTimers();
+    // Deterministic jitter (mid-range): exp * (0.9 + 0.5 * 0.2) = exp * 1.0
+    Math.random = () => 0.5;
+  });
+  afterEach(() => { vi.useRealTimers(); vi.clearAllMocks(); Math.random = realRandom; });
 
   it('calls heartbeat on start', async () => {
     const onCmd = vi.fn();
