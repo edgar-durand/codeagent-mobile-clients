@@ -17,6 +17,13 @@ updates:
     labels:
       - dependencies
       - vsc-plugin
+    ignore:
+      # VS Code 1.93 ships Node 20 as its embedded runtime; pin @types/node to
+      # the matching major so we don't typecheck against APIs that don't exist
+      # at runtime. Minor/patch updates within 20.x remain allowed.
+      - dependency-name: "@types/node"
+        update-types:
+          - version-update:semver-major
 
   - package-ecosystem: gradle
     directory: /apps/jetbrains-plugin
