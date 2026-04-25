@@ -4,6 +4,44 @@ All notable changes to the CodeAgent-Mobile JetBrains plugin are documented here
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.0] — 2026-04-25
+
+### Added
+
+- **cli:** Exponential polling backoff with ±10% jitter
+- **cli:** Forward X-Plugin-Auth-Token on /commands/output
+
+### Build
+
+- **deps:** Bump com.google.zxing:core in /apps/jetbrains-plugin (#5)
+- **deps:** Bump org.jetbrains.intellij.platform (#6)
+- **deps:** Bump gradle-wrapper in /apps/jetbrains-plugin (#14)
+
+### CI
+
+- **jetbrains:** Publish plugin to Marketplace stable channel on tag
+
+### Changed
+
+- **cli:** Drop unused token field from WS auth payload
+- **cli:** Zod-validate remote command payloads
+
+### Chore
+
+- Ignore .worktrees directory
+- **cli:** Upgrade @clack/prompts to 1.2.0 (ESM bundled via tsup)
+- **deps:** Bump vitest to clear esbuild CVE (GHSA-67mh-4wv8-2f99)
+
+### Documentation
+
+- Enforce correct-and-implicit TypeScript typing
+
+### Fixed
+
+- **cli:** Pass PTY args as argv array (no shell concatenation)
+- **cli:** Clean up PTY child on SIGINT/SIGTERM
+- **vsc-plugin:** Guard startMonitoring against re-entry; scaffold vitest
+
 ## [2.0.2] — 2026-04-23
 
 ### Build
