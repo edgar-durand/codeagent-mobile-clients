@@ -34,3 +34,6 @@ npm-debug.log*
 
 # Coverage
 coverage/
+
+# Local worktrees (superpowers/subagent-driven-development)
+.worktrees/
