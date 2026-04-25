@@ -110,7 +110,7 @@ Each app ships independently and keeps its own version number and changelog:
 | VS Code plugin | **2.0.0** | [apps/vsc-plugin/CHANGELOG.md](apps/vsc-plugin/CHANGELOG.md) | [VS Code Marketplace](https://marketplace.visualstudio.com/items?itemName=CodeAgentMobile.codeagent-mobile) · [Open VSX](https://open-vsx.org/extension/CodeAgentMobile/codeagent-mobile) |
 | JetBrains plugin | **2.0.0** | [apps/jetbrains-plugin/CHANGELOG.md](apps/jetbrains-plugin/CHANGELOG.md) | [JetBrains Marketplace](https://plugins.jetbrains.com/plugin/30697-codeagent-mobile) |
 
-From **2.0.0 onwards all three clients ship under the same version line.** Pushing a single tag `vX.Y.Z` releases `codeam-cli@X.Y.Z` to npm and the VS Code extension `X.Y.Z` to both the VS Code Marketplace and Open VSX via the automated [release workflow](.github/workflows/release.yml). The JetBrains plugin is versioned together but currently uploaded manually to the JetBrains Marketplace.
+From **2.0.0 onwards all three clients ship under the same version line.** Pushing a single tag `vX.Y.Z` releases `codeam-cli@X.Y.Z` to npm, the VS Code extension `X.Y.Z` to both the VS Code Marketplace and Open VSX, and the JetBrains plugin `X.Y.Z` to the JetBrains Marketplace stable channel via the automated [release workflow](.github/workflows/release.yml). Pre-release tags (`vX.Y.Z-rc.N`) skip the JetBrains marketplace push — the `.zip` is still attached to the GitHub Release for manual upload to a non-stable channel.
 
 Publishing secrets (`PAT`, `OVSX_TOKEN`, `CERTIFICATE_CHAIN`, `PRIVATE_KEY`, `PRIVATE_KEY_PASSWORD`, `PUBLISH_TOKEN`) live in local `.env` files and are gitignored — they never land in this repo.
 

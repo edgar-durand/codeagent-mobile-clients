@@ -5,11 +5,11 @@ on:
     tags:
       - 'v*.*.*'
 
-# Tag vX.Y.Z → publishes codeam-cli@X.Y.Z to npm and the VS Code extension
-# X.Y.Z to the VS Code Marketplace and Open VSX, and drafts a GitHub Release
-# with both artifacts attached. The JetBrains plugin is built here for
-# archival attachment to the Release but is uploaded to the JetBrains
-# Marketplace manually for now.
+# Tag vX.Y.Z → publishes codeam-cli to npm, the VS Code extension to the VS
+# Code Marketplace and Open VSX, and the JetBrains plugin to JetBrains
+# Marketplace (stable channel). Drafts a GitHub Release with all three
+# artifacts attached. Pre-release tags (vX.Y.Z-rc.N) skip the JetBrains
+# marketplace push.
 
 permissions:
   contents: write
@@ -106,9 +106,20 @@ jobs:
         working-directory: apps/cli
         run: npm pack
 
-      - name: Build JetBrains plugin (archive only)
+      - name: Build JetBrains plugin
         working-directory: apps/jetbrains-plugin
         run: ./gradlew clean buildPlugin
+
+      - name: Verify JetBrains plugin
+        working-directory: apps/jetbrains-plugin
+        run: ./gradlew verifyPlugin
+
+      - name: Publish JetBrains plugin to Marketplace
+        if: ${{ !contains(steps.version.outputs.version, '-') }}
+        working-directory: apps/jetbrains-plugin
+        run: ./gradlew publishPlugin
+        env:
+          PUBLISH_TOKEN: ${{ secrets.JETBRAINS_MARKETPLACE_TOKEN }}
 
       # --- Publish ----------------------------------------------------------
 

@@ -57,7 +57,8 @@ intellijPlatform {
     }
 
     publishing {
-        token = System.getenv("PUBLISH_TOKEN") ?: ""
+        token = providers.environmentVariable("PUBLISH_TOKEN").orElse("")
+        channels = listOf("default")
     }
 }
 

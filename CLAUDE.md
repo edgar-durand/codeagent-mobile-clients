@@ -8,7 +8,7 @@ This repo holds the **client-side pieces** of [CodeAgent Mobile](https://www.cod
 
 - `apps/cli` — `codeam-cli`, the Node.js CLI that spawns Claude Code under a PTY and relays mobile prompts. Published to npm.
 - `apps/vsc-plugin` — The VS Code / Cursor / Windsurf extension. Published to VS Code Marketplace and Open VSX.
-- `apps/jetbrains-plugin` — The IntelliJ-family plugin (IntelliJ IDEA, WebStorm, PyCharm, Rider, GoLand, …). Published to JetBrains Marketplace (currently uploaded manually).
+- `apps/jetbrains-plugin` — The IntelliJ-family plugin (IntelliJ IDEA, WebStorm, PyCharm, Rider, GoLand, …). Published to JetBrains Marketplace (stable channel) by the tag-triggered release workflow.
 - `packages/shared` — `@codeagent/shared`, pure-TypeScript modules (chunk-protocol parser, Anthropic pricing tables) bundled into the CLI and the VS Code extension at build time.
 
 The backend, mobile app, and web dashboard are maintained elsewhere and are not in scope here.
@@ -200,8 +200,9 @@ and `.github/workflows/release.yml` does the rest:
 - `NPM_TOKEN` — an npmjs.com *Automation* access token with publish scope on `codeam-cli`
 - `VSCE_PAT` — Azure DevOps personal access token for the VS Code Marketplace
 - `OVSX_TOKEN` — Open VSX token for the Cursor/Windsurf store
+- `JETBRAINS_MARKETPLACE_TOKEN` — JetBrains Hub permanent token (https://plugins.jetbrains.com/author/me/tokens). Auto-injected as `PUBLISH_TOKEN` env var that the Gradle plugin reads.
 
-**JetBrains Marketplace** is not automated — download the `.zip` from the GitHub Release and upload it to https://plugins.jetbrains.com/plugin/30697-codeagent-mobile manually.
+**JetBrains Marketplace** is fully automated alongside npm + VS Code Marketplace + Open VSX. Tagging `vX.Y.Z` publishes the plugin to the **stable** channel via `./gradlew publishPlugin` in CI. Pre-release tags (`vX.Y.Z-rc.N`) skip the marketplace push — the build still runs and the `.zip` is attached to the GitHub Release for manual upload to a non-stable channel if needed.
 
 ## CI
 
