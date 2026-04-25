@@ -220,6 +220,18 @@ export class TerminalAgentService {
    * chrome_steps, and select_prompt chunks.
    */
   startMonitoring(sessionId: string, prompt: string): void {
+    // Re-entry guard: if a previous tick loop is still active for an
+    // earlier turn, drop this call rather than tearing it down and
+    // double-spawning. Two rapid `startMonitoring` calls (e.g. a user
+    // double-fires a prompt) would otherwise leave two interval timers
+    // racing on the same rawBuffer.
+    if (this.isActive) {
+      this.log.appendLine(
+        `[terminal] startMonitoring: ignoring re-entry while session=${this.currentSessionId} is active`,
+      );
+      return;
+    }
+
     this.stopMonitoring();
 
     if (!this.pseudoterminal?.isAlive()) {
