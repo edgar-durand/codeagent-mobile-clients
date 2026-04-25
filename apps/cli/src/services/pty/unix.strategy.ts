@@ -152,6 +152,30 @@ export class UnixPtyStrategy implements IPtyStrategy {
       this.dispose();
       this.opts.onExit(code ?? 0);
     });
+
+    this.installSignalHandlers();
+  }
+
+  /**
+   * Install once-fired SIGINT/SIGTERM handlers that kill the child PTY helper
+   * (and via it the Claude process group) before this Node process exits.
+   *
+   * Without this, Ctrl+C tears down Node but the Python helper / Claude can
+   * be left as a zombie or orphaned process. Exit codes follow the standard
+   * 128 + signal-number convention (130 for SIGINT, 143 for SIGTERM).
+   *
+   * No-op if the child has already exited (`proc.killed === true`) so we
+   * don't double-signal a dead process.
+   */
+  public installSignalHandlers(): void {
+    const handler = (signal: 'SIGINT' | 'SIGTERM'): void => {
+      if (this.proc && !this.proc.killed) {
+        this.proc.kill('SIGTERM');
+      }
+      process.exit(signal === 'SIGINT' ? 130 : 143);
+    };
+    process.once('SIGINT', () => handler('SIGINT'));
+    process.once('SIGTERM', () => handler('SIGTERM'));
   }
 
   /**
@@ -191,6 +215,8 @@ export class UnixPtyStrategy implements IPtyStrategy {
       this.dispose();
       this.opts.onExit(code ?? 0);
     });
+
+    this.installSignalHandlers();
   }
 
   write(data: string | Buffer): void {
