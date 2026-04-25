@@ -101,7 +101,7 @@ jobs:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Upload CLI tarball artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: cli-tgz
           path: apps/cli/codeam-cli-${{ needs.setup.outputs.version }}.tgz
@@ -156,7 +156,7 @@ jobs:
           OVSX_TOKEN: ${{ secrets.OVSX_TOKEN }}
 
       - name: Upload VSIX artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: vsc-vsix
           path: apps/vsc-plugin/codeagent-mobile-${{ needs.setup.outputs.version }}.vsix
@@ -206,7 +206,7 @@ jobs:
           echo "zip=$ZIP" >> "$GITHUB_OUTPUT"
 
       - name: Upload JetBrains plugin archive
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: jb-zip
           path: ${{ steps.jb.outputs.zip }}
@@ -231,20 +231,20 @@ jobs:
           fetch-depth: 0
 
       - name: Download CLI tarball
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: cli-tgz
           path: dist/cli
 
       - name: Download VSIX
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: vsc-vsix
           path: dist/vsc
 
       - name: Download JetBrains plugin archive
         if: ${{ needs.publish-jetbrains.result == 'success' }}
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: jb-zip
           path: dist/jb
@@ -307,7 +307,7 @@ jobs:
         # received the release, so we always want the GitHub Release to exist
         # with the built artifacts attached.
         if: always() && needs.setup.outputs.version != ''
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           name: v${{ needs.setup.outputs.version }}
           body_path: RELEASE_NOTES.md
