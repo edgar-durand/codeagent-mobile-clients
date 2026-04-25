@@ -231,20 +231,20 @@ jobs:
           fetch-depth: 0
 
       - name: Download CLI tarball
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: cli-tgz
           path: dist/cli
 
       - name: Download VSIX
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: vsc-vsix
           path: dist/vsc
 
       - name: Download JetBrains plugin archive
         if: ${{ needs.publish-jetbrains.result == 'success' }}
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: jb-zip
           path: dist/jb
