@@ -1,7 +1,7 @@
 plugins {
     id("java")
     id("org.jetbrains.kotlin.jvm") version "2.0.21"
-    id("org.jetbrains.intellij.platform") version "2.2.1"
+    id("org.jetbrains.intellij.platform") version "2.14.0"
     id("org.jetbrains.changelog") version "2.2.1"
 }
 
@@ -19,8 +19,8 @@ dependencies {
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("com.google.code.gson:gson:2.10.1")
     implementation("org.java-websocket:Java-WebSocket:1.5.6")
-    implementation("com.google.zxing:core:3.5.3")
-    implementation("com.google.zxing:javase:3.5.3")
+    implementation("com.google.zxing:core:3.5.4")
+    implementation("com.google.zxing:javase:3.5.4")
     testImplementation("org.jetbrains.kotlin:kotlin-test")
     testImplementation("junit:junit:4.13.2")
 
