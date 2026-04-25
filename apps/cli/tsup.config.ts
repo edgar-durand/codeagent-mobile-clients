@@ -6,6 +6,7 @@ export default defineConfig([
     format: ['cjs'],
     target: 'node18',
     clean: true,
+    noExternal: ['@clack/prompts', '@clack/core'],
     banner: { js: '#!/usr/bin/env node' },
   },
   {
