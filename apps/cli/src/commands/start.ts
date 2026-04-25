@@ -12,14 +12,11 @@ import { ClaudeService } from '../services/claude.service';
 import { findInPath } from '../services/pty/types';
 import { OutputService } from '../services/output.service';
 import { HistoryService } from '../services/history.service';
+import { parsePayload, startCommandSchema, type FileEntry } from '../lib/payload';
 
-// Mirrors packages/shared/src/types/agent.ts — keep in sync manually.
-// The CLI is a standalone npm package and cannot import from packages/shared.
-interface FileAttachment {
-  filename: string;
-  mimeType: string;
-  base64: string;
-}
+// FileAttachment shape mirrors packages/shared/src/types/agent.ts — kept in
+// sync via the zod schema in src/lib/payload.ts (see `fileEntrySchema`).
+type FileAttachment = FileEntry;
 
 /** Write base64-encoded file attachments to temp files; returns their paths. */
 function saveFilesTemp(files: FileAttachment[]): string[] {
@@ -175,10 +172,17 @@ except Exception:sys.exit(0)
   }
 
   const relay = new CommandRelayService(pluginId, async (cmd) => {
+    // Validate the incoming payload once at the top — every handler reads
+    // off the parsed/narrowed object instead of casting per field. If the
+    // backend sends a wrong shape we drop the command rather than crash mid-flight.
+    const parsed = parsePayload(startCommandSchema, cmd.payload);
+    if (!parsed) {
+      showInfo(`Ignoring malformed ${cmd.type} payload.`);
+      return;
+    }
     switch (cmd.type) {
       case 'start_task': {
-        const prompt = cmd.payload.prompt as string | undefined;
-        const files = cmd.payload.files as FileAttachment[] | undefined;
+        const { prompt, files } = parsed;
         const effectivePrompt = prompt ?? '';
         if (files && files.length > 0) {
           const paths = saveFilesTemp(files);
@@ -194,7 +198,7 @@ except Exception:sys.exit(0)
         break;
       }
       case 'provide_input': {
-        const input = cmd.payload.input as string | undefined;
+        const { input } = parsed;
         if (input) sendPrompt(input);
         break;
       }
@@ -205,8 +209,8 @@ except Exception:sys.exit(0)
         // stale closure captures index=0 for the Enter key and always picks option 1.
         // `from` is the current highlighted position sent by the client for
         // list-style selectors; defaults to 0 (numbered selectors always start there).
-        const index = cmd.payload.index as number | undefined ?? 0;
-        const from  = cmd.payload.from  as number | undefined ?? 0;
+        const index = parsed.index ?? 0;
+        const from  = parsed.from  ?? 0;
         outputSvc.newTurn();
         claude.selectOption(index, from);
         break;
@@ -231,13 +235,12 @@ except Exception:sys.exit(0)
         break;
       }
       case 'resume_session': {
-        const id = cmd.payload.id as string | undefined;
-        const auto = (cmd.payload.auto as boolean | undefined) ?? false;
+        const { id, auto } = parsed;
         if (!id) break;
         historySvc.setCurrentConversationId(id);
         await historySvc.loadConversation(id);
         await outputSvc.newTurnResume(id);
-        claude.restart(id, auto);
+        claude.restart(id, auto ?? false);
         break;
       }
       case 'get_conversation': {
@@ -275,11 +278,15 @@ except Exception:sys.exit(0)
     onDisconnected() { /* reconnect handled internally */ },
     onMessage(type, payload) {
       if (type !== 'agent_command') return;
-      const cmdType = payload.type as string;
-      const inner = (payload.payload as Record<string, unknown>) ?? {};
+      const cmdType = typeof payload.type === 'string' ? payload.type : null;
+      if (!cmdType) return;
+      const parsed = parsePayload(startCommandSchema, payload.payload ?? {});
+      if (!parsed) {
+        showInfo(`Ignoring malformed ${cmdType} payload (ws).`);
+        return;
+      }
       if (cmdType === 'start_task') {
-        const prompt = inner.prompt as string | undefined;
-        const files = inner.files as FileAttachment[] | undefined;
+        const { prompt, files } = parsed;
         const effectivePrompt = prompt ?? '';
         if (files && files.length > 0) {
           const paths = saveFilesTemp(files);
@@ -293,11 +300,11 @@ except Exception:sys.exit(0)
           sendPrompt(effectivePrompt);
         }
       } else if (cmdType === 'provide_input') {
-        const input = inner.input as string | undefined;
+        const { input } = parsed;
         if (input) sendPrompt(input);
       } else if (cmdType === 'select_option') {
-        const index = inner.index as number | undefined ?? 0;
-        const from  = inner.from  as number | undefined ?? 0;
+        const index = parsed.index ?? 0;
+        const from  = parsed.from  ?? 0;
         outputSvc.newTurn();
         claude.selectOption(index, from);
       } else if (cmdType === 'escape_key') {
@@ -311,12 +318,12 @@ except Exception:sys.exit(0)
           historySvc.loadConversation(currentId).catch(() => {});
         }
       } else if (cmdType === 'resume_session') {
-        const id = inner.id as string | undefined;
-        const auto = (inner.auto as boolean | undefined) ?? false;
+        const { id, auto } = parsed;
         if (id) {
+          const autoFlag = auto ?? false;
           historySvc.loadConversation(id)
             .then(() => outputSvc.newTurnResume(id))
-            .then(() => { claude.restart(id, auto); })
+            .then(() => { claude.restart(id, autoFlag); })
             .catch(() => {});
         }
       }

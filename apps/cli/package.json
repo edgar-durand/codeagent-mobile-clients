@@ -71,7 +71,8 @@
     "@clack/prompts": "^1.2.0",
     "picocolors": "^1.1.0",
     "qrcode-terminal": "^0.12.0",
-    "ws": "^8.18.0"
+    "ws": "^8.18.0",
+    "zod": "^3.22.4"
   },
   "devDependencies": {
     "@codeagent/shared": "*",
