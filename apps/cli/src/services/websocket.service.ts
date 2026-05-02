@@ -1,4 +1,5 @@
 import WebSocket from 'ws';
+import { computePollDelay } from '../lib/poll-delay';
 
 const API_BASE = process.env.CODEAM_API_URL ?? 'https://codeagent-mobile-api.vercel.app';
 const WS_URL = API_BASE.replace('https://', 'wss://').replace('http://', 'ws://') + '/api/ws';
@@ -59,7 +60,10 @@ export class WebSocketService {
         this.handlers.forEach(h => h.onDisconnected());
         if (this.reconnectAttempts < MAX_RECONNECT) {
           this.reconnectAttempts++;
-          const delay = Math.min(1000 * 2 ** this.reconnectAttempts, 30_000);
+          // Exponential + ±10% jitter, capped at 30 s. Jitter prevents
+          // many clients from reconnecting in lockstep after a backend
+          // outage.
+          const delay = computePollDelay({ baseMs: 1000, failures: this.reconnectAttempts });
           this.reconnectTimer = setTimeout(() => this.connect(), delay);
         }
       });
