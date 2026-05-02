@@ -11,18 +11,23 @@ import java.nio.charset.StandardCharsets
 
 /**
  * File read/write helpers for the mobile / landing mini-IDE modal.
- * Resolves paths against the open IntelliJ project's base directory and
- * refuses anything that escapes it. Writes go through `LocalFileSystem`
- * so the IDE's VFS picks up the change immediately (the editor refreshes,
- * indexers re-run, etc.) — same effect as the user typing in the IDE.
+ *
+ * Resolves paths against the open IntelliJ project. Tries the direct
+ * project-relative path first, then walks the project tree (capped at
+ * depth 6, ignoring noise dirs) and matches by suffix so an agent that
+ * emits a path relative to a deeper subdirectory still resolves cleanly
+ * to the right file.
+ *
+ * Writes go through `LocalFileSystem` + `VfsUtil.saveText` inside a
+ * `runWriteAction` so the IDE picks up the change immediately (editor
+ * refreshes, indexers re-run) — same effect as the user typing in IntelliJ.
  */
 @Service(Service.Level.APP)
 class FileOpsService {
 
     fun readFile(rawPath: String): JsonObject {
         return try {
-            val file = resolveSafe(rawPath) ?: return errorObj("Path escapes the open project.")
-            if (!file.exists()) return errorObj("File not found.")
+            val file = resolve(rawPath) ?: return errorObj("File not found in the project tree: $rawPath")
             if (!file.isFile) return errorObj("Not a regular file.")
             if (file.length() > MAX_BYTES) {
                 return errorObj("File too large (${file.length() / 1024 / 1024} MB).")
@@ -39,25 +44,21 @@ class FileOpsService {
 
     fun writeFile(rawPath: String, content: String): JsonObject {
         return try {
-            val file = resolveSafe(rawPath) ?: return errorObj("Path escapes the open project.")
+            val file = resolve(rawPath) ?: directWriteTarget(rawPath)
+                ?: return errorObj("Path escapes the open project.")
             val bytes = content.toByteArray(StandardCharsets.UTF_8)
             if (bytes.size > MAX_BYTES) return errorObj("Content too large.")
 
-            // Ensure parent directories exist.
             file.parentFile?.let { parent ->
                 if (!parent.exists()) parent.mkdirs()
             }
 
-            // Write through the IDE's VFS so the editor picks up the change
-            // and indexers / file watchers re-run as if the user had edited
-            // the file natively.
             ApplicationManager.getApplication().invokeAndWait {
                 ApplicationManager.getApplication().runWriteAction {
                     val vfile = LocalFileSystem.getInstance().refreshAndFindFileByIoFile(file)
                     if (vfile != null) {
                         VfsUtil.saveText(vfile, content)
                     } else {
-                        // File didn't exist yet — write directly, then refresh VFS.
                         file.writeBytes(bytes)
                         LocalFileSystem.getInstance().refreshAndFindFileByIoFile(file)
                     }
@@ -72,22 +73,88 @@ class FileOpsService {
         }
     }
 
-    private fun resolveSafe(rawPath: String): File? {
-        val projects = ProjectManager.getInstance().openProjects
-        if (projects.isEmpty()) return null
-        for (project in projects) {
-            val basePath = project.basePath ?: continue
-            val rootFile = File(basePath).canonicalFile
+    /**
+     * Pass 1: every open project's basePath + direct relative resolution.
+     * Pass 2: recursive suffix-match walk. Returns the shortest match.
+     */
+    private fun resolve(rawPath: String): File? {
+        val roots = ProjectManager.getInstance().openProjects.mapNotNull { proj ->
+            proj.basePath?.let { File(it).canonicalFile }
+        }
+        if (roots.isEmpty()) return null
+
+        // Pass 1
+        for (root in roots) {
             val candidate = if (File(rawPath).isAbsolute) {
                 File(rawPath).canonicalFile
             } else {
-                File(rootFile, rawPath).canonicalFile
+                File(root, rawPath).canonicalFile
             }
-            if (candidate == rootFile || candidate.path.startsWith(rootFile.path + File.separator)) {
-                return candidate
+            if (isUnder(root, candidate) && candidate.isFile) return candidate
+        }
+
+        // Pass 2
+        val needle = "/" + rawPath.trimStart('.', '/', '\\').replace('\\', '/')
+        val matches = mutableListOf<File>()
+        val ctx = WalkContext(visited = 0, cap = 16, matches = matches)
+        for (root in roots) {
+            walk(root, needle, depth = 0, ctx = ctx)
+            if (matches.size >= ctx.cap) break
+        }
+        return matches
+            .filter { f -> roots.any { isUnder(it, f) } }
+            .minByOrNull { it.path.length }
+    }
+
+    private fun directWriteTarget(rawPath: String): File? {
+        val roots = ProjectManager.getInstance().openProjects.mapNotNull { proj ->
+            proj.basePath?.let { File(it).canonicalFile }
+        }
+        for (root in roots) {
+            val candidate = if (File(rawPath).isAbsolute) {
+                File(rawPath).canonicalFile
+            } else {
+                File(root, rawPath).canonicalFile
             }
+            if (isUnder(root, candidate)) return candidate
         }
         return null
+    }
+
+    private data class WalkContext(var visited: Int, val cap: Int, val matches: MutableList<File>)
+
+    private fun walk(dir: File, needle: String, depth: Int, ctx: WalkContext) {
+        if (depth > MAX_WALK_DEPTH) return
+        if (ctx.visited > MAX_VISITED_DIRS) return
+        if (ctx.matches.size >= ctx.cap) return
+        ctx.visited++
+
+        val entries = dir.listFiles() ?: return
+
+        // Files first.
+        for (e in entries) {
+            if (e.isFile) {
+                val p = e.path.replace('\\', '/')
+                if (p.endsWith(needle)) {
+                    ctx.matches.add(e)
+                    if (ctx.matches.size >= ctx.cap) return
+                }
+            }
+        }
+        // Then dirs.
+        for (e in entries) {
+            if (!e.isDirectory) continue
+            if (SUBDIR_IGNORE.contains(e.name)) continue
+            walk(e, needle, depth + 1, ctx)
+            if (ctx.matches.size >= ctx.cap) return
+        }
+    }
+
+    private fun isUnder(parent: File, candidate: File): Boolean {
+        val p = parent.path
+        val c = candidate.path
+        if (c == p) return true
+        return c.startsWith(p + File.separator)
     }
 
     private fun looksBinary(bytes: ByteArray): Boolean {
@@ -105,7 +172,18 @@ class FileOpsService {
     }
 
     companion object {
-        private const val MAX_BYTES = 5L * 1024 * 1024 // 5 MB
+        private const val MAX_BYTES = 5L * 1024 * 1024
+        private const val MAX_WALK_DEPTH = 6
+        private const val MAX_VISITED_DIRS = 5000
+
+        private val SUBDIR_IGNORE = setOf(
+            "node_modules", ".git", ".next", ".expo", "dist", "build", "out", ".cache",
+            "coverage", ".turbo", ".parcel-cache", ".idea", ".vscode", ".vscode-test",
+            "ios", "android",
+            ".gradle", ".cxx", ".intellijPlatform", ".kotlin",
+            "tmp", "target", "venv", ".venv", ".mypy_cache", ".pytest_cache",
+            "__pycache__",
+        )
 
         fun getInstance(): FileOpsService =
             ApplicationManager.getApplication().getService(FileOpsService::class.java)

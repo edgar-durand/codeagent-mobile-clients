@@ -2,86 +2,133 @@ import * as fs from 'fs/promises';
 import * as path from 'path';
 
 /**
- * Read & write helpers for the mobile / landing mini-IDE modal. The agent
- * pairs against whatever `cwd` the CLI was launched from — that's usually
- * the project root, but in monorepo / parent-dir setups the agent may
- * mention paths that live in a sibling subdirectory. We:
+ * Read & write helpers for the mobile / landing mini-IDE modal.
  *
- *   1. Try the path relative to `cwd` first (the common case).
- *   2. If not there, scan first-level subdirectories of `cwd` for the
- *      same relative path. Lets the agent reference `apps/foo/bar.ts`
- *      from a parent dir that holds multiple sub-repos and still hit
- *      the right file.
- *   3. Path is always required to stay *under* `cwd` after resolution
- *      (the relative-from-cwd check) so a malicious client can't pull
- *      `/etc/passwd` or write outside the project tree.
+ * Path resolution is forgiving: the agent often emits a path that's
+ * relative to *its* working directory (whatever subdir of the project
+ * it was inspecting), but the CLI's `process.cwd()` may be a few
+ * levels above that — common in monorepo / parent-of-many-repos
+ * setups. We resolve in three passes:
  *
- * Binary files (NUL byte in the first 8 KB) are rejected on read so a
- * Monaco buffer can't render garbage; 5 MB cap on both directions.
+ *   1. Direct: `cwd + path` (the typical case when the agent and the
+ *      CLI share a cwd).
+ *   2. Suffix walk: recursively scan first-level subdirs, ignoring the
+ *      usual noise (`node_modules`, `.git`, build outputs, native
+ *      mobile dirs, …), and pick any file whose absolute path *ends
+ *      with* the requested relative path. Capped at depth 6 and 5000
+ *      visited dirs so the worst case doesn't tank a busy machine.
+ *   3. Pick the shortest match — the file closest to the project root
+ *      is almost always the canonical one when multiple workspaces
+ *      mirror the same path.
+ *
+ * Sandbox: the resolved absolute path must live under `cwd` (the
+ * relative-from-cwd check), so a malicious or buggy client can't pull
+ * `/etc/passwd` or write outside the user's project tree.
+ *
+ * Binary files (NUL byte in the first 8 KB) are rejected on read; the
+ * cap on both directions is 5 MB.
  */
 
 const MAX_FILE_BYTES = 5 * 1024 * 1024;
+const MAX_WALK_DEPTH = 6;
+const MAX_VISITED_DIRS = 5000;
 
 const SUBDIR_IGNORE = new Set([
   'node_modules', '.git', '.next', '.expo', 'dist', 'build', 'out', '.cache',
-  'coverage', '.turbo', '.parcel-cache', '.idea', '.vscode',
+  'coverage', '.turbo', '.parcel-cache', '.idea', '.vscode', '.vscode-test',
   'ios', 'android', // expo-managed native dirs are huge and rarely interesting
+  '.gradle', '.cxx', '.intellijPlatform', '.kotlin',
+  'tmp', 'target', 'venv', '.venv', '.mypy_cache', '.pytest_cache',
+  '__pycache__',
 ]);
-
-async function listSubdirs(dir: string): Promise<string[]> {
-  try {
-    const entries = await fs.readdir(dir, { withFileTypes: true });
-    return entries
-      .filter((e) => e.isDirectory() && !e.name.startsWith('.') ? true : !SUBDIR_IGNORE.has(e.name))
-      .filter((e) => e.isDirectory() && !SUBDIR_IGNORE.has(e.name))
-      .map((e) => path.join(dir, e.name));
-  } catch {
-    return [];
-  }
-}
 
 function isUnder(parent: string, candidate: string): boolean {
   const rel = path.relative(parent, candidate);
-  return !rel.startsWith('..') && !path.isAbsolute(rel);
+  return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
 }
 
-/**
- * Find an existing file matching `rawPath`. Tries cwd-relative first, then
- * each first-level subdirectory of cwd. Returns the first absolute path
- * that exists and is a regular file.
- */
+async function isExistingFile(absPath: string): Promise<boolean> {
+  try {
+    const stat = await fs.stat(absPath);
+    return stat.isFile();
+  } catch {
+    return false;
+  }
+}
+
+interface WalkContext {
+  visited: number;
+  matches: string[];
+  cap: number; // stop adding matches once we've collected enough
+}
+
+async function walkForSuffix(
+  dir: string,
+  needleVariants: string[],
+  depth: number,
+  ctx: WalkContext,
+): Promise<void> {
+  if (depth > MAX_WALK_DEPTH) return;
+  if (ctx.visited > MAX_VISITED_DIRS) return;
+  if (ctx.matches.length >= ctx.cap) return;
+  ctx.visited++;
+
+  let entries: import('fs').Dirent[] = [];
+  try {
+    entries = await fs.readdir(dir, { withFileTypes: true });
+  } catch {
+    return;
+  }
+
+  // Files first so we can short-circuit if a match drops in this dir.
+  for (const e of entries) {
+    if (!e.isFile()) continue;
+    const full = path.join(dir, e.name);
+    if (needleVariants.some((needle) => full.endsWith(needle))) {
+      ctx.matches.push(full);
+      if (ctx.matches.length >= ctx.cap) return;
+    }
+  }
+
+  for (const e of entries) {
+    if (!e.isDirectory()) continue;
+    if (SUBDIR_IGNORE.has(e.name)) continue;
+    if (e.name.startsWith('.') && SUBDIR_IGNORE.has(e.name)) continue;
+    await walkForSuffix(path.join(dir, e.name), needleVariants, depth + 1, ctx);
+    if (ctx.matches.length >= ctx.cap) return;
+  }
+}
+
 async function findFile(rawPath: string): Promise<string | null> {
   const cwd = process.cwd();
-  const candidates: string[] = [];
 
+  // Pass 1: absolute or cwd-relative direct hit.
   if (path.isAbsolute(rawPath)) {
-    candidates.push(path.normalize(rawPath));
-  } else {
-    candidates.push(path.resolve(cwd, rawPath));
-    const subdirs = await listSubdirs(cwd);
-    for (const sub of subdirs) {
-      candidates.push(path.resolve(sub, rawPath));
-    }
+    const abs = path.normalize(rawPath);
+    if (isUnder(cwd, abs) && (await isExistingFile(abs))) return abs;
   }
+  const direct = path.resolve(cwd, rawPath);
+  if (isUnder(cwd, direct) && (await isExistingFile(direct))) return direct;
 
-  for (const cand of candidates) {
-    if (!isUnder(cwd, cand)) continue;
-    try {
-      const stat = await fs.stat(cand);
-      if (stat.isFile()) return cand;
-    } catch {
-      /* continue */
-    }
-  }
-  return null;
+  // Pass 2: suffix walk. Try both `/normalized/path` and `\\normalized\\path`
+  // so Windows-shaped paths still match on POSIX (rare but cheap to do).
+  const normalized = path.normalize(rawPath).replace(/^[./\\]+/, '');
+  const needles = [
+    `${path.sep}${normalized}`,
+    `/${normalized}`,
+  ].filter((v, i, a) => a.indexOf(v) === i);
+
+  const ctx: WalkContext = { visited: 0, matches: [], cap: 16 };
+  await walkForSuffix(cwd, needles, 0, ctx);
+
+  const candidates = ctx.matches.filter((c) => isUnder(cwd, c));
+  if (candidates.length === 0) return null;
+
+  // Pass 3: prefer the SHORTEST match (closest to root → most canonical).
+  candidates.sort((a, b) => a.length - b.length);
+  return candidates[0];
 }
 
-/**
- * Like `findFile` but returns the resolution target for a *write*: the
- * existing file path if one is found, otherwise the cwd-relative resolution
- * (which may not exist yet — `writeProjectFile` will create it). Always
- * sandboxed under `cwd`.
- */
 async function findWriteTarget(rawPath: string): Promise<string | null> {
   const found = await findFile(rawPath);
   if (found) return found;
