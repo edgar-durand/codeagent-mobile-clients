@@ -23,6 +23,7 @@ import com.windsurf.controller.services.TerminalAgentService
 import com.windsurf.controller.services.McpConfigWriterService
 import com.windsurf.controller.services.McpConfigureRequest
 import com.windsurf.controller.services.McpEntry
+import com.windsurf.controller.services.FileOpsService
 import com.windsurf.controller.services.McpServerDef
 import com.windsurf.controller.services.WebSocketService
 import okhttp3.MediaType.Companion.toMediaType
