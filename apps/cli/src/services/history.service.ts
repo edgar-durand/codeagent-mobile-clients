@@ -3,8 +3,35 @@ import * as path from 'path';
 import * as os from 'os';
 import * as https from 'https';
 import * as http from 'http';
+import { z } from 'zod';
 import { getContextWindow, getPricing } from '@codeagent/shared';
 import { log } from './logger';
+
+/**
+ * Schema for one record in a Claude Code session JSONL file. Only fields
+ * actually consumed by parseJsonl are validated — the file may carry many
+ * other keys (tool calls, internal IDs, etc.) and we deliberately ignore
+ * them via `.passthrough()`. A schema mismatch (corruption, version
+ * skew, partial write) results in the record being skipped with a warn
+ * log rather than producing undefined values that break downstream code.
+ */
+const historyRecordSchema = z
+  .object({
+    type: z.string().optional(),
+    timestamp: z.union([z.string(), z.number()]).optional(),
+    uuid: z.string().optional(),
+    isMeta: z.boolean().optional(),
+    message: z
+      .object({
+        // Claude content is either a string or an array of typed blocks.
+        content: z.union([z.string(), z.array(z.unknown())]).optional(),
+      })
+      .passthrough()
+      .optional(),
+  })
+  .passthrough();
+
+type HistoryRecord = z.infer<typeof historyRecordSchema>;
 
 const API_BASE = process.env.CODEAM_API_URL ?? 'https://codeagent-mobile-api.vercel.app';
 
@@ -56,28 +83,35 @@ function parseJsonl(filePath: string): ClaudeHistoryMessage[] {
   }
   const lines = raw.split('\n').filter(Boolean);
   for (const line of lines) {
+    let parsedJson: unknown;
     try {
-      const record = JSON.parse(line) as Record<string, unknown>;
-      const type = record['type'] as string | undefined;
-      const msg = record['message'] as Record<string, unknown> | undefined;
-      const ts = record['timestamp'];
-      const timestamp =
-        typeof ts === 'string' ? new Date(ts).getTime() : typeof ts === 'number' ? ts : Date.now();
-      const uuid =
-        (record['uuid'] as string | undefined) ?? `${Date.now()}-${Math.random()}`;
-
-      // isMeta=true marks injected context (skills, hooks, system prompts) — skip
-      if (record['isMeta']) continue;
-
-      if (type === 'user' && msg) {
-        const text = extractText(msg['content']).trim();
-        if (text) messages.push({ id: uuid, role: 'user', text, timestamp });
-      } else if (type === 'assistant' && msg) {
-        const text = extractText(msg['content']).trim();
-        if (text) messages.push({ id: uuid, role: 'agent', text, timestamp });
-      }
+      parsedJson = JSON.parse(line);
     } catch {
-      // malformed line — skip
+      // malformed JSON — skip
+      continue;
+    }
+    const result = historyRecordSchema.safeParse(parsedJson);
+    if (!result.success) {
+      log.warn('history:parseJsonl', `record failed schema validation in ${filePath}`, result.error.issues);
+      continue;
+    }
+    const record: HistoryRecord = result.data;
+
+    // isMeta=true marks injected context (skills, hooks, system prompts) — skip
+    if (record.isMeta) continue;
+
+    const ts = record.timestamp;
+    const timestamp =
+      typeof ts === 'string' ? new Date(ts).getTime() : typeof ts === 'number' ? ts : Date.now();
+    const uuid = record.uuid ?? `${Date.now()}-${Math.random()}`;
+    const msg = record.message;
+
+    if (record.type === 'user' && msg) {
+      const text = extractText(msg.content).trim();
+      if (text) messages.push({ id: uuid, role: 'user', text, timestamp });
+    } else if (record.type === 'assistant' && msg) {
+      const text = extractText(msg.content).trim();
+      if (text) messages.push({ id: uuid, role: 'agent', text, timestamp });
     }
   }
   return messages;
