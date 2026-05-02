@@ -4,6 +4,12 @@ All notable changes to the CodeAgent-Mobile JetBrains plugin are documented here
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.2.1] — 2026-05-02
+
+### Fixed
+
+- **cli:** Subdir fallback for read_file when CLI cwd is a monorepo parent (v2.2.1)
+
 ## [2.1.0] — 2026-04-25
 
 ### Added
