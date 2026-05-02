@@ -2,9 +2,9 @@ package com.windsurf.controller.services
 
 import com.google.gson.Gson
 import com.google.gson.JsonObject
-import com.intellij.execution.process.ProcessAdapter
 import com.intellij.execution.process.ProcessEvent
 import com.intellij.execution.process.ProcessHandler
+import com.intellij.execution.process.ProcessListener
 import com.intellij.ide.plugins.PluginManagerCore
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.components.Service
@@ -67,7 +67,7 @@ class AgentOutputMonitor {
     private var jcefOriginalDisplayHandler: Any? = null
     private var jcefCefClient: Any? = null
     private var interceptedHandler: ProcessHandler? = null
-    private var processAdapter: ProcessAdapter? = null
+    private var processAdapter: ProcessListener? = null
     private val processOutputBuffer = StringBuilder()
     private var processInterceptAttached = false
     private var currentPromptText: String = ""
@@ -949,7 +949,7 @@ class AgentOutputMonitor {
     }
 
     private fun attachProcessListener(handler: ProcessHandler) {
-        val adapter = object : ProcessAdapter() {
+        val adapter = object : ProcessListener {
             override fun onTextAvailable(event: ProcessEvent, outputType: Key<*>) {
                 val text = event.text ?: return
                 if (text.isBlank()) return

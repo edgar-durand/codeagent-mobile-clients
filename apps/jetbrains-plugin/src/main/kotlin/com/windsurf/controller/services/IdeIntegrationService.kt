@@ -97,8 +97,9 @@ class IdeIntegrationService {
         val seenPluginIds = mutableSetOf<String>()
 
         for (agent in knownAgents) {
-            val plugin = PluginManagerCore.getPlugin(PluginId.getId(agent.pluginId))
-            val isInstalled = plugin != null && plugin.isEnabled
+            val pluginIdObj = PluginId.getId(agent.pluginId)
+            val plugin = PluginManagerCore.getPlugin(pluginIdObj)
+            val isInstalled = plugin != null && !PluginManagerCore.isDisabled(pluginIdObj)
             if (isInstalled) {
                 detected.add(
                     DetectedAgent(
@@ -117,8 +118,8 @@ class IdeIntegrationService {
 
         val allPlugins = PluginManager.getPlugins()
         for (descriptor in allPlugins) {
-            if (!descriptor.isEnabled) continue
             val pid = descriptor.pluginId?.idString ?: continue
+            if (PluginManagerCore.isDisabled(descriptor.pluginId!!)) continue
             if (pid in seenPluginIds || pid in excludedPluginIds) continue
 
             val pluginName = descriptor.name.lowercase()

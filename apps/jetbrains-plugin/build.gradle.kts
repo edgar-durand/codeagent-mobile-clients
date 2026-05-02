@@ -60,6 +60,22 @@ intellijPlatform {
         token = providers.environmentVariable("PUBLISH_TOKEN").orElse("")
         channels = listOf("default")
     }
+
+    pluginVerification {
+        // Default in IntelliJ Platform Gradle plugin 2.15.0+ now flags
+        // INTERNAL_API_USAGES + OVERRIDE_ONLY_API_USAGES as failure-level.
+        // Our usages come from Kotlin's auto-generated bridge methods over
+        // ToolWindowFactory's interface-default methods (getAnchor, getIcon,
+        // manage, isApplicable, isDoNotActivateOnStart) — we never invoke or
+        // override them in our source. Fail only on actual binary-compat
+        // problems and invalid plugin metadata.
+        failureLevel = listOf(
+            org.jetbrains.intellij.platform.gradle.tasks.VerifyPluginTask.FailureLevel.COMPATIBILITY_PROBLEMS,
+            org.jetbrains.intellij.platform.gradle.tasks.VerifyPluginTask.FailureLevel.INVALID_PLUGIN,
+            org.jetbrains.intellij.platform.gradle.tasks.VerifyPluginTask.FailureLevel.MISSING_DEPENDENCIES,
+            org.jetbrains.intellij.platform.gradle.tasks.VerifyPluginTask.FailureLevel.PLUGIN_STRUCTURE_WARNINGS,
+        )
+    }
 }
 
 changelog {

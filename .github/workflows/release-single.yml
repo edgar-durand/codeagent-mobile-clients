@@ -1,0 +1,214 @@
+name: Release single plugin (manual)
+
+# Manual single-target publish. Use this when you need to re-publish ONE plugin
+# (cli / vsc-plugin / jetbrains-plugin) without re-running the full release.yml.
+#
+# Defaults to the latest existing tag — bring the version up via release.yml
+# (which patches manifests + commits CHANGELOG); this workflow only re-publishes
+# the prebuilt artifact for that already-tagged version.
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: Which plugin to re-publish
+        type: choice
+        required: true
+        options:
+          - cli
+          - vsc-plugin
+          - jetbrains-plugin
+      tag:
+        description: Tag to publish (leave empty to use the latest vX.Y.Z tag)
+        type: string
+        required: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-single-${{ github.event.inputs.target }}
+  cancel-in-progress: false
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  resolve:
+    name: Resolve tag and version
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.r.outputs.tag }}
+      version: ${{ steps.r.outputs.version }}
+      is_prerelease: ${{ steps.r.outputs.is_prerelease }}
+    steps:
+      - name: Checkout (full history for tags)
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Resolve target tag and version
+        id: r
+        run: |
+          set -euo pipefail
+          INPUT_TAG="${{ github.event.inputs.tag }}"
+          if [ -z "$INPUT_TAG" ]; then
+            TAG=$(git tag --list 'v*.*.*' --sort=-v:refname | head -n 1)
+          else
+            TAG="$INPUT_TAG"
+          fi
+          if [ -z "$TAG" ]; then
+            echo "::error::No matching tag found (looked for vX.Y.Z[-prerelease])"
+            exit 1
+          fi
+          if ! git rev-parse --quiet --verify "refs/tags/$TAG" >/dev/null; then
+            echo "::error::Tag '$TAG' does not exist"
+            exit 1
+          fi
+          VERSION="${TAG#v}"
+          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::Tag $TAG does not match vMAJOR.MINOR.PATCH[-prerelease]"
+            exit 1
+          fi
+          IS_PRERELEASE=false
+          if [[ "$VERSION" == *-* ]]; then IS_PRERELEASE=true; fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "is_prerelease=$IS_PRERELEASE" >> "$GITHUB_OUTPUT"
+          echo "Resolved tag=$TAG version=$VERSION prerelease=$IS_PRERELEASE"
+
+  publish-cli:
+    name: Publish codeam-cli to npm
+    needs: resolve
+    if: github.event.inputs.target == 'cli'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.resolve.outputs.tag }}
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '20'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Patch CLI version
+        working-directory: apps/cli
+        run: npm version "${{ needs.resolve.outputs.version }}" --no-git-tag-version --allow-same-version
+
+      - name: Install workspace deps
+        run: npm ci
+
+      - name: CLI typecheck
+        working-directory: apps/cli
+        run: npm run typecheck
+
+      - name: CLI tests
+        working-directory: apps/cli
+        run: npm run test
+
+      - name: Build CLI
+        working-directory: apps/cli
+        run: npm run build
+
+      - name: Publish CLI to npm
+        working-directory: apps/cli
+        run: npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+  publish-vsc-plugin:
+    name: Publish VS Code plugin to Marketplace + Open VSX
+    needs: resolve
+    if: github.event.inputs.target == 'vsc-plugin'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.resolve.outputs.tag }}
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '20'
+
+      - name: Patch VS Code plugin version
+        working-directory: apps/vsc-plugin
+        run: npm version "${{ needs.resolve.outputs.version }}" --no-git-tag-version --allow-same-version
+
+      - name: Install workspace deps
+        run: npm ci
+
+      - name: Build VS Code plugin
+        working-directory: apps/vsc-plugin
+        run: npm run build
+
+      - name: Package VS Code plugin (.vsix)
+        working-directory: apps/vsc-plugin
+        run: npx @vscode/vsce package --no-dependencies --out "codeagent-mobile-${{ needs.resolve.outputs.version }}.vsix"
+
+      - name: Publish VS Code plugin to Marketplace
+        working-directory: apps/vsc-plugin
+        run: |
+          npx @vscode/vsce publish --no-dependencies --pat "$VSCE_PAT" \
+            --packagePath "codeagent-mobile-${{ needs.resolve.outputs.version }}.vsix"
+        env:
+          VSCE_PAT: ${{ secrets.VSCE_PAT }}
+
+      - name: Publish VS Code plugin to Open VSX
+        working-directory: apps/vsc-plugin
+        run: |
+          npx ovsx publish --no-dependencies --pat "$OVSX_TOKEN" \
+            "codeagent-mobile-${{ needs.resolve.outputs.version }}.vsix"
+        env:
+          OVSX_TOKEN: ${{ secrets.OVSX_TOKEN }}
+
+  publish-jetbrains-plugin:
+    name: Publish JetBrains plugin to Marketplace
+    needs: resolve
+    if: github.event.inputs.target == 'jetbrains-plugin' && needs.resolve.outputs.is_prerelease == 'false'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.resolve.outputs.tag }}
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Patch JetBrains plugin version
+        run: |
+          VERSION="${{ needs.resolve.outputs.version }}"
+          sed -i -E "s/^version = \"[^\"]+\"/version = \"$VERSION\"/" apps/jetbrains-plugin/build.gradle.kts
+          sed -i -E "s|<version>[^<]+</version>|<version>$VERSION</version>|" apps/jetbrains-plugin/src/main/resources/META-INF/plugin.xml
+
+      - name: Build JetBrains plugin
+        working-directory: apps/jetbrains-plugin
+        run: ./gradlew clean buildPlugin
+
+      - name: Verify JetBrains plugin
+        working-directory: apps/jetbrains-plugin
+        run: ./gradlew verifyPlugin
+
+      - name: Publish JetBrains plugin to Marketplace
+        working-directory: apps/jetbrains-plugin
+        run: ./gradlew publishPlugin
+        env:
+          PUBLISH_TOKEN: ${{ secrets.JETBRAINS_MARKETPLACE_TOKEN }}
+
+  publish-jetbrains-prerelease-skip:
+    name: Skip JetBrains publish (prerelease tag)
+    needs: resolve
+    if: github.event.inputs.target == 'jetbrains-plugin' && needs.resolve.outputs.is_prerelease == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          echo "::warning::Tag ${{ needs.resolve.outputs.tag }} is a prerelease (-rc.N pattern); skipping JetBrains marketplace publish to keep the stable channel clean."
+          exit 0
