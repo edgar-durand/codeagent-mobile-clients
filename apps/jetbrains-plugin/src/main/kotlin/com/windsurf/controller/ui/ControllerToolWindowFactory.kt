@@ -432,6 +432,29 @@ class ControllerToolWindowFactory : ToolWindowFactory {
                     "mcp_status" -> {
                         handleMcpStatus(command, relay)
                     }
+                    "read_file" -> {
+                        val filePath = command.payload.get("path")?.asString
+                        if (filePath.isNullOrEmpty()) {
+                            relay.sendResult(command.id, "failed", com.google.gson.JsonObject().apply {
+                                addProperty("error", "Missing path")
+                            })
+                        } else {
+                            val res = FileOpsService.getInstance().readFile(filePath)
+                            relay.sendResult(command.id, "completed", res)
+                        }
+                    }
+                    "write_file" -> {
+                        val filePath = command.payload.get("path")?.asString
+                        val contentEl = command.payload.get("content")
+                        if (filePath.isNullOrEmpty() || contentEl == null || contentEl.isJsonNull) {
+                            relay.sendResult(command.id, "failed", com.google.gson.JsonObject().apply {
+                                addProperty("error", "Missing path or content")
+                            })
+                        } else {
+                            val res = FileOpsService.getInstance().writeFile(filePath, contentEl.asString)
+                            relay.sendResult(command.id, "completed", res)
+                        }
+                    }
                     else -> {
                         relay.sendResult(command.id, "failed", com.google.gson.JsonObject().apply {
                             addProperty("error", "Unknown command type: ${command.type}")

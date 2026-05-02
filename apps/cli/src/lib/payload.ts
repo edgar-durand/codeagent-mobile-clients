@@ -35,6 +35,11 @@ export const startCommandSchema = z.object({
   from: z.number().optional(),
   id: z.string().optional(),
   auto: z.boolean().optional(),
+  // `read_file` / `write_file` for the mobile + landing mini-IDE modal.
+  // `path` is bounded to 4096 chars (a comfortable POSIX path max) so a
+  // malformed payload can't blow up the disk-side validator.
+  path: z.string().min(1).max(4096).optional(),
+  content: z.string().optional(),
 });
 
 export type StartCommandPayload = z.infer<typeof startCommandSchema>;

@@ -3,6 +3,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import { SettingsService } from '../services/settings.service';
+import { FileOpsService } from '../services/file-ops.service';
 import { PairingService } from '../services/pairing.service';
 import { CommandRelayService, RemoteCommand, CommandListener } from '../services/command-relay.service';
 import { WebSocketService } from '../services/websocket.service';
@@ -521,6 +522,32 @@ export class ControllerPanelProvider implements vscode.WebviewViewProvider, Comm
 
       case 'mcp_status': {
         this.handleMcpStatus(command, relay);
+        break;
+      }
+
+      case 'read_file': {
+        const filePath = (command.payload as Record<string, unknown>)?.path as string | undefined;
+        if (!filePath) {
+          relay.sendResult(command.id, 'failed', { error: 'Missing path' });
+          break;
+        }
+        FileOpsService.readFile(filePath).then((res: Record<string, unknown>) => {
+          relay.sendResult(command.id, 'completed', res);
+        });
+        break;
+      }
+
+      case 'write_file': {
+        const p = command.payload as Record<string, unknown>;
+        const filePath = p?.path as string | undefined;
+        const content = p?.content as string | undefined;
+        if (!filePath || typeof content !== 'string') {
+          relay.sendResult(command.id, 'failed', { error: 'Missing path or content' });
+          break;
+        }
+        FileOpsService.writeFile(filePath, content).then((res: Record<string, unknown>) => {
+          relay.sendResult(command.id, 'completed', res);
+        });
         break;
       }
 

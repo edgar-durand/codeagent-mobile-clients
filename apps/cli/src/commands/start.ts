@@ -13,6 +13,7 @@ import { findInPath } from '../services/pty/types';
 import { OutputService } from '../services/output.service';
 import { HistoryService } from '../services/history.service';
 import { parsePayload, startCommandSchema, type FileEntry } from '../lib/payload';
+import { readProjectFile, writeProjectFile } from '../services/file-ops.service';
 
 // FileAttachment shape mirrors packages/shared/src/types/agent.ts — kept in
 // sync via the zod schema in src/lib/payload.ts (see `fileEntrySchema`).
@@ -268,6 +269,26 @@ except Exception:sys.exit(0)
           { id: 'claude-haiku-4-5-20251001', label: 'Claude Haiku 4.5',  description: 'Fastest',       family: 'claude',  vendor: 'anthropic', isDefault: false },
         ];
         await relay.sendResult(cmd.id, 'completed', { models });
+        break;
+      }
+      case 'read_file': {
+        const { path: filePath } = parsed;
+        if (!filePath) {
+          await relay.sendResult(cmd.id, 'failed', { error: 'Missing path' });
+          break;
+        }
+        const result = await readProjectFile(filePath);
+        await relay.sendResult(cmd.id, 'completed', result as Record<string, unknown>);
+        break;
+      }
+      case 'write_file': {
+        const { path: filePath, content } = parsed;
+        if (!filePath || typeof content !== 'string') {
+          await relay.sendResult(cmd.id, 'failed', { error: 'Missing path or content' });
+          break;
+        }
+        const result = await writeProjectFile(filePath, content);
+        await relay.sendResult(cmd.id, 'completed', result as Record<string, unknown>);
         break;
       }
     }
