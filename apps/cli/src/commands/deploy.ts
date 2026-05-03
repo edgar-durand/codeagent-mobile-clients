@@ -187,28 +187,57 @@ export async function deploy(): Promise<void> {
     }
   }
 
-  // Step 4 — Pre-stage Claude credentials BEFORE install. This order
-  // matters: claude's install.sh launches `claude` once during setup,
-  // and that first invocation can persist "first-launch" state files
-  // that ignore credentials we write afterward — that's why users
-  // were seeing the "Select login method" screen even after a
-  // successful tar copy. Writing credentials FIRST means the very
-  // first time `claude` runs on the workspace, it already sees a
-  // logged-in user and skips the first-launch UX entirely.
+  // Step 4 — Decide credential strategy. We could silently bridge
+  // the user's local Claude credentials to the workspace, but that
+  // assumes they want to use the SAME account on the cloud agent —
+  // and plenty of users explicitly want a different one (work vs.
+  // personal Claude account, a sandbox account for the deploy, etc.).
+  //
+  // So: only ask if there's something we COULD bridge. If yes,
+  // confirm with the user (default: yes, since that's the common
+  // "skip re-auth" pitch). If they say no, we skip the bridge and
+  // the verify step in step 7 will route them through interactive
+  // `claude login` automatically with whatever account they want.
   const localClaudeDir = path.join(os.homedir(), '.claude');
-  const credStep = p.spinner();
-  credStep.start('Bridging Claude credentials…');
-  const bridged = await bridgeClaudeCredentials(provider, workspace.id, localClaudeDir);
-  switch (bridged) {
-    case 'flat-file':
-      credStep.stop('✓ Local credentials staged');
-      break;
-    case 'macos-keychain':
-      credStep.stop('✓ Credentials extracted from macOS Keychain and staged');
-      break;
-    case 'none':
-      credStep.stop('· No local credentials found — will run interactive login after install');
-      break;
+  const localCredsKind = await detectLocalClaudeCredentials(localClaudeDir);
+  let bridged: 'flat-file' | 'macos-keychain' | 'none' = 'none';
+
+  if (localCredsKind !== 'none') {
+    const sourceLabel =
+      localCredsKind === 'flat-file' ? '~/.claude/.credentials.json'
+      : 'macOS Keychain';
+    const useLocal = await p.confirm({
+      message: `Copy your local Claude credentials (${sourceLabel}) to the workspace?`,
+      active: 'Yes — same account, no re-auth',
+      inactive: 'No — log in with a different account',
+      initialValue: true,
+    });
+    if (p.isCancel(useLocal)) {
+      p.cancel('Cancelled.');
+      process.exit(0);
+    }
+    if (useLocal) {
+      // Pre-stage credentials BEFORE install. The order matters:
+      // claude's install.sh launches `claude` once during setup, and
+      // that first invocation persists "first-launch" state files
+      // that can ignore credentials written afterward. Writing creds
+      // first means claude's first run already sees a logged-in user
+      // and skips the first-launch UX entirely.
+      const credStep = p.spinner();
+      credStep.start('Bridging Claude credentials…');
+      bridged = await bridgeClaudeCredentials(provider, workspace.id, localClaudeDir);
+      switch (bridged) {
+        case 'flat-file':
+          credStep.stop('✓ Local credentials staged');
+          break;
+        case 'macos-keychain':
+          credStep.stop('✓ Credentials extracted from macOS Keychain and staged');
+          break;
+        case 'none':
+          credStep.stop('⚠ Could not extract local credentials — falling back to remote login');
+          break;
+      }
+    }
   }
 
   // Step 5 — Install Claude CLI on the workspace.
@@ -365,6 +394,44 @@ async function runRemoteClaudeLogin(
       'Heads up',
     );
   }
+}
+
+/**
+ * Detect whether the user has Claude credentials we could ship to a
+ * remote workspace, WITHOUT actually extracting them. Used to decide
+ * whether to ask "want to copy your local creds?" — there's no point
+ * showing the prompt if there are no creds to copy.
+ *
+ *   - Linux  → `~/.claude/.credentials.json` exists?
+ *   - macOS  → Keychain has a `Claude Code-credentials` entry? We
+ *              probe with the metadata-only form of `security`
+ *              (`find-generic-password` without `-w`) so the user
+ *              isn't prompted to unlock the keychain just to be
+ *              asked the question.
+ *   - Windows → Not yet implemented; reports `none`.
+ */
+async function detectLocalClaudeCredentials(
+  localClaudeDir: string,
+): Promise<'flat-file' | 'macos-keychain' | 'none'> {
+  if (fs.existsSync(path.join(localClaudeDir, '.credentials.json'))) {
+    return 'flat-file';
+  }
+  if (process.platform === 'darwin') {
+    try {
+      // `security find-generic-password -s <service>` (no -w) returns
+      // metadata if the entry exists, errors if not. Doesn't expose
+      // the secret, doesn't trigger a keychain unlock prompt.
+      await execFileP(
+        'security',
+        ['find-generic-password', '-s', 'Claude Code-credentials'],
+        { maxBuffer: 1024 * 1024 },
+      );
+      return 'macos-keychain';
+    } catch {
+      return 'none';
+    }
+  }
+  return 'none';
 }
 
 /**
