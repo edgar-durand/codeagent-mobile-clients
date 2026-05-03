@@ -1,0 +1,92 @@
+/**
+ * Cloud-workspace provider interface. Every backend (GitHub Codespaces,
+ * future GitLab WebIDE / Coder / Gitpod / etc.) implements the same
+ * shape so `codeam deploy` can switch between them without rewriting
+ * the orchestrator.
+ *
+ * Design notes:
+ *   - Authorization is per-provider and side-effecting (may open a
+ *     browser, run device-flow OAuth, prompt for a PAT, or shell out to
+ *     a CLI like `gh`). The orchestrator only calls `authorize()` once
+ *     up front and trusts that subsequent calls have credentials.
+ *   - `listProjects` returns the user's deployable projects (repos for
+ *     git-based providers, templates for others). Pagination is the
+ *     provider's problem; the orchestrator gets the full list back.
+ *   - `createWorkspace` is async-blocking until the workspace is in a
+ *     state where we can `exec()` against it. The provider is free to
+ *     poll its own API to wait for "ready".
+ *   - `exec` is one-shot: synchronous-style, captures full output,
+ *     suitable for setup steps (install scripts, config copies).
+ *   - `streamCommand` runs a command and streams its stdout to the
+ *     orchestrator's stdout. Used for `codeam pair` so the QR + code
+ *     show up in the local terminal as the remote process renders them.
+ *   - `uploadDirectory` copies a *recursive* local dir to a remote
+ *     path. Used to seed the codespace with the user's `~/.claude/`
+ *     credentials so they don't have to re-auth.
+ */
+
+export interface DeployableProject {
+  /** Stable identifier the provider's API uses (e.g. `owner/repo`). */
+  id: string;
+  /** Display name (e.g. `repo`). */
+  name: string;
+  /** Long form for the user to disambiguate (e.g. `owner/repo`). */
+  fullName: string;
+  description?: string;
+  defaultBranch?: string;
+  private?: boolean;
+}
+
+export interface Workspace {
+  /** Provider-issued workspace identifier (e.g. codespace name). */
+  id: string;
+  /** Optional display label (e.g. `stunning-bassoon-xyz123`). */
+  displayName?: string;
+  /** Optional URL the user can open in a browser to inspect. */
+  webUrl?: string;
+}
+
+export interface ExecResult {
+  stdout: string;
+  stderr: string;
+  code: number;
+}
+
+export interface CloudProvider {
+  /** Stable id used for selection (e.g. `github-codespaces`). */
+  readonly id: string;
+  /** User-facing name (e.g. `GitHub Codespaces`). */
+  readonly displayName: string;
+  /** Short tagline shown next to the name in the picker. */
+  readonly tagline?: string;
+  /** True when the provider is fully implemented; false → "coming soon". */
+  readonly available: boolean;
+
+  /**
+   * Verify or acquire the credentials needed for the rest of the API.
+   * Resolves on success; rejects with a user-friendly message on failure.
+   */
+  authorize(): Promise<void>;
+
+  /** Return the user's deployable projects. */
+  listProjects(): Promise<DeployableProject[]>;
+
+  /**
+   * Create a new workspace from a project. Resolves once the workspace
+   * is ready to accept `exec` and `streamCommand` calls.
+   */
+  createWorkspace(projectId: string): Promise<Workspace>;
+
+  /** Run a single command in the workspace and return all of its output. */
+  exec(workspaceId: string, command: string): Promise<ExecResult>;
+
+  /**
+   * Run a command and stream its stdout/stderr to the local terminal.
+   * Inherits stdio so ANSI escapes (color, QR codes, cursor moves)
+   * pass through unchanged. Resolves when the remote process exits.
+   */
+  streamCommand(workspaceId: string, command: string): Promise<{ code: number }>;
+
+  /** Recursive copy of a local directory to a remote path inside the workspace. */
+  uploadDirectory(workspaceId: string, localDir: string, remoteDir: string): Promise<void>;
+}
