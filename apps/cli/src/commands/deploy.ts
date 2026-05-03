@@ -439,17 +439,50 @@ export async function deploy(): Promise<void> {
     'pm2 delete codeam-pair >/dev/null 2>&1',
     // Start codeam pair under PM2. `--merge-logs` writes stdout
     // and stderr to the same file so we only need one tail.
-    'pm2 start codeam --name codeam-pair --cwd "$PROJECT_DIR" -o "$LOG" -e "$LOG" --merge-logs --time -- pair >/dev/null 2>&1',
+    // --max-restarts 3 keeps PM2 from looping forever if codeam pair
+    // can't start (e.g. backend unreachable) — three attempts is
+    // enough for transient flakes, anything more wastes time.
+    'pm2 start codeam --name codeam-pair --cwd "$PROJECT_DIR" --max-restarts 3 -o "$LOG" -e "$LOG" --merge-logs --time -- pair >/dev/null 2>&1',
+    // Give PM2 a moment to spawn the process before we start polling
+    // status — otherwise the very first jlist can race the spawn.
+    'sleep 2',
     'tail -n 0 -F "$LOG" 2>/dev/null &',
     'TAIL=$!',
     "trap 'kill $TAIL 2>/dev/null; exit 130' INT TERM",
-    // Phase 1 — wait for "Paired with".
+    // Phase 1 — wait for "Paired with", or for codeam to print a
+    // recognisable failure, or for PM2 to report the process gone.
     'SUCCESS=0',
+    'FAIL_REASON=""',
     'while true; do',
     '  if grep -q "Paired with" "$LOG" 2>/dev/null; then SUCCESS=1; break; fi',
-    '  STATUS=$(pm2 jlist 2>/dev/null | grep -o \'"name":"codeam-pair","[^}]*"status":"[^"]*"\' | grep -o \'"status":"[^"]*"\' | head -1)',
-    '  if [ -z "$STATUS" ]; then SUCCESS=0; break; fi',
-    '  if echo "$STATUS" | grep -q "stopped\\|errored"; then SUCCESS=0; break; fi',
+    // Detect specific codeam error messages early so the user gets
+    // an actionable message instead of a generic "did not start".
+    '  if grep -q "Could not reach the server" "$LOG" 2>/dev/null; then',
+    '    FAIL_REASON="codeam could not reach the CodeAgent backend (network/firewall? Vercel bot-challenge on the API?)"',
+    '    SUCCESS=0; break',
+    '  fi',
+    '  if grep -qE "Pairing timed out|Failed to" "$LOG" 2>/dev/null; then',
+    '    FAIL_REASON="$(grep -E "Pairing timed out|Failed to" "$LOG" | head -1)"',
+    '    SUCCESS=0; break',
+    '  fi',
+    // Status check: parse PM2 jlist via Python (every codespace has
+    // python3) for resilient JSON handling, instead of fragile grep.
+    '  ALIVE=$(pm2 jlist 2>/dev/null | python3 -c "import json,sys',
+    'try:',
+    '  d=json.load(sys.stdin)',
+    "  it=[x for x in d if x.get('name')=='codeam-pair']",
+    "  print(it[0]['pm2_env']['status'] if it else 'missing')",
+    'except Exception:',
+    "  print('parse-error')" + '" 2>/dev/null)',
+    '  case "$ALIVE" in',
+    '    online|launching) ;;',  // still good
+    '    "")',
+    '      FAIL_REASON="PM2 not responding"',
+    '      SUCCESS=0; break ;;',
+    '    missing|stopped|errored|stopping)',
+    '      FAIL_REASON="PM2 reports codeam-pair is $ALIVE"',
+    '      SUCCESS=0; break ;;',
+    '  esac',
     '  sleep 1',
     'done',
     'if [ "$SUCCESS" = "1" ]; then',
@@ -474,7 +507,11 @@ export async function deploy(): Promise<void> {
     '  echo "  To stop later: gh codespace ssh -- pm2 delete codeam-pair"',
     '  exit 0',
     'else',
-    '  echo "✗ Pairing did not complete (codeam pair did not start)."',
+    '  echo "✗ Pairing did not complete."',
+    '  if [ -n "$FAIL_REASON" ]; then echo "  Reason: $FAIL_REASON"; fi',
+    '  echo',
+    '  echo "  Last log lines from codeam pair:"',
+    '  tail -n 8 "$LOG" 2>/dev/null | sed "s/^/    /"',
     '  pm2 delete codeam-pair >/dev/null 2>&1',
     '  exit 1',
     'fi',
