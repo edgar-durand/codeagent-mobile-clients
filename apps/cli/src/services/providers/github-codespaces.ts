@@ -630,20 +630,16 @@ export class GitHubCodespacesProvider implements CloudProvider {
     });
   }
 
-  async listExistingWorkspaces(projectId: string): Promise<ExistingWorkspace[]> {
-    // `--repo` filters to a single repo; `--json` gives us machine-
-    // readable output. We use `displayName` (human-readable) as the
-    // label and `name` (the stable id used by every other gh API).
+  async listExistingWorkspaces(projectId?: string): Promise<ExistingWorkspace[]> {
+    // `--repo` filters to a single repo when `projectId` is given;
+    // omit it for "all the user's codespaces" (used by `codeam deploy
+    // stop`). `--json` gives us machine-readable output. We use
+    // `displayName` (human-readable) as the label and `name` (the
+    // stable id used by every other gh API).
     try {
-      const { stdout } = await execFileP(
-        'gh',
-        [
-          'codespace', 'list',
-          '--repo', projectId,
-          '--json', 'name,displayName,state,lastUsedAt',
-        ],
-        { maxBuffer: MAX_BUFFER },
-      );
+      const args = ['codespace', 'list', '--json', 'name,displayName,state,lastUsedAt'];
+      if (projectId) args.push('--repo', projectId);
+      const { stdout } = await execFileP('gh', args, { maxBuffer: MAX_BUFFER });
       interface RawCodespace {
         name: string;
         displayName?: string;

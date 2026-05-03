@@ -25,12 +25,20 @@ export async function requestCode(
   pluginId: string,
 ): Promise<{ code: string; expiresAt: number } | null> {
   try {
+    // Detect "running on a remote managed workspace" so the backend
+    // (and apps) can show a "☁ codespace" tag next to the session,
+    // distinguishing a `codeam deploy` from a regular local pair.
+    // GitHub Codespaces sets CODESPACES=true and CODESPACE_NAME.
+    const runtime = process.env.CODESPACES === 'true' ? 'github-codespaces' : 'local';
+    const codespaceName = process.env.CODESPACE_NAME;
     // Call through _transport so vi.spyOn can intercept in tests
     const result = await _transport.postJson(`${API_BASE}/api/pairing/code`, {
       pluginId,
       ideName: 'Terminal (codeam-cli)',
       ideVersion: pkg.version,
       hostname: os.hostname(),
+      runtime,
+      ...(codespaceName ? { codespaceName } : {}),
     });
     const data = result?.data as Record<string, unknown> | undefined;
     if (!data?.code) return null;

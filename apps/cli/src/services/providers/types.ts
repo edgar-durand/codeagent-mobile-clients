@@ -118,12 +118,13 @@ export interface CloudProvider {
   createWorkspace(projectId: string, machineTypeId?: string): Promise<Workspace>;
 
   /**
-   * Return existing workspaces the user has for this project. Optional
-   * — providers without a "list workspaces" concept can omit it. The
-   * orchestrator uses this to offer a "reuse vs. create new" picker
-   * so re-running `codeam deploy` doesn't pile up codespaces.
+   * Return existing workspaces the user has. With `projectId` set, the
+   * result is filtered to that project; with no argument, return ALL
+   * workspaces across the user's account (used by `codeam deploy
+   * stop` to manage sessions globally). Optional — providers without
+   * a "list workspaces" concept can omit it.
    */
-  listExistingWorkspaces?(projectId: string): Promise<ExistingWorkspace[]>;
+  listExistingWorkspaces?(projectId?: string): Promise<ExistingWorkspace[]>;
 
   /**
    * Bring an existing workspace back to a usable state (e.g. start a

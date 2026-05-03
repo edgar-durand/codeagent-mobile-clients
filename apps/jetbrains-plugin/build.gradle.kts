@@ -6,7 +6,7 @@ plugins {
 }
 
 group = "com.codeagent.mobile"
-version = "2.4.17"
+version = "2.4.18"
 
 repositories {
     mavenCentral()

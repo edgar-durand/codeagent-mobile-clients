@@ -47,12 +47,14 @@ That's it. Open the [CodeAgent Mobile app](https://codeagent-mobile.com), enter 
 | `codeam status` | Show connection status |
 | `codeam logout` | Remove all paired sessions |
 | `codeam deploy` | Provision a cloud workspace (GitHub Codespaces) and pair it to your phone |
+| `codeam deploy ls` | List the cloud workspaces you've deployed (and which still have a session running) |
+| `codeam deploy stop` | Pick a deployed workspace and stop its codeam session (and optionally the workspace itself) |
 
 ---
 
 ## `codeam deploy` — drive a cloud workspace from your phone
 
-Don't want to keep your laptop running while you control Claude from the train? `codeam deploy` spins up a fresh **GitHub Codespace** for any of your repos, installs Claude Code + `codeam-cli` inside it, copies your local Claude credentials so you skip the re-auth (or runs `claude login` interactively if you don't have a local config yet), and finishes by streaming `codeam pair` from inside the codespace — so you get a pairing code on this terminal already wired to the remote workspace.
+Don't want to keep your laptop running while you control Claude from the train? `codeam deploy` spins up a fresh **GitHub Codespace** for any of your repos, installs Claude Code + `codeam-cli` inside it, copies your local Claude credentials so you skip the re-auth (or runs `claude login` interactively if you don't have a local config yet), supervises the agent with **PM2** so the session survives even after you close your laptop, and gives you a QR/code to pair your phone — straight from your local terminal.
 
 ```bash
 codeam deploy
@@ -62,10 +64,25 @@ That's it. You'll be guided through:
 
 1. **Pick a provider** (GitHub Codespaces today; more coming).
 2. **Pick a repo** from your account.
-3. **Wait ~1 minute** while the codespace boots and tools install.
-4. **Scan the QR / enter the code** on the CodeAgent Mobile app — same flow as `codeam pair`, only the agent is now running in the cloud.
+3. **Reuse an existing codespace or create a new one** — re-runs of `codeam deploy` against the same project don't pile up codespaces.
+4. **Wait ~1 minute** while the codespace boots and tools install.
+5. **Scan the QR / enter the code** on the CodeAgent Mobile app.
+6. Your local terminal **automatically disconnects** once Claude is ready — close the laptop, the agent keeps running on the codespace, and your phone stays connected.
 
 Requirements: the [GitHub CLI (`gh`)](https://cli.github.com/) installed and authenticated (`gh auth login`). The deploy flow re-uses `gh`'s OAuth — we don't ask for a separate token.
+
+### Managing your deployed workspaces
+
+```bash
+# Show every workspace you've deployed and whether codeam is still running on it.
+codeam deploy ls
+
+# Pick one and stop the codeam session — also offers to stop the workspace
+# itself so you don't burn compute hours.
+codeam deploy stop
+```
+
+Stopping a workspace via `codeam deploy stop` is non-destructive: the GitHub Codespace stays around (preserving your branch, files, and dotfiles); only the running compute is paused. Re-running `codeam deploy` will offer to resume that same codespace.
 
 Adding more cloud backends (Gitpod, Coder, your own SSH host, …) is a single new file in `apps/cli/src/services/providers/` — the `CloudProvider` interface keeps it pluggable.
 
