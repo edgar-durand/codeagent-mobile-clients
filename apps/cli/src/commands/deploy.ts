@@ -403,39 +403,53 @@ export async function deploy(): Promise<void> {
     'Almost there',
   );
 
-  // After Claude is set up, run `codeam pair` on the workspace and
-  // disconnect locally once it's ready. The wrapper:
-  //   1. nohup + disown the codeam pair process so SIGHUP from the
-  //      SSH session ending does NOT propagate. (The Python PTY
-  //      helper inside codeam-cli also ignores SIGHUP — defense in
-  //      depth.)
-  //   2. Tails the log so the QR / pairing code render live.
-  //   3. Phase 1 — wait for the "Paired with" marker; phase 2 wait
-  //      for "for shortcuts" so any first-time Claude prompt (trust
-  //      this folder, etc.) gets resolved on the user's phone before
-  //      we let go.
-  //   4. Local Ctrl+C kills only the local tail — relay survives.
+  // After Claude is set up, run `codeam pair` on the workspace via
+  // PM2 — a battle-tested Node.js process manager whose god-daemon
+  // survives SSH session cleanup on Codespaces (where nohup, setsid
+  // and tmux all fail). PM2 owns the lifecycle: spawn, restart on
+  // crash, log redirection, graceful stop.
+  //
+  // The wrapper:
+  //   1. Installs PM2 if missing (idempotent first-run setup).
+  //   2. `pm2 start codeam --name codeam-pair -- pair` with merged
+  //      stdout/stderr piped to a session log.
+  //   3. Tails the log locally so the QR / pairing code renders.
+  //   4. Phase 1: wait for "Paired with"; phase 2: wait for
+  //      "for shortcuts" so any first-time Claude prompts (trust
+  //      this folder, model picker, etc.) get answered on the
+  //      phone before we close locally.
+  //   5. Local Ctrl+C kills only the local tail — PM2 keeps the
+  //      relay running.
   const wrapper = [
     'mkdir -p ~/.codeam-deploy',
     'LOG=~/.codeam-deploy/session.log',
-    'PIDFILE=~/.codeam-deploy/session.pid',
-    'if [ -f "$PIDFILE" ]; then OLD=$(cat "$PIDFILE" 2>/dev/null); if [ -n "$OLD" ] && kill -0 "$OLD" 2>/dev/null; then kill "$OLD" 2>/dev/null; sleep 1; fi; fi',
     ': > "$LOG"',
-    // Detach codeam pair from this shell so SSH hangup never reaches
-    // it. The combination is: setsid (new session, no controlling
-    // terminal) + nohup (ignore SIGHUP) + < /dev/null (no stdin
-    // attached) + redirect stdio to log file.
-    'setsid nohup codeam pair > "$LOG" 2>&1 < /dev/null &',
-    'sleep 1',
-    'PID=$(pgrep -fn "codeam pair" | head -1)',
-    'echo "$PID" > "$PIDFILE"',
-    'tail -n +1 -F "$LOG" 2>/dev/null &',
+    // The default `gh codespace ssh` cwd is the repo root
+    // (/workspaces/<repo>), which is exactly where Claude needs to
+    // run so it can read/edit project files. Pass that to PM2 via
+    // --cwd so the relay's child Claude inherits the right
+    // working directory.
+    'PROJECT_DIR="$(pwd)"',
+    // Install PM2 if it isn't already on PATH. Idempotent.
+    'if ! command -v pm2 >/dev/null 2>&1; then',
+    '  echo "Installing pm2 (one-time setup)…"',
+    '  npm install -g pm2 >/dev/null 2>&1 || { echo "✗ Failed to install pm2"; exit 1; }',
+    'fi',
+    // Stop any prior codeam-pair instance — fresh start each deploy.
+    'pm2 delete codeam-pair >/dev/null 2>&1',
+    // Start codeam pair under PM2. `--merge-logs` writes stdout
+    // and stderr to the same file so we only need one tail.
+    'pm2 start codeam --name codeam-pair --cwd "$PROJECT_DIR" -o "$LOG" -e "$LOG" --merge-logs --time -- pair >/dev/null 2>&1',
+    'tail -n 0 -F "$LOG" 2>/dev/null &',
     'TAIL=$!',
     "trap 'kill $TAIL 2>/dev/null; exit 130' INT TERM",
+    // Phase 1 — wait for "Paired with".
     'SUCCESS=0',
     'while true; do',
     '  if grep -q "Paired with" "$LOG" 2>/dev/null; then SUCCESS=1; break; fi',
-    '  if [ -z "$PID" ] || ! kill -0 "$PID" 2>/dev/null; then SUCCESS=0; break; fi',
+    '  STATUS=$(pm2 jlist 2>/dev/null | grep -o \'"name":"codeam-pair","[^}]*"status":"[^"]*"\' | grep -o \'"status":"[^"]*"\' | head -1)',
+    '  if [ -z "$STATUS" ]; then SUCCESS=0; break; fi',
+    '  if echo "$STATUS" | grep -q "stopped\\|errored"; then SUCCESS=0; break; fi',
     '  sleep 1',
     'done',
     'if [ "$SUCCESS" = "1" ]; then',
@@ -444,10 +458,10 @@ export async function deploy(): Promise<void> {
     '  echo "  Answer any first-time prompts (\"trust this folder\", etc.) on your phone."',
     '  echo "  Local terminal will close once Claude is ready."',
     '  echo',
+    // Phase 2 — wait for the Claude "ready" marker.
     '  WAIT_START=$(date +%s)',
     '  while true; do',
     '    if grep -q "for shortcuts" "$LOG" 2>/dev/null; then break; fi',
-    '    if [ -z "$PID" ] || ! kill -0 "$PID" 2>/dev/null; then break; fi',
     '    if [ $(($(date +%s) - WAIT_START)) -gt 180 ]; then break; fi',
     '    sleep 1',
     '  done',
@@ -456,10 +470,12 @@ export async function deploy(): Promise<void> {
     'kill $TAIL 2>/dev/null',
     'echo',
     'if [ "$SUCCESS" = "1" ]; then',
-    '  echo "✓ Session running on codespace (PID $PID). Closing local connection — your phone stays paired."',
+    '  echo "✓ Session running via PM2 on the codespace. Closing local connection — your phone stays paired."',
+    '  echo "  To stop later: gh codespace ssh -- pm2 delete codeam-pair"',
     '  exit 0',
     'else',
-    '  echo "✗ Pairing did not complete (codeam pair exited)."',
+    '  echo "✗ Pairing did not complete (codeam pair did not start)."',
+    '  pm2 delete codeam-pair >/dev/null 2>&1',
     '  exit 1',
     'fi',
   ].join('\n');
