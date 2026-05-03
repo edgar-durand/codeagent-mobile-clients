@@ -300,6 +300,36 @@ export async function deploy(): Promise<void> {
     }
   }
 
+  // Step 6.5 — Ship `~/.claude.json` (the sibling FILE, not the dir
+  // tarred above). This file holds the user's UI state across
+  // launches: `hasCompletedOnboarding`, `hasIdeOnboardingBeenShown`,
+  // `lastOnboardingVersion`, `tipsHistory`, etc. Without it, claude
+  // treats the codespace as a brand-new install and shows the
+  // "Select login method" + onboarding flow on every interactive
+  // launch even when credentials are already valid.
+  //
+  // Only ships when the user opted into the credential bridge — the
+  // file contains `oauthAccount` (email, orgId) so it'd be a privacy
+  // leak to ship when they're going to log in as a different account.
+  if (bridged !== 'none') {
+    const localClaudeJson = path.join(os.homedir(), '.claude.json');
+    if (fs.existsSync(localClaudeJson)) {
+      try {
+        const contents = fs.readFileSync(localClaudeJson);
+        await provider.uploadFile(
+          workspace.id,
+          '/home/codespace/.claude.json',
+          contents,
+          { mode: 0o600 },
+        );
+      } catch (err) {
+        // Best-effort: claude still works without this file, the
+        // user just sees the onboarding screen.
+        void err;
+      }
+    }
+  }
+
   // Step 7 — Verify Claude auth on the workspace, and fall back to
   // interactive login if anything is wrong. We don't trust "we wrote
   // a file" as success — credentials might be expired, the format
