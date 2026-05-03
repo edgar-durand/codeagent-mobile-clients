@@ -97,25 +97,47 @@ export async function deploy(): Promise<void> {
   }
   claudeStep.stop('✓ Claude CLI installed');
 
-  // Step 5 — Copy local Claude config if the user has one.
+  // Step 5 — Claude credentials. Two branches:
+  //   (a) local `~/.claude/` exists → copy it to the workspace so the
+  //       user doesn't have to re-auth.
+  //   (b) no local config → offer to run `claude login` on the
+  //       workspace. The login prints a URL the user opens in their
+  //       LOCAL browser, then pastes back a code; with `streamCommand`
+  //       (stdio inherited) that whole back-and-forth happens in the
+  //       same terminal where the user typed `codeam deploy`.
   const localClaudeDir = path.join(os.homedir(), '.claude');
-  if (fs.existsSync(localClaudeDir) && fs.statSync(localClaudeDir).isDirectory()) {
+  const haveLocalClaude =
+    fs.existsSync(localClaudeDir) && fs.statSync(localClaudeDir).isDirectory();
+
+  if (haveLocalClaude) {
     const copyStep = p.spinner();
     copyStep.start('Copying local Claude config to workspace…');
     try {
       await provider.uploadDirectory(workspace.id, localClaudeDir, '/home/codespace/.claude');
       copyStep.stop('✓ Claude config copied — no re-auth needed');
     } catch (err) {
-      copyStep.stop('⚠ Could not copy Claude config — you may need to login on the workspace');
-      // Non-fatal; continue. The remote codeam pair will still work,
-      // the user just has to `claude login` themselves.
+      copyStep.stop('⚠ Could not copy Claude config — falling back to remote login');
       void err;
+      await runRemoteClaudeLogin(provider, workspace.id);
     }
   } else {
     p.note(
-      'No local ~/.claude config found. You can authenticate Claude in the workspace shell when needed.',
-      'Heads up',
+      [
+        'No local ~/.claude config found.',
+        'We can run `claude login` inside the workspace right now — the URL',
+        'will print here, you open it in your browser, paste the code back,',
+        'and the workspace gets authenticated. (Skip if you\'d rather do it',
+        'manually later from inside the codespace.)',
+      ].join('\n'),
+      'Claude credentials',
     );
+    const proceed = await p.confirm({
+      message: 'Run `claude login` on the workspace now?',
+      initialValue: true,
+    });
+    if (!p.isCancel(proceed) && proceed) {
+      await runRemoteClaudeLogin(provider, workspace.id);
+    }
   }
 
   // Step 6 — Install codeam-cli in the workspace so we can pair.
@@ -150,6 +172,42 @@ export async function deploy(): Promise<void> {
     p.outro(pc.green(`✓ Workspace deployed and paired. Drive from your phone, anywhere.`));
   } else {
     p.outro(pc.yellow(`Pairing exited with code ${code}. Run "codeam pair" inside the codespace if needed.`));
+  }
+}
+
+/**
+ * Run `claude login` inside the workspace with full stdio inheritance
+ * so the URL the CLI prints (and any code-paste prompt the auth flow
+ * asks for) come straight to the user's local terminal. After the
+ * login finishes we sanity-check with `claude` to confirm the
+ * credentials landed; if it looks broken we surface a friendly note
+ * but continue — pairing still works for non-Claude agents.
+ *
+ * The remote command shape is:
+ *   bash -lc "claude login"
+ * via the provider's `streamCommand` so PATH from .bashrc / .zshrc /
+ * /etc/profile.d / nvm pick up the freshly-installed `claude` binary.
+ */
+async function runRemoteClaudeLogin(
+  provider: CloudProvider,
+  workspaceId: string,
+): Promise<void> {
+  p.note(
+    [
+      'A login URL will print below. Open it in your local browser, sign in,',
+      'and paste any code Claude asks for back into this terminal.',
+    ].join('\n'),
+    'Authenticating Claude on workspace',
+  );
+  const result = await provider.streamCommand(
+    workspaceId,
+    'bash -lc "claude login || claude /login || true"',
+  );
+  if (result.code !== 0) {
+    p.note(
+      'claude login exited non-zero. You can re-run it manually inside the codespace later.',
+      'Heads up',
+    );
   }
 }
 
