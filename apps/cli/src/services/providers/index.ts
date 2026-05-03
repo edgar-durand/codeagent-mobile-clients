@@ -1,22 +1,25 @@
 import type { CloudProvider } from './types';
 import { GitHubCodespacesProvider } from './github-codespaces';
+import { GitpodProvider } from './gitpod';
+import { GitLabWorkspacesProvider } from './gitlab-workspaces';
+import { RailwayProvider } from './railway';
 
 /**
- * Registry of cloud-workspace providers. Order matters: it's the order
- * users see in the picker. Add new providers by implementing
+ * Registry of cloud-workspace providers. Order matters: it's the
+ * order users see in the picker. Add new providers by implementing
  * `CloudProvider` and pushing them onto the list — the orchestrator
  * (`commands/deploy.ts`) is provider-agnostic.
  *
- * Placeholders with `available: false` show in the menu as "coming
- * soon" so users can see what's on the roadmap without us having to
- * ship empty subcommands.
+ * Each provider leans on its native CLI for auth (gh / gitpod /
+ * glab / railway) so we don't have to re-implement OAuth or store
+ * tokens. The first-time prompt for a missing CLI / login surfaces
+ * the install command and exits cleanly.
  */
 export const PROVIDERS: CloudProvider[] = [
   new GitHubCodespacesProvider(),
-  // Sketches for future providers — uncomment + implement when ready.
-  // new GitpodProvider(),
-  // new CoderProvider(),
-  // new GitLabWebIDEProvider(),
+  new GitpodProvider(),
+  new GitLabWorkspacesProvider(),
+  new RailwayProvider(),
 ];
 
 export type {
