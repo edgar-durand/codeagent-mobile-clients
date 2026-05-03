@@ -512,37 +512,65 @@ except Exception:sys.exit(0)
   /**
    * Honor the "Avoid suspend codespace on inactivity" toggle from
    * the apps' Settings modal. Only meaningful when this agent is
-   * actually running inside a GitHub Codespace — that's where the
-   * inactivity-based auto-suspend exists. We detect the environment
-   * via `CODESPACES=true` (set by GitHub on every Codespace VM).
-   * On a local pairing, the heartbeat is a no-op so we skip it
-   * entirely instead of spamming `gh codespace list` on the user's
-   * Mac for nothing.
+   * actually running inside a GitHub Codespace.
    *
-   * When enabled (and inside a Codespace), we run a `gh codespace
-   * list` call every 8 minutes. The GitHub control plane counts
-   * that as user activity and resets the idle timer that would
-   * otherwise auto-suspend the workspace. When disabled, we cancel
-   * the heartbeat.
+   * Why the previous "ping the API" approach didn't work: GitHub's
+   * inactivity detection is based on INCOMING connections (VS Code
+   * Remote, `gh codespace ssh`), not on outgoing API calls from the
+   * VM itself. So `gh codespace list` from inside the codespace
+   * doesn't reset the idle timer — and the workspace got suspended
+   * anyway after 30 min of "real" inactivity.
+   *
+   * What actually works: bump the codespace's `idle_timeout_minutes`
+   * via the GitHub API. Default is 30; max is 240 (or higher if the
+   * org admin raised it). We set 240 when the toggle is on and reset
+   * to 30 when it's off. We re-apply the setting periodically because
+   * GitHub does NOT reset the idle clock on PATCH — it just sets the
+   * ceiling, so re-PATCHing has no extra effect, but doing it on a
+   * timer protects against transient API failures + clock skew.
+   *
+   * Beyond 240 min of true inactivity (no SSH / no VS Code), the
+   * codespace WILL stop regardless of what we do — GitHub's design.
+   * The toggle gives the user 8× longer than default; not infinite.
    */
   const inCodespace = process.env.CODESPACES === 'true';
+  const codespaceName = process.env.CODESPACE_NAME;
   let keepAliveTimer: NodeJS.Timeout | null = null;
+  async function setIdleTimeout(minutes: number): Promise<void> {
+    if (!inCodespace || !codespaceName) return;
+    // PATCH /user/codespaces/<name> { idle_timeout_minutes }.
+    // gh's --field flag is the cleanest way to send a numeric body
+    // without shell-escaping JSON ourselves.
+    await new Promise<void>((resolve) => {
+      const proc = spawn(
+        'gh',
+        [
+          'api',
+          '-X', 'PATCH',
+          `/user/codespaces/${codespaceName}`,
+          '-F', `idle_timeout_minutes=${minutes}`,
+        ],
+        { stdio: 'ignore', detached: true },
+      );
+      proc.unref();
+      proc.on('exit', () => resolve());
+      proc.on('error', () => resolve());
+    });
+  }
   function setKeepAlive(enabled: boolean): void {
     if (keepAliveTimer) {
       clearInterval(keepAliveTimer);
       keepAliveTimer = null;
     }
-    if (!enabled || !inCodespace) return;
-    const ping = (): void => {
-      const proc = spawn('bash', ['-lc', 'gh codespace list >/dev/null 2>&1 || true'], {
-        stdio: 'ignore',
-        detached: true,
-      });
-      proc.unref();
-    };
-    ping();
-    // 8 minutes — comfortably under GitHub's 30-minute default
-    // idle timeout, with margin for clock skew / brief outages.
-    keepAliveTimer = setInterval(ping, 8 * 60 * 1000);
+    if (!inCodespace || !codespaceName) return;
+    if (!enabled) {
+      // Reset to GitHub's default idle timeout.
+      void setIdleTimeout(30);
+      return;
+    }
+    // Set to the max (240 min) immediately + every 30 min just in
+    // case the first call hit a transient API hiccup.
+    void setIdleTimeout(240);
+    keepAliveTimer = setInterval(() => { void setIdleTimeout(240); }, 30 * 60 * 1000);
   }
 }
