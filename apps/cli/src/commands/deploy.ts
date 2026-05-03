@@ -454,7 +454,12 @@ export async function deploy(): Promise<void> {
     // pairing code" lines per second in the file — pure noise. Drop
     // them so the user sees just the QR + the pairing code + the
     // "Paired with" / "for shortcuts" markers.
-    'tail -n 0 -F "$LOG" 2>/dev/null | grep --line-buffered -vE "Waiting for mobile app|Requesting pairing code" &',
+    // `tail -n +1` shows everything in the file from the start —
+    // critical because pm2 has already written the QR + pairing
+    // code by the time we get here (during the `sleep 2` above).
+    // `-n 0` would miss all of that and only show the post-spawn
+    // spinner spam, leaving the user staring at a blank screen.
+    'tail -n +1 -F "$LOG" 2>/dev/null | grep --line-buffered -vE "Waiting for mobile app|Requesting pairing code" &',
     'TAIL=$!',
     "trap 'kill $TAIL 2>/dev/null; exit 130' INT TERM",
     // Phase 1 — wait for "Paired with", or for codeam to print a
