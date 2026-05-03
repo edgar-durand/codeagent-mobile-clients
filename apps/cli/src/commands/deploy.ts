@@ -366,9 +366,29 @@ export async function deploy(): Promise<void> {
   }
   cliStep.stop('✓ codeam-cli installed');
 
-  // Step 7 — Stream `codeam pair` from the workspace. The QR + pairing
-  // code render straight to this local terminal because gh codespace ssh
-  // forwards stdio and `-t` keeps ANSI escapes intact.
+  // Step 7 — Pair the workspace, but in a way that *survives* the
+  // local SSH disconnect. `codeam pair` falls through into the
+  // long-running mobile↔Claude relay (`start()`) once the user pairs
+  // — if we just stream it normally, the local terminal stays bound
+  // forever, and a Ctrl+C kills the relay along with the SSH session,
+  // dropping the mobile app's connection.
+  //
+  // The wrapper:
+  //   1. `nohup`s `codeam pair` with stdin from /dev/null so it
+  //      ignores SIGHUP (SSH disconnect) AND so a local Ctrl+C
+  //      doesn't reach it (`disown` removes it from the shell's job
+  //      table so signal-on-shell-exit doesn't propagate either).
+  //   2. Tees stdout/stderr into a session log on the codespace and
+  //      `tail -F`s it locally, so the QR / pairing-code renders to
+  //      the user's terminal in real time.
+  //   3. Waits for the "Paired with" marker. On success, the local
+  //      wrapper exits cleanly and SSH disconnects — the relay keeps
+  //      running because it's nohup'd + disowned.
+  //   4. On Ctrl+C: kills the tail and exits, BUT does NOT touch the
+  //      remote relay. Local terminal returns; remote pair-or-relay
+  //      keeps running. (If the user cancels before pairing, codeam
+  //      pair has its own 5-min timeout, after which it'll exit on
+  //      its own — no orphans.)
   p.note(
     [
       `Workspace: ${pc.cyan(workspace.displayName ?? workspace.id)}`,
@@ -376,18 +396,69 @@ export async function deploy(): Promise<void> {
       '',
       'Starting `codeam pair` on the workspace.',
       'Scan the QR code below with the CodeAgent Mobile app to finish pairing.',
+      pc.dim('(Once paired, this terminal disconnects automatically; the session stays alive on the codespace.)'),
     ]
       .filter(Boolean)
       .join('\n'),
     'Almost there',
   );
 
-  const code = (await provider.streamCommand(workspace.id, 'codeam pair')).code;
+  const wrapperLines = [
+    'mkdir -p ~/.codeam-deploy',
+    'LOG=~/.codeam-deploy/session.log',
+    'PIDFILE=~/.codeam-deploy/session.pid',
+    // Stop any prior detached session for this codespace.
+    'if [ -f "$PIDFILE" ]; then OLD=$(cat "$PIDFILE" 2>/dev/null); if [ -n "$OLD" ] && kill -0 "$OLD" 2>/dev/null; then kill "$OLD" 2>/dev/null; sleep 1; fi; fi',
+    ': > "$LOG"',
+    // Detach codeam pair from this shell so SSH hangup and Ctrl+C
+    // can never reach it.
+    'nohup codeam pair > "$LOG" 2>&1 < /dev/null &',
+    'PID=$!',
+    'disown',
+    'echo "$PID" > "$PIDFILE"',
+    // Stream the log to the local terminal.
+    'tail -n +1 -F "$LOG" 2>/dev/null &',
+    'TAIL=$!',
+    // Local Ctrl+C: kill ONLY the tail and exit — relay stays alive.
+    'trap \'kill $TAIL 2>/dev/null; exit 130\' INT TERM',
+    // Wait for the paired-marker, or codeam dying / timing out.
+    'SUCCESS=0',
+    'while true; do',
+    '  if grep -q "Paired with" "$LOG" 2>/dev/null; then sleep 1; SUCCESS=1; break; fi',
+    '  if ! kill -0 "$PID" 2>/dev/null; then SUCCESS=0; break; fi',
+    '  sleep 1',
+    'done',
+    'trap - INT TERM',
+    'kill $TAIL 2>/dev/null',
+    'echo',
+    'if [ "$SUCCESS" = "1" ]; then',
+    '  echo "✓ Session running on codespace (PID $PID). Closing local connection — your phone stays paired."',
+    '  exit 0',
+    'else',
+    '  echo "✗ Pairing did not complete (codeam pair exited)."',
+    '  exit 1',
+    'fi',
+  ];
+  const wrapper = wrapperLines.join('\n');
+  const code = (
+    await provider.streamCommand(workspace.id, `bash -lc ${shellQuoteSingle(wrapper)}`)
+  ).code;
   if (code === 0) {
-    p.outro(pc.green(`✓ Workspace deployed and paired. Drive from your phone, anywhere.`));
+    p.outro(pc.green('✓ Workspace deployed and paired. Drive from your phone, anywhere.'));
+  } else if (code === 130) {
+    p.outro(pc.yellow('Disconnected from local terminal. Mobile session keeps running on the codespace.'));
   } else {
-    p.outro(pc.yellow(`Pairing exited with code ${code}. Run "codeam pair" inside the codespace if needed.`));
+    p.outro(pc.yellow(`Pairing did not complete. Run "codeam pair" inside the codespace if needed.`));
   }
+}
+
+/**
+ * Single-quote a multi-line bash script for safe inclusion in a
+ * `bash -lc '<script>'` invocation. Escapes embedded single quotes
+ * with the standard `'\''` trick.
+ */
+function shellQuoteSingle(s: string): string {
+  return `'${s.replace(/'/g, `'\\''`)}'`;
 }
 
 /**
