@@ -9,6 +9,28 @@ const execFileP = promisify(execFile);
 const MAX_BUFFER = 8 * 1024 * 1024;
 
 /**
+ * Restore stdin to canonical (line-buffered) mode before handing the
+ * terminal to an interactive subprocess. clack's prompts (`select`,
+ * `confirm`, …) put stdin in raw mode while they're active and don't
+ * always restore canonical mode cleanly afterward — which means a
+ * child invoked with `stdio: 'inherit'` reads byte-by-byte instead of
+ * a line per Enter, so its readline-style prompts (`gh auth login`,
+ * `gh auth refresh`) silently swallow keystrokes and look hung.
+ *
+ * Calling this right before each `spawn(..., { stdio: 'inherit' })`
+ * is cheap and removes the entire class of bug.
+ */
+function resetStdinForChild(): void {
+  if (process.stdin.isTTY) {
+    try {
+      process.stdin.setRawMode(false);
+    } catch {
+      // Some terminals don't support raw mode toggling; nothing to do.
+    }
+  }
+}
+
+/**
  * GitHub Codespaces backend. We layer over the official `gh` CLI rather
  * than calling the REST API directly because:
  *   - `gh` already handles OAuth (device flow, browser handoff, scope
@@ -66,6 +88,7 @@ export class GitHubCodespacesProvider implements CloudProvider {
       // so the user can answer the device-flow prompts. We pass the
       // exact scopes Codespaces needs so the granted token works for
       // the rest of the deploy without a second auth round-trip.
+      resetStdinForChild();
       await new Promise<void>((resolve, reject) => {
         const proc = spawn('gh', ['auth', 'login', '-s', 'codespace,repo,read:user'], {
           stdio: 'inherit',
@@ -94,6 +117,7 @@ export class GitHubCodespacesProvider implements CloudProvider {
         ].join('\n'),
         'One more permission needed',
       );
+      resetStdinForChild();
       await new Promise<void>((resolve, reject) => {
         const proc = spawn(
           'gh',
@@ -225,15 +249,17 @@ export class GitHubCodespacesProvider implements CloudProvider {
     });
     if (p.isCancel(proceed) || !proceed) return;
 
-    const installStep = p.spinner();
-    installStep.start(`Installing gh via ${installCmd.describe}…`);
+    // No clack spinner here — the package manager streams progress
+    // (download bars, post-install scripts) that need the terminal.
+    p.log.step(`Installing gh via ${installCmd.describe}…`);
+    resetStdinForChild();
     const ok = await new Promise<boolean>((resolve) => {
       const proc = spawn(installCmd.exe, installCmd.args, { stdio: 'inherit' });
       proc.on('exit', (code) => resolve(code === 0));
       proc.on('error', () => resolve(false));
     });
-    if (ok) installStep.stop('✓ gh installed');
-    else installStep.stop('✗ gh install failed');
+    if (ok) p.log.success('gh installed');
+    else p.log.error('gh install failed');
   }
 
   async listProjects(): Promise<DeployableProject[]> {
@@ -405,6 +431,7 @@ export class GitHubCodespacesProvider implements CloudProvider {
   }
 
   async streamCommand(workspaceId: string, command: string): Promise<{ code: number }> {
+    resetStdinForChild();
     return new Promise((resolve, reject) => {
       // `-t` allocates a TTY so ANSI escapes (color, QR-code drawing,
       // cursor positioning) come through cleanly. `--` separates the

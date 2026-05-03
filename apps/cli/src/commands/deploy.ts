@@ -27,14 +27,18 @@ export async function deploy(): Promise<void> {
     process.exit(0);
   }
 
-  // Step 1 — Authorize.
-  const authStep = p.spinner();
-  authStep.start(`Authorizing with ${provider.displayName}…`);
+  // Step 1 — Authorize. We deliberately do NOT wrap this in a clack
+  // spinner: `authorize()` may shell out to interactive subprocesses
+  // (`gh auth login`, `gh auth refresh`, `brew install gh`) whose
+  // device-flow prompts ("Press Enter to open in browser…") need to
+  // own the last line of the terminal. A spinner running above keeps
+  // re-drawing and hides the prompt, so the user thinks the run hung.
+  p.log.step(`Authorizing with ${provider.displayName}…`);
   try {
     await provider.authorize();
-    authStep.stop(`✓ Authorized with ${provider.displayName}`);
+    p.log.success(`Authorized with ${provider.displayName}`);
   } catch (err) {
-    authStep.stop(`✗ Authorization failed`);
+    p.log.error('Authorization failed');
     p.cancel(err instanceof Error ? err.message : String(err));
     process.exit(1);
   }
