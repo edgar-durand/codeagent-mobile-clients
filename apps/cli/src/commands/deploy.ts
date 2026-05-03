@@ -442,11 +442,19 @@ export async function deploy(): Promise<void> {
     // --max-restarts 3 keeps PM2 from looping forever if codeam pair
     // can't start (e.g. backend unreachable) — three attempts is
     // enough for transient flakes, anything more wastes time.
-    'pm2 start codeam --name codeam-pair --cwd "$PROJECT_DIR" --max-restarts 3 -o "$LOG" -e "$LOG" --merge-logs --time -- pair >/dev/null 2>&1',
+    // No `--time` (would prefix every line with a timestamp and
+    // break the QR rendering); no `--no-pmx` either (default off).
+    'pm2 start codeam --name codeam-pair --cwd "$PROJECT_DIR" --max-restarts 3 -o "$LOG" -e "$LOG" --merge-logs -- pair >/dev/null 2>&1',
     // Give PM2 a moment to spawn the process before we start polling
     // status — otherwise the very first jlist can race the spawn.
     'sleep 2',
-    'tail -n 0 -F "$LOG" 2>/dev/null &',
+    // Filter the live tail: PM2 captures stdout to a file, so codeam-
+    // cli's spinner (which uses \r to redraw a single line in a TTY)
+    // becomes hundreds of new "Waiting for mobile app" / "Requesting
+    // pairing code" lines per second in the file — pure noise. Drop
+    // them so the user sees just the QR + the pairing code + the
+    // "Paired with" / "for shortcuts" markers.
+    'tail -n 0 -F "$LOG" 2>/dev/null | grep --line-buffered -vE "Waiting for mobile app|Requesting pairing code" &',
     'TAIL=$!',
     "trap 'kill $TAIL 2>/dev/null; exit 130' INT TERM",
     // Phase 1 — wait for "Paired with", or for codeam to print a
