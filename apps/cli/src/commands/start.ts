@@ -234,6 +234,27 @@ except Exception:sys.exit(0)
       case 'stop_task':
         claude.interrupt();
         break;
+      case 'shutdown_session': {
+        // Mobile/web sent "Stop session" — typically targets a
+        // remote `codeam deploy` codespace. Tear down PM2's
+        // supervisor (so it doesn't respawn us), kill Claude, and
+        // exit cleanly so the codespace's compute can idle out.
+        // The pm2 cleanup is fire-and-forget detached so we can
+        // exit before pm2 reaps the parent.
+        try { await relay.sendResult(cmd.id, 'success', { ok: true }); } catch { /* best-effort */ }
+        try { claude.kill(); } catch { /* best-effort */ }
+        try {
+          const proc = spawn('bash', ['-lc', 'pm2 delete codeam-pair >/dev/null 2>&1 || true'], {
+            detached: true,
+            stdio: 'ignore',
+          });
+          proc.unref();
+        } catch { /* pm2 may not be installed locally; ignore */ }
+        outputSvc.dispose();
+        relay.stop();
+        ws.disconnect();
+        process.exit(0);
+      }
       case 'get_context': {
         const usage = historySvc.getCurrentUsage();
         const monthlyCost = historySvc.getMonthlyEstimatedCost();
