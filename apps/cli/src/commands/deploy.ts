@@ -421,13 +421,33 @@ export async function deploy(): Promise<void> {
     'TAIL=$!',
     // Local Ctrl+C: kill ONLY the tail and exit — relay stays alive.
     'trap \'kill $TAIL 2>/dev/null; exit 130\' INT TERM',
-    // Wait for the paired-marker, or codeam dying / timing out.
+    // Phase 1 — wait for the QR scan to complete.
     'SUCCESS=0',
     'while true; do',
-    '  if grep -q "Paired with" "$LOG" 2>/dev/null; then sleep 1; SUCCESS=1; break; fi',
+    '  if grep -q "Paired with" "$LOG" 2>/dev/null; then SUCCESS=1; break; fi',
     '  if ! kill -0 "$PID" 2>/dev/null; then SUCCESS=0; break; fi',
     '  sleep 1',
     'done',
+    'if [ "$SUCCESS" = "1" ]; then',
+    '  echo',
+    '  echo "✓ Phone paired."',
+    '  echo "  Claude may ask first-time prompts (\"trust this folder\", model picker, etc.) — answer those on your phone."',
+    '  echo "  This terminal will disconnect once Claude is fully ready, or press Ctrl+C now to disconnect immediately."',
+    '  echo',
+    // Phase 2 — wait until Claude is fully initialised. The
+    // "? for shortcuts" line (from Claude\'s status bar) is the most
+    // reliable "ready" marker — it only renders AFTER any trust /
+    // onboarding prompts have been resolved. Cap at 3 minutes so we
+    // never hang the local terminal forever if the user doesn\'t
+    // resolve a prompt on their phone.
+    '  WAIT_START=$(date +%s)',
+    '  while true; do',
+    '    if grep -q "for shortcuts" "$LOG" 2>/dev/null; then break; fi',
+    '    if ! kill -0 "$PID" 2>/dev/null; then break; fi',
+    '    if [ $(($(date +%s) - WAIT_START)) -gt 180 ]; then break; fi',
+    '    sleep 1',
+    '  done',
+    'fi',
     'trap - INT TERM',
     'kill $TAIL 2>/dev/null',
     'echo',
