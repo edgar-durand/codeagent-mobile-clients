@@ -2,7 +2,7 @@
   "name": "codeagent-mobile",
   "displayName": "CodeAgent Mobile",
   "description": "Control your AI coding agents remotely from your mobile device",
-  "version": "2.4.22",
+  "version": "2.4.23",
   "publisher": "CodeAgentMobile",
   "icon": "resources/icon.png",
   "galleryBanner": {

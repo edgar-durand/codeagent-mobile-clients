@@ -253,14 +253,28 @@ except Exception:sys.exit(0)
         break;
       }
       case 'shutdown_session': {
-        // Mobile/web sent "Stop session" — typically targets a
-        // remote `codeam deploy` codespace. Tear down PM2's
-        // supervisor (so it doesn't respawn us), kill Claude, and
-        // exit cleanly so the codespace's compute can idle out.
-        // The pm2 cleanup is fire-and-forget detached so we can
-        // exit before pm2 reaps the parent.
+        // Mobile/web sent "Stop session". Two layers of cleanup:
+        //   1. Tear down PM2's supervisor + kill Claude + exit so
+        //      our agent stops responding.
+        //   2. If we're INSIDE a Codespace, also run
+        //      `gh codespace stop` so the workspace itself
+        //      suspends — saves the user's compute hours
+        //      immediately instead of waiting for GitHub's idle
+        //      timeout. Detached + fire-and-forget so it survives
+        //      our exit and the SSH tear-down.
         try { await relay.sendResult(cmd.id, 'success', { ok: true }); } catch { /* best-effort */ }
         try { claude.kill(); } catch { /* best-effort */ }
+        const codespaceName = process.env.CODESPACE_NAME;
+        if (codespaceName && process.env.CODESPACES === 'true') {
+          try {
+            const stopProc = spawn(
+              'bash',
+              ['-lc', `sleep 1; gh codespace stop -c ${JSON.stringify(codespaceName)} >/dev/null 2>&1 || true`],
+              { detached: true, stdio: 'ignore' },
+            );
+            stopProc.unref();
+          } catch { /* gh may be unavailable; ignore */ }
+        }
         try {
           const proc = spawn('bash', ['-lc', 'pm2 delete codeam-pair >/dev/null 2>&1 || true'], {
             detached: true,
