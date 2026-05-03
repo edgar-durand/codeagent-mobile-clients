@@ -52,6 +52,24 @@ export interface ExecResult {
   code: number;
 }
 
+/**
+ * A machine / instance type the provider can spin up. Returned from
+ * `listMachineTypes` so the orchestrator can let the user pick. Memory
+ * is in GB so the picker can render "8 GB" without doing math.
+ */
+export interface MachineType {
+  /** Provider-issued id passed back to `createWorkspace`. */
+  id: string;
+  /** User-facing label (e.g. "2 cores · 8 GB RAM · 32 GB storage"). */
+  label: string;
+  /** Memory in GB — used to filter to a minimum. */
+  memoryGb: number;
+  /** CPU core count, if known. */
+  cpus?: number;
+  /** Storage in GB, if known. */
+  storageGb?: number;
+}
+
 export interface CloudProvider {
   /** Stable id used for selection (e.g. `github-codespaces`). */
   readonly id: string;
@@ -72,10 +90,19 @@ export interface CloudProvider {
   listProjects(): Promise<DeployableProject[]>;
 
   /**
-   * Create a new workspace from a project. Resolves once the workspace
-   * is ready to accept `exec` and `streamCommand` calls.
+   * Return the machine types available to the user for this project.
+   * Optional — providers that don't expose machine selection (or where
+   * the concept doesn't apply) can omit this. The orchestrator will
+   * skip the picker when it's missing or returns an empty array.
    */
-  createWorkspace(projectId: string): Promise<Workspace>;
+  listMachineTypes?(projectId: string): Promise<MachineType[]>;
+
+  /**
+   * Create a new workspace from a project. Resolves once the workspace
+   * is ready to accept `exec` and `streamCommand` calls. `machineTypeId`
+   * is forwarded if the provider supports machine selection.
+   */
+  createWorkspace(projectId: string, machineTypeId?: string): Promise<Workspace>;
 
   /** Run a single command in the workspace and return all of its output. */
   exec(workspaceId: string, command: string): Promise<ExecResult>;

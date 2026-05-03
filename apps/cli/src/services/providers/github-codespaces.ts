@@ -1,6 +1,8 @@
 import { execFile, spawn } from 'child_process';
 import { promisify } from 'util';
-import type { CloudProvider, DeployableProject, ExecResult, Workspace } from './types';
+import * as p from '@clack/prompts';
+import pc from 'picocolors';
+import type { CloudProvider, DeployableProject, ExecResult, MachineType, Workspace } from './types';
 
 const execFileP = promisify(execFile);
 
@@ -28,20 +30,27 @@ export class GitHubCodespacesProvider implements CloudProvider {
   readonly available = true;
 
   async authorize(): Promise<void> {
-    // Step 1: gh installed?
+    // Step 1: gh installed? If not, offer to install it for the user
+    // — opt-in so we never sudo / brew without permission.
     try {
       await execFileP('gh', ['--version'], { maxBuffer: MAX_BUFFER });
     } catch {
-      throw new Error(
-        [
-          'GitHub CLI (`gh`) is required for Codespaces deploys.',
-          'Install it with:',
-          '  • macOS:   brew install gh',
-          '  • Linux:   https://github.com/cli/cli/blob/trunk/docs/install_linux.md',
-          '  • Windows: winget install --id GitHub.cli',
-          'Then run `gh auth login` and try `codeam deploy` again.',
-        ].join('\n'),
-      );
+      await this.tryInstallGh();
+      // Re-check after the install attempt.
+      try {
+        await execFileP('gh', ['--version'], { maxBuffer: MAX_BUFFER });
+      } catch {
+        throw new Error(
+          [
+            'GitHub CLI (`gh`) is still not on PATH.',
+            'Install it manually with:',
+            '  • macOS:   brew install gh',
+            '  • Linux:   https://github.com/cli/cli/blob/trunk/docs/install_linux.md',
+            '  • Windows: winget install --id GitHub.cli',
+            'Then run `codeam deploy` again.',
+          ].join('\n'),
+        );
+      }
     }
     // Step 2: gh authed?
     try {
@@ -62,6 +71,107 @@ export class GitHubCodespacesProvider implements CloudProvider {
       });
       proc.on('error', reject);
     });
+  }
+
+  /**
+   * Try to install the `gh` CLI for the user. Opt-in via a confirm
+   * prompt — we never run `brew` / `winget` / `apt` without explicit
+   * consent. Strategy per platform:
+   *
+   *   - macOS:   `brew install gh` (requires Homebrew)
+   *   - Windows: `winget install --id GitHub.cli -e --silent`
+   *   - Linux:   too many distros / package managers to be safe; we
+   *              point the user at the official install doc instead.
+   *
+   * Stdio is inherited so any sudo / authentication prompt the package
+   * manager surfaces (e.g. macOS keychain, Windows UAC) lands in this
+   * terminal. On failure or an unsupported platform we just return —
+   * the caller will re-check `gh --version` and surface the manual-
+   * install error if it's still missing.
+   */
+  private async tryInstallGh(): Promise<void> {
+    const platform = process.platform;
+    p.note(
+      `GitHub CLI (${pc.cyan('gh')}) is required for Codespaces deploys but isn't on your PATH.`,
+      'Heads up',
+    );
+
+    if (platform === 'linux') {
+      // Linux package managers vary too much (apt vs dnf vs pacman vs
+      // apk, and most need sudo + a third-party repo for a current
+      // gh). Pointing the user at the official installer is safer.
+      p.note(
+        [
+          'On Linux, please install gh from the official guide:',
+          '  https://github.com/cli/cli/blob/trunk/docs/install_linux.md',
+          'Re-run `codeam deploy` once it is on your PATH.',
+        ].join('\n'),
+        'Install gh on Linux',
+      );
+      return;
+    }
+
+    let installCmd: { exe: string; args: string[]; describe: string } | null = null;
+    if (platform === 'darwin') {
+      // brew is the de-facto package manager on macOS dev machines —
+      // bail out early if it isn't installed so we don't get a cryptic
+      // "command not found" mid-install.
+      try {
+        await execFileP('brew', ['--version'], { maxBuffer: MAX_BUFFER });
+      } catch {
+        p.note(
+          [
+            'Homebrew (`brew`) is not installed.',
+            'Install it from https://brew.sh and re-run `codeam deploy`,',
+            'or install gh manually: https://cli.github.com/',
+          ].join('\n'),
+          'Cannot auto-install on macOS',
+        );
+        return;
+      }
+      installCmd = {
+        exe: 'brew',
+        args: ['install', 'gh'],
+        describe: 'brew install gh',
+      };
+    } else if (platform === 'win32') {
+      try {
+        await execFileP('winget', ['--version'], { maxBuffer: MAX_BUFFER });
+      } catch {
+        p.note(
+          [
+            'winget is not available on this machine.',
+            'Install gh manually: https://github.com/cli/cli/releases/latest',
+          ].join('\n'),
+          'Cannot auto-install on Windows',
+        );
+        return;
+      }
+      installCmd = {
+        exe: 'winget',
+        args: ['install', '--id', 'GitHub.cli', '-e', '--silent'],
+        describe: 'winget install --id GitHub.cli',
+      };
+    } else {
+      // Unknown platform — let the caller's manual-instruction error fire.
+      return;
+    }
+
+    const proceed = await p.confirm({
+      message: `Run ${pc.cyan(installCmd.describe)} now?`,
+      initialValue: true,
+    });
+    if (p.isCancel(proceed) || !proceed) return;
+
+    const installStep = p.spinner();
+    installStep.start(`Installing gh via ${installCmd.describe}…`);
+    const ok = await new Promise<boolean>((resolve) => {
+      const proc = spawn(installCmd.exe, installCmd.args, { stdio: 'inherit' });
+      proc.on('exit', (code) => resolve(code === 0));
+      proc.on('error', () => resolve(false));
+    });
+    if (ok) installStep.stop('✓ gh installed');
+    else installStep.stop('✗ gh install failed');
   }
 
   async listProjects(): Promise<DeployableProject[]> {
@@ -92,13 +202,71 @@ export class GitHubCodespacesProvider implements CloudProvider {
     }));
   }
 
-  async createWorkspace(projectId: string): Promise<Workspace> {
+  /**
+   * Return the machine types available to the user for this repo. The
+   * `gh api /repos/.../codespaces/machines` endpoint reports CPU / RAM /
+   * storage, so we hand all three to the picker for a clean label.
+   *
+   * We filter out anything below 8 GB RAM — Claude Code wants headroom
+   * for `tsc`, build tools, and parallel test runners; the 4 GB tier
+   * (when available) is too tight in practice.
+   */
+  async listMachineTypes(projectId: string): Promise<MachineType[]> {
+    try {
+      const { stdout } = await execFileP(
+        'gh',
+        ['api', `/repos/${projectId}/codespaces/machines`],
+        { maxBuffer: MAX_BUFFER },
+      );
+      const data = JSON.parse(stdout) as {
+        machines?: Array<{
+          name: string;
+          display_name?: string;
+          cpus?: number;
+          memory_in_bytes?: number;
+          storage_in_bytes?: number;
+        }>;
+      };
+      const machines = data.machines ?? [];
+      const GB = 1024 ** 3;
+      return machines
+        .map<MachineType>((m) => {
+          const memoryGb = m.memory_in_bytes ? Math.round(m.memory_in_bytes / GB) : 0;
+          const storageGb = m.storage_in_bytes ? Math.round(m.storage_in_bytes / GB) : undefined;
+          const parts: string[] = [];
+          if (m.cpus) parts.push(`${m.cpus} ${m.cpus === 1 ? 'core' : 'cores'}`);
+          if (memoryGb) parts.push(`${memoryGb} GB RAM`);
+          if (storageGb) parts.push(`${storageGb} GB storage`);
+          return {
+            id: m.name,
+            label: m.display_name ?? (parts.join(' · ') || m.name),
+            memoryGb,
+            cpus: m.cpus,
+            storageGb,
+          };
+        })
+        .filter((m) => m.memoryGb >= 8)
+        .sort((a, b) => a.memoryGb - b.memoryGb || (a.cpus ?? 0) - (b.cpus ?? 0));
+    } catch {
+      return [];
+    }
+  }
+
+  async createWorkspace(projectId: string, machineTypeId?: string): Promise<Workspace> {
     // `gh codespace create` returns the codespace name on stdout.
     // `--default-permissions` skips the "Authorize repository access?"
     // browser prompt for repos with default permissions configured.
+    //
+    // We MUST pass `-m <machine>` here. Without it, `gh` tries to prompt
+    // the user interactively to pick a machine type — and since we shell
+    // out via `execFile` with no TTY, that prompt fails with
+    // `error getting machine type: error getting machine: no terminal`.
+    const machine = machineTypeId ?? (await this.pickDefaultMachine(projectId));
+    const args = ['codespace', 'create', '-R', projectId, '--default-permissions'];
+    if (machine) args.push('-m', machine);
     const { stdout } = await execFileP(
       'gh',
-      ['codespace', 'create', '-R', projectId, '--default-permissions'],
+      args,
       { maxBuffer: MAX_BUFFER, timeout: 120_000 },
     );
     const name = stdout.trim().split('\n').filter(Boolean).pop() ?? '';
@@ -112,6 +280,28 @@ export class GitHubCodespacesProvider implements CloudProvider {
       displayName: name,
       webUrl: `https://github.com/codespaces/${name}`,
     };
+  }
+
+  /**
+   * Fallback machine picker for when the orchestrator didn't ask the
+   * user — defaults to the cheapest 8 GB tier (`basicLinux32gb`) and
+   * walks up only if the repo restricts that tier. Returns `null` if
+   * the API call fails entirely; the caller will then omit `-m` and
+   * let `gh` use the repo/org default.
+   */
+  private async pickDefaultMachine(projectId: string): Promise<string | null> {
+    const machines = await this.listMachineTypes(projectId);
+    if (machines.length === 0) return null;
+    const preferenceOrder = [
+      'basicLinux32gb',
+      'standardLinux32gb',
+      'premiumLinux',
+      'largePremiumLinux',
+    ];
+    for (const pref of preferenceOrder) {
+      if (machines.some((m) => m.id === pref)) return pref;
+    }
+    return machines[0].id;
   }
 
   private async waitUntilAvailable(name: string): Promise<void> {

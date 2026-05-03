@@ -46,6 +46,28 @@ That's it. Open the [CodeAgent Mobile app](https://codeagent-mobile.com), enter 
 | `codeam sessions` | List all paired devices |
 | `codeam status` | Show connection status |
 | `codeam logout` | Remove all paired sessions |
+| `codeam deploy` | Provision a cloud workspace (GitHub Codespaces) and pair it to your phone |
+
+---
+
+## `codeam deploy` — drive a cloud workspace from your phone
+
+Don't want to keep your laptop running while you control Claude from the train? `codeam deploy` spins up a fresh **GitHub Codespace** for any of your repos, installs Claude Code + `codeam-cli` inside it, copies your local Claude credentials so you skip the re-auth (or runs `claude login` interactively if you don't have a local config yet), and finishes by streaming `codeam pair` from inside the codespace — so you get a pairing code on this terminal already wired to the remote workspace.
+
+```bash
+codeam deploy
+```
+
+That's it. You'll be guided through:
+
+1. **Pick a provider** (GitHub Codespaces today; more coming).
+2. **Pick a repo** from your account.
+3. **Wait ~1 minute** while the codespace boots and tools install.
+4. **Scan the QR / enter the code** on the CodeAgent Mobile app — same flow as `codeam pair`, only the agent is now running in the cloud.
+
+Requirements: the [GitHub CLI (`gh`)](https://cli.github.com/) installed and authenticated (`gh auth login`). The deploy flow re-uses `gh`'s OAuth — we don't ask for a separate token.
+
+Adding more cloud backends (Gitpod, Coder, your own SSH host, …) is a single new file in `apps/cli/src/services/providers/` — the `CloudProvider` interface keeps it pluggable.
 
 ---
 

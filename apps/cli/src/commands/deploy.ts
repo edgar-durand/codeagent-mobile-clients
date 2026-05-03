@@ -70,12 +70,52 @@ export async function deploy(): Promise<void> {
   }
   const project = projects.find((proj) => proj.id === projectId)!;
 
-  // Step 3 — Create workspace.
+  // Step 3a — Pick a machine type (only if the provider exposes them).
+  // We hide options under 8 GB RAM in the provider — Claude Code's tools
+  // (tsc, test runners, dev servers) need headroom and the 4 GB tier
+  // tends to swap badly. The user picks from what's left, defaulting
+  // to the smallest 8 GB option.
+  let machineTypeId: string | undefined;
+  if (provider.listMachineTypes) {
+    const machineStep = p.spinner();
+    machineStep.start('Loading machine types…');
+    let machines: Awaited<ReturnType<NonNullable<CloudProvider['listMachineTypes']>>> = [];
+    try {
+      machines = await provider.listMachineTypes(project.id);
+      machineStep.stop(
+        machines.length > 0
+          ? `✓ ${machines.length} machine type${machines.length === 1 ? '' : 's'} available`
+          : '· No machine types reported (using provider default)',
+      );
+    } catch {
+      machineStep.stop('· Could not list machine types — using provider default');
+    }
+    if (machines.length > 1) {
+      const picked = await p.select<string>({
+        message: 'Pick a machine size (starts at 8 GB RAM):',
+        initialValue: machines[0].id,
+        options: machines.map((m) => ({
+          value: m.id,
+          label: m.label,
+          hint: `${m.memoryGb} GB RAM`,
+        })),
+      });
+      if (p.isCancel(picked)) {
+        p.cancel('Cancelled.');
+        process.exit(0);
+      }
+      machineTypeId = picked;
+    } else if (machines.length === 1) {
+      machineTypeId = machines[0].id;
+    }
+  }
+
+  // Step 3b — Create workspace.
   const createStep = p.spinner();
   createStep.start(`Creating workspace for ${project.fullName}…`);
   let workspace: Workspace;
   try {
-    workspace = await provider.createWorkspace(project.id);
+    workspace = await provider.createWorkspace(project.id, machineTypeId);
     createStep.stop(`✓ Workspace ready: ${workspace.displayName ?? workspace.id}`);
   } catch (err) {
     createStep.stop(`✗ Workspace creation failed`);
