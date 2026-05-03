@@ -4,6 +4,12 @@ All notable changes to `codeam-cli` are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.4.14] — 2026-05-03
+
+### Fixed
+
+- **cli:** Use PM2 to keep codeam-pair alive on Codespaces (v2.4.14)
+
 ## [2.4.13] — 2026-05-03
 
 ### Fixed
