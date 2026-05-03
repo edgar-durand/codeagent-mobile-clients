@@ -4,6 +4,12 @@ All notable changes to the CodeAgent-Mobile JetBrains plugin are documented here
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.4.20] — 2026-05-03
+
+### Added
+
+- **cli:** Handle set_keep_alive command from apps' Settings modal (v2.4.20)
+
 ## [2.4.19] — 2026-05-03
 
 ### Added
