@@ -4,6 +4,12 @@ All notable changes to the CodeAgent-Mobile JetBrains plugin are documented here
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.4.17] — 2026-05-03
+
+### Fixed
+
+- **cli:** Show the QR in codeam deploy (tail -n +1) (v2.4.17)
+
 ## [2.4.16] — 2026-05-03
 
 ### Fixed
