@@ -51,6 +51,7 @@ def onwinch(n,f):
     except Exception:pass
 signal.signal(signal.SIGCHLD,onchld)
 signal.signal(signal.SIGWINCH,onwinch)
+signal.signal(signal.SIGHUP,signal.SIG_IGN)
 i=sys.stdin.fileno()
 o=sys.stdout.fileno()
 while not done[0]:

@@ -403,47 +403,51 @@ export async function deploy(): Promise<void> {
     'Almost there',
   );
 
-  const wrapperLines = [
+  // After Claude is set up, run `codeam pair` on the workspace and
+  // disconnect locally once it's ready. The wrapper:
+  //   1. nohup + disown the codeam pair process so SIGHUP from the
+  //      SSH session ending does NOT propagate. (The Python PTY
+  //      helper inside codeam-cli also ignores SIGHUP — defense in
+  //      depth.)
+  //   2. Tails the log so the QR / pairing code render live.
+  //   3. Phase 1 — wait for the "Paired with" marker; phase 2 wait
+  //      for "for shortcuts" so any first-time Claude prompt (trust
+  //      this folder, etc.) gets resolved on the user's phone before
+  //      we let go.
+  //   4. Local Ctrl+C kills only the local tail — relay survives.
+  const wrapper = [
     'mkdir -p ~/.codeam-deploy',
     'LOG=~/.codeam-deploy/session.log',
     'PIDFILE=~/.codeam-deploy/session.pid',
-    // Stop any prior detached session for this codespace.
     'if [ -f "$PIDFILE" ]; then OLD=$(cat "$PIDFILE" 2>/dev/null); if [ -n "$OLD" ] && kill -0 "$OLD" 2>/dev/null; then kill "$OLD" 2>/dev/null; sleep 1; fi; fi',
     ': > "$LOG"',
-    // Detach codeam pair from this shell so SSH hangup and Ctrl+C
-    // can never reach it.
-    'nohup codeam pair > "$LOG" 2>&1 < /dev/null &',
-    'PID=$!',
-    'disown',
+    // Detach codeam pair from this shell so SSH hangup never reaches
+    // it. The combination is: setsid (new session, no controlling
+    // terminal) + nohup (ignore SIGHUP) + < /dev/null (no stdin
+    // attached) + redirect stdio to log file.
+    'setsid nohup codeam pair > "$LOG" 2>&1 < /dev/null &',
+    'sleep 1',
+    'PID=$(pgrep -fn "codeam pair" | head -1)',
     'echo "$PID" > "$PIDFILE"',
-    // Stream the log to the local terminal.
     'tail -n +1 -F "$LOG" 2>/dev/null &',
     'TAIL=$!',
-    // Local Ctrl+C: kill ONLY the tail and exit — relay stays alive.
-    'trap \'kill $TAIL 2>/dev/null; exit 130\' INT TERM',
-    // Phase 1 — wait for the QR scan to complete.
+    "trap 'kill $TAIL 2>/dev/null; exit 130' INT TERM",
     'SUCCESS=0',
     'while true; do',
     '  if grep -q "Paired with" "$LOG" 2>/dev/null; then SUCCESS=1; break; fi',
-    '  if ! kill -0 "$PID" 2>/dev/null; then SUCCESS=0; break; fi',
+    '  if [ -z "$PID" ] || ! kill -0 "$PID" 2>/dev/null; then SUCCESS=0; break; fi',
     '  sleep 1',
     'done',
     'if [ "$SUCCESS" = "1" ]; then',
     '  echo',
     '  echo "✓ Phone paired."',
-    '  echo "  Claude may ask first-time prompts (\"trust this folder\", model picker, etc.) — answer those on your phone."',
-    '  echo "  This terminal will disconnect once Claude is fully ready, or press Ctrl+C now to disconnect immediately."',
+    '  echo "  Answer any first-time prompts (\"trust this folder\", etc.) on your phone."',
+    '  echo "  Local terminal will close once Claude is ready."',
     '  echo',
-    // Phase 2 — wait until Claude is fully initialised. The
-    // "? for shortcuts" line (from Claude\'s status bar) is the most
-    // reliable "ready" marker — it only renders AFTER any trust /
-    // onboarding prompts have been resolved. Cap at 3 minutes so we
-    // never hang the local terminal forever if the user doesn\'t
-    // resolve a prompt on their phone.
     '  WAIT_START=$(date +%s)',
     '  while true; do',
     '    if grep -q "for shortcuts" "$LOG" 2>/dev/null; then break; fi',
-    '    if ! kill -0 "$PID" 2>/dev/null; then break; fi',
+    '    if [ -z "$PID" ] || ! kill -0 "$PID" 2>/dev/null; then break; fi',
     '    if [ $(($(date +%s) - WAIT_START)) -gt 180 ]; then break; fi',
     '    sleep 1',
     '  done',
@@ -458,8 +462,8 @@ export async function deploy(): Promise<void> {
     '  echo "✗ Pairing did not complete (codeam pair exited)."',
     '  exit 1',
     'fi',
-  ];
-  const wrapper = wrapperLines.join('\n');
+  ].join('\n');
+
   const code = (
     await provider.streamCommand(workspace.id, `bash -lc ${shellQuoteSingle(wrapper)}`)
   ).code;
@@ -468,18 +472,14 @@ export async function deploy(): Promise<void> {
   } else if (code === 130) {
     p.outro(pc.yellow('Disconnected from local terminal. Mobile session keeps running on the codespace.'));
   } else {
-    p.outro(pc.yellow(`Pairing did not complete. Run "codeam pair" inside the codespace if needed.`));
+    p.outro(pc.yellow('Pairing did not complete. Run "codeam pair" inside the codespace if needed.'));
   }
 }
 
-/**
- * Single-quote a multi-line bash script for safe inclusion in a
- * `bash -lc '<script>'` invocation. Escapes embedded single quotes
- * with the standard `'\''` trick.
- */
 function shellQuoteSingle(s: string): string {
   return `'${s.replace(/'/g, `'\\''`)}'`;
 }
+
 
 /**
  * Run `claude login` inside the workspace with full stdio inheritance
