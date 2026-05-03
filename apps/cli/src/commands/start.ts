@@ -236,15 +236,20 @@ except Exception:sys.exit(0)
         break;
       case 'set_keep_alive': {
         // Mobile/web's "Avoid suspend codespace on inactivity"
-        // toggle. When enabled, we ping the GitHub Codespaces API
-        // every 8 minutes via `gh codespace list` — that activity is
-        // counted as user activity and resets the inactivity timer
-        // that would otherwise auto-suspend the workspace. When
-        // disabled, we cancel the heartbeat. Best-effort; relies on
-        // `gh` being on PATH (it is in every Codespace by default).
+        // toggle. The heartbeat only runs inside a GitHub Codespace
+        // (CODESPACES=true env var) — on a local pairing there's no
+        // inactivity timer to keep alive, so the toggle is a no-op
+        // and we tell the backend so the apps can warn / hide it.
         const enabled = !!cmd.payload.enabled;
+        const inCodespaceEnv = process.env.CODESPACES === 'true';
         setKeepAlive(enabled);
-        try { await relay.sendResult(cmd.id, 'success', { enabled }); } catch { /* ignore */ }
+        try {
+          await relay.sendResult(
+            cmd.id,
+            'success',
+            { enabled, applied: enabled && inCodespaceEnv, runtime: inCodespaceEnv ? 'github-codespaces' : 'local' },
+          );
+        } catch { /* ignore */ }
         break;
       }
       case 'shutdown_session': {
@@ -492,23 +497,29 @@ except Exception:sys.exit(0)
 
   /**
    * Honor the "Avoid suspend codespace on inactivity" toggle from
-   * the apps. When enabled, we run a periodic `gh codespace list`
-   * call from inside the codespace — that's a user-API request the
-   * GitHub control plane sees as activity, which resets the idle
-   * timer. When disabled, we cancel the heartbeat. No-op on local
-   * pairings (gh is fine to spam locally too, but there's no
-   * inactivity timer to keep alive).
+   * the apps' Settings modal. Only meaningful when this agent is
+   * actually running inside a GitHub Codespace — that's where the
+   * inactivity-based auto-suspend exists. We detect the environment
+   * via `CODESPACES=true` (set by GitHub on every Codespace VM).
+   * On a local pairing, the heartbeat is a no-op so we skip it
+   * entirely instead of spamming `gh codespace list` on the user's
+   * Mac for nothing.
+   *
+   * When enabled (and inside a Codespace), we run a `gh codespace
+   * list` call every 8 minutes. The GitHub control plane counts
+   * that as user activity and resets the idle timer that would
+   * otherwise auto-suspend the workspace. When disabled, we cancel
+   * the heartbeat.
    */
+  const inCodespace = process.env.CODESPACES === 'true';
   let keepAliveTimer: NodeJS.Timeout | null = null;
   function setKeepAlive(enabled: boolean): void {
     if (keepAliveTimer) {
       clearInterval(keepAliveTimer);
       keepAliveTimer = null;
     }
-    if (!enabled) return;
+    if (!enabled || !inCodespace) return;
     const ping = (): void => {
-      // Run gh in the background; we don't care about the result,
-      // just that the call hits GitHub's control plane.
       const proc = spawn('bash', ['-lc', 'gh codespace list >/dev/null 2>&1 || true'], {
         stdio: 'ignore',
         detached: true,
