@@ -328,6 +328,41 @@ export class GitHubCodespacesProvider implements CloudProvider {
     else p.log.error('gh install failed');
   }
 
+  /**
+   * Re-run `gh auth refresh` with broader scopes so `gh repo list`
+   * can return repos in orgs the user belongs to (and team repos
+   * accessible via membership). The default codespace scope set
+   * (`codespace,repo,read:user`) already covers the user's own
+   * repos and most personal collaborator repos, but org repos and
+   * private team repos require `read:org`. We add `read:org` here
+   * and re-issue.
+   */
+  async expandListScopes(): Promise<void> {
+    p.note(
+      [
+        "We'll re-authorize `gh` with broader scopes so org and team",
+        'repositories show up in the list. A browser will open for',
+        'a one-tap approval.',
+      ].join('\n'),
+      'Expanding GitHub scopes',
+    );
+    resetStdinForChild();
+    await new Promise<void>((resolve, reject) => {
+      const proc = spawn(
+        'gh',
+        ['auth', 'refresh', '-h', 'github.com', '-s', 'repo,read:org'],
+        { stdio: 'inherit' },
+      );
+      proc.on('exit', (code) => {
+        if (code === 0) resolve();
+        else reject(new Error(
+          'gh auth refresh failed. Re-run `gh auth refresh -h github.com -s repo,read:org` manually.',
+        ));
+      });
+      proc.on('error', reject);
+    });
+  }
+
   async listProjects(): Promise<DeployableProject[]> {
     const { stdout } = await execFileP(
       'gh',

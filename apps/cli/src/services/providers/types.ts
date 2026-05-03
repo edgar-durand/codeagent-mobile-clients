@@ -103,6 +103,17 @@ export interface CloudProvider {
   listProjects(): Promise<DeployableProject[]>;
 
   /**
+   * Expand the OAuth scopes used for listing projects. Used when the
+   * user can't find their target repo in `listProjects` because it
+   * lives in an org / team they need extra scopes to see (e.g.
+   * `read:org` on GitHub). Optional — providers without
+   * extensible-scope OAuth (or that already grant everything by
+   * default) can omit this. Resolves once the new scopes are in
+   * effect; the orchestrator then re-runs `listProjects()`.
+   */
+  expandListScopes?(): Promise<void>;
+
+  /**
    * Return the machine types available to the user for this project.
    * Optional — providers that don't expose machine selection (or where
    * the concept doesn't apply) can omit this. The orchestrator will

@@ -47,36 +47,64 @@ export async function deploy(): Promise<void> {
     process.exit(1);
   }
 
-  // Step 2 — List + pick project.
-  const listStep = p.spinner();
-  listStep.start('Loading your projects…');
-  let projects: DeployableProject[] = [];
-  try {
-    projects = await provider.listProjects();
-    listStep.stop(`✓ ${projects.length} project${projects.length === 1 ? '' : 's'} available`);
-  } catch (err) {
-    listStep.stop(`✗ Could not list projects`);
-    p.cancel(err instanceof Error ? err.message : String(err));
-    process.exit(1);
-  }
-  if (projects.length === 0) {
-    p.cancel('No projects found on the account.');
-    process.exit(0);
-  }
+  // Step 2 — List + pick project. Wrapped in a loop so the user can
+  // ask the provider to "expand list scopes" (e.g. add `read:org`
+  // on GitHub) when their target repo isn't visible — common when
+  // the user's account belongs to orgs / teams that the default
+  // OAuth scope doesn't expose. Picking the magic "+ Don't see your
+  // project?" entry triggers `provider.expandListScopes()` and the
+  // loop re-fetches.
+  const EXPAND_SCOPES = '__expand_scopes__';
+  let project: DeployableProject | null = null;
+  while (!project) {
+    const listStep = p.spinner();
+    listStep.start('Loading your projects…');
+    let projects: DeployableProject[] = [];
+    try {
+      projects = await provider.listProjects();
+      listStep.stop(`✓ ${projects.length} project${projects.length === 1 ? '' : 's'} available`);
+    } catch (err) {
+      listStep.stop(`✗ Could not list projects`);
+      p.cancel(err instanceof Error ? err.message : String(err));
+      process.exit(1);
+    }
 
-  const projectId = await p.select<string>({
-    message: 'Select a project to deploy:',
-    options: projects.slice(0, 50).map((proj) => ({
+    const options = projects.slice(0, 50).map((proj) => ({
       value: proj.id,
       label: proj.fullName,
       hint: proj.description ? proj.description.slice(0, 80) : (proj.private ? 'private' : 'public'),
-    })),
-  });
-  if (p.isCancel(projectId) || typeof projectId !== 'string') {
-    p.cancel('Cancelled.');
-    process.exit(0);
+    }));
+    if (provider.expandListScopes) {
+      options.push({
+        value: EXPAND_SCOPES,
+        label: pc.cyan("+ Don't see your project? Expand scopes…"),
+        hint: 'Re-authorize with broader scopes (org / team repos)',
+      });
+    }
+    if (options.length === 0) {
+      p.cancel('No projects found on the account.');
+      process.exit(0);
+    }
+
+    const projectId = await p.select<string>({
+      message: 'Select a project to deploy:',
+      options,
+    });
+    if (p.isCancel(projectId) || typeof projectId !== 'string') {
+      p.cancel('Cancelled.');
+      process.exit(0);
+    }
+    if (projectId === EXPAND_SCOPES) {
+      try {
+        await provider.expandListScopes!();
+      } catch (err) {
+        p.log.warn(err instanceof Error ? err.message : String(err));
+      }
+      // Loop iterates → re-fetch projects with the new scopes.
+      continue;
+    }
+    project = projects.find((proj) => proj.id === projectId) ?? null;
   }
-  const project = projects.find((proj) => proj.id === projectId)!;
 
   // Step 3a — Reuse or create new? If the provider lists existing
   // workspaces and the user already has one (or several) for this
