@@ -53,24 +53,86 @@ export class GitHubCodespacesProvider implements CloudProvider {
       }
     }
     // Step 2: gh authed?
+    let isAuthed = false;
     try {
       await execFileP('gh', ['auth', 'status'], { maxBuffer: MAX_BUFFER });
-      return;
+      isAuthed = true;
     } catch {
-      // Fall through to interactive login below.
+      // Not authed — fall through to interactive login below.
     }
-    // Step 3: run `gh auth login` interactively. Stdio is inherited so
-    // the user can answer the device-flow prompts.
-    await new Promise<void>((resolve, reject) => {
-      const proc = spawn('gh', ['auth', 'login', '-s', 'codespace,repo,read:user'], {
-        stdio: 'inherit',
+
+    if (!isAuthed) {
+      // Step 3a: run `gh auth login` interactively. Stdio is inherited
+      // so the user can answer the device-flow prompts. We pass the
+      // exact scopes Codespaces needs so the granted token works for
+      // the rest of the deploy without a second auth round-trip.
+      await new Promise<void>((resolve, reject) => {
+        const proc = spawn('gh', ['auth', 'login', '-s', 'codespace,repo,read:user'], {
+          stdio: 'inherit',
+        });
+        proc.on('exit', (code) => {
+          if (code === 0) resolve();
+          else reject(new Error('gh auth login failed.'));
+        });
+        proc.on('error', reject);
       });
-      proc.on('exit', (code) => {
-        if (code === 0) resolve();
-        else reject(new Error('gh auth login failed.'));
+      return;
+    }
+
+    // Step 3b: already authed — but the token may be missing the
+    // `codespace` scope (e.g. the user ran `gh auth login` long ago
+    // before Codespaces existed, or chose a narrower scope set). That
+    // would explode mid-deploy with HTTP 404 from `/user/codespaces`.
+    // Detect it up front and offer to refresh.
+    const hasScope = await this.hasCodespaceScope();
+    if (!hasScope) {
+      p.note(
+        [
+          'Your existing GitHub login is missing the `codespace` scope.',
+          'I\'ll run `gh auth refresh` to add it — your browser will open',
+          'for a one-tap approval.',
+        ].join('\n'),
+        'One more permission needed',
+      );
+      await new Promise<void>((resolve, reject) => {
+        const proc = spawn(
+          'gh',
+          ['auth', 'refresh', '-h', 'github.com', '-s', 'codespace'],
+          { stdio: 'inherit' },
+        );
+        proc.on('exit', (code) => {
+          if (code === 0) resolve();
+          else reject(new Error('gh auth refresh failed — re-run `gh auth refresh -h github.com -s codespace` manually.'));
+        });
+        proc.on('error', reject);
       });
-      proc.on('error', reject);
-    });
+    }
+  }
+
+  /**
+   * Check whether the current `gh` token includes the `codespace`
+   * OAuth scope. We hit `/user` with `-i` so GitHub echoes the granted
+   * scopes back in the `X-OAuth-Scopes` response header — the most
+   * authoritative source (more reliable than scraping `gh auth status`,
+   * whose format has shifted across `gh` versions).
+   */
+  private async hasCodespaceScope(): Promise<boolean> {
+    try {
+      const { stdout } = await execFileP(
+        'gh',
+        ['api', '-i', 'user'],
+        { maxBuffer: MAX_BUFFER },
+      );
+      const m = stdout.match(/^x-oauth-scopes:\s*(.+)$/im);
+      if (!m) return false;
+      const scopes = m[1].split(',').map((s) => s.trim().toLowerCase());
+      return scopes.includes('codespace');
+    } catch {
+      // If the API call fails for any reason, assume the scope is
+      // missing — the worst case is one extra `gh auth refresh` round
+      // that grants the scope cleanly.
+      return false;
+    }
   }
 
   /**
