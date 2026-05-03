@@ -364,15 +364,6 @@ export class GitHubCodespacesProvider implements CloudProvider {
   }
 
   async listProjects(): Promise<DeployableProject[]> {
-    const { stdout } = await execFileP(
-      'gh',
-      [
-        'repo', 'list',
-        '--json', 'name,nameWithOwner,description,defaultBranchRef,isPrivate',
-        '--limit', '200',
-      ],
-      { maxBuffer: MAX_BUFFER },
-    );
     interface RawRepo {
       name: string;
       nameWithOwner: string;
@@ -380,8 +371,60 @@ export class GitHubCodespacesProvider implements CloudProvider {
       defaultBranchRef?: { name?: string };
       isPrivate?: boolean;
     }
-    const raw = JSON.parse(stdout) as RawRepo[];
-    return raw.map((r) => ({
+
+    const fetchRepos = async (owner?: string): Promise<RawRepo[]> => {
+      const args = ['repo', 'list'];
+      if (owner) args.push(owner);
+      args.push(
+        '--json', 'name,nameWithOwner,description,defaultBranchRef,isPrivate',
+        '--limit', '200',
+      );
+      try {
+        const { stdout } = await execFileP('gh', args, { maxBuffer: MAX_BUFFER });
+        return JSON.parse(stdout) as RawRepo[];
+      } catch {
+        return [];
+      }
+    };
+
+    // 1. The user's personal repos (owner = self).
+    const own = await fetchRepos();
+
+    // 2. Enumerate orgs the user is a member of (requires `read:org`
+    //    on the token; if the scope is missing, this returns empty
+    //    silently and the picker just shows the personal repos +
+    //    the "+ Don't see your project?" entry that re-asks for
+    //    scopes). For each org, fetch its repos.
+    let orgRepos: RawRepo[] = [];
+    try {
+      const { stdout } = await execFileP(
+        'gh',
+        ['api', '--paginate', 'user/orgs', '--jq', '.[].login'],
+        { maxBuffer: MAX_BUFFER },
+      );
+      const orgLogins = stdout
+        .split('\n')
+        .map((l) => l.trim())
+        .filter((l) => l.length > 0);
+      // Fetch in parallel; gh handles its own rate limiting and
+      // these are read-only public-listing calls.
+      const perOrg = await Promise.all(orgLogins.map((org) => fetchRepos(org)));
+      orgRepos = perOrg.flat();
+    } catch {
+      // No `read:org` scope, or transient error — skip silently.
+    }
+
+    // De-duplicate by `nameWithOwner` (a repo could surface twice if
+    // the user is both an org member and a direct collaborator).
+    const seen = new Set<string>();
+    const merged: RawRepo[] = [];
+    for (const r of [...own, ...orgRepos]) {
+      if (seen.has(r.nameWithOwner)) continue;
+      seen.add(r.nameWithOwner);
+      merged.push(r);
+    }
+
+    return merged.map((r) => ({
       id: r.nameWithOwner,
       name: r.name,
       fullName: r.nameWithOwner,
