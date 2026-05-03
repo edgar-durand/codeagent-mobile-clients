@@ -109,27 +109,83 @@ export class GitHubCodespacesProvider implements CloudProvider {
     // Detect it up front and offer to refresh.
     const hasScope = await this.hasCodespaceScope();
     if (!hasScope) {
-      p.note(
-        [
-          'Your existing GitHub login is missing the `codespace` scope.',
-          'I\'ll run `gh auth refresh` to add it — your browser will open',
-          'for a one-tap approval.',
-        ].join('\n'),
-        'One more permission needed',
-      );
+      // Pre-flight: figure out which GitHub account the user needs to
+      // pick in the browser. The most common reason `gh auth refresh`
+      // fails on the first try is a different account being signed in
+      // on github.com (multi-account setups, work + personal, etc.) —
+      // gh refuses to swap identities silently. Showing the expected
+      // login up front avoids that round-trip.
+      const expectedUser = await this.getActiveGhUser();
+      const noteLines = [
+        'Your existing GitHub login is missing the `codespace` scope.',
+        'I\'ll run `gh auth refresh` to add it — your browser will open',
+        'for a one-tap approval.',
+      ];
+      if (expectedUser) {
+        noteLines.push('');
+        noteLines.push(
+          `${pc.yellow('⚠')}  Sign in as ${pc.cyan(expectedUser)} in the browser.`,
+        );
+        noteLines.push(
+          '   If a different GitHub account is already signed in, sign out',
+        );
+        noteLines.push(
+          '   of it first — or open the URL in an incognito/private window.',
+        );
+      }
+      p.note(noteLines.join('\n'), 'One more permission needed');
       resetStdinForChild();
-      await new Promise<void>((resolve, reject) => {
+      const refreshCode = await new Promise<number>((resolve, reject) => {
         const proc = spawn(
           'gh',
           ['auth', 'refresh', '-h', 'github.com', '-s', 'codespace'],
           { stdio: 'inherit' },
         );
-        proc.on('exit', (code) => {
-          if (code === 0) resolve();
-          else reject(new Error('gh auth refresh failed — re-run `gh auth refresh -h github.com -s codespace` manually.'));
-        });
+        proc.on('exit', (code) => resolve(code ?? 1));
         proc.on('error', reject);
       });
+      if (refreshCode !== 0) {
+        // Most common failure today: the user authed as the wrong
+        // GitHub account in the browser, and gh's stderr says
+        // "received credentials for X, did you use the correct
+        // account?". Give that resolution path top billing rather
+        // than a generic "try again manually".
+        const lines = [
+          'The browser approval came back for a different GitHub account',
+          `than the one gh is configured for${expectedUser ? ` (${pc.cyan(expectedUser)})` : ''}.`,
+          '',
+          'To recover:',
+          '  1. Open https://github.com and sign out of any non-target',
+          `     account${expectedUser ? ` (or open the URL in an incognito window)` : ''}.`,
+          '  2. Re-run codeam deploy.',
+          '',
+          'You can also grant the scope manually first and skip this step',
+          'on the next run:',
+          `  ${pc.cyan('gh auth refresh -h github.com -s codespace')}`,
+        ];
+        throw new Error(lines.join('\n'));
+      }
+    }
+  }
+
+  /**
+   * Return the GitHub login that the current `gh` token belongs to,
+   * or `null` if the call fails. Used to tell the user which account
+   * they need to authenticate as in the browser when refreshing
+   * scopes — multi-account browser sessions are the #1 cause of
+   * `gh auth refresh` failures.
+   */
+  private async getActiveGhUser(): Promise<string | null> {
+    try {
+      const { stdout } = await execFileP(
+        'gh',
+        ['api', 'user', '--jq', '.login'],
+        { maxBuffer: MAX_BUFFER },
+      );
+      const login = stdout.trim();
+      return login.length > 0 ? login : null;
+    } catch {
+      return null;
     }
   }
 
