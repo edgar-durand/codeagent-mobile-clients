@@ -1,10 +1,14 @@
+import { execFile } from 'child_process';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+import { promisify } from 'util';
 import * as p from '@clack/prompts';
 import pc from 'picocolors';
 import { PROVIDERS } from '../services/providers';
 import type { CloudProvider, DeployableProject, ExistingWorkspace, Workspace } from '../services/providers';
+
+const execFileP = promisify(execFile);
 
 /**
  * `codeam deploy` — provision a fresh cloud workspace, install the
@@ -210,15 +214,68 @@ export async function deploy(): Promise<void> {
     fs.existsSync(localClaudeDir) && fs.statSync(localClaudeDir).isDirectory();
 
   if (haveLocalClaude) {
+    // First: ship the static config (skills, settings, subagents,
+    // plugins, …) via tar. We exclude the heavy local-only state so
+    // the upload doesn't drag for minutes — `~/.claude/projects` alone
+    // is typically hundreds of MB of conversation history that is
+    // pure noise on the remote.
     const copyStep = p.spinner();
     copyStep.start('Copying local Claude config to workspace…');
+    let configUploaded = false;
     try {
-      await provider.uploadDirectory(workspace.id, localClaudeDir, '/home/codespace/.claude');
-      copyStep.stop('✓ Claude config copied — no re-auth needed');
+      await provider.uploadDirectory(
+        workspace.id,
+        localClaudeDir,
+        '/home/codespace/.claude',
+        {
+          exclude: [
+            './projects',          // per-project conversation history (often 700MB+)
+            './file-history',      // per-project file diffs
+            './downloads',         // downloaded artifacts
+            './image-cache',       // cached images
+            './paste-cache',       // clipboard/paste cache
+            './backups',           // local backups
+            './shell-snapshots',   // shell history snapshots
+            './telemetry',         // analytics dumps
+            './statsig',           // feature-flag cache
+            './cache',             // generic cache dir
+            './history.jsonl',     // global REPL history
+            './ide',               // local IDE bridge state
+            './todos',             // local todo state
+            './tasks',             // local task state
+          ],
+        },
+      );
+      configUploaded = true;
+      copyStep.stop('✓ Claude config uploaded');
     } catch (err) {
-      copyStep.stop('⚠ Could not copy Claude config — falling back to remote login');
+      copyStep.stop('⚠ Could not upload Claude config — falling back to remote login');
       void err;
       await runRemoteClaudeLogin(provider, workspace.id);
+    }
+
+    // Second: bridge credentials. Claude Code stores them per-OS:
+    //   - Linux  → ~/.claude/.credentials.json (flat file, already
+    //              shipped in the tar above)
+    //   - macOS  → Keychain entry "Claude Code-credentials" (NOT in
+    //              the dir — we extract and write separately)
+    //   - Windows → Credential Manager (no auto-bridge yet → fallback)
+    if (configUploaded) {
+      const credStep = p.spinner();
+      credStep.start('Bridging Claude credentials…');
+      const bridged = await bridgeClaudeCredentials(provider, workspace.id, localClaudeDir);
+      switch (bridged) {
+        case 'flat-file':
+          credStep.stop('✓ Credentials in tar — no re-auth needed');
+          break;
+        case 'macos-keychain':
+          credStep.stop('✓ Credentials extracted from macOS Keychain — no re-auth needed');
+          break;
+        case 'none':
+          credStep.stop('⚠ No transferable Claude credentials found — falling back to remote login');
+          await runRemoteClaudeLogin(provider, workspace.id);
+          break;
+      }
     }
   } else {
     p.note(
@@ -309,6 +366,67 @@ async function runRemoteClaudeLogin(
       'Heads up',
     );
   }
+}
+
+/**
+ * Cross-platform credential bridge for Claude Code on the codespace.
+ *
+ *   - Linux  → credentials live at `~/.claude/.credentials.json` as
+ *              a flat file. The tar in `uploadDirectory` already
+ *              shipped it; nothing to do here. (Returns `'flat-file'`.)
+ *   - macOS  → credentials live in the macOS Keychain under the
+ *              service name `Claude Code-credentials`. We pull the
+ *              JSON via `security find-generic-password -w` and write
+ *              it to `~/.claude/.credentials.json` on the remote
+ *              (chmod 600). Same shape Claude Code reads on Linux.
+ *   - Windows → credentials live in Windows Credential Manager. We
+ *              don't auto-bridge today (would need a PowerShell or
+ *              native API hop); the caller falls back to interactive
+ *              login. (Returns `'none'`.)
+ *
+ * Returns a discriminator the caller uses to decide whether to
+ * announce success or run the remote-login fallback.
+ */
+async function bridgeClaudeCredentials(
+  provider: CloudProvider,
+  workspaceId: string,
+  localClaudeDir: string,
+): Promise<'flat-file' | 'macos-keychain' | 'none'> {
+  // Case 1 — flat file (Linux's default; also possible on macOS for
+  // users on a custom build). The directory tar already shipped it.
+  const fileBased = path.join(localClaudeDir, '.credentials.json');
+  if (fs.existsSync(fileBased)) return 'flat-file';
+
+  // Case 2 — macOS Keychain. Out of process: shell to `security`,
+  // pipe the JSON straight into the remote write so it never touches
+  // disk on either side.
+  if (process.platform === 'darwin') {
+    try {
+      const { stdout } = await execFileP(
+        'security',
+        ['find-generic-password', '-s', 'Claude Code-credentials', '-w'],
+        { maxBuffer: 1024 * 1024 },
+      );
+      const json = stdout.trim();
+      if (json.length === 0) return 'none';
+      await provider.uploadFile(
+        workspaceId,
+        '/home/codespace/.claude/.credentials.json',
+        json,
+        { mode: 0o600 },
+      );
+      return 'macos-keychain';
+    } catch {
+      // No entry, denied, or `security` missing — fall through.
+      return 'none';
+    }
+  }
+
+  // Case 3 — Windows Credential Manager (or Linux installs that use
+  // libsecret instead of the flat file). Bridging from these stores
+  // requires native API hops we haven't built yet; the caller will
+  // run `claude login` interactively on the remote instead.
+  return 'none';
 }
 
 /**

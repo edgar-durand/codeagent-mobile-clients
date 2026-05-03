@@ -143,6 +143,41 @@ export interface CloudProvider {
    */
   streamCommand(workspaceId: string, command: string): Promise<{ code: number }>;
 
-  /** Recursive copy of a local directory to a remote path inside the workspace. */
-  uploadDirectory(workspaceId: string, localDir: string, remoteDir: string): Promise<void>;
+  /**
+   * Recursive copy of a local directory to a remote path inside the
+   * workspace. `options.exclude` lets callers skip heavy / irrelevant
+   * subpaths (e.g. local conversation history, caches) so we don't
+   * waste minutes uploading files the remote will never read. Patterns
+   * are interpreted as `tar --exclude` globs (relative to `localDir`).
+   */
+  uploadDirectory(
+    workspaceId: string,
+    localDir: string,
+    remoteDir: string,
+    options?: UploadDirectoryOptions,
+  ): Promise<void>;
+
+  /**
+   * Write a single file to the workspace from a string / buffer the
+   * caller already has in memory. Used for ferrying secrets that
+   * don't live on the local filesystem (e.g. macOS Keychain entries
+   * that Claude stores there instead of as a flat file). Creates the
+   * parent directory if missing.
+   */
+  uploadFile(
+    workspaceId: string,
+    remotePath: string,
+    contents: string | Buffer,
+    options?: UploadFileOptions,
+  ): Promise<void>;
+}
+
+export interface UploadDirectoryOptions {
+  /** Glob patterns to skip during the upload (tar `--exclude` syntax). */
+  exclude?: string[];
+}
+
+export interface UploadFileOptions {
+  /** Octal file mode to chmod the destination to (e.g. 0o600 for secrets). */
+  mode?: number;
 }

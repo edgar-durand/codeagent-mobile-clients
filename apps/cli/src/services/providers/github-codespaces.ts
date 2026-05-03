@@ -2,7 +2,17 @@ import { execFile, spawn } from 'child_process';
 import { promisify } from 'util';
 import * as p from '@clack/prompts';
 import pc from 'picocolors';
-import type { CloudProvider, DeployableProject, ExecResult, ExistingWorkspace, MachineType, Workspace } from './types';
+import * as path from 'path';
+import type {
+  CloudProvider,
+  DeployableProject,
+  ExecResult,
+  ExistingWorkspace,
+  MachineType,
+  UploadDirectoryOptions,
+  UploadFileOptions,
+  Workspace,
+} from './types';
 
 const execFileP = promisify(execFile);
 
@@ -503,7 +513,12 @@ export class GitHubCodespacesProvider implements CloudProvider {
     });
   }
 
-  async uploadDirectory(workspaceId: string, localDir: string, remoteDir: string): Promise<void> {
+  async uploadDirectory(
+    workspaceId: string,
+    localDir: string,
+    remoteDir: string,
+    options: UploadDirectoryOptions = {},
+  ): Promise<void> {
     // We deliberately avoid `gh codespace cp` here. Two reasons:
     //   1. It silently swallows useful errors — failures bubble up as
     //      a generic non-zero exit with no stderr surfaced to the
@@ -519,12 +534,24 @@ export class GitHubCodespacesProvider implements CloudProvider {
     //   - preserves perms / hidden files / symlinks
     //   - surfaces tar / ssh stderr if anything goes wrong
     //   - works exactly the same on macOS, Linux, and inside Codespaces
+    //
+    // `options.exclude` is forwarded to tar as `--exclude` flags so
+    // callers can skip irrelevant subpaths (e.g. ~/.claude/projects,
+    // a 700 MB local conversation cache that the remote will never
+    // touch). Without this, a fresh deploy can spend minutes uploading
+    // gigabytes of dead weight.
+    const tarArgs = ['-czf', '-', '-C', localDir];
+    for (const pattern of options.exclude ?? []) {
+      tarArgs.push(`--exclude=${pattern}`);
+    }
+    tarArgs.push('.');
+
     const sshArgs = [
       'codespace', 'ssh', '-c', workspaceId, '--',
       `mkdir -p ${shellQuote(remoteDir)} && tar -xzf - -C ${shellQuote(remoteDir)}`,
     ];
     await new Promise<void>((resolve, reject) => {
-      const tar = spawn('tar', ['-czf', '-', '-C', localDir, '.'], {
+      const tar = spawn('tar', tarArgs, {
         stdio: ['ignore', 'pipe', 'pipe'],
       });
       const ssh = spawn('gh', sshArgs, {
@@ -544,6 +571,43 @@ export class GitHubCodespacesProvider implements CloudProvider {
           reject(new Error(`Remote tar failed: ${reason}`));
         }
       });
+    });
+  }
+
+  async uploadFile(
+    workspaceId: string,
+    remotePath: string,
+    contents: string | Buffer,
+    options: UploadFileOptions = {},
+  ): Promise<void> {
+    // Stream the bytes through ssh stdin into `cat > <path>` on the
+    // remote — keeps the secret off the command line (so it doesn't
+    // hit `ps` / shell history) and works for arbitrary content
+    // including JSON with quotes and braces.
+    const remoteDir = path.posix.dirname(remotePath);
+    const parts = [
+      `mkdir -p ${shellQuote(remoteDir)}`,
+      `cat > ${shellQuote(remotePath)}`,
+    ];
+    if (options.mode != null) {
+      parts.push(`chmod ${options.mode.toString(8)} ${shellQuote(remotePath)}`);
+    }
+    const cmd = parts.join(' && ');
+    await new Promise<void>((resolve, reject) => {
+      const proc = spawn(
+        'gh',
+        ['codespace', 'ssh', '-c', workspaceId, '--', cmd],
+        { stdio: ['pipe', 'pipe', 'pipe'] },
+      );
+      let stderr = '';
+      proc.stderr?.on('data', (d) => { stderr += d.toString(); });
+      proc.on('error', reject);
+      proc.on('exit', (code) => {
+        if (code === 0) resolve();
+        else reject(new Error(`Remote write failed: ${(stderr || `exit ${code}`).trim().slice(0, 500)}`));
+      });
+      proc.stdin?.write(contents);
+      proc.stdin?.end();
     });
   }
 
