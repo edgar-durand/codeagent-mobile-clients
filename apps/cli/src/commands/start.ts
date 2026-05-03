@@ -234,6 +234,19 @@ except Exception:sys.exit(0)
       case 'stop_task':
         claude.interrupt();
         break;
+      case 'set_keep_alive': {
+        // Mobile/web's "Avoid suspend codespace on inactivity"
+        // toggle. When enabled, we ping the GitHub Codespaces API
+        // every 8 minutes via `gh codespace list` — that activity is
+        // counted as user activity and resets the inactivity timer
+        // that would otherwise auto-suspend the workspace. When
+        // disabled, we cancel the heartbeat. Best-effort; relies on
+        // `gh` being on PATH (it is in every Codespace by default).
+        const enabled = !!cmd.payload.enabled;
+        setKeepAlive(enabled);
+        try { await relay.sendResult(cmd.id, 'success', { enabled }); } catch { /* ignore */ }
+        break;
+      }
       case 'shutdown_session': {
         // Mobile/web sent "Stop session" — typically targets a
         // remote `codeam deploy` codespace. Tear down PM2's
@@ -476,4 +489,35 @@ except Exception:sys.exit(0)
   }, 2000);
   // Fetch quota usage on startup (after Claude is ready)
   setTimeout(() => { fetchQuotaUsage(); }, 5000);
+
+  /**
+   * Honor the "Avoid suspend codespace on inactivity" toggle from
+   * the apps. When enabled, we run a periodic `gh codespace list`
+   * call from inside the codespace — that's a user-API request the
+   * GitHub control plane sees as activity, which resets the idle
+   * timer. When disabled, we cancel the heartbeat. No-op on local
+   * pairings (gh is fine to spam locally too, but there's no
+   * inactivity timer to keep alive).
+   */
+  let keepAliveTimer: NodeJS.Timeout | null = null;
+  function setKeepAlive(enabled: boolean): void {
+    if (keepAliveTimer) {
+      clearInterval(keepAliveTimer);
+      keepAliveTimer = null;
+    }
+    if (!enabled) return;
+    const ping = (): void => {
+      // Run gh in the background; we don't care about the result,
+      // just that the call hits GitHub's control plane.
+      const proc = spawn('bash', ['-lc', 'gh codespace list >/dev/null 2>&1 || true'], {
+        stdio: 'ignore',
+        detached: true,
+      });
+      proc.unref();
+    };
+    ping();
+    // 8 minutes — comfortably under GitHub's 30-minute default
+    // idle timeout, with margin for clock skew / brief outages.
+    keepAliveTimer = setInterval(ping, 8 * 60 * 1000);
+  }
 }
