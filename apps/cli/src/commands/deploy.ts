@@ -4,7 +4,7 @@ import * as path from 'path';
 import * as p from '@clack/prompts';
 import pc from 'picocolors';
 import { PROVIDERS } from '../services/providers';
-import type { CloudProvider, DeployableProject, Workspace } from '../services/providers';
+import type { CloudProvider, DeployableProject, ExistingWorkspace, Workspace } from '../services/providers';
 
 /**
  * `codeam deploy` — provision a fresh cloud workspace, install the
@@ -74,13 +74,68 @@ export async function deploy(): Promise<void> {
   }
   const project = projects.find((proj) => proj.id === projectId)!;
 
-  // Step 3a — Pick a machine type (only if the provider exposes them).
-  // We hide options under 8 GB RAM in the provider — Claude Code's tools
-  // (tsc, test runners, dev servers) need headroom and the 4 GB tier
-  // tends to swap badly. The user picks from what's left, defaulting
-  // to the smallest 8 GB option.
+  // Step 3a — Reuse or create new? If the provider lists existing
+  // workspaces and the user already has one (or several) for this
+  // project, it would be wasteful to silently spin up another — most
+  // re-runs of `codeam deploy` are intentional follow-ups on the
+  // same project. Offer a picker so the user can pick up where they
+  // left off; selecting "create new" continues the original flow.
+  let workspace: Workspace | null = null;
+  if (provider.listExistingWorkspaces && provider.startWorkspace) {
+    const existingStep = p.spinner();
+    existingStep.start('Checking for existing workspaces…');
+    let existing: ExistingWorkspace[] = [];
+    try {
+      existing = await provider.listExistingWorkspaces(project.id);
+      existingStep.stop(
+        existing.length === 0
+          ? '· No existing workspaces — will create a fresh one'
+          : `✓ ${existing.length} existing workspace${existing.length === 1 ? '' : 's'} found`,
+      );
+    } catch {
+      existingStep.stop('· Could not list existing workspaces — will create a fresh one');
+    }
+
+    if (existing.length > 0) {
+      const choice = await p.select<string>({
+        message: 'Reuse an existing workspace or create a new one?',
+        options: [
+          ...existing.map((w) => ({
+            value: w.id,
+            label: w.displayName ?? w.id,
+            hint: [w.state, formatLastUsed(w.lastUsedAt)].filter(Boolean).join(' · '),
+          })),
+          { value: '__new__', label: pc.green('+ Create a new workspace'), hint: 'fresh codespace' },
+        ],
+      });
+      if (p.isCancel(choice)) {
+        p.cancel('Cancelled.');
+        process.exit(0);
+      }
+      if (choice !== '__new__') {
+        const reuseStep = p.spinner();
+        const picked = existing.find((w) => w.id === choice)!;
+        const needsStart = picked.state && picked.state !== 'Available';
+        reuseStep.start(needsStart ? `Starting ${picked.displayName ?? picked.id}…` : `Connecting to ${picked.displayName ?? picked.id}…`);
+        try {
+          workspace = await provider.startWorkspace(picked.id);
+          reuseStep.stop(`✓ Reusing ${workspace.displayName ?? workspace.id}`);
+        } catch (err) {
+          reuseStep.stop('✗ Could not start the existing workspace');
+          p.cancel(err instanceof Error ? err.message : String(err));
+          process.exit(1);
+        }
+      }
+    }
+  }
+
+  // Step 3b — Pick a machine type (only if we're creating new and the
+  // provider exposes them). We hide options under 8 GB RAM in the
+  // provider — Claude Code's tools (tsc, test runners, dev servers)
+  // need headroom and the 4 GB tier tends to swap badly. The user
+  // picks from what's left, defaulting to the smallest 8 GB option.
   let machineTypeId: string | undefined;
-  if (provider.listMachineTypes) {
+  if (!workspace && provider.listMachineTypes) {
     const machineStep = p.spinner();
     machineStep.start('Loading machine types…');
     let machines: Awaited<ReturnType<NonNullable<CloudProvider['listMachineTypes']>>> = [];
@@ -114,17 +169,18 @@ export async function deploy(): Promise<void> {
     }
   }
 
-  // Step 3b — Create workspace.
-  const createStep = p.spinner();
-  createStep.start(`Creating workspace for ${project.fullName}…`);
-  let workspace: Workspace;
-  try {
-    workspace = await provider.createWorkspace(project.id, machineTypeId);
-    createStep.stop(`✓ Workspace ready: ${workspace.displayName ?? workspace.id}`);
-  } catch (err) {
-    createStep.stop(`✗ Workspace creation failed`);
-    p.cancel(err instanceof Error ? err.message : String(err));
-    process.exit(1);
+  // Step 3c — Create workspace (only if we're not reusing one).
+  if (!workspace) {
+    const createStep = p.spinner();
+    createStep.start(`Creating workspace for ${project.fullName}…`);
+    try {
+      workspace = await provider.createWorkspace(project.id, machineTypeId);
+      createStep.stop(`✓ Workspace ready: ${workspace.displayName ?? workspace.id}`);
+    } catch (err) {
+      createStep.stop(`✗ Workspace creation failed`);
+      p.cancel(err instanceof Error ? err.message : String(err));
+      process.exit(1);
+    }
   }
 
   // Step 4 — Install Claude CLI on the workspace.
@@ -253,6 +309,33 @@ async function runRemoteClaudeLogin(
       'Heads up',
     );
   }
+}
+
+/**
+ * Render an ISO timestamp as a short relative string ("3 days ago",
+ * "5 minutes ago"). Used in the "reuse vs. create" picker to give the
+ * user a quick sense of which existing workspace is the recent one.
+ */
+function formatLastUsed(iso?: string): string {
+  if (!iso) return '';
+  const t = Date.parse(iso);
+  if (Number.isNaN(t)) return '';
+  const diffMs = Date.now() - t;
+  if (diffMs < 0) return 'in the future';
+  const minute = 60_000;
+  const hour = 60 * minute;
+  const day = 24 * hour;
+  if (diffMs < minute) return 'just now';
+  if (diffMs < hour) {
+    const m = Math.round(diffMs / minute);
+    return `${m} min${m === 1 ? '' : 's'} ago`;
+  }
+  if (diffMs < day) {
+    const h = Math.round(diffMs / hour);
+    return `${h} hour${h === 1 ? '' : 's'} ago`;
+  }
+  const d = Math.round(diffMs / day);
+  return `${d} day${d === 1 ? '' : 's'} ago`;
 }
 
 /**

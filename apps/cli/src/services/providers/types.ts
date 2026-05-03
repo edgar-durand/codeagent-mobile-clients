@@ -46,6 +46,19 @@ export interface Workspace {
   webUrl?: string;
 }
 
+/**
+ * Existing workspace found for a project — used by `codeam deploy` to
+ * offer "reuse existing or create new?" instead of always spinning up
+ * a fresh one. Adds runtime metadata (state, last activity) so the
+ * picker can show useful hints next to each option.
+ */
+export interface ExistingWorkspace extends Workspace {
+  /** Provider state (e.g. 'Available', 'Stopped', 'Starting', 'Shutdown'). */
+  state?: string;
+  /** ISO timestamp of the last activity, if the provider exposes it. */
+  lastUsedAt?: string;
+}
+
 export interface ExecResult {
   stdout: string;
   stderr: string;
@@ -103,6 +116,22 @@ export interface CloudProvider {
    * is forwarded if the provider supports machine selection.
    */
   createWorkspace(projectId: string, machineTypeId?: string): Promise<Workspace>;
+
+  /**
+   * Return existing workspaces the user has for this project. Optional
+   * — providers without a "list workspaces" concept can omit it. The
+   * orchestrator uses this to offer a "reuse vs. create new" picker
+   * so re-running `codeam deploy` doesn't pile up codespaces.
+   */
+  listExistingWorkspaces?(projectId: string): Promise<ExistingWorkspace[]>;
+
+  /**
+   * Bring an existing workspace back to a usable state (e.g. start a
+   * stopped codespace). Resolves once it is ready for `exec` /
+   * `streamCommand`. Optional — providers that always keep workspaces
+   * hot can omit it.
+   */
+  startWorkspace?(workspaceId: string): Promise<Workspace>;
 
   /** Run a single command in the workspace and return all of its output. */
   exec(workspaceId: string, command: string): Promise<ExecResult>;

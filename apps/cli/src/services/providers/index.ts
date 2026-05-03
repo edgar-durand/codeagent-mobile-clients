@@ -19,4 +19,11 @@ export const PROVIDERS: CloudProvider[] = [
   // new GitLabWebIDEProvider(),
 ];
 
-export type { CloudProvider, DeployableProject, Workspace, ExecResult } from './types';
+export type {
+  CloudProvider,
+  DeployableProject,
+  ExecResult,
+  ExistingWorkspace,
+  MachineType,
+  Workspace,
+} from './types';

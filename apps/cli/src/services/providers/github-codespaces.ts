@@ -2,7 +2,7 @@ import { execFile, spawn } from 'child_process';
 import { promisify } from 'util';
 import * as p from '@clack/prompts';
 import pc from 'picocolors';
-import type { CloudProvider, DeployableProject, ExecResult, MachineType, Workspace } from './types';
+import type { CloudProvider, DeployableProject, ExecResult, ExistingWorkspace, MachineType, Workspace } from './types';
 
 const execFileP = promisify(execFile);
 
@@ -489,12 +489,13 @@ export class GitHubCodespacesProvider implements CloudProvider {
   async streamCommand(workspaceId: string, command: string): Promise<{ code: number }> {
     resetStdinForChild();
     return new Promise((resolve, reject) => {
-      // `-t` allocates a TTY so ANSI escapes (color, QR-code drawing,
-      // cursor positioning) come through cleanly. `--` separates the
-      // remote command from gh's own flags.
+      // `-tt` is an SSH flag (force-allocate a TTY even with stdin
+      // attached), NOT a gh flag — it must come AFTER `--`. The TTY
+      // is what lets `codeam pair`'s QR-code drawing, cursor moves
+      // and `claude login`'s code prompt render and read input.
       const proc = spawn(
         'gh',
-        ['codespace', 'ssh', '-c', workspaceId, '-t', '--', command],
+        ['codespace', 'ssh', '-c', workspaceId, '--', '-tt', command],
         { stdio: 'inherit' },
       );
       proc.on('exit', (code) => resolve({ code: code ?? 0 }));
@@ -503,12 +504,115 @@ export class GitHubCodespacesProvider implements CloudProvider {
   }
 
   async uploadDirectory(workspaceId: string, localDir: string, remoteDir: string): Promise<void> {
-    // `gh codespace cp -r <local> remote:<path> -c <name>` does a
-    // recursive copy. The `remote:` prefix is required.
-    await execFileP(
-      'gh',
-      ['codespace', 'cp', '-r', '-c', workspaceId, localDir, `remote:${remoteDir}`],
-      { maxBuffer: MAX_BUFFER, timeout: 300_000 },
-    );
+    // We deliberately avoid `gh codespace cp` here. Two reasons:
+    //   1. It silently swallows useful errors — failures bubble up as
+    //      a generic non-zero exit with no stderr surfaced to the
+    //      orchestrator, so the user sees "Could not copy Claude
+    //      config" with no clue why.
+    //   2. It's flaky on directories that don't pre-exist on the
+    //      remote, on dotfiles, and on permission edges.
+    //
+    // Instead, stream a tar of the local directory through ssh's
+    // stdin and untar on the remote — the canonical "pipe a tarball"
+    // pattern. This:
+    //   - creates the remote directory if missing (`mkdir -p`)
+    //   - preserves perms / hidden files / symlinks
+    //   - surfaces tar / ssh stderr if anything goes wrong
+    //   - works exactly the same on macOS, Linux, and inside Codespaces
+    const sshArgs = [
+      'codespace', 'ssh', '-c', workspaceId, '--',
+      `mkdir -p ${shellQuote(remoteDir)} && tar -xzf - -C ${shellQuote(remoteDir)}`,
+    ];
+    await new Promise<void>((resolve, reject) => {
+      const tar = spawn('tar', ['-czf', '-', '-C', localDir, '.'], {
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      const ssh = spawn('gh', sshArgs, {
+        stdio: [tar.stdout!, 'pipe', 'pipe'],
+      });
+      let tarErr = '';
+      let sshErr = '';
+      tar.stderr?.on('data', (d) => { tarErr += d.toString(); });
+      ssh.stderr?.on('data', (d) => { sshErr += d.toString(); });
+      tar.on('error', reject);
+      ssh.on('error', reject);
+      ssh.on('exit', (code) => {
+        if (code === 0) {
+          resolve();
+        } else {
+          const reason = (sshErr || tarErr || `exit ${code}`).trim().slice(0, 500);
+          reject(new Error(`Remote tar failed: ${reason}`));
+        }
+      });
+    });
   }
+
+  async listExistingWorkspaces(projectId: string): Promise<ExistingWorkspace[]> {
+    // `--repo` filters to a single repo; `--json` gives us machine-
+    // readable output. We use `displayName` (human-readable) as the
+    // label and `name` (the stable id used by every other gh API).
+    try {
+      const { stdout } = await execFileP(
+        'gh',
+        [
+          'codespace', 'list',
+          '--repo', projectId,
+          '--json', 'name,displayName,state,lastUsedAt',
+        ],
+        { maxBuffer: MAX_BUFFER },
+      );
+      interface RawCodespace {
+        name: string;
+        displayName?: string;
+        state?: string;
+        lastUsedAt?: string;
+      }
+      const list = JSON.parse(stdout) as RawCodespace[];
+      return list.map<ExistingWorkspace>((c) => ({
+        id: c.name,
+        displayName: c.displayName || c.name,
+        webUrl: `https://github.com/codespaces/${c.name}`,
+        state: c.state,
+        lastUsedAt: c.lastUsedAt,
+      }));
+    } catch {
+      return [];
+    }
+  }
+
+  async startWorkspace(workspaceId: string): Promise<Workspace> {
+    // `gh codespace` doesn't expose a `start` subcommand; the public
+    // REST endpoint is the way. Posting to /user/codespaces/<name>/start
+    // queues a wake — we then poll `gh codespace list` until the
+    // state flips to `Available`, same logic the new-workspace path
+    // already uses.
+    try {
+      await execFileP(
+        'gh',
+        ['api', '-X', 'POST', `/user/codespaces/${workspaceId}/start`],
+        { maxBuffer: MAX_BUFFER, timeout: 60_000 },
+      );
+    } catch (err) {
+      // Some states (already Available) make /start return 304 / 422 —
+      // those aren't real failures. Fall through to the polling step;
+      // if it really is broken, the poll will surface it.
+      void err;
+    }
+    await this.waitUntilAvailable(workspaceId);
+    return {
+      id: workspaceId,
+      displayName: workspaceId,
+      webUrl: `https://github.com/codespaces/${workspaceId}`,
+    };
+  }
+}
+
+/**
+ * Single-quote a string for safe inclusion in a remote shell command.
+ * The escaping rule: `'` → `'\''`, then wrap the whole thing in `'…'`.
+ * Used when constructing the inline `mkdir … && tar …` we ship to the
+ * codespace via `gh codespace ssh -- '…'`.
+ */
+function shellQuote(s: string): string {
+  return `'${s.replace(/'/g, `'\\''`)}'`;
 }
