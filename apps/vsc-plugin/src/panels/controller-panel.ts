@@ -4,6 +4,7 @@ import * as path from 'path';
 import * as os from 'os';
 import { SettingsService } from '../services/settings.service';
 import { FileOpsService } from '../services/file-ops.service';
+import { ProjectOpsService } from '../services/project-ops.service';
 import { PairingService } from '../services/pairing.service';
 import { CommandRelayService, RemoteCommand, CommandListener } from '../services/command-relay.service';
 import { WebSocketService } from '../services/websocket.service';
@@ -547,6 +548,79 @@ export class ControllerPanelProvider implements vscode.WebviewViewProvider, Comm
         }
         FileOpsService.writeFile(filePath, content).then((res: Record<string, unknown>) => {
           relay.sendResult(command.id, 'completed', res);
+        });
+        break;
+      }
+
+      case 'list_files': {
+        const query = (command.payload as Record<string, unknown>)?.query as string | undefined;
+        ProjectOpsService.listFiles(query).then((res) => {
+          relay.sendResult(command.id, 'completed', res as unknown as Record<string, unknown>);
+        });
+        break;
+      }
+      case 'git_status': {
+        ProjectOpsService.gitStatus().then((res) => {
+          relay.sendResult(command.id, 'completed', res);
+        });
+        break;
+      }
+      case 'git_diff': {
+        const p = (command.payload as Record<string, unknown>)?.path as string | undefined;
+        ProjectOpsService.gitDiff(p ?? null).then((res) => {
+          relay.sendResult(command.id, 'completed', res as Record<string, unknown>);
+        });
+        break;
+      }
+      case 'git_diff_staged': {
+        const p = (command.payload as Record<string, unknown>)?.path as string | undefined;
+        ProjectOpsService.gitDiffStaged(p ?? null).then((res) => {
+          relay.sendResult(command.id, 'completed', res as Record<string, unknown>);
+        });
+        break;
+      }
+      case 'git_log': {
+        const limit = (command.payload as Record<string, unknown>)?.limit as number | undefined;
+        ProjectOpsService.gitLog(limit ?? 30).then((res) => {
+          relay.sendResult(command.id, 'completed', res as unknown as Record<string, unknown>);
+        });
+        break;
+      }
+      case 'git_commit': {
+        const p = command.payload as Record<string, unknown>;
+        const message = p?.message as string | undefined;
+        const paths = p?.paths as string[] | undefined;
+        if (!message) {
+          relay.sendResult(command.id, 'failed', { error: 'Missing message' });
+          break;
+        }
+        ProjectOpsService.gitCommit(message, paths).then((res) => {
+          relay.sendResult(command.id, 'completed', res as Record<string, unknown>);
+        });
+        break;
+      }
+      case 'git_push': {
+        ProjectOpsService.gitPush().then((res) => {
+          relay.sendResult(command.id, 'completed', res as Record<string, unknown>);
+        });
+        break;
+      }
+      case 'git_pull': {
+        ProjectOpsService.gitPull().then((res) => {
+          relay.sendResult(command.id, 'completed', res as Record<string, unknown>);
+        });
+        break;
+      }
+      case 'git_resolve': {
+        const p = command.payload as Record<string, unknown>;
+        const filePath = p?.path as string | undefined;
+        const side = p?.side as 'ours' | 'theirs' | undefined;
+        if (!filePath || !side) {
+          relay.sendResult(command.id, 'failed', { error: 'Missing path or side' });
+          break;
+        }
+        ProjectOpsService.gitResolve(filePath, side).then((res) => {
+          relay.sendResult(command.id, 'completed', res as Record<string, unknown>);
         });
         break;
       }

@@ -1,7 +1,7 @@
 <idea-plugin>
     <id>com.codeagent.mobile</id>
     <name>CodeAgent-Mobile</name>
-    <version>2.2.2</version>
+    <version>2.3.0</version>
     <vendor email="support@codeagent-mobile.com" url="https://www.codeagent-mobile.com">
         CodeAgent-Mobile
     </vendor>
@@ -58,6 +58,8 @@
                 serviceImplementation="com.windsurf.controller.services.McpConfigWriterService"/>
         <applicationService
                 serviceImplementation="com.windsurf.controller.services.FileOpsService"/>
+        <applicationService
+                serviceImplementation="com.windsurf.controller.services.ProjectOpsService"/>
         <applicationConfigurable
                 parentId="tools"
                 instance="com.windsurf.controller.settings.ControllerConfigurable"

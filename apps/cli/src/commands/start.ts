@@ -14,6 +14,17 @@ import { OutputService } from '../services/output.service';
 import { HistoryService } from '../services/history.service';
 import { parsePayload, startCommandSchema, type FileEntry } from '../lib/payload';
 import { readProjectFile, writeProjectFile } from '../services/file-ops.service';
+import {
+  listProjectFiles,
+  gitStatus,
+  gitDiff,
+  gitDiffStaged,
+  gitLog,
+  gitCommit,
+  gitPush,
+  gitPull,
+  gitResolve,
+} from '../services/project-ops.service';
 
 // FileAttachment shape mirrors packages/shared/src/types/agent.ts — kept in
 // sync via the zod schema in src/lib/payload.ts (see `fileEntrySchema`).
@@ -288,6 +299,62 @@ except Exception:sys.exit(0)
           break;
         }
         const result = await writeProjectFile(filePath, content);
+        await relay.sendResult(cmd.id, 'completed', result as Record<string, unknown>);
+        break;
+      }
+      case 'list_files': {
+        const result = await listProjectFiles({ query: parsed.query });
+        await relay.sendResult(cmd.id, 'completed', result as unknown as Record<string, unknown>);
+        break;
+      }
+      case 'git_status': {
+        const result = await gitStatus();
+        await relay.sendResult(cmd.id, 'completed', result as unknown as Record<string, unknown>);
+        break;
+      }
+      case 'git_diff': {
+        const { path: filePath } = parsed;
+        const result = await gitDiff(filePath ?? null);
+        await relay.sendResult(cmd.id, 'completed', result as Record<string, unknown>);
+        break;
+      }
+      case 'git_diff_staged': {
+        const { path: filePath } = parsed;
+        const result = await gitDiffStaged(filePath ?? null);
+        await relay.sendResult(cmd.id, 'completed', result as Record<string, unknown>);
+        break;
+      }
+      case 'git_log': {
+        const result = await gitLog(parsed.limit ?? 30);
+        await relay.sendResult(cmd.id, 'completed', result as unknown as Record<string, unknown>);
+        break;
+      }
+      case 'git_commit': {
+        if (!parsed.message) {
+          await relay.sendResult(cmd.id, 'failed', { error: 'Missing message' });
+          break;
+        }
+        const result = await gitCommit(parsed.message, parsed.paths);
+        await relay.sendResult(cmd.id, 'completed', result as Record<string, unknown>);
+        break;
+      }
+      case 'git_push': {
+        const result = await gitPush();
+        await relay.sendResult(cmd.id, 'completed', result as Record<string, unknown>);
+        break;
+      }
+      case 'git_pull': {
+        const result = await gitPull();
+        await relay.sendResult(cmd.id, 'completed', result as Record<string, unknown>);
+        break;
+      }
+      case 'git_resolve': {
+        const { path: filePath, side } = parsed;
+        if (!filePath || !side) {
+          await relay.sendResult(cmd.id, 'failed', { error: 'Missing path or side' });
+          break;
+        }
+        const result = await gitResolve(filePath, side);
         await relay.sendResult(cmd.id, 'completed', result as Record<string, unknown>);
         break;
       }

@@ -40,6 +40,14 @@ export const startCommandSchema = z.object({
   // malformed payload can't blow up the disk-side validator.
   path: z.string().min(1).max(4096).optional(),
   content: z.string().optional(),
+  // Mini-IDE / project ops. `paths` (plural, strings) is used for
+  // git_commit's optional file selection — distinct from `files`
+  // (FileEntry[]) used by `start_task` for attachments.
+  query: z.string().max(256).optional(),
+  message: z.string().max(8000).optional(),
+  paths: z.array(z.string().max(4096)).optional(),
+  side: z.enum(['ours', 'theirs']).optional(),
+  limit: z.number().int().min(1).max(500).optional(),
 });
 
 export type StartCommandPayload = z.infer<typeof startCommandSchema>;

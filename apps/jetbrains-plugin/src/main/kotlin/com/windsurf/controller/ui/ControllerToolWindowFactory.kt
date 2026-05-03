@@ -24,6 +24,7 @@ import com.windsurf.controller.services.McpConfigWriterService
 import com.windsurf.controller.services.McpConfigureRequest
 import com.windsurf.controller.services.McpEntry
 import com.windsurf.controller.services.FileOpsService
+import com.windsurf.controller.services.ProjectOpsService
 import com.windsurf.controller.services.McpServerDef
 import com.windsurf.controller.services.WebSocketService
 import okhttp3.MediaType.Companion.toMediaType
@@ -454,6 +455,54 @@ class ControllerToolWindowFactory : ToolWindowFactory {
                         } else {
                             val res = FileOpsService.getInstance().writeFile(filePath, contentEl.asString)
                             relay.sendResult(command.id, "completed", res)
+                        }
+                    }
+                    "list_files" -> {
+                        val q = command.payload.get("query")?.asString
+                        relay.sendResult(command.id, "completed", ProjectOpsService.getInstance().listFiles(q))
+                    }
+                    "git_status" -> {
+                        relay.sendResult(command.id, "completed", ProjectOpsService.getInstance().gitStatus())
+                    }
+                    "git_diff" -> {
+                        val p = command.payload.get("path")?.asString
+                        relay.sendResult(command.id, "completed", ProjectOpsService.getInstance().gitDiff(p))
+                    }
+                    "git_diff_staged" -> {
+                        val p = command.payload.get("path")?.asString
+                        relay.sendResult(command.id, "completed", ProjectOpsService.getInstance().gitDiffStaged(p))
+                    }
+                    "git_log" -> {
+                        val limit = command.payload.get("limit")?.asInt ?: 30
+                        relay.sendResult(command.id, "completed", ProjectOpsService.getInstance().gitLog(limit))
+                    }
+                    "git_commit" -> {
+                        val message = command.payload.get("message")?.asString
+                        if (message.isNullOrBlank()) {
+                            relay.sendResult(command.id, "failed", com.google.gson.JsonObject().apply {
+                                addProperty("error", "Missing message")
+                            })
+                        } else {
+                            val pathsEl = command.payload.getAsJsonArray("paths")
+                            val paths = pathsEl?.mapNotNull { it.asString }
+                            relay.sendResult(command.id, "completed", ProjectOpsService.getInstance().gitCommit(message, paths))
+                        }
+                    }
+                    "git_push" -> {
+                        relay.sendResult(command.id, "completed", ProjectOpsService.getInstance().gitPush())
+                    }
+                    "git_pull" -> {
+                        relay.sendResult(command.id, "completed", ProjectOpsService.getInstance().gitPull())
+                    }
+                    "git_resolve" -> {
+                        val p = command.payload.get("path")?.asString
+                        val side = command.payload.get("side")?.asString
+                        if (p.isNullOrEmpty() || side.isNullOrEmpty()) {
+                            relay.sendResult(command.id, "failed", com.google.gson.JsonObject().apply {
+                                addProperty("error", "Missing path or side")
+                            })
+                        } else {
+                            relay.sendResult(command.id, "completed", ProjectOpsService.getInstance().gitResolve(p, side))
                         }
                     }
                     else -> {
