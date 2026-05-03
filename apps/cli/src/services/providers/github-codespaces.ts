@@ -540,11 +540,29 @@ export class GitHubCodespacesProvider implements CloudProvider {
     // a 700 MB local conversation cache that the remote will never
     // touch). Without this, a fresh deploy can spend minutes uploading
     // gigabytes of dead weight.
+    // BSD tar (macOS default) accepts both `--exclude=PAT` and a
+    // bare `--exclude PAT`, but the pattern matching differs slightly
+    // from GNU tar — entries from `-C dir .` are emitted with a
+    // leading `./` (e.g. `./projects/foo`), but BSD tar matches
+    // patterns *without* the leading `./` against the storage name.
+    // To avoid the foot-gun, we emit BOTH forms (`projects` and
+    // `./projects`) so either tar implementation skips the entry.
+    // Excludes have to come *before* the `.` operand or BSD tar
+    // ignores them.
     const tarArgs = ['-czf', '-', '-C', localDir];
     for (const pattern of options.exclude ?? []) {
       tarArgs.push(`--exclude=${pattern}`);
+      const stripped = pattern.replace(/^\.\/+/, '');
+      if (stripped !== pattern) tarArgs.push(`--exclude=${stripped}`);
     }
     tarArgs.push('.');
+
+    // `COPYFILE_DISABLE=1` tells macOS's `tar` *not* to emit
+    // AppleDouble resource forks (the `._*` shadow files). Without
+    // it, every regular file in `~/.claude` gets a useless `._<name>`
+    // sibling on the codespace that pollutes the directory listing.
+    // No-op on Linux/Windows tar.
+    const tarEnv = { ...process.env, COPYFILE_DISABLE: '1' };
 
     const sshArgs = [
       'codespace', 'ssh', '-c', workspaceId, '--',
@@ -553,6 +571,7 @@ export class GitHubCodespacesProvider implements CloudProvider {
     await new Promise<void>((resolve, reject) => {
       const tar = spawn('tar', tarArgs, {
         stdio: ['ignore', 'pipe', 'pipe'],
+        env: tarEnv,
       });
       const ssh = spawn('gh', sshArgs, {
         stdio: [tar.stdout!, 'pipe', 'pipe'],

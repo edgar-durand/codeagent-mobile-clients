@@ -187,7 +187,31 @@ export async function deploy(): Promise<void> {
     }
   }
 
-  // Step 4 — Install Claude CLI on the workspace.
+  // Step 4 — Pre-stage Claude credentials BEFORE install. This order
+  // matters: claude's install.sh launches `claude` once during setup,
+  // and that first invocation can persist "first-launch" state files
+  // that ignore credentials we write afterward — that's why users
+  // were seeing the "Select login method" screen even after a
+  // successful tar copy. Writing credentials FIRST means the very
+  // first time `claude` runs on the workspace, it already sees a
+  // logged-in user and skips the first-launch UX entirely.
+  const localClaudeDir = path.join(os.homedir(), '.claude');
+  const credStep = p.spinner();
+  credStep.start('Bridging Claude credentials…');
+  const bridged = await bridgeClaudeCredentials(provider, workspace.id, localClaudeDir);
+  switch (bridged) {
+    case 'flat-file':
+      credStep.stop('✓ Local credentials staged');
+      break;
+    case 'macos-keychain':
+      credStep.stop('✓ Credentials extracted from macOS Keychain and staged');
+      break;
+    case 'none':
+      credStep.stop('· No local credentials found — will run interactive login after install');
+      break;
+  }
+
+  // Step 5 — Install Claude CLI on the workspace.
   const claudeStep = p.spinner();
   claudeStep.start('Installing Claude CLI on workspace…');
   const installResult = await provider.exec(
@@ -201,27 +225,16 @@ export async function deploy(): Promise<void> {
   }
   claudeStep.stop('✓ Claude CLI installed');
 
-  // Step 5 — Claude credentials. Two branches:
-  //   (a) local `~/.claude/` exists → copy it to the workspace so the
-  //       user doesn't have to re-auth.
-  //   (b) no local config → offer to run `claude login` on the
-  //       workspace. The login prints a URL the user opens in their
-  //       LOCAL browser, then pastes back a code; with `streamCommand`
-  //       (stdio inherited) that whole back-and-forth happens in the
-  //       same terminal where the user typed `codeam deploy`.
-  const localClaudeDir = path.join(os.homedir(), '.claude');
+  // Step 6 — Copy local config (skills/settings/subagents/plugins).
+  // This goes AFTER install so it overlays the user's customisations
+  // on top of install's defaults. Excludes drop the heavy local-only
+  // state (~700MB of conversation history etc.) that the remote
+  // never reads.
   const haveLocalClaude =
     fs.existsSync(localClaudeDir) && fs.statSync(localClaudeDir).isDirectory();
-
   if (haveLocalClaude) {
-    // First: ship the static config (skills, settings, subagents,
-    // plugins, …) via tar. We exclude the heavy local-only state so
-    // the upload doesn't drag for minutes — `~/.claude/projects` alone
-    // is typically hundreds of MB of conversation history that is
-    // pure noise on the remote.
     const copyStep = p.spinner();
     copyStep.start('Copying local Claude config to workspace…');
-    let configUploaded = false;
     try {
       await provider.uploadDirectory(
         workspace.id,
@@ -243,57 +256,43 @@ export async function deploy(): Promise<void> {
             './ide',               // local IDE bridge state
             './todos',             // local todo state
             './tasks',             // local task state
+            // Don't overwrite the credentials we already staged in
+            // step 4 — the local dir on macOS doesn't have a flat
+            // credentials file anyway, but on Linux it would, and a
+            // re-write here would be redundant.
+            './.credentials.json',
           ],
         },
       );
-      configUploaded = true;
       copyStep.stop('✓ Claude config uploaded');
     } catch (err) {
-      copyStep.stop('⚠ Could not upload Claude config — falling back to remote login');
+      copyStep.stop('⚠ Could not upload Claude config (continuing)');
       void err;
-      await runRemoteClaudeLogin(provider, workspace.id);
     }
+  }
 
-    // Second: bridge credentials. Claude Code stores them per-OS:
-    //   - Linux  → ~/.claude/.credentials.json (flat file, already
-    //              shipped in the tar above)
-    //   - macOS  → Keychain entry "Claude Code-credentials" (NOT in
-    //              the dir — we extract and write separately)
-    //   - Windows → Credential Manager (no auto-bridge yet → fallback)
-    if (configUploaded) {
-      const credStep = p.spinner();
-      credStep.start('Bridging Claude credentials…');
-      const bridged = await bridgeClaudeCredentials(provider, workspace.id, localClaudeDir);
-      switch (bridged) {
-        case 'flat-file':
-          credStep.stop('✓ Credentials in tar — no re-auth needed');
-          break;
-        case 'macos-keychain':
-          credStep.stop('✓ Credentials extracted from macOS Keychain — no re-auth needed');
-          break;
-        case 'none':
-          credStep.stop('⚠ No transferable Claude credentials found — falling back to remote login');
-          await runRemoteClaudeLogin(provider, workspace.id);
-          break;
-      }
-    }
+  // Step 7 — Verify Claude auth on the workspace, and fall back to
+  // interactive login if anything is wrong. We don't trust "we wrote
+  // a file" as success — credentials might be expired, the format
+  // might have changed in a Claude release, the keychain might've
+  // been empty, etc. The user sees ONE outcome: a logged-in Claude.
+  // They never have to know how it got there.
+  const verifyStep = p.spinner();
+  verifyStep.start('Verifying Claude auth on workspace…');
+  const verified = await verifyClaudeAuth(provider, workspace.id);
+  if (verified) {
+    verifyStep.stop('✓ Claude is logged in — no re-auth needed');
   } else {
-    p.note(
-      [
-        'No local ~/.claude config found.',
-        'We can run `claude login` inside the workspace right now — the URL',
-        'will print here, you open it in your browser, paste the code back,',
-        'and the workspace gets authenticated. (Skip if you\'d rather do it',
-        'manually later from inside the codespace.)',
-      ].join('\n'),
-      'Claude credentials',
-    );
-    const proceed = await p.confirm({
-      message: 'Run `claude login` on the workspace now?',
-      initialValue: true,
-    });
-    if (!p.isCancel(proceed) && proceed) {
-      await runRemoteClaudeLogin(provider, workspace.id);
+    verifyStep.stop('· Claude not yet authenticated — running login flow');
+    await runRemoteClaudeLogin(provider, workspace.id);
+    // After interactive login, verify one more time so we catch the
+    // case where the user bailed out mid-flow.
+    const reverified = await verifyClaudeAuth(provider, workspace.id);
+    if (!reverified) {
+      p.note(
+        'Claude auth could not be confirmed. You may need to run `claude /login` manually inside the codespace.',
+        'Heads up',
+      );
     }
   }
 
@@ -365,6 +364,48 @@ async function runRemoteClaudeLogin(
       'claude login exited non-zero. You can re-run it manually inside the codespace later.',
       'Heads up',
     );
+  }
+}
+
+/**
+ * Verify that `claude` is authenticated on the workspace by running
+ * `claude auth status --json` and inspecting the JSON output for
+ * `loggedIn: true`. We deliberately call `auth status` rather than
+ * trying to parse the credentials file ourselves — Claude is the
+ * source of truth for whether tokens are valid (it knows about
+ * expiry, scope mismatches, format changes between versions, etc.).
+ *
+ * Used at two points by `codeam deploy`:
+ *   1. After the credential bridge, to decide whether we can skip
+ *      interactive login.
+ *   2. After interactive login, to confirm the user actually finished
+ *      the device-code flow (not bail out mid-flow with a half-done
+ *      auth state).
+ *
+ * Returns `true` only when Claude reports `loggedIn: true`. Any
+ * non-zero exit, malformed JSON, missing field, or `loggedIn: false`
+ * counts as not-authed.
+ */
+async function verifyClaudeAuth(
+  provider: CloudProvider,
+  workspaceId: string,
+): Promise<boolean> {
+  // Run via login shell so the freshly-installed `claude` binary is
+  // on PATH (it lives in ~/.local/bin which is added by .bashrc).
+  const result = await provider.exec(
+    workspaceId,
+    'bash -lc "claude auth status 2>/dev/null || true"',
+  );
+  if (result.code !== 0) return false;
+  // Find the first balanced JSON object in stdout — `claude auth
+  // status` may print warnings before the JSON on some platforms.
+  const jsonStart = result.stdout.indexOf('{');
+  if (jsonStart < 0) return false;
+  try {
+    const parsed = JSON.parse(result.stdout.slice(jsonStart)) as { loggedIn?: boolean };
+    return parsed.loggedIn === true;
+  } catch {
+    return false;
   }
 }
 
