@@ -181,9 +181,16 @@ export async function deploy(): Promise<void> {
     } catch {
       machineStep.stop('· Could not list machine types — using provider default');
     }
-    if (machines.length > 1) {
+    if (machines.length >= 1) {
+      // Always show the picker, even with a single option, so the
+      // user sees the specs of what they're about to deploy. Orgs
+      // commonly restrict their members to a single machine class
+      // (the smallest tier) and silently auto-picking it left the
+      // user wondering "what did I just create?".
       const picked = await p.select<string>({
-        message: 'Pick a machine size (starts at 8 GB RAM):',
+        message: machines.length === 1
+          ? 'Confirm machine size (only one is available for this project):'
+          : 'Pick a machine size (starts at 8 GB RAM):',
         initialValue: machines[0].id,
         options: machines.map((m) => ({
           value: m.id,
@@ -196,8 +203,6 @@ export async function deploy(): Promise<void> {
         process.exit(0);
       }
       machineTypeId = picked;
-    } else if (machines.length === 1) {
-      machineTypeId = machines[0].id;
     }
   }
 
