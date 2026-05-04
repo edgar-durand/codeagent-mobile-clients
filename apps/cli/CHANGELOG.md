@@ -4,6 +4,12 @@ All notable changes to `codeam-cli` are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.4.26] — 2026-05-03
+
+### Fixed
+
+- **cli:** Set_keep_alive PATCHes idle_timeout instead of pinging API (v2.4.26)
+
 ## [2.4.25] — 2026-05-03
 
 ### Added
