@@ -2,6 +2,7 @@ import { IPtyStrategy, findInPath } from './pty/types';
 import { UnixPtyStrategy } from './pty/unix.strategy';
 import { WindowsPtyStrategy } from './pty/windows.strategy';
 import { WindowsConPtyStrategy } from './pty/windows-conpty.strategy';
+import { ensureClaudeInstalled } from './claude-installer';
 
 export interface ClaudeServiceOptions {
   cwd: string;
@@ -40,13 +41,26 @@ export class ClaudeService {
     }
   }
 
-  spawn(): void {
+  async spawn(): Promise<void> {
     if (!findInPath('claude') && !findInPath('claude-code')) {
-      console.error(
-        '\n  ✗ claude not found in PATH.\n' +
-          '    Install it with: npm install -g @anthropic-ai/claude-code\n',
-      );
-      process.exit(1);
+      // Inline auto-install via Anthropic's official installer (curl|bash
+      // on macOS/Linux, irm|iex on Windows). After the installer exits,
+      // ensureClaudeInstalled() also prepends the known install dirs to
+      // this process's PATH so findInPath sees the freshly-dropped binary
+      // without needing a shell restart.
+      const installed = await ensureClaudeInstalled();
+      if (!installed) {
+        const cmd =
+          process.platform === 'win32'
+            ? 'irm https://claude.ai/install.ps1 | iex'
+            : 'curl -fsSL https://claude.ai/install.sh | bash';
+        console.error(
+          '\n  ✗ claude is required to continue. Install it manually with:\n' +
+            `    ${cmd}\n` +
+            '    Then restart your terminal and run `codeam pair` again.\n',
+        );
+        process.exit(1);
+      }
     }
 
     const claudeCmd = findInPath('claude') ? 'claude' : 'claude-code';

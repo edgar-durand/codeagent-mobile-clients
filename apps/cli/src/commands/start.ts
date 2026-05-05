@@ -495,7 +495,7 @@ except Exception:sys.exit(0)
   }
 
   process.once('SIGINT', sigintHandler);
-  claude.spawn();
+  await claude.spawn();
   setTimeout(() => {
     historySvc.detectCurrentConversation();
     historySvc.load().catch(() => {});
