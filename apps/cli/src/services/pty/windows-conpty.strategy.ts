@@ -101,29 +101,25 @@ export class WindowsConPtyStrategy implements IPtyStrategy {
     // Forwarding `cmd` directly works for `claude.cmd` / `claude.exe`
     // on PATH because ConPTY launches via cmd.exe under the hood;
     // no `shell: true` workaround needed.
-    try {
-      this.pty = this.lib.spawn(cmd, args, {
-        name: 'xterm-256color',
-        cols: 220,
-        rows: 50,
-        cwd,
-        env: {
-          ...process.env,
-          TERM: 'xterm-256color',
-          FORCE_COLOR: '1',
-        },
-        useConpty: true,
-        conptyInheritCursor: false,
-      });
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      console.error(
-        `\n  ✗ Failed to launch Claude Code via ConPTY: ${msg}\n` +
-          '    Make sure claude is installed: npm install -g @anthropic-ai/claude-code\n',
-      );
-      this.opts.onExit(1);
-      return;
-    }
+    //
+    // Errors here (most commonly: native `conpty.node` failed to load
+    // because the prebuild for the host arch wasn't bundled or got
+    // removed by AV) are RE-THROWN, not handled. ClaudeService catches
+    // and falls back to the legacy WindowsPtyStrategy so a missing
+    // ConPTY binary doesn't kill the whole pairing flow.
+    this.pty = this.lib.spawn(cmd, args, {
+      name: 'xterm-256color',
+      cols: 220,
+      rows: 50,
+      cwd,
+      env: {
+        ...process.env,
+        TERM: 'xterm-256color',
+        FORCE_COLOR: '1',
+      },
+      useConpty: true,
+      conptyInheritCursor: false,
+    });
 
     this.dataSub = this.pty.onData((data) => {
       // Mirror to the local terminal so the user sees Claude's UI on

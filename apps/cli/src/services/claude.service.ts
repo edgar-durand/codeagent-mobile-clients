@@ -11,34 +11,17 @@ export interface ClaudeServiceOptions {
 }
 
 export class ClaudeService {
-  private strategy: IPtyStrategy;
+  // Strategy is selected lazily inside spawn() so we can fall back from
+  // ConPTY → legacy pipe at runtime if the native binding fails to load.
+  // Methods called before spawn() (e.g. early kill/SIGINT) no-op safely.
+  private strategy: IPtyStrategy | null = null;
+  private readonly strategyOpts: { onData: (d: string) => void; onExit: (c: number) => void };
 
   constructor(private readonly opts: ClaudeServiceOptions) {
-    const strategyOpts = {
+    this.strategyOpts = {
       onData: opts.onData ?? (() => {}),
       onExit: opts.onExit,
     };
-    if (process.platform === 'win32') {
-      // Prefer ConPTY (real terminal) over the legacy pipe strategy:
-      // without a TTY, Claude Code detects non-interactive mode, drops
-      // into --print, waits 3s for stdin, and errors out. node-pty is
-      // an optionalDependency with prebuilt binaries — if loading
-      // fails (exotic arch, missing prebuild) we fall back to the old
-      // pipe strategy so pairing still works at all.
-      const conpty = WindowsConPtyStrategy.tryCreate(strategyOpts);
-      if (conpty) {
-        this.strategy = conpty;
-      } else {
-        console.error(
-          '\n  ⚠ Windows: node-pty unavailable, falling back to pipe mode.\n' +
-            '    Claude Code may exit immediately with "no stdin data" / "--print" errors.\n' +
-            '    Install build tools or run codeam-cli inside WSL for the best experience.\n',
-        );
-        this.strategy = new WindowsPtyStrategy(strategyOpts);
-      }
-    } else {
-      this.strategy = new UnixPtyStrategy(strategyOpts);
-    }
   }
 
   async spawn(): Promise<void> {
@@ -64,7 +47,49 @@ export class ClaudeService {
     }
 
     const claudeCmd = findInPath('claude') ? 'claude' : 'claude-code';
-    this.strategy.spawn(claudeCmd, this.opts.cwd);
+
+    if (process.platform === 'win32') {
+      // Prefer ConPTY (real terminal) so Claude doesn't fall into its
+      // "--print + 3s stdin wait" non-interactive path. node-pty is an
+      // optionalDependency that ships prebuilt `conpty.node` binaries
+      // for win32-x64 / win32-arm64 since 1.1.0. Two failure modes:
+      //
+      //   1. require('node-pty') itself throws (rare — usually only on
+      //      truly exotic CPUs). tryCreate() returns null → pipe
+      //      fallback.
+      //   2. require succeeds but the native binding fails to load
+      //      lazily during lib.spawn() (this is what bit our first
+      //      Windows customer with v2.4.28 — older node-pty without a
+      //      win32 prebuild). Caught here → pipe fallback.
+      const conpty = WindowsConPtyStrategy.tryCreate(this.strategyOpts);
+      if (conpty) {
+        try {
+          conpty.spawn(claudeCmd, this.opts.cwd);
+          this.strategy = conpty;
+          return;
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          // Best-effort cleanup of half-initialized state.
+          try { conpty.dispose(); } catch { /* ignore */ }
+          console.error(`\n  ⚠ ConPTY launch failed (${msg.split('\n')[0]})`);
+          console.error('    Falling back to pipe mode (limited interactivity)…\n');
+        }
+      } else {
+        console.error(
+          '\n  ⚠ Windows: node-pty unavailable, falling back to pipe mode.\n' +
+            '    Claude may exit with "no stdin data" / "--print" errors.\n' +
+            '    Reinstall the CLI to fetch the prebuilt ConPTY binary, or run inside WSL.\n',
+        );
+      }
+      const pipe = new WindowsPtyStrategy(this.strategyOpts);
+      pipe.spawn(claudeCmd, this.opts.cwd);
+      this.strategy = pipe;
+      return;
+    }
+
+    const unix = new UnixPtyStrategy(this.strategyOpts);
+    unix.spawn(claudeCmd, this.opts.cwd);
+    this.strategy = unix;
   }
 
   /**
@@ -81,8 +106,10 @@ export class ClaudeService {
    * a fresh event-loop tick, after React has flushed the text into input state.
    */
   sendCommand(text: string): void {
-    this.strategy.write(text);
-    setTimeout(() => this.strategy.write('\r'), 50);
+    if (!this.strategy) return;
+    const s = this.strategy;
+    s.write(text);
+    setTimeout(() => s.write('\r'), 50);
   }
 
   /**
@@ -104,6 +131,8 @@ export class ClaudeService {
    * ENTER_MS after the last arrow.
    */
   selectOption(targetIndex: number, fromIndex = 0): void {
+    if (!this.strategy) return;
+    const s = this.strategy;
     const delta = targetIndex - fromIndex;
     const steps = Math.abs(delta);
     const arrow  = delta >= 0 ? '\x1B[B' : '\x1B[A'; // ↓ or ↑
@@ -112,30 +141,30 @@ export class ClaudeService {
     const ENTER_MS = 200;
 
     if (steps === 0) {
-      this.strategy.write('\r');
+      s.write('\r');
       return;
     }
 
     for (let i = 0; i < steps; i++) {
-      setTimeout(() => { this.strategy.write(arrow); }, i * ARROW_MS);
+      setTimeout(() => { s.write(arrow); }, i * ARROW_MS);
     }
     setTimeout(() => {
-      this.strategy.write('\r');
+      s.write('\r');
     }, steps * ARROW_MS + ENTER_MS);
   }
 
   /** Send Escape key to Claude (cancels interactive prompts). */
   sendEscape(): void {
-    this.strategy.write('\x1b');
+    this.strategy?.write('\x1b');
   }
 
   /** Send Ctrl+C to Claude. */
   interrupt(): void {
-    this.strategy.write('\x03');
+    this.strategy?.write('\x03');
   }
 
   kill(): void {
-    this.strategy.kill();
+    this.strategy?.kill();
   }
 
   /**
@@ -143,6 +172,7 @@ export class ClaudeService {
    * Pass auto=true to add --dangerously-skip-permissions (no confirmation prompts).
    */
   restart(sessionId: string, auto = false): void {
+    if (!this.strategy) return;
     const claudeCmd = findInPath('claude') ? 'claude' : 'claude-code';
     this.strategy.kill();
     const args = ['--resume', sessionId];
