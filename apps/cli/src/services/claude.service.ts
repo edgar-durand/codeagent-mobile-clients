@@ -1,8 +1,9 @@
-import { IPtyStrategy, findInPath } from './pty/types';
+import { IPtyStrategy } from './pty/types';
 import { UnixPtyStrategy } from './pty/unix.strategy';
 import { WindowsPtyStrategy } from './pty/windows.strategy';
 import { WindowsConPtyStrategy } from './pty/windows-conpty.strategy';
 import { ensureClaudeInstalled } from './claude-installer';
+import { buildClaudeLaunch, type ClaudeLaunch } from './claude-resolver';
 
 export interface ClaudeServiceOptions {
   cwd: string;
@@ -25,14 +26,16 @@ export class ClaudeService {
   }
 
   async spawn(): Promise<void> {
-    if (!findInPath('claude') && !findInPath('claude-code')) {
+    let launch = buildClaudeLaunch();
+    if (!launch) {
       // Inline auto-install via Anthropic's official installer (curl|bash
       // on macOS/Linux, irm|iex on Windows). After the installer exits,
       // ensureClaudeInstalled() also prepends the known install dirs to
-      // this process's PATH so findInPath sees the freshly-dropped binary
-      // without needing a shell restart.
+      // this process's PATH so the next buildClaudeLaunch() probe sees
+      // the freshly-dropped binary without needing a shell restart.
       const installed = await ensureClaudeInstalled();
-      if (!installed) {
+      if (installed) launch = buildClaudeLaunch();
+      if (!launch) {
         const cmd =
           process.platform === 'win32'
             ? 'irm https://claude.ai/install.ps1 | iex'
@@ -46,25 +49,23 @@ export class ClaudeService {
       }
     }
 
-    const claudeCmd = findInPath('claude') ? 'claude' : 'claude-code';
-
     if (process.platform === 'win32') {
       // Prefer ConPTY (real terminal) so Claude doesn't fall into its
-      // "--print + 3s stdin wait" non-interactive path. node-pty is an
-      // optionalDependency that ships prebuilt `conpty.node` binaries
-      // for win32-x64 / win32-arm64 since 1.1.0. Two failure modes:
+      // "--print + 3s stdin wait" non-interactive path. The vendored
+      // node-pty bundle (see scripts/vendor-node-pty.js) ships the
+      // prebuilt conpty.node so this load is deterministic. Two
+      // failure modes still possible:
       //
-      //   1. require('node-pty') itself throws (rare — usually only on
-      //      truly exotic CPUs). tryCreate() returns null → pipe
-      //      fallback.
-      //   2. require succeeds but the native binding fails to load
-      //      lazily during lib.spawn() (this is what bit our first
-      //      Windows customer with v2.4.28 — older node-pty without a
-      //      win32 prebuild). Caught here → pipe fallback.
+      //   1. require throws because the vendored bundle is corrupt or
+      //      missing (e.g. AV quarantined the .node file). tryCreate
+      //      returns null → pipe fallback.
+      //   2. require succeeds but lib.spawn() throws — typically a
+      //      mis-resolved cmd (e.g. a `.cmd` shim handed to ConPTY
+      //      without a cmd.exe wrapper). Caught here → pipe fallback.
       const conpty = WindowsConPtyStrategy.tryCreate(this.strategyOpts);
       if (conpty) {
         try {
-          conpty.spawn(claudeCmd, this.opts.cwd);
+          conpty.spawn(launch.cmd, this.opts.cwd, launch.args);
           this.strategy = conpty;
           return;
         } catch (err) {
@@ -82,13 +83,13 @@ export class ClaudeService {
         );
       }
       const pipe = new WindowsPtyStrategy(this.strategyOpts);
-      pipe.spawn(claudeCmd, this.opts.cwd);
+      pipe.spawn(launch.cmd, this.opts.cwd, launch.args);
       this.strategy = pipe;
       return;
     }
 
     const unix = new UnixPtyStrategy(this.strategyOpts);
-    unix.spawn(claudeCmd, this.opts.cwd);
+    unix.spawn(launch.cmd, this.opts.cwd, launch.args);
     this.strategy = unix;
   }
 
@@ -173,10 +174,11 @@ export class ClaudeService {
    */
   restart(sessionId: string, auto = false): void {
     if (!this.strategy) return;
-    const claudeCmd = findInPath('claude') ? 'claude' : 'claude-code';
+    const extraArgs = ['--resume', sessionId];
+    if (auto) extraArgs.push('--dangerously-skip-permissions');
+    const launch: ClaudeLaunch | null = buildClaudeLaunch(extraArgs);
+    if (!launch) return;
     this.strategy.kill();
-    const args = ['--resume', sessionId];
-    if (auto) args.push('--dangerously-skip-permissions');
-    this.strategy.spawn(claudeCmd, this.opts.cwd, args);
+    this.strategy.spawn(launch.cmd, this.opts.cwd, launch.args);
   }
 }
