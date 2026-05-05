@@ -103,6 +103,7 @@ export class WindowsConPtyStrategy implements IPtyStrategy {
   private dataSub: PtyDataDisposable | null = null;
   private exitSub: PtyDataDisposable | null = null;
   private rawModeSet = false;
+  private resizeHandler: (() => void) | null = null;
 
   /**
    * Factory that returns a working ConPTY strategy or `null` if
@@ -130,10 +131,21 @@ export class WindowsConPtyStrategy implements IPtyStrategy {
     // removed by AV) are RE-THROWN, not handled. ClaudeService catches
     // and falls back to the legacy WindowsPtyStrategy so a missing
     // ConPTY binary doesn't kill the whole pairing flow.
+    // Match the local terminal's actual size so Claude's React Ink UI
+    // doesn't render at a phantom width and look mangled on the user's
+    // screen. Conservative fallbacks if columns/rows aren't available
+    // (e.g. running under a non-TTY parent).
+    const cols = process.stdout.columns && process.stdout.columns > 0
+      ? process.stdout.columns
+      : 120;
+    const rows = process.stdout.rows && process.stdout.rows > 0
+      ? process.stdout.rows
+      : 30;
+
     this.pty = this.lib.spawn(cmd, args, {
       name: 'xterm-256color',
-      cols: 220,
-      rows: 50,
+      cols,
+      rows,
       cwd,
       env: {
         ...process.env,
@@ -168,6 +180,24 @@ export class WindowsConPtyStrategy implements IPtyStrategy {
     }
     process.stdin.resume();
     process.stdin.on('data', this.stdinHandler);
+
+    // Forward terminal resizes so Claude's UI re-flows when the user
+    // resizes the window. Without this, the PTY stays at the launch
+    // size and any reflowed content drifts off-screen.
+    this.resizeHandler = () => {
+      const c = process.stdout.columns && process.stdout.columns > 0
+        ? process.stdout.columns
+        : cols;
+      const r = process.stdout.rows && process.stdout.rows > 0
+        ? process.stdout.rows
+        : rows;
+      try {
+        this.pty?.resize(c, r);
+      } catch {
+        /* pty already gone */
+      }
+    };
+    process.stdout.on('resize', this.resizeHandler);
   }
 
   write(data: string | Buffer): void {
@@ -190,6 +220,10 @@ export class WindowsConPtyStrategy implements IPtyStrategy {
     this.dataSub = null;
     this.exitSub = null;
     process.stdin.removeListener('data', this.stdinHandler);
+    if (this.resizeHandler) {
+      process.stdout.removeListener('resize', this.resizeHandler);
+      this.resizeHandler = null;
+    }
     if (this.rawModeSet && process.stdin.isTTY) {
       try {
         process.stdin.setRawMode(false);

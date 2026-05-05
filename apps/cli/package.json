@@ -1,6 +1,6 @@
 {
   "name": "codeam-cli",
-  "version": "2.4.32",
+  "version": "2.4.33",
   "description": "Remote control Claude Code (and other AI coding agents) from your mobile phone. Pair your device, send prompts, stream responses in real-time, and approve commands — from anywhere.",
   "main": "dist/index.js",
   "bin": {
