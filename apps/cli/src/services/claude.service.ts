@@ -1,6 +1,7 @@
 import { IPtyStrategy, findInPath } from './pty/types';
 import { UnixPtyStrategy } from './pty/unix.strategy';
 import { WindowsPtyStrategy } from './pty/windows.strategy';
+import { WindowsConPtyStrategy } from './pty/windows-conpty.strategy';
 
 export interface ClaudeServiceOptions {
   cwd: string;
@@ -16,10 +17,27 @@ export class ClaudeService {
       onData: opts.onData ?? (() => {}),
       onExit: opts.onExit,
     };
-    this.strategy =
-      process.platform === 'win32'
-        ? new WindowsPtyStrategy(strategyOpts)
-        : new UnixPtyStrategy(strategyOpts);
+    if (process.platform === 'win32') {
+      // Prefer ConPTY (real terminal) over the legacy pipe strategy:
+      // without a TTY, Claude Code detects non-interactive mode, drops
+      // into --print, waits 3s for stdin, and errors out. node-pty is
+      // an optionalDependency with prebuilt binaries — if loading
+      // fails (exotic arch, missing prebuild) we fall back to the old
+      // pipe strategy so pairing still works at all.
+      const conpty = WindowsConPtyStrategy.tryCreate(strategyOpts);
+      if (conpty) {
+        this.strategy = conpty;
+      } else {
+        console.error(
+          '\n  ⚠ Windows: node-pty unavailable, falling back to pipe mode.\n' +
+            '    Claude Code may exit immediately with "no stdin data" / "--print" errors.\n' +
+            '    Install build tools or run codeam-cli inside WSL for the best experience.\n',
+        );
+        this.strategy = new WindowsPtyStrategy(strategyOpts);
+      }
+    } else {
+      this.strategy = new UnixPtyStrategy(strategyOpts);
+    }
   }
 
   spawn(): void {
