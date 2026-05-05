@@ -1,3 +1,4 @@
+import * as path from 'path';
 import { IPtyStrategy, PtyStrategyOptions } from './types';
 
 /**
@@ -62,16 +63,38 @@ interface NodePtyModule {
 }
 
 /**
- * Lazy-load `node-pty`. Returns `null` if the optional dependency
- * isn't installed, the prebuild doesn't match the host arch, or the
- * binary fails to load (corrupt install, AV blocking, etc.).
+ * Load `node-pty` from the slim copy we vendor into our own dist
+ * folder at build time (see scripts/vendor-node-pty.js). Falls back
+ * to a normal `require('node-pty')` for the dev-mode path where the
+ * bundle isn't built yet.
+ *
+ * Returns `null` if:
+ *   - the vendored bundle doesn't exist (e.g. local-build dist not
+ *     produced yet, or somebody trimmed `dist/` in CI), AND
+ *   - no `node-pty` is installed alongside as a regular dep.
+ *
+ * At runtime in a published install, the vendored path is what hits
+ * — so the prebuilt `conpty.node` is guaranteed to be on disk and
+ * the load is deterministic regardless of the user's npm config.
  */
 function loadNodePty(): NodePtyModule | null {
+  // Prefer the vendored copy. `__dirname` after tsup bundles into
+  // dist/ resolves to the dist directory at runtime, so the vendored
+  // path lives at `<install>/dist/vendor/node-pty/`.
+  const vendoredPath = path.join(__dirname, 'vendor', 'node-pty');
   try {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
-    return require('node-pty') as NodePtyModule;
-  } catch {
-    return null;
+    return require(vendoredPath) as NodePtyModule;
+  } catch (vendorErr) {
+    // Dev-mode fallback (running from src/ with tsx, no built dist yet).
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      return require('node-pty') as NodePtyModule;
+    } catch {
+      // Re-throw the vendor error since that's the path used in prod.
+      void vendorErr;
+      return null;
+    }
   }
 }
 

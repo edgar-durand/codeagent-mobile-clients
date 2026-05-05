@@ -1,6 +1,6 @@
 {
   "name": "codeam-cli",
-  "version": "2.4.30",
+  "version": "2.4.31",
   "description": "Remote control Claude Code (and other AI coding agents) from your mobile phone. Pair your device, send prompts, stream responses in real-time, and approve commands — from anywhere.",
   "main": "dist/index.js",
   "bin": {
@@ -13,7 +13,7 @@
     "LICENSE"
   ],
   "scripts": {
-    "build": "tsup",
+    "build": "tsup && node scripts/vendor-node-pty.js",
     "dev": "tsup --watch",
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
@@ -74,14 +74,12 @@
     "ws": "^8.18.0",
     "zod": "^4.3.6"
   },
-  "optionalDependencies": {
-    "node-pty": "^1.1.0"
-  },
   "devDependencies": {
     "@codeagent/shared": "*",
     "@types/node": "^22.0.0",
     "@types/qrcode-terminal": "^0.12.0",
     "@types/ws": "^8.5.0",
+    "node-pty": "^1.1.0",
     "tsup": "^8.0.0",
     "typescript": "^6.0.3",
     "vitest": "^4.1.5"
