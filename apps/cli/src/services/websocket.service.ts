@@ -1,5 +1,6 @@
 import WebSocket from 'ws';
 import { computePollDelay } from '../lib/poll-delay';
+import { log } from './logger';
 
 const API_BASE = process.env.CODEAM_API_URL ?? 'https://codeagent-mobile-api.vercel.app';
 const WS_URL = API_BASE.replace('https://', 'wss://').replace('http://', 'ws://') + '/api/ws';
@@ -35,6 +36,7 @@ export class WebSocketService {
       this.client = new WebSocket(WS_URL);
 
       this.client.on('open', () => {
+        log.trace('ws', `connected to ${WS_URL}`);
         this._connected = true;
         this.reconnectAttempts = 0;
         this.client!.send(JSON.stringify({
@@ -49,12 +51,19 @@ export class WebSocketService {
       this.client.on('message', (raw: WebSocket.Data) => {
         try {
           const msg = JSON.parse(raw.toString()) as { type: string; payload?: Record<string, unknown> };
-          if (msg.type === 'pong' || msg.type === 'auth_success' || msg.type === 'auth_error') return;
+          if (msg.type === 'pong' || msg.type === 'auth_success' || msg.type === 'auth_error') {
+            log.trace('ws', `meta msg type=${msg.type}`);
+            return;
+          }
+          log.trace('ws', `dispatch msg type=${msg.type}`);
           this.handlers.forEach(h => h.onMessage(msg.type, msg.payload ?? {}));
-        } catch { /* ignore malformed */ }
+        } catch (err) {
+          log.trace('ws', 'malformed message', err);
+        }
       });
 
-      this.client.on('close', () => {
+      this.client.on('close', (code, reason) => {
+        log.trace('ws', `closed code=${code} reason=${reason?.toString() || '(empty)'}`);
         this._connected = false;
         this.stopHeartbeat();
         this.handlers.forEach(h => h.onDisconnected());
@@ -68,8 +77,12 @@ export class WebSocketService {
         }
       });
 
-      this.client.on('error', () => { /* handled by close */ });
-    } catch { /* ignore — handled by close */ }
+      this.client.on('error', (err: Error) => {
+        log.trace('ws', 'error', err);
+      });
+    } catch (err) {
+      log.trace('ws', 'sync connect threw', err);
+    }
   }
 
   send(type: string, payload: Record<string, unknown>): void {

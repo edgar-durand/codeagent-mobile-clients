@@ -1,5 +1,6 @@
 import { _postJson, _getJson } from './pairing.service';
 import { computePollDelay } from '../lib/poll-delay';
+import { log } from './logger';
 
 const API_BASE = process.env.CODEAM_API_URL ?? 'https://codeagent-mobile-api.vercel.app';
 
@@ -84,18 +85,29 @@ export class CommandRelayService {
       // Successful poll (HTTP+JSON parse OK) — reset backoff regardless of payload shape
       this.consecutiveFailures = 0;
       if (!Array.isArray(commands)) return;
+      if (commands.length > 0) {
+        log.trace('relay', `poll received ${commands.length} command(s)`);
+      }
       for (const obj of commands) {
         try {
+          log.trace('relay', `dispatch type=${obj.type as string} id=${obj.id as string}`);
           await this.onCommand({
             id: obj.id as string,
             sessionId: obj.sessionId as string,
             type: obj.type as string,
             payload: (obj.payload as Record<string, unknown>) ?? {},
           });
-        } catch { /* command handler error – continue with next */ }
+        } catch (err) {
+          log.trace('relay', `command handler threw`, err);
+        }
       }
-    } catch {
+    } catch (err) {
       this.consecutiveFailures += 1;
+      log.trace(
+        'relay',
+        `poll failed (failures=${this.consecutiveFailures})`,
+        err,
+      );
     }
   }
 
@@ -103,7 +115,9 @@ export class CommandRelayService {
     await _postJson(`${API_BASE}/api/plugin/heartbeat`, {
       pluginId: this.pluginId,
       online,
-    }).catch(() => {});
+    })
+      .then(() => log.trace('relay', `heartbeat ok online=${online}`))
+      .catch((err: unknown) => log.trace('relay', `heartbeat failed online=${online}`, err));
   }
 
   private reportAgents(): void {

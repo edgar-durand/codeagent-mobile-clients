@@ -1,5 +1,6 @@
 import * as path from 'path';
 import { IPtyStrategy, PtyStrategyOptions } from './types';
+import { log } from '../logger';
 
 /**
  * Preferred Windows strategy — uses ConPTY (Windows 10+) via the
@@ -156,15 +157,23 @@ export class WindowsConPtyStrategy implements IPtyStrategy {
       conptyInheritCursor: false,
     });
 
+    let traceCount = 0;
     this.dataSub = this.pty.onData((data) => {
       // Mirror to the local terminal so the user sees Claude's UI on
       // Windows the same way they do on macOS, AND feed the chunk
       // parser that streams to mobile.
       process.stdout.write(data);
       this.opts.onData(data);
+      // Trace only the first few + every 50th chunk so the debug
+      // log doesn't drown in PTY frames.
+      traceCount++;
+      if (traceCount <= 5 || traceCount % 50 === 0) {
+        log.trace('conpty', `onData #${traceCount} ${data.length}B`);
+      }
     });
 
     this.exitSub = this.pty.onExit(({ exitCode }) => {
+      log.trace('conpty', `claude exited code=${exitCode ?? 0}`);
       this.dispose();
       this.opts.onExit(exitCode ?? 0);
     });

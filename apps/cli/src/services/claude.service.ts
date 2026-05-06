@@ -4,6 +4,7 @@ import { WindowsPtyStrategy } from './pty/windows.strategy';
 import { WindowsConPtyStrategy } from './pty/windows-conpty.strategy';
 import { ensureClaudeInstalled } from './claude-installer';
 import { buildClaudeLaunch, type ClaudeLaunch } from './claude-resolver';
+import { log } from './logger';
 
 export interface ClaudeServiceOptions {
   cwd: string;
@@ -62,11 +63,13 @@ export class ClaudeService {
       //   2. require succeeds but lib.spawn() throws — typically a
       //      mis-resolved cmd (e.g. a `.cmd` shim handed to ConPTY
       //      without a cmd.exe wrapper). Caught here → pipe fallback.
+      log.trace('claude', `spawn (win32) cmd=${launch.cmd} args=${launch.args.join(' ')}`);
       const conpty = WindowsConPtyStrategy.tryCreate(this.strategyOpts);
       if (conpty) {
         try {
           conpty.spawn(launch.cmd, this.opts.cwd, launch.args);
           this.strategy = conpty;
+          log.trace('claude', 'ConPTY spawn ok');
           return;
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
@@ -107,8 +110,12 @@ export class ClaudeService {
    * a fresh event-loop tick, after React has flushed the text into input state.
    */
   sendCommand(text: string): void {
-    if (!this.strategy) return;
+    if (!this.strategy) {
+      log.trace('claude', 'sendCommand dropped (no strategy)');
+      return;
+    }
     const s = this.strategy;
+    log.trace('claude', `sendCommand text=${text.length}B`);
     s.write(text);
     setTimeout(() => s.write('\r'), 50);
   }

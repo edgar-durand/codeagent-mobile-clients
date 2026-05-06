@@ -9,6 +9,7 @@ import {
   renderToLines,
   type ChromeStep,
 } from '@codeagent/shared';
+import { log } from './logger';
 
 const API_BASE = process.env.CODEAM_API_URL ?? 'https://codeagent-mobile-api.vercel.app';
 
@@ -96,6 +97,7 @@ export class OutputService {
   }
 
   newTurn(): void {
+    log.trace('outputSvc', 'newTurn() — activating output stream');
     this.stopPoll();
     this.rawBuffer = '';
     this.lastSentContent = '';
@@ -142,9 +144,11 @@ export class OutputService {
         const printable = raw.replace(/\x1B\[[^@-~]*[@-~]/g, '').replace(/[\x00-\x1F\x7F]/g, '');
         if (printable.trim()) {
           this.terminalTurnPending = true;
+          log.trace('outputSvc', `terminal-turn detected (idle, ${raw.length}B)`);
           this.onTerminalTurnDetected?.();
         }
       }
+      log.trace('outputSvc', `push dropped (inactive, ${raw.length}B)`);
       return;
     }
     this.rawBuffer += raw;
@@ -156,6 +160,10 @@ export class OutputService {
       // Detect rate limit messages
       this.tryDetectRateLimit(printable);
     }
+    log.trace(
+      'outputSvc',
+      `push +${raw.length}B (buf=${this.rawBuffer.length}B printable=${printable.trim().length})`,
+    );
   }
 
   /** Extract Claude conversation ID from output text (e.g., from /cost command or session resume) */
@@ -210,6 +218,10 @@ export class OutputService {
 
     if (selector) {
       const idleMs = this.lastPushTime > 0 ? now - this.lastPushTime : elapsed;
+      log.trace(
+        'outputSvc',
+        `tick selector found (idleMs=${idleMs}, options=${selector.options.length})`,
+      );
       if (idleMs >= OutputService.SELECTOR_IDLE_MS) {
         this.stopPoll();
         this.active = false;
@@ -222,11 +234,19 @@ export class OutputService {
     const content = filterChrome(lines).join('\n').replace(/\n{3,}/g, '\n\n').trim();
 
     if (!content) {
+      log.trace(
+        'outputSvc',
+        `tick empty content (raw=${this.rawBuffer.length}B lines=${lines.length} elapsed=${elapsed}ms)`,
+      );
       if (elapsed >= OutputService.EMPTY_TIMEOUT_MS) this.finalize();
       return;
     }
 
     const idleMs = this.lastPushTime > 0 ? now - this.lastPushTime : elapsed;
+    log.trace(
+      'outputSvc',
+      `tick content (raw=${this.rawBuffer.length}B lines=${lines.length} content=${content.length} idleMs=${idleMs})`,
+    );
     if (idleMs >= OutputService.IDLE_MS) { this.finalize(); return; }
 
     if (content !== this.lastSentContent) {
@@ -310,11 +330,16 @@ export class OutputService {
       headers['X-Plugin-Auth-Token'] = this.pluginAuthToken;
     }
 
+    log.trace(
+      'outputSvc',
+      `postChunk type=${(body.type as string) ?? '(clear)'} done=${(body.done as boolean) === true} bytes=${payload.length}`,
+    );
     return new Promise((resolve) => {
       const attempt = (attemptsLeft: number) => {
         // Call through _transport so tests can vi.spyOn it.
         _transport.sendOutputChunk(`${API_BASE}/api/commands/output`, headers, payload)
           .then(({ statusCode, body: resBody }) => {
+            log.trace('outputSvc', `postChunk status=${statusCode}`);
             // 410 Gone (or 404 with SESSION_NOT_FOUND on older
             // backends) means the session was deleted / disconnected
             // server-side. There's no point continuing — stop the
@@ -339,7 +364,12 @@ export class OutputService {
             }
             resolve();
           })
-          .catch(() => {
+          .catch((err: unknown) => {
+            log.trace(
+              'outputSvc',
+              `postChunk error (retries left=${attemptsLeft})`,
+              err,
+            );
             if (attemptsLeft > 0) {
               const delay = 200 * (maxRetries - attemptsLeft + 1);
               setTimeout(() => attempt(attemptsLeft - 1), delay);
