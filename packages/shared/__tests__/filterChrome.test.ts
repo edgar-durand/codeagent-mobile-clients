@@ -57,4 +57,47 @@ describe('filterChrome — context compaction and thinking indicators', () => {
     ];
     expect(filterChrome(input)).toEqual(['Some real content']);
   });
+
+  // Regression: on Windows ConPTY, Claude's reply often appears on the
+  // line immediately AFTER the user echo with no blank separator, so the
+  // user-echo continuation flag was swallowing the reply for the rest
+  // of the turn. The fix: a `● ` / `⏺ ` prefix hard-resets the flag.
+  it('keeps the Claude reply when it lands right after the user echo (Windows ConPTY layout)', () => {
+    const input = [
+      '❯ Hola',
+      '* Actualizing…',
+      '● ¡Hola! ¿En qué puedo ayudarte hoy?',
+      '',
+      '✻ Crunched for 1s',
+      '❯ ',
+    ];
+    // Echo (`❯ Hola`) and `* Actualizing…` (continuation) and the
+    // spinner / empty input prompt all stay filtered; only Claude's
+    // reply survives.
+    expect(filterChrome(input)).toEqual([
+      '● ¡Hola! ¿En qué puedo ayudarte hoy?',
+    ]);
+  });
+
+  it('also resets continuation on the alternative ⏺ prefix', () => {
+    const input = [
+      '❯ multi-line',
+      'user input continuation that wraps',
+      '⏺ Reply from Claude after no blank line',
+    ];
+    expect(filterChrome(input)).toEqual([
+      '⏺ Reply from Claude after no blank line',
+    ]);
+  });
+
+  it('still filters everything between echo and a blank line on Mac-style layouts', () => {
+    const input = [
+      '❯ Hola',
+      'user input wrap line one',
+      'user input wrap line two',
+      '',
+      '● Hi there',
+    ];
+    expect(filterChrome(input)).toEqual(['● Hi there']);
+  });
 });

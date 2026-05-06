@@ -18,6 +18,16 @@ export function filterChrome(lines: string[]): string[] {
     if (!t) { skipEchoContinuation = false; continue; }
     if (/^[─━—═─\-]{3,}$/.test(t)) { skipEchoContinuation = false; continue; }
 
+    // Claude's reply always starts with `● ` (U+25CF) or `⏺ ` (U+23FA)
+    // — that prefix is a hard signal that the user-echo block is over,
+    // even on Windows ConPTY where the reply often lands on the very
+    // next line with no blank separator. Without this reset, the echo
+    // continuation flag swallows Claude's first response line and the
+    // mobile/web client sees nothing for the entire turn. Mac doesn't
+    // hit this because its output usually has a blank line between
+    // the echo and the reply, which already resets the flag above.
+    if (/^[●⏺]\s/.test(t)) skipEchoContinuation = false;
+
     if (/^[✳✢✶✻✽✴✷✸✹⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏◐◑◒◓▁▂▃▄▅▆▇█]\s/.test(t)) continue;
     if (/esc.{0,5}to.{0,5}interrupt/i.test(t)) continue;
     if (/high\s*[·•]\s*\/effort/i.test(t)) continue;
