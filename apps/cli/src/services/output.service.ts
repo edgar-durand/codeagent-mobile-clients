@@ -238,19 +238,6 @@ export class OutputService {
         'outputSvc',
         `tick empty content (raw=${this.rawBuffer.length}B lines=${lines.length} elapsed=${elapsed}ms)`,
       );
-      // Dump the actual rendered lines when the buffer is non-trivial
-      // but content is empty — that's the "filterChrome ate everything"
-      // smoking gun, especially on Windows ConPTY where Claude's
-      // welcome banner / status TUI may render in a way the chrome
-      // filter doesn't recognise as "real content". Trace-only so
-      // it costs nothing in normal runs. Capped to ~1500 chars and
-      // emitted once per tick (every 1s) — the cap keeps the log
-      // readable when Claude's TUI grows large.
-      if (lines.length > 0 && this.rawBuffer.length > 200) {
-        const dump = lines.map((l, i) => `${i}: ${JSON.stringify(l)}`).join('\n');
-        const preview = dump.length > 1500 ? dump.slice(0, 1500) + '…(truncated)' : dump;
-        log.trace('outputSvc', `lines dump:\n${preview}`);
-      }
       if (elapsed >= OutputService.EMPTY_TIMEOUT_MS) this.finalize();
       return;
     }

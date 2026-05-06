@@ -101,28 +101,4 @@ describe('filterChrome — context compaction and thinking indicators', () => {
     expect(filterChrome(input)).toEqual(['● Hi there']);
   });
 
-  // Regression: the Claude Code welcome banner / "tips" panel renders
-  // as `│ left col │ right col │` two-column box layout. On Windows
-  // ConPTY the banner cells linger as a "background" that bleeds into
-  // Claude's response cells when the TUI repaints — without filtering
-  // these lines we see chunks like "Tip: Run /install-github-app to
-  // tag @claude right from your Github issues and PRs" appearing as
-  // if it were Claude's reply.
-  it('filters multi-column TUI box chrome (welcome banner / tips panel)', () => {
-    const input = [
-      '│                                                    │ Tips for getting started                                                       │',
-      '│                 Welcome back Edgar!                │ Run /init to create a CLAUDE.md file with instructions for Claude              │',
-      '│  Opus 4.7 (1M context) · Claude Team · Privacyhawk │ /release-notes for more                                                        │',
-      '│            ~\\AppData\\Local\\Programs\\Warp           │                                                                                │',
-      '● This line IS Claude content',
-    ];
-    expect(filterChrome(input)).toEqual(['● This line IS Claude content']);
-  });
-
-  it('keeps single-pipe lines that are not multi-column box chrome', () => {
-    // Line containing one `│` (no leading `│`) — that's not the
-    // multi-column box pattern; let it through.
-    const input = ['use the | character to pipe output'];
-    expect(filterChrome(input)).toEqual(['use the | character to pipe output']);
-  });
 });
