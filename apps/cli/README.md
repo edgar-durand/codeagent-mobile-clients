@@ -49,6 +49,8 @@ That's it. Open the [CodeAgent Mobile app](https://codeagent-mobile.com), enter 
 | `codeam deploy` | Provision a cloud workspace (GitHub Codespaces) and pair it to your phone |
 | `codeam deploy ls` | List the cloud workspaces you've deployed (and which still have a session running) |
 | `codeam deploy stop` | Pick a deployed workspace and stop its codeam session (and optionally the workspace itself) |
+| `codeam --version`, `-v` | Print the installed CLI version |
+| `codeam --help`, `-h` | Show usage and the full command list |
 
 ---
 
@@ -93,6 +95,14 @@ Adding more cloud backends (Gitpod, Coder, your own SSH host, …) is a single n
 - **Node.js 18+**
 - **Claude Code** — see the [official quickstart](https://code.claude.com/docs/en/quickstart)
 - **[CodeAgent Mobile](https://codeagent-mobile.com)** app on your phone ([iOS](https://apps.apple.com/) / [Android](https://play.google.com/store/apps/details?id=com.codeagent.mobile))
+
+---
+
+## Environment variables
+
+| Variable | Default | Effect |
+|---|---|---|
+| `CODEAM_DISABLE_UPDATE_CHECK` | unset | Set to `1` to suppress the "update available" banner. The check also auto-skips on non-TTY stdout, in CI, and during tests. |
 
 ---
 
