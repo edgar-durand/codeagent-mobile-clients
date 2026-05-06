@@ -7,15 +7,30 @@ export interface ChromeStep {
   status: 'running' | 'done';
 }
 
-const SPINNER_RE = /^[✳✢✶✻✽✴✷✸✹⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏◐◑◒◓▁▂▃▄▅▆▇█]\s/;
+// Spinner glyphs Claude Code cycles through during the "thinking"
+// animation. Includes the original ASCII / Unicode set AND the newer
+// colored-circle emoji set the v2.1+ TUI introduced — without these
+// the status/spinner line leaks into the conversation as plain text
+// and the chat shows duplicated "Symbioting…" / "Boondoggling…"
+// lines once per CLI tick. Variation Selector-16 (U+FE0F) is
+// stripped before the test so we don't have to enumerate both forms.
+const SPINNER_RE =
+  /^(?:[✳✢✶✻✽✴✷✸✹⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏◐◑◒◓▁▂▃▄▅▆▇█]|🔴|🟠|🟡|🟢|🔵|🟣|🟤|⚫|⚪|🌀|💭|✨)\s/u;
 
 const BULLET_TOOL_RE =
   /^•\s+(?:Read(?:ing)?|Edit(?:ing)?|Writ(?:e|ing)|Bash|Runn(?:ing)?|Search(?:ing)?|Glob(?:bing)?|Grep(?:ping)?|Creat(?:e|ing)|Execut(?:e|ing)|Task|Agent|NotebookEdit)\b/i;
 const TREE_LINE_RE = /^└\s/;
-const STATUS_LINE_RE = /^\+\s/;
+// Status line: legacy "+ Symbioting…" or new emoji-prefixed
+// "🔵 Symbioting…". Both end in a status detail like "(8s · ↓ 620
+// tokens)" which the existing tests downstream still match against.
+const STATUS_LINE_RE =
+  /^(?:\+|[🔴🟠🟡🟢🔵🟣🟤⚫⚪🌀💭✨])\s/u;
 
 export function isChromeLine(line: string): boolean {
-  const t = line.trim();
+  // Strip the U+FE0F variation selector that often follows emoji so
+  // the regexes match both presentations of the colored-circle
+  // spinner glyphs.
+  const t = line.replace(/️/g, '').trim();
   if (!t) return false;
   if (/^[─━—═─\-]{3,}$/.test(t)) return true;
   if (SPINNER_RE.test(t)) return true;
@@ -41,7 +56,7 @@ export function isChromeLine(line: string): boolean {
 }
 
 export function parseChromeLine(line: string): ChromeStep | null {
-  const t = line.trim();
+  const t = line.replace(/️/g, '').trim();
   if (!t) return null;
 
   if (/^[─━—═─\-]{3,}$/.test(t)) return null;

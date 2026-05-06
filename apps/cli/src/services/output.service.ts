@@ -315,6 +315,25 @@ export class OutputService {
         // Call through _transport so tests can vi.spyOn it.
         _transport.sendOutputChunk(`${API_BASE}/api/commands/output`, headers, payload)
           .then(({ statusCode, body: resBody }) => {
+            // 410 Gone (or 404 with SESSION_NOT_FOUND on older
+            // backends) means the session was deleted / disconnected
+            // server-side. There's no point continuing — stop the
+            // output pump immediately so the terminal doesn't fill
+            // with retry errors. The matching `session_terminated`
+            // command (when delivered) handles the full process exit;
+            // here we just guarantee the pump stops even when the
+            // command queue is also unreachable.
+            if (
+              statusCode === 410 ||
+              (statusCode === 404 && /SESSION_NOT_FOUND|SESSION_GONE/.test(resBody))
+            ) {
+              if (this.active) {
+                process.stderr.write('[codeam] session was deleted/disconnected — stopping output stream.\n');
+                this.dispose();
+              }
+              resolve();
+              return;
+            }
             if (statusCode >= 400) {
               process.stderr.write(`[codeam] output API error ${statusCode}: ${resBody}\n`);
             }

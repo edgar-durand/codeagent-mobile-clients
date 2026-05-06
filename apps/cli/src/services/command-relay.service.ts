@@ -14,7 +14,10 @@ export class CommandRelayService {
   private _running = false;
   private pollTimer: NodeJS.Timeout | null = null;
   private heartbeatTimer: NodeJS.Timeout | null = null;
+  private agentsTimer: NodeJS.Timeout | null = null;
   private consecutiveFailures = 0;
+  /** True once `/api/plugin/agents` has accepted at least one report. */
+  private agentsRegistered = false;
 
   constructor(
     private readonly pluginId: string,
@@ -25,12 +28,22 @@ export class CommandRelayService {
     // Tear down any existing timers directly — no offline heartbeat during restart
     if (this.pollTimer) { clearTimeout(this.pollTimer); this.pollTimer = null; }
     if (this.heartbeatTimer) { clearInterval(this.heartbeatTimer); this.heartbeatTimer = null; }
+    if (this.agentsTimer) { clearInterval(this.agentsTimer); this.agentsTimer = null; }
 
     this._running = true;
+    this.agentsRegistered = false;
     this.sendHeartbeat(true);
     this.heartbeatTimer = setInterval(() => this.sendHeartbeat(true), 20_000);
     void this.pollLoop();
     this.reportAgents();
+    // Re-report agents until the server confirms — covers Windows
+    // users who hit transient proxy / firewall errors on the first
+    // POST and otherwise see "No AI agents detected in your IDE" in
+    // the apps with no recovery path. Stops as soon as a report
+    // succeeds; cheap idempotent POST otherwise.
+    this.agentsTimer = setInterval(() => {
+      if (this._running && !this.agentsRegistered) this.reportAgents();
+    }, 5_000);
   }
 
   stop(): void {
@@ -38,6 +51,7 @@ export class CommandRelayService {
     this._running = false;
     if (this.pollTimer) { clearTimeout(this.pollTimer); this.pollTimer = null; }
     if (this.heartbeatTimer) { clearInterval(this.heartbeatTimer); this.heartbeatTimer = null; }
+    if (this.agentsTimer) { clearInterval(this.agentsTimer); this.agentsTimer = null; }
     this.sendHeartbeat(false).catch(() => {});
   }
 
@@ -96,6 +110,14 @@ export class CommandRelayService {
     _postJson(`${API_BASE}/api/plugin/agents`, {
       pluginId: this.pluginId,
       agents: [{ id: 'claude-code', name: 'Claude Code', icon: '🤖', installed: true }],
-    }).catch(() => {});
+    })
+      .then(() => {
+        this.agentsRegistered = true;
+      })
+      .catch(() => {
+        // Will be retried by the agents timer until it lands. Don't
+        // log to stderr — Windows proxy hiccups are common and the
+        // retry path is silent on success.
+      });
   }
 }

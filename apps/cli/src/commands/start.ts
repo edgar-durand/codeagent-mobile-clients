@@ -252,6 +252,28 @@ except Exception:sys.exit(0)
         } catch { /* ignore */ }
         break;
       }
+      case 'session_terminated': {
+        // Mobile/web's "Delete session" pushes this command BEFORE
+        // removing the row. Tear down the local pairing so the CLI
+        // process exits cleanly instead of looping with 410 Gone
+        // responses against a dead sessionId. Same teardown shape as
+        // `shutdown_session` minus the codespace stop step (delete
+        // is "remove this device's pair" — codespace lifecycle is a
+        // separate concern that uses shutdown_session).
+        showInfo('Session was deleted from the app — exiting.');
+        try { claude.kill(); } catch { /* best-effort */ }
+        try {
+          const proc = spawn('bash', ['-lc', 'pm2 delete codeam-pair >/dev/null 2>&1 || true'], {
+            detached: true,
+            stdio: 'ignore',
+          });
+          proc.unref();
+        } catch { /* pm2 may not be installed locally; ignore */ }
+        outputSvc.dispose();
+        relay.stop();
+        ws.disconnect();
+        process.exit(0);
+      }
       case 'shutdown_session': {
         // Mobile/web sent "Stop session". Two layers of cleanup:
         //   1. Tear down PM2's supervisor + kill Claude + exit so
