@@ -28,6 +28,16 @@ export function filterChrome(lines: string[]): string[] {
     // the echo and the reply, which already resets the flag above.
     if (/^[●⏺]\s/.test(t)) skipEchoContinuation = false;
 
+    // Multi-column TUI box chrome — welcome banners and info panels
+    // render as `│ left col │ right col │`. The line starts with `│`
+    // and contains 2+ `│` total. Filter unconditionally — Claude's
+    // actual replies never use this shape (they're prefixed with `● `
+    // / `⏺ ` and live outside the box). Catches the "Tips for getting
+    // started" / "What's new" / "Welcome back …" leak that on Windows
+    // ConPTY otherwise bleeds into Claude's response cells when the
+    // TUI repaints on top of the still-present banner.
+    if (/^│/.test(t) && (t.match(/│/g)?.length ?? 0) >= 2) continue;
+
     if (/^[✳✢✶✻✽✴✷✸✹⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏◐◑◒◓▁▂▃▄▅▆▇█]\s/.test(t)) continue;
     if (/esc.{0,5}to.{0,5}interrupt/i.test(t)) continue;
     if (/high\s*[·•]\s*\/effort/i.test(t)) continue;
