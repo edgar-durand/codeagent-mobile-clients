@@ -226,6 +226,14 @@ export class HistoryService {
   private _rateLimitReset: string | null = null;
   private _quotaPercent: number | null = null;
   private _quotaFetchedAt: number = 0;
+  /**
+   * Per-conversation marker of the last message uuid we successfully
+   * uploaded to the backend. `uploadDelta()` reads the JSONL,
+   * filters out everything up to and including this uuid, and
+   * uploads only the tail. Resets per conversation so a session
+   * resume re-uploads the full transcript on first call.
+   */
+  private lastUploadedUuid = new Map<string, string>();
 
   constructor(
     private readonly pluginId: string,
@@ -562,5 +570,68 @@ export class HistoryService {
         throw new Error(`Failed to upload conversation batch ${i + 1}/${totalBatches} after all retries`);
       }
     }
+    // Mark the last message as the high-water mark so subsequent
+    // `uploadDelta()` calls only ship the tail.
+    const last = messages[messages.length - 1];
+    if (last) this.lastUploadedUuid.set(sessionId, last.id);
+  }
+
+  /**
+   * Incremental upload — ships only the messages added since the last
+   * `loadConversation` / `uploadDelta` call for this conversation.
+   * Used by `onTurnComplete` after every turn so the backend's
+   * conversation table stays fresh enough for the SSE consumers
+   * (mobile + web dashboard) to fetch the canonical markdown via
+   * `?last=N` and replace the streaming-from-PTY approximation —
+   * which lacks the markdown ``` fences the parser needs to surface
+   * the rich CodeBlock / DiffBlock / etc. components.
+   *
+   * Posts under `mode: 'append'` so the server merges by uuid
+   * instead of replacing the full conversation. Idempotent — if
+   * called twice in a row the second call sees zero new messages
+   * and is a no-op.
+   *
+   * Returns the number of messages uploaded (0 means nothing new).
+   */
+  async uploadDelta(): Promise<number> {
+    if (!this.currentConversationId) return 0;
+    const sessionId = this.currentConversationId;
+    const filePath = path.join(this.projectDir, `${sessionId}.jsonl`);
+    const messages = parseJsonl(filePath);
+    if (messages.length === 0) return 0;
+
+    const marker = this.lastUploadedUuid.get(sessionId);
+    let newMessages = messages;
+    if (marker) {
+      const idx = messages.findIndex((m) => m.id === marker);
+      if (idx >= 0) {
+        newMessages = messages.slice(idx + 1);
+      }
+      // If marker not found (JSONL was rewritten by Claude or
+      // session resume rewrote uuids), fall back to uploading all
+      // messages in append mode — server-side dedup-by-uuid keeps
+      // it idempotent so the only cost is bandwidth on a recovery
+      // path that should be rare.
+    }
+    if (newMessages.length === 0) return 0;
+
+    const body = {
+      pluginId: this.pluginId,
+      sessionId,
+      messages: newMessages,
+      mode: 'append' as const,
+    };
+
+    const ok = await post('/api/sessions/claude-conversation', body);
+    if (ok) {
+      const last = newMessages[newMessages.length - 1];
+      this.lastUploadedUuid.set(sessionId, last.id);
+      return newMessages.length;
+    }
+    // Soft failure — keep the marker as it was so the next call
+    // re-tries the same delta. Don't throw; the caller is fire-and-
+    // forget and the streamed approximation already showed in the
+    // UI, the canonical refresh is a polish.
+    return 0;
   }
 }

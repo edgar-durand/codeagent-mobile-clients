@@ -167,6 +167,15 @@ except Exception:sys.exit(0)
     if (historySvc.isQuotaStale()) {
       fetchQuotaUsage();
     }
+    // Push the just-finished turn's messages to the backend so the
+    // SSE consumers (mobile + landing) can fetch the canonical
+    // markdown via `?last=1` and replace the streamed-from-PTY
+    // approximation. Delta-only — only the new tail of the JSONL
+    // ships, so long sessions don't pay for the full transcript
+    // each turn. Brief delay gives Claude time to flush the JSONL.
+    setTimeout(() => {
+      historySvc.uploadDelta().catch(() => { /* best-effort */ });
+    }, 400);
   }, () => {
     // Terminal-initiated turn: user typed directly in the terminal.
     // Poll the JSONL until Claude Code writes the new user message, then
