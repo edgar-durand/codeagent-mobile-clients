@@ -38,8 +38,47 @@ export interface ClaudeModelInfo {
   isDefault?: boolean;
 }
 
+/**
+ * Encode a cwd path to the matching Claude project directory name.
+ *
+ *   macOS / Linux: `/Users/me/foo`   → `-Users-me-foo`
+ *   Windows:       `C:\Users\me\foo` → `C--Users-me-foo`
+ *                  (`:\` collapses to `--` because both characters
+ *                   are replaced; matches Claude Code's own scheme)
+ *
+ * Mirrors the encoder in apps/cli/src/services/history.service.ts —
+ * keep the two in sync. Previously this only replaced `/`, which on
+ * Windows left backslashes intact and produced an invalid path inside
+ * `~/.claude/projects/`, silently breaking the get_context / quota
+ * snapshot for VS Code users on Windows.
+ */
 function encodeCwd(cwd: string): string {
-  return cwd.replace(/\//g, '-');
+  return cwd.replace(/[\\/:]/g, '-');
+}
+
+/**
+ * Find the Claude project directory for `cwd`. Tries the canonical
+ * encoding first; if that directory doesn't exist on disk, scans
+ * `~/.claude/projects/` for a directory whose name *would* encode to
+ * the same canonical form when slashes/colons are normalized — this
+ * salvages cases where a future Claude version tweaks the encoding
+ * without us shipping an extension update.
+ */
+function findProjectDir(cwd: string): string {
+  const projectsRoot = path.join(os.homedir(), '.claude', 'projects');
+  const primary = path.join(projectsRoot, encodeCwd(cwd));
+  if (fs.existsSync(primary)) return primary;
+  try {
+    const entries = fs.readdirSync(projectsRoot, { withFileTypes: true });
+    const wanted = encodeCwd(cwd).replace(/-+/g, '-');
+    for (const e of entries) {
+      if (!e.isDirectory()) continue;
+      if (e.name.replace(/-+/g, '-') === wanted) {
+        return path.join(projectsRoot, e.name);
+      }
+    }
+  } catch { /* projectsRoot doesn't exist yet — fall through */ }
+  return primary;
 }
 
 /** Hardcoded list matching what Claude Code accepts via `/model`. Mirrors the CLI's list_models response. */
@@ -95,7 +134,7 @@ export class ClaudeContextService {
    */
   getContextSnapshot(): ClaudeContextSnapshot {
     const cwd = this.resolveCwd();
-    const projectDir = path.join(os.homedir(), '.claude', 'projects', encodeCwd(cwd));
+    const projectDir = findProjectDir(cwd);
 
     const usage = this.getCurrentUsage(projectDir);
     const monthlyCost = this.getMonthlyEstimatedCost(projectDir);
