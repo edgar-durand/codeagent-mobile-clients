@@ -105,8 +105,17 @@ export async function start(): Promise<void> {
   }
 
   process.once('SIGINT', sigintHandler);
-  relay.start();
+  // Spawn Claude FIRST so its strategy is set + the PTY is launching
+  // before the relay starts dispatching remote commands. The relay's
+  // first command after a fresh pair routinely fires within ~1 s of
+  // start() returning, so any commands handed to ClaudeService before
+  // `spawn()` set the strategy were silently dropped on Windows.
+  // ClaudeService also internally buffers remote `sendCommand`s until
+  // it sees PTY output (proof Claude's input field has mounted) — this
+  // ordering removes the race; that buffer covers the residual gap
+  // between strategy-set and Claude's React Ink tree being live.
   await claude.spawn();
+  relay.start();
 
   // After Claude is up, give the JSONL a moment to settle, then
   // detect the active conversation + push it into the local history

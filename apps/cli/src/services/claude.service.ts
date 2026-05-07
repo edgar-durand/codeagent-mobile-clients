@@ -18,12 +18,52 @@ export class ClaudeService {
   // Methods called before spawn() (e.g. early kill/SIGINT) no-op safely.
   private strategy: IPtyStrategy | null = null;
   private readonly strategyOpts: { onData: (d: string) => void; onExit: (c: number) => void };
+  /**
+   * Set once the PTY emits its FIRST batch of output — proxy for
+   * "Claude has rendered its input box and is ready to read keystrokes."
+   * Before this, remote `sendCommand`s are buffered (`pendingInputs`)
+   * and replayed in order on first data. Without this guard, the very
+   * first prompt right after `codeam pair` on Windows lands while
+   * Claude's React Ink tree is still mounting — the input bytes are
+   * accepted by the PTY but never make it to the input field, and
+   * the prompt silently vanishes.
+   */
+  private claudeReady = false;
+  private readonly pendingInputs: string[] = [];
 
   constructor(private readonly opts: ClaudeServiceOptions) {
     this.strategyOpts = {
-      onData: opts.onData ?? (() => {}),
+      onData: (d) => {
+        if (!this.claudeReady && d.length > 0) {
+          this.claudeReady = true;
+          // Wait one tick so the input field finishes mounting before
+          // we splat the buffered keystrokes — sending in the same
+          // microtask as the data arrival caused React Ink to batch
+          // the pending writes with the initial render and lose the
+          // first character. 250 ms is conservative and human-
+          // imperceptible compared with the multi-second cold start.
+          setTimeout(() => this.drainPending(), 250);
+        }
+        (opts.onData ?? (() => {}))(d);
+      },
       onExit: opts.onExit,
     };
+  }
+
+  private drainPending(): void {
+    if (!this.strategy || this.pendingInputs.length === 0) return;
+    const s = this.strategy;
+    log.trace('claude', `drain pending=${this.pendingInputs.length}`);
+    // Each buffered input replays the original sendCommand pacing
+    // (text → 50 ms → \r) so React Ink has a fresh tick to absorb the
+    // text into input state before the submit fires.
+    let offset = 0;
+    for (const text of this.pendingInputs) {
+      setTimeout(() => s.write(text), offset);
+      setTimeout(() => s.write('\r'), offset + 50);
+      offset += 200;
+    }
+    this.pendingInputs.length = 0;
   }
 
   async spawn(): Promise<void> {
@@ -112,6 +152,13 @@ export class ClaudeService {
   sendCommand(text: string): void {
     if (!this.strategy) {
       log.trace('claude', 'sendCommand dropped (no strategy)');
+      return;
+    }
+    if (!this.claudeReady) {
+      // Claude's input field hasn't mounted yet. Buffer; we'll
+      // replay this in `drainPending()` on first PTY output.
+      log.trace('claude', `sendCommand buffered (not ready) text=${text.length}B`);
+      this.pendingInputs.push(text);
       return;
     }
     const s = this.strategy;
