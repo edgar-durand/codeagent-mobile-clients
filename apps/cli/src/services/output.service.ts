@@ -1,174 +1,294 @@
-import * as https from 'https';
-import * as http from 'http';
-import {
-  detectListSelector,
-  detectSelector,
-  filterChrome,
-  isChromeLine,
-  parseChromeLine,
-  renderToLines,
-  type ChromeStep,
-} from '@codeagent/shared';
 import { log } from './logger';
+import { ChromeStepTracker } from './output/chrome-tracker';
+import { ChunkEmitter, type SendOutcome } from './output/chunk-emitter';
+import { PtyBuffer } from './output/pty-buffer';
+import {
+  detectAnySelector,
+  extractContent,
+  renderLines,
+} from './output/turn-renderer';
 
-const API_BASE = process.env.CODEAM_API_URL ?? 'https://codeagent-mobile-api.vercel.app';
-
-// Virtual terminal (renderToLines), selector detection, and chrome filter
-// all live in @codeagent/shared so the VS Code extension processes PTY
-// output byte-for-byte identically to this CLI.
-
-
+/**
+ * Orchestrator for the CLI's streaming output pipeline.
+ *
+ * Wires four collaborators each owning one slice of behaviour:
+ *
+ *   - `PtyBuffer` (data plane) — accumulates raw PTY bytes; flags
+ *     terminal-initiated turns when input arrives between turns.
+ *   - `ChromeStepTracker` — per-turn cumulative + delta protocol
+ *     for thinking-step chunks.
+ *   - `ChunkEmitter` (transport) — HTTP POST with retries + auth
+ *     header + 410-Gone session-dead detection.
+ *   - `turn-renderer` (pure functions) — virtual-terminal render,
+ *     selector detection, chrome filtering.
+ *
+ * The orchestrator owns the per-turn lifecycle (active flag,
+ * tick scheduler, finalisation thresholds) — that's the one
+ * piece that must coordinate between the four collaborators
+ * and so stays here. Everything else delegates.
+ */
 export class OutputService {
-  private rawBuffer = '';
+  private readonly pty = new PtyBuffer();
+  private readonly steps = new ChromeStepTracker();
+  private readonly emitter: ChunkEmitter;
+
   private lastSentContent = '';
-  private lastSentChromeStepsJson = '';
-  private chromeStepsHistory: ChromeStep[] = [];
   private pollTimer: NodeJS.Timeout | null = null;
   private startTime = 0;
-  private active = false;
   private terminalTurnPending = false;
-  private lastPushTime = 0;
-  private onSessionIdDetected?: (sessionId: string) => void;
-  private onRateLimitDetected?: (reset: string) => void;
-  private onTurnComplete?: () => void;
-  private onTerminalTurnDetected?: () => void;
 
+  private readonly onSessionIdDetected?: (sessionId: string) => void;
+  private readonly onRateLimitDetected?: (reset: string) => void;
+  private readonly onTurnComplete?: () => void;
+  private readonly onTerminalTurnDetected?: () => void;
+
+  /** Tick cadence — every 1 s while a turn is active. */
   private static readonly POLL_MS = 1000;
+  /** Idle threshold for "the agent's text settled, finalize the turn". */
   private static readonly IDLE_MS = 3000;
-  /** Shorter idle threshold for selector detection (UI is ready immediately). */
+  /** Same threshold but tighter for selectors (UI is ready to interact immediately). */
   private static readonly SELECTOR_IDLE_MS = 1500;
   /**
-   * Grace period before the first tick processes output.
-   * Prevents the raw PTY input echo from being captured before Claude Code
-   * clears and re-renders its TUI (which happens within ~100-200 ms of
-   * receiving the input, but we give a 1.5 s margin for loaded machines).
+   * Grace period before tick processes anything — Claude needs ~100-
+   * 200 ms after `\r` to clear the input echo and re-render the TUI.
+   * 1.5 s is a comfortable margin on loaded machines.
    */
   private static readonly WARMUP_MS = 1500;
-  /** Max idle with no visible content (spinner only) before finalizing. */
+  /** Max idle with chrome-only output before we stop waiting on the agent. */
   private static readonly EMPTY_TIMEOUT_MS = 60_000;
+  /** Hard turn cap — pathological no-op turns get cut after 2 minutes. */
   private static readonly MAX_MS = 120_000;
 
   constructor(
-    private readonly sessionId: string,
-    private readonly pluginId: string,
+    sessionId: string,
+    pluginId: string,
     onSessionIdDetected?: (sessionId: string) => void,
     onRateLimitDetected?: (reset: string) => void,
     onTurnComplete?: () => void,
     onTerminalTurnDetected?: () => void,
-    /**
-     * Per-pairing token captured from `/api/pairing/status`. When present,
-     * forwarded as `X-Plugin-Auth-Token` on every POST to
-     * `/api/commands/output`. Undefined for sessions paired before this CLI
-     * version (or against an older backend) — those keep working via the
-     * server's rolling legacy fallback (sunset 2026-05-25).
-     */
-    private readonly pluginAuthToken?: string,
+    pluginAuthToken?: string,
   ) {
     this.onSessionIdDetected = onSessionIdDetected;
     this.onRateLimitDetected = onRateLimitDetected;
     this.onTurnComplete = onTurnComplete;
     this.onTerminalTurnDetected = onTerminalTurnDetected;
+    this.emitter = new ChunkEmitter({
+      sessionId,
+      pluginId,
+      pluginAuthToken,
+    });
+  }
+
+  // ─── Turn lifecycle ──────────────────────────────────────────────
+
+  /**
+   * Begin a turn driven by a mobile-side prompt. Resets the buffer
+   * and emits the boundary chunks (clear → new_turn) that tell
+   * clients to wipe the prior agent reply and show "Agent is
+   * typing…".
+   */
+  newTurn(): void {
+    log.trace('outputSvc', 'newTurn() — activating output stream');
+    this.beginTurn();
+    this.send({ type: 'clear' }, { critical: true })
+      .then(() => this.send({ type: 'new_turn', done: false }, { critical: true }))
+      .catch(() => {});
   }
 
   /**
-   * Called by the terminal-turn callback once the user message is known.
-   * Sequences: clear → user_message (if any) → new_turn → start timer.
-   * This guarantees the user message appears before the typing placeholder
-   * in the apps, with no race against the clear event.
+   * Begin a turn driven by the user typing locally in their
+   * terminal. Same shape as `newTurn` but additionally sends a
+   * `user_message` so collaborators see the prompt attributed
+   * correctly. `userText` is the prompt text scraped from the
+   * Claude JSONL by `historySvc.waitForNewUserMessage`.
    */
   async startTerminalTurn(userText?: string): Promise<void> {
     this.terminalTurnPending = false;
-    this.stopPoll();
-    this.rawBuffer = '';
-    this.lastSentContent = '';
-    this.lastSentChromeStepsJson = '';
-    this.chromeStepsHistory = [];
-    this.lastPushTime = 0;
-    this.active = true;
-    this.startTime = Date.now();
-
-    await this.postChunk({ clear: true });
+    this.beginTurn();
+    await this.send({ type: 'clear' }, { critical: true });
     if (userText) {
-      await this.postChunk({ type: 'user_message', content: userText, done: true });
+      await this.send({ type: 'user_message', content: userText, done: true }, { critical: true });
     }
-    await this.postChunk({ type: 'new_turn', content: '', done: false });
-
-    this.pollTimer = setInterval(() => this.tick(), OutputService.POLL_MS);
-  }
-
-  newTurn(): void {
-    log.trace('outputSvc', 'newTurn() — activating output stream');
-    this.stopPoll();
-    this.rawBuffer = '';
-    this.lastSentContent = '';
-    this.lastSentChromeStepsJson = '';
-    this.chromeStepsHistory = [];
-    this.lastPushTime = 0;
-    this.active = true;
-    this.terminalTurnPending = false;
-    this.startTime = Date.now();
-
-    this.postChunk({ clear: true })
-      .then(() => this.postChunk({ type: 'new_turn', content: '', done: false }))
-      .catch(() => {});
-
-    this.pollTimer = setInterval(() => this.tick(), OutputService.POLL_MS);
+    await this.send({ type: 'new_turn', done: false }, { critical: true });
   }
 
   /**
-   * Like newTurn() but signals clients that a session is being resumed.
-   * The resumedSessionId tells clients to fetch the conversation from the API.
-   * Awaits the POST so callers can guarantee the signal is sent before restarting Claude.
+   * Begin a turn after a `resume_session` request. Includes the
+   * `resumedSessionId` so the client wipes its history and
+   * re-fetches from the JSONL via `get_conversation`.
    */
   async newTurnResume(resumedSessionId: string): Promise<void> {
-    this.stopPoll();
-    this.rawBuffer = '';
-    this.lastSentContent = '';
-    this.lastSentChromeStepsJson = '';
-    this.chromeStepsHistory = [];
-    this.lastPushTime = 0;
-    this.active = true;
-    this.startTime = Date.now();
-
-    await this.postChunk({ clear: true });
-    await this.postChunk({ type: 'new_turn', resumedSessionId, content: '', done: false });
-
-    this.pollTimer = setInterval(() => this.tick(), OutputService.POLL_MS);
+    this.beginTurn();
+    await this.send({ type: 'clear' }, { critical: true });
+    await this.send(
+      { type: 'new_turn', done: false, resumedSessionId },
+      { critical: true },
+    );
   }
 
+  // ─── Pump ────────────────────────────────────────────────────────
+
   push(raw: string): void {
-    if (!this.active) {
-      // Detect terminal-initiated turn: user typed directly in the terminal.
-      // Only fire once per turn (terminalTurnPending guards duplicate triggers).
-      if (!this.terminalTurnPending) {
-        const printable = raw.replace(/\x1B\[[^@-~]*[@-~]/g, '').replace(/[\x00-\x1F\x7F]/g, '');
-        if (printable.trim()) {
-          this.terminalTurnPending = true;
-          log.trace('outputSvc', `terminal-turn detected (idle, ${raw.length}B)`);
-          this.onTerminalTurnDetected?.();
-        }
+    const result = this.pty.push(raw);
+    if (!result.active) {
+      if (result.terminalInputDetected && !this.terminalTurnPending) {
+        this.terminalTurnPending = true;
+        this.onTerminalTurnDetected?.();
       }
       log.trace('outputSvc', `push dropped (inactive, ${raw.length}B)`);
       return;
     }
-    this.rawBuffer += raw;
-    const printable = raw.replace(/\x1B\[[^@-~]*[@-~]/g, '').replace(/[\x00-\x1F\x7F]/g, '');
-    if (printable.trim()) {
-      this.lastPushTime = Date.now();
-      // Try to extract conversation ID from Claude output
-      this.tryExtractSessionId(printable);
-      // Detect rate limit messages
-      this.tryDetectRateLimit(printable);
-    }
     log.trace(
       'outputSvc',
-      `push +${raw.length}B (buf=${this.rawBuffer.length}B printable=${printable.trim().length})`,
+      `push +${raw.length}B (buf=${this.pty.size}B)`,
     );
+    // Sniff for session id + rate-limit hints in the printable text;
+    // these are side-effect callbacks that don't influence the pump.
+    this.tryExtractSessionId(raw);
+    this.tryDetectRateLimit(raw);
   }
 
-  /** Extract Claude conversation ID from output text (e.g., from /cost command or session resume) */
+  dispose(): void {
+    this.stopPoll();
+    this.pty.deactivate();
+  }
+
+  // ─── Internals ───────────────────────────────────────────────────
+
+  private beginTurn(): void {
+    this.stopPoll();
+    this.pty.activate();
+    this.steps.reset();
+    this.lastSentContent = '';
+    this.startTime = Date.now();
+    this.pollTimer = setInterval(() => this.tick(), OutputService.POLL_MS);
+  }
+
+  private async send(
+    body: Record<string, unknown>,
+    opts: { critical?: boolean } = {},
+  ): Promise<void> {
+    const outcome: SendOutcome = await this.emitter.send(body, opts);
+    if (outcome.dead && this.pty.isActive) {
+      this.dispose();
+    }
+  }
+
+  private stopPoll(): void {
+    if (this.pollTimer) {
+      clearInterval(this.pollTimer);
+      this.pollTimer = null;
+    }
+  }
+
+  private tick(): void {
+    if (!this.pty.isActive) return;
+
+    const now = Date.now();
+    const elapsed = now - this.startTime;
+
+    if (elapsed >= OutputService.MAX_MS) { this.finalize(); return; }
+
+    // Skip early ticks so the renderer sees Claude's settled state,
+    // not the raw input echo (which it overwrites within ~100 ms).
+    if (elapsed < OutputService.WARMUP_MS) return;
+
+    const lines = renderLines(this.pty.content);
+
+    // Emit chrome-step deltas if any new ones surfaced this tick.
+    this.steps.ingest(lines);
+    const stepsDelta = this.steps.consumeDelta();
+    if (stepsDelta.length > 0) {
+      this.send({ type: 'chrome_steps', appendSteps: stepsDelta }).catch(() => {});
+    }
+
+    const selector = detectAnySelector(lines);
+    if (selector) {
+      const idleMs = this.pty.lastPushTime > 0 ? now - this.pty.lastPushTime : elapsed;
+      log.trace(
+        'outputSvc',
+        `tick selector found (idleMs=${idleMs}, options=${selector.options.length})`,
+      );
+      if (idleMs >= OutputService.SELECTOR_IDLE_MS) {
+        this.stopPoll();
+        this.pty.deactivate();
+        this.send(
+          {
+            type: 'select_prompt',
+            content: selector.question,
+            options: selector.options,
+            optionDescriptions: selector.optionDescriptions,
+            currentIndex: selector.currentIndex,
+            done: true,
+          },
+          { critical: true },
+        ).catch(() => {});
+      }
+      return;
+    }
+
+    const content = extractContent(lines);
+
+    if (!content) {
+      log.trace(
+        'outputSvc',
+        `tick empty content (raw=${this.pty.size}B lines=${lines.length} elapsed=${elapsed}ms)`,
+      );
+      if (elapsed >= OutputService.EMPTY_TIMEOUT_MS) this.finalize();
+      return;
+    }
+
+    const idleMs = this.pty.lastPushTime > 0 ? now - this.pty.lastPushTime : elapsed;
+    log.trace(
+      'outputSvc',
+      `tick content (raw=${this.pty.size}B lines=${lines.length} content=${content.length} idleMs=${idleMs})`,
+    );
+    if (idleMs >= OutputService.IDLE_MS) { this.finalize(); return; }
+
+    if (content !== this.lastSentContent) {
+      this.lastSentContent = content;
+      this.send({ type: 'text', content, done: false }).catch(() => {});
+    }
+  }
+
+  private finalize(): void {
+    const lines = renderLines(this.pty.content);
+    this.steps.ingest(lines);
+    const stepsDelta = this.steps.consumeDelta();
+    if (stepsDelta.length > 0) {
+      this.send({ type: 'chrome_steps', appendSteps: stepsDelta }).catch(() => {});
+    }
+    const selector = detectAnySelector(lines);
+    this.stopPoll();
+    this.pty.deactivate();
+
+    if (selector) {
+      this.send(
+        {
+          type: 'select_prompt',
+          content: selector.question,
+          options: selector.options,
+          optionDescriptions: selector.optionDescriptions,
+          currentIndex: selector.currentIndex,
+          done: true,
+        },
+        { critical: true },
+      ).catch(() => {});
+    } else {
+      const content = extractContent(lines);
+      this.send(
+        { type: 'text', content, done: true },
+        { critical: true },
+      ).catch(() => {});
+      this.onTurnComplete?.();
+    }
+  }
+
+  // ─── Side-channel observation (session id + rate limit) ──────────
+
   private tryExtractSessionId(text: string): void {
-    // Patterns to match session/conversation IDs in Claude output
+    if (!this.onSessionIdDetected) return;
+    const printable = text.replace(/\x1B\[[^@-~]*[@-~]/g, '').replace(/[\x00-\x1F\x7F]/g, '');
     const patterns = [
       /Resuming session[:\s]+([a-f0-9-]{36})/i,
       /Session[:\s]+([a-f0-9-]{36})/i,
@@ -176,269 +296,28 @@ export class OutputService {
       /Session\s+ID[:\s]+([a-f0-9-]{36})/i,
     ];
     for (const pattern of patterns) {
-      const match = text.match(pattern);
-      if (match && this.onSessionIdDetected) {
+      const match = printable.match(pattern);
+      if (match) {
         this.onSessionIdDetected(match[1]);
         return;
       }
     }
   }
 
-  /** Detect rate limit messages from Claude Code output (e.g. "You've hit your limit · resets Apr 16 at 1pm") */
   private tryDetectRateLimit(text: string): void {
-    const match = text.match(/hit your limit.*resets\s+(.+?)(?:\s*\(|$)/i)
-      ?? text.match(/rate.?limit.*resets\s+(.+?)(?:\s*\(|$)/i);
-    if (match && this.onRateLimitDetected) {
+    if (!this.onRateLimitDetected) return;
+    const printable = text.replace(/\x1B\[[^@-~]*[@-~]/g, '').replace(/[\x00-\x1F\x7F]/g, '');
+    const match =
+      printable.match(/hit your limit.*resets\s+(.+?)(?:\s*\(|$)/i) ??
+      printable.match(/rate.?limit.*resets\s+(.+?)(?:\s*\(|$)/i);
+    if (match) {
       this.onRateLimitDetected(match[1].trim());
     }
   }
-
-  dispose(): void {
-    this.stopPoll();
-    this.active = false;
-  }
-
-  private tick(): void {
-    if (!this.active) return;
-
-    const now = Date.now();
-    const elapsed = now - this.startTime;
-
-    if (elapsed >= OutputService.MAX_MS) { this.finalize(); return; }
-
-    // Skip early ticks to let Claude Code process and re-render.
-    // The raw PTY input echo arrives within ~1 ms of writing; Claude Code's
-    // full TUI re-render (which clears the echo) follows within ~100 ms.
-    // Waiting 1.5 s guarantees we see the settled state, not the raw echo.
-    if (elapsed < OutputService.WARMUP_MS) return;
-
-    const lines = renderToLines(this.rawBuffer);
-    this.postChromeSteps(lines);
-    const selector = detectSelector(lines) ?? detectListSelector(lines);
-
-    if (selector) {
-      const idleMs = this.lastPushTime > 0 ? now - this.lastPushTime : elapsed;
-      log.trace(
-        'outputSvc',
-        `tick selector found (idleMs=${idleMs}, options=${selector.options.length})`,
-      );
-      if (idleMs >= OutputService.SELECTOR_IDLE_MS) {
-        this.stopPoll();
-        this.active = false;
-        this.postChunk({ type: 'select_prompt', content: selector.question, options: selector.options, optionDescriptions: selector.optionDescriptions, currentIndex: selector.currentIndex, done: true }).catch(() => {});
-      }
-      // While selector is still settling, don't send anything
-      return;
-    }
-
-    const content = filterChrome(lines).join('\n').replace(/\n{3,}/g, '\n\n').trim();
-
-    if (!content) {
-      log.trace(
-        'outputSvc',
-        `tick empty content (raw=${this.rawBuffer.length}B lines=${lines.length} elapsed=${elapsed}ms)`,
-      );
-      if (elapsed >= OutputService.EMPTY_TIMEOUT_MS) this.finalize();
-      return;
-    }
-
-    const idleMs = this.lastPushTime > 0 ? now - this.lastPushTime : elapsed;
-    log.trace(
-      'outputSvc',
-      `tick content (raw=${this.rawBuffer.length}B lines=${lines.length} content=${content.length} idleMs=${idleMs})`,
-    );
-    if (idleMs >= OutputService.IDLE_MS) { this.finalize(); return; }
-
-    if (content !== this.lastSentContent) {
-      this.lastSentContent = content;
-      this.postChunk({ type: 'text', content, done: false }).catch(() => {});
-    }
-  }
-
-  private finalize(): void {
-    const lines = renderToLines(this.rawBuffer);
-    this.postChromeSteps(lines);
-    const selector = detectSelector(lines) ?? detectListSelector(lines);
-    this.stopPoll();
-    this.active = false;
-
-    if (selector) {
-      this.postChunk({ type: 'select_prompt', content: selector.question, options: selector.options, optionDescriptions: selector.optionDescriptions, currentIndex: selector.currentIndex, done: true }).catch(() => {});
-    } else {
-      const content = filterChrome(lines).join('\n').replace(/\n{3,}/g, '\n\n').trim();
-      this.postChunk({ type: 'text', content, done: true }).catch(() => {});
-      this.onTurnComplete?.();
-    }
-  }
-
-  private stopPoll(): void {
-    if (this.pollTimer) { clearInterval(this.pollTimer); this.pollTimer = null; }
-  }
-
-  private postChromeSteps(lines: string[]): void {
-    const visible = lines
-      .filter((l) => isChromeLine(l))
-      .map((l) => parseChromeLine(l))
-      .filter((s): s is ChromeStep => s !== null);
-    if (visible.length === 0) return;
-
-    // Accumulate unique steps (by tool+label) into the turn history.
-    // The CLI sends the growing unique list; apps REPLACE rather than append.
-    let changed = false;
-    for (const step of visible) {
-      const exists = this.chromeStepsHistory.some(
-        (s) => s.tool === step.tool && s.label === step.label,
-      );
-      if (!exists) {
-        this.chromeStepsHistory.push(step);
-        changed = true;
-      }
-    }
-    if (!changed) return;
-
-    const json = JSON.stringify(this.chromeStepsHistory);
-    if (json === this.lastSentChromeStepsJson) return;
-    this.lastSentChromeStepsJson = json;
-    this.postChunk({ type: 'chrome_steps', content: '', steps: [...this.chromeStepsHistory] }).catch(() => {});
-  }
-
-  private postChunk(body: Record<string, unknown>): Promise<void> {
-    // Critical chunks must reach the server: clear, new_turn, user_message, and any
-    // done:true finalizer (text, select_prompt).  Streaming updates (text done:false,
-    // chrome_steps) are superseded by the next tick, so no retry needed.
-    const isCritical =
-      body.clear === true ||
-      body.type === 'new_turn' ||
-      body.type === 'user_message' ||
-      body.done === true;
-    const maxRetries = isCritical ? 3 : 0;
-
-    // Compute payload once — it's the same across all retry attempts.
-    const payload = JSON.stringify({
-      sessionId: this.sessionId,
-      pluginId: this.pluginId,
-      ...body,
-    });
-
-    const headers: Record<string, string> = {
-      'Content-Type': 'application/json',
-    };
-    // Forward the per-pairing token when present. Sessions paired before
-    // this field existed simply omit the header and rely on the server's
-    // rolling legacy fallback (sunset 2026-05-25).
-    if (this.pluginAuthToken) {
-      headers['X-Plugin-Auth-Token'] = this.pluginAuthToken;
-    }
-
-    const chunkType = (body.type as string) ?? '(clear)';
-    log.trace(
-      'outputSvc',
-      `postChunk type=${chunkType} done=${(body.done as boolean) === true} bytes=${payload.length}`,
-    );
-    // Dump the full JSON payload (truncated) for the chunks where the
-    // wire shape matters when diagnosing per-platform divergence —
-    // select_prompt and new_turn carry interactive metadata that
-    // mobile renders as clickable options. Truncated to 2 KB so the
-    // log doesn't drown when Claude's response is long.
-    if (chunkType === 'select_prompt' || chunkType === 'new_turn' || (body.type === 'text' && body.done === true)) {
-      const preview = payload.length > 2048 ? payload.slice(0, 2048) + '…(truncated)' : payload;
-      log.trace('outputSvc', `payload ${preview}`);
-    }
-    return new Promise((resolve) => {
-      const attempt = (attemptsLeft: number) => {
-        // Call through _transport so tests can vi.spyOn it.
-        _transport.sendOutputChunk(`${API_BASE}/api/commands/output`, headers, payload)
-          .then(({ statusCode, body: resBody }) => {
-            log.trace('outputSvc', `postChunk status=${statusCode}`);
-            // 410 Gone (or 404 with SESSION_NOT_FOUND on older
-            // backends) means the session was deleted / disconnected
-            // server-side. There's no point continuing — stop the
-            // output pump immediately so the terminal doesn't fill
-            // with retry errors. The matching `session_terminated`
-            // command (when delivered) handles the full process exit;
-            // here we just guarantee the pump stops even when the
-            // command queue is also unreachable.
-            if (
-              statusCode === 410 ||
-              (statusCode === 404 && /SESSION_NOT_FOUND|SESSION_GONE/.test(resBody))
-            ) {
-              if (this.active) {
-                process.stderr.write('[codeam] session was deleted/disconnected — stopping output stream.\n');
-                this.dispose();
-              }
-              resolve();
-              return;
-            }
-            if (statusCode >= 400) {
-              process.stderr.write(`[codeam] output API error ${statusCode}: ${resBody}\n`);
-            }
-            resolve();
-          })
-          .catch((err: unknown) => {
-            log.trace(
-              'outputSvc',
-              `postChunk error (retries left=${attemptsLeft})`,
-              err,
-            );
-            if (attemptsLeft > 0) {
-              const delay = 200 * (maxRetries - attemptsLeft + 1);
-              setTimeout(() => attempt(attemptsLeft - 1), delay);
-            } else {
-              resolve();
-            }
-          });
-      };
-
-      attempt(maxRetries);
-    });
-  }
 }
 
-// Exported transport object — allows tests to spy on the HTTP send without
-// trying to monkey-patch the built-in `http` module (whose exports are
-// non-configurable). Mirrors the pattern used in pairing.service.ts.
-export const _transport = {
-  sendOutputChunk: _sendOutputChunk,
-};
-
-export function _sendOutputChunk(
-  url: string,
-  headers: Record<string, string>,
-  payload: string,
-): Promise<{ statusCode: number; body: string }> {
-  return new Promise((resolve, reject) => {
-    let settled = false;
-    const u = new URL(url);
-    const transport = u.protocol === 'https:' ? https : http;
-    const req = transport.request(
-      {
-        hostname: u.hostname,
-        port: u.port || (u.protocol === 'https:' ? 443 : 80),
-        path: u.pathname,
-        method: 'POST',
-        headers: {
-          ...headers,
-          'Content-Length': Buffer.byteLength(payload),
-        },
-        timeout: 8000,
-      },
-      (res) => {
-        let resData = '';
-        res.on('data', (c: Buffer) => { resData += c.toString(); });
-        res.on('end', () => {
-          if (settled) return;
-          settled = true;
-          resolve({ statusCode: res.statusCode ?? 0, body: resData });
-        });
-      },
-    );
-    req.on('error', (err) => {
-      if (settled) return;
-      settled = true;
-      reject(err);
-    });
-    req.on('timeout', () => { req.destroy(); });
-    req.write(payload);
-    req.end();
-  });
-}
+/**
+ * Re-export the transport seam so existing test files that import
+ * `_transport` from this module keep working without changes.
+ */
+export { _transport, _post as _sendOutputChunk } from './output/chunk-emitter';
