@@ -33,7 +33,18 @@ export function detectSelector(lines: string[]): SelectPrompt | null {
   // Accept both `❯` (the canonical React Ink arrow) and the bare
   // `>` that Windows ConPTY emits for the same glyph when the
   // terminal font lacks U+276F. Both render as the selector cursor.
-  if (!clean.some(l => /^[❯>]\s*\d+\./.test(l.trim()))) return null;
+  // Anchor on the cursor presence OR a trust-dialog signature so a
+  // PTY rendering pass that ate the cursor (Windows font fallback,
+  // partial frame) still surfaces the selector.
+  const hasCursor = clean.some(l => /^[❯>]\s*\d+\./.test(l.trim()));
+  // First-run "Do you trust this folder?" dialog is the most
+  // recognisable case where the cursor character can disappear
+  // through the rendering pipeline. Match the question phrasing so
+  // we lock onto it whether or not `❯`/`>` survived.
+  const looksLikeTrust = clean.some(l =>
+    /\b(?:trust\s+the\s+files|trust\s+this\s+folder|safety\s+check)\b/i.test(l),
+  );
+  if (!hasCursor && !looksLikeTrust) return null;
 
   let optionStartIdx = -1;
   for (let i = 0; i < clean.length; i++) {
