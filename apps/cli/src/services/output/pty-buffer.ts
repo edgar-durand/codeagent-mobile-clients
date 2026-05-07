@@ -1,12 +1,20 @@
 /**
  * Raw PTY byte accumulator + terminal-input detection.
  *
- * Owns the bytes Claude's TUI emits. Bytes only accumulate while
- * the buffer is "active" (i.e. inside a turn). When the buffer is
- * inactive and printable bytes arrive, that's a terminal-initiated
- * turn — the user typed directly in their local terminal — and the
- * caller is told via the `terminalInputDetected` flag so it can
- * kick the turn lifecycle.
+ * Always accumulates. The `active` flag is just a hint to the
+ * orchestrator about whether `tick()` should be processing the
+ * buffer right now — it does NOT gate ingestion. Dropping bytes
+ * while inactive made the cold-pair startup window lose Claude's
+ * first interactive selector (the trust dialog), because by the
+ * time the orchestrator finished its warmup the framing data was
+ * already flushed past us and Claude was sitting idle.
+ *
+ * `activate()` flips the flag without resetting `raw`, so anything
+ * Claude emitted between process spawn and the first turn boundary
+ * is still in the buffer for the next render-and-detect tick.
+ * `deactivate()` clears the buffer so a fresh between-turn idle
+ * period starts empty (no stale cursor blink frames bleeding into
+ * the next turn).
  *
  * Pure data-plane; no HTTP, no rendering, no parsing.
  */
@@ -30,13 +38,20 @@ export class PtyBuffer {
 
   activate(): void {
     this.active = true;
-    this.raw = '';
     this.lastPushAt = 0;
     this.terminalInputPending = false;
+    // NOTE: do NOT reset `raw` here. Bytes Claude emitted before
+    // the orchestrator armed (banner, trust dialog, …) need to be
+    // visible to the next render so the selector detector can
+    // surface them as a `select_prompt` chunk to the client.
   }
 
   deactivate(): void {
     this.active = false;
+    // Done with this turn — drop the raw frame so the next
+    // between-turn idle period and the next turn both start clean.
+    this.raw = '';
+    this.lastPushAt = 0;
   }
 
   reset(): void {
@@ -45,12 +60,16 @@ export class PtyBuffer {
   }
 
   /**
-   * Ingest a raw PTY frame. Returns whether the buffer was active
-   * at the time (caller cares because rendering only matters for
-   * active frames) and whether this push triggered the
-   * terminal-initiated-turn signal.
+   * Ingest a raw PTY frame. Always accumulates so cold-startup
+   * frames aren't lost. Returns whether the buffer was active at
+   * the time (caller may render now, vs. wait) and whether this
+   * push triggered the terminal-initiated-turn signal — the latter
+   * still only fires while inactive, so the orchestrator can kick
+   * a turn for human local-terminal typing.
    */
   push(raw: string): { active: boolean; terminalInputDetected: boolean } {
+    this.raw += raw;
+    if (hasPrintable(raw)) this.lastPushAt = Date.now();
     if (!this.active) {
       let terminalInputDetected = false;
       if (!this.terminalInputPending && hasPrintable(raw)) {
@@ -59,8 +78,6 @@ export class PtyBuffer {
       }
       return { active: false, terminalInputDetected };
     }
-    this.raw += raw;
-    if (hasPrintable(raw)) this.lastPushAt = Date.now();
     return { active: true, terminalInputDetected: false };
   }
 }
