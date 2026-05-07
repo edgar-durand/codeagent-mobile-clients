@@ -30,11 +30,14 @@ export function detectSelector(lines: string[]): SelectPrompt | null {
       .replace(/\s*[│╭╰╮╯┌└┐┘├┤┬┴┼─━═]+\s*$/, ''),
   );
 
-  if (!clean.some(l => /^❯\s*\d+\./.test(l.trim()))) return null;
+  // Accept both `❯` (the canonical React Ink arrow) and the bare
+  // `>` that Windows ConPTY emits for the same glyph when the
+  // terminal font lacks U+276F. Both render as the selector cursor.
+  if (!clean.some(l => /^[❯>]\s*\d+\./.test(l.trim()))) return null;
 
   let optionStartIdx = -1;
   for (let i = 0; i < clean.length; i++) {
-    if (/^(?:❯\s*)?\d+\.\s/.test(clean[i].trim())) { optionStartIdx = i; break; }
+    if (/^(?:[❯>]\s*)?\d+\.\s/.test(clean[i].trim())) { optionStartIdx = i; break; }
   }
   if (optionStartIdx === -1) return null;
 
@@ -62,7 +65,7 @@ export function detectSelector(lines: string[]): SelectPrompt | null {
     const t = clean[i].trim();
     if (!t) continue;
 
-    const m = t.match(/^(?:❯\s*)?(\d+)\.\s+(.+)/);
+    const m = t.match(/^(?:[❯>]\s*)?(\d+)\.\s+(.+)/);
     if (m) {
       const num = parseInt(m[1], 10);
       if (!optionLabels.has(num)) {
