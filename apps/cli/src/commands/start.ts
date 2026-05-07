@@ -106,15 +106,20 @@ export async function start(): Promise<void> {
 
   process.once('SIGINT', sigintHandler);
   // Spawn Claude FIRST so its strategy is set + the PTY is launching
-  // before the relay starts dispatching remote commands. The relay's
-  // first command after a fresh pair routinely fires within ~1 s of
-  // start() returning, so any commands handed to ClaudeService before
-  // `spawn()` set the strategy were silently dropped on Windows.
-  // ClaudeService also internally buffers remote `sendCommand`s until
-  // it sees PTY output (proof Claude's input field has mounted) — this
-  // ordering removes the race; that buffer covers the residual gap
-  // between strategy-set and Claude's React Ink tree being live.
+  // before the relay starts dispatching remote commands.
   await claude.spawn();
+  // Eagerly activate the output stream BEFORE the relay starts so
+  // Claude's startup screen reaches the mobile / landing client. The
+  // trust-this-folder dialog (and any other first-run interactive
+  // selector) renders within the first second of `claude` boot — if
+  // the OutputService is still inactive, those bytes get dropped at
+  // `pty-buffer.push()` and the user is stranded looking at a blank
+  // chat with no way to acknowledge the dialog. Calling
+  // `startTerminalTurn` here is the same code path used when the
+  // human types directly in the local terminal: emits `clear` +
+  // `new_turn`, activates the buffer, and tick() picks up the
+  // selector that's already on screen.
+  await outputSvc.startTerminalTurn();
   relay.start();
 
   // After Claude is up, give the JSONL a moment to settle, then
