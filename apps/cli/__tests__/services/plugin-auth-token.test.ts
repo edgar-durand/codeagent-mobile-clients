@@ -56,7 +56,7 @@ describe('config: pluginAuthToken persistence', () => {
 describe('OutputService: X-Plugin-Auth-Token header', () => {
   it('includes X-Plugin-Auth-Token header when pluginAuthToken is set', async () => {
     const sendSpy = vi
-      .spyOn(_transport, 'sendOutputChunk')
+      .spyOn(_transport, 'post')
       .mockResolvedValue({ statusCode: 200, body: '' });
 
     const svc = new OutputService(
@@ -88,7 +88,7 @@ describe('OutputService: X-Plugin-Auth-Token header', () => {
 
   it('omits X-Plugin-Auth-Token header when pluginAuthToken is undefined (legacy)', async () => {
     const sendSpy = vi
-      .spyOn(_transport, 'sendOutputChunk')
+      .spyOn(_transport, 'post')
       .mockResolvedValue({ statusCode: 200, body: '' });
 
     const svc = new OutputService(

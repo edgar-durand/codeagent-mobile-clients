@@ -1,0 +1,365 @@
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
+import { randomUUID } from 'crypto';
+import { spawn } from 'child_process';
+import type { ClaudeService } from '../../services/claude.service';
+import type { CommandRelayService, RemoteCommand } from '../../services/command-relay.service';
+import type { HistoryService } from '../../services/history.service';
+import type { OutputService } from '../../services/output.service';
+import {
+  parsePayload,
+  startCommandSchema,
+  type FileEntry,
+  type StartCommandPayload,
+} from '../../lib/payload';
+import { readProjectFile, writeProjectFile } from '../../services/file-ops.service';
+import {
+  listProjectFiles,
+  gitStatus,
+  gitDiff,
+  gitDiffStaged,
+  gitLog,
+  gitCommit,
+  gitPush,
+  gitPull,
+  gitResolve,
+} from '../../services/project-ops.service';
+import { showInfo } from '../../ui/banner';
+import type { KeepAliveContext } from './keep-alive';
+
+/**
+ * Shared dependency container for command handlers.
+ *
+ * Constructed once in `start.ts` and threaded through every
+ * handler so each one stays free of module-level singletons +
+ * gets a unit-testable surface (replace any field with a fake).
+ */
+export interface HandlerContext {
+  outputSvc: OutputService;
+  claude: ClaudeService;
+  historySvc: HistoryService;
+  relay: CommandRelayService;
+  setKeepAlive: (enabled: boolean) => void;
+  keepAliveCtx: KeepAliveContext;
+}
+
+/**
+ * Each entry handles ONE remote command type. Returns a Promise
+ * that resolves once the command is fully handled (including any
+ * `relay.sendResult` calls). Unrecognised types map to nothing —
+ * the dispatcher logs and skips.
+ */
+export type CommandHandler = (
+  ctx: HandlerContext,
+  cmd: RemoteCommand,
+  parsed: StartCommandPayload,
+) => Promise<void> | void;
+
+// ─── Helpers ─────────────────────────────────────────────────────
+
+/**
+ * Saves base64-encoded attachments to per-temp-file paths so they
+ * can be referenced as `@path` arguments for Claude. Returns the
+ * resolved temp paths in the order they were supplied.
+ */
+function saveFilesTemp(files: FileEntry[]): string[] {
+  return files
+    .filter(({ base64 }) => base64 && base64.length > 0)
+    .map(({ filename, base64 }) => {
+      const safeName = filename.replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 80);
+      const tmpPath = path.join(os.tmpdir(), `codeam-${randomUUID()}-${safeName}`);
+      fs.writeFileSync(tmpPath, Buffer.from(base64, 'base64'));
+      return tmpPath;
+    });
+}
+
+function dispatchPrompt(ctx: HandlerContext, prompt: string): void {
+  ctx.outputSvc.newTurn();
+  ctx.claude.sendCommand(prompt);
+}
+
+// ─── Agent control ───────────────────────────────────────────────
+
+const startTask: CommandHandler = (ctx, _cmd, parsed) => {
+  const { prompt, files } = parsed;
+  const effectivePrompt = prompt ?? '';
+  if (files && files.length > 0) {
+    const paths = saveFilesTemp(files);
+    const atRefs = paths.map((p) => `@${p}`).join(' ');
+    ctx.outputSvc.newTurn();
+    ctx.claude.sendCommand(`${atRefs} ${effectivePrompt}`.trim());
+    setTimeout(() => {
+      for (const p of paths) { try { fs.unlinkSync(p); } catch { /* ignore */ } }
+    }, 120_000);
+  } else if (effectivePrompt) {
+    dispatchPrompt(ctx, effectivePrompt);
+  }
+};
+
+const provideInput: CommandHandler = (ctx, _cmd, parsed) => {
+  if (parsed.input) dispatchPrompt(ctx, parsed.input);
+};
+
+const selectOption: CommandHandler = (ctx, _cmd, parsed) => {
+  // Navigate React Ink's selector to the chosen option and confirm.
+  // Must use `claude.selectOption()` — arrows + Enter must be paced
+  // so React Ink batches the keypress events correctly.
+  const index = parsed.index ?? 0;
+  const from = parsed.from ?? 0;
+  ctx.outputSvc.newTurn();
+  ctx.claude.selectOption(index, from);
+};
+
+const escapeKey: CommandHandler = (ctx) => {
+  ctx.outputSvc.newTurn();
+  ctx.claude.sendEscape();
+};
+
+const stopTask: CommandHandler = (ctx) => {
+  ctx.claude.interrupt();
+};
+
+const resumeSession: CommandHandler = async (ctx, _cmd, parsed) => {
+  const { id, auto } = parsed;
+  if (!id) return;
+  ctx.historySvc.setCurrentConversationId(id);
+  await ctx.historySvc.loadConversation(id);
+  await ctx.outputSvc.newTurnResume(id);
+  ctx.claude.restart(id, auto ?? false);
+};
+
+// ─── Read-only context queries ───────────────────────────────────
+
+const getContext: CommandHandler = async (ctx, cmd) => {
+  const usage = ctx.historySvc.getCurrentUsage();
+  const monthlyCost = ctx.historySvc.getMonthlyEstimatedCost();
+  const rateLimitReset = ctx.historySvc.getRateLimitReset();
+  const quotaPercent = ctx.historySvc.getQuotaPercent();
+  const base = usage
+    ? { ...usage, monthlyCost }
+    : { used: 0, total: 200000, percent: 0, model: null, outputTokens: 0, cacheReadTokens: 0, monthlyCost, error: 'No usage data found' };
+  const result = {
+    ...base,
+    ...(rateLimitReset ? { rateLimitReset } : {}),
+    ...(quotaPercent !== null ? { quotaPercent } : {}),
+  };
+  await ctx.relay.sendResult(cmd.id, 'completed', result as Record<string, unknown>);
+};
+
+const getConversation: CommandHandler = async (ctx, cmd) => {
+  const currentId = ctx.historySvc.getCurrentConversationId();
+  if (!currentId) {
+    await ctx.relay.sendResult(cmd.id, 'completed', { conversationId: null });
+    return;
+  }
+  try {
+    await ctx.historySvc.loadConversation(currentId);
+    await ctx.relay.sendResult(cmd.id, 'completed', { conversationId: currentId });
+  } catch {
+    await ctx.relay.sendResult(cmd.id, 'failed', {});
+  }
+};
+
+const listModels: CommandHandler = async (ctx, cmd) => {
+  // Claude Code models available via `/model`. Mirror the Anthropic
+  // catalog so the mobile picker can switch by sending `/model <id>`.
+  const models = [
+    { id: 'claude-opus-4-7',           label: 'Claude Opus 4.7',   description: 'Most capable',  family: 'claude',  vendor: 'anthropic', isDefault: false },
+    { id: 'claude-opus-4-6',           label: 'Claude Opus 4.6',   description: 'Top tier',      family: 'claude',  vendor: 'anthropic', isDefault: false },
+    { id: 'claude-sonnet-4-6',         label: 'Claude Sonnet 4.6', description: 'Balanced',      family: 'claude',  vendor: 'anthropic', isDefault: true  },
+    { id: 'claude-haiku-4-5-20251001', label: 'Claude Haiku 4.5',  description: 'Fastest',       family: 'claude',  vendor: 'anthropic', isDefault: false },
+  ];
+  await ctx.relay.sendResult(cmd.id, 'completed', { models });
+};
+
+// ─── Lifecycle ───────────────────────────────────────────────────
+
+const setKeepAlive: CommandHandler = async (ctx, cmd) => {
+  // Mobile/web "Avoid suspend codespace on inactivity" toggle. Only
+  // meaningful inside a GitHub Codespace (CODESPACES=true) — locally
+  // the toggle is a no-op and we report that back so the apps can
+  // hide it.
+  const enabled = !!cmd.payload.enabled;
+  ctx.setKeepAlive(enabled);
+  try {
+    await ctx.relay.sendResult(
+      cmd.id,
+      'success',
+      {
+        enabled,
+        applied: enabled && ctx.keepAliveCtx.inCodespace,
+        runtime: ctx.keepAliveCtx.inCodespace ? 'github-codespaces' : 'local',
+      },
+    );
+  } catch { /* ignore */ }
+};
+
+const sessionTerminated: CommandHandler = (ctx) => {
+  // Mobile/web "Delete session". Tear down everything and exit.
+  showInfo('Session was deleted from the app — exiting.');
+  try { ctx.claude.kill(); } catch { /* best-effort */ }
+  try {
+    const proc = spawn('bash', ['-lc', 'pm2 delete codeam-pair >/dev/null 2>&1 || true'], {
+      detached: true,
+      stdio: 'ignore',
+    });
+    proc.unref();
+  } catch { /* pm2 may not be installed locally; ignore */ }
+  ctx.outputSvc.dispose();
+  ctx.relay.stop();
+  process.exit(0);
+};
+
+const shutdownSession: CommandHandler = async (ctx, cmd) => {
+  // Mobile/web "Stop session". Tear down PM2 supervisor + kill
+  // Claude + exit. Inside a Codespace, also `gh codespace stop` so
+  // the workspace itself suspends and the user stops paying for
+  // compute hours.
+  try { await ctx.relay.sendResult(cmd.id, 'success', { ok: true }); } catch { /* best-effort */ }
+  try { ctx.claude.kill(); } catch { /* best-effort */ }
+  if (ctx.keepAliveCtx.inCodespace && ctx.keepAliveCtx.codespaceName) {
+    try {
+      const stopProc = spawn(
+        'bash',
+        ['-lc', `sleep 1; gh codespace stop -c ${JSON.stringify(ctx.keepAliveCtx.codespaceName)} >/dev/null 2>&1 || true`],
+        { detached: true, stdio: 'ignore' },
+      );
+      stopProc.unref();
+    } catch { /* gh may be unavailable; ignore */ }
+  }
+  try {
+    const proc = spawn('bash', ['-lc', 'pm2 delete codeam-pair >/dev/null 2>&1 || true'], {
+      detached: true,
+      stdio: 'ignore',
+    });
+    proc.unref();
+  } catch { /* ignore */ }
+  ctx.outputSvc.dispose();
+  ctx.relay.stop();
+  process.exit(0);
+};
+
+// ─── Mini-IDE file ops ───────────────────────────────────────────
+
+const readFile: CommandHandler = async (ctx, cmd, parsed) => {
+  if (!parsed.path) {
+    await ctx.relay.sendResult(cmd.id, 'failed', { error: 'Missing path' });
+    return;
+  }
+  const result = await readProjectFile(parsed.path);
+  await ctx.relay.sendResult(cmd.id, 'completed', result as Record<string, unknown>);
+};
+
+const writeFile: CommandHandler = async (ctx, cmd, parsed) => {
+  if (!parsed.path || typeof parsed.content !== 'string') {
+    await ctx.relay.sendResult(cmd.id, 'failed', { error: 'Missing path or content' });
+    return;
+  }
+  const result = await writeProjectFile(parsed.path, parsed.content);
+  await ctx.relay.sendResult(cmd.id, 'completed', result as Record<string, unknown>);
+};
+
+const listFiles: CommandHandler = async (ctx, cmd, parsed) => {
+  const result = await listProjectFiles({ query: parsed.query });
+  await ctx.relay.sendResult(cmd.id, 'completed', result as unknown as Record<string, unknown>);
+};
+
+// ─── Git ops ─────────────────────────────────────────────────────
+
+const gitStatusH: CommandHandler = async (ctx, cmd) => {
+  const result = await gitStatus();
+  await ctx.relay.sendResult(cmd.id, 'completed', result as unknown as Record<string, unknown>);
+};
+
+const gitDiffH: CommandHandler = async (ctx, cmd, parsed) => {
+  const result = await gitDiff(parsed.path ?? null);
+  await ctx.relay.sendResult(cmd.id, 'completed', result as Record<string, unknown>);
+};
+
+const gitDiffStagedH: CommandHandler = async (ctx, cmd, parsed) => {
+  const result = await gitDiffStaged(parsed.path ?? null);
+  await ctx.relay.sendResult(cmd.id, 'completed', result as Record<string, unknown>);
+};
+
+const gitLogH: CommandHandler = async (ctx, cmd, parsed) => {
+  const result = await gitLog(parsed.limit ?? 30);
+  await ctx.relay.sendResult(cmd.id, 'completed', result as unknown as Record<string, unknown>);
+};
+
+const gitCommitH: CommandHandler = async (ctx, cmd, parsed) => {
+  if (!parsed.message) {
+    await ctx.relay.sendResult(cmd.id, 'failed', { error: 'Missing message' });
+    return;
+  }
+  const result = await gitCommit(parsed.message, parsed.paths);
+  await ctx.relay.sendResult(cmd.id, 'completed', result as Record<string, unknown>);
+};
+
+const gitPushH: CommandHandler = async (ctx, cmd) => {
+  const result = await gitPush();
+  await ctx.relay.sendResult(cmd.id, 'completed', result as Record<string, unknown>);
+};
+
+const gitPullH: CommandHandler = async (ctx, cmd) => {
+  const result = await gitPull();
+  await ctx.relay.sendResult(cmd.id, 'completed', result as Record<string, unknown>);
+};
+
+const gitResolveH: CommandHandler = async (ctx, cmd, parsed) => {
+  if (!parsed.path || !parsed.side) {
+    await ctx.relay.sendResult(cmd.id, 'failed', { error: 'Missing path or side' });
+    return;
+  }
+  const result = await gitResolve(parsed.path, parsed.side);
+  await ctx.relay.sendResult(cmd.id, 'completed', result as Record<string, unknown>);
+};
+
+// ─── Dispatch table ──────────────────────────────────────────────
+
+export const handlers: Record<string, CommandHandler> = {
+  start_task: startTask,
+  provide_input: provideInput,
+  select_option: selectOption,
+  escape_key: escapeKey,
+  stop_task: stopTask,
+  resume_session: resumeSession,
+  get_context: getContext,
+  get_conversation: getConversation,
+  list_models: listModels,
+  set_keep_alive: setKeepAlive,
+  session_terminated: sessionTerminated,
+  shutdown_session: shutdownSession,
+  read_file: readFile,
+  write_file: writeFile,
+  list_files: listFiles,
+  git_status: gitStatusH,
+  git_diff: gitDiffH,
+  git_diff_staged: gitDiffStagedH,
+  git_log: gitLogH,
+  git_commit: gitCommitH,
+  git_push: gitPushH,
+  git_pull: gitPullH,
+  git_resolve: gitResolveH,
+};
+
+/**
+ * Dispatcher entry point — called by the relay's onCommand
+ * callback. Validates the command's payload against the shared
+ * Zod schema, looks up the handler by command type, and lets it
+ * execute. Unknown / malformed commands are logged and dropped
+ * so a misbehaving server can't crash the CLI.
+ */
+export async function dispatchCommand(
+  ctx: HandlerContext,
+  cmd: RemoteCommand,
+): Promise<void> {
+  const parsed = parsePayload(startCommandSchema, cmd.payload);
+  if (!parsed) {
+    showInfo(`Ignoring malformed ${cmd.type} payload.`);
+    return;
+  }
+  const handler = handlers[cmd.type];
+  if (!handler) return;
+  await handler(ctx, cmd, parsed);
+}
