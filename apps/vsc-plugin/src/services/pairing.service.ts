@@ -114,6 +114,14 @@ export class PairingService {
             };
           }
 
+          // Persist the per-pairing token. Replayed as
+          // `X-Plugin-Auth-Token` on every authed call so we still
+          // pass auth after the legacy fallback expires (2026-05-25).
+          const rawToken = data.pluginAuthToken;
+          if (typeof rawToken === 'string' && rawToken.length > 0) {
+            SettingsService.getInstance().setPluginAuthToken(rawToken);
+          }
+
           this.currentSessionId = sessionId;
           this.log.appendLine(`Pairing detected! Session: ${sessionId}, user: ${this.pairedUser?.email}`);
           this.stopPolling();
@@ -141,6 +149,7 @@ export class PairingService {
   clearCurrentSession(): void {
     this.currentSessionId = null;
     this.pairedUser = null;
+    SettingsService.getInstance().setPluginAuthToken(null);
   }
 
   onReconnected(sessionId: string, user: PairedUserInfo): void {

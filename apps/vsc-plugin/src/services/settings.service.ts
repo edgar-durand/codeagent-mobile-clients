@@ -54,6 +54,24 @@ export class SettingsService {
     return pluginId;
   }
 
+  /**
+   * Per-pairing token returned by the backend at `/api/pairing/status`
+   * once `paired: true`. Replayed as `X-Plugin-Auth-Token` on every
+   * authed POST/GET so the server can authenticate this plugin
+   * after the legacy fallback expires (2026-05-25).
+   */
+  getPluginAuthToken(): string | null {
+    return this.context.globalState.get<string>('pluginAuthToken') ?? null;
+  }
+
+  setPluginAuthToken(token: string | null): void {
+    if (token) {
+      this.context.globalState.update('pluginAuthToken', token);
+    } else {
+      this.context.globalState.update('pluginAuthToken', undefined);
+    }
+  }
+
   getRecentSessions(): RecentSession[] {
     return this.context.globalState.get<RecentSession[]>('recentSessions') || [];
   }

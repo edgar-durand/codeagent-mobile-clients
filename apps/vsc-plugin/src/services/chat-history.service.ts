@@ -39,6 +39,14 @@ export class ChatHistoryService {
   private sessions: ChatHistorySession[] = [];
   private currentSessionId: string | null = null;
   private lastActivityAt = 0;
+  /**
+   * Per-conversation high-water mark — the id of the last message we
+   * shipped to `/api/sessions/claude-conversation`. Subsequent
+   * `pushConversation` calls slice the message array after this
+   * marker and POST only the new entries with `mode: 'append'`.
+   * Mirrors the CLI's `lastUploadedUuid` map (history.service.ts).
+   */
+  private lastUploadedMessageId = new Map<string, string>();
 
   private constructor(context: vscode.ExtensionContext, log: OutputChannel) {
     this.context = context;
@@ -173,13 +181,34 @@ export class ChatHistoryService {
     }
   }
 
-  /** Push the full message list of a specific session (for resume). */
+  /**
+   * Incremental upload — ships only the messages added since the
+   * last `pushConversation` call for this conversation, under
+   * `mode: 'append'` so the server merges by id instead of
+   * replacing the full conversation. Idempotent: if called twice in
+   * a row the second call sees zero new messages and is a no-op.
+   * Mirrors the CLI's `uploadDelta()` (history.service.ts:596).
+   */
   async pushConversation(sessionId: string): Promise<void> {
     const session = this.getSession(sessionId);
     if (!session) {
       this.log.appendLine(`[chat-history] pushConversation: session ${sessionId} not found`);
       return;
     }
+
+    let newMessages = session.messages;
+    const marker = this.lastUploadedMessageId.get(sessionId);
+    if (marker) {
+      const idx = session.messages.findIndex((m) => m.id === marker);
+      if (idx >= 0) {
+        newMessages = session.messages.slice(idx + 1);
+      }
+      // Marker not found (history was cleared / IDs rotated) → fall
+      // through to uploading the full list. The server's append mode
+      // dedups by uuid so this is still safe, just heavier.
+    }
+    if (newMessages.length === 0) return;
+
     const settings = SettingsService.getInstance();
     const pluginId = settings.ensurePluginId();
     try {
@@ -188,7 +217,8 @@ export class ChatHistoryService {
         {
           pluginId,
           sessionId,
-          messages: session.messages.map((m) => ({
+          mode: 'append' as const,
+          messages: newMessages.map((m) => ({
             id: m.id,
             role: m.role,
             text: m.text,
@@ -196,7 +226,9 @@ export class ChatHistoryService {
           })),
         },
       );
-      this.log.appendLine(`[chat-history] pushConversation: ${session.messages.length} msg(s) → ${JSON.stringify(result)}`);
+      const last = newMessages[newMessages.length - 1];
+      this.lastUploadedMessageId.set(sessionId, last.id);
+      this.log.appendLine(`[chat-history] pushConversation: ${newMessages.length} new msg(s) → ${JSON.stringify(result)}`);
     } catch (e) {
       this.log.appendLine(`[chat-history] pushConversation error: ${e}`);
     }

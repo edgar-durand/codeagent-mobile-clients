@@ -151,6 +151,27 @@ export class CommandRelayService {
     }
   }
 
+  /**
+   * Headers we attach to every authed call. The auth token is the
+   * per-pairing secret returned at pair time; the protocol-version
+   * header lets the backend route legacy translations or 426-us
+   * when we drift too far.
+   *
+   * Public so other services (terminal-agent, chat-history) can
+   * apply the same headers to their own postJson calls without
+   * redefining them.
+   */
+  authHeaders(): Record<string, string> {
+    const headers: Record<string, string> = {
+      'X-Codeam-Protocol-Version': '2.0.0',
+    };
+    const token = SettingsService.getInstance().getPluginAuthToken();
+    if (token) {
+      headers['X-Plugin-Auth-Token'] = token;
+    }
+    return headers;
+  }
+
   async postJson(url: string, body: Record<string, unknown>): Promise<Record<string, unknown> | null> {
     return new Promise((resolve, reject) => {
       const data = JSON.stringify(body);
@@ -166,6 +187,7 @@ export class CommandRelayService {
           headers: {
             'Content-Type': 'application/json',
             'Content-Length': Buffer.byteLength(data),
+            ...this.authHeaders(),
           },
           timeout: 10000,
         },
@@ -200,6 +222,7 @@ export class CommandRelayService {
           port: urlObj.port,
           path: urlObj.pathname + urlObj.search,
           method: 'GET',
+          headers: this.authHeaders(),
           timeout: 10000,
         },
         (res) => {
