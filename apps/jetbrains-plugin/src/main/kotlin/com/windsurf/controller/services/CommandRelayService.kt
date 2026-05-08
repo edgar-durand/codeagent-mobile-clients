@@ -15,6 +15,23 @@ import java.util.TimerTask
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.TimeUnit
 
+/**
+ * Apply the headers we attach to every authed call: `X-Plugin-Auth-Token`
+ * (per-pairing secret returned at pair time, replays as auth after the
+ * legacy fallback expires 2026-05-25) and `X-Codeam-Protocol-Version`
+ * (lets the backend route legacy translations or 426-us when we drift
+ * too far).
+ *
+ * Call from any builder pointed at a post-pair authenticated endpoint
+ * — pairing/code and pairing/status DON'T need it (the token is what
+ * those endpoints establish).
+ */
+fun Request.Builder.withAuthHeaders(): Request.Builder {
+    addHeader("X-Codeam-Protocol-Version", "2.0.0")
+    SettingsService.getInstance().getPluginAuthToken()?.let { addHeader("X-Plugin-Auth-Token", it) }
+    return this
+}
+
 @Service(Service.Level.APP)
 class CommandRelayService {
 
@@ -97,6 +114,7 @@ class CommandRelayService {
         val request = Request.Builder()
             .url("${settings.state.apiBaseUrl}/api/plugin/heartbeat")
             .post(gson.toJson(body).toRequestBody("application/json".toMediaType()))
+            .withAuthHeaders()
             .build()
         try {
             httpClient.newCall(request).execute().close()
@@ -127,6 +145,7 @@ class CommandRelayService {
         val request = Request.Builder()
             .url("${settings.state.apiBaseUrl}/api/plugin/agents")
             .post(gson.toJson(body).toRequestBody("application/json".toMediaType()))
+            .withAuthHeaders()
             .build()
         try {
             httpClient.newCall(request).execute().close()
@@ -146,6 +165,7 @@ class CommandRelayService {
         val request = Request.Builder()
             .url("${settings.state.apiBaseUrl}/api/plugin/heartbeat")
             .post(gson.toJson(body).toRequestBody("application/json".toMediaType()))
+            .withAuthHeaders()
             .build()
         try {
             httpClient.newCall(request).execute().close()
@@ -162,6 +182,7 @@ class CommandRelayService {
         val request = Request.Builder()
             .url("${settings.state.apiBaseUrl}/api/commands/pending?pluginId=$pluginId")
             .get()
+            .withAuthHeaders()
             .build()
 
         try {
@@ -204,6 +225,7 @@ class CommandRelayService {
         val request = Request.Builder()
             .url("${settings.state.apiBaseUrl}/api/commands/result")
             .post(gson.toJson(body).toRequestBody("application/json".toMediaType()))
+            .withAuthHeaders()
             .build()
 
         try {

@@ -27,6 +27,7 @@ import com.windsurf.controller.services.FileOpsService
 import com.windsurf.controller.services.ProjectOpsService
 import com.windsurf.controller.services.McpServerDef
 import com.windsurf.controller.services.WebSocketService
+import com.windsurf.controller.services.withAuthHeaders
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.RequestBody.Companion.toRequestBody
@@ -378,8 +379,33 @@ class ControllerToolWindowFactory : ToolWindowFactory {
 
                 when (command.type) {
                     "start_task" -> {
-                        val prompt = command.payload.get("prompt")?.asString ?: ""
+                        var prompt = command.payload.get("prompt")?.asString ?: ""
                         val agentId = command.payload.get("agentId")?.asString
+                        // Inline @path attachments — mirror AgentBridgeService /
+                        // CLI's saveFilesTemp. Files arrive as base64 in the
+                        // payload; we materialize them to tmpdir and prefix the
+                        // prompt with `@path` references that Claude Code reads.
+                        // Schedule cleanup after 2 min so the prompt actually
+                        // gets a chance to consume them.
+                        val files = command.payload.getAsJsonArray("files")
+                        if (files != null && files.size() > 0) {
+                            val refs = mutableListOf<String>()
+                            for (el in files) {
+                                val f = el.asJsonObject
+                                val filename = f.get("filename")?.asString ?: continue
+                                val base64 = f.get("base64")?.asString ?: continue
+                                val safeName = filename.replace(Regex("[^a-zA-Z0-9._-]"), "_").take(80)
+                                val tmp = java.io.File(System.getProperty("java.io.tmpdir"), "codeagent-${System.currentTimeMillis()}-$safeName")
+                                tmp.writeBytes(java.util.Base64.getDecoder().decode(base64))
+                                refs.add("@${tmp.absolutePath}")
+                                Thread {
+                                    try { Thread.sleep(120_000); tmp.delete() } catch (_: Exception) {}
+                                }.start()
+                            }
+                            if (refs.isNotEmpty()) {
+                                prompt = "${refs.joinToString(" ")} $prompt".trim()
+                            }
+                        }
                         agent.startTask(prompt)
                         val sent = ide.sendPromptToAgent(prompt, agentId)
                         relay.sendResult(command.id, "completed", com.google.gson.JsonObject().apply {
@@ -504,6 +530,128 @@ class ControllerToolWindowFactory : ToolWindowFactory {
                         } else {
                             relay.sendResult(command.id, "completed", ProjectOpsService.getInstance().gitResolve(p, side))
                         }
+                    }
+                    "select_option" -> {
+                        // Navigate Claude Code's React Ink selector to the
+                        // chosen index (incl. the trust dialog at first pair).
+                        // The CLI counterpart insists arrows + Enter are paced
+                        // so React Ink batches keypresses correctly — same
+                        // contract honored by `TerminalAgentService.selectOption`.
+                        val target = command.payload.get("index")?.asInt ?: 0
+                        val current = command.payload.get("from")?.asInt
+                            ?: command.payload.get("currentIndex")?.asInt
+                            ?: 0
+                        TerminalAgentService.getInstance().selectOption(target, current)
+                        relay.sendResult(command.id, "completed", com.google.gson.JsonObject().apply {
+                            addProperty("message", "Option selected")
+                        })
+                    }
+                    "escape_key" -> {
+                        TerminalAgentService.getInstance().sendEscape()
+                        relay.sendResult(command.id, "completed", com.google.gson.JsonObject().apply {
+                            addProperty("message", "Escape sent")
+                        })
+                    }
+                    "cancel_task" -> {
+                        agent.cancelCurrentTask()
+                        relay.sendResult(command.id, "completed", com.google.gson.JsonObject().apply {
+                            addProperty("message", "Task cancelled")
+                        })
+                    }
+                    "resume_session" -> {
+                        // Mirror AgentBridgeService.handleAgentCommand's
+                        // `resume_session` arm: Ctrl+C the running prompt,
+                        // brief pause, then re-enter Claude with `--resume`.
+                        val sessionId = command.payload.get("id")?.asString
+                        if (sessionId.isNullOrEmpty()) {
+                            relay.sendResult(command.id, "failed", com.google.gson.JsonObject().apply {
+                                addProperty("error", "Missing session id")
+                            })
+                        } else {
+                            val auto = command.payload.get("auto")?.asBoolean ?: false
+                            val resumePrompt = if (auto) "--resume $sessionId --dangerously-skip-permissions" else "--resume $sessionId"
+                            val terminal = TerminalAgentService.getInstance()
+                            terminal.sendRawToTerminal("\u0003")
+                            Thread.sleep(500)
+                            terminal.sendPromptToClaudeCode(resumePrompt)
+                            relay.sendResult(command.id, "completed", com.google.gson.JsonObject().apply {
+                                addProperty("message", "Resumed session $sessionId")
+                            })
+                        }
+                    }
+                    "get_context" -> {
+                        // No live token-usage telemetry from a JetBrains
+                        // terminal session — return a sentinel shape mobile's
+                        // quota bar interprets as "unknown" (zeros + error).
+                        relay.sendResult(command.id, "completed", com.google.gson.JsonObject().apply {
+                            addProperty("used", 0)
+                            addProperty("total", 200000)
+                            addProperty("percent", 0)
+                            addProperty("model", null as String?)
+                            addProperty("outputTokens", 0)
+                            addProperty("cacheReadTokens", 0)
+                            addProperty("monthlyCost", 0)
+                            addProperty("error", "Token usage not tracked from JetBrains plugin")
+                        })
+                    }
+                    "get_conversation" -> {
+                        // No JSONL parsing on the JB side — the per-turn
+                        // `claude-conversation` upload (mode:'append') keeps
+                        // the canonical history fresh on the backend, so the
+                        // mobile canonical-refresh path still works. Just
+                        // ack with a null id so mobile knows there's nothing
+                        // to load directly from the plugin.
+                        relay.sendResult(command.id, "completed", com.google.gson.JsonObject().apply {
+                            add("conversationId", null)
+                        })
+                    }
+                    "list_models" -> {
+                        // Mirror the CLI's catalog so mobile's model picker
+                        // works the same on both surfaces. Keep this list in
+                        // sync with apps/cli/src/commands/start/handlers.ts.
+                        val models = com.google.gson.JsonArray()
+                        listOf(
+                            Triple("claude-opus-4-7", "Claude Opus 4.7", "Most capable"),
+                            Triple("claude-opus-4-6", "Claude Opus 4.6", "Top tier"),
+                            Triple("claude-sonnet-4-6", "Claude Sonnet 4.6", "Balanced"),
+                            Triple("claude-haiku-4-5-20251001", "Claude Haiku 4.5", "Fastest"),
+                        ).forEach { (id, label, description) ->
+                            models.add(com.google.gson.JsonObject().apply {
+                                addProperty("id", id)
+                                addProperty("label", label)
+                                addProperty("description", description)
+                                addProperty("family", "claude")
+                                addProperty("vendor", "anthropic")
+                                addProperty("isDefault", id == "claude-sonnet-4-6")
+                            })
+                        }
+                        relay.sendResult(command.id, "completed", com.google.gson.JsonObject().apply {
+                            add("models", models)
+                        })
+                    }
+                    "set_keep_alive" -> {
+                        // "Avoid suspend codespace on inactivity" toggle. The
+                        // JetBrains plugin always runs locally; report
+                        // `applied: false` so mobile hides the UI affordance.
+                        val enabled = command.payload.get("enabled")?.asBoolean ?: false
+                        relay.sendResult(command.id, "success", com.google.gson.JsonObject().apply {
+                            addProperty("enabled", enabled)
+                            addProperty("applied", false)
+                            addProperty("runtime", "local")
+                        })
+                    }
+                    "session_terminated", "shutdown_session" -> {
+                        // Mobile/web "Delete" or "Stop session". Tear
+                        // monitoring down and forget the pairing locally so
+                        // the user can pair fresh without restarting the IDE.
+                        try { TerminalAgentService.getInstance().stopMonitoring() } catch (_: Exception) {}
+                        try { AgentOutputMonitor.getInstance().stopMonitoring() } catch (_: Exception) {}
+                        try { agent.cancelCurrentTask() } catch (_: Exception) {}
+                        try { PairingService.getInstance().clearCurrentSession() } catch (_: Exception) {}
+                        try { relay.stopPolling() } catch (_: Exception) {}
+                        relay.sendResult(command.id, "success", com.google.gson.JsonObject().apply {
+                            addProperty("ok", true)
+                        })
                     }
                     else -> {
                         relay.sendResult(command.id, "failed", com.google.gson.JsonObject().apply {
@@ -892,6 +1040,7 @@ class ControllerToolWindowFactory : ToolWindowFactory {
                         .url("${settings.state.apiBaseUrl}/api/pairing/reconnect")
                         .post(com.google.gson.Gson().toJson(body)
                             .toRequestBody("application/json".toMediaType()))
+                        .withAuthHeaders()
                         .build()
                     val response = httpClient.newCall(request).execute()
                     val responseBody = response.body?.string()
@@ -960,6 +1109,7 @@ class ControllerToolWindowFactory : ToolWindowFactory {
                     val request = okhttp3.Request.Builder()
                         .url("${settings.state.apiBaseUrl}/api/pairing/sessions/${session.sessionId}")
                         .delete()
+                        .withAuthHeaders()
                         .build()
                     val response = httpClient.newCall(request).execute()
                     response.close()

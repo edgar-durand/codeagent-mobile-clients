@@ -142,6 +142,14 @@ class PairingService {
                             currentPeriodEnd = userObj.get("currentPeriodEnd")?.takeIf { !it.isJsonNull }?.asString
                         )
                     }
+                    // Persist the per-pairing token. Replayed as
+                    // `X-Plugin-Auth-Token` on every authed call so
+                    // we still pass auth after the legacy fallback
+                    // expires (2026-05-25).
+                    val rawToken = data.get("pluginAuthToken")?.takeIf { !it.isJsonNull }?.asString
+                    if (!rawToken.isNullOrEmpty()) {
+                        SettingsService.getInstance().setPluginAuthToken(rawToken)
+                    }
                     currentSessionId = sessionId
                     logger.info("Pairing detected! Session: $sessionId, user: ${pairedUser?.email}")
                     stopPolling()
@@ -170,6 +178,7 @@ class PairingService {
     fun clearCurrentSession() {
         currentSessionId = null
         pairedUser = null
+        SettingsService.getInstance().setPluginAuthToken(null)
     }
 
     fun onReconnected(sessionId: String, user: PairedUserInfo) {

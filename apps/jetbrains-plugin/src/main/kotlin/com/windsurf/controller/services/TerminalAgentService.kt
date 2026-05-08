@@ -50,6 +50,24 @@ class TerminalAgentService {
     private var hasContent: Boolean = false
     private var promptText: String = ""
     private var projectRef: WeakReference<Project>? = null
+    /**
+     * Last `select_prompt` we shipped, expressed as a stable string
+     * fingerprint (question + options joined). Suppresses duplicate
+     * emissions while the selector is still on screen — without this
+     * the polling loop would re-ship the same prompt every tick.
+     * Cleared when the selector goes away so a future identical-shape
+     * selector is treated as fresh.
+     */
+    private var lastSelectorSignature: String? = null
+    /**
+     * Set of `tool|label` signatures we've already shipped as part of
+     * the current turn's `chrome_steps` stream. Mirrors the CLI's
+     * delta-protocol contract: each tick we re-scan the terminal for
+     * chrome lines, and emit only the steps not present in this set
+     * (so mobile sees a monotonically growing thinking timeline).
+     * Cleared at the start of each turn via `startMonitoring`.
+     */
+    private val seenChromeSignatures: MutableSet<String> = mutableSetOf()
 
     companion object {
         private const val POLL_INTERVAL_MS = 2000L
@@ -902,6 +920,11 @@ class TerminalAgentService {
         stableCount = 0
         hasContent = false
         lastSentText = ""
+        // Reset per-turn dedup state: chrome timeline restarts on a
+        // new turn, and any leftover selector signature is no longer
+        // representative of what's on screen.
+        seenChromeSignatures.clear()
+        lastSelectorSignature = null
 
         clearRemoteOutput(sessionId)
 
@@ -933,6 +956,54 @@ class TerminalAgentService {
         }
         logger.info("pollTerminalOutput: raw text length=${terminalText.length}, preview=${terminalText.takeLast(100).replace("\n", "\\n")}")
 
+        // Selector detection. We feed the detector the ANSI-stripped
+        // (but otherwise unmodified) screen lines so it can see the
+        // chrome glyphs the CLI's `selector.ts` expects. Has to run
+        // BEFORE `extractResponseAfterPrompt` / `cleanTerminalOutput`
+        // — those pass shred the cursor (❯) and box characters the
+        // detector keys on.
+        //
+        // Critical for cold-pair UX: this is how the trust dialog
+        // ("Do you trust the files in this folder?") becomes tappable
+        // on mobile. Without it, the plugin user has to physically
+        // pick option 1 in the IDE, defeating the remote-control flow.
+        val selectorLines = terminalText
+            .replace(Regex("\\x1B\\[[0-9;]*[a-zA-Z]"), "")
+            .lines()
+        val selector = SelectorDetector.detectSelector(selectorLines)
+            ?: SelectorDetector.detectListSelector(selectorLines)
+        if (selector != null && lastSelectorSignature != selector.signature()) {
+            lastSelectorSignature = selector.signature()
+            pushSelectPrompt(sessionId, selector)
+            // Don't follow with a text chunk — the selector is the turn.
+            return
+        }
+        if (selector == null && lastSelectorSignature != null) {
+            // Selector closed (user picked an option, dialog dismissed,
+            // etc.) — drop the signature so a future selector with the
+            // same options still emits.
+            lastSelectorSignature = null
+        }
+
+        // Chrome-step delta. Walk the same ANSI-stripped lines and
+        // pull anything ChromeParser flags as TUI chrome. Dedup by
+        // tool|label signature against everything we've already
+        // shipped this turn, then emit just the new ones as one
+        // `chrome_steps` chunk so mobile's thinking timeline grows
+        // monotonically. Mirrors the CLI's delta protocol.
+        val deltaSteps = mutableListOf<ChromeStep>()
+        for (line in selectorLines) {
+            if (!ChromeParser.isChromeLine(line)) continue
+            val step = ChromeParser.parseChromeLine(line) ?: continue
+            val sig = step.signature()
+            if (seenChromeSignatures.add(sig)) {
+                deltaSteps.add(step)
+            }
+        }
+        if (deltaSteps.isNotEmpty()) {
+            pushChromeSteps(sessionId, deltaSteps)
+        }
+
         // Extract response: everything after the prompt text
         val responseText = extractResponseAfterPrompt(terminalText)
         if (responseText.isBlank()) {
@@ -946,6 +1017,18 @@ class TerminalAgentService {
             if (stableCount >= STABLE_THRESHOLD && hasContent) {
                 logger.info("Terminal output stabilized after ${stableCount * POLL_INTERVAL_MS}ms")
                 pushOutput(sessionId, "text", responseText, done = true)
+                // Per-turn conversation upload — mirrors the CLI's
+                // `historySvc.uploadDelta()` from `onTurnComplete`. Posts
+                // the user prompt and the final agent response as the
+                // turn's delta with `mode: 'append'` so the server's
+                // dedup-by-uuid keeps it idempotent. Without this the
+                // mobile sessions-list and canonical-refresh paths see
+                // an empty history for JB-driven turns.
+                try {
+                    pushConversationDelta(sessionId, promptText, responseText)
+                } catch (e: Exception) {
+                    logger.warn("Conversation delta upload failed: ${e.message}")
+                }
                 stopMonitoring()
             }
             return
@@ -1028,12 +1111,140 @@ class TerminalAgentService {
         val request = Request.Builder()
             .url("${settings.state.apiBaseUrl}/api/commands/output")
             .post(gson.toJson(body).toRequestBody("application/json".toMediaType()))
+            .withAuthHeaders()
             .build()
         try {
             httpClient.newCall(request).execute().close()
             logger.info("Pushed terminal output to API: type=$type, done=$done, length=${content.length}")
         } catch (e: Exception) {
             logger.warn("Failed to push terminal output: ${e.message}")
+        }
+    }
+
+    /**
+     * Ship a `chrome_steps` chunk with only the steps we haven't
+     * sent yet this turn. Mobile / web append these to the active
+     * agent message's thinking timeline (read/edit/bash/search/…).
+     * The wire shape — `appendSteps: ChromeStep[]` — matches the
+     * discriminated `OutputChunk` union the frontends already
+     * understand from CLI emissions.
+     */
+    private fun pushChromeSteps(sessionId: String, steps: List<ChromeStep>) {
+        if (steps.isEmpty()) return
+        val settings = SettingsService.getInstance()
+        val pluginId = settings.ensurePluginId()
+        val arr = com.google.gson.JsonArray()
+        for (s in steps) {
+            arr.add(JsonObject().apply {
+                addProperty("tool", s.tool)
+                addProperty("label", s.label)
+                val detail = s.detail
+                if (detail != null) addProperty("detail", detail)
+                addProperty("status", s.status)
+            })
+        }
+        val body = JsonObject().apply {
+            addProperty("sessionId", sessionId)
+            addProperty("pluginId", pluginId)
+            addProperty("type", "chrome_steps")
+            add("appendSteps", arr)
+        }
+        val request = Request.Builder()
+            .url("${settings.state.apiBaseUrl}/api/commands/output")
+            .post(gson.toJson(body).toRequestBody("application/json".toMediaType()))
+            .withAuthHeaders()
+            .build()
+        try {
+            httpClient.newCall(request).execute().close()
+            logger.info("Pushed ${steps.size} chrome step(s)")
+        } catch (e: Exception) {
+            logger.warn("Failed to push chrome_steps: ${e.message}")
+        }
+    }
+
+    /**
+     * Push the turn's user prompt + agent response as a 2-message
+     * delta to `/api/sessions/claude-conversation` with `mode:'append'`.
+     * Server merges by `id` so a retry of the same turn is a no-op.
+     *
+     * The CLI uploads from the parsed `~/.claude/projects/<id>.jsonl`
+     * which gives it markdown-rich source text (with code fences,
+     * tool blocks, etc.). The JetBrains plugin only sees the rendered
+     * terminal output, so the agent message here is the PTY-cleaned
+     * text — sufficient for the mobile sessions-list and recovery-on-
+     * reentry, but lacks the structured blocks the CLI sessions get.
+     * Documented as a known fidelity gap; full parity would require
+     * porting the JSONL parser and project-dir resolution.
+     */
+    private fun pushConversationDelta(sessionId: String, userPrompt: String, agentResponse: String) {
+        if (userPrompt.isBlank() && agentResponse.isBlank()) return
+        val settings = SettingsService.getInstance()
+        val pluginId = settings.ensurePluginId()
+        val now = System.currentTimeMillis()
+        val msgs = com.google.gson.JsonArray()
+        if (userPrompt.isNotBlank()) {
+            msgs.add(JsonObject().apply {
+                addProperty("id", "jb-${now}-u")
+                addProperty("role", "user")
+                addProperty("text", userPrompt)
+                addProperty("timestamp", now)
+            })
+        }
+        if (agentResponse.isNotBlank()) {
+            msgs.add(JsonObject().apply {
+                addProperty("id", "jb-${now}-a")
+                addProperty("role", "agent")
+                addProperty("text", agentResponse)
+                addProperty("timestamp", now + 1)
+            })
+        }
+        val body = JsonObject().apply {
+            addProperty("pluginId", pluginId)
+            addProperty("sessionId", sessionId)
+            addProperty("mode", "append")
+            add("messages", msgs)
+        }
+        val request = Request.Builder()
+            .url("${settings.state.apiBaseUrl}/api/sessions/claude-conversation")
+            .post(gson.toJson(body).toRequestBody("application/json".toMediaType()))
+            .withAuthHeaders()
+            .build()
+        try {
+            httpClient.newCall(request).execute().close()
+            logger.info("Pushed conversation delta: ${msgs.size()} message(s) to session $sessionId")
+        } catch (e: Exception) {
+            logger.warn("Failed to push conversation delta: ${e.message}")
+        }
+    }
+
+    private fun pushSelectPrompt(sessionId: String, prompt: SelectPrompt) {
+        val settings = SettingsService.getInstance()
+        val pluginId = settings.ensurePluginId()
+        val optsArr = com.google.gson.JsonArray().apply {
+            prompt.options.forEach { add(it) }
+        }
+        val descsArr = com.google.gson.JsonArray().apply {
+            prompt.optionDescriptions.forEach { add(it) }
+        }
+        val body = JsonObject().apply {
+            addProperty("sessionId", sessionId)
+            addProperty("pluginId", pluginId)
+            addProperty("type", "select_prompt")
+            addProperty("content", prompt.question)
+            add("options", optsArr)
+            add("optionDescriptions", descsArr)
+            addProperty("currentIndex", prompt.currentIndex)
+        }
+        val request = Request.Builder()
+            .url("${settings.state.apiBaseUrl}/api/commands/output")
+            .post(gson.toJson(body).toRequestBody("application/json".toMediaType()))
+            .withAuthHeaders()
+            .build()
+        try {
+            httpClient.newCall(request).execute().close()
+            logger.info("Pushed select_prompt: ${prompt.options.size} option(s), currentIndex=${prompt.currentIndex}")
+        } catch (e: Exception) {
+            logger.warn("Failed to push select_prompt: ${e.message}")
         }
     }
 
@@ -1048,6 +1259,7 @@ class TerminalAgentService {
         val request = Request.Builder()
             .url("${settings.state.apiBaseUrl}/api/commands/output")
             .post(gson.toJson(body).toRequestBody("application/json".toMediaType()))
+            .withAuthHeaders()
             .build()
         try {
             httpClient.newCall(request).execute().close()

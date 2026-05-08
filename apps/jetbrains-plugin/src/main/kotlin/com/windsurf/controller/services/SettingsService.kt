@@ -27,7 +27,15 @@ class SettingsService : PersistentStateComponent<SettingsService.State> {
         var autoConnect: Boolean = true,
         var showNotifications: Boolean = true,
         var heartbeatIntervalMs: Long = 30000,
-        var recentSessions: MutableList<RecentSession> = mutableListOf()
+        var recentSessions: MutableList<RecentSession> = mutableListOf(),
+        /**
+         * Per-pairing token returned by the backend at
+         * `/api/pairing/status` once `paired: true`. Replayed as
+         * `X-Plugin-Auth-Token` on every authed call so we still
+         * pass auth after the legacy fallback expires (2026-05-25).
+         * Empty string when not yet paired.
+         */
+        var pluginAuthToken: String = ""
     )
 
     fun addRecentSession(session: RecentSession) {
@@ -57,6 +65,13 @@ class SettingsService : PersistentStateComponent<SettingsService.State> {
             myState.pluginId = java.util.UUID.randomUUID().toString()
         }
         return myState.pluginId
+    }
+
+    fun getPluginAuthToken(): String? =
+        myState.pluginAuthToken.takeIf { it.isNotEmpty() }
+
+    fun setPluginAuthToken(token: String?) {
+        myState.pluginAuthToken = token ?: ""
     }
 
     companion object {

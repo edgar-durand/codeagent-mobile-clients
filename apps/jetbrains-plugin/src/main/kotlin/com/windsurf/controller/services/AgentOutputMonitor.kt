@@ -808,6 +808,7 @@ class AgentOutputMonitor {
             val request = Request.Builder()
                 .url("${settings.state.apiBaseUrl}/api/commands/output")
                 .post(gson.toJson(body).toRequestBody("application/json".toMediaType()))
+                .withAuthHeaders()
                 .build()
             try {
                 httpClient.newCall(request).execute().close()
@@ -824,6 +825,7 @@ class AgentOutputMonitor {
             val request = Request.Builder()
                 .url("${settings.state.apiBaseUrl}/api/commands/output?sessionId=$sessionId")
                 .delete()
+                .withAuthHeaders()
                 .build()
             try {
                 httpClient.newCall(request).execute().close()
