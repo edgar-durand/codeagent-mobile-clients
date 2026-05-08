@@ -4,6 +4,25 @@ All notable changes to the CodeAgent Mobile VS Code extension are documented her
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.6.0] — 2026-05-08
+
+### Added
+
+- **vsc-plugin:** Replay X-Plugin-Auth-Token + delta conversation upload
+- **jetbrains-plugin:** Full parity with CLI — auth token, missing handlers, chunk emissions
+
+### CI
+
+- **release:** Make verifyPlugin non-fatal so JetBrains release ships
+
+### Chore
+
+- **cli:** Bump source version to 2.6.0 for unified release line
+
+### Fixed
+
+- **shared:** Selector detector locks onto trust-dialog text without a cursor
+
 ## [2.5.4] — 2026-05-07
 
 ### Fixed
