@@ -1,0 +1,19 @@
+<!--
+  Tool window icon for the CodeAgent Mobile sidebar tab. Strips the
+  rounded-rectangle backdrop the app icon has — at 13×13 px the
+  backdrop disappears anyway, and the `</>` mark needs to fill the
+  glyph cell to stay legible. Same violet→fuchsia brand gradient.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="16" height="16">
+  <defs>
+    <linearGradient id="tw-brand" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#a78bfa"/>
+      <stop offset="100%" stop-color="#e879f9"/>
+    </linearGradient>
+  </defs>
+  <g stroke="url(#tw-brand)" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" fill="none">
+    <polyline points="5,2 1.6,8 5,14"/>
+    <polyline points="11,2 14.4,8 11,14"/>
+    <line x1="9.5" y1="1.5" x2="6.5" y2="14.5"/>
+  </g>
+</svg>

@@ -30,6 +30,7 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
 import javax.accessibility.AccessibleContext
+import javax.swing.SwingUtilities
 import javax.accessibility.AccessibleText
 import javax.swing.JEditorPane
 import javax.swing.JLabel
@@ -73,6 +74,13 @@ class AgentOutputMonitor {
     private var currentPromptText: String = ""
     private var responseDoneSent: Boolean = false
     private var lastSentResponseText: String = ""
+    /**
+     * Opt-in flag set by {@link JetBrainsAIAssistantStrategy}. When
+     * true, `captureToolWindowContent` also walks live `Editor` hosts
+     * inside the tool window — needed for JetBrains AI Assistant
+     * because its bubbles live inside `EditorComponentImpl`.
+     */
+    private var captureEmbeddedEditorEnabled: Boolean = false
 
     companion object {
         private const val POLL_INTERVAL_MS = 2000L
@@ -82,12 +90,30 @@ class AgentOutputMonitor {
             ApplicationManager.getApplication().getService(AgentOutputMonitor::class.java)
     }
 
-    fun startMonitoring(sessionId: String, toolWindowId: String, promptText: String) {
+    /**
+     * Begin polling the given tool window for response output.
+     *
+     * `captureEmbeddedEditor` opt-in: when true, after the standard
+     * Swing scrape we also pull `editor.document.text` for every live
+     * `EditorEx` hosted under the tool window. Required for the
+     * JetBrains AI Assistant panel — its message bubbles render
+     * inside `EditorComponentImpl`, which is NOT a `JTextComponent`,
+     * so the standard Swing scrape misses them. Other strategies pass
+     * `false` so their behaviour is identical to the pre-strategy
+     * implementation.
+     */
+    fun startMonitoring(
+        sessionId: String,
+        toolWindowId: String,
+        promptText: String,
+        captureEmbeddedEditor: Boolean = false,
+    ) {
         stopMonitoring()
 
         currentSessionId = sessionId
         currentToolWindowId = toolWindowId
         currentPromptText = promptText.trim()
+        captureEmbeddedEditorEnabled = captureEmbeddedEditor
         projectRef = WeakReference(
             ProjectManager.getInstance().openProjects.firstOrNull()
         )
@@ -125,6 +151,7 @@ class AgentOutputMonitor {
         pollCount = 0
         hasEverCapturedContent = false
         responseDoneSent = false
+        captureEmbeddedEditorEnabled = false
         detachFromProcess()
         stopCaptureServer()
         cleanupJcefConsoleHandler()
@@ -390,6 +417,18 @@ class AgentOutputMonitor {
                     logger.info("Tool window component types: ${componentTypes.joinToString(", ")}")
                 }
 
+                // Opt-in pass for tool windows that render message
+                // bubbles inside `EditorComponentImpl` (JetBrains AI
+                // Assistant, PR AI Assistant). Strategies that need it
+                // call `startMonitoring(..., captureEmbeddedEditor = true)`;
+                // every other strategy sees no behavioural change.
+                if (captureEmbeddedEditorEnabled) {
+                    for (c in content) {
+                        val component = c.component ?: continue
+                        collectEmbeddedEditorText(component, textParts, componentTypes)
+                    }
+                }
+
                 if (textParts.isNotEmpty()) {
                     result.set(textParts.joinToString("\n"))
                 } else {
@@ -548,6 +587,33 @@ class AgentOutputMonitor {
             for (i in 0 until component.componentCount) {
                 collectAccessibleText(component.getComponent(i), sb, depth + 1)
             }
+        }
+    }
+
+    /**
+     * Append the document text of every live `Editor` (IntelliJ's
+     * `EditorEx` / `EditorComponentImpl`) that lives inside the given
+     * Swing root. `JTextComponent.getText()` returns nothing for these,
+     * so without this pass the AIAssistant chat (and any other tool
+     * window that hosts an embedded code editor) looks empty to the
+     * snapshot diff.
+     */
+    private fun collectEmbeddedEditorText(
+        root: Component,
+        textParts: MutableList<String>,
+        types: MutableSet<String>,
+    ) {
+        try {
+            val editors = EditorFactory.getInstance().allEditors
+            for (editor in editors) {
+                val editorComponent = editor.component
+                if (!SwingUtilities.isDescendingFrom(editorComponent, root)) continue
+                types.add(editorComponent.javaClass.name)
+                val text = try { editor.document.text } catch (_: Exception) { "" }
+                if (text.isNotBlank()) textParts.add(text)
+            }
+        } catch (e: Exception) {
+            logger.debug("collectEmbeddedEditorText failed: ${e.message}")
         }
     }
 

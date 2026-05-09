@@ -1,12 +1,21 @@
+<!--
+  Plugin Marketplace icon (light theme). 40×40 to match JetBrains'
+  recommended size. Mirrors the CodeAgent Mobile app icon: rounded
+  white tile + violet→fuchsia "</>" mark. Keep this in sync with the
+  mobile app icon at codeagent-mobile/apps/landing/public/app-icon.png
+  if the brand mark changes.
+-->
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 40" width="40" height="40">
   <defs>
-    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" stop-color="#8b5cf6"/>
-      <stop offset="100%" stop-color="#6366f1"/>
+    <linearGradient id="brand" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#a78bfa"/>
+      <stop offset="100%" stop-color="#e879f9"/>
     </linearGradient>
   </defs>
-  <rect width="40" height="40" rx="9" fill="url(#bg)"/>
-  <path d="M14 14 L8 20 L14 26" fill="none" stroke="#ffffff" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
-  <path d="M26 14 L32 20 L26 26" fill="none" stroke="#ffffff" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
-  <line x1="22.5" y1="12" x2="17.5" y2="28" stroke="#ffffff" stroke-width="2.5" stroke-linecap="round"/>
+  <rect width="40" height="40" rx="9" fill="#ffffff" stroke="#e5e7eb" stroke-width="1"/>
+  <g stroke="url(#brand)" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" fill="none">
+    <polyline points="15,15 9,20 15,25"/>
+    <polyline points="25,15 31,20 25,25"/>
+    <line x1="22.5" y1="12.5" x2="17.5" y2="27.5"/>
+  </g>
 </svg>

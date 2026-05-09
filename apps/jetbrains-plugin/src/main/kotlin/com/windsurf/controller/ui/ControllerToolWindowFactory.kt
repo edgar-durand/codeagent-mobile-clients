@@ -27,6 +27,8 @@ import com.windsurf.controller.services.FileOpsService
 import com.windsurf.controller.services.ProjectOpsService
 import com.windsurf.controller.services.McpServerDef
 import com.windsurf.controller.services.WebSocketService
+import com.windsurf.controller.services.strategies.AgentInvocation
+import com.windsurf.controller.services.strategies.AgentStrategyRegistry
 import com.windsurf.controller.services.withAuthHeaders
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
@@ -375,8 +377,6 @@ class ControllerToolWindowFactory : ToolWindowFactory {
                 val relay = CommandRelayService.getInstance()
                 val ide = IdeIntegrationService.getInstance()
 
-                val outputMonitor = AgentOutputMonitor.getInstance()
-
                 when (command.type) {
                     "start_task" -> {
                         var prompt = command.payload.get("prompt")?.asString ?: ""
@@ -407,28 +407,31 @@ class ControllerToolWindowFactory : ToolWindowFactory {
                             }
                         }
                         agent.startTask(prompt)
-                        val sent = ide.sendPromptToAgent(prompt, agentId)
-                        relay.sendResult(command.id, "completed", com.google.gson.JsonObject().apply {
-                            addProperty("message", "Task started: $prompt")
-                        })
-                        if (sent) {
-                            val targetAgent = if (agentId != null) {
-                                ide.detectInstalledAgents().find { it.id == agentId }
-                            } else {
-                                ide.detectInstalledAgents().firstOrNull()
-                            }
-                            val twId = targetAgent?.toolWindowId ?: ""
-                            if (twId.startsWith("__terminal__:")) {
-                                val terminalMonitor = TerminalAgentService.getInstance()
-                                terminalMonitor.startMonitoring(command.sessionId, prompt)
-                            } else if (twId.isNotEmpty()) {
-                                outputMonitor.startMonitoring(command.sessionId, twId, prompt)
-                            }
+                        // Resolve the target agent up front so we can hand a
+                        // typed `AgentInvocation` to the strategy registry.
+                        // The registry then picks the right strategy based on
+                        // toolWindowId / pluginId, sends the prompt and wires
+                        // up the matching output monitor — everything that
+                        // used to live as inline if/else here.
+                        val targetAgent = if (agentId != null) {
+                            ide.detectInstalledAgents().find { it.id == agentId }
+                        } else {
+                            ide.detectInstalledAgents().firstOrNull()
                         }
+                        val sent = AgentStrategyRegistry.getInstance().execute(
+                            AgentInvocation(
+                                project = project,
+                                agent = targetAgent,
+                                prompt = prompt,
+                                sessionId = command.sessionId,
+                            )
+                        )
+                        relay.sendResult(command.id, "completed", com.google.gson.JsonObject().apply {
+                            addProperty("message", if (sent) "Task started: $prompt" else "Could not deliver prompt — copied to clipboard")
+                        })
                     }
                     "stop_task" -> {
-                        outputMonitor.stopMonitoring()
-                        TerminalAgentService.getInstance().stopMonitoring()
+                        AgentStrategyRegistry.getInstance().stop()
                         agent.stopCurrentTask()
                         relay.sendResult(command.id, "completed", com.google.gson.JsonObject().apply {
                             addProperty("message", "Task stopped")
@@ -1053,6 +1056,18 @@ class ControllerToolWindowFactory : ToolWindowFactory {
                             val userObj = dataObj?.getAsJsonObject("user")
                             val plan = userObj?.get("plan")?.asString ?: session.userPlan
                             val periodEnd = userObj?.get("currentPeriodEnd")?.takeIf { !it.isJsonNull }?.asString
+                            // Persist the freshly-replayed plugin auth
+                            // token so post-reconnect calls (e.g. the
+                            // mint-cli-token flow that drives Claude
+                            // Code auto-pair) have it available.
+                            // Sessions paired before plugin v2.x never
+                            // had the token persisted; reconnect is
+                            // their upgrade path.
+                            val refreshedAuthToken = dataObj?.get("pluginAuthToken")
+                                ?.takeIf { !it.isJsonNull }?.asString
+                            if (!refreshedAuthToken.isNullOrEmpty()) {
+                                settings.setPluginAuthToken(refreshedAuthToken)
+                            }
                             SwingUtilities.invokeLater {
                                 // Trigger pairing flow as if newly paired
                                 pairing.onReconnected(
