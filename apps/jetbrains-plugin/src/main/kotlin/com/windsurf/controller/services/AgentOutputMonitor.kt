@@ -82,6 +82,19 @@ class AgentOutputMonitor {
      */
     private var captureEmbeddedEditorEnabled: Boolean = false
 
+    /**
+     * Per-agent capture seam. Set by strategies that own a
+     * {@link com.windsurf.controller.services.strategies.MessageExtractor}
+     * (Copilot, AI Assistant, …). When non-null, `checkForChanges`
+     * delegates the snapshot to the extractor and emits chunks based
+     * on its result — no agent-specific code in this class. When null,
+     * the legacy Swing/JCEF/accessibility scrape runs (Cascade /
+     * Windsurf / Codeium and friends).
+     */
+    private var currentExtractor: com.windsurf.controller.services.strategies.MessageExtractor? = null
+    private var extractorLastSentMarkdown: String = ""
+    private var extractorStableCount: Int = 0
+
     companion object {
         private const val POLL_INTERVAL_MS = 2000L
         private const val STABLE_THRESHOLD = 3
@@ -107,6 +120,7 @@ class AgentOutputMonitor {
         toolWindowId: String,
         promptText: String,
         captureEmbeddedEditor: Boolean = false,
+        extractor: com.windsurf.controller.services.strategies.MessageExtractor? = null,
     ) {
         stopMonitoring()
 
@@ -114,6 +128,9 @@ class AgentOutputMonitor {
         currentToolWindowId = toolWindowId
         currentPromptText = promptText.trim()
         captureEmbeddedEditorEnabled = captureEmbeddedEditor
+        currentExtractor = extractor
+        extractorLastSentMarkdown = ""
+        extractorStableCount = 0
         projectRef = WeakReference(
             ProjectManager.getInstance().openProjects.firstOrNull()
         )
@@ -133,12 +150,18 @@ class AgentOutputMonitor {
 
         clearRemoteOutput(sessionId)
 
+        // Extractor-driven agents poll a small, scoped subtree (one
+        // assistant bubble for Copilot, the Compose accessibility tree
+        // for AI Assistant), so we can afford a faster cadence — 500 ms
+        // feels close to CLI streaming. Legacy scrape-based agents use
+        // the original 2 s cadence.
+        val intervalMs = if (extractor != null) 500L else POLL_INTERVAL_MS
         monitorTimer = Timer("agent-output-monitor", true).apply {
             scheduleAtFixedRate(object : TimerTask() {
                 override fun run() {
                     checkForChanges()
                 }
-            }, POLL_INTERVAL_MS, POLL_INTERVAL_MS)
+            }, intervalMs, intervalMs)
         }
     }
 
@@ -152,6 +175,9 @@ class AgentOutputMonitor {
         hasEverCapturedContent = false
         responseDoneSent = false
         captureEmbeddedEditorEnabled = false
+        currentExtractor = null
+        extractorLastSentMarkdown = ""
+        extractorStableCount = 0
         detachFromProcess()
         stopCaptureServer()
         cleanupJcefConsoleHandler()
@@ -236,6 +262,15 @@ class AgentOutputMonitor {
 
         val sessionId = currentSessionId ?: return
         pollCount++
+
+        // Per-agent capture seam: when a strategy registered an
+        // extractor, delegate the snapshot to it and emit chunks
+        // generically. No agent-specific code lives in this class.
+        val extractor = currentExtractor
+        if (extractor != null) {
+            handleExtractorPoll(sessionId, extractor)
+            return
+        }
 
         val currentContent = captureToolWindowContent() ?: ""
 
@@ -782,53 +817,11 @@ class AgentOutputMonitor {
                 }
             }
 
-            // Execute JS to capture body text + attempt HTML capture of response elements
-            // Use CefFrame interface (exported) instead of concrete RemoteFrame class (non-exported module)
-            val escapedPrompt = currentPromptText.replace("'", "\\'")
-            val js = """(function(){
-              try {
-                var t = document.body ? (document.body.innerText || '') : '';
-                if (t.length > 5) console.log('__CAGENT__:' + t);
-
-                // Find last agent response HTML via Cascade DOM structure:
-                // .cascade-scrollbar > div > div > div[many children] > last-child
-                var scroll = document.querySelector('.cascade-scrollbar');
-                if (!scroll) return;
-
-                // Find the messages container: deepest descendant with 5+ direct children
-                var msgContainer = null;
-                var candidates = scroll.querySelectorAll('div');
-                for (var i = 0; i < candidates.length; i++) {
-                  if (candidates[i].children.length >= 5) {
-                    if (!msgContainer || candidates[i].children.length > msgContainer.children.length) {
-                      msgContainer = candidates[i];
-                    }
-                  }
-                }
-                if (!msgContainer || msgContainer.children.length < 2) return;
-
-                // Walk backwards to find actual response element (skip feedback/UI elements)
-                var responseEl = null;
-                var skipPatterns = ['Feedback submitted', 'Was this response helpful'];
-                for (var j = msgContainer.children.length - 1; j >= 0; j--) {
-                  var child = msgContainer.children[j];
-                  var txt = (child.innerText || '').trim();
-                  if (txt.length < 10) continue;
-                  var isUI = false;
-                  for (var k = 0; k < skipPatterns.length; k++) {
-                    if (txt.indexOf(skipPatterns[k]) >= 0 && txt.length < 200) { isUI = true; break; }
-                  }
-                  if (!isUI) { responseEl = child; break; }
-                }
-                if (responseEl && responseEl.innerHTML && responseEl.innerHTML.length > 20) {
-                  console.log('__CAGENT_HTML__:' + responseEl.innerHTML);
-                  var respText = (responseEl.innerText || '').trim();
-                  if (respText.length > 3) {
-                    console.log('__CAGENT_RESPONSE__:' + respText);
-                  }
-                }
-              } catch(e) {}
-            })();""".trimIndent()
+            // Execute JS to capture body text + attempt HTML capture of response elements.
+            // Use CefFrame interface (exported) instead of concrete RemoteFrame class
+            // (non-exported module). Only the Cascade/Windsurf path uses JCEF; agents
+            // with their own MessageExtractor (Copilot, AI Assistant) never reach this.
+            val js = buildCascadeInjectionJs()
             val cefFrameIface = Class.forName("org.cef.browser.CefFrame", true, jcefCL)
             val mainFrame = cefBrowserIface.getMethod("getMainFrame").invoke(cefBrowser)
             if (mainFrame != null) {
@@ -859,6 +852,145 @@ class AgentOutputMonitor {
         text = text.replace(Regex("\\n{3,}"), "\n\n")
         return text.trim()
     }
+
+    // ---------------------------------------------------------------
+    // Generic extractor-driven poll
+    // ---------------------------------------------------------------
+    //
+    // The polling loop, dedup state, push protocol, and turn lifecycle
+    // live here. The agent-specific knowledge (where the bubbles are,
+    // how to convert them to markdown, how to detect "done") lives in
+    // each strategy's MessageExtractor. That keeps this class agnostic
+    // of any one agent and lets us add new providers by writing a new
+    // extractor — no edits to AgentOutputMonitor.
+
+    private fun handleExtractorPoll(
+        sessionId: String,
+        extractor: com.windsurf.controller.services.strategies.MessageExtractor,
+    ) {
+        val project = projectRef?.get() ?: return
+        val twId = currentToolWindowId ?: return
+        val twRef = AtomicReference<com.intellij.openapi.wm.ToolWindow?>(null)
+        val app = ApplicationManager.getApplication()
+        val twTask = Runnable {
+            twRef.set(ToolWindowManager.getInstance(project).getToolWindow(twId))
+        }
+        if (app.isDispatchThread) twTask.run() else {
+            try { app.invokeAndWait(twTask) } catch (_: Exception) {}
+        }
+        val tw = twRef.get() ?: return
+
+        val msg = try {
+            extractor.extract(project, tw, currentPromptText)
+        } catch (e: Exception) {
+            logger.debug("Extractor threw: ${e.message}")
+            null
+        }
+
+        if (msg == null) {
+            if (!hasEverCapturedContent && pollCount >= MAX_EMPTY_POLLS) {
+                logger.warn("No message captured after $MAX_EMPTY_POLLS polls (extractor=${extractor.javaClass.simpleName})")
+                pushOutput(sessionId, "status", "Could not capture agent response.", done = true)
+                stopMonitoring()
+            }
+            return
+        }
+
+        val md = msg.markdown
+        if (md.isBlank()) return
+
+        // Explicit done signal from the extractor (e.g. Copilot's
+        // "Completed" pill). Always emit a final chunk so the mobile
+        // UI's streaming indicator closes immediately.
+        if (msg.isDone == true) {
+            if (!responseDoneSent) {
+                extractorLastSentMarkdown = md
+                hasEverCapturedContent = true
+                responseDoneSent = true
+                pushOutput(sessionId, "text", md, done = true)
+                logger.info("Extractor done (explicit): emitted final chunk (${md.length} chars)")
+            }
+            return
+        }
+
+        if (md == extractorLastSentMarkdown) {
+            // Content unchanged. If the extractor can't tell us when
+            // generation finishes (isDone == null), fall back to the
+            // stability heuristic: emit a final chunk after the response
+            // has been steady for STABLE_THRESHOLD polls.
+            if (msg.isDone == null && hasEverCapturedContent && !responseDoneSent) {
+                extractorStableCount++
+                if (extractorStableCount >= STABLE_THRESHOLD) {
+                    responseDoneSent = true
+                    pushOutput(sessionId, "text", md, done = true)
+                    logger.info("Extractor done (stability): emitted final chunk (${md.length} chars)")
+                }
+            }
+            return
+        }
+
+        // Content changed — reset stability counter and emit a delta.
+        extractorStableCount = 0
+        if (responseDoneSent) {
+            // A new turn started after a previously-completed reply.
+            // Reset the chunk pipeline before emitting the first delta.
+            responseDoneSent = false
+            extractorLastSentMarkdown = ""
+            clearRemoteOutput(sessionId)
+        }
+        extractorLastSentMarkdown = md
+        hasEverCapturedContent = true
+        pushOutput(sessionId, "text", md, done = false)
+    }
+
+
+    /**
+     * Legacy JS payload for Cascade / Windsurf JCEF panels. Captures the
+     * page text (used by the polling stability heuristic) plus the HTML
+     * of the latest assistant bubble.
+     */
+    private fun buildCascadeInjectionJs(): String = """(function(){
+      try {
+        var t = document.body ? (document.body.innerText || '') : '';
+        if (t.length > 5) console.log('__CAGENT__:' + t);
+
+        // Find last agent response HTML via Cascade DOM structure:
+        // .cascade-scrollbar > div > div > div[many children] > last-child
+        var scroll = document.querySelector('.cascade-scrollbar');
+        if (!scroll) return;
+
+        var msgContainer = null;
+        var candidates = scroll.querySelectorAll('div');
+        for (var i = 0; i < candidates.length; i++) {
+          if (candidates[i].children.length >= 5) {
+            if (!msgContainer || candidates[i].children.length > msgContainer.children.length) {
+              msgContainer = candidates[i];
+            }
+          }
+        }
+        if (!msgContainer || msgContainer.children.length < 2) return;
+
+        var responseEl = null;
+        var skipPatterns = ['Feedback submitted', 'Was this response helpful'];
+        for (var j = msgContainer.children.length - 1; j >= 0; j--) {
+          var child = msgContainer.children[j];
+          var txt = (child.innerText || '').trim();
+          if (txt.length < 10) continue;
+          var isUI = false;
+          for (var k = 0; k < skipPatterns.length; k++) {
+            if (txt.indexOf(skipPatterns[k]) >= 0 && txt.length < 200) { isUI = true; break; }
+          }
+          if (!isUI) { responseEl = child; break; }
+        }
+        if (responseEl && responseEl.innerHTML && responseEl.innerHTML.length > 20) {
+          console.log('__CAGENT_HTML__:' + responseEl.innerHTML);
+          var respText = (responseEl.innerText || '').trim();
+          if (respText.length > 3) {
+            console.log('__CAGENT_RESPONSE__:' + respText);
+          }
+        }
+      } catch(e) {}
+    })();""".trimIndent()
 
     private fun pushOutput(sessionId: String, type: String, content: String, done: Boolean) {
         Thread {

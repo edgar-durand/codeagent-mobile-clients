@@ -11,10 +11,11 @@ import com.windsurf.controller.services.IdeIntegrationService
  * same way it does for Windsurf. Kept as its own strategy so we have a
  * dedicated seam for Copilot-specific quirks if the chat UI evolves.
  *
- * Note: the `github.copilotToolWindow` and `GitHub Copilot MCP Log`
- * windows are completion/log surfaces, not chat — they are excluded
- * upstream by `IdeIntegrationService.completionToolWindowIds`, so this
- * strategy only ever sees the actual `GitHub Copilot Chat` window.
+ * Note: the `github.copilotToolWindow`, `GitHub Copilot MCP Log` and
+ * `GitHub Copilot Multiple Code Suggestions` windows are completion/log
+ * surfaces, not chat — they are excluded upstream by
+ * `IdeIntegrationService.isNonChatPromptTarget`, so this strategy only
+ * ever sees the actual `GitHub Copilot Chat` window.
  */
 class CopilotChatStrategy : AgentStrategy {
     override val name: String = "GitHub Copilot Chat"
@@ -32,8 +33,17 @@ class CopilotChatStrategy : AgentStrategy {
         val sent = ide.sendPromptToAgent(invocation.prompt, invocation.agent?.id)
         if (!sent) return false
         val twId = invocation.agent?.toolWindowId ?: return true
+        // The CopilotMessageExtractor walks the Swing tree for the latest
+        // CopilotAgentMessageComponent, converts its MarkdownPane HTML to
+        // markdown, and reports "Completed" via the BottomLinePanel. The
+        // shared monitor handles dedup, streaming chunks, and done.
         AgentOutputMonitor.getInstance()
-            .startMonitoring(invocation.sessionId, twId, invocation.prompt)
+            .startMonitoring(
+                sessionId = invocation.sessionId,
+                toolWindowId = twId,
+                promptText = invocation.prompt,
+                extractor = CopilotMessageExtractor(),
+            )
         logger.info("Started Copilot monitor on toolWindow=$twId")
         return true
     }

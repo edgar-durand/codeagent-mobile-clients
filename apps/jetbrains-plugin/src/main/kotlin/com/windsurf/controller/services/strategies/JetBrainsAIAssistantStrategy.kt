@@ -8,20 +8,21 @@ import com.windsurf.controller.services.IdeIntegrationService
 /**
  * JetBrains AI Assistant — the bundled AI Chat ("AIAssistant" tool
  * window, plugin id `com.intellij.ml.llm`). Recent versions of this
- * panel render message bubbles inside `EditorComponentImpl`, IntelliJ's
- * full code-editor widget. That component is NOT a `JTextComponent`,
- * so the generic Swing scrape never sees the response text and the
- * polling loop times out with "No content captured after 15 polls".
+ * panel render the conversation inside a Jetpack Compose Desktop scene
+ * (`JewelComposePanelWrapper` → `ComposePanel` → Skia surface). That
+ * means there are NO Swing components for the message bubbles, so the
+ * earlier `captureEmbeddedEditor` path (which walked live IntelliJ
+ * Editors) only ever found the input field — never the response.
  *
- * This strategy adds the embedded-Editor capture path on top of the
- * normal Swing scrape — `AgentOutputMonitor.startMonitoring` accepts a
- * `captureEmbeddedEditor` flag that pulls `editor.document.text` for
- * every editor hosted under the tool window. Other strategies do NOT
- * pass the flag, so their behaviour is unchanged.
+ * `aiAssistantMode = true` switches `AgentOutputMonitor` to a
+ * Compose-aware capture path: it locates the Compose panel and walks
+ * its `AccessibleContext` tree (the only surface that exposes the
+ * Compose semantics text), strips the user's own prompt, and emits
+ * incremental `text` chunks. Done is inferred via the stability
+ * heuristic (no change for `STABLE_THRESHOLD` polls).
  *
- * Diagnosed against WebStorm 2026.1 + JetBrains AI Assistant + Codex
- * (May 2026): `AccessibleJPanel` tree dominated by `AIAssistant*`
- * classes and at least one `EditorComponentImpl` per response bubble.
+ * Diagnosed against WebStorm 2026.1 + JetBrains AI Assistant +
+ * Codex (May 2026).
  */
 class JetBrainsAIAssistantStrategy : AgentStrategy {
     override val name: String = "JetBrains AI Assistant"
@@ -41,12 +42,12 @@ class JetBrainsAIAssistantStrategy : AgentStrategy {
         if (!sent) return false
         val twId = invocation.agent?.toolWindowId ?: return true
         AgentOutputMonitor.getInstance().startMonitoring(
-            invocation.sessionId,
-            twId,
-            invocation.prompt,
-            captureEmbeddedEditor = true,
+            sessionId = invocation.sessionId,
+            toolWindowId = twId,
+            promptText = invocation.prompt,
+            extractor = AIAssistantMessageExtractor(),
         )
-        logger.info("Started AI Assistant monitor (embedded editor capture) on toolWindow=$twId")
+        logger.info("Started AI Assistant monitor on toolWindow=$twId")
         return true
     }
 

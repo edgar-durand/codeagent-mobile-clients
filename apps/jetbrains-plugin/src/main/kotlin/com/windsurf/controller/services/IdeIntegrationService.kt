@@ -21,7 +21,10 @@ import java.awt.datatransfer.StringSelection
 import java.awt.event.KeyEvent
 import java.awt.Robot
 import java.lang.ref.WeakReference
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
+import javax.swing.AbstractButton
+import javax.swing.text.JTextComponent
 
 data class DetectedAgent(
     val id: String,
@@ -46,7 +49,7 @@ class IdeIntegrationService {
     )
 
     private val knownAgents = listOf(
-        KnownAgent("com.intellij.ai", "JetBrains AI Assistant", listOf("AI Assistant", "JetBrains AI Assistant"), "jetbrains-ai"),
+        KnownAgent("com.intellij.ai", "JetBrains AI Assistant", listOf("AIAssistant", "AI Assistant", "JetBrains AI Assistant"), "jetbrains-ai"),
         KnownAgent("com.github.copilot", "GitHub Copilot", listOf("GitHub Copilot Chat"), "copilot"),
         KnownAgent("com.codeium.intellij", "Codeium / Windsurf", listOf("Codeium Chat", "Codeium", "Cascade", "Windsurf"), "codeium"),
         KnownAgent("com.anthropic.claude", "Claude Code", listOf("Claude", "Claude Code"), "claude"),
@@ -74,10 +77,23 @@ class IdeIntegrationService {
         "com.codeagent.mobile"
     )
 
-    // Tool window IDs that are code completions/suggestions, NOT chat — must never be used as prompt targets
+    // Tool window IDs that are code completions/suggestions/logs, NOT chat — must never be used as prompt targets.
+    // Exact matches first, plus a contains-based rule for any non-chat Copilot panel
+    // (Multiple Code Suggestions, MCP Log, raw github.copilotToolWindow, etc.).
     private val completionToolWindowIds = setOf(
         "github copilot", "copilot"
     )
+
+    private fun isNonChatPromptTarget(twId: String): Boolean {
+        val lower = twId.lowercase()
+        if (completionToolWindowIds.contains(lower)) return true
+        // Any Copilot tool window that isn't the actual Chat panel — e.g.
+        // "GitHub Copilot Multiple Code Suggestions", "GitHub Copilot MCP Log",
+        // "github.copilotToolWindow". The mobile app should never see these as
+        // selectable agents and the prompt router must never activate them.
+        if (lower.contains("copilot") && !lower.contains("chat")) return true
+        return false
+    }
 
     private var cachedAgents: List<DetectedAgent>? = null
 
@@ -147,8 +163,8 @@ class IdeIntegrationService {
 
         val toolWindowAgents = scanToolWindowsOnEdt()
         for (twAgent in toolWindowAgents) {
-            // Never use completions/suggestions windows as chat targets
-            if (completionToolWindowIds.contains(twAgent.toolWindowId.lowercase())) continue
+            // Never use completions/suggestions/log windows as chat targets
+            if (isNonChatPromptTarget(twAgent.toolWindowId)) continue
 
             val existing = detected.find {
                 it.name.lowercase() == twAgent.name.lowercase() ||
@@ -247,7 +263,7 @@ class IdeIntegrationService {
                     val lower = twId.lowercase()
                     if (lower == selfId) continue
                     if (knownToolWindowIds.contains(lower)) continue
-                    if (completionToolWindowIds.contains(lower)) continue
+                    if (isNonChatPromptTarget(twId)) continue
                     if (detected.any { it.toolWindowId == twId }) continue
 
                     if (aiKeywords.any { lower.contains(it) }) {
@@ -373,6 +389,29 @@ class IdeIntegrationService {
             CopyPasteManager.getInstance().setContents(StringSelection(prompt))
             showNotification("Prompt copied to clipboard (no AI agent found)", prompt)
             return false
+        }
+
+        // Copilot Chat is rendered ENTIRELY in Swing (not JCEF) — find its
+        // CopilotAgentInputTextArea + click the send button directly. This
+        // fixes the "first prompt lost" race: when the panel just opened
+        // cold, the input wasn't focused yet and the previous clipboard +
+        // Robot Cmd+V fallback would paste into the wrong place. We retry
+        // for up to 3 s while the Swing tree is still mounting.
+        if (targetAgent != null && isCopilotChatAgent(targetAgent)) {
+            val twForCopilot = ApplicationManager.getApplication().let { app ->
+                val ref = AtomicReference<com.intellij.openapi.wm.ToolWindow?>(null)
+                val task = Runnable { ref.set(ToolWindowManager.getInstance(project).getToolWindow(targetAgent.toolWindowId)) }
+                if (app.isDispatchThread) task.run() else try { app.invokeAndWait(task) } catch (_: Exception) {}
+                ref.get()
+            }
+            if (twForCopilot != null) {
+                val sent = trySwingCopilotPromptInjection(twForCopilot, prompt, maxWaitMs = 3000L)
+                if (sent) {
+                    showNotification("Prompt sent to ${targetAgent.name}", prompt)
+                    return true
+                }
+                logger.warn("Copilot Swing injection failed; falling back to JCEF/Robot")
+            }
         }
 
         val jcefBrowser = jcefBrowserRef.get()
@@ -546,13 +585,36 @@ class IdeIntegrationService {
         val twManager = ToolWindowManager.getInstance(project)
 
         if (targetAgent != null) {
+            // Try the declared toolWindowId first.
             val tw = twManager.getToolWindow(targetAgent.toolWindowId)
             if (tw != null) return tw
-            logger.warn("Target tool window not found: ${targetAgent.toolWindowId}")
+
+            // Try every alternate window declared for this known plugin —
+            // e.g. JetBrains AI publishes both "AI Assistant" and "AIAssistant"
+            // depending on IDE/plugin version. Falling back through the list
+            // keeps the user on THEIR selected agent instead of jumping
+            // to a different vendor's window.
+            val matchingKnown = knownAgents.firstOrNull { it.pluginId == targetAgent.pluginId }
+            if (matchingKnown != null) {
+                for (twId in matchingKnown.toolWindowIds) {
+                    if (isNonChatPromptTarget(twId)) continue
+                    val candidate = twManager.getToolWindow(twId)
+                    if (candidate != null) return candidate
+                }
+            }
+
+            // Specific agent was requested but not found. Do NOT silently
+            // open an unrelated AI tool window — that's how selecting
+            // "JetBrains AI Assistant" used to end up activating
+            // "GitHub Copilot Multiple Code Suggestions". Fail closed
+            // and let the caller fall back to clipboard.
+            logger.warn("Target tool window not found: ${targetAgent.toolWindowId} (agent=${targetAgent.name}); refusing to substitute another AI window")
+            return null
         }
 
         for (agent in agents) {
             if (isClaudeCodeAgent(agent)) continue
+            if (isNonChatPromptTarget(agent.toolWindowId)) continue
             val tw = twManager.getToolWindow(agent.toolWindowId)
             if (tw != null) return tw
         }
@@ -560,7 +622,7 @@ class IdeIntegrationService {
         for (twId in twManager.toolWindowIds) {
             val lower = twId.lowercase()
             if (lower == "codeagent-mobile") continue
-            if (completionToolWindowIds.contains(lower)) continue
+            if (isNonChatPromptTarget(twId)) continue
             if (aiKeywords.any { lower.contains(it) }) {
                 val tw = twManager.getToolWindow(twId)
                 if (tw != null) return tw
@@ -594,6 +656,133 @@ class IdeIntegrationService {
         } catch (e: Exception) {
             logger.warn("Robot simulation failed: ${e.message}")
         }
+    }
+
+    private fun isCopilotChatAgent(agent: DetectedAgent): Boolean {
+        if (agent.pluginId.equals("com.github.copilot", ignoreCase = true)) return true
+        return agent.toolWindowId.equals("GitHub Copilot Chat", ignoreCase = true)
+    }
+
+    /**
+     * Direct Swing prompt injection for Copilot Chat: walks the tool
+     * window's component tree, finds `CopilotAgentInputTextArea`, sets
+     * its text to `prompt`, then clicks the send button inside
+     * `SendStopActionButtonPanel`. Verifies the click *actually
+     * dispatched* by checking that the input cleared shortly after —
+     * a cold-open Copilot panel sometimes finds the button but the
+     * doClick is a no-op until Compose Desktop finishes activating
+     * it, so we have to retry until we see the input go empty. Without
+     * this verification the very first prompt after the chat opens is
+     * silently discarded.
+     */
+    private fun trySwingCopilotPromptInjection(
+        tw: com.intellij.openapi.wm.ToolWindow,
+        prompt: String,
+        maxWaitMs: Long,
+    ): Boolean {
+        val app = ApplicationManager.getApplication()
+        val deadline = System.currentTimeMillis() + maxWaitMs
+        while (System.currentTimeMillis() < deadline) {
+            val sentRef = AtomicBoolean(false)
+            val attemptedRef = AtomicReference<JTextComponent?>(null)
+            val task = Runnable {
+                try {
+                    val (attempted, input) = performCopilotSwingInjection(tw, prompt)
+                    sentRef.set(attempted)
+                    attemptedRef.set(input)
+                } catch (e: Exception) {
+                    logger.debug("Copilot Swing injection iteration failed: ${e.message}")
+                }
+            }
+            if (app.isDispatchThread) task.run() else {
+                try { app.invokeAndWait(task) } catch (_: Exception) {}
+            }
+            if (sentRef.get()) {
+                // Verify the click actually submitted by checking that the
+                // input cleared. Compose-backed buttons silently no-op on
+                // their first doClick when the panel just mounted — the
+                // text stays in the field and the prompt never reaches
+                // Copilot. If we see the prompt still in the input, retry.
+                try { Thread.sleep(200) } catch (_: InterruptedException) { return false }
+                val cleared = AtomicBoolean(true)
+                val verifyTask = Runnable {
+                    val input = attemptedRef.get()
+                    if (input != null) {
+                        val current = (input.text ?: "").trim()
+                        if (current == prompt.trim() && current.isNotBlank()) {
+                            cleared.set(false)
+                        }
+                    }
+                }
+                if (app.isDispatchThread) verifyTask.run() else {
+                    try { app.invokeAndWait(verifyTask) } catch (_: Exception) {}
+                }
+                if (cleared.get()) return true
+                logger.info("Copilot Swing injection: click did not submit (input still has prompt) — retrying")
+            }
+            try { Thread.sleep(120) } catch (_: InterruptedException) { return false }
+        }
+        return false
+    }
+
+    /**
+     * Returns (attempted, inputComponent). `attempted = true` means we
+     * found the input and dispatched the click/Enter; the caller still
+     * has to verify the click took effect. The input reference is
+     * returned so the caller can re-check its contents off-EDT later.
+     */
+    private fun performCopilotSwingInjection(
+        tw: com.intellij.openapi.wm.ToolWindow,
+        prompt: String,
+    ): Pair<Boolean, JTextComponent?> {
+        var inputArea: JTextComponent? = null
+        var sendButton: AbstractButton? = null
+
+        fun walk(c: Component) {
+            val cls = c.javaClass.name
+            if (inputArea == null && cls.endsWith(".CopilotAgentInputTextArea") && c is JTextComponent) {
+                inputArea = c
+            }
+            if (sendButton == null && cls.endsWith(".SendStopActionButtonPanel")) {
+                fun findBtn(node: Component): AbstractButton? {
+                    if (node is AbstractButton && node.isVisible && node.isEnabled) return node
+                    if (node is Container) {
+                        for (i in 0 until node.componentCount) {
+                            val found = findBtn(node.getComponent(i))
+                            if (found != null) return found
+                        }
+                    }
+                    return null
+                }
+                findBtn(c)?.let { sendButton = it }
+            }
+            if (c is Container) {
+                for (i in 0 until c.componentCount) walk(c.getComponent(i))
+            }
+        }
+
+        for (content in tw.contentManager.contents) {
+            val component = content.component ?: continue
+            walk(component)
+        }
+
+        val input = inputArea ?: return false to null
+        input.text = prompt
+        input.caretPosition = prompt.length
+        input.requestFocusInWindow()
+
+        val btn = sendButton
+        if (btn != null) {
+            btn.doClick()
+            logger.info("Copilot Swing injection: setText + clicked ${btn.javaClass.simpleName}")
+            return true to input
+        }
+        // No send button found — dispatch an Enter key on the input as a
+        // last resort. Many text inputs in IntelliJ map Enter to submit.
+        val enter = KeyEvent(input, KeyEvent.KEY_PRESSED, System.currentTimeMillis(), 0, KeyEvent.VK_ENTER, '\n')
+        input.dispatchEvent(enter)
+        logger.info("Copilot Swing injection: send button missing, dispatched Enter")
+        return true to input
     }
 
     private fun isClaudeCodeAgent(agent: DetectedAgent): Boolean {
