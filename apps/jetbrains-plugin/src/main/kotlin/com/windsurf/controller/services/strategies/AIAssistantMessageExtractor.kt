@@ -307,18 +307,44 @@ class AIAssistantMessageExtractor : MessageExtractor {
             }
         }
         /**
-         * Heuristic table detection for Compose Desktop. Compose builds
-         * tables with `Column { Row { Text/Cell × N } }` and does NOT
-         * expose `AccessibleTable` for them, so the standard branch
-         * below misses them and the walker emits each cell as a
-         * separate line on the mobile UI.
+         * Recursively collect every leaf accessible-text under `ctx`.
+         * "Leaf" = a context with zero accessibleChildren whose
+         * `accessibleName` is non-empty. Used by the table heuristic
+         * so cells wrapped in extra Compose containers
+         * (Row → Box → Padding → Text) still count as one cell.
+         */
+        fun collectLeafTexts(ctx: AccessibleContext): List<String> {
+            val out = mutableListOf<String>()
+            fun walk(c: AccessibleContext, d: Int) {
+                if (d > 10) return
+                val n = c.accessibleChildrenCount
+                if (n == 0) {
+                    val name = c.accessibleName?.replace(whitespace, " ")?.trim().orEmpty()
+                    if (name.isNotEmpty()) out.add(name)
+                    return
+                }
+                for (i in 0 until n) {
+                    val sub = c.getAccessibleChild(i)?.accessibleContext ?: continue
+                    walk(sub, d + 1)
+                }
+            }
+            walk(ctx, 0)
+            return out
+        }
+
+        /**
+         * Heuristic table detection for Compose Desktop. Compose
+         * builds tables with `Column { Row { Cell × M } }` and does
+         * NOT expose `AccessibleTable` for them, so the standard
+         * branch below misses them and the walker emits each cell as
+         * a separate line on the mobile UI.
          *
-         * If a node has K ≥ 2 child rows, every row has the SAME
-         * number M ≥ 2 of leaf-text grand-children, and every cell
-         * is non-empty, treat it as an M-column table. This is the
-         * pattern Compose tables produce; isolated lists / paragraphs
-         * fail the equal-width check (1 col) so they slip through to
-         * the regular text branch.
+         * If a node has K ≥ 2 children whose subtrees each yield the
+         * SAME number M ≥ 2 of leaf-text descendants and every cell
+         * is non-empty, treat it as an M-column table. Walking each
+         * child's subtree (instead of only direct grandchildren)
+         * tolerates extra Compose wrapper layers (Box/Padding/etc.)
+         * between Row and Cell.
          *
          * Returns markdown rows when detected, `null` otherwise.
          */
@@ -328,20 +354,17 @@ class AIAssistantMessageExtractor : MessageExtractor {
             val rows = mutableListOf<List<String>>()
             for (i in 0 until n) {
                 val rowCtx = ctx.getAccessibleChild(i)?.accessibleContext ?: return null
-                val cellCount = rowCtx.accessibleChildrenCount
-                if (cellCount < 2) return null
-                val cells = mutableListOf<String>()
-                for (j in 0 until cellCount) {
-                    val cellCtx = rowCtx.getAccessibleChild(j)?.accessibleContext ?: return null
-                    // Cell is a leaf text — accessibleName carries the rendered string.
-                    val name = cellCtx.accessibleName?.replace(whitespace, " ")?.trim().orEmpty()
-                    if (name.isEmpty()) return null
-                    cells += name.replace("|", "\\|")
-                }
-                rows += cells
+                val leaves = collectLeafTexts(rowCtx)
+                if (leaves.size < 2) return null
+                rows += leaves.map { it.replace("|", "\\|") }
             }
             val firstSize = rows[0].size
             if (rows.any { it.size != firstSize }) return null
+            // Sanity: distinct content. If every row collapses to the
+            // same N strings, this is probably not a real table —
+            // could be a navigation rail repeating per item.
+            if (rows.size >= 2 && rows.toSet().size == 1) return null
+            logger.info("AI Assistant: detected ${rows.size}×$firstSize table heuristically")
             return rows
         }
 
