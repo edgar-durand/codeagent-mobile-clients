@@ -1,6 +1,7 @@
 import { start } from './commands/start';
 import { pair } from './commands/pair';
 import { pairAuto } from './commands/pair-auto';
+import { pluginBridge } from './commands/plugin-bridge';
 import { sessions } from './commands/sessions';
 import { status } from './commands/status';
 import { logout } from './commands/logout';
@@ -31,6 +32,7 @@ async function main(): Promise<void> {
     case 'help':     return help();
     case 'pair':     return pair();
     case 'pair-auto': return pairAuto(args);
+    case 'plugin-bridge': return pluginBridge();
     case 'sessions': return sessions(args);
     case 'status':   return status();
     case 'logout':   return logout();
