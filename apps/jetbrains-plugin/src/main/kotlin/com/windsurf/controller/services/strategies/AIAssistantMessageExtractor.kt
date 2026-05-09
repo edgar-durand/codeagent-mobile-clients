@@ -236,29 +236,159 @@ class AIAssistantMessageExtractor : MessageExtractor {
     // ---------------------------------------------------------------
 
     /**
+     * Strings the assistant's chrome inserts as standalone accessible
+     * nodes — agent display name labels, transient streaming
+     * indicators, etc. We never want them in the markdown we send to
+     * mobile. Compared case-insensitively after whitespace collapsing.
+     */
+    private val CHROME_LABELS = setOf(
+        "thinking…", "thinking...", "generating…", "generating...",
+        "stop", "stop generating", "loading…", "loading...",
+    )
+
+    /**
      * Walk the AccessibleContext tree of `root` and collect distinct
-     * strings, ONE entry per node. Compose Desktop maps every Text
-     * composable to an AccessibleContext whose `accessibleName`
-     * carries the rendered text — using only that field avoids the
-     * triple-emission bug where the same paragraph showed up as
-     * (a) accessibleName, (b) AccessibleText sentence 1, plus
-     * (c) AccessibleText sentence 2, all on the mobile UI.
+     * markdown content. Compose Desktop maps every Text composable to
+     * an AccessibleContext, with tables exposing `AccessibleTable`
+     * which we use to reconstruct GFM table markdown (otherwise each
+     * cell would emit as a separate line). The walker also:
      *
-     * Walks ONLY via `accessibleChildren` (Compose's semantics tree).
-     * Visiting Swing children too would re-enter the same nodes via
-     * two paths and reintroduce the duplicates we just fixed.
+     *   • follows ONLY `accessibleChildren` (Compose's semantics tree)
+     *     and tracks `visited` by identity hash so a node referenced
+     *     from multiple paths is only handled once — fixes the
+     *     "everything emitted twice" duplication on mobile.
+     *   • drops known chrome strings ("Thinking…", "Generating…", …)
+     *     after whitespace normalisation, since Compose retains those
+     *     transient nodes in the layout even after the response
+     *     arrives.
+     *   • normalises whitespace (incl. NBSP / zero-width) before
+     *     dedup so visually-identical strings collapse correctly.
+     *
+     * Note: an earlier draft also filtered by
+     * `AccessibleState.SHOWING`, but Compose Desktop's root
+     * `JewelComposePanelWrapper.accessibleContext` doesn't expose
+     * that state — the filter killed the very first node we visited,
+     * the walker never recursed, and the mobile app sat at "Agent is
+     * responding…" forever with no chunks ever flowing.
      */
     private fun collectAccessibleStrings(root: Component): String {
         val sb = StringBuilder()
         val seen = HashSet<String>()
+        val visited = HashSet<Int>()
+        val whitespace = Regex("[\\s\\u00A0\\u200B\\u200C\\u200D]+")
         fun appendUnique(s: String?) {
-            val text = s?.trim().orEmpty()
+            val text = s?.replace(whitespace, " ")?.trim().orEmpty()
             if (text.isEmpty()) return
+            if (text.lowercase() in CHROME_LABELS) return
             if (seen.add(text)) sb.append(text).append('\n')
         }
+        fun emitTable(table: javax.accessibility.AccessibleTable) {
+            val rows = table.accessibleRowCount
+            val cols = table.accessibleColumnCount
+            if (rows <= 0 || cols <= 0) return
+            fun cell(r: Int, c: Int): String = try {
+                val a = table.getAccessibleAt(r, c) ?: return ""
+                a.accessibleContext?.accessibleName
+                    ?.replace(whitespace, " ")?.trim()
+                    ?.replace("|", "\\|")
+                    ?: ""
+            } catch (_: Exception) { "" }
+            sb.append("\n")
+            sb.append("| ").append((0 until cols).joinToString(" | ") { cell(0, it) }).append(" |\n")
+            sb.append("|").append((0 until cols).joinToString("|") { " --- " }).append("|\n")
+            for (r in 1 until rows) {
+                sb.append("| ").append((0 until cols).joinToString(" | ") { cell(r, it) }).append(" |\n")
+            }
+            sb.append("\n")
+            // Mark every cell's text as seen so it doesn't re-emit later
+            // when the walker descends into the same Text composables.
+            for (r in 0 until rows) for (c in 0 until cols) {
+                seen.add(cell(r, c).replace("\\|", "|"))
+            }
+        }
+        /**
+         * Heuristic table detection for Compose Desktop. Compose builds
+         * tables with `Column { Row { Text/Cell × N } }` and does NOT
+         * expose `AccessibleTable` for them, so the standard branch
+         * below misses them and the walker emits each cell as a
+         * separate line on the mobile UI.
+         *
+         * If a node has K ≥ 2 child rows, every row has the SAME
+         * number M ≥ 2 of leaf-text grand-children, and every cell
+         * is non-empty, treat it as an M-column table. This is the
+         * pattern Compose tables produce; isolated lists / paragraphs
+         * fail the equal-width check (1 col) so they slip through to
+         * the regular text branch.
+         *
+         * Returns markdown rows when detected, `null` otherwise.
+         */
+        fun detectComposeTable(ctx: AccessibleContext): List<List<String>>? {
+            val n = ctx.accessibleChildrenCount
+            if (n < 2) return null
+            val rows = mutableListOf<List<String>>()
+            for (i in 0 until n) {
+                val rowCtx = ctx.getAccessibleChild(i)?.accessibleContext ?: return null
+                val cellCount = rowCtx.accessibleChildrenCount
+                if (cellCount < 2) return null
+                val cells = mutableListOf<String>()
+                for (j in 0 until cellCount) {
+                    val cellCtx = rowCtx.getAccessibleChild(j)?.accessibleContext ?: return null
+                    // Cell is a leaf text — accessibleName carries the rendered string.
+                    val name = cellCtx.accessibleName?.replace(whitespace, " ")?.trim().orEmpty()
+                    if (name.isEmpty()) return null
+                    cells += name.replace("|", "\\|")
+                }
+                rows += cells
+            }
+            val firstSize = rows[0].size
+            if (rows.any { it.size != firstSize }) return null
+            return rows
+        }
+
+        fun emitDetectedTable(rows: List<List<String>>, ctx: AccessibleContext) {
+            val cols = rows[0].size
+            sb.append("\n")
+            sb.append("| ").append(rows[0].joinToString(" | ")).append(" |\n")
+            sb.append("|").append((0 until cols).joinToString("|") { " --- " }).append("|\n")
+            for (i in 1 until rows.size) {
+                sb.append("| ").append(rows[i].joinToString(" | ")).append(" |\n")
+            }
+            sb.append("\n")
+            // Mark every cell text as seen so the walker doesn't re-emit
+            // them as standalone lines when it later visits the cell
+            // composables individually.
+            for (row in rows) for (cell in row) seen.add(cell.replace("\\|", "|"))
+            // Also mark every descendant context as visited so the walker
+            // doesn't re-enter the table's interior via accessibleChildren.
+            fun markVisited(c: AccessibleContext) {
+                visited.add(System.identityHashCode(c))
+                for (i in 0 until c.accessibleChildrenCount) {
+                    val sub = c.getAccessibleChild(i)?.accessibleContext ?: continue
+                    markVisited(sub)
+                }
+            }
+            markVisited(ctx)
+        }
+
         fun visit(ctx: AccessibleContext, depth: Int) {
             if (depth > 80) return
+            if (!visited.add(System.identityHashCode(ctx))) return
             try {
+                // Standard accessibility table (rare for Compose Desktop
+                // but kept for any future agent that exposes one).
+                val asTable = ctx.accessibleTable
+                if (asTable != null) {
+                    emitTable(asTable)
+                    return
+                }
+
+                // Compose Desktop fallback — pattern-match a uniform grid.
+                val composeTable = detectComposeTable(ctx)
+                if (composeTable != null) {
+                    emitDetectedTable(composeTable, ctx)
+                    return
+                }
+
                 val name = ctx.accessibleName
                 if (!name.isNullOrBlank()) {
                     appendUnique(name)
