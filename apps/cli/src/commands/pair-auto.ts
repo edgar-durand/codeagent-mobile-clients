@@ -65,21 +65,13 @@ function readTokenFromArgs(args: string[]): string {
 
 async function claim(token: string, pluginId: string): Promise<ClaimSuccess> {
   const url = `${API_BASE}/api/pairing/claim-auto-token`;
-  // CODESPACE_NAME is GitHub's standard env var inside Codespaces. When
-  // it's set, we're running inside the codespace deploy flow and the
-  // session should be labelled accordingly so the mobile Sessions UI
-  // renders the "☁ codespace" badge. When it's empty we're paired
-  // from a local plugin (JetBrains/VS Code) and the session is just a
-  // regular CLI client — no codespace marker.
-  const codespaceName = process.env.CODESPACE_NAME ?? '';
-  const isCodespace = codespaceName.length > 0;
   const body = {
     token,
     pluginId,
-    ideName: isCodespace ? 'codeam-cli (codespace)' : 'codeam-cli',
+    ideName: 'codeam-cli (codespace)',
     ideVersion: process.env.npm_package_version ?? 'unknown',
     hostname: os.hostname(),
-    codespaceName,
+    codespaceName: process.env.CODESPACE_NAME ?? '',
   };
 
   const res = await fetch(url, {
