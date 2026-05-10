@@ -29,6 +29,7 @@ import com.windsurf.controller.services.McpServerDef
 import com.windsurf.controller.services.WebSocketService
 import com.windsurf.controller.services.strategies.AgentInvocation
 import com.windsurf.controller.services.strategies.AgentStrategyRegistry
+import com.windsurf.controller.services.strategies.CopilotChatMetadataBridge
 import com.windsurf.controller.services.withAuthHeaders
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
@@ -381,6 +382,34 @@ class ControllerToolWindowFactory : ToolWindowFactory {
                     "start_task" -> {
                         var prompt = command.payload.get("prompt")?.asString ?: ""
                         val agentId = command.payload.get("agentId")?.asString
+
+                        // The mobile/web model picker sends the change as
+                        // a `start_task` whose prompt is `/model <id>`
+                        // (the slash command Claude Code interprets).
+                        // Copilot has no slash commands — it must go
+                        // through `ChatAction.ModelSelected` via the
+                        // metadata bridge. Intercept the pattern here
+                        // before the prompt reaches a strategy.
+                        val modelSwitch = Regex("^/model\\s+(\\S+)\\s*$").find(prompt.trim())
+                        val isCopilotAgent = agentId?.equals("com.github.copilot", ignoreCase = true) == true
+                        if (modelSwitch != null && isCopilotAgent) {
+                            val modelId = modelSwitch.groupValues[1]
+                            val ok = CopilotChatMetadataBridge.selectModel(project, modelId)
+                            relay.sendResult(
+                                command.id,
+                                if (ok) "completed" else "failed",
+                                com.google.gson.JsonObject().apply {
+                                    addProperty("message", if (ok)
+                                        "Switched Copilot model to $modelId"
+                                    else
+                                        "Could not switch Copilot model to $modelId")
+                                    addProperty("modelId", modelId)
+                                    addProperty("applied", ok)
+                                },
+                            )
+                            return@invokeLater
+                        }
+
                         // Inline @path attachments — mirror AgentBridgeService /
                         // CLI's saveFilesTemp. Files arrive as base64 in the
                         // payload; we materialize them to tmpdir and prefix the
@@ -583,19 +612,43 @@ class ControllerToolWindowFactory : ToolWindowFactory {
                         }
                     }
                     "get_context" -> {
-                        // No live token-usage telemetry from a JetBrains
-                        // terminal session — return a sentinel shape mobile's
-                        // quota bar interprets as "unknown" (zeros + error).
-                        relay.sendResult(command.id, "completed", com.google.gson.JsonObject().apply {
-                            addProperty("used", 0)
-                            addProperty("total", 200000)
-                            addProperty("percent", 0)
-                            addProperty("model", null as String?)
-                            addProperty("outputTokens", 0)
-                            addProperty("cacheReadTokens", 0)
-                            addProperty("monthlyCost", 0)
-                            addProperty("error", "Token usage not tracked from JetBrains plugin")
-                        })
+                        // Try Copilot's internal context-window API first.
+                        // Returns the same shape the CLI's `ContextUsage`
+                        // produces (used/total/percent/model) plus an
+                        // optional `breakdown` map with the per-section
+                        // fractions Copilot exposes (system / tool defs /
+                        // user messages / assistant messages / files /
+                        // tool results) — mobile shows these as a
+                        // tooltip if present.
+                        val ctx = CopilotChatMetadataBridge.readContextWindow(project)
+                        val payload = com.google.gson.JsonObject()
+                        if (ctx != null) {
+                            payload.addProperty("used", ctx.used)
+                            payload.addProperty("total", ctx.total)
+                            payload.addProperty("percent", ctx.percent)
+                            payload.addProperty("model", ctx.model)
+                            payload.addProperty("outputTokens", 0)
+                            payload.addProperty("cacheReadTokens", 0)
+                            payload.addProperty("monthlyCost", 0)
+                            if (ctx.breakdown.isNotEmpty()) {
+                                val br = com.google.gson.JsonObject()
+                                ctx.breakdown.forEach { (k, v) -> br.addProperty(k, v) }
+                                payload.add("breakdown", br)
+                            }
+                        } else {
+                            // Sentinel: no Copilot, or chat hasn't run a
+                            // turn yet. Mobile interprets zeros + error as
+                            // "context unknown — hide indicator".
+                            payload.addProperty("used", 0)
+                            payload.addProperty("total", 200000)
+                            payload.addProperty("percent", 0)
+                            payload.addProperty("model", null as String?)
+                            payload.addProperty("outputTokens", 0)
+                            payload.addProperty("cacheReadTokens", 0)
+                            payload.addProperty("monthlyCost", 0)
+                            payload.addProperty("error", "Token usage not available (send a prompt first or Copilot not active)")
+                        }
+                        relay.sendResult(command.id, "completed", payload)
                     }
                     "get_conversation" -> {
                         // No JSONL parsing on the JB side — the per-turn
@@ -609,28 +662,70 @@ class ControllerToolWindowFactory : ToolWindowFactory {
                         })
                     }
                     "list_models" -> {
-                        // Mirror the CLI's catalog so mobile's model picker
-                        // works the same on both surfaces. Keep this list in
-                        // sync with apps/cli/src/commands/start/handlers.ts.
+                        // Try Copilot's real model catalog first (Anthropic
+                        // Sonnet, OpenAI GPT, Google Gemini, etc. — owned by
+                        // GitHub's backend, drifts independently of our
+                        // CLI's hardcoded Anthropic-only list). Falls back
+                        // to the CLI catalog if Copilot isn't installed.
+                        val copilotModels = CopilotChatMetadataBridge.listModels(project)
                         val models = com.google.gson.JsonArray()
-                        listOf(
-                            Triple("claude-opus-4-7", "Claude Opus 4.7", "Most capable"),
-                            Triple("claude-opus-4-6", "Claude Opus 4.6", "Top tier"),
-                            Triple("claude-sonnet-4-6", "Claude Sonnet 4.6", "Balanced"),
-                            Triple("claude-haiku-4-5-20251001", "Claude Haiku 4.5", "Fastest"),
-                        ).forEach { (id, label, description) ->
-                            models.add(com.google.gson.JsonObject().apply {
-                                addProperty("id", id)
-                                addProperty("label", label)
-                                addProperty("description", description)
-                                addProperty("family", "claude")
-                                addProperty("vendor", "anthropic")
-                                addProperty("isDefault", id == "claude-sonnet-4-6")
-                            })
+                        if (copilotModels != null) {
+                            for (m in copilotModels.all) {
+                                models.add(com.google.gson.JsonObject().apply {
+                                    addProperty("id", m.id)
+                                    addProperty("label", m.label)
+                                    addProperty("description", if (m.preview) "preview" else "")
+                                    addProperty("family", m.family ?: "")
+                                    addProperty("vendor", "github-copilot")
+                                    addProperty("isDefault", m.isDefault)
+                                    addProperty("isActive", m.id == copilotModels.active)
+                                })
+                            }
+                        } else {
+                            // CLI fallback catalog. Keep in sync with
+                            // apps/cli/src/commands/start/handlers.ts.
+                            listOf(
+                                Triple("claude-opus-4-7", "Claude Opus 4.7", "Most capable"),
+                                Triple("claude-opus-4-6", "Claude Opus 4.6", "Top tier"),
+                                Triple("claude-sonnet-4-6", "Claude Sonnet 4.6", "Balanced"),
+                                Triple("claude-haiku-4-5-20251001", "Claude Haiku 4.5", "Fastest"),
+                            ).forEach { (id, label, description) ->
+                                models.add(com.google.gson.JsonObject().apply {
+                                    addProperty("id", id)
+                                    addProperty("label", label)
+                                    addProperty("description", description)
+                                    addProperty("family", "claude")
+                                    addProperty("vendor", "anthropic")
+                                    addProperty("isDefault", id == "claude-sonnet-4-6")
+                                })
+                            }
                         }
                         relay.sendResult(command.id, "completed", com.google.gson.JsonObject().apply {
                             add("models", models)
+                            if (copilotModels?.active != null) addProperty("active", copilotModels.active)
                         })
+                    }
+                    "set_model" -> {
+                        // Switch the active Copilot Chat model from the
+                        // mobile/web picker. Returns success=true if the
+                        // bridge dispatched ChatAction.ModelSelected, which
+                        // also persists via Copilot's
+                        // UserSelectedModelService (the picker UI's own
+                        // store). Falls back to no-op for non-Copilot.
+                        val modelId = command.payload.get("modelId")?.asString
+                            ?: command.payload.get("id")?.asString ?: ""
+                        val applied = if (modelId.isNotBlank())
+                            CopilotChatMetadataBridge.selectModel(project, modelId)
+                        else false
+                        relay.sendResult(
+                            command.id,
+                            if (applied) "completed" else "failed",
+                            com.google.gson.JsonObject().apply {
+                                addProperty("modelId", modelId)
+                                addProperty("applied", applied)
+                                if (!applied) addProperty("error", "Could not switch model (Copilot not active or modelId not in catalog)")
+                            },
+                        )
                     }
                     "set_keep_alive" -> {
                         // "Avoid suspend codespace on inactivity" toggle. The

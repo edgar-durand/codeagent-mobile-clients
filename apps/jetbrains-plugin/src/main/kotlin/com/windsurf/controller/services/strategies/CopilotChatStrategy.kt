@@ -49,6 +49,17 @@ class CopilotChatStrategy : AgentStrategy {
 
     override fun deliverPrompt(invocation: AgentInvocation): Boolean {
         val ide = IdeIntegrationService.getInstance()
+
+        // Primary path — Copilot's own internal API.
+        if (CopilotChatBridge.submit(invocation.project, invocation.prompt)) {
+            logger.info("Copilot: dispatched via CopilotChatService")
+            ide.showNotification("Prompt sent to Copilot Chat", invocation.prompt)
+            return true
+        }
+
+        // Fallback for older / patched Copilot builds where the
+        // internal API isn't reachable. Activate the tool window,
+        // try Swing-direct, then JCEF, then Robot Cmd+V.
         return deliverPromptFallback(invocation, ide)
     }
 
