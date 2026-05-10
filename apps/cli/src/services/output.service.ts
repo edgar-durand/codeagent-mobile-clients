@@ -149,11 +149,16 @@ export class OutputService {
       'outputSvc',
       `push +${raw.length}B (buf=${this.pty.size}B)`,
     );
-    // Sniff for session id + rate-limit hints in the printable text;
-    // these are side-effect callbacks that don't influence the pump.
+    // Sniff for session id + rate-limit + API-error hints. The
+    // session-id and rate-limit detectors are happy with the raw
+    // chunk (their patterns are short and arrive atomically from
+    // Claude), but `Credit balance too low …` lands as part of a
+    // longer rendered TUI block that PTY commonly splits across
+    // multiple `raw` writes. Feed the API-error detector the full
+    // accumulated buffer so the phrase isn't fragmented mid-match.
     this.tryExtractSessionId(raw);
     this.tryDetectRateLimit(raw);
-    this.tryDetectApiError(raw);
+    this.tryDetectApiError(this.pty.content);
   }
 
   dispose(): void {
