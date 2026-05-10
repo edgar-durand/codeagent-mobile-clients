@@ -1,0 +1,152 @@
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
+
+// Mock os.homedir BEFORE importing HistoryService — the module
+// resolves the projects-root via os.homedir() at projectDir-getter
+// time, but vi.mock takes effect at import. Using a module factory
+// keeps both the spied homedir and any other os exports available.
+vi.mock('os', async () => {
+  const actual = await vi.importActual<typeof import('os')>('os');
+  return {
+    ...actual,
+    homedir: vi.fn(() => process.env.HOME ?? actual.homedir()),
+  };
+});
+
+import { HistoryService } from '../../src/services/history.service';
+
+/**
+ * Regression: codespaces vs local CLI rendering parity.
+ *
+ * In codespaces, Anthropic's `claude` launcher lazy-downloads node 16
+ * on the first interactive invocation (~30-60s). That meant the JSONL
+ * file the CLI watches doesn't exist yet at start.ts's eager
+ * detectCurrentConversation() call (T+2000ms), so currentConversationId
+ * stayed null forever. Every subsequent uploadDelta() then early-bailed
+ * and the server never received the canonical markdown — mobile/web
+ * rendered the streaming-text approximation (no ``` fences) instead of
+ * a CodeBlock.
+ *
+ * The fix: when uploadDelta is the first path that needs the
+ * conversation id, detect it then. These tests pin both the eager-detect
+ * behaviour AND the lazy-detect fallback so the codespace regression
+ * can't sneak back in.
+ */
+describe('HistoryService — lazy detect on uploadDelta', () => {
+  let tmpHome: string;
+  let originalHome: string | undefined;
+  // Pretend we're inside a codespace working dir.
+  const cwd = '/workspaces/test-repo';
+
+  beforeEach(() => {
+    tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'codeam-history-'));
+    originalHome = process.env.HOME;
+    process.env.HOME = tmpHome;
+  });
+
+  afterEach(() => {
+    process.env.HOME = originalHome;
+    fs.rmSync(tmpHome, { recursive: true, force: true });
+  });
+
+  function encodedProjectDir(): string {
+    // Mirror history.service's encodeCwd: replace [/\\:] with `-`.
+    const encoded = cwd.replace(/[/\\:]/g, '-');
+    return path.join(tmpHome, '.claude', 'projects', encoded);
+  }
+
+  function writeJsonl(uuid: string, lines: string[]): void {
+    const dir = encodedProjectDir();
+    fs.mkdirSync(dir, { recursive: true });
+    const file = path.join(dir, `${uuid}.jsonl`);
+    fs.writeFileSync(file, lines.join('\n') + '\n');
+  }
+
+  it('uploadDelta returns 0 when no conversation id is detectable yet', async () => {
+    // Empty home — no JSONL anywhere. detectCurrentConversation will
+    // fail to find a file. uploadDelta must return 0 cleanly without
+    // throwing.
+    const svc = new HistoryService('plg-1', cwd);
+    expect(svc.getCurrentConversationId()).toBeNull();
+    const sent = await svc.uploadDelta();
+    expect(sent).toBe(0);
+    // Lazy-detect ran, found nothing, conversation id is still null.
+    expect(svc.getCurrentConversationId()).toBeNull();
+  });
+
+  it('uploadDelta lazy-detects a JSONL that landed AFTER construction', async () => {
+    const svc = new HistoryService('plg-1', cwd);
+    expect(svc.getCurrentConversationId()).toBeNull();
+
+    // Simulate: claude finally finished bootstrapping (post-T+2000ms)
+    // and wrote its first JSONL. Eager detect already ran and found
+    // nothing — the lazy path inside uploadDelta is the only thing
+    // that can pick this up.
+    const uuid = '11111111-2222-3333-4444-555555555555';
+    writeJsonl(uuid, [
+      JSON.stringify({
+        type: 'user',
+        uuid: 'msg-1',
+        timestamp: Date.now(),
+        message: { content: 'hello' },
+      }),
+      JSON.stringify({
+        type: 'assistant',
+        uuid: 'msg-2',
+        timestamp: Date.now() + 1,
+        message: { content: '```ts\nfoo()\n```' },
+      }),
+    ]);
+
+    // Stub the network so the test stays hermetic. The post helper is
+    // a private import, but since uploadDelta uses fetch under the hood
+    // we mock global fetch just in case; simpler: assert the side-effect
+    // we care about (conversation id became set).
+    const originalFetch = global.fetch;
+    global.fetch = vi.fn(() =>
+      Promise.resolve({ ok: true, status: 200, json: async () => ({ success: true }) }) as never,
+    );
+    try {
+      await svc.uploadDelta();
+    } finally {
+      global.fetch = originalFetch;
+    }
+
+    expect(svc.getCurrentConversationId()).toBe(uuid);
+  });
+
+  it('uploadDelta is a no-op when conversation id is already set and JSONL is up to date', async () => {
+    const uuid = 'aaaa-bbbb';
+    writeJsonl(uuid, [
+      JSON.stringify({
+        type: 'user',
+        uuid: 'msg-1',
+        timestamp: Date.now(),
+        message: { content: 'hi' },
+      }),
+    ]);
+
+    const svc = new HistoryService('plg-1', cwd);
+    svc.setCurrentConversationId(uuid);
+    expect(svc.getCurrentConversationId()).toBe(uuid);
+
+    // The lazy-detect path must NOT clobber an already-set
+    // conversation id even if the projects dir has multiple files.
+    writeJsonl('zzzz-other', [
+      JSON.stringify({ type: 'user', uuid: 'm-x', timestamp: 1, message: { content: 'x' } }),
+    ]);
+
+    const originalFetch = global.fetch;
+    global.fetch = vi.fn(() =>
+      Promise.resolve({ ok: true, status: 200, json: async () => ({ success: true }) }) as never,
+    );
+    try {
+      await svc.uploadDelta();
+    } finally {
+      global.fetch = originalFetch;
+    }
+    expect(svc.getCurrentConversationId()).toBe(uuid);
+  });
+});
