@@ -347,7 +347,16 @@ export class OutputService {
    */
   private tryDetectApiError(text: string): void {
     if (this.apiErrorEmittedThisTurn) return;
-    const printable = text.replace(/\x1B\[[^@-~]*[@-~]/g, '').replace(/[\x00-\x1F\x7F]/g, '');
+    const printable = text
+      .replace(/\x1B\[[^@-~]*[@-~]/g, '')
+      // Strip control chars EXCEPT \n / \r — the line-based
+      // extractor below relies on newlines as the terminator so the
+      // captured message doesn't bleed into the next TUI chrome line
+      // (e.g. "* Baked for 0s ─" gets joined onto the credit-balance
+      // line if we strip \n, leaking chrome into the user-facing
+      // banner). The other detectors (sessionId, rate-limit) match
+      // short atomic phrases and don't care.
+      .replace(/[\x00-\x09\x0B\x0C\x0E-\x1F\x7F]/g, '');
     const message = extractApiErrorMessage(printable);
     if (!message) return;
     this.apiErrorEmittedThisTurn = true;

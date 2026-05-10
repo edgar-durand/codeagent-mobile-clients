@@ -22,6 +22,24 @@ describe('extractApiErrorMessage', () => {
     expect(extractApiErrorMessage(text)).toMatch(/Credit balance too low/);
   });
 
+  it('does NOT bleed subsequent TUI chrome lines into the captured message', () => {
+    // Production regression: PTY emits the credit-balance line
+    // followed by "* Baked for 0s ─" and shortcut hints. The captured
+    // message MUST stop at the end of the credit-balance line — no
+    // "Baked for 0s", no "for shortcuts" tail.
+    const text = [
+      '✳ Accomplishing…',
+      '└ Credit balance too low · Add funds: https://platform.claude.com/settings/billing',
+      '* Baked for 0s ──────────────────────',
+      '? for shortcuts',
+    ].join('\n');
+    const msg = extractApiErrorMessage(text);
+    expect(msg).toBeTruthy();
+    expect(msg).not.toMatch(/Baked/);
+    expect(msg).not.toMatch(/shortcuts/);
+    expect(msg).toMatch(/Add funds/);
+  });
+
   it('detects a generic "API Error: …" envelope', () => {
     const text = '└ API Error: 529 overloaded_error – please retry shortly';
     expect(extractApiErrorMessage(text)).toBe(
