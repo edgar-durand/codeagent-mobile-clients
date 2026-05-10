@@ -50,8 +50,24 @@ class CopilotChatStrategy : AgentStrategy {
     override fun deliverPrompt(invocation: AgentInvocation): Boolean {
         val ide = IdeIntegrationService.getInstance()
 
-        // Primary path — Copilot's own internal API.
-        if (CopilotChatBridge.submit(invocation.project, invocation.prompt)) {
+        // Primary path — Copilot's own internal API. We attach
+        // onError + onComplete to capture quota / rate-limit messages
+        // so mobile/web can show the same banner the CLI shows for
+        // Claude. CopilotChatBridge.lastQuotaError is read later by
+        // the metadata bridge and forwarded as `rateLimitReset` in
+        // the get_context payload.
+        val dispatched = CopilotChatBridge.submit(
+            project = invocation.project,
+            prompt = invocation.prompt,
+            onAssistantDone = { CopilotChatBridge.lastQuotaError = null },
+            onError = { msg ->
+                if (CopilotChatBridge.looksLikeQuotaError(msg)) {
+                    CopilotChatBridge.lastQuotaError = msg
+                    logger.warn("Copilot quota error captured: $msg")
+                }
+            },
+        )
+        if (dispatched) {
             logger.info("Copilot: dispatched via CopilotChatService")
             ide.showNotification("Prompt sent to Copilot Chat", invocation.prompt)
             return true

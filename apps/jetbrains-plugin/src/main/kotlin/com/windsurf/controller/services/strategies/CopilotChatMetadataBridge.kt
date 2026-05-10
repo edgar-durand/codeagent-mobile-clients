@@ -14,6 +14,8 @@ data class CopilotContextWindow(
     val percent: Int,
     val model: String?,
     val breakdown: Map<String, Double> = emptyMap(),
+    /** Last quota / plan-exhausted message, mirrors CLI's `rateLimitReset`. */
+    val rateLimitReset: String? = null,
 )
 
 data class CopilotModelInfo(
@@ -128,7 +130,14 @@ internal object CopilotChatMetadataBridge {
             ) else emptyMap()
 
             log.info("readContextWindow: used=$used total=$total pct=$pct model=$activeModelName")
-            CopilotContextWindow(used, total, pct, activeModelName, breakdown)
+            CopilotContextWindow(
+                used = used,
+                total = total,
+                percent = pct,
+                model = activeModelName,
+                breakdown = breakdown,
+                rateLimitReset = CopilotChatBridge.lastQuotaError,
+            )
         } catch (t: Throwable) {
             log.warn("readContextWindow: ${t.javaClass.simpleName}: ${t.message}", t)
             null

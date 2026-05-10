@@ -96,6 +96,15 @@ class CopilotMessageExtractor : MessageExtractor {
                         continue
                     }
 
+                    // Plan / quota error sometimes renders inline in
+                    // the assistant bubble instead of firing through
+                    // the `onError` callback. Capture it for the
+                    // metadata bridge so mobile/web shows the same
+                    // banner the CLI shows for Claude rate limits.
+                    if (CopilotChatBridge.looksLikeQuotaError(md)) {
+                        CopilotChatBridge.lastQuotaError = md
+                    }
+
                     ref.set(ExtractedMessage(md, detectDone(bubble)))
                     return@Runnable
                 }

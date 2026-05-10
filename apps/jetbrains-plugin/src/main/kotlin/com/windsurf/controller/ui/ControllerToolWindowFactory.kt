@@ -383,31 +383,41 @@ class ControllerToolWindowFactory : ToolWindowFactory {
                         var prompt = command.payload.get("prompt")?.asString ?: ""
                         val agentId = command.payload.get("agentId")?.asString
 
-                        // The mobile/web model picker sends the change as
-                        // a `start_task` whose prompt is `/model <id>`
-                        // (the slash command Claude Code interprets).
-                        // Copilot has no slash commands — it must go
-                        // through `ChatAction.ModelSelected` via the
-                        // metadata bridge. Intercept the pattern here
-                        // before the prompt reaches a strategy.
+                        // The mobile/web model picker sends the change
+                        // as a `start_task` whose prompt is `/model
+                        // <id>` (the slash command Claude Code
+                        // interprets). Copilot has no slash commands —
+                        // it must go through `ChatAction.ModelSelected`
+                        // via the metadata bridge. The frontend does
+                        // NOT include `agentId` on that payload (only
+                        // on get_context / list_models), so we can't
+                        // gate on it here. Instead we check whether
+                        // the requested modelId belongs to Copilot's
+                        // catalog: if it does, switch via Copilot; if
+                        // not, fall through to the normal strategy
+                        // dispatch so `/model claude-sonnet-4-6` keeps
+                        // working when the active agent is Claude.
                         val modelSwitch = Regex("^/model\\s+(\\S+)\\s*$").find(prompt.trim())
-                        val isCopilotAgent = agentId?.equals("com.github.copilot", ignoreCase = true) == true
-                        if (modelSwitch != null && isCopilotAgent) {
+                        if (modelSwitch != null) {
                             val modelId = modelSwitch.groupValues[1]
-                            val ok = CopilotChatMetadataBridge.selectModel(project, modelId)
-                            relay.sendResult(
-                                command.id,
-                                if (ok) "completed" else "failed",
-                                com.google.gson.JsonObject().apply {
-                                    addProperty("message", if (ok)
-                                        "Switched Copilot model to $modelId"
-                                    else
-                                        "Could not switch Copilot model to $modelId")
-                                    addProperty("modelId", modelId)
-                                    addProperty("applied", ok)
-                                },
-                            )
-                            return@invokeLater
+                            val copilotModels = CopilotChatMetadataBridge.listModels(project)
+                            val belongsToCopilot = copilotModels?.all?.any { it.id == modelId } == true
+                            if (belongsToCopilot) {
+                                val ok = CopilotChatMetadataBridge.selectModel(project, modelId)
+                                relay.sendResult(
+                                    command.id,
+                                    if (ok) "completed" else "failed",
+                                    com.google.gson.JsonObject().apply {
+                                        addProperty("message", if (ok)
+                                            "Switched Copilot model to $modelId"
+                                        else
+                                            "Could not switch Copilot model to $modelId")
+                                        addProperty("modelId", modelId)
+                                        addProperty("applied", ok)
+                                    },
+                                )
+                                return@invokeLater
+                            }
                         }
 
                         // Inline @path attachments — mirror AgentBridgeService /
@@ -634,6 +644,9 @@ class ControllerToolWindowFactory : ToolWindowFactory {
                                 val br = com.google.gson.JsonObject()
                                 ctx.breakdown.forEach { (k, v) -> br.addProperty(k, v) }
                                 payload.add("breakdown", br)
+                            }
+                            if (ctx.rateLimitReset != null) {
+                                payload.addProperty("rateLimitReset", ctx.rateLimitReset)
                             }
                         } else {
                             // Sentinel: no Copilot, or chat hasn't run a

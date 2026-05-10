@@ -59,6 +59,45 @@ internal object CopilotChatBridge {
     private val COPILOT_PLUGIN_ID = PluginId.getId("com.github.copilot")
 
     /**
+     * Last quota / plan / rate-limit error message Copilot surfaced.
+     * Updated from two sources:
+     *   1. The `onError` callback we register on `query(...)`. Copilot
+     *      passes the user-facing reason as one of the five strings;
+     *      we catch the ones that look like plan exhaustion.
+     *   2. The output extractor, when the assistant bubble's text
+     *      matches the same patterns (Copilot sometimes renders the
+     *      banner inline in the chat instead of firing onError).
+     *
+     * Cleared automatically when a subsequent prompt completes
+     * successfully (`onComplete` callback) — that is the only signal
+     * we have that the user's allowance renewed or upgraded.
+     *
+     * Read by `CopilotChatMetadataBridge.readContextWindow` and
+     * forwarded to mobile/web in the `get_context` result as
+     * `rateLimitReset`, mirroring the CLI contract.
+     */
+    @Volatile
+    var lastQuotaError: String? = null
+
+    /**
+     * Heuristic for "Copilot says the user is out of plan". Matches
+     * "monthly chat messages quota" / "upgrade to Copilot Pro" /
+     * "wait for your allowance to renew" — the user-visible strings
+     * GitHub uses on the Free plan banner. False-positives here are
+     * cheap (we just show a stale banner until the next turn clears
+     * it); false-negatives mean the user gets no UI feedback, which
+     * is worse, so we err on the inclusive side.
+     */
+    fun looksLikeQuotaError(msg: String?): Boolean {
+        if (msg.isNullOrBlank()) return false
+        val lower = msg.lowercase()
+        return ("quota" in lower && ("monthly" in lower || "messages" in lower)) ||
+            ("upgrade" in lower && "copilot" in lower) ||
+            ("allowance" in lower && "renew" in lower) ||
+            ("rate" in lower && "limit" in lower)
+    }
+
+    /**
      * Submit `prompt` to Copilot Chat. Returns:
      *   - `true` if the prompt was successfully dispatched into Copilot's
      *     internal pipeline. The `onAssistantDone` callback (if provided)
