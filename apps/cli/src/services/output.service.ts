@@ -36,13 +36,6 @@ export class OutputService {
   private pollTimer: NodeJS.Timeout | null = null;
   private startTime = 0;
   private terminalTurnPending = false;
-  /**
-   * Tracks whether we already emitted an api-error status chunk for
-   * the current turn. The error pattern usually appears in multiple
-   * consecutive PTY frames as Claude redraws — without this flag the
-   * mobile/web client would see the same banner several times in a row.
-   */
-  private apiErrorEmittedThisTurn = false;
 
   private readonly onSessionIdDetected?: (sessionId: string) => void;
   private readonly onRateLimitDetected?: (reset: string) => void;
@@ -149,16 +142,10 @@ export class OutputService {
       'outputSvc',
       `push +${raw.length}B (buf=${this.pty.size}B)`,
     );
-    // Sniff for session id + rate-limit + API-error hints. The
-    // session-id and rate-limit detectors are happy with the raw
-    // chunk (their patterns are short and arrive atomically from
-    // Claude), but `Credit balance too low …` lands as part of a
-    // longer rendered TUI block that PTY commonly splits across
-    // multiple `raw` writes. Feed the API-error detector the full
-    // accumulated buffer so the phrase isn't fragmented mid-match.
+    // Sniff for session id + rate-limit hints in the printable text;
+    // these are side-effect callbacks that don't influence the pump.
     this.tryExtractSessionId(raw);
     this.tryDetectRateLimit(raw);
-    this.tryDetectApiError(this.pty.content);
   }
 
   dispose(): void {
@@ -173,7 +160,6 @@ export class OutputService {
     this.pty.activate();
     this.steps.reset();
     this.lastSentContent = '';
-    this.apiErrorEmittedThisTurn = false;
     this.startTime = Date.now();
     this.pollTimer = setInterval(() => this.tick(), OutputService.POLL_MS);
   }
@@ -328,78 +314,6 @@ export class OutputService {
       this.onRateLimitDetected(match[1].trim());
     }
   }
-
-  /**
-   * Detect provider-side API errors that block the turn (out of
-   * credits, quota exceeded, auth invalid). These appear in Claude's
-   * TUI as `└ Credit balance too low …` / `└ API Error: …` and would
-   * otherwise be filtered by `filterChrome` as box-drawing chrome —
-   * leaving the mobile chat looking frozen when the user actually
-   * just needs to add funds or wait.
-   *
-   * Side-channel: emits a `status` chunk so the UI can render a
-   * banner above the (empty) reply. Does NOT modify the chrome
-   * filter — that's tuned for Windows ConPTY quirks and stays as-is.
-   *
-   * Once-per-turn guard: Claude redraws the same error in multiple
-   * frames. Without the guard the user sees the same banner several
-   * times in a row.
-   */
-  private tryDetectApiError(text: string): void {
-    if (this.apiErrorEmittedThisTurn) return;
-    const printable = text
-      .replace(/\x1B\[[^@-~]*[@-~]/g, '')
-      // Strip control chars EXCEPT \n / \r — the line-based
-      // extractor below relies on newlines as the terminator so the
-      // captured message doesn't bleed into the next TUI chrome line
-      // (e.g. "* Baked for 0s ─" gets joined onto the credit-balance
-      // line if we strip \n, leaking chrome into the user-facing
-      // banner). The other detectors (sessionId, rate-limit) match
-      // short atomic phrases and don't care.
-      .replace(/[\x00-\x09\x0B\x0C\x0E-\x1F\x7F]/g, '');
-    const message = extractApiErrorMessage(printable);
-    if (!message) return;
-    this.apiErrorEmittedThisTurn = true;
-    this.send({ type: 'status', content: message }, { critical: true }).catch(() => {});
-  }
-}
-
-/**
- * Match common Anthropic / claude-code error blurbs and return the
- * user-facing summary line. Returns null when no error is present.
- *
- * Patterns are conservative on purpose — only the well-known ones
- * we've seen in production logs. Adding more is safe (the once-
- * per-turn guard de-dupes).
- *
- * Exported for unit tests.
- */
-export function extractApiErrorMessage(text: string): string | null {
-  // Credit balance — most common case for users on metered API keys.
-  // Match up to end-of-line (URLs in the message often contain
-  // periods, so we can't use [^.\n] as a terminator).
-  const credit = text.match(/Credit balance too low[^\n]*/i);
-  if (credit) {
-    return credit[0].trim().replace(/\s+/g, ' ');
-  }
-  // Generic "API Error: <msg>" envelope Claude prints for upstream
-  // errors it doesn't have a more specific UI for.
-  const apiError = text.match(/API Error[:\s]+([^\n]{3,200})/i);
-  if (apiError) {
-    return `API Error: ${apiError[1].trim()}`;
-  }
-  // Quota family.
-  if (/(?:\bquota\b.*\b(?:exceeded|exhausted)\b|\binsufficient[\s_-]+(?:credits?|funds?|quota)\b)/i.test(text)) {
-    const m = text.match(/(?:\bquota\b[^\n]{0,200}|insufficient[^\n]{0,200})/i);
-    return m ? m[0].trim().replace(/\s+/g, ' ') : 'API quota exceeded';
-  }
-  // Auth — surface as-is so user knows it's a credential issue, not
-  // a content one.
-  const auth = text.match(/(?:authentication failed|invalid api key|unauthorized)[^\n]{0,200}/i);
-  if (auth) {
-    return auth[0].trim().replace(/\s+/g, ' ');
-  }
-  return null;
 }
 
 /**
