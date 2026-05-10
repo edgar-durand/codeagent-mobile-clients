@@ -594,7 +594,22 @@ export class HistoryService {
    * Returns the number of messages uploaded (0 means nothing new).
    */
   async uploadDelta(): Promise<number> {
-    if (!this.currentConversationId) return 0;
+    // Lazy-detect the conversation id when uploadDelta is the first
+    // path that needs it. The eager detect at start.ts T+2000ms
+    // misses the case where claude takes longer than 2s to spawn
+    // (e.g. codespace cold start that triggers Claude's lazy
+    // node-16 download — claude doesn't start writing the JSONL
+    // until ~30-60s in). Without this fallback the conversationId
+    // stays null forever, every uploadDelta early-bails, the
+    // server never sees the canonical JSONL with markdown fences,
+    // and mobile/web stay stuck on the streaming-text approximation
+    // (no `\`\`\`` fences → CodeBlock never renders, code shows as
+    // plain monospace with template-literal backticks misparsed
+    // as inline-code pills).
+    if (!this.currentConversationId) {
+      this.detectCurrentConversation();
+      if (!this.currentConversationId) return 0;
+    }
     const sessionId = this.currentConversationId;
     const filePath = path.join(this.projectDir, `${sessionId}.jsonl`);
     const messages = parseJsonl(filePath);
