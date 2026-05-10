@@ -84,8 +84,18 @@ class CopilotMessageExtractor : MessageExtractor {
                     val bubble = bubbles[i]
                     val sb = StringBuilder()
                     walkBubble(bubble, sb)
-                    val md = sb.toString().replace(Regex("\\n{3,}"), "\n\n").trim()
-                    if (md.isBlank()) continue
+                    var md = sb.toString().replace(Regex("\\n{3,}"), "\n\n").trim()
+                    if (md.isBlank()) {
+                        // Fallback: error banners (quota / plan-exhausted /
+                        // rate-limit) live in Compose widgets that don't
+                        // expose a `MarkdownPane`. Walk the bubble for any
+                        // visible text — JLabel / JTextComponent /
+                        // accessibleName chains pick up the banner copy
+                        // ("You've reached your monthly chat messages
+                        // quota…") that the user is meant to see.
+                        md = collectVisibleText(bubble).trim()
+                        if (md.isBlank()) continue
+                    }
 
                     // Copilot wraps user and assistant turns in the
                     // same `CopilotAgentMessageComponent`; the user

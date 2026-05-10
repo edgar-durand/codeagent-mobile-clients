@@ -253,10 +253,26 @@ internal object CopilotChatMetadataBridge {
             val modelCls = Class.forName(
                 "com.github.copilot.chat.conversation.agent.rpc.command.CopilotModel", false, cl,
             )
-            val target = models.firstOrNull {
-                (modelCls.getMethod("getId").invoke(it) as String) == modelId
+            val wanted = modelId.lowercase()
+            // Flexible match: id (exact / case-insensitive),
+            // modelFamily (Copilot exposes that as the API id, e.g.
+            // "gpt-4.1" / "claude-sonnet-4-5"), or modelName ignoring
+            // case + spaces (so "GPT-4o" matches "gpt-4o" / "GPT 4o").
+            // Without this the front-end's `gpt-4o` never matches
+            // Copilot's `gpt-4.1` even when the family is the same.
+            val target = models.firstOrNull { m ->
+                val id = (modelCls.getMethod("getId").invoke(m) as String).lowercase()
+                val family = (modelCls.getMethod("getModelFamily").invoke(m) as? String)?.lowercase() ?: ""
+                val name = (modelCls.getMethod("getModelName").invoke(m) as? String)?.lowercase()?.replace("\\s+".toRegex(), "") ?: ""
+                val wantedNoSpace = wanted.replace("\\s+".toRegex(), "")
+                id == wanted || family == wanted || name == wantedNoSpace ||
+                    id.contains(wanted) || wanted.contains(id) ||
+                    family.contains(wanted) || wanted.contains(family)
             } ?: run {
-                log.warn("selectModel: model '$modelId' not in chat-panel scope")
+                val available = models.joinToString(", ") {
+                    (modelCls.getMethod("getId").invoke(it) as String)
+                }
+                log.warn("selectModel: '$modelId' not in chat-panel scope. Available: $available")
                 return false
             }
 

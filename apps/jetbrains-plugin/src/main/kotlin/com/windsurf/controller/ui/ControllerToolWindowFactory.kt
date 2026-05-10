@@ -400,20 +400,21 @@ class ControllerToolWindowFactory : ToolWindowFactory {
                         val modelSwitch = Regex("^/model\\s+(\\S+)\\s*$").find(prompt.trim())
                         if (modelSwitch != null) {
                             val modelId = modelSwitch.groupValues[1]
-                            val copilotModels = CopilotChatMetadataBridge.listModels(project)
-                            val belongsToCopilot = copilotModels?.all?.any { it.id == modelId } == true
-                            if (belongsToCopilot) {
-                                val ok = CopilotChatMetadataBridge.selectModel(project, modelId)
+                            // Try Copilot first; selectModel returns false
+                            // immediately if Copilot isn't installed or
+                            // the modelId doesn't match its catalog (by
+                            // id / family / name — case + space
+                            // tolerant). On false, fall through so
+                            // `/model claude-sonnet-4-6` still reaches
+                            // Claude Code's slash-command handler.
+                            if (CopilotChatMetadataBridge.selectModel(project, modelId)) {
                                 relay.sendResult(
                                     command.id,
-                                    if (ok) "completed" else "failed",
+                                    "completed",
                                     com.google.gson.JsonObject().apply {
-                                        addProperty("message", if (ok)
-                                            "Switched Copilot model to $modelId"
-                                        else
-                                            "Could not switch Copilot model to $modelId")
+                                        addProperty("message", "Switched Copilot model to $modelId")
                                         addProperty("modelId", modelId)
-                                        addProperty("applied", ok)
+                                        addProperty("applied", true)
                                     },
                                 )
                                 return@invokeLater
