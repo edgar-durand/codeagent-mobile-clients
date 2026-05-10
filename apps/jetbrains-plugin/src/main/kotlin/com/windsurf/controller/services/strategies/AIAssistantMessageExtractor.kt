@@ -58,6 +58,18 @@ class AIAssistantMessageExtractor : MessageExtractor {
     )
 
     override fun extract(project: Project, toolWindow: ToolWindow, userPrompt: String): ExtractedMessage? {
+        // Primary path — read the latest assistant message directly
+        // from `ChatSessionStorage` via the AI Assistant plugin's
+        // internal API. That gives us the canonical markdown the UI
+        // is rendering, with no Swing-tree walking and no AccessibleContext
+        // guesses. Falls back to the original Swing+Accessibility scrape
+        // below if the bridge can't reach the API (older plugin
+        // build, internal class moved, etc.).
+        val fromBridge = AIAssistantBridge.readLatestAssistantMessage(project)
+        if (!fromBridge.isNullOrBlank() && fromBridge.trim() != userPrompt.trim()) {
+            return ExtractedMessage(fromBridge, isDone = null)
+        }
+
         val ref = AtomicReference<ExtractedMessage?>(null)
         val app = ApplicationManager.getApplication()
         val task = Runnable {

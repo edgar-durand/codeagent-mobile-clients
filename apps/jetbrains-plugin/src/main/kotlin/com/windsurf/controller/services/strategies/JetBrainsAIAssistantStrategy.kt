@@ -97,6 +97,18 @@ class JetBrainsAIAssistantStrategy : AgentStrategy {
             try { Thread.sleep(1500) } catch (_: InterruptedException) { return false }
         }
 
+        // Primary path — AI Assistant's own input + send action.
+        // Replaces the document directly (not setText, which on
+        // AIAssistantInputEditorTextField appends instead of replacing
+        // and produced "holahola..."), then invokes
+        // AIAssistant.Chat.SendActions.Send by id.
+        if (AIAssistantBridge.submit(invocation.project, invocation.prompt, tw)) {
+            logger.info("AI Assistant: dispatched via AIAssistantBridge")
+            ide.showNotification("Prompt sent to AI Assistant", invocation.prompt)
+            return true
+        }
+        logger.info("AI Assistant: bridge unavailable — falling back to Swing-direct")
+
         if (trySwingAIAssistantPromptInjection(tw, invocation.prompt, maxWaitMs = 3000L)) {
             ide.showNotification("Prompt sent to AI Assistant", invocation.prompt)
             return true
