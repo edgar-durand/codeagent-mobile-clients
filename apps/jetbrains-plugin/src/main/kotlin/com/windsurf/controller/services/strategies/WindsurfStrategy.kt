@@ -3,15 +3,17 @@ package com.windsurf.controller.services.strategies
 import com.intellij.openapi.diagnostic.Logger
 import com.windsurf.controller.services.AgentOutputMonitor
 import com.windsurf.controller.services.DetectedAgent
-import com.windsurf.controller.services.IdeIntegrationService
 
 /**
- * Codeium / Windsurf / Cascade chat. The original `AgentOutputMonitor`
- * was written and tuned against this UI — Swing tree with a JCEF
- * browser inside, captured via `console.log` injection. This strategy
- * preserves that exact behaviour, so the production-tested capture
- * for Windsurf is never accidentally regressed by changes made for
- * other agents.
+ * Codeium / Windsurf / Cascade chat. Renders inside a JCEF browser, so
+ * the JCEF JS injection path delivers the prompt and the production-
+ * tested Swing+JCEF capture handles the output. Self-contained: no
+ * shared dispatcher, no other-agent code reaches this file.
+ *
+ * The shared `deliverPromptViaJcef` helper is a generic JCEF building
+ * block — it has no Codeium-specific selectors or behaviours. Anything
+ * Windsurf-specific (capture, idle/done heuristics) lives here or in
+ * the `AgentOutputMonitor` Windsurf-default extractor.
  */
 class WindsurfStrategy : AgentStrategy {
     override val name: String = "Windsurf / Codeium"
@@ -25,10 +27,15 @@ class WindsurfStrategy : AgentStrategy {
             tw == "codeium" || tw == "codeium chat"
     }
 
+    override fun deliverPrompt(invocation: AgentInvocation): Boolean = deliverPromptViaJcef(
+        invocation = invocation,
+        notificationTitle = "Prompt sent to Windsurf",
+        notFoundMessage = "Prompt copied to clipboard (Windsurf chat not found)",
+        logger = logger,
+    )
+
     override fun execute(invocation: AgentInvocation): Boolean {
-        val ide = IdeIntegrationService.getInstance()
-        val sent = ide.sendPromptToAgent(invocation.prompt, invocation.agent?.id)
-        if (!sent) return false
+        if (!deliverPrompt(invocation)) return false
         val twId = invocation.agent?.toolWindowId ?: return true
         AgentOutputMonitor.getInstance()
             .startMonitoring(invocation.sessionId, twId, invocation.prompt)

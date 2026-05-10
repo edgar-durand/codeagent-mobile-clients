@@ -39,6 +39,21 @@ class CopilotMessageExtractor : MessageExtractor {
 
     private val logger = Logger.getInstance(CopilotMessageExtractor::class.java)
 
+    /**
+     * Number of `CopilotAgentMessageComponent` bubbles present in the
+     * chat at the moment we started watching for the current turn.
+     * Anything at index < `baseline` is part of an earlier conversation
+     * and must NOT be reported as the response to the current prompt.
+     * `-1` means "not initialised yet" — the first `extract` call
+     * doubles as initialisation if `resetForNewTurn` wasn't invoked
+     * (defensive: works even if the monitor forgets to call it).
+     */
+    private var baselineBubbleCount: Int = -1
+
+    override fun resetForNewTurn(toolWindow: ToolWindow) {
+        baselineBubbleCount = countBubblesOnEdt(toolWindow)
+    }
+
     override fun extract(project: Project, toolWindow: ToolWindow, userPrompt: String): ExtractedMessage? {
         val ref = AtomicReference<ExtractedMessage?>(null)
         val app = ApplicationManager.getApplication()
@@ -46,18 +61,42 @@ class CopilotMessageExtractor : MessageExtractor {
             try {
                 val bubbles = mutableListOf<Component>()
                 for (c in toolWindow.contentManager.contents) {
-                    val component = c.component ?: continue
-                    collectMessageBubbles(component, bubbles)
+                    collectMessageBubbles(c.component, bubbles)
                 }
                 if (bubbles.isEmpty()) return@Runnable
+
+                if (baselineBubbleCount < 0) {
+                    // Lazy init — `resetForNewTurn` wasn't called.
+                    // Treat every existing bubble as "old".
+                    baselineBubbleCount = bubbles.size
+                    return@Runnable
+                }
+
+                // We want bubbles introduced by THIS turn. If Copilot
+                // added bubbles (count grew), only consider the new
+                // tail. If Copilot reused the trailing bubble in place
+                // (count didn't grow), scan everything and let the
+                // user-prompt filter below skip the user's own echo.
+                val lowerBound = if (bubbles.size > baselineBubbleCount) baselineBubbleCount else 0
+                val promptTrimmed = userPrompt.trim()
                 for (i in bubbles.indices.reversed()) {
+                    if (i < lowerBound) break
                     val bubble = bubbles[i]
                     val sb = StringBuilder()
                     walkBubble(bubble, sb)
                     val md = sb.toString().replace(Regex("\\n{3,}"), "\n\n").trim()
                     if (md.isBlank()) continue
-                    val isDone = detectDone(bubble)
-                    ref.set(ExtractedMessage(md, isDone))
+
+                    // Copilot wraps user and assistant turns in the
+                    // same `CopilotAgentMessageComponent`; the user
+                    // bubble's markdown equals the prompt verbatim.
+                    if (promptTrimmed.isNotBlank() &&
+                        (md == promptTrimmed || md.equals(promptTrimmed, ignoreCase = true))
+                    ) {
+                        continue
+                    }
+
+                    ref.set(ExtractedMessage(md, detectDone(bubble)))
                     return@Runnable
                 }
             } catch (e: Exception) {
@@ -67,6 +106,22 @@ class CopilotMessageExtractor : MessageExtractor {
         if (app.isDispatchThread) task.run() else {
             try { app.invokeAndWait(task) } catch (_: Exception) {}
         }
+        return ref.get()
+    }
+
+    private fun countBubblesOnEdt(toolWindow: ToolWindow): Int {
+        val app = ApplicationManager.getApplication()
+        val ref = AtomicReference(0)
+        val task = Runnable {
+            val bubbles = mutableListOf<Component>()
+            for (c in toolWindow.contentManager.contents) {
+                collectMessageBubbles(c.component, bubbles)
+            }
+            ref.set(bubbles.size)
+        }
+        if (app.isDispatchThread) task.run() else try {
+            app.invokeAndWait(task)
+        } catch (_: Exception) {}
         return ref.get()
     }
 

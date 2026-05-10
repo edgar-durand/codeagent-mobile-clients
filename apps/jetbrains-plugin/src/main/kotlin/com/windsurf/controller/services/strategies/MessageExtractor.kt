@@ -38,4 +38,25 @@ data class ExtractedMessage(
  */
 interface MessageExtractor {
     fun extract(project: Project, toolWindow: ToolWindow, userPrompt: String): ExtractedMessage?
+
+    /**
+     * Per-turn lifecycle hook. Called by `AgentOutputMonitor` between
+     * turns so the extractor can record a baseline of the chat (bubble
+     * count, last-seen message id, etc.) and avoid reporting messages
+     * that already existed before the new prompt was sent. Default is
+     * a no-op — extractors that don't need turn isolation can ignore
+     * it.
+     *
+     * Why this exists: Copilot's chat may take 100–500 ms to mount the
+     * new assistant bubble after a prompt is dispatched. During that
+     * gap, the previous turn's bubble is still the "last bubble with
+     * markdown", so a naive "report the last non-empty bubble" loop
+     * re-reports the previous turn's response as though it were the
+     * answer to the current prompt. The extractor uses this hook to
+     * remember "everything before this point is old" and only report
+     * bubbles that materialise afterwards.
+     */
+    fun resetForNewTurn(toolWindow: ToolWindow) {
+        // no-op default
+    }
 }

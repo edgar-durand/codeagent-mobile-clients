@@ -11,7 +11,6 @@ import com.intellij.openapi.extensions.PluginId
 import com.intellij.openapi.ide.CopyPasteManager
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.project.ProjectManager
-import com.intellij.openapi.util.Ref
 import com.intellij.openapi.util.SystemInfo
 import com.intellij.openapi.wm.ToolWindow
 import com.intellij.openapi.wm.ToolWindowManager
@@ -21,10 +20,7 @@ import java.awt.datatransfer.StringSelection
 import java.awt.event.KeyEvent
 import java.awt.Robot
 import java.lang.ref.WeakReference
-import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
-import javax.swing.AbstractButton
-import javax.swing.text.JTextComponent
 
 data class DetectedAgent(
     val id: String,
@@ -301,6 +297,16 @@ class IdeIntegrationService {
         return result.get()
     }
 
+    /**
+     * Send an ad-hoc prompt (no `start_task` monitor) into a target
+     * agent. Routes through the strategy registry so each agent's
+     * specific delivery path (Swing for Copilot/AI Assistant, JCEF for
+     * Windsurf/PR/Generic, terminal for Claude Code) is honoured. This
+     * service no longer owns any agent-specific logic — strategies do.
+     *
+     * Used by `sendPromptToIde`, which is in turn called from the
+     * plugin's own side panel when the user types into its input field.
+     */
     fun sendPromptToAgent(prompt: String, agentId: String? = null): Boolean {
         logger.info("Sending prompt to agent=${agentId ?: "auto"}: ${prompt.take(50)}...")
 
@@ -320,118 +326,37 @@ class IdeIntegrationService {
         val targetAgent = if (agentId != null) {
             agents.find { it.id == agentId }
         } else {
-            agents.firstOrNull()
+            // No specific agent requested — pick the first non-terminal
+            // chat target. Terminal agents (Claude Code) don't fit the
+            // "type into the active chat" use case for this entry point;
+            // the strategy registry would happily dispatch to them, but
+            // a side-panel input shouldn't suddenly spawn a terminal.
+            agents.firstOrNull { !it.toolWindowId.startsWith("__terminal__:") }
+                ?: agents.firstOrNull()
         }
 
-        // Route terminal-based agents (they run in a terminal, not a tool window)
-        if (targetAgent != null && targetAgent.toolWindowId.startsWith("__terminal__:")) {
-            val configId = targetAgent.toolWindowId.removePrefix("__terminal__:")
-            val config = TerminalAgentService.TERMINAL_AGENTS.find { it.id == configId }
-            if (config != null) {
-                logger.info("Routing to TerminalAgentService for ${config.name}")
-                val terminalService = TerminalAgentService.getInstance()
-                terminalService.setProject(project)
-                val sent = terminalService.sendPromptToTerminalAgent(prompt, config)
-                logger.info("TerminalAgentService.sendPromptToTerminalAgent returned: $sent")
-                if (sent) {
-                    showNotification("Prompt sent to ${config.name}", prompt)
-                    return true
-                }
-                CopyPasteManager.getInstance().setContents(StringSelection(prompt))
-                showNotification("Prompt copied to clipboard (${config.name} not accessible)", prompt)
-                return false
-            }
-        }
-
-        val app = ApplicationManager.getApplication()
-        val activated = Ref.create(false)
-        val jcefBrowserRef = AtomicReference<Any?>(null)
-
-        val activateTask = Runnable {
-            try {
-                val tw = findToolWindow(project, targetAgent, agents)
-                if (tw != null) {
-                    logger.info("Activating tool window: ${tw.id}")
-                    tw.show()
-                    tw.activate(null)
-                    activated.set(true)
-
-                    // Find the JCEF browser component inside the tool window
-                    for (content in tw.contentManager.contents) {
-                        val component = content.component ?: continue
-                        val browser = findJBCefBrowser(component)
-                        if (browser != null) {
-                            jcefBrowserRef.set(browser)
-                            logger.info("Found JCEF browser in tool window: ${tw.id}")
-                            break
-                        }
-                    }
-                } else {
-                    logger.warn("No AI tool window could be activated.")
-                }
-            } catch (e: Exception) {
-                logger.error("Error activating tool window: ${e.message}", e)
-            }
-        }
-
-        if (app.isDispatchThread) {
-            activateTask.run()
-        } else {
-            try {
-                app.invokeAndWait(activateTask)
-            } catch (e: Exception) {
-                logger.warn("invokeAndWait for activation failed: ${e.message}")
-                activateTask.run()
-            }
-        }
-
-        if (!activated.get()) {
+        if (targetAgent == null) {
             CopyPasteManager.getInstance().setContents(StringSelection(prompt))
             showNotification("Prompt copied to clipboard (no AI agent found)", prompt)
             return false
         }
 
-        // Copilot Chat is rendered ENTIRELY in Swing (not JCEF) — find its
-        // CopilotAgentInputTextArea + click the send button directly. This
-        // fixes the "first prompt lost" race: when the panel just opened
-        // cold, the input wasn't focused yet and the previous clipboard +
-        // Robot Cmd+V fallback would paste into the wrong place. We retry
-        // for up to 3 s while the Swing tree is still mounting.
-        if (targetAgent != null && isCopilotChatAgent(targetAgent)) {
-            val twForCopilot = ApplicationManager.getApplication().let { app ->
-                val ref = AtomicReference<com.intellij.openapi.wm.ToolWindow?>(null)
-                val task = Runnable { ref.set(ToolWindowManager.getInstance(project).getToolWindow(targetAgent.toolWindowId)) }
-                if (app.isDispatchThread) task.run() else try { app.invokeAndWait(task) } catch (_: Exception) {}
-                ref.get()
-            }
-            if (twForCopilot != null) {
-                val sent = trySwingCopilotPromptInjection(twForCopilot, prompt, maxWaitMs = 3000L)
-                if (sent) {
-                    showNotification("Prompt sent to ${targetAgent.name}", prompt)
-                    return true
-                }
-                logger.warn("Copilot Swing injection failed; falling back to JCEF/Robot")
-            }
+        val invocation = com.windsurf.controller.services.strategies.AgentInvocation(
+            project = project,
+            agent = targetAgent,
+            prompt = prompt,
+            // Ad-hoc dispatches have no `start_task` session id — strategies'
+            // `deliverPrompt` paths must not consult this field.
+            sessionId = "",
+        )
+        val sent = com.windsurf.controller.services.strategies.AgentStrategyRegistry
+            .getInstance()
+            .deliverPrompt(invocation)
+        if (!sent) {
+            CopyPasteManager.getInstance().setContents(StringSelection(prompt))
+            showNotification("Prompt copied to clipboard (delivery failed)", prompt)
+            return false
         }
-
-        val jcefBrowser = jcefBrowserRef.get()
-        if (jcefBrowser != null) {
-            // Pure JCEF JS injection — no Robot paste needed, works regardless of focus state
-            val sent = executeJcefPromptInjection(jcefBrowser, prompt)
-            if (sent) {
-                showNotification("Prompt sent to AI", prompt)
-                return true
-            }
-            logger.warn("JCEF JS injection failed, falling back to Robot paste")
-        }
-
-        // Fallback: clipboard + Robot paste for non-JCEF tool windows
-        CopyPasteManager.getInstance().setContents(StringSelection(prompt))
-        app.invokeLater {
-            Thread.sleep(800)
-            simulatePasteAndSubmit()
-        }
-        showNotification("Prompt sent to AI", prompt)
         return true
     }
 
@@ -439,7 +364,13 @@ class IdeIntegrationService {
         return sendPromptToAgent(prompt, null)
     }
 
-    private fun executeJcefPromptInjection(browser: Any, prompt: String): Boolean {
+    /**
+     * JCEF JS prompt injection — strategies whose chat is rendered in
+     * Chromium/JBCef (Windsurf, generic) call this directly. The
+     * regex-based input discovery handles ProseMirror, contenteditable,
+     * textarea, and the role=textbox patterns.
+     */
+    fun executeJcefPromptInjection(browser: Any, prompt: String): Boolean {
         try {
             val platformCL = browser.javaClass.classLoader
             val jbCefBaseClass = Class.forName("com.intellij.ui.jcef.JBCefBrowserBase", true, platformCL)
@@ -562,7 +493,8 @@ class IdeIntegrationService {
         }
     }
 
-    private fun findJBCefBrowser(component: Component): Any? {
+    /** Recursively walk a Swing tree looking for a JBCef browser instance. */
+    fun findJBCefBrowser(component: Component): Any? {
         val className = component.javaClass.name
         if (className.contains("\$MyPanel") && className.contains("JBCef")) {
             try {
@@ -581,7 +513,12 @@ class IdeIntegrationService {
         return null
     }
 
-    private fun findToolWindow(project: Project, targetAgent: DetectedAgent?, agents: List<DetectedAgent>): ToolWindow? {
+    /**
+     * Resolve the ToolWindow for the given target agent. Strategies
+     * call this to get the same well-known + alternate-id resolution
+     * the dispatcher uses, without duplicating the knownAgents lookup.
+     */
+    fun findToolWindow(project: Project, targetAgent: DetectedAgent?, agents: List<DetectedAgent>): ToolWindow? {
         val twManager = ToolWindowManager.getInstance(project)
 
         if (targetAgent != null) {
@@ -633,156 +570,50 @@ class IdeIntegrationService {
         return null
     }
 
-    private fun simulatePasteAndSubmit() {
+    /**
+     * Robot-driven Cmd+V (or Ctrl+V on non-Mac) followed by Enter.
+     * Last-resort path used when neither Swing-direct nor JCEF
+     * injection is available. Strategies that opt into this must
+     * have first put the prompt on the clipboard via CopyPasteManager.
+     *
+     * **macOS Cmd+V race:** older versions used `robot.autoDelay = 50`
+     * with no explicit sleep between modifier press and key press.
+     * On a busy macOS event loop the OS sometimes registered the
+     * `V` keystroke BEFORE the `Cmd` modifier was active, producing
+     * a literal "v" character in the focused input instead of a
+     * paste. We now insert explicit `Thread.sleep` gaps so the OS
+     * has time to latch the modifier state before the key arrives.
+     * Same pattern applied to the Cmd release at the end.
+     */
+    fun simulatePasteAndSubmit() {
         try {
-            val robot = Robot()
-            robot.autoDelay = 50
+            val robot = java.awt.Robot()
+            robot.autoDelay = 80
 
-            if (SystemInfo.isMac) {
-                robot.keyPress(KeyEvent.VK_META)
-                robot.keyPress(KeyEvent.VK_V)
-                robot.keyRelease(KeyEvent.VK_V)
-                robot.keyRelease(KeyEvent.VK_META)
+            if (com.intellij.openapi.util.SystemInfo.isMac) {
+                robot.keyPress(java.awt.event.KeyEvent.VK_META)
+                Thread.sleep(80)
+                robot.keyPress(java.awt.event.KeyEvent.VK_V)
+                Thread.sleep(80)
+                robot.keyRelease(java.awt.event.KeyEvent.VK_V)
+                Thread.sleep(80)
+                robot.keyRelease(java.awt.event.KeyEvent.VK_META)
             } else {
-                robot.keyPress(KeyEvent.VK_CONTROL)
-                robot.keyPress(KeyEvent.VK_V)
-                robot.keyRelease(KeyEvent.VK_V)
-                robot.keyRelease(KeyEvent.VK_CONTROL)
+                robot.keyPress(java.awt.event.KeyEvent.VK_CONTROL)
+                Thread.sleep(80)
+                robot.keyPress(java.awt.event.KeyEvent.VK_V)
+                Thread.sleep(80)
+                robot.keyRelease(java.awt.event.KeyEvent.VK_V)
+                Thread.sleep(80)
+                robot.keyRelease(java.awt.event.KeyEvent.VK_CONTROL)
             }
 
-            Thread.sleep(300)
-            robot.keyPress(KeyEvent.VK_ENTER)
-            robot.keyRelease(KeyEvent.VK_ENTER)
+            Thread.sleep(500)
+            robot.keyPress(java.awt.event.KeyEvent.VK_ENTER)
+            robot.keyRelease(java.awt.event.KeyEvent.VK_ENTER)
         } catch (e: Exception) {
             logger.warn("Robot simulation failed: ${e.message}")
         }
-    }
-
-    private fun isCopilotChatAgent(agent: DetectedAgent): Boolean {
-        if (agent.pluginId.equals("com.github.copilot", ignoreCase = true)) return true
-        return agent.toolWindowId.equals("GitHub Copilot Chat", ignoreCase = true)
-    }
-
-    /**
-     * Direct Swing prompt injection for Copilot Chat: walks the tool
-     * window's component tree, finds `CopilotAgentInputTextArea`, sets
-     * its text to `prompt`, then clicks the send button inside
-     * `SendStopActionButtonPanel`. Verifies the click *actually
-     * dispatched* by checking that the input cleared shortly after —
-     * a cold-open Copilot panel sometimes finds the button but the
-     * doClick is a no-op until Compose Desktop finishes activating
-     * it, so we have to retry until we see the input go empty. Without
-     * this verification the very first prompt after the chat opens is
-     * silently discarded.
-     */
-    private fun trySwingCopilotPromptInjection(
-        tw: com.intellij.openapi.wm.ToolWindow,
-        prompt: String,
-        maxWaitMs: Long,
-    ): Boolean {
-        val app = ApplicationManager.getApplication()
-        val deadline = System.currentTimeMillis() + maxWaitMs
-        while (System.currentTimeMillis() < deadline) {
-            val sentRef = AtomicBoolean(false)
-            val attemptedRef = AtomicReference<JTextComponent?>(null)
-            val task = Runnable {
-                try {
-                    val (attempted, input) = performCopilotSwingInjection(tw, prompt)
-                    sentRef.set(attempted)
-                    attemptedRef.set(input)
-                } catch (e: Exception) {
-                    logger.debug("Copilot Swing injection iteration failed: ${e.message}")
-                }
-            }
-            if (app.isDispatchThread) task.run() else {
-                try { app.invokeAndWait(task) } catch (_: Exception) {}
-            }
-            if (sentRef.get()) {
-                // Verify the click actually submitted by checking that the
-                // input cleared. Compose-backed buttons silently no-op on
-                // their first doClick when the panel just mounted — the
-                // text stays in the field and the prompt never reaches
-                // Copilot. If we see the prompt still in the input, retry.
-                try { Thread.sleep(200) } catch (_: InterruptedException) { return false }
-                val cleared = AtomicBoolean(true)
-                val verifyTask = Runnable {
-                    val input = attemptedRef.get()
-                    if (input != null) {
-                        val current = (input.text ?: "").trim()
-                        if (current == prompt.trim() && current.isNotBlank()) {
-                            cleared.set(false)
-                        }
-                    }
-                }
-                if (app.isDispatchThread) verifyTask.run() else {
-                    try { app.invokeAndWait(verifyTask) } catch (_: Exception) {}
-                }
-                if (cleared.get()) return true
-                logger.info("Copilot Swing injection: click did not submit (input still has prompt) — retrying")
-            }
-            try { Thread.sleep(120) } catch (_: InterruptedException) { return false }
-        }
-        return false
-    }
-
-    /**
-     * Returns (attempted, inputComponent). `attempted = true` means we
-     * found the input and dispatched the click/Enter; the caller still
-     * has to verify the click took effect. The input reference is
-     * returned so the caller can re-check its contents off-EDT later.
-     */
-    private fun performCopilotSwingInjection(
-        tw: com.intellij.openapi.wm.ToolWindow,
-        prompt: String,
-    ): Pair<Boolean, JTextComponent?> {
-        var inputArea: JTextComponent? = null
-        var sendButton: AbstractButton? = null
-
-        fun walk(c: Component) {
-            val cls = c.javaClass.name
-            if (inputArea == null && cls.endsWith(".CopilotAgentInputTextArea") && c is JTextComponent) {
-                inputArea = c
-            }
-            if (sendButton == null && cls.endsWith(".SendStopActionButtonPanel")) {
-                fun findBtn(node: Component): AbstractButton? {
-                    if (node is AbstractButton && node.isVisible && node.isEnabled) return node
-                    if (node is Container) {
-                        for (i in 0 until node.componentCount) {
-                            val found = findBtn(node.getComponent(i))
-                            if (found != null) return found
-                        }
-                    }
-                    return null
-                }
-                findBtn(c)?.let { sendButton = it }
-            }
-            if (c is Container) {
-                for (i in 0 until c.componentCount) walk(c.getComponent(i))
-            }
-        }
-
-        for (content in tw.contentManager.contents) {
-            val component = content.component ?: continue
-            walk(component)
-        }
-
-        val input = inputArea ?: return false to null
-        input.text = prompt
-        input.caretPosition = prompt.length
-        input.requestFocusInWindow()
-
-        val btn = sendButton
-        if (btn != null) {
-            btn.doClick()
-            logger.info("Copilot Swing injection: setText + clicked ${btn.javaClass.simpleName}")
-            return true to input
-        }
-        // No send button found — dispatch an Enter key on the input as a
-        // last resort. Many text inputs in IntelliJ map Enter to submit.
-        val enter = KeyEvent(input, KeyEvent.KEY_PRESSED, System.currentTimeMillis(), 0, KeyEvent.VK_ENTER, '\n')
-        input.dispatchEvent(enter)
-        logger.info("Copilot Swing injection: send button missing, dispatched Enter")
-        return true to input
     }
 
     private fun isClaudeCodeAgent(agent: DetectedAgent): Boolean {
@@ -791,7 +622,7 @@ class IdeIntegrationService {
                agent.name.contains("Claude Code", ignoreCase = true)
     }
 
-    private fun showNotification(title: String, content: String) {
+    fun showNotification(title: String, content: String) {
         try {
             val project = getProject()
             NotificationGroupManager.getInstance()

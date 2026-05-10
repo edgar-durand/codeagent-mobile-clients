@@ -37,7 +37,7 @@ class ClaudeCodeTerminalStrategy : AgentStrategy {
         return agent.name.contains("Claude Code", ignoreCase = true)
     }
 
-    override fun execute(invocation: AgentInvocation): Boolean {
+    override fun deliverPrompt(invocation: AgentInvocation): Boolean {
         val configId = invocation.agent?.toolWindowId?.removePrefix("__terminal__:")
             ?: "claude_code"
         val config = TerminalAgentService.TERMINAL_AGENTS.find { it.id == configId }
@@ -45,9 +45,13 @@ class ClaudeCodeTerminalStrategy : AgentStrategy {
         val terminal = TerminalAgentService.getInstance()
         terminal.setProject(invocation.project)
         val sent = terminal.sendPromptToTerminalAgent(invocation.prompt, config)
-        logger.info("ClaudeCodeTerminalStrategy.send returned=$sent")
-        if (!sent) return false
-        terminal.startMonitoring(invocation.sessionId, invocation.prompt)
+        logger.info("ClaudeCodeTerminalStrategy.deliverPrompt returned=$sent")
+        return sent
+    }
+
+    override fun execute(invocation: AgentInvocation): Boolean {
+        if (!deliverPrompt(invocation)) return false
+        TerminalAgentService.getInstance().startMonitoring(invocation.sessionId, invocation.prompt)
         return true
     }
 

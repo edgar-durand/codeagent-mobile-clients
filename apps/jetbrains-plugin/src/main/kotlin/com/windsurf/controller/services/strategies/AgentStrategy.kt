@@ -38,10 +38,24 @@ interface AgentStrategy {
     fun canHandle(agent: DetectedAgent?): Boolean
 
     /**
-     * Send the prompt into the agent's UI and wire up the response
-     * monitor. Returns `false` if the prompt couldn't be delivered
-     * (no project, missing tool window, terminal launch failed) so
+     * Deliver the prompt into the agent's UI ONLY — no monitor, no
+     * `start_task` bookkeeping. This is the path used by ad-hoc inputs
+     * coming from the plugin's own side panel (`sendPromptToIde`),
+     * where the user just wants the prompt to land in the chat.
+     *
+     * Each strategy is fully self-contained here: it resolves its own
+     * tool window, decides whether to inject via Swing / JCEF / Robot
+     * / terminal, and never delegates to a shared dispatcher in
+     * `IdeIntegrationService`. Returns `false` if delivery failed so
      * the caller can fall back to clipboard + notification.
+     */
+    fun deliverPrompt(invocation: AgentInvocation): Boolean
+
+    /**
+     * `start_task` entry point. Default implementation delivers the
+     * prompt then starts the strategy's monitor; override only if a
+     * strategy needs to interleave the two (e.g. terminal-based agents
+     * that own their own capture loop and bypass `AgentOutputMonitor`).
      */
     fun execute(invocation: AgentInvocation): Boolean
 

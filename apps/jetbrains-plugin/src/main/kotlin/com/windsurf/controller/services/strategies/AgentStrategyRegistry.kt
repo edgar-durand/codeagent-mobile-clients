@@ -66,6 +66,28 @@ class AgentStrategyRegistry {
         }
     }
 
+    /**
+     * Deliver a prompt without starting a monitor. Used by ad-hoc
+     * "type into the active agent" inputs (the plugin's own side
+     * panel), where there is no `start_task` lifecycle. Routes through
+     * the same `canHandle` logic so each agent's specific delivery
+     * path (Swing, JCEF, terminal) is honoured.
+     */
+    fun deliverPrompt(invocation: AgentInvocation): Boolean {
+        val strategy = strategies.firstOrNull { it.canHandle(invocation.agent) }
+        if (strategy == null) {
+            logger.warn("No strategy claimed agent=${invocation.agent?.id ?: "<null>"} for deliverPrompt")
+            return false
+        }
+        logger.info("deliverPrompt strategy=${strategy.name} agent=${invocation.agent?.id ?: "<null>"}")
+        return try {
+            strategy.deliverPrompt(invocation)
+        } catch (e: Exception) {
+            logger.warn("Strategy ${strategy.name} deliverPrompt threw: ${e.message}", e)
+            false
+        }
+    }
+
     /** Stop whatever the last invocation started. */
     fun stop() {
         try { lastActive?.stop() } catch (e: Exception) { logger.debug("stop: ${e.message}") }

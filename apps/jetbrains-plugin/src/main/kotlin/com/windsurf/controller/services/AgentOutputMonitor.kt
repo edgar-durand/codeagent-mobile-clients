@@ -148,7 +148,34 @@ class AgentOutputMonitor {
         previousSnapshot = captureToolWindowContent() ?: ""
         logger.info("Output monitoring started for session=$sessionId, toolWindow=$toolWindowId, baselineLength=${previousSnapshot.length}")
 
+        // Per-turn reset: extractors need to know "everything visible
+        // right now is the previous turn — the response to the current
+        // prompt will materialise after this point". Without this hook
+        // Copilot's extractor reports the previous turn's bubble while
+        // the new bubble is still mounting, causing the mobile UI to
+        // see "previous response + current response" concatenated.
+        if (extractor != null) {
+            try {
+                val project = projectRef?.get()
+                val tw = if (project != null) ToolWindowManager.getInstance(project).getToolWindow(toolWindowId) else null
+                if (tw != null) extractor.resetForNewTurn(tw)
+            } catch (e: Exception) {
+                logger.debug("Extractor resetForNewTurn failed: ${e.message}")
+            }
+        }
+
         clearRemoteOutput(sessionId)
+
+        // Tell the mobile/web client that a new turn is starting so it
+        // creates a fresh agent bubble instead of appending to the
+        // previous one. The legacy non-extractor path emits this when
+        // it detects activity after a `done`, but extractor-driven
+        // turns may emit `text/done=true` on their very first poll
+        // (Copilot finishes a short reply before our 500 ms tick), so
+        // we have to issue the signal up front — otherwise mobile
+        // treats the new chunk as a continuation of the old bubble
+        // and the user sees "previous response + current response".
+        pushOutput(sessionId, "new_turn", "", done = false)
 
         // Extractor-driven agents poll a small, scoped subtree (one
         // assistant bubble for Copilot, the Compose accessibility tree

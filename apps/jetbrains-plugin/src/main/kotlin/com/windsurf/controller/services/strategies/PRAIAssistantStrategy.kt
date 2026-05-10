@@ -3,12 +3,18 @@ package com.windsurf.controller.services.strategies
 import com.intellij.openapi.diagnostic.Logger
 import com.windsurf.controller.services.AgentOutputMonitor
 import com.windsurf.controller.services.DetectedAgent
-import com.windsurf.controller.services.IdeIntegrationService
 
 /**
  * "PR AI Assistant" tool window — JetBrains' code-review companion to
- * the main AI Assistant. Same `com.intellij.ml.llm.*` provenance, so
- * we apply the same embedded-editor capture path.
+ * the main AI Assistant. Same `com.intellij.ml.llm.*` provenance, but
+ * historically it has used a different renderer than the main chat
+ * (Swing-only, no Compose surface), so the embedded-editor capture
+ * path applies here even though it does not on the main AI Assistant.
+ *
+ * Sending side: PR AI Assistant has historically rendered inside a
+ * JCEF panel for the agentic UI, so the shared JCEF helper covers it.
+ * If a future renderer change moves the input out of JCEF this is
+ * where we'd add a Swing-direct path mirroring CopilotChatStrategy.
  *
  * Kept as its own strategy (vs. folding it into
  * {@link JetBrainsAIAssistantStrategy}) so a future renderer change
@@ -24,10 +30,15 @@ class PRAIAssistantStrategy : AgentStrategy {
         return agent.toolWindowId.equals("PR AI Assistant", ignoreCase = true)
     }
 
+    override fun deliverPrompt(invocation: AgentInvocation): Boolean = deliverPromptViaJcef(
+        invocation = invocation,
+        notificationTitle = "Prompt sent to PR AI Assistant",
+        notFoundMessage = "Prompt copied to clipboard (PR AI Assistant not found)",
+        logger = logger,
+    )
+
     override fun execute(invocation: AgentInvocation): Boolean {
-        val ide = IdeIntegrationService.getInstance()
-        val sent = ide.sendPromptToAgent(invocation.prompt, invocation.agent?.id)
-        if (!sent) return false
+        if (!deliverPrompt(invocation)) return false
         val twId = invocation.agent?.toolWindowId ?: return true
         AgentOutputMonitor.getInstance().startMonitoring(
             invocation.sessionId,
