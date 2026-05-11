@@ -58,17 +58,19 @@ class AIAssistantMessageExtractor : MessageExtractor {
     )
 
     override fun extract(project: Project, toolWindow: ToolWindow, userPrompt: String): ExtractedMessage? {
-        // Primary path — read the latest assistant message directly
-        // from `ChatSessionStorage` via the AI Assistant plugin's
-        // internal API. That gives us the canonical markdown the UI
-        // is rendering, with no Swing-tree walking and no AccessibleContext
-        // guesses. Falls back to the original Swing+Accessibility scrape
-        // below if the bridge can't reach the API (older plugin
-        // build, internal class moved, etc.).
-        val fromBridge = AIAssistantBridge.readLatestAssistantMessage(project)
-        if (!fromBridge.isNullOrBlank() && fromBridge.trim() != userPrompt.trim()) {
-            return ExtractedMessage(fromBridge, isDone = null)
-        }
+        // The Swing scrape below is the only reliable read path: it
+        // walks the TextPartViewEditorPane instances the chat panel
+        // renders and converts their HTMLDocument to markdown. A
+        // previous version called AIAssistantBridge.readLatestAssistantMessage
+        // first, but every getter on ChatMessage we could reach
+        // returned either non-text objects (ChatSessionImpl) or
+        // arbitrary strings (UID) that mobile then displayed
+        // verbatim. Until we identify a getter on the assistant
+        // message subtype that actually carries the rendered markdown
+        // (Markdown­ChatMessage.getDisplayText needs verifying in this
+        // Codex build) we stick with the Swing scrape, which at
+        // least produced legible plain text. The canonical-final
+        // markdown emit will be added once the read path is solid.
 
         val ref = AtomicReference<ExtractedMessage?>(null)
         val app = ApplicationManager.getApplication()
@@ -98,6 +100,31 @@ class AIAssistantMessageExtractor : MessageExtractor {
             try { app.invokeAndWait(task) } catch (_: Exception) {}
         }
         return ref.get()
+    }
+
+    /**
+     * Canonical-final markdown for the current turn, pulled from the
+     * live ChatSession via reflection. Streaming chunks above come from
+     * the Swing scrape, which flattens code blocks (no fences) and
+     * tables (one cell per line). The bridge reads
+     * `MarkdownChatMessage.getDisplayText()` on the last assistant
+     * message, which is the same markdown the chat panel renders to
+     * HTML — fences / tables / lists intact.
+     *
+     * The monitor uses this only at end-of-turn (when the stability
+     * heuristic or an explicit done signal fires) and falls back to
+     * the streaming snapshot if this returns null or implausibly short
+     * text, so it can never make things worse than the streaming path.
+     */
+    override fun finalize(project: Project, toolWindow: ToolWindow, userPrompt: String): String? {
+        return try {
+            val raw = AIAssistantBridge.readLatestAssistantMessage(project) ?: return null
+            val stripped = stripUserPrompt(raw, userPrompt)
+            stripped.ifBlank { null }
+        } catch (e: Exception) {
+            logger.debug("AI Assistant finalize failed: ${e.message}")
+            null
+        }
     }
 
     // ---------------------------------------------------------------
@@ -288,6 +315,26 @@ class AIAssistantMessageExtractor : MessageExtractor {
         val seen = HashSet<String>()
         val visited = HashSet<Int>()
         val whitespace = Regex("[\\s\\u00A0\\u200B\\u200C\\u200D]+")
+
+        // PRE-STEP: try to reconstruct a table by grouping accessibility
+        // leaves on their absolute Y coordinate.
+        //
+        // Why this helps: in Codex's Compose Desktop renderer the chat
+        // bubble exposes table cells as a FLAT list of accessibility
+        // leaves with the same parent (the standard `detectComposeTable`
+        // below expects N children with M leaves each — Codex gives us
+        // K=N×M children at the same level, so the heuristic misses).
+        // But each cell still has its own on-screen Y coordinate. Cells
+        // in the same visual row share Y; grouping by Y reconstructs
+        // the row layout exactly.
+        //
+        // If the grouping yields ≥ 2 rows × ≥ 2 columns AND every row
+        // has the same column count, we emit markdown table syntax
+        // directly and skip the depth-first walker (which would
+        // re-emit each cell on its own line).
+        val tableMarkdown = tryReconstructTableByY(root, whitespace)
+        if (tableMarkdown != null) return tableMarkdown
+
         fun appendUnique(s: String?) {
             val text = s?.replace(whitespace, " ")?.trim().orEmpty()
             if (text.isEmpty()) return
@@ -452,6 +499,299 @@ class AIAssistantMessageExtractor : MessageExtractor {
         val rootCtx = root.accessibleContext ?: return ""
         visit(rootCtx, 0)
         return sb.toString().trim()
+    }
+
+    /**
+     * Walk the accessibility tree, collect every leaf with its absolute
+     * Y coordinate, then group leaves whose Y values cluster (within
+     * `tolerance` pixels) into rows. If we end up with a clean N×M
+     * grid (≥2 rows, ≥2 cols, every row same width, every cell
+     * non-empty), render it as a GFM markdown table.
+     *
+     * Returns null if the leaves don't form a clean grid — caller
+     * falls back to the normal flat-list emission.
+     */
+    private data class GridLeaf(val text: String, val y: Int, val x: Int)
+
+    /**
+     * Collect every accessibility leaf in `root` with its absolute
+     * screen X/Y, group adjacent leaves by Y (tolerance 6 px), then
+     * classify each "line" as one of:
+     *   • table row (≥2 cells on the same Y)
+     *   • code      (single cell whose content looks like source)
+     *   • plain text
+     *
+     * The output stitches consecutive same-type runs into the right
+     * markdown construct: tables get `| … |` rows + `---` divider,
+     * code runs get triple-backtick fences with a detected language,
+     * and plain text is emitted as paragraphs.
+     *
+     * Returns null only when the leaves don't contain anything richer
+     * than a single paragraph — caller falls back to the unstructured
+     * walker. The previous version of this function only handled
+     * tables; once `looksLikeCode` started firing, callers also get
+     * proper fenced code blocks (Java / Python / JS / etc.) instead of
+     * the previous flattened-on-one-line plain text.
+     */
+    private fun tryReconstructTableByY(root: Component, whitespace: Regex): String? {
+        val leaves = mutableListOf<GridLeaf>()
+        val visited = HashSet<Int>()
+        val rootCtx = root.accessibleContext ?: return null
+
+        var sawAnyBounds = 0
+        var sawScreenLoc = 0
+        fun visit(ctx: AccessibleContext, depth: Int, accumulatedX: Int, accumulatedY: Int) {
+            if (depth > 80) return
+            if (!visited.add(System.identityHashCode(ctx))) return
+            try {
+                val comp = ctx.accessibleComponent
+                var ownX = accumulatedX
+                var ownY = accumulatedY
+                if (comp != null) {
+                    try {
+                        val loc = comp.locationOnScreen
+                        ownX = loc.x; ownY = loc.y; sawScreenLoc++
+                    } catch (_: Exception) {
+                        try {
+                            val b = comp.bounds
+                            ownX = b.x + accumulatedX; ownY = b.y + accumulatedY
+                            sawAnyBounds++
+                        } catch (_: Exception) { /* keep accumulated */ }
+                    }
+                }
+                val n = ctx.accessibleChildrenCount
+                if (n == 0) {
+                    val raw = ctx.accessibleName?.replace(whitespace, " ")?.trim().orEmpty()
+                    if (raw.isEmpty()) return
+                    if (raw.lowercase() in CHROME_LABELS) return
+                    leaves.add(GridLeaf(raw, ownY, ownX))
+                    return
+                }
+                for (i in 0 until n) {
+                    val sub = ctx.getAccessibleChild(i)?.accessibleContext ?: continue
+                    visit(sub, depth + 1, ownX, ownY)
+                }
+            } catch (_: Exception) { /* tolerate */ }
+        }
+        visit(rootCtx, 0, 0, 0)
+
+        if (leaves.size < 2) {
+            logger.info("tryReconstructTableByY: ${leaves.size} leaves collected (need ≥2) screenLoc=$sawScreenLoc bounds=$sawAnyBounds")
+            return null
+        }
+
+        // Group by Y with tolerance, then sort each line left-to-right
+        // by X so column order matches the visual layout.
+        val tolerance = 6
+        val lines = mutableListOf<MutableList<GridLeaf>>()
+        var currentY = Int.MIN_VALUE
+        var currentLine: MutableList<GridLeaf>? = null
+        for (leaf in leaves) {
+            if (currentLine == null || kotlin.math.abs(leaf.y - currentY) > tolerance) {
+                currentLine = mutableListOf()
+                lines.add(currentLine)
+            }
+            currentLine.add(leaf)
+            currentY = leaf.y
+        }
+        lines.forEach { it.sortBy { l -> l.x } }
+
+        val lineSizes = lines.map { it.size }
+        logger.info("tryReconstructTableByY: ${leaves.size} leaves → ${lines.size} lines, sizes=${lineSizes.take(20)}")
+
+        // Classify-and-emit pass. Walk lines in order; when we see a
+        // multi-cell line, greedily consume same-width neighbours as a
+        // table. When we see a single code-like line, greedily consume
+        // adjacent code-like lines as a fenced block. Everything else
+        // is plain text.
+        val sb = StringBuilder()
+        fun escape(s: String) = s.replace("|", "\\|")
+        var emittedSomething = false
+        var i = 0
+        while (i < lines.size) {
+            val firstSize = lines[i].size
+            if (firstSize >= 2) {
+                var j = i + 1
+                while (j < lines.size && lines[j].size == firstSize) j++
+                val run = lines.subList(i, j)
+                val rows = run.map { line -> line.map { it.text } }
+                if (run.size >= 2 && rows.toSet().size > 1) {
+                    if (emittedSomething) sb.append("\n")
+                    sb.append("| ").append(rows[0].joinToString(" | ") { escape(it) }).append(" |\n")
+                    sb.append("|").append((0 until firstSize).joinToString("|") { " --- " }).append("|\n")
+                    for (r in 1 until rows.size) {
+                        sb.append("| ").append(rows[r].joinToString(" | ") { escape(it) }).append(" |\n")
+                    }
+                    emittedSomething = true
+                    i = j
+                    continue
+                }
+                // Multi-cell but only one row — treat as space-joined text.
+                if (emittedSomething) sb.append("\n")
+                sb.append(rows[0].joinToString(" ")).append("\n")
+                emittedSomething = true
+                i++
+                continue
+            }
+            // Single-cell line.
+            val text = lines[i][0].text
+            // Diff blocks: consume ≥2 consecutive diff-shaped lines
+            // (lines starting with `+`/`-`/` ` followed by content,
+            // or hunk headers `@@ … @@`).
+            if (looksLikeDiff(text)) {
+                val diffLines = mutableListOf<String>()
+                var j = i
+                while (j < lines.size && lines[j].size == 1 && looksLikeDiff(lines[j][0].text)) {
+                    diffLines.add(lines[j][0].text)
+                    j++
+                }
+                if (diffLines.size >= 2) {
+                    if (emittedSomething) sb.append("\n")
+                    sb.append("```diff\n")
+                    sb.append(diffLines.joinToString("\n"))
+                    sb.append("\n```\n")
+                    emittedSomething = true
+                    i = j
+                    continue
+                }
+                // Only one diff-shaped line — fall through to plain text.
+            }
+            if (looksLikeCode(text)) {
+                // Consume consecutive code-like lines into one fence.
+                val codeLines = mutableListOf<String>()
+                var j = i
+                while (j < lines.size && lines[j].size == 1 && looksLikeCode(lines[j][0].text)) {
+                    codeLines.add(reflowCodeLine(lines[j][0].text))
+                    j++
+                }
+                val lang = detectCodeLang(codeLines.joinToString("\n"))
+                if (emittedSomething) sb.append("\n")
+                sb.append("```").append(lang).append("\n")
+                sb.append(codeLines.joinToString("\n"))
+                sb.append("\n```\n")
+                emittedSomething = true
+                i = j
+                continue
+            }
+            if (emittedSomething) sb.append("\n")
+            sb.append(text).append("\n")
+            emittedSomething = true
+            i++
+        }
+        return sb.toString().trim().ifBlank { null }
+    }
+
+    /**
+     * A line looks like part of a unified diff if it starts with
+     * `+`, `-`, or ` ` followed by content (the standard diff payload
+     * prefix), or with a hunk header `@@ … @@`, or with
+     * `diff --git`. Used to detect a run of diff lines that should be
+     * fenced as ```diff so mobile gets red/green highlighting.
+     */
+    private fun looksLikeDiff(text: String): Boolean {
+        if (text.length < 2) return false
+        if (text.startsWith("@@") && text.indexOf("@@", startIndex = 2) >= 0) return true
+        if (text.startsWith("diff --git ")) return true
+        if (text.startsWith("--- ") || text.startsWith("+++ ")) return true
+        val first = text[0]
+        if (first != '+' && first != '-' && first != ' ') return false
+        // Bare "+" or "-" alone (single char) is more likely an emoji /
+        // bullet — require some content after the marker.
+        if (text.length < 3) return false
+        return text[1] == ' ' || text[1].isLetterOrDigit() || text[1] in "({/_\""
+    }
+
+    /**
+     * Heuristic test: does this single-line cell look like source code?
+     *
+     * Triggers on a combination of length + density of code punctuation
+     * (`{` `}` `;` `()`) plus one strong syntactic marker
+     * (`class`, `function`, `def`, `import`, `public`, …). Tuned to
+     * fire on a one-line flattened Java/JS/Python snippet (the
+     * accessibility tree collapses code blocks into a single leaf)
+     * while NOT firing on prose paragraphs that happen to contain
+     * parentheses or semicolons.
+     */
+    private fun looksLikeCode(text: String): Boolean {
+        if (text.length < 25) return false
+        val punctCount =
+            text.count { it == '{' || it == '}' || it == ';' } +
+            text.count { it == '(' } / 2  // each call has ( + ); count once
+        val hasKeyword = Regex(
+            "(?i)\\b(class|public|private|protected|static|void|return|function|def|import|const|let|var|new|if|else|for|while)\\b"
+        ).containsMatchIn(text)
+        // dense punctuation + at least one keyword OR very dense punctuation alone
+        return (punctCount >= 3 && hasKeyword) || punctCount >= 6
+    }
+
+    /**
+     * Detect a fenced-code-block language tag from the text. Returns
+     * empty string if uncertain (mobile renderer falls back to a
+     * generic code block in that case).
+     */
+    private fun detectCodeLang(text: String): String {
+        val t = text
+        return when {
+            Regex("\\bpublic\\s+(?:static\\s+)?(?:void|class|final|abstract)\\b").containsMatchIn(t) -> "java"
+            Regex("\\bSystem\\.out\\.println\\b").containsMatchIn(t) -> "java"
+            Regex("\\bdef\\s+\\w+\\s*\\(").containsMatchIn(t) -> "python"
+            Regex("\\bprint\\(").containsMatchIn(t) && Regex("\\bimport\\s+\\w").containsMatchIn(t) -> "python"
+            Regex("\\b(?:const|let|var)\\s+\\w+\\s*=").containsMatchIn(t) -> "javascript"
+            Regex("\\bfunction\\s+\\w+\\s*\\(").containsMatchIn(t) -> "javascript"
+            Regex("\\bfn\\s+\\w+\\s*\\(").containsMatchIn(t) -> "rust"
+            Regex("\\bfunc\\s+\\w+\\s*\\(").containsMatchIn(t) -> "go"
+            Regex("#include\\s*<").containsMatchIn(t) -> "cpp"
+            Regex("<\\w+[^>]*>").containsMatchIn(t) && Regex("</\\w+>").containsMatchIn(t) -> "html"
+            else -> ""
+        }
+    }
+
+    /**
+     * Attempt to reflow a single-line flattened code string into
+     * multiple lines by inserting newlines after `;`, `{`, and before
+     * `}`. The accessibility tree gives us all-on-one-line code; we
+     * can't recover the original indentation, but introducing line
+     * breaks at statement / block boundaries makes the mobile rendering
+     * massively more readable than a 600-char wall of text.
+     *
+     * Conservative: only reflows when the input is clearly a single
+     * line (no embedded `\n`) and is long (>60 chars). Otherwise
+     * returns the input unchanged.
+     */
+    private fun reflowCodeLine(s: String): String {
+        if (s.contains('\n') || s.length < 60) return s
+        val out = StringBuilder()
+        var i = 0
+        var inString = false
+        var stringChar = '"'
+        while (i < s.length) {
+            val c = s[i]
+            out.append(c)
+            if (inString) {
+                if (c == '\\' && i + 1 < s.length) { out.append(s[i + 1]); i += 2; continue }
+                if (c == stringChar) inString = false
+            } else {
+                if (c == '"' || c == '\'') { inString = true; stringChar = c }
+                else if (c == '{' || c == ';') {
+                    // newline after structural punctuation, swallowing
+                    // any following space
+                    var j = i + 1
+                    while (j < s.length && s[j] == ' ') j++
+                    if (j < s.length && s[j] != '\n') out.append('\n')
+                    i = j
+                    continue
+                } else if (c == '}') {
+                    // newline AFTER `}` too
+                    var j = i + 1
+                    while (j < s.length && s[j] == ' ') j++
+                    if (j < s.length && s[j] != '\n') out.append('\n')
+                    i = j
+                    continue
+                }
+            }
+            i++
+        }
+        return out.toString()
     }
 
     /**

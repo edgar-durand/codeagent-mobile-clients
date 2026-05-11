@@ -59,4 +59,25 @@ interface MessageExtractor {
     fun resetForNewTurn(toolWindow: ToolWindow) {
         // no-op default
     }
+
+    /**
+     * Optional end-of-turn hook. Called by `AgentOutputMonitor` right
+     * before emitting the `done=true` chunk. Lets an extractor produce
+     * a canonical-final markdown payload that the streaming snapshots
+     * couldn't — typically because the streaming path scrapes a Swing
+     * or accessibility surface that flattens structure (tables → one
+     * cell per line, code → no fences), while the model object the
+     * agent owns has the raw markdown intact.
+     *
+     * AI Assistant is the motivating case: streaming reads
+     * `TextPartViewEditorPane` plus the Compose accessibility tree,
+     * which loses code-block newlines and table boundaries. Finalize
+     * pulls `MarkdownChatMessage.getDisplayText()` from the live
+     * ChatSession via reflection, which is the same markdown the chat
+     * panel renders to HTML — fences, tables, lists intact.
+     *
+     * Return `null` to keep the last streaming snapshot as the final
+     * chunk. Default is null (no canonical override).
+     */
+    fun finalize(project: Project, toolWindow: ToolWindow, userPrompt: String): String? = null
 }

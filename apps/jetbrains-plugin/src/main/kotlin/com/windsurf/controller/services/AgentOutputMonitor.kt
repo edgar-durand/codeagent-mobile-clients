@@ -928,14 +928,16 @@ class AgentOutputMonitor {
 
         // Explicit done signal from the extractor (e.g. Copilot's
         // "Completed" pill). Always emit a final chunk so the mobile
-        // UI's streaming indicator closes immediately.
+        // UI's streaming indicator closes immediately. Prefer the
+        // extractor's canonical-final markdown if it provides one.
         if (msg.isDone == true) {
             if (!responseDoneSent) {
-                extractorLastSentMarkdown = md
+                val canonical = finalizeMarkdown(extractor, project, tw, md)
+                extractorLastSentMarkdown = canonical
                 hasEverCapturedContent = true
                 responseDoneSent = true
-                pushOutput(sessionId, "text", md, done = true)
-                logger.info("Extractor done (explicit): emitted final chunk (${md.length} chars)")
+                pushOutput(sessionId, "text", canonical, done = true)
+                logger.info("Extractor done (explicit): emitted final chunk (${canonical.length} chars, canonical=${canonical !== md})")
             }
             return
         }
@@ -944,13 +946,21 @@ class AgentOutputMonitor {
             // Content unchanged. If the extractor can't tell us when
             // generation finishes (isDone == null), fall back to the
             // stability heuristic: emit a final chunk after the response
-            // has been steady for STABLE_THRESHOLD polls.
+            // has been steady for STABLE_THRESHOLD polls. Prefer the
+            // extractor's canonical-final markdown if it provides one —
+            // streaming chunks may have come from a flattening path
+            // (accessibility tree → tables as one cell per line, code
+            // blocks without fences), and finalize() typically reads
+            // the live ChatSession's MarkdownChatMessage which carries
+            // the canonical markdown the chat panel renders.
             if (msg.isDone == null && hasEverCapturedContent && !responseDoneSent) {
                 extractorStableCount++
                 if (extractorStableCount >= STABLE_THRESHOLD) {
                     responseDoneSent = true
-                    pushOutput(sessionId, "text", md, done = true)
-                    logger.info("Extractor done (stability): emitted final chunk (${md.length} chars)")
+                    val canonical = finalizeMarkdown(extractor, project, tw, md)
+                    extractorLastSentMarkdown = canonical
+                    pushOutput(sessionId, "text", canonical, done = true)
+                    logger.info("Extractor done (stability): emitted final chunk (${canonical.length} chars, canonical=${canonical !== md})")
                 }
             }
             return
@@ -968,6 +978,43 @@ class AgentOutputMonitor {
         extractorLastSentMarkdown = md
         hasEverCapturedContent = true
         pushOutput(sessionId, "text", md, done = false)
+    }
+
+    /**
+     * Ask the extractor for its canonical-final markdown payload, with
+     * graceful fall-back to the last streaming snapshot.
+     *
+     * Streaming chunks for AI Assistant come from a Swing /
+     * accessibility-tree scrape that flattens structure: code blocks
+     * lose their fences, tables emit one cell per line, lists merge
+     * into one paragraph. `finalize()` lets the extractor pull the
+     * canonical markdown out of the agent's model object (for AI
+     * Assistant, `MarkdownChatMessage.getDisplayText()` via the bridge),
+     * so the final chunk the mobile renders has tables / code / lists
+     * intact.
+     *
+     * Returns the canonical markdown if finalize produces a non-blank
+     * result that is at least as long as the streaming snapshot (guard
+     * against a getter that returns a UID or some other short string —
+     * we'd rather show flattened-but-complete than short-but-empty).
+     * Otherwise returns the streaming snapshot unchanged.
+     */
+    private fun finalizeMarkdown(
+        extractor: com.windsurf.controller.services.strategies.MessageExtractor,
+        project: Project,
+        tw: com.intellij.openapi.wm.ToolWindow,
+        streamingMarkdown: String,
+    ): String {
+        return try {
+            val canonical = extractor.finalize(project, tw, currentPromptText)
+            // The extractor's heuristic already rejects non-markdown
+            // strings (returns null for things like UIDs / labels).
+            // We only need to gate on null/blank here.
+            if (canonical.isNullOrBlank()) streamingMarkdown else canonical
+        } catch (e: Exception) {
+            logger.debug("Extractor finalize threw: ${e.message}")
+            streamingMarkdown
+        }
     }
 
 
