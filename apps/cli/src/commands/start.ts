@@ -122,16 +122,20 @@ export async function start(): Promise<void> {
   await outputSvc.startTerminalTurn();
   relay.start();
 
-  // After Claude is up, give the JSONL a moment to settle, then
-  // detect the active conversation + push it into the local history
-  // cache so /usage and /context surfaces work immediately.
+  // After Claude is up, load the local history index so the
+  // /sessions surface (list of past conversations) is ready to
+  // serve. We deliberately DO NOT auto-detect + upload "the most
+  // recently modified JSONL" here: on a freshly paired CLI in a
+  // directory that already has prior Claude history, that would
+  // publish a stale conversation as the session's "active" one
+  // and the mobile / web chat would render an old conversation
+  // as if it were the new session's content. `uploadDelta()`
+  // lazy-detects when Claude actually writes a turn (real
+  // interaction), so the conversation id gets set the right way
+  // — only after the user has engaged with the session, never
+  // because a leftover JSONL happens to exist on disk.
   setTimeout(() => {
-    historySvc.detectCurrentConversation();
     historySvc.load().catch(() => {});
-    const currentId = historySvc.getCurrentConversationId();
-    if (currentId) {
-      historySvc.loadConversation(currentId).catch(() => {});
-    }
   }, 2000);
   setTimeout(() => fetchQuotaUsage(historySvc), 5000);
 }
