@@ -1,8 +1,8 @@
 package com.windsurf.controller.services.strategies
 
+import com.intellij.ide.DataManager
 import com.intellij.ide.plugins.PluginManagerCore
 import com.intellij.openapi.actionSystem.ActionManager
-import com.intellij.openapi.actionSystem.DataContext
 import com.intellij.openapi.actionSystem.ex.ActionUtil
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.command.WriteCommandAction
@@ -84,24 +84,30 @@ internal object AIAssistantBridge {
             }
             if (!replaced) return false
 
-            // Invoke the registered Send action by id. This is what
-            // the visible ⏵ button is bound to and what
-            // `AIAssistantInputSubmitController.onButtonSendAction`
-            // ends up routing through after the user clicks.
+            // Invoke the registered Send action by id, anchored at the
+            // input component. Asking DataManager for the context
+            // anchored at that Swing component fills in PROJECT,
+            // EDITOR, and everything else the action's `update()`
+            // method reads at the `AIAssistantChatInputRight` place.
+            // Passing `DataContext { null }` (the previous attempt)
+            // left the action disabled, which is why the input kept
+            // its text after the notification fired.
             ApplicationManager.getApplication().invokeLater {
                 try {
                     val action = ActionManager.getInstance().getAction("AIAssistant.Chat.SendActions.Send")
-                    if (action != null) {
-                        ActionUtil.invokeAction(
-                            action,
-                            DataContext { _ -> null },
-                            "CodeAgentMobile.AIAssistantBridge",
-                            null,
-                            null,
-                        )
-                    } else {
+                    if (action == null) {
                         log.warn("AIAssistantBridge: action AIAssistant.Chat.SendActions.Send not found")
+                        return@invokeLater
                     }
+                    val component = input as? java.awt.Component
+                    val dataContext = if (component != null) {
+                        DataManager.getInstance().getDataContext(component)
+                    } else {
+                        DataManager.getInstance().getDataContextFromFocus().resultSync
+                    }
+                    val place = "AIAssistantChatInputRight"
+                    ActionUtil.invokeAction(action, dataContext, place, null, null)
+                    log.info("AIAssistantBridge: invoked AIAssistant.Chat.SendActions.Send at $place")
                 } catch (e: Exception) {
                     log.warn("AIAssistantBridge: invokeAction failed: ${e.message}")
                 }
