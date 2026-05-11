@@ -625,6 +625,34 @@ export class ControllerPanelProvider implements vscode.WebviewViewProvider, Comm
         break;
       }
 
+      case 'install_cli_and_pair': {
+        // Open a terminal in the active workspace and pair with
+        // `codeam-cli`. We try `codeam` first (works when the user
+        // already installed it globally) and fall back to
+        // `npx -y codeam-cli pair` — npx fetches the package on the
+        // fly so the user doesn't need write access to the global
+        // node_modules. `;` between commands keeps things working in
+        // both POSIX shells and PowerShell.
+        const folder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+        const terminal = vscode.window.createTerminal({
+          name: 'codeam pair',
+          ...(folder ? { cwd: folder } : {}),
+        });
+        terminal.show(true);
+        // Always install/upgrade codeam-cli to latest, THEN pair.
+        // `npm install -g codeam-cli@latest` is idempotent — fast
+        // no-op if already on the latest, real upgrade otherwise.
+        // Chained with `&&` so pair only runs after a successful
+        // install; the final `|| npx` fallback handles environments
+        // where `npm i -g` would need sudo (npx fetches + runs
+        // without touching the global node_modules).
+        terminal.sendText('npm install -g codeam-cli@latest && codeam pair || npx -y codeam-cli@latest pair');
+        relay.sendResult(command.id, 'completed', {
+          message: 'Terminal opened with codeam pair',
+        });
+        break;
+      }
+
       default: {
         relay.sendResult(command.id, 'failed', {
           error: `Unknown command type: ${command.type}`,

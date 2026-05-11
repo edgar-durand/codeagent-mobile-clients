@@ -765,6 +765,41 @@ class ControllerToolWindowFactory : ToolWindowFactory {
                             addProperty("ok", true)
                         })
                     }
+                    "install_cli_and_pair" -> {
+                        // Open the IDE's Terminal tool window and run
+                        // `codeam pair`, with `npx -y codeam-cli pair`
+                        // as the fallback when the binary isn't on
+                        // PATH yet. `;` between the two commands keeps
+                        // this working in both POSIX shells and
+                        // PowerShell (cmd.exe also accepts `;` as a
+                        // command separator).
+                        try {
+                            val terminalView = org.jetbrains.plugins.terminal.TerminalToolWindowManager
+                                .getInstance(project)
+                            val widget = terminalView.createLocalShellWidget(
+                                project.basePath,
+                                "codeam pair",
+                            )
+                            // Always install/upgrade codeam-cli to
+                            // latest, THEN pair. `npm install -g
+                            // codeam-cli@latest` is idempotent (no-op
+                            // on already-latest, real upgrade otherwise).
+                            // `&&` so pair only fires after install
+                            // succeeds; final `|| npx` fallback handles
+                            // sudo-restricted environments.
+                            widget.executeCommand(
+                                "npm install -g codeam-cli@latest && codeam pair || npx -y codeam-cli@latest pair",
+                            )
+                            relay.sendResult(command.id, "completed", com.google.gson.JsonObject().apply {
+                                addProperty("message", "Terminal opened with codeam pair")
+                            })
+                        } catch (e: Exception) {
+                            relay.sendResult(command.id, "failed", com.google.gson.JsonObject().apply {
+                                addProperty("error", "Failed to open terminal: ${e.message}")
+                            })
+                        }
+                    }
+
                     else -> {
                         relay.sendResult(command.id, "failed", com.google.gson.JsonObject().apply {
                             addProperty("error", "Unknown command type: ${command.type}")
