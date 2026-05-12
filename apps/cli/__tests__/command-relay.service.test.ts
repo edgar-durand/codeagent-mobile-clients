@@ -29,16 +29,25 @@ describe('CommandRelayService', () => {
     relay.stop();
   });
 
-  it('polls for commands every 2 seconds', async () => {
+  it('polls for commands with idle backoff after empty responses', async () => {
+    // After the idle-streak backoff landed, an idle CLI no longer
+    // hits the API every 2 s — empty responses widen the delay
+    // exponentially (capped) so a quiet CLI doesn't burn rate
+    // limit / pgbouncer capacity. The polling fallback is still
+    // active (this test runs with NODE_ENV=test so SSE is
+    // disabled), it just paces itself when nothing is delivered.
     const onCmd = vi.fn();
     const relay = new CommandRelayService('plugin-1', onCmd);
     relay.start();
-    await vi.advanceTimersByTimeAsync(6100);
-    // Initial poll + 3 interval polls
+    await vi.advanceTimersByTimeAsync(10_100);
     expect(pairing._getJson).toHaveBeenCalledWith(
       expect.stringContaining('pending?pluginId=plugin-1'),
     );
-    expect(vi.mocked(pairing._getJson).mock.calls.length).toBeGreaterThanOrEqual(3);
+    // At least two polls in ~10 s of idle (initial + one backed-off
+    // retry). The exact count drifts with jitter so we don't pin a
+    // hard upper bound — we just verify the fallback is still
+    // making forward progress.
+    expect(vi.mocked(pairing._getJson).mock.calls.length).toBeGreaterThanOrEqual(2);
     relay.stop();
   });
 
