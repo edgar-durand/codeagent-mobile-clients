@@ -234,11 +234,39 @@ export class HistoryService {
    * resume re-uploads the full transcript on first call.
    */
   private lastUploadedUuid = new Map<string, string>();
+  /**
+   * Captured at construction time so every JSONL discovery (detect,
+   * usage stats) can ignore files that already existed in the
+   * project's `~/.claude/projects/<cwd>/` dir *before* this CLI
+   * run started. Without this filter, an old conversation — or
+   * a *parallel* Claude session actively writing to the same
+   * project — wins the mtime sort and we publish its content
+   * to the mobile app as if it were the fresh pair's chat.
+   */
+  private readonly bootTimeMs: number;
+  /**
+   * Small grace window subtracted from `bootTimeMs` when filtering
+   * by `birthtime`. Covers clock skew + filesystem timestamp
+   * rounding (HFS+ floors to 1 s; some Linux filesystems round to
+   * the nearest second). 5 s is comfortably wider than any
+   * filesystem rounding while still excluding everything from a
+   * previous pair / previous Claude run.
+   */
+  private static readonly BIRTHTIME_GRACE_MS = 5_000;
 
   constructor(
     private readonly pluginId: string,
     private readonly cwd: string,
-  ) {}
+    /**
+     * Test seam — overrides the wall-clock construction time used
+     * for the birthtime filter. Production callers omit this; tests
+     * use it to simulate a CLI that started just after a pre-existing
+     * parallel-session JSONL.
+     */
+    options?: { bootTimeMs?: number },
+  ) {
+    this.bootTimeMs = options?.bootTimeMs ?? Date.now();
+  }
 
   /** Store rate limit reset info detected from Claude Code output */
   setRateLimitReset(reset: string): void {
@@ -308,16 +336,31 @@ export class HistoryService {
     return null;
   }
 
-  /** Detect the active conversation by finding the most recently modified JSONL file */
+  /**
+   * Detect the active conversation by finding the most recently
+   * modified JSONL file that was **created during this CLI run**.
+   * The birthtime filter is critical: without it, an old
+   * conversation in the same project dir — or a parallel Claude
+   * session actively writing to a sibling JSONL — wins the mtime
+   * sort, and we publish that other run's content to mobile as if
+   * it were the fresh pair's chat. With the filter, only files
+   * Claude created on or after `bootTimeMs` are eligible, so a
+   * fresh pair stays empty until the user actually types a turn.
+   */
   detectCurrentConversation(): void {
     const dir = this.projectDir;
+    const cutoff = this.bootTimeMs - HistoryService.BIRTHTIME_GRACE_MS;
     try {
       const files = fs.readdirSync(dir, { withFileTypes: true })
         .filter(e => e.isFile() && e.name.endsWith('.jsonl'))
         .map(e => {
-          try { return { name: e.name, mtime: fs.statSync(path.join(dir, e.name)).mtimeMs }; }
-          catch { return { name: e.name, mtime: 0 }; }
+          try {
+            const stat = fs.statSync(path.join(dir, e.name));
+            return { name: e.name, mtime: stat.mtimeMs, birthtime: stat.birthtimeMs };
+          }
+          catch { return { name: e.name, mtime: 0, birthtime: 0 }; }
         })
+        .filter(f => f.birthtime >= cutoff)
         .sort((a, b) => b.mtime - a.mtime);
       if (files.length > 0) {
         this.currentConversationId = path.basename(files[0].name, '.jsonl');
@@ -325,21 +368,21 @@ export class HistoryService {
     } catch { /* silent */ }
   }
 
-  /** Extract conversation ID from Claude output (e.g., from session resume messages) */
+  /**
+   * Extract conversation ID from Claude output. Limited to the
+   * unambiguous "Resuming session: <uuid>" pattern — the older
+   * generic `Session: <uuid>` / `Conversation: <uuid>` patterns
+   * were too greedy and matched any incidental UUID-bearing line
+   * Claude printed (debug logs, status info, etc.), causing the
+   * CLI to "detect" the wrong conversation on a fresh pair.
+   * Resume is the only flow that legitimately needs to bind via
+   * output text; everything else sets `currentConversationId`
+   * via `setCurrentConversationId()` or the birthtime-filtered
+   * `detectCurrentConversation()`.
+   */
   tryExtractConversationIdFromOutput(output: string): void {
-    // Pattern: "Resuming session: <uuid>" or similar messages
-    const patterns = [
-      /Resuming session[:\s]+([a-f0-9-]{36})/i,
-      /session[:\s]+([a-f0-9-]{36})/i,
-      /conversation[:\s]+([a-f0-9-]{36})/i,
-    ];
-    for (const pattern of patterns) {
-      const match = output.match(pattern);
-      if (match) {
-        this.currentConversationId = match[1];
-        return;
-      }
-    }
+    const match = output.match(/Resuming session[:\s]+([a-f0-9-]{36})/i);
+    if (match) this.currentConversationId = match[1];
   }
 
   /**
@@ -352,26 +395,39 @@ export class HistoryService {
    */
   getCurrentUsage(): ContextUsage | null {
     const dir = this.projectDir;
+    const cutoff = this.bootTimeMs - HistoryService.BIRTHTIME_GRACE_MS;
 
     let entries: fs.Dirent[];
     try { entries = fs.readdirSync(dir, { withFileTypes: true }); }
     catch { return null; }
 
-    // Get all JSONL files sorted by modification time (most recent first)
+    // Same birthtime filter as `detectCurrentConversation`: the
+    // fallback "most recent JSONL" branch otherwise reads usage
+    // from a parallel Claude session that happens to share the
+    // project dir, leaking that run's context-window stats into
+    // our fresh-pair mobile UI.
     const files = entries
       .filter(e => e.isFile() && e.name.endsWith('.jsonl'))
       .map(e => {
-        try { return { name: e.name, mtime: fs.statSync(path.join(dir, e.name)).mtimeMs }; }
-        catch { return { name: e.name, mtime: 0 }; }
+        try {
+          const stat = fs.statSync(path.join(dir, e.name));
+          return { name: e.name, mtime: stat.mtimeMs, birthtime: stat.birthtimeMs };
+        }
+        catch { return { name: e.name, mtime: 0, birthtime: 0 }; }
       })
+      .filter(f => f.birthtime >= cutoff)
       .sort((a, b) => b.mtime - a.mtime);
 
     if (files.length === 0) return null;
 
-    // Determine which file to read
+    // Determine which file to read. When `currentConversationId`
+    // is set, trust it directly (it was set via the same birthtime-
+    // filtered detect, the resume_session command, or an explicit
+    // /cost output extraction). Otherwise fall back to the freshest
+    // newly-created JSONL.
     const targetFile = this.currentConversationId
       ? `${this.currentConversationId}.jsonl`
-      : files[0].name; // most recent if no conversation set
+      : files[0].name;
 
     if (!files.some(f => f.name === targetFile)) return null;
 

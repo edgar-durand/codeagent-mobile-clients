@@ -288,20 +288,18 @@ export class OutputService {
 
   private tryExtractSessionId(text: string): void {
     if (!this.onSessionIdDetected) return;
+    // Only the explicit `Resuming session: <uuid>` line is safe to
+    // bind to. The older broader patterns (`Session: <uuid>`,
+    // `Conversation: <uuid>`, `Session ID: <uuid>`) matched any
+    // incidental UUID-bearing log line Claude printed and ended
+    // up "detecting" the wrong conversation on a fresh pair —
+    // including the UUID of a *parallel* Claude session running
+    // in the same directory. The fresh-pair flow doesn't need any
+    // text-based detection; `detectCurrentConversation()` (filtered
+    // by birthtime) handles it after the user's first turn.
     const printable = text.replace(/\x1B\[[^@-~]*[@-~]/g, '').replace(/[\x00-\x1F\x7F]/g, '');
-    const patterns = [
-      /Resuming session[:\s]+([a-f0-9-]{36})/i,
-      /Session[:\s]+([a-f0-9-]{36})/i,
-      /Conversation[:\s]+([a-f0-9-]{36})/i,
-      /Session\s+ID[:\s]+([a-f0-9-]{36})/i,
-    ];
-    for (const pattern of patterns) {
-      const match = printable.match(pattern);
-      if (match) {
-        this.onSessionIdDetected(match[1]);
-        return;
-      }
-    }
+    const match = printable.match(/Resuming session[:\s]+([a-f0-9-]{36})/i);
+    if (match) this.onSessionIdDetected(match[1]);
   }
 
   private tryDetectRateLimit(text: string): void {

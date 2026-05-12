@@ -117,6 +117,60 @@ describe('HistoryService — lazy detect on uploadDelta', () => {
     expect(svc.getCurrentConversationId()).toBe(uuid);
   });
 
+  it('uploadDelta ignores a JSONL that existed BEFORE the CLI started (parallel Claude session in the same project dir)', async () => {
+    // Repro for: user runs `codeam pair` in a project where a
+    // separate Claude Code session is already chatting. The other
+    // session's JSONL is being actively written, so a naive
+    // mtime sort picks it as the "current" conversation and the
+    // CLI uploads that other run's chat to the API — mobile auto-
+    // loads it as if it were the fresh pair's content.
+    //
+    // The fix filters detect-by-mtime through `birthtime >=
+    // bootTimeMs - grace`, so JSONLs that already existed in the
+    // dir before this CLI's HistoryService was constructed are
+    // ineligible regardless of how hot their mtime is.
+    const parallelUuid = '99999999-aaaa-bbbb-cccc-dddddddddddd';
+    writeJsonl(parallelUuid, [
+      JSON.stringify({
+        type: 'user',
+        uuid: 'parallel-1',
+        timestamp: Date.now() - 1_000,
+        message: { content: 'leaking parallel chat' },
+      }),
+    ]);
+
+    // Inject a bootTimeMs that's 1 minute in the future relative
+    // to the parallel JSONL's birthtime. This mirrors the real-
+    // world scenario (CLI starts long after the other Claude
+    // session was opened) without making the test wait through
+    // the 5 s grace window.
+    const svc = new HistoryService('plg-1', cwd, { bootTimeMs: Date.now() + 60_000 });
+    expect(svc.getCurrentConversationId()).toBeNull();
+
+    // Touch the parallel JSONL so its mtime is "now" — the
+    // scenario where a separate Claude session is actively
+    // writing to it. Without the birthtime filter, this would
+    // win the mtime sort.
+    const filePath = path.join(encodedProjectDir(), `${parallelUuid}.jsonl`);
+    const now = Date.now() / 1000;
+    fs.utimesSync(filePath, now, now);
+
+    const originalFetch = global.fetch;
+    global.fetch = vi.fn(() =>
+      Promise.resolve({ ok: true, status: 200, json: async () => ({ success: true }) }) as never,
+    );
+    try {
+      await svc.uploadDelta();
+    } finally {
+      global.fetch = originalFetch;
+    }
+
+    // Detect must have skipped the parallel JSONL — it was
+    // created before bootTimeMs, even though its mtime is
+    // currently the most recent in the dir.
+    expect(svc.getCurrentConversationId()).toBeNull();
+  });
+
   it('uploadDelta is a no-op when conversation id is already set and JSONL is up to date', async () => {
     const uuid = 'aaaa-bbbb';
     writeJsonl(uuid, [
