@@ -37,6 +37,13 @@ export class CommandRelayService {
   /** Polling backoff state (only used on the fallback). */
   private pollTimer: NodeJS.Timeout | null = null;
   private pollFailures = 0;
+  // Successive polls that returned no commands. Drives an idle
+  // backoff so a CLI sitting on the polling fallback (SSE was
+  // unavailable) doesn't keep hammering the API every 2 s when
+  // there's nothing to do. Reset to 0 whenever a poll DELIVERS a
+  // command, so the first real work after a quiet period still
+  // reaches the CLI quickly.
+  private pollEmptyStreak = 0;
   /** Reconnect backoff state for the SSE stream. */
   private sseFailures = 0;
   private sseReconnectTimer: NodeJS.Timeout | null = null;
@@ -196,7 +203,14 @@ export class CommandRelayService {
     if (!this._running) return;
     await this.pollOnce();
     if (this._running) {
-      const delay = computePollDelay({ baseMs: 2000, failures: this.pollFailures });
+      // Pick whichever streak is longer (failures vs empty) so the
+      // backoff respects whichever signal is active. Cap empty at
+      // a smaller exponent so a long idle CLI sits at ~30 s polls
+      // instead of going to 5 min — fresh commands should still
+      // land within the same poll cycle the user notices.
+      const idleExp = Math.min(this.pollEmptyStreak, 4);
+      const effectiveFailures = Math.max(this.pollFailures, idleExp);
+      const delay = computePollDelay({ baseMs: 2000, failures: effectiveFailures });
       this.pollTimer = setTimeout(() => this.pollLoop(), delay);
     }
   }
@@ -206,7 +220,13 @@ export class CommandRelayService {
       const data = await _getJson(`${API_BASE}/api/commands/pending?pluginId=${this.pluginId}`);
       const commands = data?.data as RemoteCommand[] | undefined;
       this.pollFailures = 0;
-      if (!Array.isArray(commands) || commands.length === 0) return;
+      if (!Array.isArray(commands) || commands.length === 0) {
+        this.pollEmptyStreak += 1;
+        return;
+      }
+      // Real work arrived — collapse both streaks so the next poll
+      // fires at the base 2 s cadence and the user feels snappy.
+      this.pollEmptyStreak = 0;
       log.trace('relay', `poll received ${commands.length} command(s)`);
       await this.dispatchCommands(commands);
     } catch (err) {
