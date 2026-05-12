@@ -13,6 +13,8 @@ import { AgentBridgeService } from '../services/agent-bridge.service';
 import { AgentOutputMonitor } from '../services/agent-output-monitor';
 import { TerminalAgentService } from '../services/terminal-agent.service';
 import { CopilotChatService } from '../services/copilot-chat.service';
+import { AgentStrategyRegistry } from '../services/strategies/AgentStrategyRegistry';
+import type { AgentInvocation } from '../services/strategies/AgentStrategy';
 import { ChatHistoryService } from '../services/chat-history.service';
 import { ClaudeContextService } from '../services/claude-context.service';
 import { McpConfigWriterService, McpConfigureRequest, McpEntry } from '../services/mcp-config-writer.service';
@@ -275,24 +277,20 @@ export class ControllerPanelProvider implements vscode.WebviewViewProvider, Comm
 
         vscode.window.showInformationMessage(`CodeAgent: Prompt received → ${prompt.substring(0, 60)}${prompt.length > 60 ? '...' : ''}`);
 
-        // Route: VS Code Chat (Copilot via vscode.lm) — stream tokens back over relay.
+        // Intercept "/model <id>" for LM agents — the mobile's model
+        // picker uses this as a portable cross-agent switch. For LM
+        // agents it's a preference update, not a real prompt, so we
+        // short-circuit before strategy dispatch.
         if (agentId?.startsWith('__vscode_lm__:')) {
-          const copilot = CopilotChatService.getInstance();
-
-          // Intercept "/model <id>" — used by the mobile's model picker as
-          // a portable way to switch models across agents. For LM agents
-          // we handle it as a preference update (no real prompt sent).
           const modelSwitch = /^\/model\s+(\S+)\s*$/.exec(prompt.trim());
           if (modelSwitch) {
             const newId = modelSwitch[1];
-            copilot.setPreferredModel(newId);
+            CopilotChatService.getInstance().setPreferredModel(newId);
             relay.sendResult(command.id, 'completed', {
               message: `Model preference set to ${newId}`,
               modelSwitch: true,
               modelId: newId,
             });
-            // Trigger a re-detect so the mobile sees updated model label.
-            const ide = IdeIntegrationService.getInstance();
             ide.clearCache();
             ide.detectInstalledAgents().then((fresh) => {
               relay.reportAgents(
@@ -301,38 +299,44 @@ export class ControllerPanelProvider implements vscode.WebviewViewProvider, Comm
             });
             break;
           }
-
-          const modelFromPayload = command.payload.model as string | undefined;
-          copilot.sendPrompt(prompt, sessionId, modelFromPayload).then((sent) => {
-            relay.sendResult(command.id, sent ? 'completed' : 'failed', {
-              message: sent ? 'Prompt streamed via Copilot' : 'Copilot request failed',
-              sent,
-            });
-          });
-          break;
         }
 
-        ide.sendPromptToAgent(prompt, agentId).then(async (sent) => {
-          relay.sendResult(command.id, 'completed', {
-            message: sent ? 'Prompt sent to AI agent' : 'Prompt copied to clipboard',
-            sent,
-          });
-
-          if (sent) {
-            const agents = await ide.detectInstalledAgents();
+        // Resolve the target agent so strategies can use the full
+        // DetectedAgent (`isTerminalAgent`, etc.) instead of guessing
+        // from the agentId string. Falls back to the agentId-only
+        // path if detection fails or the requested agent isn't
+        // currently installed — strategies still match by id prefix.
+        ide.detectInstalledAgents()
+          .then((agents) => {
             const target = agentId
               ? agents.find((a) => a.id === agentId)
-              : agents.find((a) => a.isTerminalAgent) || agents[0];
-            const isTerminal = target?.isTerminalAgent || agentId?.startsWith('__terminal__:');
+              : agents.find((a) => a.isTerminalAgent) ?? agents[0];
 
-            if (isTerminal) {
-              TerminalAgentService.getInstance().startMonitoring(sessionId, prompt);
-            } else {
-              const monitor = AgentOutputMonitor.getInstance();
-              monitor.startMonitoring(sessionId, prompt);
-            }
-          }
-        });
+            const invocation: AgentInvocation = {
+              agent: target,
+              agentId,
+              prompt,
+              sessionId,
+              commandId: command.id,
+              model: command.payload.model as string | undefined,
+            };
+
+            return AgentStrategyRegistry.getInstance(this.log).execute(invocation);
+          })
+          .then((result) => {
+            relay.sendResult(
+              command.id,
+              result.delivered ? 'completed' : 'failed',
+              { message: result.message, ...(result.extra ?? {}) },
+            );
+          })
+          .catch((err) => {
+            this.log.appendLine(`[handleCommand] strategy execute threw: ${err}`);
+            relay.sendResult(command.id, 'failed', {
+              message: 'Strategy execution failed',
+              error: String(err),
+            });
+          });
         break;
       }
 
