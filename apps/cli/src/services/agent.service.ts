@@ -227,6 +227,21 @@ export class AgentService {
     }, steps * ARROW_MS + ENTER_MS);
   }
 
+  /**
+   * Write raw bytes to the PTY without any auto-appended `\r` or delay.
+   * Use this when the caller already owns the full input (e.g. the
+   * `ptyInput` returned by `RuntimeStrategy.changeModelInstruction()`
+   * already contains the trailing `\r`).
+   */
+  sendRawPtyInput(text: string): void {
+    if (!this.strategy) {
+      log.trace('claude', 'sendRawPtyInput dropped (no strategy)');
+      return;
+    }
+    log.trace('claude', `sendRawPtyInput len=${text.length}`);
+    this.strategy.write(text);
+  }
+
   /** Send Escape key to Claude (cancels interactive prompts). */
   sendEscape(): void {
     this.strategy?.write('\x1b');

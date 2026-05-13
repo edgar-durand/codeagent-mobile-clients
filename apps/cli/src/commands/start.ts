@@ -97,6 +97,7 @@ export async function start(): Promise<void> {
     outputSvc,
     claude,
     historySvc,
+    runtime,
     relay: undefined as unknown as CommandRelayService,
     setKeepAlive,
     keepAliveCtx,
