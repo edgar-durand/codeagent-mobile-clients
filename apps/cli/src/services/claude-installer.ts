@@ -7,7 +7,7 @@ import { findInPath } from './pty/types';
 /**
  * Auto-install Claude Code if it isn't on PATH.
  *
- * Used by ClaudeService.spawn() the first time someone runs
+ * Used by AgentService.spawn() the first time someone runs
  * `codeam pair` on a clean machine. Instead of bailing with
  * "claude not found", we offer to run Anthropic's official installer
  * inline so pairing → first prompt is a single uninterrupted flow.

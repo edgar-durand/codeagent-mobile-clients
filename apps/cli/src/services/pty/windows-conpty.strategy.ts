@@ -108,7 +108,7 @@ export class WindowsConPtyStrategy implements IPtyStrategy {
 
   /**
    * Factory that returns a working ConPTY strategy or `null` if
-   * node-pty can't load. The caller (claude.service.ts) decides
+   * node-pty can't load. The caller (agent.service.ts) decides
    * whether to fall back to the legacy pipe strategy.
    */
   static tryCreate(opts: PtyStrategyOptions): WindowsConPtyStrategy | null {
@@ -129,7 +129,7 @@ export class WindowsConPtyStrategy implements IPtyStrategy {
     //
     // Errors here (most commonly: native `conpty.node` failed to load
     // because the prebuild for the host arch wasn't bundled or got
-    // removed by AV) are RE-THROWN, not handled. ClaudeService catches
+    // removed by AV) are RE-THROWN, not handled. AgentService catches
     // and falls back to the legacy WindowsPtyStrategy so a missing
     // ConPTY binary doesn't kill the whole pairing flow.
     // Match the local terminal's actual size so Claude's React Ink UI

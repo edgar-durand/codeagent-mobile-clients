@@ -2,7 +2,8 @@ import pc from 'picocolors';
 import { getActiveSession, ensurePluginId } from '../config';
 import { showIntro, showInfo } from '../ui/banner';
 import { CommandRelayService } from '../services/command-relay.service';
-import { ClaudeService } from '../services/claude.service';
+import { AgentService } from '../services/agent.service';
+import { createRuntimeStrategy } from '../agents/registry';
 import { OutputService } from '../services/output.service';
 import { HistoryService } from '../services/history.service';
 import { fetchQuotaUsage } from './start/quota-fetcher';
@@ -70,16 +71,19 @@ export async function start(): Promise<void> {
     session.pluginAuthToken,
   );
 
-  const claude = new ClaudeService({
-    cwd,
-    onData(raw) { outputSvc.push(raw); },
-    onExit(code) {
-      process.removeListener('SIGINT', sigintHandler);
-      outputSvc.dispose();
-      relay.stop();
-      process.exit(code);
+  const claude = new AgentService(
+    createRuntimeStrategy('claude'), // D.4 will replace 'claude' with session.agent
+    {
+      cwd,
+      onData(raw) { outputSvc.push(raw); },
+      onExit(code) {
+        process.removeListener('SIGINT', sigintHandler);
+        outputSvc.dispose();
+        relay.stop();
+        process.exit(code);
+      },
     },
-  });
+  );
 
   // Built EARLY so the closure inside `relay`'s onCommand below has
   // a stable reference. Filled in once the dependent services exist.

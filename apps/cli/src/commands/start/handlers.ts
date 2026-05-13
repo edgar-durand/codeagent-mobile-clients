@@ -3,7 +3,7 @@ import * as os from 'os';
 import * as path from 'path';
 import { randomUUID } from 'crypto';
 import { spawn } from 'child_process';
-import type { ClaudeService } from '../../services/claude.service';
+import type { AgentService } from '../../services/agent.service';
 import type { CommandRelayService, RemoteCommand } from '../../services/command-relay.service';
 import type { HistoryService } from '../../services/history.service';
 import type { OutputService } from '../../services/output.service';
@@ -37,7 +37,7 @@ import type { KeepAliveContext } from './keep-alive';
  */
 export interface HandlerContext {
   outputSvc: OutputService;
-  claude: ClaudeService;
+  claude: AgentService;
   historySvc: HistoryService;
   relay: CommandRelayService;
   setKeepAlive: (enabled: boolean) => void;

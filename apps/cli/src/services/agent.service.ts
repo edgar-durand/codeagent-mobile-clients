@@ -3,8 +3,9 @@ import { UnixPtyStrategy } from './pty/unix.strategy';
 import { WindowsPtyStrategy } from './pty/windows.strategy';
 import { WindowsConPtyStrategy } from './pty/windows-conpty.strategy';
 import { ensureClaudeInstalled } from './claude-installer';
-import { buildClaudeLaunch, type ClaudeLaunch } from './claude-resolver';
+import { buildClaudeLaunch } from './claude-resolver';
 import { log } from './logger';
+import type { RuntimeStrategy } from '../agents/strategy';
 
 export interface ClaudeServiceOptions {
   cwd: string;
@@ -12,7 +13,7 @@ export interface ClaudeServiceOptions {
   onExit: (code: number) => void;
 }
 
-export class ClaudeService {
+export class AgentService {
   // Strategy is selected lazily inside spawn() so we can fall back from
   // ConPTY → legacy pipe at runtime if the native binding fails to load.
   // Methods called before spawn() (e.g. early kill/SIGINT) no-op safely.
@@ -31,7 +32,10 @@ export class ClaudeService {
   private claudeReady = false;
   private readonly pendingInputs: string[] = [];
 
-  constructor(private readonly opts: ClaudeServiceOptions) {
+  constructor(
+    private readonly runtime: RuntimeStrategy,
+    private readonly opts: ClaudeServiceOptions,
+  ) {
     this.strategyOpts = {
       onData: (d) => {
         if (!this.claudeReady && d.length > 0) {
@@ -67,15 +71,30 @@ export class ClaudeService {
   }
 
   async spawn(): Promise<void> {
-    let launch = buildClaudeLaunch();
-    if (!launch) {
+    // Ask the runtime strategy for the launch descriptor. For Claude,
+    // this calls buildClaudeLaunch() internally; for future agents it
+    // will delegate to their own resolver. If the binary is missing
+    // the strategy throws — we catch and attempt auto-install before
+    // re-trying once, then give up with a user-friendly message.
+    let launch: { cmd: string; args: string[]; env?: Record<string, string> };
+    try {
+      launch = await this.runtime.prepareLaunch();
+    } catch {
       // Inline auto-install via Anthropic's official installer (curl|bash
       // on macOS/Linux, irm|iex on Windows). After the installer exits,
       // ensureClaudeInstalled() also prepends the known install dirs to
-      // this process's PATH so the next buildClaudeLaunch() probe sees
+      // this process's PATH so the next prepareLaunch() probe sees
       // the freshly-dropped binary without needing a shell restart.
       const installed = await ensureClaudeInstalled();
-      if (installed) launch = buildClaudeLaunch();
+      if (installed) {
+        try {
+          launch = await this.runtime.prepareLaunch();
+        } catch {
+          launch = null as unknown as typeof launch;
+        }
+      } else {
+        launch = null as unknown as typeof launch;
+      }
       if (!launch) {
         const cmd =
           process.platform === 'win32'
@@ -225,14 +244,31 @@ export class ClaudeService {
   /**
    * Kill the current Claude process and relaunch it resuming the given session.
    * Pass auto=true to add --dangerously-skip-permissions (no confirmation prompts).
+   *
+   * For agents that use CLI flags (Claude: --resume <id>), `resumeLaunchArgs`
+   * returns a non-empty array and we pass those directly to the binary.
+   * For agents that use a post-spawn PTY instruction (e.g. Codex), `resumeLaunchArgs`
+   * returns [] and `postSpawnInstruction` types the resume command into the PTY.
    */
   restart(sessionId: string, auto = false): void {
     if (!this.strategy) return;
-    const extraArgs = ['--resume', sessionId];
-    if (auto) extraArgs.push('--dangerously-skip-permissions');
-    const launch: ClaudeLaunch | null = buildClaudeLaunch(extraArgs);
+    // Source resume args from the runtime strategy so agent-specific flag
+    // conventions (Claude: --resume + --dangerously-skip-permissions) live
+    // in one place. When auto=false we only need --resume without the
+    // permissions bypass, so we fall back to a simple base array.
+    const resumeArgs = auto
+      ? this.runtime.resumeLaunchArgs(sessionId)
+      : ['--resume', sessionId];
+    const launch = buildClaudeLaunch(resumeArgs);
     if (!launch) return;
     this.strategy.kill();
     this.strategy.spawn(launch.cmd, this.opts.cwd, launch.args);
+    // For agents whose resume is triggered by a PTY instruction rather than
+    // a CLI flag (resumeArgs.length === 0), send the instruction once the
+    // PTY is ready. Claude always uses flags so this branch is a no-op for now.
+    if (resumeArgs.length === 0 && this.runtime.postSpawnInstruction) {
+      const { ptyInput } = this.runtime.postSpawnInstruction(sessionId);
+      setTimeout(() => { this.strategy?.write(ptyInput); }, 500);
+    }
   }
 }
