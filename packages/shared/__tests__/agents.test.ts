@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import type { AgentId, AgentAuth, NormalizedMessage } from '../src/agents/types';
+import { AGENT_REGISTRY, getEnabledAgents, getAgent } from '../src/agents/registry';
 
 describe('agent types', () => {
   it('AgentId accepts the three known agents', () => {
@@ -21,5 +22,37 @@ describe('agent types', () => {
       timestamp: '2026-05-13T00:00:00Z',
     };
     expect(m.id).toBe('m1');
+  });
+});
+
+describe('AGENT_REGISTRY', () => {
+  it('has entries for claude, codex, copilot', () => {
+    expect(AGENT_REGISTRY.claude).toBeDefined();
+    expect(AGENT_REGISTRY.codex).toBeDefined();
+    expect(AGENT_REGISTRY.copilot).toBeDefined();
+  });
+
+  it('claude is enabled in Phase 1', () => {
+    expect(AGENT_REGISTRY.claude.enabled).toBe(true);
+  });
+
+  it('codex and copilot are disabled in Phase 1', () => {
+    expect(AGENT_REGISTRY.codex.enabled).toBe(false);
+    expect(AGENT_REGISTRY.copilot.enabled).toBe(false);
+  });
+
+  it('getEnabledAgents returns only enabled ones', () => {
+    const enabled = getEnabledAgents();
+    expect(enabled.map(a => a.id)).toEqual(['claude']);
+  });
+
+  it('getAgent throws on unknown id', () => {
+    expect(() => getAgent('zzz' as any)).toThrow();
+  });
+
+  it('every agent declares its preferredAuthKind in supportedAuthKinds', () => {
+    for (const meta of Object.values(AGENT_REGISTRY)) {
+      expect(meta.supportedAuthKinds).toContain(meta.preferredAuthKind);
+    }
   });
 });
