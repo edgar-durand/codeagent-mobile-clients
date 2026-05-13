@@ -6,7 +6,8 @@ import * as http from 'http';
 import { z } from 'zod';
 import { getContextWindow, getPricing } from '@codeagent/shared';
 import { log } from './logger';
-import { encodeCwd, resolveHistoryDir } from '../agents/claude/history';
+import { encodeCwd } from '../agents/claude/history';
+import type { RuntimeStrategy } from '../agents/strategy';
 
 /**
  * Schema for one record in a Claude Code session JSONL file. Only fields
@@ -201,7 +202,10 @@ export class HistoryService {
    */
   private static readonly BIRTHTIME_GRACE_MS = 5_000;
 
+  private readonly runtime: RuntimeStrategy;
+
   constructor(
+    runtime: RuntimeStrategy,
     private readonly pluginId: string,
     private readonly cwd: string,
     /**
@@ -212,6 +216,7 @@ export class HistoryService {
      */
     options?: { bootTimeMs?: number },
   ) {
+    this.runtime = runtime;
     this.bootTimeMs = options?.bootTimeMs ?? Date.now();
   }
 
@@ -240,10 +245,12 @@ export class HistoryService {
   }
 
   private get projectDir(): string {
-    // Try the canonical encoding first, then fall back to a directory
-    // scan for cosmetic encoding drift. Either path returns the same
-    // shape (`<projectsRoot>/<encoded>`) so callers stay simple.
-    return resolveHistoryDir(this.cwd)
+    // Delegate to the runtime strategy's resolveHistoryDir, which
+    // tries the canonical encoding first, then falls back to a
+    // directory scan for cosmetic encoding drift. Fall back to the
+    // derived path when the strategy returns null (directory doesn't
+    // exist yet — e.g. first-ever Claude run in this cwd).
+    return this.runtime.resolveHistoryDir(this.cwd)
       ?? path.join(os.homedir(), '.claude', 'projects', encodeCwd(this.cwd));
   }
 

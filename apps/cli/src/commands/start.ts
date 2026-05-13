@@ -35,7 +35,8 @@ export async function start(): Promise<void> {
 
   const cwd = process.cwd();
 
-  const historySvc = new HistoryService(pluginId, cwd);
+  const runtime = createRuntimeStrategy('claude'); // D.4 will replace 'claude' with session.agent
+  const historySvc = new HistoryService(runtime, pluginId, cwd);
 
   const keepAliveCtx = {
     inCodespace: process.env.CODESPACES === 'true',
@@ -53,7 +54,7 @@ export async function start(): Promise<void> {
       // delta of the just-finished turn so the SSE consumers can
       // fetch the canonical markdown via `?last=1` and replace the
       // streamed PTY approximation with proper ``` fences / blocks.
-      if (historySvc.isQuotaStale()) fetchQuotaUsage(historySvc);
+      if (historySvc.isQuotaStale()) fetchQuotaUsage(runtime, historySvc);
       setTimeout(() => {
         historySvc.uploadDelta().catch(() => { /* best-effort */ });
       }, 400);
@@ -72,7 +73,7 @@ export async function start(): Promise<void> {
   );
 
   const claude = new AgentService(
-    createRuntimeStrategy('claude'), // D.4 will replace 'claude' with session.agent
+    runtime,
     {
       cwd,
       onData(raw) { outputSvc.push(raw); },
@@ -141,5 +142,5 @@ export async function start(): Promise<void> {
   setTimeout(() => {
     historySvc.load().catch(() => {});
   }, 2000);
-  setTimeout(() => fetchQuotaUsage(historySvc), 5000);
+  setTimeout(() => fetchQuotaUsage(runtime, historySvc), 5000);
 }

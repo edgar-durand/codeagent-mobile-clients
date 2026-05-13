@@ -1,4 +1,4 @@
-import { fetchClaudeQuota } from '../../agents/claude/quota';
+import type { RuntimeStrategy } from '../../agents/strategy';
 import type { HistoryService } from '../../services/history.service';
 
 /**
@@ -16,17 +16,19 @@ import type { HistoryService } from '../../services/history.service';
  * no-ops on Windows where Python may not be on PATH or those
  * modules may import-fail.
  *
- * The subprocess spawn + parse logic lives in agents/claude/quota.ts.
+ * The subprocess spawn + parse logic is delegated through the
+ * RuntimeStrategy so future agents can swap in their own quota
+ * mechanism without touching this file.
  */
 
 /** Set to `true` while a fetch is in flight; prevents reentry. */
 let inProgress = false;
 
-export function fetchQuotaUsage(historySvc: HistoryService): void {
+export function fetchQuotaUsage(runtime: RuntimeStrategy, historySvc: HistoryService): void {
   if (inProgress) return;
   inProgress = true;
 
-  fetchClaudeQuota()
+  runtime.fetchWeeklyUsage()
     .then((result) => {
       if (!result) return;
       historySvc.setQuotaPercent(result.percent);

@@ -16,6 +16,29 @@ vi.mock('os', async () => {
 });
 
 import { HistoryService } from '../../src/services/history.service';
+import { resolveHistoryDir } from '../../src/agents/claude/history';
+import type { RuntimeStrategy } from '../../src/agents/strategy';
+
+/**
+ * Minimal RuntimeStrategy stub for tests. resolveHistoryDir delegates
+ * to the real claude/history implementation via os.homedir (which is
+ * already mocked above), so the birthtime-filter tests remain hermetic.
+ */
+function makeTestRuntime(_cwd: string): RuntimeStrategy {
+  return {
+    id: 'claude',
+    meta: {} as RuntimeStrategy['meta'],
+    resolveHistoryDir: (c: string) => resolveHistoryDir(c),
+    parseHistoryFile: () => [],
+    getCurrentUsage: () => null,
+    fetchWeeklyUsage: async () => null,
+    prepareLaunch: async () => ({ cmd: 'claude', args: [] }),
+    resumeLaunchArgs: () => [],
+    listModels: async () => [],
+    changeModelInstruction: () => ({ type: 'pty', ptyInput: '' }),
+    summarizeInstruction: () => ({ ptyInput: '' }),
+  } as unknown as RuntimeStrategy;
+}
 
 /**
  * Regression: codespaces vs local CLI rendering parity.
@@ -68,7 +91,7 @@ describe('HistoryService — lazy detect on uploadDelta', () => {
     // Empty home — no JSONL anywhere. detectCurrentConversation will
     // fail to find a file. uploadDelta must return 0 cleanly without
     // throwing.
-    const svc = new HistoryService('plg-1', cwd);
+    const svc = new HistoryService(makeTestRuntime(cwd), 'plg-1', cwd);
     expect(svc.getCurrentConversationId()).toBeNull();
     const sent = await svc.uploadDelta();
     expect(sent).toBe(0);
@@ -77,7 +100,7 @@ describe('HistoryService — lazy detect on uploadDelta', () => {
   });
 
   it('uploadDelta lazy-detects a JSONL that landed AFTER construction', async () => {
-    const svc = new HistoryService('plg-1', cwd);
+    const svc = new HistoryService(makeTestRuntime(cwd), 'plg-1', cwd);
     expect(svc.getCurrentConversationId()).toBeNull();
 
     // Simulate: claude finally finished bootstrapping (post-T+2000ms)
@@ -144,7 +167,7 @@ describe('HistoryService — lazy detect on uploadDelta', () => {
     // world scenario (CLI starts long after the other Claude
     // session was opened) without making the test wait through
     // the 5 s grace window.
-    const svc = new HistoryService('plg-1', cwd, { bootTimeMs: Date.now() + 60_000 });
+    const svc = new HistoryService(makeTestRuntime(cwd), 'plg-1', cwd, { bootTimeMs: Date.now() + 60_000 });
     expect(svc.getCurrentConversationId()).toBeNull();
 
     // Touch the parallel JSONL so its mtime is "now" — the
@@ -182,7 +205,7 @@ describe('HistoryService — lazy detect on uploadDelta', () => {
       }),
     ]);
 
-    const svc = new HistoryService('plg-1', cwd);
+    const svc = new HistoryService(makeTestRuntime(cwd), 'plg-1', cwd);
     svc.setCurrentConversationId(uuid);
     expect(svc.getCurrentConversationId()).toBe(uuid);
 
