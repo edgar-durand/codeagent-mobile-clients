@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import type { AgentId, AgentAuth, AgentAuthKind, AgentMetadata, NormalizedMessage } from '../src/agents/types';
+import type { AgentId, AgentAuth, NormalizedMessage } from '../src/agents/types';
 
 describe('agent types', () => {
   it('AgentId accepts the three known agents', () => {
