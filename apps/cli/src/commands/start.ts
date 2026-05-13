@@ -1,4 +1,5 @@
 import pc from 'picocolors';
+import { AGENT_REGISTRY } from '@codeagent/shared';
 import { getActiveSession, ensurePluginId } from '../config';
 import { showIntro, showInfo } from '../ui/banner';
 import { CommandRelayService } from '../services/command-relay.service';
@@ -26,16 +27,20 @@ export async function start(): Promise<void> {
     process.exit(0);
   }
 
+  if (!session.agent) {
+    throw new Error('Active session has no agent — re-pair with `codeam pair`.');
+  }
+
   // Use the per-session pluginId (set since v1.4.6); fall back to the
   // installation-level pluginId for sessions paired with older CLIs.
   const pluginId = session.pluginId ?? ensurePluginId();
 
   showInfo(`${session.userName}  ·  ${pc.cyan(session.plan)}`);
-  showInfo('Launching Claude Code...\n');
+  showInfo(`Launching ${AGENT_REGISTRY[session.agent].displayName}...\n`);
 
   const cwd = process.cwd();
 
-  const runtime = createRuntimeStrategy('claude'); // D.4 will replace 'claude' with session.agent
+  const runtime = createRuntimeStrategy(session.agent);
   const historySvc = new HistoryService(runtime, pluginId, cwd);
 
   const keepAliveCtx = {
