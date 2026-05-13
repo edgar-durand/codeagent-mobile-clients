@@ -4,6 +4,43 @@ All notable changes to `codeam-cli` are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.11.0] — 2026-05-13
+
+### Added
+
+- **shared:** Add agent type primitives
+- **shared:** Add AGENT_REGISTRY with Claude enabled
+- **shared:** Export agents module + bump minor
+- **cli:** Define RuntimeStrategy + DeployStrategy interfaces
+- **cli:** Implement ClaudeRuntimeStrategy
+- **cli:** Implement ClaudeDeployStrategy + extract credential bridge
+- **cli:** Add agent to SavedSession + preferredAgent to CliConfig
+- **cli:** Add parseAgentFlag + promptForAgent helpers
+- **cli:** Pair accepts --agent flag + prompts + remembers preferredAgent
+- **cli:** Pair-auto consumes agent from API response
+- **cli:** Change_model + summarize handlers route through RuntimeStrategy
+
+### Changed
+
+- **vsc-plugin:** Port JetBrains agent-strategy pattern
+- **cli:** Extract Claude history parsing to agents/claude/history.ts
+- **cli:** Extract Claude /usage parsing to agents/claude/quota.ts
+- **cli:** Rename ClaudeService → AgentService, add registry factory
+- **cli:** History + quota services delegate to RuntimeStrategy
+- **cli:** Start.ts uses session.agent for runtime factory
+- **cli:** Deploy uses DeployStrategy + switches to pair-auto
+- **cli:** Pass args to pair command
+
+### Documentation
+
+- Align CLAUDE.md + bump in-source versions to v2.10.8
+- **cli:** Drop misleading codeam-login note in deploy.ts
+
+### Fixed
+
+- **cli:** Reload config after addSession to avoid clobbering activeSessionId
+- **cli:** Revert deploy PM2 wrapper to pair --agent=<id> (Phase 1 lacks user-JWT)
+
 ## [2.10.8] — 2026-05-12
 
 ### Fixed
