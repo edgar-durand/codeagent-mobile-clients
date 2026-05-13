@@ -1,46 +1,18 @@
 import * as p from '@clack/prompts';
 import pc from 'picocolors';
 import { AGENT_REGISTRY } from '@codeagent/shared';
-import type { AgentId } from '@codeagent/shared';
 import { PROVIDERS } from '../services/providers';
 import type { CloudProvider, DeployableProject, ExistingWorkspace, Workspace } from '../services/providers';
 import { parseAgentFlag, promptForAgent } from '../utils/agent-prompt';
 import { createDeployStrategy } from '../agents/registry';
 import { loadCliConfig } from '../config';
 
-const API_BASE = process.env.CODEAM_API_URL ?? 'https://codeagent-mobile-api.vercel.app';
-
-/**
- * Mint a one-shot auto-pair token via POST /api/pairing/mint-auto-token.
- *
- * TODO: The CLI does NOT store a user JWT — only the `pluginAuthToken`
- * (an HMAC-derived session secret) is available, but the backend's
- * `getAuthUser()` requires a proper JWT signed with JWT_SECRET. Until
- * the CLI gains a durable user-JWT store (e.g. from an explicit
- * `codeam login` command), this function throws at runtime.
- *
- * Once a JWT store is available, replace the `throw` below with:
- *   const userJwt = loadUserJwt();   // read from ~/.codeam/auth.json or similar
- *   const res = await fetch(`${API_BASE}/api/pairing/mint-auto-token`, {
- *     method: 'POST',
- *     headers: { Authorization: `Bearer ${userJwt}`, 'Content-Type': 'application/json' },
- *     body: JSON.stringify({ agent: agentId, codespaceId }),
- *   });
- *   if (!res.ok) { const t = await res.text(); throw new Error(`mint-auto-token failed (${res.status}): ${t}`); }
- *   const { token } = await res.json() as { token: string; expiresAt: string };
- *   return token;
- */
-async function mintAutoPairToken(_agentId: AgentId, _codespaceId?: string): Promise<string> {
-  // The user JWT is not stored by the CLI in Phase 1 — only the mobile app holds JWTs.
-  // pair-auto will fall back to reading CODEAM_AUTO_TOKEN env var if present.
-  void _agentId;
-  void _codespaceId;
-  throw new Error(
-    'TODO: implement mintAutoPairToken — CLI does not yet store a user JWT.\n' +
-    'Track in: https://github.com/edgar-durand/codeagent-mobile-clients/issues (pair-auto token minting)\n' +
-    `API_BASE: ${API_BASE}`,
-  );
-}
+// NOTE — Phase 1 uses `codeam pair --agent=<id>` for local deploy pairing
+// (interactive QR flow on the remote workspace, agent flag carries the local choice).
+// Phase 2 may switch to `codeam pair-auto` when a `codeam login` command is added
+// that stores a user-JWT — at that point the CLI can call POST /api/pairing/mint-auto-token
+// (already implemented server-side) to get a one-shot token instead of running
+// the manual QR flow on the codespace.
 
 /**
  * `codeam deploy` — provision a fresh cloud workspace, install the
@@ -318,41 +290,18 @@ export async function deploy(args: string[] = []): Promise<void> {
   }
   cliStep.stop('✓ codeam-cli installed');
 
-  // Step 7 — Mint a one-shot auto-pair token and start `codeam pair-auto`
-  // on the workspace. pair-auto claims the token silently — no QR code,
-  // no interactive prompt — and the phone is paired automatically.
-  //
-  // The token is uploaded to /tmp/codeam-auto-token (mode 0600) so it
-  // never appears in `ps -ef`. The PM2 wrapper deletes the file
-  // immediately after pm2 start so it doesn't linger on disk.
-  //
-  // If mintAutoPairToken throws (see the TODO in its JSDoc), the flow
-  // falls back gracefully: autoToken is null, and the wrapper runs
-  // `codeam pair-auto` with CODEAM_AUTO_TOKEN unset, which will cause
-  // pair-auto to fail with a clear error on the workspace log.
-  let autoToken: string | null = null;
-  try {
-    autoToken = await mintAutoPairToken(agentId, workspace.id);
-    await provider.uploadFile(
-      workspace.id,
-      '/tmp/codeam-auto-token',
-      Buffer.from(autoToken),
-      { mode: 0o600 },
-    );
-  } catch (err) {
-    p.log.warn(
-      `Could not mint auto-pair token — you may need to pair manually.\n` +
-      `  Reason: ${err instanceof Error ? err.message : String(err)}`,
-    );
-  }
-
+  // Step 7 — Start `codeam pair --agent=<id>` on the workspace via PM2.
+  // Phase 1: the interactive QR flow runs on the codespace; the user scans
+  // with their phone to pair. The agent flag carries the local selection so
+  // the saved session on the codespace knows which agent to spawn — no API
+  // token mint needed.
   p.note(
     [
       `Workspace: ${pc.cyan(workspace.displayName ?? workspace.id)}`,
       workspace.webUrl ? `Web:       ${pc.cyan(workspace.webUrl)}` : '',
       '',
-      `Starting \`codeam pair-auto\` on the workspace (agent: ${AGENT_REGISTRY[agentId].displayName}).`,
-      'The workspace will pair automatically — no QR code needed.',
+      `Starting \`codeam pair\` on the workspace (agent: ${AGENT_REGISTRY[agentId].displayName}).`,
+      'Scan the QR code from your phone to pair.',
       pc.dim('(Once paired, this terminal disconnects automatically; the session stays alive on the codespace.)'),
     ]
       .filter(Boolean)
@@ -360,7 +309,7 @@ export async function deploy(args: string[] = []): Promise<void> {
     'Almost there',
   );
 
-  // After the agent is set up, run `codeam pair-auto` on the workspace
+  // After the agent is set up, run `codeam pair --agent=<id>` on the workspace
   // via PM2 — a battle-tested Node.js process manager whose god-daemon
   // survives SSH session cleanup on Codespaces (where nohup, setsid
   // and tmux all fail). PM2 owns the lifecycle: spawn, restart on
@@ -368,16 +317,14 @@ export async function deploy(args: string[] = []): Promise<void> {
   //
   // The wrapper:
   //   1. Installs PM2 if missing (idempotent first-run setup).
-  //   2. `pm2 start codeam --name codeam-pair -- pair-auto --token-file=…`
+  //   2. `pm2 start codeam --name codeam-pair -- pair --agent=<id>`
   //      with merged stdout/stderr piped to a session log.
-  //   3. Deletes the token file immediately after pm2 start (single-use).
-  //   4. Tails the log locally so the "Paired with" marker renders.
-  //   5. Phase 1: wait for "Paired with"; phase 2: wait for "for shortcuts"
+  //   3. Tails the log locally so the QR code + "Paired with" marker render.
+  //   4. Phase 1: wait for "Paired with"; phase 2: wait for "for shortcuts"
   //      so any first-time agent prompts get answered on the phone before
   //      we close locally.
-  //   6. Local Ctrl+C kills only the local tail — PM2 keeps the relay
+  //   5. Local Ctrl+C kills only the local tail — PM2 keeps the relay
   //      running.
-  const tokenFileArg = autoToken !== null ? '--token-file=/tmp/codeam-auto-token' : '';
   const wrapper = [
     'mkdir -p ~/.codeam-deploy',
     'LOG=~/.codeam-deploy/session.log',
@@ -394,17 +341,14 @@ export async function deploy(args: string[] = []): Promise<void> {
     'fi',
     // Stop any prior codeam-pair instance — fresh start each deploy.
     'pm2 delete codeam-pair >/dev/null 2>&1',
-    // Start codeam pair-auto under PM2. `--merge-logs` writes stdout
+    // Start codeam pair under PM2. `--merge-logs` writes stdout
     // and stderr to the same file so we only need one tail.
-    // --max-restarts 3 keeps PM2 from looping forever if codeam pair-auto
-    // can't start (e.g. backend unreachable or token invalid) — three
-    // attempts is enough for transient flakes.
+    // --max-restarts 3 keeps PM2 from looping forever if codeam pair
+    // can't start (e.g. backend unreachable) — three attempts is enough
+    // for transient flakes.
     // No `--time` (would prefix every line with a timestamp); no
     // `--no-pmx` either (default off).
-    `pm2 start codeam --name codeam-pair --cwd "$PROJECT_DIR" --max-restarts 3 -o "$LOG" -e "$LOG" --merge-logs -- pair-auto ${tokenFileArg} >/dev/null 2>&1`,
-    // Token is single-use — delete from disk immediately after pm2 start
-    // so it doesn't linger if the process crashes before pair-auto reads it.
-    'rm -f /tmp/codeam-auto-token',
+    `pm2 start codeam --name codeam-pair --cwd "$PROJECT_DIR" --max-restarts 3 -o "$LOG" -e "$LOG" --merge-logs -- pair --agent=${agentId} >/dev/null 2>&1`,
     // Give PM2 a moment to spawn the process before we start polling
     // status — otherwise the very first jlist can race the spawn.
     'sleep 2',
