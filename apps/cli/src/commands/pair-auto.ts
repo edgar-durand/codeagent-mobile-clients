@@ -1,6 +1,7 @@
 import * as fs from 'fs';
 import * as os from 'os';
 import { randomUUID } from 'crypto';
+import { isKnownAgentId } from '@codeagent/shared';
 import { addSession } from '../config';
 import { start } from './start';
 
@@ -21,6 +22,7 @@ import { start } from './start';
 interface ClaimSuccess {
   sessionId: string;
   pluginAuthToken?: string;
+  agent: string;
   user: { name: string; email: string; plan: string };
 }
 
@@ -104,6 +106,15 @@ export async function pairAuto(args: string[]): Promise<void> {
   console.log('  Claiming pairing token…');
   const claimed = await claim(token, pluginId);
 
+  // Validate the agent the API picked is one this CLI version knows about.
+  // (Forward-compat guard for when the backend ships an agent we haven't released yet.)
+  if (!isKnownAgentId(claimed.agent)) {
+    fail(
+      `agent "${claimed.agent}" is not supported in this codeam-cli version. ` +
+      `Upgrade with 'npm i -g codeam-cli@latest'.`,
+    );
+  }
+
   addSession({
     id: claimed.sessionId,
     pluginId,
@@ -112,6 +123,7 @@ export async function pairAuto(args: string[]): Promise<void> {
     plan: claimed.user.plan,
     pairedAt: Date.now(),
     pluginAuthToken: claimed.pluginAuthToken,
+    agent: claimed.agent,
   });
 
   // eslint-disable-next-line no-console
