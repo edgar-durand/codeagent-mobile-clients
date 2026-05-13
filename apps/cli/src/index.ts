@@ -29,7 +29,7 @@ async function main(): Promise<void> {
     case '--help':
     case '-h':
     case 'help':     return help();
-    case 'pair':     return pair();
+    case 'pair':     return pair(args);
     case 'pair-auto': return pairAuto(args);
     case 'sessions': return sessions(args);
     case 'status':   return status();
@@ -40,7 +40,7 @@ async function main(): Promise<void> {
       // `codeam deploy stop|remove` → pick a workspace and stop its codeam-pair session
       if (args[0] === 'ls' || args[0] === 'list') return deployList();
       if (args[0] === 'stop' || args[0] === 'remove') return deployStop();
-      return deploy();
+      return deploy(args);
     default:         return start();
   }
 }

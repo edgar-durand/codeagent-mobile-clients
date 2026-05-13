@@ -3,10 +3,11 @@ import * as os from 'os';
 import * as path from 'path';
 import { randomUUID } from 'crypto';
 import { spawn } from 'child_process';
-import type { ClaudeService } from '../../services/claude.service';
+import type { AgentService } from '../../services/agent.service';
 import type { CommandRelayService, RemoteCommand } from '../../services/command-relay.service';
 import type { HistoryService } from '../../services/history.service';
 import type { OutputService } from '../../services/output.service';
+import type { RuntimeStrategy } from '../../agents/strategy';
 import {
   parsePayload,
   startCommandSchema,
@@ -37,9 +38,10 @@ import type { KeepAliveContext } from './keep-alive';
  */
 export interface HandlerContext {
   outputSvc: OutputService;
-  claude: ClaudeService;
+  claude: AgentService;
   historySvc: HistoryService;
   relay: CommandRelayService;
+  runtime: RuntimeStrategy;
   setKeepAlive: (enabled: boolean) => void;
   keepAliveCtx: KeepAliveContext;
 }
@@ -162,15 +164,41 @@ const getConversation: CommandHandler = async (ctx, cmd) => {
 };
 
 const listModels: CommandHandler = async (ctx, cmd) => {
-  // Claude Code models available via `/model`. Mirror the Anthropic
-  // catalog so the mobile picker can switch by sending `/model <id>`.
-  const models = [
-    { id: 'claude-opus-4-7',           label: 'Claude Opus 4.7',   description: 'Most capable',  family: 'claude',  vendor: 'anthropic', isDefault: false },
-    { id: 'claude-opus-4-6',           label: 'Claude Opus 4.6',   description: 'Top tier',      family: 'claude',  vendor: 'anthropic', isDefault: false },
-    { id: 'claude-sonnet-4-6',         label: 'Claude Sonnet 4.6', description: 'Balanced',      family: 'claude',  vendor: 'anthropic', isDefault: true  },
-    { id: 'claude-haiku-4-5-20251001', label: 'Claude Haiku 4.5',  description: 'Fastest',       family: 'claude',  vendor: 'anthropic', isDefault: false },
-  ];
+  // Delegate to the runtime so each agent returns its own catalog.
+  // Claude returns the static Anthropic model list; future agents
+  // (e.g. Codex) will return OpenAI models without touching this file.
+  const models = await ctx.runtime.listModels();
   await ctx.relay.sendResult(cmd.id, 'completed', { models });
+};
+
+const changeModel: CommandHandler = async (ctx, cmd) => {
+  const params = cmd.payload as { modelId?: unknown };
+  if (typeof params.modelId !== 'string' || !params.modelId) {
+    await ctx.relay.sendResult(cmd.id, 'failed', { error: 'modelId required' });
+    return;
+  }
+  const instr = ctx.runtime.changeModelInstruction(params.modelId);
+  if (instr.type === 'pty') {
+    if (!instr.ptyInput) {
+      await ctx.relay.sendResult(cmd.id, 'failed', { error: 'no pty input for this agent' });
+      return;
+    }
+    ctx.claude.sendRawPtyInput(instr.ptyInput);
+  } else if (instr.type === 'restart') {
+    // Restart path — Claude doesn't use this in Phase 1, but the design
+    // supports it for future agents. Defer full implementation.
+    await ctx.relay.sendResult(cmd.id, 'failed', { error: 'restart-mode change_model not supported in Phase 1' });
+    return;
+  }
+  await ctx.relay.sendResult(cmd.id, 'completed', {});
+};
+
+const summarize: CommandHandler = async (ctx, cmd) => {
+  const params = cmd.payload as { mode?: unknown };
+  const mode: 'normal' | 'auto' = params.mode === 'auto' ? 'auto' : 'normal';
+  const instr = ctx.runtime.summarizeInstruction(mode);
+  ctx.claude.sendRawPtyInput(instr.ptyInput);
+  await ctx.relay.sendResult(cmd.id, 'completed', {});
 };
 
 // ─── Lifecycle ───────────────────────────────────────────────────
@@ -327,6 +355,8 @@ export const handlers: Record<string, CommandHandler> = {
   get_context: getContext,
   get_conversation: getConversation,
   list_models: listModels,
+  change_model: changeModel,
+  summarize,
   set_keep_alive: setKeepAlive,
   session_terminated: sessionTerminated,
   shutdown_session: shutdownSession,

@@ -3,10 +3,15 @@ import pc from 'picocolors';
 import { p } from '../ui/prompts';
 import { showIntro, showSuccess, showError, showPairingCode } from '../ui/banner';
 import { requestCode, pollStatus } from '../services/pairing.service';
-import { addSession } from '../config';
+import { addSession, loadCliConfig, saveCliConfig } from '../config';
 import { start } from './start';
+import { parseAgentFlag, promptForAgent } from '../utils/agent-prompt';
 
-export async function pair(): Promise<void> {
+export async function pair(args: string[] = []): Promise<void> {
+  const config = loadCliConfig();
+  const flagAgent = parseAgentFlag(args);
+  const agentId = flagAgent ?? (await promptForAgent(config.preferredAgent ?? 'claude'));
+
   showIntro();
 
   // Generate a fresh pluginId for this pairing so multiple sessions from the
@@ -52,7 +57,10 @@ export async function pair(): Promise<void> {
           plan: info.plan,
           pairedAt: Date.now(),
           pluginAuthToken: info.pluginAuthToken,
+          agent: agentId,
         });
+        // Persist preferredAgent for next time (reload to pick up activeSessionId written by addSession)
+        saveCliConfig({ ...loadCliConfig(), preferredAgent: agentId });
         showSuccess(`Paired with ${info.userName} (${info.plan})`);
         console.log('');
         resolve();

@@ -1,8 +1,10 @@
 import pc from 'picocolors';
+import { AGENT_REGISTRY } from '@codeagent/shared';
 import { getActiveSession, ensurePluginId } from '../config';
 import { showIntro, showInfo } from '../ui/banner';
 import { CommandRelayService } from '../services/command-relay.service';
-import { ClaudeService } from '../services/claude.service';
+import { AgentService } from '../services/agent.service';
+import { createRuntimeStrategy } from '../agents/registry';
 import { OutputService } from '../services/output.service';
 import { HistoryService } from '../services/history.service';
 import { fetchQuotaUsage } from './start/quota-fetcher';
@@ -25,16 +27,21 @@ export async function start(): Promise<void> {
     process.exit(0);
   }
 
+  if (!session.agent) {
+    throw new Error('Active session has no agent — re-pair with `codeam pair`.');
+  }
+
   // Use the per-session pluginId (set since v1.4.6); fall back to the
   // installation-level pluginId for sessions paired with older CLIs.
   const pluginId = session.pluginId ?? ensurePluginId();
 
   showInfo(`${session.userName}  ·  ${pc.cyan(session.plan)}`);
-  showInfo('Launching Claude Code...\n');
+  showInfo(`Launching ${AGENT_REGISTRY[session.agent].displayName}...\n`);
 
   const cwd = process.cwd();
 
-  const historySvc = new HistoryService(pluginId, cwd);
+  const runtime = createRuntimeStrategy(session.agent);
+  const historySvc = new HistoryService(runtime, pluginId, cwd);
 
   const keepAliveCtx = {
     inCodespace: process.env.CODESPACES === 'true',
@@ -52,7 +59,7 @@ export async function start(): Promise<void> {
       // delta of the just-finished turn so the SSE consumers can
       // fetch the canonical markdown via `?last=1` and replace the
       // streamed PTY approximation with proper ``` fences / blocks.
-      if (historySvc.isQuotaStale()) fetchQuotaUsage(historySvc);
+      if (historySvc.isQuotaStale()) fetchQuotaUsage(runtime, historySvc);
       setTimeout(() => {
         historySvc.uploadDelta().catch(() => { /* best-effort */ });
       }, 400);
@@ -70,16 +77,19 @@ export async function start(): Promise<void> {
     session.pluginAuthToken,
   );
 
-  const claude = new ClaudeService({
-    cwd,
-    onData(raw) { outputSvc.push(raw); },
-    onExit(code) {
-      process.removeListener('SIGINT', sigintHandler);
-      outputSvc.dispose();
-      relay.stop();
-      process.exit(code);
+  const claude = new AgentService(
+    runtime,
+    {
+      cwd,
+      onData(raw) { outputSvc.push(raw); },
+      onExit(code) {
+        process.removeListener('SIGINT', sigintHandler);
+        outputSvc.dispose();
+        relay.stop();
+        process.exit(code);
+      },
     },
-  });
+  );
 
   // Built EARLY so the closure inside `relay`'s onCommand below has
   // a stable reference. Filled in once the dependent services exist.
@@ -87,6 +97,7 @@ export async function start(): Promise<void> {
     outputSvc,
     claude,
     historySvc,
+    runtime,
     relay: undefined as unknown as CommandRelayService,
     setKeepAlive,
     keepAliveCtx,
@@ -137,5 +148,5 @@ export async function start(): Promise<void> {
   setTimeout(() => {
     historySvc.load().catch(() => {});
   }, 2000);
-  setTimeout(() => fetchQuotaUsage(historySvc), 5000);
+  setTimeout(() => fetchQuotaUsage(runtime, historySvc), 5000);
 }

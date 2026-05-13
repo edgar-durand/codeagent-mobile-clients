@@ -26,14 +26,14 @@ describe('makeConfig', () => {
   });
 
   it('addSession saves and getActiveSession returns it', () => {
-    cfg.addSession({ id: 's1', userName: 'Edgar', userEmail: 'e@e.com', plan: 'PRO', pairedAt: 1000 });
+    cfg.addSession({ id: 's1', userName: 'Edgar', userEmail: 'e@e.com', plan: 'PRO', pairedAt: 1000, agent: 'claude' });
     const active = cfg.getActiveSession();
     expect(active?.id).toBe('s1');
     expect(active?.userName).toBe('Edgar');
   });
 
   it('addSession sets first session as active automatically', () => {
-    cfg.addSession({ id: 's1', userName: 'A', userEmail: 'a@a.com', plan: 'FREE', pairedAt: 1000 });
+    cfg.addSession({ id: 's1', userName: 'A', userEmail: 'a@a.com', plan: 'FREE', pairedAt: 1000, agent: 'claude' });
     expect(cfg.getConfig().activeSessionId).toBe('s1');
   });
 
@@ -41,14 +41,14 @@ describe('makeConfig', () => {
     // Rationale: pair → start should use the most recently paired session's
     // pluginId, so each addSession takes over as the active one (see
     // src/config.ts:addSession).
-    cfg.addSession({ id: 's1', userName: 'A', userEmail: 'a@a.com', plan: 'FREE', pairedAt: 1000 });
-    cfg.addSession({ id: 's2', userName: 'B', userEmail: 'b@b.com', plan: 'PRO', pairedAt: 2000 });
+    cfg.addSession({ id: 's1', userName: 'A', userEmail: 'a@a.com', plan: 'FREE', pairedAt: 1000, agent: 'claude' });
+    cfg.addSession({ id: 's2', userName: 'B', userEmail: 'b@b.com', plan: 'PRO', pairedAt: 2000, agent: 'claude' });
     expect(cfg.getConfig().activeSessionId).toBe('s2');
   });
 
   it('removeSession deletes the session and promotes next as active', () => {
-    cfg.addSession({ id: 's1', userName: 'A', userEmail: 'a@a.com', plan: 'FREE', pairedAt: 1000 });
-    cfg.addSession({ id: 's2', userName: 'B', userEmail: 'b@b.com', plan: 'PRO', pairedAt: 2000 });
+    cfg.addSession({ id: 's1', userName: 'A', userEmail: 'a@a.com', plan: 'FREE', pairedAt: 1000, agent: 'claude' });
+    cfg.addSession({ id: 's2', userName: 'B', userEmail: 'b@b.com', plan: 'PRO', pairedAt: 2000, agent: 'claude' });
     cfg.setActiveSession('s1');
     cfg.removeSession('s1');
     const config = cfg.getConfig();
@@ -57,8 +57,8 @@ describe('makeConfig', () => {
   });
 
   it('setActiveSession changes the active session', () => {
-    cfg.addSession({ id: 's1', userName: 'A', userEmail: 'a@a.com', plan: 'FREE', pairedAt: 1000 });
-    cfg.addSession({ id: 's2', userName: 'B', userEmail: 'b@b.com', plan: 'PRO', pairedAt: 2000 });
+    cfg.addSession({ id: 's1', userName: 'A', userEmail: 'a@a.com', plan: 'FREE', pairedAt: 1000, agent: 'claude' });
+    cfg.addSession({ id: 's2', userName: 'B', userEmail: 'b@b.com', plan: 'PRO', pairedAt: 2000, agent: 'claude' });
     cfg.setActiveSession('s2');
     expect(cfg.getConfig().activeSessionId).toBe('s2');
   });
