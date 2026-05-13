@@ -59,8 +59,8 @@ export async function pair(args: string[] = []): Promise<void> {
           pluginAuthToken: info.pluginAuthToken,
           agent: agentId,
         });
-        // Persist preferredAgent for next time
-        saveCliConfig({ ...config, preferredAgent: agentId });
+        // Persist preferredAgent for next time (reload to pick up activeSessionId written by addSession)
+        saveCliConfig({ ...loadCliConfig(), preferredAgent: agentId });
         showSuccess(`Paired with ${info.userName} (${info.plan})`);
         console.log('');
         resolve();
