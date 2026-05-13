@@ -1,14 +1,16 @@
-import { execFile } from 'child_process';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { promisify } from 'util';
 import * as p from '@clack/prompts';
 import pc from 'picocolors';
 import { PROVIDERS } from '../services/providers';
 import type { CloudProvider, DeployableProject, ExistingWorkspace, Workspace } from '../services/providers';
-
-const execFileP = promisify(execFile);
+import {
+  detectLocalClaudeCredentials,
+  bridgeClaudeCredentials,
+  runRemoteClaudeLogin,
+  verifyClaudeAuth,
+} from '../agents/claude/credentials';
 
 /**
  * `codeam deploy` — provision a fresh cloud workspace, install the
@@ -232,13 +234,12 @@ export async function deploy(): Promise<void> {
   // the verify step in step 7 will route them through interactive
   // `claude login` automatically with whatever account they want.
   const localClaudeDir = path.join(os.homedir(), '.claude');
-  const localCredsKind = await detectLocalClaudeCredentials(localClaudeDir);
+  const localCredsResult = await detectLocalClaudeCredentials();
+  const localCredsKind = localCredsResult.source;
   let bridged: 'flat-file' | 'macos-keychain' | 'none' = 'none';
 
   if (localCredsKind !== 'none') {
-    const sourceLabel =
-      localCredsKind === 'flat-file' ? '~/.claude/.credentials.json'
-      : 'macOS Keychain';
+    const sourceLabel = localCredsResult.description;
     const useLocal = await p.confirm({
       message: `Copy your local Claude credentials (${sourceLabel}) to the workspace?`,
       active: 'Yes — same account, no re-auth',
@@ -258,7 +259,8 @@ export async function deploy(): Promise<void> {
       // and skips the first-launch UX entirely.
       const credStep = p.spinner();
       credStep.start('Bridging Claude credentials…');
-      bridged = await bridgeClaudeCredentials(provider, workspace.id, localClaudeDir);
+      const bridgeResult = await bridgeClaudeCredentials(provider, workspace.id);
+      bridged = bridgeResult.source === 'env-var' ? 'none' : bridgeResult.source;
       switch (bridged) {
         case 'flat-file':
           credStep.stop('✓ Local credentials staged');
@@ -577,184 +579,6 @@ export async function deploy(): Promise<void> {
 
 function shellQuoteSingle(s: string): string {
   return `'${s.replace(/'/g, `'\\''`)}'`;
-}
-
-
-/**
- * Run `claude login` inside the workspace with full stdio inheritance
- * so the URL the CLI prints (and any code-paste prompt the auth flow
- * asks for) come straight to the user's local terminal. After the
- * login finishes we sanity-check with `claude` to confirm the
- * credentials landed; if it looks broken we surface a friendly note
- * but continue — pairing still works for non-Claude agents.
- *
- * The remote command shape is:
- *   bash -lc "claude login"
- * via the provider's `streamCommand` so PATH from .bashrc / .zshrc /
- * /etc/profile.d / nvm pick up the freshly-installed `claude` binary.
- */
-async function runRemoteClaudeLogin(
-  provider: CloudProvider,
-  workspaceId: string,
-): Promise<void> {
-  p.note(
-    [
-      'A login URL will print below. Open it in your local browser, sign in,',
-      'and paste any code Claude asks for back into this terminal.',
-    ].join('\n'),
-    'Authenticating Claude on workspace',
-  );
-  const result = await provider.streamCommand(
-    workspaceId,
-    'bash -lc "claude login || claude /login || true"',
-  );
-  if (result.code !== 0) {
-    p.note(
-      'claude login exited non-zero. You can re-run it manually inside the codespace later.',
-      'Heads up',
-    );
-  }
-}
-
-/**
- * Detect whether the user has Claude credentials we could ship to a
- * remote workspace, WITHOUT actually extracting them. Used to decide
- * whether to ask "want to copy your local creds?" — there's no point
- * showing the prompt if there are no creds to copy.
- *
- *   - Linux  → `~/.claude/.credentials.json` exists?
- *   - macOS  → Keychain has a `Claude Code-credentials` entry? We
- *              probe with the metadata-only form of `security`
- *              (`find-generic-password` without `-w`) so the user
- *              isn't prompted to unlock the keychain just to be
- *              asked the question.
- *   - Windows → Not yet implemented; reports `none`.
- */
-async function detectLocalClaudeCredentials(
-  localClaudeDir: string,
-): Promise<'flat-file' | 'macos-keychain' | 'none'> {
-  if (fs.existsSync(path.join(localClaudeDir, '.credentials.json'))) {
-    return 'flat-file';
-  }
-  if (process.platform === 'darwin') {
-    try {
-      // `security find-generic-password -s <service>` (no -w) returns
-      // metadata if the entry exists, errors if not. Doesn't expose
-      // the secret, doesn't trigger a keychain unlock prompt.
-      await execFileP(
-        'security',
-        ['find-generic-password', '-s', 'Claude Code-credentials'],
-        { maxBuffer: 1024 * 1024 },
-      );
-      return 'macos-keychain';
-    } catch {
-      return 'none';
-    }
-  }
-  return 'none';
-}
-
-/**
- * Verify that `claude` is authenticated on the workspace by running
- * `claude auth status --json` and inspecting the JSON output for
- * `loggedIn: true`. We deliberately call `auth status` rather than
- * trying to parse the credentials file ourselves — Claude is the
- * source of truth for whether tokens are valid (it knows about
- * expiry, scope mismatches, format changes between versions, etc.).
- *
- * Used at two points by `codeam deploy`:
- *   1. After the credential bridge, to decide whether we can skip
- *      interactive login.
- *   2. After interactive login, to confirm the user actually finished
- *      the device-code flow (not bail out mid-flow with a half-done
- *      auth state).
- *
- * Returns `true` only when Claude reports `loggedIn: true`. Any
- * non-zero exit, malformed JSON, missing field, or `loggedIn: false`
- * counts as not-authed.
- */
-async function verifyClaudeAuth(
-  provider: CloudProvider,
-  workspaceId: string,
-): Promise<boolean> {
-  // Run via login shell so the freshly-installed `claude` binary is
-  // on PATH (it lives in ~/.local/bin which is added by .bashrc).
-  const result = await provider.exec(
-    workspaceId,
-    'bash -lc "claude auth status 2>/dev/null || true"',
-  );
-  if (result.code !== 0) return false;
-  // Find the first balanced JSON object in stdout — `claude auth
-  // status` may print warnings before the JSON on some platforms.
-  const jsonStart = result.stdout.indexOf('{');
-  if (jsonStart < 0) return false;
-  try {
-    const parsed = JSON.parse(result.stdout.slice(jsonStart)) as { loggedIn?: boolean };
-    return parsed.loggedIn === true;
-  } catch {
-    return false;
-  }
-}
-
-/**
- * Cross-platform credential bridge for Claude Code on the codespace.
- *
- *   - Linux  → credentials live at `~/.claude/.credentials.json` as
- *              a flat file. The tar in `uploadDirectory` already
- *              shipped it; nothing to do here. (Returns `'flat-file'`.)
- *   - macOS  → credentials live in the macOS Keychain under the
- *              service name `Claude Code-credentials`. We pull the
- *              JSON via `security find-generic-password -w` and write
- *              it to `~/.claude/.credentials.json` on the remote
- *              (chmod 600). Same shape Claude Code reads on Linux.
- *   - Windows → credentials live in Windows Credential Manager. We
- *              don't auto-bridge today (would need a PowerShell or
- *              native API hop); the caller falls back to interactive
- *              login. (Returns `'none'`.)
- *
- * Returns a discriminator the caller uses to decide whether to
- * announce success or run the remote-login fallback.
- */
-async function bridgeClaudeCredentials(
-  provider: CloudProvider,
-  workspaceId: string,
-  localClaudeDir: string,
-): Promise<'flat-file' | 'macos-keychain' | 'none'> {
-  // Case 1 — flat file (Linux's default; also possible on macOS for
-  // users on a custom build). The directory tar already shipped it.
-  const fileBased = path.join(localClaudeDir, '.credentials.json');
-  if (fs.existsSync(fileBased)) return 'flat-file';
-
-  // Case 2 — macOS Keychain. Out of process: shell to `security`,
-  // pipe the JSON straight into the remote write so it never touches
-  // disk on either side.
-  if (process.platform === 'darwin') {
-    try {
-      const { stdout } = await execFileP(
-        'security',
-        ['find-generic-password', '-s', 'Claude Code-credentials', '-w'],
-        { maxBuffer: 1024 * 1024 },
-      );
-      const json = stdout.trim();
-      if (json.length === 0) return 'none';
-      await provider.uploadFile(
-        workspaceId,
-        '/home/codespace/.claude/.credentials.json',
-        json,
-        { mode: 0o600 },
-      );
-      return 'macos-keychain';
-    } catch {
-      // No entry, denied, or `security` missing — fall through.
-      return 'none';
-    }
-  }
-
-  // Case 3 — Windows Credential Manager (or Linux installs that use
-  // libsecret instead of the flat file). Bridging from these stores
-  // requires native API hops we haven't built yet; the caller will
-  // run `claude login` interactively on the remote instead.
-  return 'none';
 }
 
 /**
