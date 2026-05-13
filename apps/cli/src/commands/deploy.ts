@@ -7,19 +7,11 @@ import { parseAgentFlag, promptForAgent } from '../utils/agent-prompt';
 import { createDeployStrategy } from '../agents/registry';
 import { loadCliConfig } from '../config';
 
-// NOTE — Phase 1 uses `codeam pair --agent=<id>` for local deploy pairing
-// (interactive QR flow on the remote workspace, agent flag carries the local choice).
-// Phase 2 may switch to `codeam pair-auto` when a `codeam login` command is added
-// that stores a user-JWT — at that point the CLI can call POST /api/pairing/mint-auto-token
-// (already implemented server-side) to get a one-shot token instead of running
-// the manual QR flow on the codespace.
-
 /**
  * `codeam deploy` — provision a fresh cloud workspace, install the
  * agent CLI inside it, copy the user's local agent config so they
- * don't have to re-auth, and finish by streaming `codeam pair-auto`
- * from the workspace so the phone pairs automatically without an
- * interactive QR flow on the codespace.
+ * don't have to re-auth, and finish by streaming `codeam pair` from
+ * the workspace so the user scans the QR code from their phone.
  *
  * The orchestrator is provider-agnostic — it only talks through the
  * `CloudProvider` interface — so adding new backends (Gitpod, Coder,
