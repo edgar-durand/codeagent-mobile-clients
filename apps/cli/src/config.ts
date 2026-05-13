@@ -120,10 +120,18 @@ export function makeConfig(baseDir?: string) {
     }
   }
 
-  return { getConfig, ensurePluginId, addSession, removeSession, setActiveSession, getActiveSession, clearAll };
+  function saveCliConfig(c: CliConfig): void {
+    save(c);
+  }
+
+  function loadCliConfig(): CliConfig {
+    return load();
+  }
+
+  return { getConfig, ensurePluginId, addSession, removeSession, setActiveSession, getActiveSession, clearAll, saveCliConfig, loadCliConfig };
 }
 
 // Default instance — uses ~/.codeam/config.json
 const _default = makeConfig();
-export const { getConfig, ensurePluginId, addSession, removeSession, setActiveSession, getActiveSession, clearAll } =
+export const { getConfig, ensurePluginId, addSession, removeSession, setActiveSession, getActiveSession, clearAll, saveCliConfig, loadCliConfig } =
   _default;
