@@ -29,7 +29,7 @@ async function main(): Promise<void> {
     case '--help':
     case '-h':
     case 'help':     return help();
-    case 'pair':     return pair();
+    case 'pair':     return pair(args);
     case 'pair-auto': return pairAuto(args);
     case 'sessions': return sessions(args);
     case 'status':   return status();
