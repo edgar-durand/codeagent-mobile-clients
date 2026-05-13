@@ -40,7 +40,7 @@ codeagent-mobile-clients/
 └── README.md, LICENSE
 ```
 
-All three clients ship **under one unified version line** starting at `2.0.0`. A single `vX.Y.Z` tag releases all of them together.
+All three clients ship **under one unified version line** starting at `2.0.0`. A single `vX.Y.Z` tag releases all of them together. **Current published version: `v2.10.8`** (May 2026).
 
 ## Commands
 
@@ -84,11 +84,12 @@ npm run use-commit-template      # one-time: configure git to use .gitmessage
 ### Data flow
 
 ```
-┌─────────────────────┐   REST + WebSocket   ┌────────────────────┐
+┌─────────────────────┐   REST + SSE         ┌────────────────────┐
 │  Mobile app / Web   │  ───────────────────▶│ CodeAgent backend  │
 │  dashboard          │                       │                    │
 └─────────────────────┘                       └─────────┬──────────┘
-                                                        │ WS / HTTP poll
+                                                        │ SSE pull (primary)
+                                                        │ + HTTP polling (fallback)
                                                         ▼
                                               ┌────────────────────┐
                                               │ THIS REPO          │
@@ -104,6 +105,21 @@ npm run use-commit-template      # one-time: configure git to use .gitmessage
                                               │ JetBrains AI …     │
                                               └────────────────────┘
 ```
+
+### Command relay (clients ← backend)
+
+All three clients (CLI, VS Code, JetBrains) implement the same two-mode command relay:
+
+1. **SSE pull primary** — subscribe to `/api/commands/pending/stream?pluginId=…`. The backend `pushCommand` publishes a `commands` event; the client wakes within ~50 ms and dispatches the command. Vercel's 25 s fn cap closes the stream periodically — the client reconnects immediately (long-poll style).
+2. **Polling fallback** — on two consecutive SSE failures (network blip, older backend without the stream endpoint, proxy stripping SSE), the client falls back to `GET /api/commands/pending` polling with **idle-streak backoff**: 2 s base, exponentially widening to ~32 s when consecutive polls return empty, reset to 2 s the moment a real command arrives.
+
+Implementation shape is uniform across the three clients:
+
+- CLI: `apps/cli/src/services/command-relay.service.ts`
+- VS Code: `apps/vsc-plugin/src/services/command-relay.service.ts`
+- JetBrains: `apps/jetbrains-plugin/src/main/kotlin/com/windsurf/controller/services/CommandRelayService.kt`
+
+Auth header: `X-Plugin-Auth-Token` (the per-pairing secret returned at pair time) + `X-Codeam-Protocol-Version: 2.0.0`.
 
 ### Shared package (`@codeagent/shared`)
 
@@ -127,9 +143,36 @@ JetBrains plugin is Kotlin and does **not** consume the shared package — if th
 
 **Critical: `select_option` handling.** When navigating a React Ink selector, arrow keys MUST be sent one at a time with ≥80 ms gaps. Sending all arrows in one write collapses into a single synchronous batch — React batches the state updates and Enter always picks option 0.
 
+**Critical: parallel-Claude JSONL detection.** `apps/cli/src/services/history.service.ts` captures a `bootTimeMs` at construction and `detectCurrentConversation()` / `getCurrentUsage()` filter `~/.claude/projects/<cwd>/*.jsonl` entries by `birthtime >= bootTimeMs - 5 s grace`. Without this filter, if the user runs `codeam pair` in a directory where another Claude session is already chatting (common when developing this project itself), the actively-written JSONL of the parallel session wins the mtime sort and the CLI publishes the wrong conversation to the mobile app — bug fixed in `v2.10.8`. Similarly, `tryExtractSessionId` (in `OutputService`) only matches the unambiguous `Resuming session: <uuid>` pattern; the older broader `/Session:|/Conversation:` patterns matched incidental log lines and were dropped in the same fix.
+
 ### VS Code PTY
 
 `apps/vsc-plugin/src/services/claude-pseudoterminal.ts` implements a custom `vscode.Pseudoterminal` backed by a `node-pty`-spawned `claude` process. `apps/vsc-plugin/src/services/terminal-agent.service.ts` waits for the `? for shortcuts` readiness marker before submitting the first prompt — a fixed-delay idle check drops the first prompt during Ink's initial render pause.
+
+### Agent strategy pattern (VS Code + JetBrains)
+
+Both plugins route `start_task` / `send_prompt` through a per-agent `AgentStrategy` interface. The pattern lives at:
+
+- VS Code: `apps/vsc-plugin/src/services/strategies/`
+  - `AgentStrategy.ts` — interface + `AgentInvocation` / `StrategyResult` types
+  - `AgentStrategyRegistry.ts` — singleton dispatch (first `canHandle` wins); tracks `lastActive` for tear-down
+  - `TerminalClaudeCodeStrategy.ts` — wraps `TerminalAgentService` for `__terminal__:` / `isTerminalAgent` agents
+  - `CopilotLmStrategy.ts` — wraps `CopilotChatService.sendPrompt` for `__vscode_lm__:` agents (vscode.lm API)
+  - `ObserverBridgeStrategy.ts` — catch-all; POSTs to the localhost observer helper at `:47832`, falls back to clipboard
+- JetBrains: `apps/jetbrains-plugin/src/main/kotlin/com/windsurf/controller/services/strategies/`
+  - Same shape, plus extra strategies for JCEF-rendered agents (Windsurf / Cascade, JetBrains AI Assistant, PR AI, generic JCEF fallback) — VS Code has no JCEF so those aren't ported.
+
+The panel layer (`ControllerPanelProvider` / `ControllerToolWindowFactory`) builds an `AgentInvocation` from the incoming `RemoteCommand` and hands it to the registry. Per-agent code lives in concrete strategy files — never inline in the panel.
+
+### "Open CLI" command (mobile → plugin → user terminal)
+
+Mobile sends `install_cli_and_pair`. Both plugins open a local terminal and run:
+
+```
+npm install -g codeam-cli@latest && codeam pair || npx -y codeam-cli@latest pair
+```
+
+The `&&` ensures pair only runs on successful install; the `||` falls back to `npx` when `npm -g` would need sudo. Behavior is identical across VS Code (`vscode.window.createTerminal`) and JetBrains (`TerminalToolWindowManager.createLocalShellWidget`).
 
 ## Commit convention
 
@@ -203,6 +246,8 @@ and `.github/workflows/release.yml` does the rest:
 - `JETBRAINS_MARKETPLACE_TOKEN` — JetBrains Hub permanent token (https://plugins.jetbrains.com/author/me/tokens). Auto-injected as `PUBLISH_TOKEN` env var that the Gradle plugin reads.
 
 **JetBrains Marketplace** is fully automated alongside npm + VS Code Marketplace + Open VSX. Tagging `vX.Y.Z` publishes the plugin to the **stable** channel via `./gradlew publishPlugin` in CI. Pre-release tags (`vX.Y.Z-rc.N`) skip the marketplace push — the build still runs and the `.zip` is attached to the GitHub Release for manual upload to a non-stable channel if needed.
+
+**Versions in git lag behind the latest tag.** The release workflow patches `apps/cli/package.json`, `apps/vsc-plugin/package.json`, `apps/jetbrains-plugin/build.gradle.kts`, and `apps/jetbrains-plugin/src/main/resources/META-INF/plugin.xml` during the build and only commits back `chore(changelog): notes for vX.Y.Z [skip ci]` — the version-bump commits are NOT pushed. So `git show HEAD:apps/cli/package.json | grep version` may show an older number than what's actually published on npm. Don't be fooled — `git describe --tags --abbrev=0` is the source of truth for what's live.
 
 ## CI
 
