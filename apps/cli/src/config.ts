@@ -2,6 +2,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import * as crypto from 'crypto';
+import type { AgentId } from '@codeagent/shared';
 
 export interface SavedSession {
   id: string;
@@ -18,12 +19,14 @@ export interface SavedSession {
    * legacy fallback on the server (sunset 2026-05-25).
    */
   pluginAuthToken?: string;
+  agent: AgentId;
 }
 
 export interface CliConfig {
   pluginId: string;
   activeSessionId: string | null;
   sessions: SavedSession[];
+  preferredAgent?: AgentId;
 }
 
 const EMPTY_CONFIG = (): CliConfig => ({
@@ -31,6 +34,14 @@ const EMPTY_CONFIG = (): CliConfig => ({
   activeSessionId: null,
   sessions: [],
 });
+
+/**
+ * Migration: Phase 1 support for multi-agent. Pre-existing sessions without
+ * an `agent` field default to 'claude' when loaded.
+ */
+function migrateSession(s: SavedSession): SavedSession {
+  return { ...s, agent: s.agent ?? 'claude' };
+}
 
 export function makeConfig(baseDir?: string) {
   const dir = path.join(baseDir ?? os.homedir(), '.codeam');
@@ -42,7 +53,8 @@ export function makeConfig(baseDir?: string) {
       return {
         pluginId: typeof raw.pluginId === 'string' ? raw.pluginId : crypto.randomUUID(),
         activeSessionId: typeof raw.activeSessionId === 'string' ? raw.activeSessionId : null,
-        sessions: Array.isArray(raw.sessions) ? raw.sessions : [],
+        sessions: Array.isArray(raw.sessions) ? raw.sessions.map(migrateSession) : [],
+        preferredAgent: typeof raw.preferredAgent === 'string' ? raw.preferredAgent : undefined,
       };
     } catch {
       return EMPTY_CONFIG();

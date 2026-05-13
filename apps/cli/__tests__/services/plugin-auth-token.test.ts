@@ -30,6 +30,7 @@ describe('config: pluginAuthToken persistence', () => {
       plan: 'PRO',
       pairedAt: 1000,
       pluginAuthToken: 'v1.abc',
+      agent: 'claude',
     });
     const stored = cfg.getActiveSession();
     expect(stored?.pluginAuthToken).toBe('v1.abc');
@@ -47,6 +48,7 @@ describe('config: pluginAuthToken persistence', () => {
       userEmail: 'e@e.com',
       plan: 'FREE',
       pairedAt: 2000,
+      agent: 'claude',
     });
     const stored = cfg.getActiveSession();
     expect(stored?.pluginAuthToken).toBeUndefined();
