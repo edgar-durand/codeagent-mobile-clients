@@ -40,7 +40,7 @@ async function main(): Promise<void> {
       // `codeam deploy stop|remove` → pick a workspace and stop its codeam-pair session
       if (args[0] === 'ls' || args[0] === 'list') return deployList();
       if (args[0] === 'stop' || args[0] === 'remove') return deployStop();
-      return deploy();
+      return deploy(args);
     default:         return start();
   }
 }

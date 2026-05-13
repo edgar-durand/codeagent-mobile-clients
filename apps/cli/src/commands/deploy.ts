@@ -1,29 +1,61 @@
-import * as fs from 'fs';
-import * as os from 'os';
-import * as path from 'path';
 import * as p from '@clack/prompts';
 import pc from 'picocolors';
+import { AGENT_REGISTRY } from '@codeagent/shared';
+import type { AgentId } from '@codeagent/shared';
 import { PROVIDERS } from '../services/providers';
 import type { CloudProvider, DeployableProject, ExistingWorkspace, Workspace } from '../services/providers';
-import {
-  detectLocalClaudeCredentials,
-  bridgeClaudeCredentials,
-  runRemoteClaudeLogin,
-  verifyClaudeAuth,
-} from '../agents/claude/credentials';
+import { parseAgentFlag, promptForAgent } from '../utils/agent-prompt';
+import { createDeployStrategy } from '../agents/registry';
+import { loadCliConfig } from '../config';
+
+const API_BASE = process.env.CODEAM_API_URL ?? 'https://codeagent-mobile-api.vercel.app';
+
+/**
+ * Mint a one-shot auto-pair token via POST /api/pairing/mint-auto-token.
+ *
+ * TODO: The CLI does NOT store a user JWT — only the `pluginAuthToken`
+ * (an HMAC-derived session secret) is available, but the backend's
+ * `getAuthUser()` requires a proper JWT signed with JWT_SECRET. Until
+ * the CLI gains a durable user-JWT store (e.g. from an explicit
+ * `codeam login` command), this function throws at runtime.
+ *
+ * Once a JWT store is available, replace the `throw` below with:
+ *   const userJwt = loadUserJwt();   // read from ~/.codeam/auth.json or similar
+ *   const res = await fetch(`${API_BASE}/api/pairing/mint-auto-token`, {
+ *     method: 'POST',
+ *     headers: { Authorization: `Bearer ${userJwt}`, 'Content-Type': 'application/json' },
+ *     body: JSON.stringify({ agent: agentId, codespaceId }),
+ *   });
+ *   if (!res.ok) { const t = await res.text(); throw new Error(`mint-auto-token failed (${res.status}): ${t}`); }
+ *   const { token } = await res.json() as { token: string; expiresAt: string };
+ *   return token;
+ */
+async function mintAutoPairToken(_agentId: AgentId, _codespaceId?: string): Promise<string> {
+  // The user JWT is not stored by the CLI in Phase 1 — only the mobile app holds JWTs.
+  // pair-auto will fall back to reading CODEAM_AUTO_TOKEN env var if present.
+  void _agentId;
+  void _codespaceId;
+  throw new Error(
+    'TODO: implement mintAutoPairToken — CLI does not yet store a user JWT.\n' +
+    'Track in: https://github.com/edgar-durand/codeagent-mobile-clients/issues (pair-auto token minting)\n' +
+    `API_BASE: ${API_BASE}`,
+  );
+}
 
 /**
  * `codeam deploy` — provision a fresh cloud workspace, install the
- * Claude CLI inside it, copy the user's local Claude config so they
- * don't have to re-auth, and finish by streaming `codeam pair` from
- * the workspace so the user gets a live pairing code on their local
- * terminal that's already connected to the remote codespace.
+ * agent CLI inside it, copy the user's local agent config so they
+ * don't have to re-auth, and finish by streaming `codeam pair-auto`
+ * from the workspace so the phone pairs automatically without an
+ * interactive QR flow on the codespace.
  *
  * The orchestrator is provider-agnostic — it only talks through the
  * `CloudProvider` interface — so adding new backends (Gitpod, Coder,
  * etc.) is one new file in `services/providers/`.
+ *
+ * @param args - Raw CLI argv slice (e.g. `['--agent=claude']`).
  */
-export async function deploy(): Promise<void> {
+export async function deploy(args: string[] = []): Promise<void> {
   console.log();
   p.intro(pc.bgMagenta(pc.white(' codeam deploy ')));
 
@@ -222,26 +254,31 @@ export async function deploy(): Promise<void> {
     }
   }
 
-  // Step 4 — Decide credential strategy. We could silently bridge
-  // the user's local Claude credentials to the workspace, but that
-  // assumes they want to use the SAME account on the cloud agent —
-  // and plenty of users explicitly want a different one (work vs.
-  // personal Claude account, a sandbox account for the deploy, etc.).
-  //
-  // So: only ask if there's something we COULD bridge. If yes,
-  // confirm with the user (default: yes, since that's the common
-  // "skip re-auth" pitch). If they say no, we skip the bridge and
-  // the verify step in step 7 will route them through interactive
-  // `claude login` automatically with whatever account they want.
-  const localClaudeDir = path.join(os.homedir(), '.claude');
-  const localCredsResult = await detectLocalClaudeCredentials();
-  const localCredsKind = localCredsResult.source;
-  let bridged: 'flat-file' | 'macos-keychain' | 'none' = 'none';
+  // Agent picker — after workspace is ready so the user has context
+  // for which provider/workspace they're configuring. Skips the prompt
+  // when `--agent=<id>` was passed or when only one agent is enabled
+  // (Phase 1: Claude only).
+  const cfg = loadCliConfig();
+  const agentId = parseAgentFlag(args) ?? await promptForAgent(cfg.preferredAgent ?? 'claude');
+  const strategy = createDeployStrategy(agentId);
 
-  if (localCredsKind !== 'none') {
-    const sourceLabel = localCredsResult.description;
+  // Step 4 — Detect + (optionally) bridge local credentials. We
+  // could silently bridge to the workspace, but that assumes the user
+  // wants the SAME account on the cloud agent — plenty of users
+  // explicitly want a different one (work vs. personal account, a
+  // sandbox account, etc.).
+  //
+  // Only ask when there's something we COULD bridge. If yes, confirm
+  // with the user (default: yes — the common "skip re-auth" pitch).
+  // If they say no, we skip the bridge and the verify step inside
+  // strategy.setupOnWorkspace() will route them through interactive
+  // agent login with whatever account they want.
+  const localCreds = await strategy.detectLocalCredentials();
+  let bridged: 'flat-file' | 'macos-keychain' | 'env-var' | 'none' = 'none';
+
+  if (localCreds.source !== 'none') {
     const useLocal = await p.confirm({
-      message: `Copy your local Claude credentials (${sourceLabel}) to the workspace?`,
+      message: `Copy your local ${AGENT_REGISTRY[agentId].displayName} credentials (${localCreds.description}) to the workspace?`,
       active: 'Yes — same account, no re-auth',
       inactive: 'No — log in with a different account',
       initialValue: true,
@@ -252,143 +289,23 @@ export async function deploy(): Promise<void> {
     }
     if (useLocal) {
       // Pre-stage credentials BEFORE install. The order matters:
-      // claude's install.sh launches `claude` once during setup, and
-      // that first invocation persists "first-launch" state files
-      // that can ignore credentials written afterward. Writing creds
-      // first means claude's first run already sees a logged-in user
+      // the agent's install.sh launches the agent binary once during
+      // setup, and that first invocation persists "first-launch" state
+      // files that can ignore credentials written afterward. Writing
+      // creds first means the first run already sees a logged-in user
       // and skips the first-launch UX entirely.
       const credStep = p.spinner();
-      credStep.start('Bridging Claude credentials…');
-      const bridgeResult = await bridgeClaudeCredentials(provider, workspace.id);
-      bridged = bridgeResult.source === 'env-var' ? 'none' : bridgeResult.source;
-      switch (bridged) {
-        case 'flat-file':
-          credStep.stop('✓ Local credentials staged');
-          break;
-        case 'macos-keychain':
-          credStep.stop('✓ Credentials extracted from macOS Keychain and staged');
-          break;
-        case 'none':
-          credStep.stop('⚠ Could not extract local credentials — falling back to remote login');
-          break;
-      }
+      credStep.start(`Bridging ${AGENT_REGISTRY[agentId].displayName} credentials…`);
+      const result = await strategy.bridgeLocalCredentials(provider, workspace.id);
+      bridged = result.source;
+      credStep.stop(`✓ Credentials staged (${bridged})`);
     }
   }
 
-  // Step 5 — Install Claude CLI on the workspace.
-  const claudeStep = p.spinner();
-  claudeStep.start('Installing Claude CLI on workspace…');
-  const installResult = await provider.exec(
-    workspace.id,
-    'curl -fsSL https://claude.ai/install.sh | bash',
-  );
-  if (installResult.code !== 0) {
-    claudeStep.stop('✗ Claude CLI install failed');
-    p.cancel(installResult.stderr.slice(0, 1000));
-    process.exit(1);
-  }
-  claudeStep.stop('✓ Claude CLI installed');
-
-  // Step 6 — Copy local config (skills/settings/subagents/plugins).
-  // This goes AFTER install so it overlays the user's customisations
-  // on top of install's defaults. Excludes drop the heavy local-only
-  // state (~700MB of conversation history etc.) that the remote
-  // never reads.
-  const haveLocalClaude =
-    fs.existsSync(localClaudeDir) && fs.statSync(localClaudeDir).isDirectory();
-  if (haveLocalClaude) {
-    const copyStep = p.spinner();
-    copyStep.start('Copying local Claude config to workspace…');
-    try {
-      await provider.uploadDirectory(
-        workspace.id,
-        localClaudeDir,
-        '/home/codespace/.claude',
-        {
-          exclude: [
-            './projects',          // per-project conversation history (often 700MB+)
-            './file-history',      // per-project file diffs
-            './downloads',         // downloaded artifacts
-            './image-cache',       // cached images
-            './paste-cache',       // clipboard/paste cache
-            './backups',           // local backups
-            './shell-snapshots',   // shell history snapshots
-            './telemetry',         // analytics dumps
-            './statsig',           // feature-flag cache
-            './cache',             // generic cache dir
-            './history.jsonl',     // global REPL history
-            './ide',               // local IDE bridge state
-            './todos',             // local todo state
-            './tasks',             // local task state
-            // Don't overwrite the credentials we already staged in
-            // step 4 — the local dir on macOS doesn't have a flat
-            // credentials file anyway, but on Linux it would, and a
-            // re-write here would be redundant.
-            './.credentials.json',
-          ],
-        },
-      );
-      copyStep.stop('✓ Claude config uploaded');
-    } catch (err) {
-      copyStep.stop('⚠ Could not upload Claude config (continuing)');
-      void err;
-    }
-  }
-
-  // Step 6.5 — Ship `~/.claude.json` (the sibling FILE, not the dir
-  // tarred above). This file holds the user's UI state across
-  // launches: `hasCompletedOnboarding`, `hasIdeOnboardingBeenShown`,
-  // `lastOnboardingVersion`, `tipsHistory`, etc. Without it, claude
-  // treats the codespace as a brand-new install and shows the
-  // "Select login method" + onboarding flow on every interactive
-  // launch even when credentials are already valid.
-  //
-  // Only ships when the user opted into the credential bridge — the
-  // file contains `oauthAccount` (email, orgId) so it'd be a privacy
-  // leak to ship when they're going to log in as a different account.
-  if (bridged !== 'none') {
-    const localClaudeJson = path.join(os.homedir(), '.claude.json');
-    if (fs.existsSync(localClaudeJson)) {
-      try {
-        const contents = fs.readFileSync(localClaudeJson);
-        await provider.uploadFile(
-          workspace.id,
-          '/home/codespace/.claude.json',
-          contents,
-          { mode: 0o600 },
-        );
-      } catch (err) {
-        // Best-effort: claude still works without this file, the
-        // user just sees the onboarding screen.
-        void err;
-      }
-    }
-  }
-
-  // Step 7 — Verify Claude auth on the workspace, and fall back to
-  // interactive login if anything is wrong. We don't trust "we wrote
-  // a file" as success — credentials might be expired, the format
-  // might have changed in a Claude release, the keychain might've
-  // been empty, etc. The user sees ONE outcome: a logged-in Claude.
-  // They never have to know how it got there.
-  const verifyStep = p.spinner();
-  verifyStep.start('Verifying Claude auth on workspace…');
-  const verified = await verifyClaudeAuth(provider, workspace.id);
-  if (verified) {
-    verifyStep.stop('✓ Claude is logged in — no re-auth needed');
-  } else {
-    verifyStep.stop('· Claude not yet authenticated — running login flow');
-    await runRemoteClaudeLogin(provider, workspace.id);
-    // After interactive login, verify one more time so we catch the
-    // case where the user bailed out mid-flow.
-    const reverified = await verifyClaudeAuth(provider, workspace.id);
-    if (!reverified) {
-      p.note(
-        'Claude auth could not be confirmed. You may need to run `claude /login` manually inside the codespace.',
-        'Heads up',
-      );
-    }
-  }
+  // Step 5 — Install agent CLI + copy config + verify auth + fallback
+  // login. All of this is now owned by the strategy so that new agents
+  // (Codex, Copilot, …) can plug in without touching deploy.ts.
+  await strategy.setupOnWorkspace(provider, workspace.id, { bridged });
 
   // Step 6 — Install codeam-cli in the workspace so we can pair.
   const cliStep = p.spinner();
@@ -401,36 +318,41 @@ export async function deploy(): Promise<void> {
   }
   cliStep.stop('✓ codeam-cli installed');
 
-  // Step 7 — Pair the workspace, but in a way that *survives* the
-  // local SSH disconnect. `codeam pair` falls through into the
-  // long-running mobile↔Claude relay (`start()`) once the user pairs
-  // — if we just stream it normally, the local terminal stays bound
-  // forever, and a Ctrl+C kills the relay along with the SSH session,
-  // dropping the mobile app's connection.
+  // Step 7 — Mint a one-shot auto-pair token and start `codeam pair-auto`
+  // on the workspace. pair-auto claims the token silently — no QR code,
+  // no interactive prompt — and the phone is paired automatically.
   //
-  // The wrapper:
-  //   1. `nohup`s `codeam pair` with stdin from /dev/null so it
-  //      ignores SIGHUP (SSH disconnect) AND so a local Ctrl+C
-  //      doesn't reach it (`disown` removes it from the shell's job
-  //      table so signal-on-shell-exit doesn't propagate either).
-  //   2. Tees stdout/stderr into a session log on the codespace and
-  //      `tail -F`s it locally, so the QR / pairing-code renders to
-  //      the user's terminal in real time.
-  //   3. Waits for the "Paired with" marker. On success, the local
-  //      wrapper exits cleanly and SSH disconnects — the relay keeps
-  //      running because it's nohup'd + disowned.
-  //   4. On Ctrl+C: kills the tail and exits, BUT does NOT touch the
-  //      remote relay. Local terminal returns; remote pair-or-relay
-  //      keeps running. (If the user cancels before pairing, codeam
-  //      pair has its own 5-min timeout, after which it'll exit on
-  //      its own — no orphans.)
+  // The token is uploaded to /tmp/codeam-auto-token (mode 0600) so it
+  // never appears in `ps -ef`. The PM2 wrapper deletes the file
+  // immediately after pm2 start so it doesn't linger on disk.
+  //
+  // If mintAutoPairToken throws (see the TODO in its JSDoc), the flow
+  // falls back gracefully: autoToken is null, and the wrapper runs
+  // `codeam pair-auto` with CODEAM_AUTO_TOKEN unset, which will cause
+  // pair-auto to fail with a clear error on the workspace log.
+  let autoToken: string | null = null;
+  try {
+    autoToken = await mintAutoPairToken(agentId, workspace.id);
+    await provider.uploadFile(
+      workspace.id,
+      '/tmp/codeam-auto-token',
+      Buffer.from(autoToken),
+      { mode: 0o600 },
+    );
+  } catch (err) {
+    p.log.warn(
+      `Could not mint auto-pair token — you may need to pair manually.\n` +
+      `  Reason: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+
   p.note(
     [
       `Workspace: ${pc.cyan(workspace.displayName ?? workspace.id)}`,
       workspace.webUrl ? `Web:       ${pc.cyan(workspace.webUrl)}` : '',
       '',
-      'Starting `codeam pair` on the workspace.',
-      'Scan the QR code below with the CodeAgent Mobile app to finish pairing.',
+      `Starting \`codeam pair-auto\` on the workspace (agent: ${AGENT_REGISTRY[agentId].displayName}).`,
+      'The workspace will pair automatically — no QR code needed.',
       pc.dim('(Once paired, this terminal disconnects automatically; the session stays alive on the codespace.)'),
     ]
       .filter(Boolean)
@@ -438,32 +360,32 @@ export async function deploy(): Promise<void> {
     'Almost there',
   );
 
-  // After Claude is set up, run `codeam pair` on the workspace via
-  // PM2 — a battle-tested Node.js process manager whose god-daemon
+  // After the agent is set up, run `codeam pair-auto` on the workspace
+  // via PM2 — a battle-tested Node.js process manager whose god-daemon
   // survives SSH session cleanup on Codespaces (where nohup, setsid
   // and tmux all fail). PM2 owns the lifecycle: spawn, restart on
   // crash, log redirection, graceful stop.
   //
   // The wrapper:
   //   1. Installs PM2 if missing (idempotent first-run setup).
-  //   2. `pm2 start codeam --name codeam-pair -- pair` with merged
-  //      stdout/stderr piped to a session log.
-  //   3. Tails the log locally so the QR / pairing code renders.
-  //   4. Phase 1: wait for "Paired with"; phase 2: wait for
-  //      "for shortcuts" so any first-time Claude prompts (trust
-  //      this folder, model picker, etc.) get answered on the
-  //      phone before we close locally.
-  //   5. Local Ctrl+C kills only the local tail — PM2 keeps the
-  //      relay running.
+  //   2. `pm2 start codeam --name codeam-pair -- pair-auto --token-file=…`
+  //      with merged stdout/stderr piped to a session log.
+  //   3. Deletes the token file immediately after pm2 start (single-use).
+  //   4. Tails the log locally so the "Paired with" marker renders.
+  //   5. Phase 1: wait for "Paired with"; phase 2: wait for "for shortcuts"
+  //      so any first-time agent prompts get answered on the phone before
+  //      we close locally.
+  //   6. Local Ctrl+C kills only the local tail — PM2 keeps the relay
+  //      running.
+  const tokenFileArg = autoToken !== null ? '--token-file=/tmp/codeam-auto-token' : '';
   const wrapper = [
     'mkdir -p ~/.codeam-deploy',
     'LOG=~/.codeam-deploy/session.log',
     ': > "$LOG"',
     // The default `gh codespace ssh` cwd is the repo root
-    // (/workspaces/<repo>), which is exactly where Claude needs to
+    // (/workspaces/<repo>), which is exactly where the agent needs to
     // run so it can read/edit project files. Pass that to PM2 via
-    // --cwd so the relay's child Claude inherits the right
-    // working directory.
+    // --cwd so the relay's child agent inherits the right directory.
     'PROJECT_DIR="$(pwd)"',
     // Install PM2 if it isn't already on PATH. Idempotent.
     'if ! command -v pm2 >/dev/null 2>&1; then',
@@ -472,14 +394,17 @@ export async function deploy(): Promise<void> {
     'fi',
     // Stop any prior codeam-pair instance — fresh start each deploy.
     'pm2 delete codeam-pair >/dev/null 2>&1',
-    // Start codeam pair under PM2. `--merge-logs` writes stdout
+    // Start codeam pair-auto under PM2. `--merge-logs` writes stdout
     // and stderr to the same file so we only need one tail.
-    // --max-restarts 3 keeps PM2 from looping forever if codeam pair
-    // can't start (e.g. backend unreachable) — three attempts is
-    // enough for transient flakes, anything more wastes time.
-    // No `--time` (would prefix every line with a timestamp and
-    // break the QR rendering); no `--no-pmx` either (default off).
-    'pm2 start codeam --name codeam-pair --cwd "$PROJECT_DIR" --max-restarts 3 -o "$LOG" -e "$LOG" --merge-logs -- pair >/dev/null 2>&1',
+    // --max-restarts 3 keeps PM2 from looping forever if codeam pair-auto
+    // can't start (e.g. backend unreachable or token invalid) — three
+    // attempts is enough for transient flakes.
+    // No `--time` (would prefix every line with a timestamp); no
+    // `--no-pmx` either (default off).
+    `pm2 start codeam --name codeam-pair --cwd "$PROJECT_DIR" --max-restarts 3 -o "$LOG" -e "$LOG" --merge-logs -- pair-auto ${tokenFileArg} >/dev/null 2>&1`,
+    // Token is single-use — delete from disk immediately after pm2 start
+    // so it doesn't linger if the process crashes before pair-auto reads it.
+    'rm -f /tmp/codeam-auto-token',
     // Give PM2 a moment to spawn the process before we start polling
     // status — otherwise the very first jlist can race the spawn.
     'sleep 2',
