@@ -6,6 +6,7 @@ import * as http from 'http';
 import { z } from 'zod';
 import { getContextWindow, getPricing } from '@codeagent/shared';
 import { log } from './logger';
+import { encodeCwd, resolveHistoryDir } from '../agents/claude/history';
 
 /**
  * Schema for one record in a Claude Code session JSONL file. Only fields
@@ -48,63 +49,9 @@ interface ClaudeHistoryMessage {
   timestamp: number;
 }
 
-/**
- * Encode a cwd path to the matching Claude project directory name.
- *
- * Claude Code stores per-project session JSONLs under
- * `~/.claude/projects/<encoded-cwd>/`. Encoding rule: every path
- * separator (and the Windows drive-letter colon) becomes a single
- * dash.
- *
- *   macOS / Linux: `/Users/me/foo`   → `-Users-me-foo`
- *   Windows:       `C:\Users\me\foo` → `C--Users-me-foo`
- *                  (`:\` collapses to `--` because both characters
- *                   are replaced; matches Claude Code's own scheme)
- *
- * The previous implementation only replaced `/`, which on Windows
- * left backslashes intact and produced an invalid lookup path inside
- * `~/.claude/projects/` — every history-driven feature
- * (terminal-typed-prompt detection, conversation loading,
- * `waitForNewUserMessage`) silently no-op'd, so prompts typed
- * directly in the terminal never reached the mobile app.
- */
-export function encodeCwd(cwd: string): string {
-  return cwd.replace(/[\\/:]/g, '-');
-}
-
-/**
- * Find the Claude project directory for `cwd`. Tries the canonical
- * encoding first; if that directory doesn't exist on disk, scans
- * `~/.claude/projects/` for a directory whose name *would* encode to
- * the same canonical form when slashes/colons are normalized — this
- * salvages cases where a future Claude version tweaks the encoding
- * without us shipping a CLI update. Returns `null` if no candidate
- * matches; callers fall through to readdir errors as before.
- */
-function findProjectDir(cwd: string): string | null {
-  const projectsRoot = path.join(os.homedir(), '.claude', 'projects');
-  const primary = path.join(projectsRoot, encodeCwd(cwd));
-  if (fs.existsSync(primary)) return primary;
-  // Fallback — scan and match by canonicalized name. Cheap (one
-  // readdir + a string compare each), and only runs when the primary
-  // lookup misses, so the macOS/Linux happy path stays free.
-  try {
-    const entries = fs.readdirSync(projectsRoot, { withFileTypes: true });
-    const wanted = encodeCwd(cwd);
-    for (const e of entries) {
-      if (!e.isDirectory()) continue;
-      // Compare on the canonical form: normalize each candidate the
-      // same way we normalize the cwd, so cosmetic encoding drift
-      // (single vs double dashes around drive letters, etc.) doesn't
-      // hide a real match.
-      const candidate = e.name.replace(/-+/g, '-');
-      if (candidate === wanted.replace(/-+/g, '-')) {
-        return path.join(projectsRoot, e.name);
-      }
-    }
-  } catch { /* projectsRoot doesn't exist yet — fall through */ }
-  return null;
-}
+// Re-export encodeCwd so callers that import it from this module
+// (e.g. __tests__/history-encoding.test.ts) continue to work unchanged.
+export { encodeCwd };
 
 /** Extract plain text from a Claude message content field (string or ContentBlock[]). */
 function extractText(content: unknown): string {
@@ -296,7 +243,7 @@ export class HistoryService {
     // Try the canonical encoding first, then fall back to a directory
     // scan for cosmetic encoding drift. Either path returns the same
     // shape (`<projectsRoot>/<encoded>`) so callers stay simple.
-    return findProjectDir(this.cwd)
+    return resolveHistoryDir(this.cwd)
       ?? path.join(os.homedir(), '.claude', 'projects', encodeCwd(this.cwd));
   }
 
