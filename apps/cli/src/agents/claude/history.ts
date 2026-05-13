@@ -1,7 +1,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
-import type { NormalizedMessage } from '@codeagent/shared';
+import { getContextWindow, type NormalizedMessage } from '@codeagent/shared';
 
 /**
  * Encode a cwd path to the matching Claude project directory name.
@@ -62,6 +62,100 @@ export function resolveHistoryDir(cwd: string, projectsRoot?: string): string | 
     }
   } catch { /* projectsRoot doesn't exist yet — fall through */ }
   return null;
+}
+
+/**
+ * Read the most recently created JSONL in `historyDir` and extract the
+ * context-window usage from the last assistant message.
+ *
+ * `bootTimeMs` is an optional birthtime filter (same semantics as
+ * HistoryService.getCurrentUsage). When omitted or 0, all files are
+ * eligible. When provided, only files created at or after
+ * `bootTimeMs - 5000 ms` are considered — this prevents a parallel
+ * Claude session's JSONL from leaking its stats into an unrelated
+ * RuntimeStrategy caller.
+ *
+ * Returns the simplified shape required by RuntimeStrategy:
+ *   { used, total, percent, model? }
+ *
+ * Returns null when the directory doesn't exist, contains no eligible
+ * files, or the most-recent file has no assistant usage records.
+ */
+export function getCurrentUsage(
+  historyDir: string,
+  bootTimeMs: number = 0,
+): { used: number; total: number; percent: number; model?: string } | null {
+  const GRACE_MS = 5_000;
+  const cutoff = bootTimeMs > 0 ? bootTimeMs - GRACE_MS : 0;
+
+  let entries: fs.Dirent[];
+  try {
+    entries = fs.readdirSync(historyDir, { withFileTypes: true });
+  } catch {
+    return null;
+  }
+
+  const files = entries
+    .filter((e) => e.isFile() && e.name.endsWith('.jsonl'))
+    .map((e) => {
+      try {
+        const stat = fs.statSync(path.join(historyDir, e.name));
+        return { name: e.name, mtime: stat.mtimeMs, birthtime: stat.birthtimeMs };
+      } catch {
+        return { name: e.name, mtime: 0, birthtime: 0 };
+      }
+    })
+    .filter((f) => f.birthtime >= cutoff)
+    .sort((a, b) => b.mtime - a.mtime);
+
+  if (files.length === 0) return null;
+
+  const filePath = path.join(historyDir, files[0].name);
+  let raw: string;
+  try {
+    raw = fs.readFileSync(filePath, 'utf8');
+  } catch {
+    return null;
+  }
+
+  let lastUsage: Record<string, number> | null = null;
+  let lastModel: string | null = null;
+
+  for (const line of raw.split('\n').filter(Boolean)) {
+    try {
+      const record = JSON.parse(line) as Record<string, unknown>;
+      if (record['type'] !== 'assistant') continue;
+      const msg = record['message'] as Record<string, unknown> | undefined;
+      if (msg?.['model'] === '<synthetic>') continue;
+      const usage = msg?.['usage'] as Record<string, number> | undefined;
+      if (usage && (usage['input_tokens'] !== undefined || usage['prompt_tokens'] !== undefined)) {
+        lastUsage = usage;
+      }
+      if (msg?.['model']) lastModel = msg['model'] as string;
+    } catch {
+      /* skip malformed */
+    }
+  }
+
+  const total = getContextWindow(lastModel);
+
+  if (!lastUsage) {
+    if (!lastModel) return null;
+    return { used: 0, total, percent: 0, model: lastModel };
+  }
+
+  const inputTokens =
+    (lastUsage['input_tokens'] ?? lastUsage['prompt_tokens'] ?? 0) +
+    (lastUsage['cache_read_input_tokens'] ?? 0) +
+    (lastUsage['cache_creation_input_tokens'] ?? 0);
+  const percent = Math.min(100, Math.round((inputTokens / total) * 100));
+
+  return {
+    used: inputTokens,
+    total,
+    percent,
+    model: lastModel ?? undefined,
+  };
 }
 
 /** Extract plain text from a Claude message content field (string or ContentBlock[]). */
