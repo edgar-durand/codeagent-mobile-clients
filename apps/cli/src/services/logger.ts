@@ -35,12 +35,15 @@ function currentLevel(): number {
   return LEVELS[raw] ?? LEVELS.error;
 }
 
-const fileEnabled = process.env.CODEAM_DEBUG === '1' || process.env.CODEAM_LOG === 'debug' || process.env.CODEAM_LOG === 'trace';
+// File logging is always on at info level so a failing pair / output
+// session leaves enough breadcrumbs in `~/.codeam/debug.log` to
+// diagnose without re-running with CODEAM_DEBUG=1 first. Trace +
+// debug levels still require the env opt-in because they're noisy.
+const verboseFileEnabled = process.env.CODEAM_DEBUG === '1' || process.env.CODEAM_LOG === 'debug' || process.env.CODEAM_LOG === 'trace';
 const debugFilePath = path.join(os.homedir(), '.codeam', 'debug.log');
 let fileInitialized = false;
 
 function appendToFile(line: string): void {
-  if (!fileEnabled) return;
   try {
     if (!fileInitialized) {
       fs.mkdirSync(path.dirname(debugFilePath), { recursive: true });
@@ -61,8 +64,10 @@ function emit(level: Level, tag: string, msg: string, err?: unknown): void {
   const detail = err instanceof Error ? `: ${err.message}` : err !== undefined ? `: ${String(err)}` : '';
   const line = `[codeam:${level}] ${tag} — ${msg}${detail}\n`;
   process.stderr.write(line);
-  // File mirror for debug+ levels gets a timestamp prefix.
-  if (LEVELS[level] >= LEVELS.debug) {
+  // File mirror policy:
+  //   - error / warn / info → always mirrored (always-on diagnostics)
+  //   - debug / trace      → only when CODEAM_DEBUG=1 or CODEAM_LOG=debug|trace
+  if (LEVELS[level] <= LEVELS.info || verboseFileEnabled) {
     appendToFile(`${new Date().toISOString()} ${line}`);
   }
 }

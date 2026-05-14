@@ -63,33 +63,41 @@ export class ChunkEmitter {
     });
     const maxRetries = opts.critical ? 3 : 0;
 
-    log.trace(
+    // info-level so it lands in the always-on file log — chunk
+    // outcomes are the most useful breadcrumb for diagnosing
+    // "mobile didn't see my agent reply" reports.
+    const t0 = Date.now();
+    log.info(
       'chunkEmitter',
-      `send type=${(body.type as string) ?? '(clear)'} bytes=${payload.length}`,
+      `send type=${(body.type as string) ?? '(clear)'} bytes=${payload.length} done=${body.done === true}`,
     );
 
     return new Promise((resolve) => {
       const attempt = (attemptsLeft: number) => {
         _transport.post(this.url, this.headers, payload)
           .then(({ statusCode, body: resBody }) => {
+            const tookMs = Date.now() - t0;
             if (
               statusCode === 410 ||
               (statusCode === 404 && /SESSION_NOT_FOUND|SESSION_GONE/.test(resBody))
             ) {
               process.stderr.write('[codeam] session was deleted/disconnected — stopping output stream.\n');
+              log.info('chunkEmitter', `dead status=${statusCode} took=${tookMs}ms`);
               resolve({ dead: true });
               return;
             }
             if (statusCode >= 400) {
+              log.warn('chunkEmitter', `api-error status=${statusCode} took=${tookMs}ms body=${resBody.slice(0, 200)}`);
               process.stderr.write(`[codeam] output API error ${statusCode}: ${resBody}\n`);
+            } else {
+              log.info('chunkEmitter', `ok status=${statusCode} took=${tookMs}ms`);
             }
-            log.trace('chunkEmitter', `status=${statusCode}`);
             resolve({ dead: false });
           })
           .catch((err: unknown) => {
-            log.trace(
+            log.warn(
               'chunkEmitter',
-              `error retries-left=${attemptsLeft}`,
+              `error retries-left=${attemptsLeft} took=${Date.now() - t0}ms`,
               err,
             );
             if (attemptsLeft > 0) {
