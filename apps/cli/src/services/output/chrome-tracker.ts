@@ -1,8 +1,4 @@
-import {
-  isChromeLine,
-  parseChromeLine,
-  type ChromeStep,
-} from '@codeagent/shared';
+import type { ChromeStep } from '@codeagent/shared';
 
 /**
  * Per-turn cumulative + delta tracker for chrome_steps.
@@ -17,6 +13,10 @@ import {
  * wire, so the CLI's transport sends only the delta — clients
  * accumulate, the wire is bounded by the count of unique steps
  * (not ticks × steps).
+ *
+ * `ingest` now accepts a per-agent `parseLine` callback so the
+ * tracker stays agent-agnostic. Pass `runtime.parseTuiChrome`
+ * (or a no-op returning null for agents without chrome steps).
  */
 export class ChromeStepTracker {
   private history: ChromeStep[] = [];
@@ -27,11 +27,18 @@ export class ChromeStepTracker {
     this.sentCount = 0;
   }
 
-  /** Parse the rendered lines, append unseen steps to the cumulative history. */
-  ingest(lines: string[]): void {
+  /**
+   * Parse the rendered lines using the supplied per-agent parser,
+   * appending unseen steps to the cumulative history.
+   *
+   * @param lines    Screen lines from `renderToLines`.
+   * @param parseLine Per-agent chrome parser — `runtime.parseTuiChrome`
+   *                  bound to the active strategy, or a no-op `() => null`
+   *                  when the agent doesn't surface tool-call chrome.
+   */
+  ingest(lines: string[], parseLine: (line: string) => ChromeStep | null): void {
     const visible = lines
-      .filter((l) => isChromeLine(l))
-      .map((l) => parseChromeLine(l))
+      .map((l) => parseLine(l))
       .filter((s): s is ChromeStep => s !== null);
     if (visible.length === 0) return;
 

@@ -2,11 +2,8 @@ import { log } from './logger';
 import { ChromeStepTracker } from './output/chrome-tracker';
 import { ChunkEmitter, type SendOutcome } from './output/chunk-emitter';
 import { PtyBuffer } from './output/pty-buffer';
-import {
-  detectAnySelector,
-  extractContent,
-  renderLines,
-} from './output/turn-renderer';
+import { renderLines } from './output/turn-renderer';
+import type { RuntimeStrategy } from '../agents/strategy';
 
 /**
  * Orchestrator for the CLI's streaming output pipeline.
@@ -31,6 +28,7 @@ export class OutputService {
   private readonly pty = new PtyBuffer();
   private readonly steps = new ChromeStepTracker();
   private readonly emitter: ChunkEmitter;
+  private readonly runtime: RuntimeStrategy;
 
   private lastSentContent = '';
   private pollTimer: NodeJS.Timeout | null = null;
@@ -67,6 +65,7 @@ export class OutputService {
     onTurnComplete?: () => void,
     onTerminalTurnDetected?: () => void,
     pluginAuthToken?: string,
+    runtime?: RuntimeStrategy,
   ) {
     this.onSessionIdDetected = onSessionIdDetected;
     this.onRateLimitDetected = onRateLimitDetected;
@@ -77,6 +76,23 @@ export class OutputService {
       pluginId,
       pluginAuthToken,
     });
+    // Fall back to a no-op stub so existing callers that don't pass a
+    // runtime (tests, legacy entry-points) keep working unchanged.
+    this.runtime = runtime ?? {
+      id: 'claude' as const,
+      meta: { } as RuntimeStrategy['meta'],
+      prepareLaunch: async () => ({ cmd: '', args: [] }),
+      resumeLaunchArgs: () => [],
+      resolveHistoryDir: () => null,
+      parseHistoryFile: () => [],
+      getCurrentUsage: () => null,
+      fetchWeeklyUsage: async () => null,
+      listModels: async () => [],
+      changeModelInstruction: () => ({ type: 'pty' as const }),
+      summarizeInstruction: () => ({ ptyInput: '' }),
+      filterTuiOutput: (lines) => lines,
+      detectInteractivePrompt: () => null,
+    };
   }
 
   // ─── Turn lifecycle ──────────────────────────────────────────────
@@ -196,13 +212,17 @@ export class OutputService {
     const lines = renderLines(this.pty.content);
 
     // Emit chrome-step deltas if any new ones surfaced this tick.
-    this.steps.ingest(lines);
+    // Route through the per-agent parseTuiChrome so Codex's `•` reply
+    // prefix (same glyph as Claude tool-call bullets) is never
+    // misclassified as a chrome step.
+    const parseLine = this.runtime.parseTuiChrome?.bind(this.runtime) ?? (() => null);
+    this.steps.ingest(lines, parseLine);
     const stepsDelta = this.steps.consumeDelta();
     if (stepsDelta.length > 0) {
       this.send({ type: 'chrome_steps', appendSteps: stepsDelta }).catch(() => {});
     }
 
-    const selector = detectAnySelector(lines);
+    const selector = this.runtime.detectInteractivePrompt(lines);
     if (selector) {
       const idleMs = this.pty.lastPushTime > 0 ? now - this.pty.lastPushTime : elapsed;
       log.trace(
@@ -227,7 +247,7 @@ export class OutputService {
       return;
     }
 
-    const content = extractContent(lines);
+    const content = this.runtime.filterTuiOutput(lines).join('\n').replace(/\n{3,}/g, '\n\n').trim();
 
     if (!content) {
       log.trace(
@@ -253,12 +273,13 @@ export class OutputService {
 
   private finalize(): void {
     const lines = renderLines(this.pty.content);
-    this.steps.ingest(lines);
+    const parseLine = this.runtime.parseTuiChrome?.bind(this.runtime) ?? (() => null);
+    this.steps.ingest(lines, parseLine);
     const stepsDelta = this.steps.consumeDelta();
     if (stepsDelta.length > 0) {
       this.send({ type: 'chrome_steps', appendSteps: stepsDelta }).catch(() => {});
     }
-    const selector = detectAnySelector(lines);
+    const selector = this.runtime.detectInteractivePrompt(lines);
     this.stopPoll();
     this.pty.deactivate();
 
@@ -275,7 +296,7 @@ export class OutputService {
         { critical: true },
       ).catch(() => {});
     } else {
-      const content = extractContent(lines);
+      const content = this.runtime.filterTuiOutput(lines).join('\n').replace(/\n{3,}/g, '\n\n').trim();
       this.send(
         { type: 'text', content, done: true },
         { critical: true },

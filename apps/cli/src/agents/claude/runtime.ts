@@ -1,7 +1,18 @@
-import { getAgent, type AgentId, type AgentMetadata, type AgentModel } from '@codeagent/shared';
+import {
+  filterChrome,
+  getAgent,
+  isChromeLine,
+  parseChromeLine,
+  type AgentId,
+  type AgentMetadata,
+  type AgentModel,
+  type ChromeStep,
+  type SelectPrompt,
+} from '@codeagent/shared';
 import { buildClaudeLaunch } from '../../services/claude-resolver';
 import { fetchClaudeQuota } from './quota';
 import * as history from './history';
+import { detectAnySelector } from '../../services/output/turn-renderer';
 import type { ChangeModelInstruction, RuntimeStrategy } from '../strategy';
 
 export class ClaudeRuntimeStrategy implements RuntimeStrategy {
@@ -54,5 +65,20 @@ export class ClaudeRuntimeStrategy implements RuntimeStrategy {
     // Open question §10.3 — Claude's "AUTO" summarize syntax not yet confirmed.
     // Defaulting to /compact until Spec §10.3 is resolved.
     return { ptyInput: '/compact\r' };
+  }
+
+  // ─── TUI parser strategy methods ─────────────────────────────────
+
+  parseTuiChrome(line: string): ChromeStep | null {
+    if (!isChromeLine(line)) return null;
+    return parseChromeLine(line);
+  }
+
+  filterTuiOutput(lines: string[]): string[] {
+    return filterChrome(lines);
+  }
+
+  detectInteractivePrompt(lines: string[]): SelectPrompt | null {
+    return detectAnySelector(lines);
   }
 }

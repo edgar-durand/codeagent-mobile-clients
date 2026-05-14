@@ -1,7 +1,8 @@
 import { spawn } from 'node:child_process';
-import { getAgent, type AgentId, type AgentMetadata, type AgentModel } from '@codeagent/shared';
+import { getAgent, type AgentId, type AgentMetadata, type AgentModel, type ChromeStep, type SelectPrompt } from '@codeagent/shared';
 import { findInPath } from '../../services/pty/types';
 import * as history from './history';
+import { filterCodexChrome, parseCodexChrome, detectCodexSelector } from './parsing';
 import type { ChangeModelInstruction, RuntimeStrategy } from '../strategy';
 
 const CODEX_CONTEXT_WINDOW = 272_000;
@@ -76,6 +77,20 @@ export class CodexRuntimeStrategy implements RuntimeStrategy {
    */
   summarizeInstruction(_mode: 'normal' | 'auto'): { ptyInput: string } {
     return { ptyInput: '/compact\r' };
+  }
+
+  // ─── TUI parser strategy methods ─────────────────────────────────
+
+  parseTuiChrome(line: string): ChromeStep | null {
+    return parseCodexChrome(line);
+  }
+
+  filterTuiOutput(lines: string[]): string[] {
+    return filterCodexChrome(lines);
+  }
+
+  detectInteractivePrompt(lines: string[]): SelectPrompt | null {
+    return detectCodexSelector(lines);
   }
 }
 

@@ -75,6 +75,7 @@ export async function start(): Promise<void> {
         .catch(() => outputSvc.startTerminalTurn(undefined));
     },
     session.pluginAuthToken,
+    runtime,
   );
 
   const claude = new AgentService(
