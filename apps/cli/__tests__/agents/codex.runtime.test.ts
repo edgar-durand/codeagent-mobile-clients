@@ -14,7 +14,9 @@ describe('CodexRuntimeStrategy', () => {
   });
 
   it('does NOT define postSpawnInstruction (resume is a CLI subcommand)', () => {
-    expect(runtime.postSpawnInstruction).toBeUndefined();
+    // Widen to the interface so TS allows accessing the optional method.
+    const r: import('../../src/agents/strategy').RuntimeStrategy = runtime;
+    expect(r.postSpawnInstruction).toBeUndefined();
   });
 
   it('changeModelInstruction emits /model <id> PTY input', () => {
