@@ -48,7 +48,9 @@ describe('CodexRuntimeStrategy', () => {
     await expect(runtime.fetchWeeklyUsage()).resolves.toBeNull();
   });
 
-  it('getCurrentUsage returns null (Codex history.jsonl has no token data)', () => {
-    expect(runtime.getCurrentUsage('/any/dir')).toBeNull();
+  it('getCurrentUsage returns null when the dir has no rollouts', () => {
+    // With a non-existent dir, the helper bails to null. Rich tests in
+    // codex.history.test.ts cover the happy path.
+    expect(runtime.getCurrentUsage('/non/existent/dir')).toBeNull();
   });
 });
