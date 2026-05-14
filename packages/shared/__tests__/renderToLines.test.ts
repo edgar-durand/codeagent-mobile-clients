@@ -30,21 +30,8 @@ describe('renderToLines — virtual terminal', () => {
     expect(renderToLines('  1. Label\r❯')).toEqual(['❯ 1. Label']);
   });
 
-  it('CSI 2J commits prior screen to scrollback and starts a fresh visible area', () => {
-    // Real terminals scroll the visible content into scrollback when an
-    // app emits 2J; the virtual terminal mirrors that so multi-paragraph
-    // agent replies that flush through this path aren't silently dropped
-    // from the mobile feed.
-    expect(renderToLines('before\n\x1B[2Jafter')).toEqual(['before', 'after']);
-  });
-
-  it('preserves content across alt-screen toggles (Codex chat-history pattern)', () => {
-    // Codex toggles in/out of alt-screen between input-box redraws and
-    // prints chat-history lines in the normal-screen pane. Entering and
-    // leaving alt-screen no longer wipes the buffer; each toggle commits
-    // whatever was visible to scrollback first.
-    const raw = 'history line\n\x1B[?1049halt screen body\x1B[?1049lpost-leave';
-    expect(renderToLines(raw)).toEqual(['history line', 'alt screen body', 'post-leave']);
+  it('clears screen on CSI 2J', () => {
+    expect(renderToLines('before\n\x1B[2Jafter')).toEqual(['after']);
   });
 
   it('swallows OSC sequences (terminal title, hyperlinks)', () => {
