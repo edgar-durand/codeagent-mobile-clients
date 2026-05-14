@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { filterCodexChrome, parseCodexChrome, detectCodexSelector } from '../../src/agents/codex/parsing';
+import { filterCodexChrome, parseCodexChrome, detectCodexSelector, wrapCodexCodeBlocks } from '../../src/agents/codex/parsing';
 
 describe('codex/parsing filterCodexChrome', () => {
   it('keeps an agent reply that starts with • after a user prompt', () => {
@@ -117,5 +117,115 @@ describe('codex/parsing detectCodexSelector', () => {
     const lines = ['❯ 1. Option A', '  2. Option B'];
     expect(detectCodexSelector(lines)).toBeNull();
     expect(detectCodexSelector([])).toBeNull();
+  });
+});
+
+describe('wrapCodexCodeBlocks', () => {
+  it('wraps Java code in ```java fences', () => {
+    const input = [
+      'public class Foo {',
+      '    public static void main(String[] args) {',
+      '        System.out.println("hi");',
+      '    }',
+      '}',
+    ];
+    const out = wrapCodexCodeBlocks(input);
+    expect(out[0]).toBe('```java');
+    expect(out[out.length - 1]).toBe('```');
+    expect(out.slice(1, -1)).toEqual(input);
+  });
+
+  it('infers typescript from type/interface keywords', () => {
+    const input = [
+      'type User = {',
+      '    id: number;',
+      '    name: string;',
+      '};',
+    ];
+    const out = wrapCodexCodeBlocks(input);
+    expect(out[0]).toBe('```typescript');
+  });
+
+  it('infers python from def + print', () => {
+    const input = [
+      'def greet(name):',
+      '    print(f"hello {name}")',
+      '    return name',
+      '',
+      'greet("Edgar")',
+    ];
+    const out = wrapCodexCodeBlocks(input);
+    expect(out[0]).toBe('```python');
+  });
+
+  it('emits ``` (no lang) when language is not detectable', () => {
+    const input = [
+      'x = 5;',
+      'y = 10;',
+      'z = x + y;',
+    ];
+    const out = wrapCodexCodeBlocks(input);
+    expect(out[0]).toBe('```');
+  });
+
+  it('leaves bullet-list text alone (no false positive on `•`-style content)', () => {
+    const input = [
+      'Plataforma para automatizar tareas administrativas',
+      'Servicio de suscripción de comidas saludables',
+      'Marketplace local de profesionales verificados',
+      'App de educación financiera',
+      'Agencia boutique de contenido',
+    ];
+    expect(wrapCodexCodeBlocks(input)).toEqual(input);
+  });
+
+  it('leaves prose alone (no false positive on a single stray `{` or `}`)', () => {
+    const input = [
+      'Mira esto: { es un curly brace }',
+      'Pero el texto es solo prosa.',
+    ];
+    expect(wrapCodexCodeBlocks(input)).toEqual(input);
+  });
+
+  it('does NOT wrap when fewer than 3 code-shaped lines (avoid false positives)', () => {
+    const input = [
+      'Mira:',
+      'const x = 5;',
+      'fin del ejemplo',
+    ];
+    // Only 1 code-shaped line → leave as-is.
+    expect(wrapCodexCodeBlocks(input)).toEqual(input);
+  });
+
+  it('preserves text before and after a code block', () => {
+    const input = [
+      'Aquí tienes el código:',
+      'public class A {',
+      '    static int x = 1;',
+      '    static int y = 2;',
+      '}',
+      'Eso es todo.',
+    ];
+    const out = wrapCodexCodeBlocks(input);
+    expect(out[0]).toBe('Aquí tienes el código:');
+    expect(out[1]).toBe('```java');
+    expect(out[out.length - 2]).toBe('```');
+    expect(out[out.length - 1]).toBe('Eso es todo.');
+  });
+
+  it('handles two separate code blocks in the same reply', () => {
+    const input = [
+      'public class A { static int x = 1; static int y = 2; }',
+      'Y otro snippet:',
+      'type B = {',
+      '    a: number;',
+      '    b: string;',
+      '};',
+    ];
+    const out = wrapCodexCodeBlocks(input);
+    // Java single-line: 1 code-shaped, doesn't reach 3 → stays plain.
+    // TS block: 3 code-shaped → wrapped.
+    const fences = out.filter(l => l.startsWith('```'));
+    expect(fences).toEqual(['```typescript', '```']);
   });
 });

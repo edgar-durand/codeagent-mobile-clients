@@ -134,6 +134,17 @@ export function filterCodexChrome(lines: string[]): string[] {
     out.push(t);
   }
 
+  // Post-pass: wrap Codex-emitted code blocks in Markdown ``` fences.
+  // Codex's TUI does syntax-highlighted code with no explicit fence
+  // markers — just an indented run of code-shaped lines. The mobile /
+  // web feed renders fenced code blocks with a copy button + monospace
+  // styling via the backend's codeBlockParser; without fences, the
+  // body comes through as a plain TextBlock and the user gets a
+  // wall of unformatted text. Injecting fences here is Codex-only:
+  // Claude (which emits proper ```lang fences itself) goes through
+  // its own filter and is unaffected.
+  const wrapped = wrapCodexCodeBlocks(out);
+
   // Info-level dump every time the filter runs so the always-on file
   // log captures EXACTLY what the parser saw on each tick. Critical
   // for the multi-line-reply bug class (e.g. bullet lists where the
@@ -155,7 +166,126 @@ export function filterCodexChrome(lines: string[]): string[] {
     log.trace('codex-parse', `filterCodexChrome in=${lines.length} out=${out.length}`);
   }
 
-  return out;
+  return wrapped;
+}
+
+// ─── Code-block detection ─────────────────────────────────────────
+
+/**
+ * Lines with at least one of these chars are "code-shaped". They're
+ * the signal we use to detect runs of Codex-emitted code in a stream
+ * of agent text. Tuned empirically against the captured Codex fixture
+ * (Java, TypeScript, table headers, bullet lists) — `;`, `{`, `}`,
+ * arrow `=>`, plus `=` are common in code and rare in prose. Bullet
+ * lists ("• Plataforma...") and table headers ("| Col |") don't get
+ * matched because they don't carry these characters in their bodies.
+ */
+const CODE_CHAR_RE = /[;{}]|=>|^\s*(?:import|public|private|static|class|function|interface|type|const|let|var|def|return|if|else|for|while)\b/;
+
+/**
+ * Heuristic language inference from the first ~10 lines of a code
+ * block. Returns the best-guess Markdown language tag or '' (no tag,
+ * still renders as code).
+ */
+function inferLanguage(block: string[]): string {
+  const head = block.slice(0, 10).join('\n');
+  if (/\bpublic\s+(?:static\s+)?(?:class|void|int|String)\b|System\.out\.println|\bjava\.util/.test(head)) return 'java';
+  if (/\b(?:interface|type)\s+\w+\s*=?\s*[{<]|\bas\s+(?:string|number|boolean)\b|\b(?:string|number|boolean)\s*[;,)\]]/.test(head)) return 'typescript';
+  if (/\bimport\s+\w+\s+from\s+['"]|=>\s*[{(]|\bconst\s+\w+\s*=\s*(?:async\s+)?\(/.test(head)) return 'javascript';
+  if (/^\s*def\s+\w+\(|^\s*from\s+\w+\s+import|print\(/m.test(head)) return 'python';
+  if (/^\s*package\s+\w+|^\s*func\s+\w+\(|\binterface\s*{/m.test(head)) return 'go';
+  if (/^\s*fn\s+\w+\(|^\s*use\s+\w+::|^\s*impl\s+/m.test(head)) return 'rust';
+  if (/#include\s*<|int\s+main\s*\(/.test(head)) return 'cpp';
+  return '';
+}
+
+/**
+ * Detect runs of "code-shaped" lines in the filtered output and wrap
+ * them in Markdown ``` fences so the backend's codeBlockParser
+ * surfaces them to the mobile feed as proper code blocks (monospace
+ * + copy button + syntax highlighting on the renderer side).
+ *
+ * Definition of a code block:
+ *   - ≥3 lines where each line either matches CODE_CHAR_RE OR is a
+ *     blank line surrounded by code-shaped lines OR is indented
+ *     continuation of a code-shaped line.
+ *   - Any single isolated code-shaped line is left as plain text
+ *     (avoids false positives on prose that happens to contain
+ *     `function` or a stray `{`).
+ *
+ * Pure function — does not mutate the input array.
+ */
+export function wrapCodexCodeBlocks(lines: string[]): string[] {
+  const result: string[] = [];
+  let i = 0;
+  while (i < lines.length) {
+    const line = lines[i];
+    if (!CODE_CHAR_RE.test(line)) {
+      result.push(line);
+      i++;
+      continue;
+    }
+    // Greedily extend the run. Allow blank lines INSIDE the run (as
+    // long as they're sandwiched between code-shaped lines) and
+    // indented continuation lines (no code chars but indented under
+    // the previous code-shaped line — function bodies, etc.).
+    const start = i;
+    let end = i;
+    let j = i + 1;
+    while (j < lines.length) {
+      const l = lines[j];
+      if (CODE_CHAR_RE.test(l)) {
+        end = j;
+        j++;
+        continue;
+      }
+      // Blank line: peek further. If the next non-blank line is
+      // also code-shaped, this blank is part of the block.
+      if (l.trim() === '') {
+        let k = j + 1;
+        while (k < lines.length && lines[k].trim() === '') k++;
+        if (k < lines.length && CODE_CHAR_RE.test(lines[k])) {
+          end = k;
+          j = k + 1;
+          continue;
+        }
+        break;
+      }
+      // Indented continuation (e.g., a long argument list): keep
+      // extending if the line has ≥2 space indent.
+      if (/^\s{2,}\S/.test(l)) {
+        end = j;
+        j++;
+        continue;
+      }
+      break;
+    }
+    const runLen = end - start + 1;
+    // Require at least 3 code-shaped lines to commit. Isolated
+    // matches (one-liner with `{` in prose) stay as text.
+    const codeShapedCount = lines.slice(start, end + 1).filter(l => CODE_CHAR_RE.test(l)).length;
+    if (codeShapedCount >= 3) {
+      const body = lines.slice(start, end + 1);
+      const lang = inferLanguage(body);
+      result.push('```' + lang);
+      for (const l of body) result.push(l);
+      // Strip any trailing blank lines before the closing fence — the
+      // codeBlockParser already drops a single trailing newline but
+      // a clean fence is nicer.
+      while (result.length > 0 && result[result.length - 1].trim() === '') {
+        result.pop();
+      }
+      result.push('```');
+      i = end + 1;
+    } else {
+      // Not enough code lines — leave as plain text.
+      for (let k = start; k <= end && k < lines.length; k++) result.push(lines[k]);
+      i = end + 1;
+      if (i === start) i++; // safety: ensure forward progress
+    }
+    void runLen; // retained for readability of the algorithm
+  }
+  return result;
 }
 
 /**
