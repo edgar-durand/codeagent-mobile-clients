@@ -134,14 +134,25 @@ export function filterCodexChrome(lines: string[]): string[] {
     out.push(t);
   }
 
-  log.trace('codex-parse', `filterCodexChrome in=${lines.length} out=${out.length}`);
-  // Verbose breadcrumb that includes a sample of input + output so
-  // future-Edgar can diagnose without re-running with a custom build.
-  // Only fires when CODEAM_DEBUG=1 — production runs are silent.
-  if (process.env.CODEAM_DEBUG === '1') {
-    const sampleIn = lines.slice(-40).map((l, i) => `  in[${i}] ${JSON.stringify(l)}`).join('\n');
+  // Info-level dump every time the filter runs so the always-on file
+  // log captures EXACTLY what the parser saw on each tick. Critical
+  // for the multi-line-reply bug class (e.g. bullet lists where the
+  // first line lands in the chunk but continuation lines silently
+  // disappear) — without this we'd have to ask the user to re-run
+  // with CODEAM_DEBUG=1 and hope the heisenbug repros.
+  //
+  // Only dumps when there's something interesting:
+  //   - non-empty output  (something was kept), OR
+  //   - in.length >= 3 with the first non-empty in[] line containing
+  //     letters (proves Codex emitted real content this tick).
+  // Plain spinner / empty-screen ticks are skipped to keep noise low.
+  const hasRealInput = lines.some(l => /\w/.test(l));
+  if (out.length > 0 || hasRealInput) {
+    const sampleIn = lines.slice(-50).map((l, i) => `  in[${i}] ${JSON.stringify(l)}`).join('\n');
     const sampleOut = out.map((l, i) => `  out[${i}] ${JSON.stringify(l)}`).join('\n');
-    log.debug('codex-parse', `\n${sampleIn}\n---\n${sampleOut}`);
+    log.info('codex-parse', `in=${lines.length} out=${out.length}\n${sampleIn}\n---\n${sampleOut}`);
+  } else {
+    log.trace('codex-parse', `filterCodexChrome in=${lines.length} out=${out.length}`);
   }
 
   return out;
