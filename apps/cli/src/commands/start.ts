@@ -106,7 +106,7 @@ export async function start(): Promise<void> {
 
   const relay = new CommandRelayService(pluginId, async (cmd) => {
     await dispatchCommand(ctx, cmd);
-  });
+  }, runtime.meta);
   ctx.relay = relay;
 
   function sigintHandler(): void {
