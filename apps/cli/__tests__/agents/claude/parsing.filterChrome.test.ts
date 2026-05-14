@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { filterChrome } from '../src';
+import { filterChrome } from '../../../src/agents/claude/parsing';
 
 describe('filterChrome — context compaction and thinking indicators', () => {
   it('filters standalone compaction notice "↓ N tokens"', () => {
@@ -99,28 +99,6 @@ describe('filterChrome — context compaction and thinking indicators', () => {
       '● Hi there',
     ];
     expect(filterChrome(input)).toEqual(['● Hi there']);
-  });
-
-  // Codex uses `·` (U+00B7 MIDDLE DOT) as the agent-reply prefix where
-  // Claude uses `●` or `⏺`. Without `·` in the reset set, every Codex
-  // reply is dropped as "continuation of user echo" and the mobile feed
-  // shows nothing.
-  it('keeps Codex agent replies (·-prefixed) after a user echo', () => {
-    const input = [
-      '> hola',
-      '',
-      '· Hola. ¿Qué necesitas que haga?',
-    ];
-    expect(filterChrome(input)).toEqual(['· Hola. ¿Qué necesitas que haga?']);
-  });
-
-  it('keeps Codex agent reply when it lands right after the user echo (no blank separator)', () => {
-    // Windows ConPTY layout — blank line may be absent between echo and reply.
-    const input = [
-      '> hola',
-      '· Hola. ¿Qué necesitas que haga?',
-    ];
-    expect(filterChrome(input)).toEqual(['· Hola. ¿Qué necesitas que haga?']);
   });
 
   it('still keeps Claude agent replies (●-prefixed) after a user echo — regression guard', () => {

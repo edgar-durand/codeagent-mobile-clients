@@ -1,6 +1,4 @@
-export * from './protocol/parseChrome';
+export * from './protocol/chrome-types';
 export * from './protocol/renderToLines';
-export * from './protocol/selector';
-export * from './protocol/filterChrome';
 export * from './models/pricing';
 export * from './agents';

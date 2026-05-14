@@ -1,8 +1,5 @@
 import {
-  filterChrome,
   getAgent,
-  isChromeLine,
-  parseChromeLine,
   type AgentId,
   type AgentMetadata,
   type AgentModel,
@@ -12,7 +9,13 @@ import {
 import { buildClaudeLaunch } from '../../services/claude-resolver';
 import { fetchClaudeQuota } from './quota';
 import * as history from './history';
-import { detectAnySelector } from '../../services/output/turn-renderer';
+import {
+  detectListSelector,
+  detectSelector,
+  filterChrome,
+  isChromeLine,
+  parseChromeLine,
+} from './parsing';
 import type { ChangeModelInstruction, RuntimeStrategy } from '../strategy';
 
 export class ClaudeRuntimeStrategy implements RuntimeStrategy {
@@ -79,6 +82,9 @@ export class ClaudeRuntimeStrategy implements RuntimeStrategy {
   }
 
   detectInteractivePrompt(lines: string[]): SelectPrompt | null {
-    return detectAnySelector(lines);
+    // Prefer the numbered `❯ N. label` selector; fall back to the
+    // list-style `  ❯ label` selector used by /mcp / /model. Mirrors
+    // the legacy call order in OutputService.tick().
+    return detectSelector(lines) ?? detectListSelector(lines);
   }
 }

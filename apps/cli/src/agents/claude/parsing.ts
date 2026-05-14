@@ -1,35 +1,124 @@
-// Ported from apps/cli/src/agents/claude/parsing.ts (the Claude
-// RuntimeStrategy module). Keep in sync with that file so the VS
-// Code extension produces the same chrome_steps / selector / filtered-
-// content output the mobile client already knows how to render for
-// codeam-cli sessions. This extension is Claude-only today — when
-// it grows multi-agent support (Phase 3+), this file should be split
-// per agent the way apps/cli/src/agents/<agent>/parsing.ts is.
-type ChromeToolType = 'read' | 'edit' | 'bash' | 'search' | 'thinking' | 'other';
+/**
+ * Claude-specific TUI parsers.
+ *
+ * Moved verbatim from @codeagent/shared's protocol/{filterChrome,parseChrome,
+ * selector}.ts. The logic is exactly what shipped for every prior Claude
+ * release — no behavioral changes. It lives here because each agent's TUI
+ * conventions are different (glyphs, selector shapes, status-line formats),
+ * so the parsers belong next to the agent's RuntimeStrategy rather than in
+ * the cross-agent shared package.
+ *
+ * Codex's parsers live at apps/cli/src/agents/codex/parsing.ts.
+ */
 
-export interface ChromeStep {
-  tool: ChromeToolType;
-  label: string;
-  detail?: string;
-  status: 'running' | 'done';
+import type { ChromeStep, SelectPrompt } from '@codeagent/shared';
+
+// ─── filterChrome ──────────────────────────────────────────────────
+
+/**
+ * Strip TUI chrome — separators, spinners, status bars, prompts, thinking
+ * frames — from rendered screen lines so only actual conversation content
+ * remains.
+ *
+ * Stateful pass so that continuation lines of a user-input echo (lines that
+ * follow a `> text` or `❯ text` line without the leading marker) are also
+ * removed. The continuation flag resets on any empty line or separator line,
+ * which always appears between the user echo and Claude's response in the TUI.
+ */
+export function filterChrome(lines: string[]): string[] {
+  const result: string[] = [];
+  let skipEchoContinuation = false;
+
+  for (const line of lines) {
+    const t = line.trim();
+
+    if (!t) { skipEchoContinuation = false; continue; }
+    if (/^[─━—═─\-]{3,}$/.test(t)) { skipEchoContinuation = false; continue; }
+
+    // Claude's reply always starts with `● ` (U+25CF) or `⏺ ` (U+23FA)
+    // — that prefix is a hard signal that the user-echo block is over,
+    // even on Windows ConPTY where the reply often lands on the very
+    // next line with no blank separator. Without this reset, the echo
+    // continuation flag swallows Claude's first response line and the
+    // mobile/web client sees nothing for the entire turn. Mac doesn't
+    // hit this because its output usually has a blank line between
+    // the echo and the reply, which already resets the flag above.
+    if (/^[●⏺]\s/.test(t)) skipEchoContinuation = false;
+
+    if (/^[✳✢✶✻✽✴✷✸✹⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏◐◑◒◓▁▂▃▄▅▆▇█]\s/.test(t)) continue;
+    if (/esc.{0,5}to.{0,5}interrupt/i.test(t)) continue;
+    if (/high\s*[·•]\s*\/effort/i.test(t)) continue;
+
+    if (/^[❯>]\s*$/.test(t)) continue;
+    if (/^\(thinking\)\s*$/.test(t)) continue;
+    if (/^\?\s.*shortcut/i.test(t)) continue;
+    if (/spending limit|usage limit/i.test(t) && t.length < 80) continue;
+    if (/↑\s*\/?\s*↓\s*to\s*navigate/i.test(t)) continue;
+
+    // A single visible character is never real content (e.g. status-bar leak).
+    if (t.replace(/\s/g, '').length === 1) continue;
+
+    // Status/progress filler — 6+ `─` chars.
+    if ((t.match(/─/g)?.length ?? 0) >= 6) continue;
+
+    if (/ctrl\+?o\s+to\s+expand/i.test(t)) continue;
+
+    // Bullet-prefixed tool-use lines (Claude Code TUI v4+). Only known tool
+    // verbs so we don't clobber bullets that appear inside Claude's responses.
+    if (
+      /^•\s+(?:Read(?:ing)?|Edit(?:ing)?|Writ(?:e|ing)|Bash|Runn(?:ing)?|Search(?:ing)?|Glob(?:bing)?|Grep(?:ping)?|Creat(?:e|ing)|Execut(?:e|ing)|Task|Agent|NotebookEdit)\b/i.test(
+        t,
+      )
+    )
+      continue;
+
+    if (/^└\s/.test(t)) continue;
+    if (/^\+\s/.test(t) && /\d+\s*s\s*[·•]|\bthought\s+for\b|\d+\s*tokens|\(thinking\)/i.test(t)) continue;
+    if (/^↓\s*\d+\s*tokens/i.test(t)) continue;
+    if (/^\bthought\s+for\s+\d+/i.test(t)) continue;
+
+    // User input echo (`> text` / `❯ text`), including box-bordered variants
+    // like `│ ❯ text`. Mark subsequent lines as continuations to filter too.
+    const stripped = t.replace(/^[│╭╰╮╯┌└┐┘├┤┬┴┼]\s?/, '');
+    if (/^[❯>]\s+\S/.test(stripped) && !/^[❯>]\s*\d+\./.test(stripped)) {
+      skipEchoContinuation = true;
+      continue;
+    }
+
+    if (skipEchoContinuation) continue;
+
+    result.push(line);
+  }
+
+  return result;
 }
 
-export interface SelectPrompt {
-  question: string;
-  options: string[];
-  optionDescriptions: string[];
-  /** 0-based index of the highlighted item (always 0 for numbered selectors). */
-  currentIndex: number;
-}
+// ─── parseChrome (isChromeLine / parseChromeLine) ──────────────────
 
-const SPINNER_RE = /^[✳✢✶✻✽✴✷✸✹⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏◐◑◒◓▁▂▃▄▅▆▇█]\s/;
+// Spinner glyphs Claude Code cycles through during the "thinking"
+// animation. Includes the original ASCII / Unicode set AND the newer
+// colored-circle emoji set the v2.1+ TUI introduced — without these
+// the status/spinner line leaks into the conversation as plain text
+// and the chat shows duplicated "Symbioting…" / "Boondoggling…"
+// lines once per CLI tick. Variation Selector-16 (U+FE0F) is
+// stripped before the test so we don't have to enumerate both forms.
+const SPINNER_RE =
+  /^(?:[✳✢✶✻✽✴✷✸✹⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏◐◑◒◓▁▂▃▄▅▆▇█]|🔴|🟠|🟡|🟢|🔵|🟣|🟤|⚫|⚪|🌀|💭|✨)\s/u;
+
 const BULLET_TOOL_RE =
   /^•\s+(?:Read(?:ing)?|Edit(?:ing)?|Writ(?:e|ing)|Bash|Runn(?:ing)?|Search(?:ing)?|Glob(?:bing)?|Grep(?:ping)?|Creat(?:e|ing)|Execut(?:e|ing)|Task|Agent|NotebookEdit)\b/i;
 const TREE_LINE_RE = /^└\s/;
-const STATUS_LINE_RE = /^\+\s/;
+// Status line: legacy "+ Symbioting…" or new emoji-prefixed
+// "🔵 Symbioting…". Both end in a status detail like "(8s · ↓ 620
+// tokens)" which the existing tests downstream still match against.
+const STATUS_LINE_RE =
+  /^(?:\+|[🔴🟠🟡🟢🔵🟣🟤⚫⚪🌀💭✨])\s/u;
 
 export function isChromeLine(line: string): boolean {
-  const t = line.trim();
+  // Strip the U+FE0F variation selector that often follows emoji so
+  // the regexes match both presentations of the colored-circle
+  // spinner glyphs.
+  const t = line.replace(/️/g, '').trim();
   if (!t) return false;
   if (/^[─━—═─\-]{3,}$/.test(t)) return true;
   if (SPINNER_RE.test(t)) return true;
@@ -55,7 +144,7 @@ export function isChromeLine(line: string): boolean {
 }
 
 export function parseChromeLine(line: string): ChromeStep | null {
-  const t = line.trim();
+  const t = line.replace(/️/g, '').trim();
   if (!t) return null;
 
   if (/^[─━—═─\-]{3,}$/.test(t)) return null;
@@ -75,6 +164,9 @@ export function parseChromeLine(line: string): ChromeStep | null {
 
   if (TREE_LINE_RE.test(t)) return null;
 
+  // Status/thinking line shape: "+ Puttering… (22s · ↑ 102 tokens · thought for 15s)".
+  // The verb before "…" is the only stable identifier; everything after is noise that
+  // changes every frame and would break dedup.
   if (STATUS_LINE_RE.test(t)) {
     const label = t
       .slice(2)
@@ -140,96 +232,43 @@ function classifyStep(text: string): ChromeStep {
   return { tool: 'other', label, status: 'running' };
 }
 
-// ─── filterChrome ──────────────────────────────────────────────────
-
-/**
- * Strip TUI chrome — separators, spinners, status bars, prompts, thinking
- * frames — from rendered screen lines so only actual conversation content
- * remains.
- *
- * Stateful pass so that continuation lines of a user-input echo (lines that
- * follow a `> text` or `❯ text` line without the leading marker) are also
- * removed. The continuation flag resets on any empty line or separator line,
- * which always appears between the user echo and Claude's response in the TUI.
- */
-export function filterChrome(lines: string[]): string[] {
-  const result: string[] = [];
-  let skipEchoContinuation = false;
-
-  for (const line of lines) {
-    const t = line.trim();
-
-    if (!t) { skipEchoContinuation = false; continue; }
-    if (/^[─━—═─\-]{3,}$/.test(t)) { skipEchoContinuation = false; continue; }
-
-    // Claude's reply always starts with `● ` (U+25CF) or `⏺ ` (U+23FA)
-    // — that prefix is a hard signal that the user-echo block is over,
-    // even on Windows ConPTY where the reply often lands on the very
-    // next line with no blank separator. Without this reset, the echo
-    // continuation flag swallows Claude's first response line and the
-    // mobile/web client sees nothing for the entire turn. Mac doesn't
-    // hit this because its output usually has a blank line between
-    // the echo and the reply, which already resets the flag above.
-    if (/^[●⏺]\s/.test(t)) skipEchoContinuation = false;
-
-    if (/^[✳✢✶✻✽✴✷✸✹⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏◐◑◒◓▁▂▃▄▅▆▇█]\s/.test(t)) continue;
-    if (/esc.{0,5}to.{0,5}interrupt/i.test(t)) continue;
-    if (/high\s*[·•]\s*\/effort/i.test(t)) continue;
-
-    if (/^[❯>]\s*$/.test(t)) continue;
-    if (/^\(thinking\)\s*$/.test(t)) continue;
-    if (/^\?\s.*shortcut/i.test(t)) continue;
-    if (/spending limit|usage limit/i.test(t) && t.length < 80) continue;
-    if (/↑\s*\/?\s*↓\s*to\s*navigate/i.test(t)) continue;
-
-    if (t.replace(/\s/g, '').length === 1) continue;
-
-    if ((t.match(/─/g)?.length ?? 0) >= 6) continue;
-
-    if (/ctrl\+?o\s+to\s+expand/i.test(t)) continue;
-
-    if (
-      /^•\s+(?:Read(?:ing)?|Edit(?:ing)?|Writ(?:e|ing)|Bash|Runn(?:ing)?|Search(?:ing)?|Glob(?:bing)?|Grep(?:ping)?|Creat(?:e|ing)|Execut(?:e|ing)|Task|Agent|NotebookEdit)\b/i.test(
-        t,
-      )
-    )
-      continue;
-
-    if (/^└\s/.test(t)) continue;
-    if (/^\+\s/.test(t) && /\d+\s*s\s*[·•]|\bthought\s+for\b|\d+\s*tokens|\(thinking\)/i.test(t)) continue;
-    if (/^↓\s*\d+\s*tokens/i.test(t)) continue;
-    if (/^\bthought\s+for\s+\d+/i.test(t)) continue;
-
-    const stripped = t.replace(/^[│╭╰╮╯┌└┐┘├┤┬┴┼]\s?/, '');
-    if (/^[❯>]\s+\S/.test(stripped) && !/^[❯>]\s*\d+\./.test(stripped)) {
-      skipEchoContinuation = true;
-      continue;
-    }
-
-    if (skipEchoContinuation) continue;
-
-    result.push(line);
-  }
-
-  return result;
-}
-
 // ─── selector (detectSelector / detectListSelector) ────────────────
 
 /**
  * Detect a numbered interactive selector — `❯ 1. Label` style — in the
- * already-rendered screen lines. Input must come from `renderToLines`.
+ * already-rendered screen lines.
+ *
+ * Input must come from {@link renderToLines}: clean text with no ANSI codes,
+ * so cursor-overwrite artifacts ("❯ 1. Label" built from `  1. Label\r❯`)
+ * have already collapsed onto one line.
+ *
+ * Guards against false positives where Claude's own response contains a
+ * numbered list while the input cursor (❯) sits elsewhere on screen. Also
+ * short-circuits when the idle input hint (`? for shortcuts`) is visible,
+ * which means the regular input field is active and no selector is live.
  */
 export function detectSelector(lines: string[]): SelectPrompt | null {
   if (lines.some(l => /\?\s+for\s+shortcuts/i.test(l.trim()))) return null;
 
+  // Strip box-border chars from line edges so that numbered selectors rendered
+  // inside a bordered panel (e.g. /mcp server detail view) are still detected.
   const clean = lines.map(l =>
     l
       .replace(/^[│╭╰╮╯┌└┐┘├┤┬┴┼]\s?/, '')
       .replace(/\s*[│╭╰╮╯┌└┐┘├┤┬┴┼─━═]+\s*$/, ''),
   );
 
+  // Accept both `❯` (the canonical React Ink arrow) and the bare
+  // `>` that Windows ConPTY emits for the same glyph when the
+  // terminal font lacks U+276F. Both render as the selector cursor.
+  // Anchor on the cursor presence OR a trust-dialog signature so a
+  // PTY rendering pass that ate the cursor (Windows font fallback,
+  // partial frame) still surfaces the selector.
   const hasCursor = clean.some(l => /^[❯>]\s*\d+\./.test(l.trim()));
+  // First-run "Do you trust this folder?" dialog is the most
+  // recognisable case where the cursor character can disappear
+  // through the rendering pipeline. Match the question phrasing so
+  // we lock onto it whether or not `❯`/`>` survived.
   const looksLikeTrust = clean.some(l =>
     /\b(?:trust\s+the\s+files|trust\s+this\s+folder|safety\s+check)\b/i.test(l),
   );
@@ -248,6 +287,7 @@ export function detectSelector(lines: string[]): SelectPrompt | null {
     if (/^[─━—═\-]{3,}$/.test(t)) continue;
     if (/^\[.*\]$/.test(t)) continue;
     if (/^[>❯]\s/.test(t)) continue;
+    // PTY overwrite artifact — no spaces + long (e.g. "needsvauthenticationhentication")
     if (!t.includes(' ') && t.length > 15) continue;
     questionParts.push(t);
   }
@@ -297,6 +337,9 @@ export function detectSelector(lines: string[]): SelectPrompt | null {
 /**
  * Detect a list-style selector — `/mcp`, `/model` — where the highlighted
  * item is prefixed with `  ❯ ` instead of `❯ N.`.
+ *
+ * Returns `currentIndex` (0-based position of ❯) so the client can send
+ * bidirectional arrow navigation rather than always starting from index 0.
  */
 export function detectListSelector(lines: string[]): SelectPrompt | null {
   if (!lines.some(l => /[↑↓].*navigate/i.test(l.trim()))) return null;
