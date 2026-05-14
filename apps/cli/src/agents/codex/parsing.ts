@@ -26,10 +26,20 @@ import type { ChromeStep } from '@codeagent/shared';
 const BOX_DRAW_RE = /^[╭─╮│╰╯]/u;
 // Codex user echo: `›` (U+203A). Also guard against plain `>`.
 const CODEX_USER_ECHO_RE = /^[›>]\s+\S/u;
-// Codex agent reply: `•` (U+2022 BULLET) followed by a space.
-const CODEX_AGENT_REPLY_RE = /^•\s/u;
+// Codex agent reply prefix. The TUI renders this with either `•`
+// (U+2022 BULLET) or `·` (U+00B7 MIDDLE DOT) depending on the
+// terminal font / Codex CLI version. Both glyphs accepted.
+const CODEX_AGENT_REPLY_RE = /^[•·]\s/u;
 const TIP_RE = /^\s*Tip:\s/i;
 const LEARN_MORE_RE = /^\s*Learn more:\s/i;
+// Codex bottom status footer — always rendered at the bottom of the
+// TUI while a session is live. Examples:
+//   "gpt-5.5 default · ~/Documents/codeagent"
+//   "gpt-5.4-mini default · /tmp"
+// Pattern: any non-space token + "default" + middle dot/bullet +
+// a path-looking token. Anchored loosely so we tolerate the Codex
+// CLI swapping the separator glyph or adding extra status fields.
+const CODEX_STATUS_FOOTER_RE = /\bdefault\s+[·•]\s+\S+/i;
 
 /**
  * Codex-specific chrome stripper.
@@ -77,12 +87,25 @@ export function filterCodexChrome(lines: string[]): string[] {
     // Drop Tip: / Learn more: post-startup banners.
     if (TIP_RE.test(t) || LEARN_MORE_RE.test(t)) continue;
 
-    // Agent reply — `•` prefix. Reset the echo guard and emit
-    // the line WITHOUT the bullet so the mobile bubble is clean.
+    // Drop the bottom status footer ("gpt-5.5 default · ~/path") that
+    // Codex re-renders on every frame. Without this rule the footer
+    // leaks into the mobile feed as the only "agent content" once the
+    // real reply has scrolled out of the visible PTY window.
+    // CHECK BEFORE the agent-reply rule because the footer carries
+    // a `·` and would otherwise look like a continuation of a `·`
+    // reply on terminals where Codex uses U+00B7 for both.
+    if (CODEX_STATUS_FOOTER_RE.test(trimmed)) {
+      skipEchoContinuation = false;
+      continue;
+    }
+
+    // Agent reply — `•` (U+2022) or `·` (U+00B7) prefix. Reset the
+    // echo guard and emit the line WITHOUT the bullet so the mobile
+    // bubble is clean.
     if (CODEX_AGENT_REPLY_RE.test(trimmed)) {
       skipEchoContinuation = false;
-      // Strip the leading `• ` (the two-char prefix — bullet + space).
-      out.push(t.replace(/^(\s*)•\s/, '$1'));
+      // Strip the leading bullet + single space.
+      out.push(t.replace(/^(\s*)[•·]\s/, '$1'));
       continue;
     }
 

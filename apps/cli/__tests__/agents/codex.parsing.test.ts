@@ -67,6 +67,36 @@ describe('codex/parsing filterCodexChrome', () => {
     expect(out.every(l => !/^[╭╰│]/.test(l.trimStart()))).toBe(true);
   });
 
+  it('drops the bottom status footer "gpt-X.Y default · ~/path"', () => {
+    const lines = [
+      '› hola',
+      '',
+      '• Hola. ¿En qué te ayudo?',
+      '',
+      'gpt-5.5 default · ~/Documents/codeagent',
+    ];
+    const out = filterCodexChrome(lines);
+    expect(out).toContain('Hola. ¿En qué te ayudo?');
+    expect(out.find(l => /default\s+[·•]/.test(l))).toBeUndefined();
+  });
+
+  it('drops the footer for other gpt models too', () => {
+    const lines = [
+      '• reply',
+      'gpt-5.4-mini default · /tmp/project',
+    ];
+    const out = filterCodexChrome(lines);
+    expect(out).toContain('reply');
+    expect(out.find(l => l.includes('gpt-5.4-mini'))).toBeUndefined();
+  });
+
+  it('keeps an agent reply that uses · (U+00B7 MIDDLE DOT) instead of • bullet', () => {
+    const lines = ['› hola', '', '· Hola con middle dot'];
+    const out = filterCodexChrome(lines);
+    expect(out).toContain('Hola con middle dot');
+    expect(out.some(l => l.startsWith('·'))).toBe(false);
+  });
+
   it('regression: Claude still works through the Claude strategy (no Codex changes touched shared)', () => {
     // No-op — Claude path goes through @codeagent/shared filterChrome
     // unchanged. This test exists as documentation.
