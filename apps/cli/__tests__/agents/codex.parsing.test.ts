@@ -302,6 +302,65 @@ describe('wrapCodexCodeBlocks', () => {
     expect(wrapCodexCodeBlocks(input)).toEqual(input);
   });
 
+  // ─── Regression: Codex's 2-space chat margin must be stripped from
+  // diff lines so the backend's diffBlockParser (anchored with ^) can
+  // claim them. Without dedenting, the line `  @@ -1,6 +1,8 @@` slips
+  // past the parser and `filePathLinkifier` turns `a/foo` and `b/foo`
+  // into READ pills mid-diff, ruining the render. See ~/.codeam/debug.log
+  // tick at 2026-05-14T19:49:50 where `in[5..9]` had 2 leading spaces.
+  it('strips Codex chat-margin from diff markers (regression for filterCodexChrome real-world tick)', () => {
+    // This is the EXACT shape that came off the wire on 2026-05-14:
+    // `•`-prefixed reply followed by a 2-space-indented unified diff.
+    const input = [
+      '• Claro, acá va otro diff de git simulado:',
+      '  diff --git a/src/auth/session.ts b/src/auth/session.ts',
+      '  index 1f3a9b2..8c7d4e1 100644',
+      '  --- a/src/auth/session.ts',
+      '  +++ b/src/auth/session.ts',
+      '  @@ -12,11 +12,18 @@ export async function getSession(userId: string) {',
+      '     const session = await db.session.findFirst({',
+      '       where: { userId },',
+      '     });',
+      '  -  if (!session) {',
+      '  +  if (!session || session.expiresAt < new Date()) {',
+      '       return null;',
+      '     }',
+      '     return session;',
+      '   }',
+    ];
+    const out = filterCodexChrome(input);
+    // Reply prose preserved.
+    expect(out).toContain('Claro, acá va otro diff de git simulado:');
+    // Diff markers MUST be at col 0 so diffBlockParser fires.
+    expect(out).toContain('diff --git a/src/auth/session.ts b/src/auth/session.ts');
+    expect(out).toContain('--- a/src/auth/session.ts');
+    expect(out).toContain('+++ b/src/auth/session.ts');
+    expect(out).toContain('@@ -12,11 +12,18 @@ export async function getSession(userId: string) {');
+    // Body add/remove markers at col 0 too.
+    expect(out).toContain('-  if (!session) {');
+    expect(out).toContain('+  if (!session || session.expiresAt < new Date()) {');
+    // Critical: no ``` fences (structured-block guard fires post-dedent).
+    expect(out.some((l) => l.startsWith('```'))).toBe(false);
+  });
+
+  it('leaves diff alone when markers are already at col 0 (no dedent regression)', () => {
+    const input = [
+      'diff --git a/app.py b/app.py',
+      '--- a/app.py',
+      '+++ b/app.py',
+      '@@ -1,3 +1,4 @@',
+      ' def saludar(nombre):',
+      '-    return "Hola " + nombre',
+      '+    return f"Hola, {nombre}!"',
+      '+',
+    ];
+    // Routes through wrapCodexCodeBlocks (structured guard fires).
+    // We assert via wrapCodexCodeBlocks since filterCodexChrome would
+    // strip nothing else here either.
+    const out = wrapCodexCodeBlocks(input);
+    expect(out).toEqual(input);
+  });
+
   it('handles two separate code blocks in the same reply', () => {
     const input = [
       'public class A { static int x = 1; static int y = 2; }',

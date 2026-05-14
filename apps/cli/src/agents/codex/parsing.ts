@@ -134,6 +134,15 @@ export function filterCodexChrome(lines: string[]): string[] {
     out.push(t);
   }
 
+  // Pre-pass: dedent Codex's chat-margin from lines that look like
+  // they belong to a structured block (diff metadata + body). Codex
+  // renders the chat with a 2-space left padding, which means
+  // `@@ -1,6 +1,8 @@` arrives as `  @@ -1,6 +1,8 @@` — neither our
+  // own structured-block guard nor the backend's diffBlockParser
+  // recognize it (both use `^@@`-anchored regexes). Dedenting first
+  // makes both fire correctly.
+  const dedented = dedentCodexDiffLines(out);
+
   // Post-pass: wrap Codex-emitted code blocks in Markdown ``` fences.
   // Codex's TUI does syntax-highlighted code with no explicit fence
   // markers — just an indented run of code-shaped lines. The mobile /
@@ -143,7 +152,7 @@ export function filterCodexChrome(lines: string[]): string[] {
   // wall of unformatted text. Injecting fences here is Codex-only:
   // Claude (which emits proper ```lang fences itself) goes through
   // its own filter and is unaffected.
-  const wrapped = wrapCodexCodeBlocks(out);
+  const wrapped = wrapCodexCodeBlocks(dedented);
 
   // Info-level dump every time the filter runs so the always-on file
   // log captures EXACTLY what the parser saw on each tick. Critical
@@ -160,8 +169,8 @@ export function filterCodexChrome(lines: string[]): string[] {
   const hasRealInput = lines.some(l => /\w/.test(l));
   if (out.length > 0 || hasRealInput) {
     const sampleIn = lines.slice(-50).map((l, i) => `  in[${i}] ${JSON.stringify(l)}`).join('\n');
-    const sampleOut = out.map((l, i) => `  out[${i}] ${JSON.stringify(l)}`).join('\n');
-    log.info('codex-parse', `in=${lines.length} out=${out.length}\n${sampleIn}\n---\n${sampleOut}`);
+    const sampleOut = dedented.map((l, i) => `  out[${i}] ${JSON.stringify(l)}`).join('\n');
+    log.info('codex-parse', `in=${lines.length} out=${dedented.length}\n${sampleIn}\n---\n${sampleOut}`);
   } else {
     log.trace('codex-parse', `filterCodexChrome in=${lines.length} out=${out.length}`);
   }
@@ -206,6 +215,39 @@ const PR_TITLE_RE    = /^title:\s+\S/;
 const PR_STATE_RE    = /^state:\s+(?:OPEN|CLOSED|MERGED|DRAFT)/i;
 const PR_URL_RE      = /https?:\/\/github\.com\/[\w.-]+\/[\w.-]+\/pull\/\d+/;
 const PR_BANNER_RE   = /^\s*[✓✔]?\s*Pull request created\s*$/i;
+
+/**
+ * Codex's TUI left-pads chat content with 2 spaces, so structural
+ * markers like `diff --git`, `@@`, `---`, `+++` arrive at column 2
+ * instead of column 0. The backend's `diffBlockParser` and our own
+ * `isStructuredBlock` guard both anchor those markers with `^`, so
+ * the indented form silently fails to parse — the diff falls through
+ * to `filePathLinkifier`, which mangles `a/path` and `b/path` into
+ * READ pills, and the body gets wrapped as a ```typescript``` block.
+ *
+ * Detect the margin from the first marker we find with a numeric
+ * leading-whitespace width, then dedent every line by that amount.
+ * Relative indent inside the diff body is preserved (a context line
+ * with ` ` + code-indent stays distinguishable from `+` / `-` body
+ * lines). No-op when no marker has leading whitespace.
+ */
+function dedentCodexDiffLines(lines: string[]): string[] {
+  let margin = -1;
+  for (const line of lines) {
+    const m = line.match(/^( +)(?:diff --git |@@ |--- |\+\+\+ )/);
+    if (m) {
+      const w = m[1].length;
+      if (margin === -1 || w < margin) margin = w;
+    }
+  }
+  if (margin <= 0) return lines;
+  return lines.map((line) => {
+    if (line.length === 0) return line;
+    const lead = line.match(/^ */)?.[0].length ?? 0;
+    const strip = Math.min(margin, lead);
+    return strip > 0 ? line.slice(strip) : line;
+  });
+}
 
 /**
  * True when the candidate run looks like a structured-block shape the
