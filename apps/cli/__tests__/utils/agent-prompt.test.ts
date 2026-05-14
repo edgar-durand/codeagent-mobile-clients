@@ -18,8 +18,8 @@ describe('parseAgentFlag', () => {
     expect(() => parseAgentFlag(['--agent=zzz'])).toThrow(/invalid agent/i);
   });
 
-  it('throws on disabled agent in Phase 1 (codex)', () => {
-    expect(() => parseAgentFlag(['--agent=codex'])).toThrow(/not.*available/i);
+  it('returns codex for --agent=codex (enabled in Phase 2)', () => {
+    expect(parseAgentFlag(['--agent=codex'])).toBe('codex');
   });
 
   it('throws on disabled agent (copilot)', () => {

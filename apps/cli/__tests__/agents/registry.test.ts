@@ -12,9 +12,9 @@ describe('cli agent registry', () => {
     expect(s.id).toBe('claude');
   });
 
-  it('throws for disabled agents in Phase 1 (codex)', () => {
-    expect(() => createRuntimeStrategy('codex')).toThrow();
-    expect(() => createDeployStrategy('codex')).toThrow();
+  it('returns CodexRuntimeStrategy + CodexDeployStrategy for "codex"', () => {
+    expect(createRuntimeStrategy('codex').id).toBe('codex');
+    expect(createDeployStrategy('codex').id).toBe('codex');
   });
 
   it('throws for disabled agents (copilot)', () => {

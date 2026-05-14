@@ -1,15 +1,18 @@
 import { AGENT_REGISTRY, type AgentId } from '@codeagent/shared';
 import { ClaudeRuntimeStrategy } from './claude/runtime';
 import { ClaudeDeployStrategy } from './claude/deploy';
+import { CodexRuntimeStrategy } from './codex/runtime';
+import { CodexDeployStrategy } from './codex/deploy';
 import type { RuntimeStrategy, DeployStrategy } from './strategy';
 
 const runtimeBuilders: Partial<Record<AgentId, () => RuntimeStrategy>> = {
   claude: () => new ClaudeRuntimeStrategy(),
-  // codex and copilot added in Phase 2 / later
+  codex: () => new CodexRuntimeStrategy(),
 };
 
 const deployBuilders: Partial<Record<AgentId, () => DeployStrategy>> = {
   claude: () => new ClaudeDeployStrategy(),
+  codex: () => new CodexDeployStrategy(),
 };
 
 export function createRuntimeStrategy(agent: AgentId): RuntimeStrategy {

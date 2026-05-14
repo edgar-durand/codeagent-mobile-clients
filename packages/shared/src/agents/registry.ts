@@ -13,7 +13,7 @@ export const AGENT_REGISTRY: Record<AgentId, AgentMetadata> = {
     id: 'codex',
     displayName: 'Codex CLI',
     binaryName: 'codex',
-    enabled: false,
+    enabled: true,
     supportedAuthKinds: ['oauth_token', 'api_key'],
     preferredAuthKind: 'oauth_token',
   },

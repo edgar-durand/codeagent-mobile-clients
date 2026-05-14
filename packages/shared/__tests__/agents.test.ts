@@ -36,14 +36,15 @@ describe('AGENT_REGISTRY', () => {
     expect(AGENT_REGISTRY.claude.enabled).toBe(true);
   });
 
-  it('codex and copilot are disabled in Phase 1', () => {
-    expect(AGENT_REGISTRY.codex.enabled).toBe(false);
+  it('claude + codex are enabled in Phase 2; copilot still disabled', () => {
+    expect(AGENT_REGISTRY.claude.enabled).toBe(true);
+    expect(AGENT_REGISTRY.codex.enabled).toBe(true);
     expect(AGENT_REGISTRY.copilot.enabled).toBe(false);
   });
 
   it('getEnabledAgents returns only enabled ones', () => {
     const enabled = getEnabledAgents();
-    expect(enabled.map(a => a.id)).toEqual(['claude']);
+    expect(enabled.map(a => a.id).sort()).toEqual(['claude', 'codex']);
   });
 
   it('getAgent throws on unknown id', () => {
