@@ -38,6 +38,21 @@ export interface RuntimeStrategy {
   parseTuiChrome?(line: string): ChromeStep | null;
 
   /**
+   * Per-agent virtual-terminal renderer. Turns the raw PTY byte buffer
+   * into the visible-screen line array that filterTuiOutput consumes.
+   *
+   * Optional: agents that work fine with the shared baseline renderer
+   * (Claude — its React Ink TUI doesn't touch scroll regions or alt
+   * screen toggles) leave this undefined and OutputService falls back
+   * to the shared `renderToLines`. Codex needs its own because the
+   * Codex CLI uses DECSTBM scroll regions + Reverse Index (ESC M) to
+   * scroll chat history within a top zone — those bytes get dropped by
+   * the shared renderer and the mobile feed sees only the first
+   * paragraph of multi-line agent replies.
+   */
+  renderToLines?(buffer: string): string[];
+
+  /**
    * Per-agent chrome stripper. Returns only the lines that should
    * appear in the mobile chat feed (agent replies + user-visible text).
    * Drops spinners, tool-call bullets, status frames, user echoes,

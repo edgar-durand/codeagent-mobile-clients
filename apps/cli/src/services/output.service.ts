@@ -209,7 +209,11 @@ export class OutputService {
     // not the raw input echo (which it overwrites within ~100 ms).
     if (elapsed < OutputService.WARMUP_MS) return;
 
-    const lines = renderLines(this.pty.content);
+    // Per-agent renderer when the strategy provides one (Codex needs
+    // DECSTBM scroll-region support that the shared renderer lacks);
+    // otherwise the shared baseline (Claude).
+    const lines = this.runtime.renderToLines?.(this.pty.content)
+      ?? renderLines(this.pty.content);
 
     // Emit chrome-step deltas if any new ones surfaced this tick.
     // Route through the per-agent parseTuiChrome so Codex's `•` reply
@@ -272,7 +276,11 @@ export class OutputService {
   }
 
   private finalize(): void {
-    const lines = renderLines(this.pty.content);
+    // Per-agent renderer when the strategy provides one (Codex needs
+    // DECSTBM scroll-region support that the shared renderer lacks);
+    // otherwise the shared baseline (Claude).
+    const lines = this.runtime.renderToLines?.(this.pty.content)
+      ?? renderLines(this.pty.content);
     const parseLine = this.runtime.parseTuiChrome?.bind(this.runtime) ?? (() => null);
     this.steps.ingest(lines, parseLine);
     const stepsDelta = this.steps.consumeDelta();
