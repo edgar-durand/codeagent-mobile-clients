@@ -1,82 +1,107 @@
 import type { ChromeStep } from '@codeagent/shared';
+import { log } from '../../services/logger';
 
 /**
  * Codex-specific TUI chrome parsers.
  *
- * Codex's TUI conventions differ from Claude's in two key ways:
+ * Codex's TUI layout (observed against codex v0.130.x + GPT-5.5):
  *
- *   - User prompt echo: `›` (U+203A SINGLE RIGHT-POINTING ANGLE
- *     QUOTATION MARK) instead of Claude's `❯` / `>`.
- *   - Agent reply prefix: `•` (U+2022 BULLET) — the SAME glyph that
- *     Claude Code uses for tool-call bullets. Because the semantics
- *     are opposite (tool-call noise for Claude vs. actual reply for
- *     Codex), agent-specific parsing is non-negotiable.
+ *   ╭─────────────────────────╮
+ *   │ >_ OpenAI Codex (v…)    │   ← startup card (filtered)
+ *   │ model: gpt-5.5          │
+ *   │ directory: ~/…          │
+ *   ╰─────────────────────────╯
  *
- * The shared `filterChrome` function cannot distinguish the two
- * because it was written for Claude's glyph conventions: it strips
- * `•`-prefixed lines that match known tool verbs (Read, Edit, Bash…)
- * and lets through everything else. For Codex this works in the
- * opposite direction — the agent's actual replies arrive with `•`
- * and need to be KEPT (with the prefix stripped), while Claude's
- * shared logic was inclined to drop or echo-continuation-swallow
- * them. Routing through the per-agent strategy eliminates the
- * ambiguity entirely.
+ *     Tip: GPT-5.5 …                ← banner (filtered)
+ *     Learn more: …                 ← banner (filtered)
+ *
+ *   ╭─────────────────────────╮
+ *   │ hola                    │   ← user-input box (filtered via BOX_DRAW)
+ *   ╰─────────────────────────╯
+ *
+ *   • Hola. ¿En qué estás …       ← AGENT REPLY (kept, bullet stripped)
+ *
+ *   ╭─────────────────────────╮
+ *   │ › Implement {feature}   │   ← next input box (filtered via BOX_DRAW)
+ *   ╰─────────────────────────╯
+ *
+ *   gpt-5.5 default · ~/…         ← bottom status footer (filtered)
+ *
+ * The codeam CLI banner ("· Edgar Durand · PRO", "· Launching Codex CLI…")
+ * is printed by OUR CLI before Codex spawns. Those lines start with `·`
+ * (U+00B7 MIDDLE DOT) and must be filtered explicitly so they don't get
+ * mistaken for agent replies (which can also start with the same dot
+ * depending on the Codex build).
  */
 
 const BOX_DRAW_RE = /^[╭─╮│╰╯]/u;
-// Codex user echo: `›` (U+203A). Also guard against plain `>`.
+// Bullet glyphs Codex (and codeam's own banner) use as line markers:
+//   `•` U+2022 BULLET
+//   `·` U+00B7 MIDDLE DOT
+//   `‧` U+2027 HYPHENATION POINT
+//   `∙` U+2219 BULLET OPERATOR
+//   `⋅` U+22C5 DOT OPERATOR
+// Defensive set — small visual size makes them indistinguishable in
+// screenshots, and Codex has historically swapped between them across
+// versions.
+const BULLET_CHARS = '•·‧∙⋅';
+const CODEX_AGENT_REPLY_RE = new RegExp(`^[${BULLET_CHARS}]\\s`, 'u');
+const STRIP_BULLET_RE = new RegExp(`^(\\s*)[${BULLET_CHARS}]\\s`, 'u');
+// Codex user echo (bare, not boxed): `›` (U+203A) or `>`.
 const CODEX_USER_ECHO_RE = /^[›>]\s+\S/u;
-// Codex agent reply prefix. The TUI renders this with either `•`
-// (U+2022 BULLET) or `·` (U+00B7 MIDDLE DOT) depending on the
-// terminal font / Codex CLI version. Both glyphs accepted.
-const CODEX_AGENT_REPLY_RE = /^[•·]\s/u;
 const TIP_RE = /^\s*Tip:\s/i;
 const LEARN_MORE_RE = /^\s*Learn more:\s/i;
 // Codex bottom status footer — always rendered at the bottom of the
 // TUI while a session is live. Examples:
 //   "gpt-5.5 default · ~/Documents/codeagent"
 //   "gpt-5.4-mini default · /tmp"
-// Pattern: any non-space token + "default" + middle dot/bullet +
-// a path-looking token. Anchored loosely so we tolerate the Codex
-// CLI swapping the separator glyph or adding extra status fields.
+// "default" + bullet/dot + path-looking token.
 const CODEX_STATUS_FOOTER_RE = /\bdefault\s+[·•]\s+\S+/i;
+// codeam CLI banner lines (NOT codex output — printed by our own CLI
+// before Codex spawns). Examples:
+//   "· Edgar Durand · PRO"
+//   "· Launching Codex CLI…"
+//   "Paired!"
+//   "✓ Paired with Edgar Durand (PRO)"
+//   "codeam v2.12.4"
+const CODEAM_BANNER_RES: RegExp[] = [
+  // Bullet-prefixed banner entries (any role / launch label).
+  new RegExp(`^[${BULLET_CHARS}]\\s+(Launching|Edgar|PRO|FREE|ENTERPRISE)\\b`, 'i'),
+  /^Paired\b/,
+  /^codeam\b\s+v\d/,
+  /^✓\s+Paired/,
+  /^◇\s+Paired/,
+];
 
 /**
  * Codex-specific chrome stripper.
  *
- * Drops:
- *   - Empty / ANSI-only lines
- *   - Intro box-drawing lines (╭─╮│╰╯) — the OpenAI Codex startup card
- *   - Banner content lines inside the box (OpenAI Codex header, model:,
- *     directory:)
- *   - Tip: / Learn more: banners printed after the startup box
- *   - User prompt echo (`› text`)
- *   - Any line while within the user-echo continuation block
+ * Whitelist-light approach: aggressively drop lines we KNOW are chrome
+ * (boxes, banners, status footer, codeam's own startup output), strip
+ * the leading bullet off agent-reply lines, and KEEP everything else.
  *
- * Keeps:
- *   - Agent replies (`• text`) — prefix stripped so the mobile bubble
- *     receives clean text
- *   - Everything else (multi-line agent responses that don't carry
- *     the `•` prefix on continuation lines)
+ * The prior version used a `skipEchoContinuation` state machine that
+ * dropped the first non-echo line after a `› user_text` echo. That
+ * worked when Codex emitted bare user echoes, but the current Codex
+ * TUI wraps user input in a box (filtered via BOX_DRAW_RE), so the
+ * state machine was both unnecessary and risky — if the bullet glyph
+ * didn't exactly match the regex, the agent reply fell into the
+ * "skip continuation" branch and got silently dropped. Removed.
  */
 export function filterCodexChrome(lines: string[]): string[] {
   const out: string[] = [];
-  let skipEchoContinuation = false;
 
   for (const line of lines) {
     const t = line.trimEnd();
     const trimmed = t.trimStart();
 
-    // Skip empty / whitespace-only lines; reset echo guard.
-    if (!trimmed) {
-      skipEchoContinuation = false;
-      continue;
-    }
+    if (!trimmed) continue;
 
-    // Drop intro box-drawing lines (Codex startup card frame).
+    // Drop box-drawing lines (Codex startup card frame + user-input
+    // box edges + bottom borders).
     if (BOX_DRAW_RE.test(trimmed)) continue;
 
-    // Drop the content lines inside the startup box.
+    // Drop startup-card content lines.
     if (
       /^OpenAI Codex\b/i.test(trimmed) ||
       /^>_\s+OpenAI Codex\b/i.test(trimmed) ||
@@ -87,40 +112,36 @@ export function filterCodexChrome(lines: string[]): string[] {
     // Drop Tip: / Learn more: post-startup banners.
     if (TIP_RE.test(t) || LEARN_MORE_RE.test(t)) continue;
 
-    // Drop the bottom status footer ("gpt-5.5 default · ~/path") that
-    // Codex re-renders on every frame. Without this rule the footer
-    // leaks into the mobile feed as the only "agent content" once the
-    // real reply has scrolled out of the visible PTY window.
-    // CHECK BEFORE the agent-reply rule because the footer carries
-    // a `·` and would otherwise look like a continuation of a `·`
-    // reply on terminals where Codex uses U+00B7 for both.
-    if (CODEX_STATUS_FOOTER_RE.test(trimmed)) {
-      skipEchoContinuation = false;
-      continue;
-    }
+    // Drop the bottom status footer.
+    if (CODEX_STATUS_FOOTER_RE.test(trimmed)) continue;
 
-    // Agent reply — `•` (U+2022) or `·` (U+00B7) prefix. Reset the
-    // echo guard and emit the line WITHOUT the bullet so the mobile
-    // bubble is clean.
+    // Drop codeam's own CLI banner lines (not codex output).
+    if (CODEAM_BANNER_RES.some(re => re.test(trimmed))) continue;
+
+    // Drop bare user-echo lines (`› hola`, `> hola`) — defensive in
+    // case Codex emits unboxed echoes on some terminals.
+    if (CODEX_USER_ECHO_RE.test(trimmed)) continue;
+
+    // Agent reply: strip the leading bullet so the mobile bubble is
+    // clean, then keep.
     if (CODEX_AGENT_REPLY_RE.test(trimmed)) {
-      skipEchoContinuation = false;
-      // Strip the leading bullet + single space.
-      out.push(t.replace(/^(\s*)[•·]\s/, '$1'));
+      out.push(t.replace(STRIP_BULLET_RE, '$1'));
       continue;
     }
 
-    // User prompt echo — `›` (U+203A) or plain `>`. Set continuation
-    // guard so separator / blank lines after the echo also get dropped.
-    if (CODEX_USER_ECHO_RE.test(trimmed)) {
-      skipEchoContinuation = true;
-      continue;
-    }
-
-    // Anything else while in echo-continuation mode: drop.
-    if (skipEchoContinuation) continue;
-
-    // Default: keep the line as-is.
+    // Default: keep the line as-is. Multi-line agent replies whose
+    // continuation lines carry no bullet land here.
     out.push(t);
+  }
+
+  log.trace('codex-parse', `filterCodexChrome in=${lines.length} out=${out.length}`);
+  // Verbose breadcrumb that includes a sample of input + output so
+  // future-Edgar can diagnose without re-running with a custom build.
+  // Only fires when CODEAM_DEBUG=1 — production runs are silent.
+  if (process.env.CODEAM_DEBUG === '1') {
+    const sampleIn = lines.slice(-40).map((l, i) => `  in[${i}] ${JSON.stringify(l)}`).join('\n');
+    const sampleOut = out.map((l, i) => `  out[${i}] ${JSON.stringify(l)}`).join('\n');
+    log.debug('codex-parse', `\n${sampleIn}\n---\n${sampleOut}`);
   }
 
   return out;
