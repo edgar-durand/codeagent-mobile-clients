@@ -3,6 +3,7 @@ import { getAgent, type AgentId, type AgentMetadata, type AgentModel, type Chrom
 import { findInPath } from '../../services/pty/types';
 import * as history from './history';
 import { filterCodexChrome, parseCodexChrome, detectCodexSelector } from './parsing';
+import { renderCodexBuffer } from './renderer';
 import type { ChangeModelInstruction, RuntimeStrategy } from '../strategy';
 
 const CODEX_CONTEXT_WINDOW = 272_000;
@@ -80,6 +81,17 @@ export class CodexRuntimeStrategy implements RuntimeStrategy {
   }
 
   // ─── TUI parser strategy methods ─────────────────────────────────
+
+  /**
+   * Codex needs its own virtual terminal because the Codex CLI uses
+   * DECSTBM scroll regions (`\x1B[1;31r`) and Reverse Index (`\x1BM`)
+   * to scroll chat history within a fixed top zone — bytes the shared
+   * renderer drops, leaving the mobile feed with only the most recent
+   * frame instead of the full reply. See ./renderer.ts.
+   */
+  renderToLines(buffer: string): string[] {
+    return renderCodexBuffer(buffer);
+  }
 
   parseTuiChrome(line: string): ChromeStep | null {
     return parseCodexChrome(line);
