@@ -60,15 +60,29 @@ function appendToFile(line: string): void {
 }
 
 function emit(level: Level, tag: string, msg: string, err?: unknown): void {
-  if (LEVELS[level] > currentLevel()) return;
   const detail = err instanceof Error ? `: ${err.message}` : err !== undefined ? `: ${String(err)}` : '';
   const line = `[codeam:${level}] ${tag} — ${msg}${detail}\n`;
-  process.stderr.write(line);
-  // File mirror policy:
+
+  // File mirror happens FIRST, gated only by the file policy below.
+  // Doing this before the stderr filter is critical — the stderr
+  // level guard suppresses noisy output for normal users, but the
+  // file should always carry the always-on diagnostics regardless of
+  // whether the user has CODEAM_LOG set. Earlier versions returned
+  // at the stderr-level gate above, which meant info / warn lines
+  // (chunk-send outcomes) silently never reached the file when
+  // CODEAM_LOG was unset.
+  //
+  // Policy:
   //   - error / warn / info → always mirrored (always-on diagnostics)
-  //   - debug / trace      → only when CODEAM_DEBUG=1 or CODEAM_LOG=debug|trace
+  //   - debug / trace       → only when CODEAM_DEBUG=1 or CODEAM_LOG=debug|trace
   if (LEVELS[level] <= LEVELS.info || verboseFileEnabled) {
     appendToFile(`${new Date().toISOString()} ${line}`);
+  }
+
+  // Stderr is gated by the user's level pref (default `error`) so
+  // the terminal stays quiet while the file still gets everything.
+  if (LEVELS[level] <= currentLevel()) {
+    process.stderr.write(line);
   }
 }
 
