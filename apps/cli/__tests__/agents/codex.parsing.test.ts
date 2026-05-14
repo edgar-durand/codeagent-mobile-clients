@@ -343,6 +343,59 @@ describe('wrapCodexCodeBlocks', () => {
     expect(out.some((l) => l.startsWith('```'))).toBe(false);
   });
 
+  it('strips Codex chat-margin from a merge (pull fast-forward) so mergeBlockParser fires', () => {
+    // Real shape from 2026-05-14 `ahora simula un pull` reproducer.
+    const input = [
+      '• $ git pull origin main',
+      '  remote: Enumerating objects: 18, done.',
+      '  Unpacking objects: 100% (12/12), 3.21 KiB | 1.60 MiB/s, done.',
+      '  From github.com:example/project',
+      '   * branch            main       -> FETCH_HEAD',
+      '     7a91c2d..b4e8f30  main       -> origin/main',
+      '  Updating 7a91c2d..b4e8f30',
+      '  Fast-forward',
+      '   src/client.ts        | 10 +++++++---',
+      '   3 files changed, 25 insertions(+), 5 deletions(-)',
+    ];
+    const out = filterCodexChrome(input);
+    // Merge markers MUST be at col 0 for mergeBlockParser to fire.
+    expect(out).toContain('Updating 7a91c2d..b4e8f30');
+    expect(out).toContain('Fast-forward');
+    // From line at col 0 too (helps the textual fetch portion render cleanly).
+    expect(out).toContain('From github.com:example/project');
+  });
+
+  it('strips Codex chat-margin from a push so pushBlockParser fires', () => {
+    const input = [
+      '• $ git push origin main',
+      '  Enumerating objects: 9, done.',
+      '  Writing objects: 100% (6/6), 1.42 KiB | 1.42 MiB/s, done.',
+      '  Total 6 (delta 3), reused 0 (delta 0), pack-reused 0',
+      '  remote: Resolving deltas: 100% (3/3), completed with 3 local objects.',
+      '  To github.com:example/project.git',
+      '     b4e8f30..d19a7bc  main -> main',
+    ];
+    const out = filterCodexChrome(input);
+    expect(out).toContain('To github.com:example/project.git');
+    // Body line preserves its single-leading-space (PUSH_UPDATE_RE has `^\s*`)
+    expect(out).toContain('   b4e8f30..d19a7bc  main -> main');
+  });
+
+  it('strips Codex chat-margin from a commit so commitBlockParser fires', () => {
+    const input = [
+      '• $ git commit -m "Improve API client validation"',
+      '  [main d19a7bc] Improve API client validation',
+      '   3 files changed, 25 insertions(+), 5 deletions(-)',
+      '   create mode 100644 tests/client.test.ts',
+    ];
+    const out = filterCodexChrome(input);
+    // Commit header at col 0 for COMMIT_HEADER_RE.
+    expect(out).toContain('[main d19a7bc] Improve API client validation');
+    // Stats / create-mode allow ^\s*, so their single leading space survives.
+    expect(out).toContain(' 3 files changed, 25 insertions(+), 5 deletions(-)');
+    expect(out).toContain(' create mode 100644 tests/client.test.ts');
+  });
+
   it('leaves diff alone when markers are already at col 0 (no dedent regression)', () => {
     const input = [
       'diff --git a/app.py b/app.py',

@@ -141,7 +141,7 @@ export function filterCodexChrome(lines: string[]): string[] {
   // own structured-block guard nor the backend's diffBlockParser
   // recognize it (both use `^@@`-anchored regexes). Dedenting first
   // makes both fire correctly.
-  const dedented = dedentCodexDiffLines(out);
+  const dedented = dedentCodexStructuredLines(out);
 
   // Post-pass: wrap Codex-emitted code blocks in Markdown ``` fences.
   // Codex's TUI does syntax-highlighted code with no explicit fence
@@ -217,24 +217,31 @@ const PR_URL_RE      = /https?:\/\/github\.com\/[\w.-]+\/[\w.-]+\/pull\/\d+/;
 const PR_BANNER_RE   = /^\s*[✓✔]?\s*Pull request created\s*$/i;
 
 /**
- * Codex's TUI left-pads chat content with 2 spaces, so structural
- * markers like `diff --git`, `@@`, `---`, `+++` arrive at column 2
- * instead of column 0. The backend's `diffBlockParser` and our own
- * `isStructuredBlock` guard both anchor those markers with `^`, so
- * the indented form silently fails to parse — the diff falls through
- * to `filePathLinkifier`, which mangles `a/path` and `b/path` into
- * READ pills, and the body gets wrapped as a ```typescript``` block.
+ * Codex's TUI left-pads chat content with 2 spaces, so every
+ * structural marker the backend recognizes — diff (`diff --git`,
+ * `@@`, `---`, `+++`), merge (`Updating <hash>`, `Fast-forward`,
+ * `Merge made by`), push (`To <repo>`), commit (`[<branch> <hash>]`),
+ * fetch (`From <repo>`) — arrives at column 2 instead of column 0.
+ * The backend's parsers all anchor those markers with `^`, so the
+ * indented form silently fails to parse: the content falls through
+ * to `filePathLinkifier`, which mangles every `a/path`, `b/path`,
+ * or `src/foo.ts` into a READ pill, breaking the structured render.
  *
- * Detect the margin from the first marker we find with a numeric
- * leading-whitespace width, then dedent every line by that amount.
- * Relative indent inside the diff body is preserved (a context line
- * with ` ` + code-indent stays distinguishable from `+` / `-` body
- * lines). No-op when no marker has leading whitespace.
+ * Detect the chat margin from any marker line, then dedent every
+ * line by that amount. Relative indent inside the body is preserved
+ * (diff context-space, `+`/`-` markers, code indent). No-op when no
+ * marker has leading whitespace (markers already at col 0).
  */
-function dedentCodexDiffLines(lines: string[]): string[] {
+function dedentCodexStructuredLines(lines: string[]): string[] {
+  // Markers grouped by structured-block kind. Each alternative is a
+  // unique-enough head fragment to identify the block from one line.
+  // Kept conservative: false positives just leave the line alone.
+  const MARKER_RE =
+    /^( +)(?:diff --git |@@ |--- |\+\+\+ |Updating [0-9a-f]|Fast-forward|Merge made by |To (?:https?:\/\/|git@|github\.com|[\w.-]+[:/])|From (?:https?:\/\/|git@|github\.com|[\w.-]+[:/])|\[[\w./@-]+\s+[0-9a-f]{7,40}\])/;
+
   let margin = -1;
   for (const line of lines) {
-    const m = line.match(/^( +)(?:diff --git |@@ |--- |\+\+\+ )/);
+    const m = line.match(MARKER_RE);
     if (m) {
       const w = m[1].length;
       if (margin === -1 || w < margin) margin = w;
