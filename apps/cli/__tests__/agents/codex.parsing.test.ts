@@ -213,6 +213,95 @@ describe('wrapCodexCodeBlocks', () => {
     expect(out[out.length - 1]).toBe('Eso es todo.');
   });
 
+  // ─── Structured-block guards: DO NOT wrap diffs/commits/PRs/pushes/merges ─
+
+  it('does NOT wrap a unified diff in ``` fences (diffBlockParser must see it)', () => {
+    const input = [
+      'Aquí el diff:',
+      'diff --git a/app.py b/app.py',
+      'index 4f2a91c..9c8e7b1 100644',
+      '--- a/app.py',
+      '+++ b/app.py',
+      '@@ -1,10 +1,18 @@',
+      ' def saludar(nombre):',
+      '-    return "Hola " + nombre',
+      '+    return f"Hola, {nombre}!"',
+      ' def sumar(a, b):',
+      '     return a + b',
+    ];
+    const out = wrapCodexCodeBlocks(input);
+    expect(out.some(l => l.startsWith('```'))).toBe(false);
+    // Body preserved verbatim so diffBlockParser can pick it up.
+    expect(out).toEqual(input);
+  });
+
+  it('does NOT wrap a hunk-only diff (no `diff --git` header)', () => {
+    const input = [
+      '@@ -1,3 +1,4 @@',
+      ' def x():',
+      '-    return 1',
+      '+    return 2',
+      '+    # comment',
+    ];
+    expect(wrapCodexCodeBlocks(input)).toEqual(input);
+  });
+
+  it('does NOT wrap a commit header + stats block', () => {
+    const input = [
+      '[main abc1234] feat(api): add user endpoint',
+      ' 3 files changed, 50 insertions(+), 2 deletions(-)',
+      ' create mode 100644 src/users.ts',
+    ];
+    expect(wrapCodexCodeBlocks(input)).toEqual(input);
+  });
+
+  it('does NOT wrap a push output block', () => {
+    const input = [
+      'To https://github.com/edgar-durand/codeagent-mobile.git',
+      '   abc1234..def5678  main -> main',
+    ];
+    expect(wrapCodexCodeBlocks(input)).toEqual(input);
+  });
+
+  it('does NOT wrap a "new branch" push block', () => {
+    const input = [
+      'To https://github.com/edgar-durand/codeagent-mobile.git',
+      ' * [new branch]      feature/foo -> feature/foo',
+    ];
+    expect(wrapCodexCodeBlocks(input)).toEqual(input);
+  });
+
+  it('does NOT wrap a merge block', () => {
+    const input = [
+      'Updating abc1234..def5678',
+      'Fast-forward',
+      ' src/foo.ts | 10 +++++++---',
+      ' 1 file changed, 7 insertions(+), 3 deletions(-)',
+    ];
+    expect(wrapCodexCodeBlocks(input)).toEqual(input);
+  });
+
+  it('does NOT wrap a `gh pr view` block', () => {
+    const input = [
+      'title: Add user endpoint',
+      'state: OPEN',
+      'number: 42',
+      'url: https://github.com/edgar-durand/codeagent-mobile/pull/42',
+      'additions: 50',
+      'deletions: 2',
+    ];
+    expect(wrapCodexCodeBlocks(input)).toEqual(input);
+  });
+
+  it('does NOT wrap content with a pull-request URL', () => {
+    const input = [
+      'Created PR:',
+      'https://github.com/edgar-durand/codeagent-mobile/pull/100',
+      'PR is open.',
+    ];
+    expect(wrapCodexCodeBlocks(input)).toEqual(input);
+  });
+
   it('handles two separate code blocks in the same reply', () => {
     const input = [
       'public class A { static int x = 1; static int y = 2; }',

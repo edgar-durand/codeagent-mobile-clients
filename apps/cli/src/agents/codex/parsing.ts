@@ -183,6 +183,62 @@ export function filterCodexChrome(lines: string[]): string[] {
 const CODE_CHAR_RE = /[;{}]|=>|^\s*(?:import|public|private|static|class|function|interface|type|const|let|var|def|return|if|else|for|while)\b/;
 
 /**
+ * Markers that prove a line is part of a structured block the backend
+ * already parses ahead of `codeBlockParser` (diff, commit, push, PR,
+ * merge). If a candidate "code run" hits any of these, we must NOT
+ * wrap it in ``` fences — the codeBlockParser would consume the
+ * content and pre-empt the specialized renderer. Mirrors the regexes
+ * in apps/api/src/lib/contentParsers/{gitBlockParser,diffBlockParser}.ts;
+ * keep in sync if those parsers add new shapes.
+ */
+const DIFF_HUNK_RE   = /^@@\s+-\d+(?:,\d+)?\s+\+\d+(?:,\d+)?\s+@@/;
+const DIFF_GIT_RE    = /^diff\s+--git\s+/;
+const DIFF_OLD_RE    = /^---\s+(?:a\/)?\S/;
+const DIFF_NEW_RE    = /^\+\+\+\s+(?:b\/)?\S/;
+const COMMIT_HEAD_RE = /^\[[\w./@-]+\s+[0-9a-f]{7,40}\]\s+/;
+const COMMIT_STATS_RE= /\d+\s+files?\s+changed/;
+const PUSH_TO_RE     = /^To\s+(?:https?:\/\/|git@)/;
+const PUSH_NEW_RE    = /\[new branch\]\s+\S+\s*->\s*\S+/;
+const PUSH_UPDATE_RE = /^\s*[0-9a-f]{7,40}\.\.[0-9a-f]{7,40}\s+\S+\s*->\s*\S+/;
+const MERGE_UPD_RE   = /^Updating\s+[0-9a-f]{7,40}\.\.[0-9a-f]{7,40}/;
+const MERGE_FF_RE    = /^Fast-forward\s*$/;
+const PR_TITLE_RE    = /^title:\s+\S/;
+const PR_STATE_RE    = /^state:\s+(?:OPEN|CLOSED|MERGED|DRAFT)/i;
+const PR_URL_RE      = /https?:\/\/github\.com\/[\w.-]+\/[\w.-]+\/pull\/\d+/;
+const PR_BANNER_RE   = /^\s*[✓✔]?\s*Pull request created\s*$/i;
+
+/**
+ * True when the candidate run looks like a structured-block shape the
+ * backend's specialized parsers handle (diff / commit / PR / push /
+ * merge). Wrapping such content in ``` fences would let the
+ * codeBlockParser consume it first and pre-empt the specialized
+ * renderer (mobile would render the diff as Python code, etc).
+ */
+function isStructuredBlock(block: string[]): boolean {
+  // Unified diff — hunk header is the strongest single signal.
+  if (block.some(l => DIFF_HUNK_RE.test(l))) return true;
+  // Git diff header + file markers (`diff --git` alone or `---` + `+++`).
+  if (block.some(l => DIFF_GIT_RE.test(l))) return true;
+  if (block.some(l => DIFF_OLD_RE.test(l)) && block.some(l => DIFF_NEW_RE.test(l))) return true;
+  // Commit — header `[branch hash] subject` or the X-files-changed stats.
+  if (block.some(l => COMMIT_HEAD_RE.test(l))) return true;
+  if (block.some(l => COMMIT_STATS_RE.test(l))) return true;
+  // Push — `To <remote>` + the new-branch / update lines.
+  if (block.some(l => PUSH_TO_RE.test(l))) return true;
+  if (block.some(l => PUSH_NEW_RE.test(l))) return true;
+  if (block.some(l => PUSH_UPDATE_RE.test(l))) return true;
+  // Merge.
+  if (block.some(l => MERGE_UPD_RE.test(l))) return true;
+  if (block.some(l => MERGE_FF_RE.test(l))) return true;
+  // Pull request — `gh pr view` field block, or a pull-request URL, or
+  // the "Pull request created" banner.
+  if (block.some(l => PR_TITLE_RE.test(l)) && block.some(l => PR_STATE_RE.test(l))) return true;
+  if (block.some(l => PR_URL_RE.test(l))) return true;
+  if (block.some(l => PR_BANNER_RE.test(l))) return true;
+  return false;
+}
+
+/**
  * Heuristic language inference from the first ~10 lines of a code
  * block. Returns the best-guess Markdown language tag or '' (no tag,
  * still renders as code).
@@ -216,6 +272,21 @@ function inferLanguage(block: string[]): string {
  * Pure function — does not mutate the input array.
  */
 export function wrapCodexCodeBlocks(lines: string[]): string[] {
+  // Whole-input guard: if the message contains a structured block
+  // (diff, commit, push, merge, PR), skip wrapping entirely.
+  // Structured-block markers usually appear in HEADERS *outside* the
+  // code-shaped run (e.g. `@@ -1,10 +1,18 @@` sits BEFORE the
+  // `def saludar(nombre):` line that triggers our run-start), so a
+  // body-only guard misses them. The trade-off: a message that mixes
+  // a prose paragraph + a real code block + a separate diff would
+  // lose code-block wrapping. That combination is exceedingly rare
+  // and accepting the trade-off is far better than the alternative
+  // (mobile rendering a diff as a Python code block, as Edgar
+  // reported on 2026-05-14).
+  if (isStructuredBlock(lines)) {
+    return lines;
+  }
+
   const result: string[] = [];
   let i = 0;
   while (i < lines.length) {
@@ -261,11 +332,22 @@ export function wrapCodexCodeBlocks(lines: string[]): string[] {
       break;
     }
     const runLen = end - start + 1;
+    // Bail-out: if the candidate run is actually a diff / commit /
+    // push / PR / merge block, leave it as plain lines — the
+    // backend's specialized parsers (registered ahead of
+    // codeBlockParser) will turn it into the right component.
+    // Wrapping it in ``` fences here would let codeBlockParser
+    // eat it first and the diff/commit/etc. renderer never fires.
+    const body = lines.slice(start, end + 1);
+    if (isStructuredBlock(body)) {
+      for (const l of body) result.push(l);
+      i = end + 1;
+      continue;
+    }
     // Require at least 3 code-shaped lines to commit. Isolated
     // matches (one-liner with `{` in prose) stay as text.
-    const codeShapedCount = lines.slice(start, end + 1).filter(l => CODE_CHAR_RE.test(l)).length;
+    const codeShapedCount = body.filter(l => CODE_CHAR_RE.test(l)).length;
     if (codeShapedCount >= 3) {
-      const body = lines.slice(start, end + 1);
       const lang = inferLanguage(body);
       result.push('```' + lang);
       for (const l of body) result.push(l);
