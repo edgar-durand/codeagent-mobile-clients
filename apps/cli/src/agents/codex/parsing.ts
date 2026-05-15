@@ -1,4 +1,4 @@
-import type { ChromeStep } from '@codeagent/shared';
+import type { ChromeStep, SelectPrompt } from '@codeagent/shared';
 import { log } from '../../services/logger';
 
 /**
@@ -48,7 +48,12 @@ const BULLET_CHARS = '•·‧∙⋅';
 const CODEX_AGENT_REPLY_RE = new RegExp(`^[${BULLET_CHARS}]\\s`, 'u');
 const STRIP_BULLET_RE = new RegExp(`^(\\s*)[${BULLET_CHARS}]\\s`, 'u');
 // Codex user echo (bare, not boxed): `›` (U+203A) or `>`.
-const CODEX_USER_ECHO_RE = /^[›>]\s+\S/u;
+// Negative lookahead skips `> 1. text` — those are the cursored option in
+// an interactive numbered selector and must be kept so the line reaches
+// `detectCodexSelector` (selector detection runs on lines BEFORE this
+// filter, but echo-stripping the cursored option ALSO drops it from the
+// fallback raw-text render when the selector trailer isn't present yet).
+const CODEX_USER_ECHO_RE = /^[›>]\s+(?!\d+\.\s)\S/u;
 const TIP_RE = /^\s*Tip:\s/i;
 const LEARN_MORE_RE = /^\s*Learn more:\s/i;
 // Codex bottom status footer — always rendered at the bottom of the
@@ -430,11 +435,90 @@ export function parseCodexChrome(_line: string): ChromeStep | null {
 }
 
 /**
- * Codex doesn't currently expose Claude-style numbered selectors via
- * the TUI. Slash commands like /model open a dedicated sub-screen that
- * can't be introspected by glyph alone. Return null until a concrete
- * selector pattern emerges from real Codex sessions.
+ * Detect Codex's numbered-choice prompt (e.g. the "Would you like to run
+ * the following command?" shell-approval flow). Codex renders it as:
+ *
+ *   Would you like to run the following command?
+ *
+ *   Reason: …
+ *
+ *   $ npm run build:check
+ *
+ *   > 1. Yes, proceed (y)
+ *     2. Yes, and don't ask again for commands that start with `…` (p)
+ *     3. No, and tell Codex what to do differently (esc)
+ *
+ *   Press enter to confirm or esc to cancel
+ *
+ * The cursored option carries a leading `>` (Codex uses ASCII `>`, not
+ * Claude's `❯` glyph). The "Press enter to confirm or esc to cancel"
+ * trailer is the strongest disambiguator from narrative numbered lists
+ * (which Codex emits often inside plans).
+ *
+ * Note: only emits a selector if the trailer is present. Codex also
+ * uses numbered lists inside ordinary agent replies (e.g. "Plan: 1. … 2.
+ * … 3. …") — without the trailer we treat those as plain text, matching
+ * the user's intent of tapping a button only when one is actually
+ * actionable.
  */
-export function detectCodexSelector(_lines: string[]): null {
-  return null;
+export function detectCodexSelector(lines: string[]): SelectPrompt | null {
+  // Strong disambiguator: Codex consistently emits this footer for
+  // shell-approval and similar choice prompts. Absent the footer, any
+  // numbered lines are narrative content, not interactive options.
+  const hasConfirmTrailer = lines.some(l =>
+    /press\s+enter\s+to\s+confirm/i.test(l),
+  );
+  if (!hasConfirmTrailer) return null;
+
+  let optionStartIdx = -1;
+  for (let i = 0; i < lines.length; i++) {
+    if (/^\s*(?:>\s+)?\d+\.\s/.test(lines[i])) {
+      optionStartIdx = i;
+      break;
+    }
+  }
+  if (optionStartIdx === -1) return null;
+
+  // Question: every non-empty line before the first option, excluding
+  // bare cursor lines (defensive — Codex shouldn't emit them above the
+  // options, but if a future build does we don't want them in the
+  // question text).
+  const questionParts: string[] = [];
+  for (let i = 0; i < optionStartIdx; i++) {
+    const t = lines[i].trim();
+    if (!t) continue;
+    if (/^[>›]\s*$/.test(t)) continue;
+    questionParts.push(t);
+  }
+  const question = questionParts.join('\n').trim();
+
+  const optionLabels = new Map<number, string>();
+  let cursorIndex = 0;
+  let hasCursor = false;
+
+  for (let i = optionStartIdx; i < lines.length; i++) {
+    const t = lines[i].trim();
+    if (!t) continue;
+    if (/^press\s+enter\s+to\s+confirm/i.test(t)) break;
+    const m = t.match(/^(>\s+)?(\d+)\.\s+(.+)/);
+    if (!m) continue;
+    const num = parseInt(m[2], 10);
+    if (!optionLabels.has(num)) {
+      optionLabels.set(num, m[3].trim());
+      if (m[1]) {
+        cursorIndex = optionLabels.size - 1;
+        hasCursor = true;
+      }
+    }
+  }
+
+  const keys = [...optionLabels.keys()].sort((a, b) => a - b);
+  if (keys.length < 2 || keys[0] !== 1) return null;
+
+  return {
+    question,
+    options: keys.map(k => optionLabels.get(k)!),
+    optionDescriptions: keys.map(() => ''),
+    currentIndex: hasCursor ? cursorIndex : 0,
+  };
 }

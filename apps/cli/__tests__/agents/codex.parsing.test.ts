@@ -113,10 +113,95 @@ describe('codex/parsing parseCodexChrome', () => {
 });
 
 describe('codex/parsing detectCodexSelector', () => {
-  it('always returns null (Codex has no numbered selector TUI)', () => {
-    const lines = ['❯ 1. Option A', '  2. Option B'];
+  it('returns null without the "Press enter to confirm" trailer (narrative numbered list)', () => {
+    // Plan-shaped numbered list in a regular agent reply must NOT be
+    // detected as a selector.
+    const lines = [
+      'Plan to fix the bug:',
+      '',
+      '  1. Reproduce locally',
+      '  2. Add a failing test',
+      '  3. Implement the fix',
+    ];
     expect(detectCodexSelector(lines)).toBeNull();
+  });
+
+  it('returns null for empty input', () => {
     expect(detectCodexSelector([])).toBeNull();
+  });
+
+  it('detects the shell-approval prompt and extracts question + 3 options + cursor index', () => {
+    const lines = [
+      'Would you like to run the following command?',
+      '',
+      'Reason: Do you want to run the landing build/prerender check outside the sandbox so tsx can create its temporary IPC pipe?',
+      '',
+      '$ npm run build:check',
+      '',
+      '> 1. Yes, proceed (y)',
+      '  2. Yes, and don\'t ask again for commands that start with `npm run build:check` (p)',
+      '  3. No, and tell Codex what to do differently (esc)',
+      '',
+      'Press enter to confirm or esc to cancel',
+    ];
+    const sel = detectCodexSelector(lines);
+    expect(sel).not.toBeNull();
+    expect(sel?.question).toContain('Would you like to run the following command?');
+    expect(sel?.question).toContain('Reason:');
+    expect(sel?.question).toContain('npm run build:check');
+    expect(sel?.options).toEqual([
+      'Yes, proceed (y)',
+      'Yes, and don\'t ask again for commands that start with `npm run build:check` (p)',
+      'No, and tell Codex what to do differently (esc)',
+    ]);
+    expect(sel?.currentIndex).toBe(0);
+  });
+
+  it('tracks cursor index when the cursor is not on the first option', () => {
+    const lines = [
+      'Pick one',
+      '',
+      '  1. Alpha',
+      '> 2. Beta',
+      '  3. Gamma',
+      '',
+      'Press enter to confirm or esc to cancel',
+    ];
+    const sel = detectCodexSelector(lines);
+    expect(sel?.currentIndex).toBe(1);
+  });
+
+  it('returns null when fewer than 2 options match', () => {
+    const lines = [
+      'Only one option?',
+      '> 1. Yes',
+      'Press enter to confirm or esc to cancel',
+    ];
+    expect(detectCodexSelector(lines)).toBeNull();
+  });
+});
+
+describe('codex/parsing filterCodexChrome — selector-cursor preservation', () => {
+  it('keeps `> 1. text` (cursored numbered option) so detectCodexSelector can see it', () => {
+    // Regression: the user-echo filter previously matched any `> token`
+    // line, eating the first option of a Codex approval prompt and
+    // leaving the mobile renderer with only options 2 and 3.
+    const lines = [
+      '> 1. Yes, proceed (y)',
+      '  2. Yes, and don\'t ask again (p)',
+      '  3. No, and tell Codex what to do differently (esc)',
+    ];
+    const out = filterCodexChrome(lines);
+    expect(out).toContain('> 1. Yes, proceed (y)');
+    expect(out).toContain('  2. Yes, and don\'t ask again (p)');
+    expect(out).toContain('  3. No, and tell Codex what to do differently (esc)');
+  });
+
+  it('still drops bare `> text` user echoes (the original filter intent)', () => {
+    const lines = ['> hola que tal', '• reply'];
+    const out = filterCodexChrome(lines);
+    expect(out.find(l => /^>\s+hola/.test(l))).toBeUndefined();
+    expect(out).toContain('reply');
   });
 });
 
