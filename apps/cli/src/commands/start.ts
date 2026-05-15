@@ -1,6 +1,6 @@
 import pc from 'picocolors';
-import { AGENT_REGISTRY } from '@codeagent/shared';
-import { getActiveSession, ensurePluginId } from '../config';
+import { AGENT_REGISTRY, type AgentId } from '@codeagent/shared';
+import { getActiveSession, getActiveSessionForAgent, ensurePluginId } from '../config';
 import { showIntro, showInfo } from '../ui/banner';
 import { CommandRelayService } from '../services/command-relay.service';
 import { AgentService } from '../services/agent.service';
@@ -17,13 +17,27 @@ import { dispatchCommand, type HandlerContext } from './start/handlers';
  * of behaviour beyond wiring lives in a sibling module under
  * `start/` so this file stays a readable orchestrator.
  */
-export async function start(): Promise<void> {
+export async function start(requestedAgent?: AgentId): Promise<void> {
   showIntro();
 
-  const session = getActiveSession();
+  // When the user runs `codeam <agent>`, restore the most-recently-paired
+  // session for THAT agent — not whatever session was last promoted to the
+  // global activeSessionId pointer (which is shared across terminals and
+  // gets clobbered every time any terminal pairs a new session).
+  const session = requestedAgent
+    ? getActiveSessionForAgent(requestedAgent)
+    : getActiveSession();
   if (!session) {
-    console.log(`  ${pc.dim('No paired session found.')}`);
-    console.log(`  ${pc.dim(`Run ${pc.white('codeam pair')} to connect your mobile app.`)}\n`);
+    if (requestedAgent) {
+      const displayName = AGENT_REGISTRY[requestedAgent]?.displayName ?? requestedAgent;
+      console.log(`  ${pc.dim(`No paired ${displayName} session found.`)}`);
+      console.log(
+        `  ${pc.dim(`Run ${pc.white('codeam pair')} from a ${displayName} setup to connect your mobile app.`)}\n`,
+      );
+    } else {
+      console.log(`  ${pc.dim('No paired session found.')}`);
+      console.log(`  ${pc.dim(`Run ${pc.white('codeam pair')} to connect your mobile app.`)}\n`);
+    }
     process.exit(0);
   }
 

@@ -69,6 +69,31 @@ describe('makeConfig', () => {
     expect(cfg.getConfig().sessions).toEqual([]);
   });
 
+  it('getActiveSessionForAgent returns the most-recently-paired session of that agent', () => {
+    // Pair (in order): claude s1 → codex s2 → claude s3. Globally active is now s3.
+    // But asking for codex should still return s2, NOT s3.
+    cfg.addSession({ id: 's1', userName: 'A', userEmail: 'a@a.com', plan: 'FREE', pairedAt: 1000, agent: 'claude' });
+    cfg.addSession({ id: 's2', userName: 'B', userEmail: 'b@b.com', plan: 'PRO', pairedAt: 2000, agent: 'codex' });
+    cfg.addSession({ id: 's3', userName: 'C', userEmail: 'c@c.com', plan: 'PRO', pairedAt: 3000, agent: 'claude' });
+    expect(cfg.getConfig().activeSessionId).toBe('s3');
+    expect(cfg.getActiveSessionForAgent('codex')?.id).toBe('s2');
+    expect(cfg.getActiveSessionForAgent('claude')?.id).toBe('s3');
+  });
+
+  it('getActiveSessionForAgent returns null when no session matches the requested agent', () => {
+    cfg.addSession({ id: 's1', userName: 'A', userEmail: 'a@a.com', plan: 'FREE', pairedAt: 1000, agent: 'claude' });
+    expect(cfg.getActiveSessionForAgent('codex')).toBeNull();
+  });
+
+  it('getActiveSessionForAgent does NOT mutate activeSessionId', () => {
+    cfg.addSession({ id: 's1', userName: 'A', userEmail: 'a@a.com', plan: 'FREE', pairedAt: 1000, agent: 'claude' });
+    cfg.addSession({ id: 's2', userName: 'B', userEmail: 'b@b.com', plan: 'PRO', pairedAt: 2000, agent: 'codex' });
+    cfg.addSession({ id: 's3', userName: 'C', userEmail: 'c@c.com', plan: 'PRO', pairedAt: 3000, agent: 'claude' });
+    // active is s3 (claude). Asking for codex must not promote s2.
+    cfg.getActiveSessionForAgent('codex');
+    expect(cfg.getConfig().activeSessionId).toBe('s3');
+  });
+
   it('getActiveSession heals a stale activeSessionId that points to nonexistent session', () => {
     // Manually write a config where activeSessionId points to a non-existent session
     const fs = require('fs');

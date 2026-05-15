@@ -9,6 +9,7 @@ import { deployList, deployStop } from './commands/deploy-manage';
 import { version } from './commands/version';
 import { help } from './commands/help';
 import { checkForUpdates } from './lib/updateNotifier';
+import { isKnownAgentId } from '@codeagent/shared';
 
 const [,, command, ...args] = process.argv;
 
@@ -41,7 +42,15 @@ async function main(): Promise<void> {
       if (args[0] === 'ls' || args[0] === 'list') return deployList();
       if (args[0] === 'stop' || args[0] === 'remove') return deployStop();
       return deploy(args);
-    default:         return start();
+    default:
+      // `codeam <agent>` (e.g. `codeam codex`) restores the most-recently-
+      // paired session for THAT agent — robust against another terminal
+      // having just paired a different agent and promoted its session to
+      // the globally-active pointer.
+      if (typeof command === 'string' && isKnownAgentId(command)) {
+        return start(command);
+      }
+      return start();
   }
 }
 

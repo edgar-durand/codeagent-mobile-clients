@@ -112,6 +112,26 @@ export function makeConfig(baseDir?: string) {
     return session;
   }
 
+  /**
+   * Returns the most-recently-paired session for the given agent, regardless
+   * of which session is globally "active". Used by `codeam <agent>` so a user
+   * explicitly requesting an agent always lands on a session paired to that
+   * agent — even when another terminal has just paired a different agent and
+   * promoted its session to globally active.
+   *
+   * Does NOT mutate `activeSessionId` — keeping that field's semantics as
+   * "last paired" rather than "last used".
+   */
+  function getActiveSessionForAgent(agent: AgentId): SavedSession | null {
+    const c = load();
+    const matches = c.sessions.filter(s => s.agent === agent);
+    if (matches.length === 0) return null;
+    // sessions[] is maintained newest-first by addSession (unshift), but be
+    // defensive in case future edits change that — sort by pairedAt desc.
+    matches.sort((a, b) => b.pairedAt - a.pairedAt);
+    return matches[0];
+  }
+
   function clearAll(): void {
     try {
       fs.unlinkSync(file);
@@ -128,10 +148,10 @@ export function makeConfig(baseDir?: string) {
     return load();
   }
 
-  return { getConfig, ensurePluginId, addSession, removeSession, setActiveSession, getActiveSession, clearAll, saveCliConfig, loadCliConfig };
+  return { getConfig, ensurePluginId, addSession, removeSession, setActiveSession, getActiveSession, getActiveSessionForAgent, clearAll, saveCliConfig, loadCliConfig };
 }
 
 // Default instance — uses ~/.codeam/config.json
 const _default = makeConfig();
-export const { getConfig, ensurePluginId, addSession, removeSession, setActiveSession, getActiveSession, clearAll, saveCliConfig, loadCliConfig } =
+export const { getConfig, ensurePluginId, addSession, removeSession, setActiveSession, getActiveSession, getActiveSessionForAgent, clearAll, saveCliConfig, loadCliConfig } =
   _default;
