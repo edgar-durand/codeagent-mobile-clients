@@ -43,15 +43,18 @@ That's it. Open the [CodeAgent Mobile app](https://codeagent-mobile.com), enter 
 
 | Command | What it does |
 |---|---|
-| `codeam` | Start Claude Code in the current directory, with mobile control |
-| `codeam codex` | Start OpenAI Codex in the current directory, with mobile control |
-| `codeam pair` | Pair a new mobile device (6-digit code or QR) |
+| `codeam` | Start the active agent in the current directory, with mobile control |
+| `codeam <agent>` | Start a specific agent — `codeam claude`, `codeam codex`, … |
+| `codeam pair` | Pair a new mobile device (6-character code or QR, interactive agent picker) |
+| `codeam pair --agent <id>` | Pair non-interactively for a specific agent (`claude`, `codex`, …) — useful in scripts |
 | `codeam sessions` | List all paired devices |
+| `codeam sessions switch` | Choose which paired session the next `codeam` invocation will use |
+| `codeam sessions delete <session-id>` | Forget a specific paired session (leaves the others intact) |
 | `codeam status` | Show connection status |
 | `codeam logout` | Remove all paired sessions |
 | `codeam deploy` | Provision a cloud workspace (GitHub Codespaces) and pair it to your phone |
-| `codeam deploy ls` | List the cloud workspaces you've deployed (and which still have a session running) |
-| `codeam deploy stop` | Pick a deployed workspace and stop its codeam session (and optionally the workspace itself) |
+| `codeam deploy ls` (alias `list`) | List the cloud workspaces you've deployed (and which still have a session running) |
+| `codeam deploy stop` (alias `remove`) | Pick a deployed workspace and stop its codeam session (and optionally the workspace itself) |
 | `codeam --version`, `-v` | Print the installed CLI version |
 | `codeam --help`, `-h` | Show usage and the full command list |
 
@@ -106,7 +109,25 @@ Adding more cloud backends (Gitpod, Coder, your own SSH host, …) is a single n
 
 | Variable | Default | Effect |
 |---|---|---|
-| `CODEAM_DISABLE_UPDATE_CHECK` | unset | Set to `1` to suppress the "update available" banner. The check also auto-skips on non-TTY stdout, in CI, and during tests. |
+| `CODEAM_API_URL` | `https://codeagent-mobile-api.vercel.app` | Override the backend relay URL. Useful for hitting a staging environment or self-hosted backend. |
+| `CODEAM_DISABLE_UPDATE_CHECK` | unset | Set to `1` to suppress the "update available" banner. The check also auto-skips on non-TTY stdout, when `CI=true`, and during tests. |
+| `CODEAM_AUTO_TOKEN` | unset | One-shot pairing token consumed by `codeam pair-auto`. Used by the `codeam deploy` bootstrap; see *Advanced / scripted pairing* below. |
+
+---
+
+## Advanced / scripted pairing
+
+For automation (CI, Codespaces bootstraps, container entry-points) `codeam` ships a non-interactive pairing command:
+
+```bash
+codeam pair-auto --token=<one-shot-pairing-token>
+# or
+codeam pair-auto --token-file=/path/to/token
+# or pass the token via env:
+CODEAM_AUTO_TOKEN=<token> codeam pair-auto
+```
+
+This is the same path `codeam deploy` uses inside a freshly-provisioned Codespace to pair the cloud session to your phone with zero interactive prompts. End users on a laptop should keep using the interactive `codeam pair`.
 
 ---
 

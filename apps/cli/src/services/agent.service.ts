@@ -165,8 +165,17 @@ export class AgentService {
    * the pre-batch (empty/previous) state → Enter submits nothing and the text
    * stays visible-but-unsubmitted in the input field.
    *
-   * Sending '\r' in a separate write() 50 ms later guarantees it arrives on
+   * Sending '\r' in a separate write() ~50 ms later guarantees it arrives on
    * a fresh event-loop tick, after React has flushed the text into input state.
+   *
+   * The delay scales with line count: Smart Composer outputs are ~500–1500
+   * chars with embedded `\n`s (Task / Context / Steps blocks). Ink's input
+   * field re-flows multi-line content per render and the 50 ms baseline that
+   * worked for single-line prompts isn't enough headroom — the text lands in
+   * the field but `\r` submits stale state and the prompt sits there until
+   * the user hits Enter manually. Adding ~40 ms per extra line (capped at
+   * 300 ms) keeps short prompts snappy while giving multi-line composer
+   * outputs the time they need to settle.
    */
   sendCommand(text: string): void {
     if (!this.strategy) {
@@ -183,7 +192,9 @@ export class AgentService {
     const s = this.strategy;
     log.trace('claude', `sendCommand text=${text.length}B`);
     s.write(text);
-    setTimeout(() => s.write('\r'), 50);
+    const lineCount = text.split('\n').length;
+    const delay = Math.min(300, 50 + (lineCount - 1) * 40);
+    setTimeout(() => s.write('\r'), delay);
   }
 
   /**
