@@ -14,6 +14,17 @@
     <b>Homepage:</b> <a href="https://www.codeagent-mobile.com">https://www.codeagent-mobile.com</a>
 
     <br/><br/>
+    <b>Supported AI Agents:</b>
+    <ul>
+        <li>Claude Code (Anthropic)</li>
+        <li>OpenAI Codex</li>
+        <li>GitHub Copilot Chat</li>
+        <li>JetBrains AI Assistant</li>
+        <li>Windsurf / Cascade (Codeium)</li>
+        <li>Cursor</li>
+    </ul>
+
+    <br/>
     <b>Features:</b>
     <ul>
         <li>Secure device pairing via 6-digit code</li>

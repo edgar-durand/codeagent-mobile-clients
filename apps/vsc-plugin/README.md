@@ -16,6 +16,7 @@ Control your AI coding agents remotely from your mobile device.
 
 - GitHub Copilot Chat
 - Claude Code / Claude Dev (Cline)
+- OpenAI Codex
 - Codeium / Windsurf / Cascade
 - Tabnine
 - Amazon Q
