@@ -5,6 +5,7 @@ import * as https from 'https';
 import * as http from 'http';
 import { z } from 'zod';
 import { getContextWindow, getPricing } from '@codeagent/shared';
+import { vercelBypassHeader } from '../lib/backend-headers';
 import { log } from './logger';
 import { encodeCwd } from '../agents/claude/history';
 import type { RuntimeStrategy } from '../agents/strategy';
@@ -133,6 +134,7 @@ function post(endpoint: string, body: Record<string, unknown>): Promise<boolean>
         headers: {
           'Content-Type': 'application/json',
           'Content-Length': Buffer.byteLength(payload),
+          ...vercelBypassHeader(),
         },
         timeout: 15000,
       },

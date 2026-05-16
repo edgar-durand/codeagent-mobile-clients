@@ -2,6 +2,7 @@ import * as https from 'https';
 import * as http from 'http';
 import * as os from 'os';
 import pkg from '../../package.json';
+import { vercelBypassHeader } from '../lib/backend-headers';
 import { computePollDelay } from '../lib/poll-delay';
 
 const API_BASE = process.env.CODEAM_API_URL ?? 'https://codeagent-mobile-api.vercel.app';
@@ -129,6 +130,7 @@ export async function _postJson(
         headers: {
           'Content-Type': 'application/json',
           'Content-Length': Buffer.byteLength(data),
+          ...vercelBypassHeader(),
         },
         timeout: 10000,
       },
@@ -164,6 +166,7 @@ export async function _getJson(
         port: u.port || (u.protocol === 'https:' ? 443 : 80),
         path: u.pathname + u.search,
         method: 'GET',
+        headers: { ...vercelBypassHeader() },
         timeout: 10000,
       },
       (res) => {

@@ -3,6 +3,7 @@ import * as os from 'os';
 import { randomUUID } from 'crypto';
 import { isKnownAgentId } from '@codeagent/shared';
 import { addSession } from '../config';
+import { vercelBypassHeader } from '../lib/backend-headers';
 import { start } from './start';
 
 /**
@@ -78,7 +79,7 @@ async function claim(token: string, pluginId: string): Promise<ClaimSuccess> {
 
   const res = await fetch(url, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...vercelBypassHeader() },
     body: JSON.stringify(body),
   });
 

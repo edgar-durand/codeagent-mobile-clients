@@ -2,6 +2,7 @@ import * as https from 'https';
 import * as http from 'http';
 import type { AgentMetadata } from '@codeagent/shared';
 import { _postJson, _getJson } from './pairing.service';
+import { vercelBypassHeader } from '../lib/backend-headers';
 import { computePollDelay } from '../lib/poll-delay';
 import { log } from './logger';
 
@@ -120,7 +121,7 @@ export class CommandRelayService {
         port: url.port || (url.protocol === 'https:' ? 443 : 80),
         path: `${url.pathname}${url.search}`,
         method: 'GET',
-        headers: { Accept: 'text/event-stream', 'Cache-Control': 'no-cache' },
+        headers: { Accept: 'text/event-stream', 'Cache-Control': 'no-cache', ...vercelBypassHeader() },
         timeout: 35_000,
       },
       (res) => {
