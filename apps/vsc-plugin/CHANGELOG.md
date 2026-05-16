@@ -4,6 +4,21 @@ All notable changes to the CodeAgent Mobile VS Code extension are documented her
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.13.0] — 2026-05-16
+
+### Added
+
+- **cli:** Forward CODEAM_VERCEL_BYPASS as x-vercel-protection-bypass
+
+### CI
+
+- **deps:** Cap @types/node major in CLI dependabot config
+
+### Chore
+
+- **deps:** Bump gradle-wrapper in /apps/jetbrains-plugin (#32)
+- **deps:** Bump org.jetbrains.intellij.platform (#29)
+
 ## [2.12.17] — 2026-05-16
 
 ### Fixed
