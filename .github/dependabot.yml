@@ -8,6 +8,15 @@ updates:
     labels:
       - dependencies
       - cli
+    ignore:
+      # @types/node tracks the Node.js major it types against. The CLI's
+      # engines.node is ">=18.0.0" and .nvmrc pins 20 for build, so a
+      # major bump (e.g. PR #31's jump to v25) would let TS surface APIs
+      # that don't exist at runtime on end-users' Node 18/20 installs.
+      # Minor/patch updates within the current major remain allowed.
+      - dependency-name: "@types/node"
+        update-types:
+          - version-update:semver-major
 
   - package-ecosystem: npm
     directory: /apps/vsc-plugin
