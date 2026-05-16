@@ -1,5 +1,6 @@
 import * as https from 'https';
 import * as http from 'http';
+import { vercelBypassHeader } from '../../lib/backend-headers';
 import { log } from '../logger';
 
 const API_BASE = process.env.CODEAM_API_URL ?? 'https://codeagent-mobile-api.vercel.app';
@@ -39,6 +40,7 @@ export class ChunkEmitter {
       // too far behind. Bumped to 2.0.0 with the discriminated-
       // chunk + delta-chrome refactor in this release.
       'X-Codeam-Protocol-Version': '2.0.0',
+      ...vercelBypassHeader(),
     };
     if (opts.pluginAuthToken) {
       this.headers['X-Plugin-Auth-Token'] = opts.pluginAuthToken;
