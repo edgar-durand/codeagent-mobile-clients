@@ -5,6 +5,7 @@ import * as os from 'os';
 import { SettingsService } from '../services/settings.service';
 import { FileOpsService } from '../services/file-ops.service';
 import { ProjectOpsService } from '../services/project-ops.service';
+import { TerminalOpsService } from '../services/terminal-ops.service';
 import { PairingService } from '../services/pairing.service';
 import { CommandRelayService, RemoteCommand, CommandListener } from '../services/command-relay.service';
 import { WebSocketService } from '../services/websocket.service';
@@ -581,6 +582,55 @@ export class ControllerPanelProvider implements vscode.WebviewViewProvider, Comm
         }).then((res) => {
           relay.sendResult(command.id, 'completed', res as unknown as Record<string, unknown>);
         });
+        break;
+      }
+      case 'terminal_open': {
+        const p = (command.payload ?? {}) as Record<string, unknown>;
+        // `command.sessionId` is the paired CodeAgent session — same
+        // value `dispatchCommand` already binds to chunk emissions.
+        const r = TerminalOpsService.getInstance().open(command.sessionId, {
+          cols: typeof p.cols === 'number' ? (p.cols as number) : undefined,
+          rows: typeof p.rows === 'number' ? (p.rows as number) : undefined,
+          cwd: typeof p.cwd === 'string' ? (p.cwd as string) : undefined,
+        });
+        if ('error' in r) relay.sendResult(command.id, 'failed', { error: r.error });
+        else relay.sendResult(command.id, 'completed', r as unknown as Record<string, unknown>);
+        break;
+      }
+      case 'terminal_write': {
+        const p = (command.payload ?? {}) as Record<string, unknown>;
+        const ts = p.sessionId as string | undefined;
+        const data = p.data as string | undefined;
+        if (!ts || typeof data !== 'string') {
+          relay.sendResult(command.id, 'failed', { error: 'Missing sessionId or data' });
+          break;
+        }
+        const r = TerminalOpsService.getInstance().write(ts, data);
+        relay.sendResult(command.id, r.ok ? 'completed' : 'failed', r as unknown as Record<string, unknown>);
+        break;
+      }
+      case 'terminal_resize': {
+        const p = (command.payload ?? {}) as Record<string, unknown>;
+        const ts = p.sessionId as string | undefined;
+        const cols = p.cols as number | undefined;
+        const rows = p.rows as number | undefined;
+        if (!ts || typeof cols !== 'number' || typeof rows !== 'number') {
+          relay.sendResult(command.id, 'failed', { error: 'Missing sessionId / cols / rows' });
+          break;
+        }
+        const r = TerminalOpsService.getInstance().resize(ts, cols, rows);
+        relay.sendResult(command.id, r.ok ? 'completed' : 'failed', r as unknown as Record<string, unknown>);
+        break;
+      }
+      case 'terminal_close': {
+        const p = (command.payload ?? {}) as Record<string, unknown>;
+        const ts = p.sessionId as string | undefined;
+        if (!ts) {
+          relay.sendResult(command.id, 'failed', { error: 'Missing sessionId' });
+          break;
+        }
+        const r = TerminalOpsService.getInstance().close(ts);
+        relay.sendResult(command.id, 'completed', r as unknown as Record<string, unknown>);
         break;
       }
       case 'git_status': {

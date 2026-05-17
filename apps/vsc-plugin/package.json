@@ -138,6 +138,7 @@
     "vitest": "^4.1.5"
   },
   "dependencies": {
+    "node-pty": "^1.1.0",
     "ws": "^8.16.0"
   }
 }

@@ -555,6 +555,57 @@ class ControllerToolWindowFactory : ToolWindowFactory {
                             )
                         }
                     }
+                    "terminal_open" -> {
+                        val cols = command.payload.get("cols")?.asInt ?: 80
+                        val rows = command.payload.get("rows")?.asInt ?: 24
+                        val cwd = command.payload.get("cwd")?.asString
+                        relay.sendResult(
+                            command.id,
+                            "completed",
+                            TerminalOpsService.getInstance().open(command.sessionId, cols, rows, cwd),
+                        )
+                    }
+                    "terminal_write" -> {
+                        val ts = command.payload.get("sessionId")?.asString
+                        val data = command.payload.get("data")?.asString
+                        if (ts.isNullOrBlank() || data == null) {
+                            relay.sendResult(command.id, "failed", com.google.gson.JsonObject().apply {
+                                addProperty("error", "Missing sessionId or data")
+                            })
+                        } else {
+                            val r = TerminalOpsService.getInstance().write(ts, data)
+                            val status = if (r.get("ok")?.asBoolean == true) "completed" else "failed"
+                            relay.sendResult(command.id, status, r)
+                        }
+                    }
+                    "terminal_resize" -> {
+                        val ts = command.payload.get("sessionId")?.asString
+                        val cols = command.payload.get("cols")?.asInt
+                        val rows = command.payload.get("rows")?.asInt
+                        if (ts.isNullOrBlank() || cols == null || rows == null) {
+                            relay.sendResult(command.id, "failed", com.google.gson.JsonObject().apply {
+                                addProperty("error", "Missing sessionId / cols / rows")
+                            })
+                        } else {
+                            val r = TerminalOpsService.getInstance().resize(ts, cols, rows)
+                            val status = if (r.get("ok")?.asBoolean == true) "completed" else "failed"
+                            relay.sendResult(command.id, status, r)
+                        }
+                    }
+                    "terminal_close" -> {
+                        val ts = command.payload.get("sessionId")?.asString
+                        if (ts.isNullOrBlank()) {
+                            relay.sendResult(command.id, "failed", com.google.gson.JsonObject().apply {
+                                addProperty("error", "Missing sessionId")
+                            })
+                        } else {
+                            relay.sendResult(
+                                command.id,
+                                "completed",
+                                TerminalOpsService.getInstance().close(ts),
+                            )
+                        }
+                    }
                     "git_status" -> {
                         relay.sendResult(command.id, "completed", ProjectOpsService.getInstance().gitStatus())
                     }
