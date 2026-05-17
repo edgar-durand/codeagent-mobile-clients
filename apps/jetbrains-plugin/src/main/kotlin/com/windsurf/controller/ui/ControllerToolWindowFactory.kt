@@ -20,6 +20,7 @@ import com.windsurf.controller.services.IdeIntegrationService
 import com.windsurf.controller.services.PairingService
 import com.windsurf.controller.services.SettingsService
 import com.windsurf.controller.services.TerminalAgentService
+import com.windsurf.controller.services.TerminalOpsService
 import com.windsurf.controller.services.McpConfigWriterService
 import com.windsurf.controller.services.McpConfigureRequest
 import com.windsurf.controller.services.McpEntry
