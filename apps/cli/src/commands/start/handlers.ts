@@ -27,6 +27,12 @@ import {
   gitResolve,
   searchFiles,
 } from '../../services/project-ops.service';
+import {
+  openTerminal,
+  writeTerminal,
+  resizeTerminal,
+  closeTerminal,
+} from '../../services/terminal-ops.service';
 import { showInfo } from '../../ui/banner';
 import type { KeepAliveContext } from './keep-alive';
 
@@ -294,6 +300,46 @@ const listFiles: CommandHandler = async (ctx, cmd, parsed) => {
   await ctx.relay.sendResult(cmd.id, 'completed', result as unknown as Record<string, unknown>);
 };
 
+const terminalOpenH: CommandHandler = async (ctx, cmd, parsed) => {
+  const r = openTerminal({
+    cols: typeof parsed.cols === 'number' ? parsed.cols : undefined,
+    rows: typeof parsed.rows === 'number' ? parsed.rows : undefined,
+    cwd: typeof parsed.cwd === 'string' ? parsed.cwd : undefined,
+  });
+  if ('error' in r) {
+    await ctx.relay.sendResult(cmd.id, 'failed', { error: r.error });
+    return;
+  }
+  await ctx.relay.sendResult(cmd.id, 'completed', r as unknown as Record<string, unknown>);
+};
+
+const terminalWriteH: CommandHandler = async (ctx, cmd, parsed) => {
+  if (typeof parsed.sessionId !== 'string' || typeof parsed.data !== 'string') {
+    await ctx.relay.sendResult(cmd.id, 'failed', { error: 'Missing sessionId or data' });
+    return;
+  }
+  const r = writeTerminal(parsed.sessionId, parsed.data);
+  await ctx.relay.sendResult(cmd.id, r.ok ? 'completed' : 'failed', r as unknown as Record<string, unknown>);
+};
+
+const terminalResizeH: CommandHandler = async (ctx, cmd, parsed) => {
+  if (typeof parsed.sessionId !== 'string' || typeof parsed.cols !== 'number' || typeof parsed.rows !== 'number') {
+    await ctx.relay.sendResult(cmd.id, 'failed', { error: 'Missing sessionId / cols / rows' });
+    return;
+  }
+  const r = resizeTerminal(parsed.sessionId, parsed.cols, parsed.rows);
+  await ctx.relay.sendResult(cmd.id, r.ok ? 'completed' : 'failed', r as unknown as Record<string, unknown>);
+};
+
+const terminalCloseH: CommandHandler = async (ctx, cmd, parsed) => {
+  if (typeof parsed.sessionId !== 'string') {
+    await ctx.relay.sendResult(cmd.id, 'failed', { error: 'Missing sessionId' });
+    return;
+  }
+  const r = closeTerminal(parsed.sessionId);
+  await ctx.relay.sendResult(cmd.id, 'completed', r as unknown as Record<string, unknown>);
+};
+
 const searchFilesH: CommandHandler = async (ctx, cmd, parsed) => {
   if (!parsed.query || typeof parsed.query !== 'string') {
     await ctx.relay.sendResult(cmd.id, 'failed', { error: 'Missing query' });
@@ -382,6 +428,10 @@ export const handlers: Record<string, CommandHandler> = {
   write_file: writeFile,
   list_files: listFiles,
   search_files: searchFilesH,
+  terminal_open: terminalOpenH,
+  terminal_write: terminalWriteH,
+  terminal_resize: terminalResizeH,
+  terminal_close: terminalCloseH,
   git_status: gitStatusH,
   git_diff: gitDiffH,
   git_diff_staged: gitDiffStagedH,

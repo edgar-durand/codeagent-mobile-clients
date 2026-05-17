@@ -190,6 +190,33 @@ export class OutputService {
     }
   }
 
+  /**
+   * Push a terminal-data chunk for the IDE-integrated terminal
+   * panel. Distinct from chat output: `type: 'terminal_data'`
+   * lets the host filter the SSE stream by terminal session id.
+   * `done: false` because terminal sessions are long-lived — the
+   * `terminal_close` command emits the final chunk separately.
+   */
+  async sendTerminalChunk(terminalSessionId: string, data: string): Promise<void> {
+    await this.emitter.send({
+      type: 'terminal_data',
+      terminalSessionId,
+      data,
+      done: false,
+    });
+  }
+
+  /** Final chunk for a terminal session — fires when the PTY
+   * exits, so the host can update UI (badge "exit 0", etc). */
+  async sendTerminalExit(terminalSessionId: string, exitCode: number): Promise<void> {
+    await this.emitter.send({
+      type: 'terminal_exit',
+      terminalSessionId,
+      exitCode,
+      done: true,
+    });
+  }
+
   private stopPoll(): void {
     if (this.pollTimer) {
       clearInterval(this.pollTimer);

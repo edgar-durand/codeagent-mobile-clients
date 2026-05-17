@@ -58,6 +58,15 @@ export const startCommandSchema = z.object({
   include: z.array(z.string().max(512)).max(64).optional(),
   exclude: z.array(z.string().max(512)).max(64).optional(),
   maxResults: z.number().int().min(1).max(500).optional(),
+  // terminal_open / _write / _resize / _close. `sessionId` is the
+  // opaque uuid returned by `terminal_open` and required by every
+  // subsequent op. `data` carries keystrokes (any UTF-8 string).
+  // `cwd` lets the host pin the spawn directory.
+  sessionId: z.string().min(1).max(128).optional(),
+  data: z.string().max(64 * 1024).optional(),
+  cwd: z.string().max(4096).optional(),
+  cols: z.number().int().min(1).max(500).optional(),
+  rows: z.number().int().min(1).max(200).optional(),
 });
 
 export type StartCommandPayload = z.infer<typeof startCommandSchema>;

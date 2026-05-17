@@ -10,6 +10,7 @@ import { HistoryService } from '../services/history.service';
 import { fetchQuotaUsage } from './start/quota-fetcher';
 import { buildKeepAlive } from './start/keep-alive';
 import { dispatchCommand, type HandlerContext } from './start/handlers';
+import { registerTerminalHandlers } from '../services/terminal-ops.service';
 
 /**
  * Wires the long-running services (PTY ↔ output relay ↔ command
@@ -122,6 +123,19 @@ export async function start(requestedAgent?: AgentId): Promise<void> {
     await dispatchCommand(ctx, cmd);
   }, runtime.meta);
   ctx.relay = relay;
+
+  // Wire the IDE terminal handlers so PTY data + exit events stream
+  // back to the IDE client via the same SSE chunk channel chat uses.
+  // The handler module keeps its own session map; we just forward
+  // the pushes through outputSvc.
+  registerTerminalHandlers({
+    onData: ({ sessionId, data }) => {
+      void outputSvc.sendTerminalChunk(sessionId, data);
+    },
+    onExit: ({ sessionId, exitCode }) => {
+      void outputSvc.sendTerminalExit(sessionId, exitCode);
+    },
+  });
 
   function sigintHandler(): void {
     claude.kill();
