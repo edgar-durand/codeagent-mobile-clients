@@ -48,6 +48,16 @@ export const startCommandSchema = z.object({
   paths: z.array(z.string().max(4096)).optional(),
   side: z.enum(['ours', 'theirs']).optional(),
   limit: z.number().int().min(1).max(500).optional(),
+  // search_files options. `query` is the haystack/needle string,
+  // declared above for list_files. The rest mirror VS Code's
+  // search panel toggles + the @codeam/ide-core SearchOptions
+  // contract.
+  caseSensitive: z.boolean().optional(),
+  wholeWord: z.boolean().optional(),
+  regex: z.boolean().optional(),
+  include: z.array(z.string().max(512)).max(64).optional(),
+  exclude: z.array(z.string().max(512)).max(64).optional(),
+  maxResults: z.number().int().min(1).max(500).optional(),
 });
 
 export type StartCommandPayload = z.infer<typeof startCommandSchema>;

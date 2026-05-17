@@ -199,6 +199,76 @@ class ProjectOpsService {
         return out
     }
 
+    /**
+     * Multi-file content search powered by `git grep`. Mirrors the
+     * CLI and VS Code plugin implementations so the mobile / web
+     * client gets identical results regardless of which IDE the
+     * paired session is hosted in. Returns `{ hits, total, truncated }`
+     * matching the @codeam/ide-core `SearchResult` contract.
+     */
+    fun searchFiles(
+        query: String,
+        caseSensitive: Boolean,
+        wholeWord: Boolean,
+        regex: Boolean,
+        include: List<String>?,
+        exclude: List<String>?,
+        maxResults: Int,
+    ): JsonObject {
+        val out = JsonObject()
+        val hits = JsonArray()
+        if (query.isBlank()) {
+            out.add("hits", hits)
+            out.addProperty("total", 0)
+            out.addProperty("truncated", false)
+            return out
+        }
+        val cap = maxResults.coerceIn(1, MAX_SEARCH_HITS)
+        val args = mutableListOf("grep", "-n", "--column", "-I")
+        if (!caseSensitive) args += "-i"
+        if (wholeWord) args += "-w"
+        if (regex) args += "-E" else args += "-F"
+        args += query
+        if (!include.isNullOrEmpty()) {
+            args += "--"
+            args += include
+        } else if (!exclude.isNullOrEmpty()) {
+            args += "--"
+            args += "."
+        }
+        exclude?.forEach { args += ":!$it" }
+        val r = git(args)
+        if (r.code != 0 && r.code != 1) {
+            out.add("hits", hits)
+            out.addProperty("total", 0)
+            out.addProperty("truncated", false)
+            return out
+        }
+        var truncated = false
+        val regexLine = Regex("^([^ ]+?):(\\d+):(\\d+):(.*)$")
+        for (line in r.stdout.split("\n")) {
+            if (line.isEmpty()) continue
+            if (hits.size() >= cap) {
+                truncated = true
+                break
+            }
+            val m = regexLine.matchEntire(line) ?: continue
+            val path = m.groupValues[1]
+            if (path.isEmpty()) continue
+            val hit = JsonObject()
+            hit.addProperty("path", path)
+            hit.addProperty("line", m.groupValues[2].toInt())
+            hit.addProperty("column", m.groupValues[3].toInt())
+            hit.addProperty("text", m.groupValues[4].take(400))
+            hit.addProperty("matchLength", query.length)
+            hits.add(hit)
+        }
+        out.add("hits", hits)
+        out.addProperty("total", hits.size())
+        out.addProperty("truncated", truncated)
+        return out
+    }
+
     private fun passOrError(args: List<String>, fallback: String): JsonObject {
         val r = git(args)
         val out = JsonObject()
@@ -257,6 +327,7 @@ class ProjectOpsService {
         private const val MAX_TREE_FILES = 5000
         private const val MAX_DIFF_BYTES = 512 * 1024
         private const val MAX_GIT_OUTPUT = 256 * 1024
+        private const val MAX_SEARCH_HITS = 500
 
         private val PROJECT_IGNORE = setOf(
             "node_modules", ".git", ".next", ".expo", "dist", "build", "out", ".cache",

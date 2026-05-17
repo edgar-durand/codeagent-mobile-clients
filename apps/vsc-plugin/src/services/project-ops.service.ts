@@ -203,4 +203,60 @@ export class ProjectOpsService {
     if (add.code !== 0) return { error: add.stderr.trim() || 'git add (resolve) failed' };
     return { ok: true };
   }
+
+  static async searchFiles(opts: {
+    query: string;
+    caseSensitive?: boolean;
+    wholeWord?: boolean;
+    regex?: boolean;
+    include?: string[];
+    exclude?: string[];
+    maxResults?: number;
+  }): Promise<{
+    hits: Array<{ path: string; line: number; column: number; text: string; matchLength: number }>;
+    total: number;
+    truncated: boolean;
+  }> {
+    if (!opts.query.trim()) return { hits: [], total: 0, truncated: false };
+    const cap = Math.min(opts.maxResults ?? 500, 500);
+    const args = ['grep', '-n', '--column', '-I'];
+    if (!opts.caseSensitive) args.push('-i');
+    if (opts.wholeWord) args.push('-w');
+    if (opts.regex) args.push('-E');
+    else args.push('-F');
+    args.push(opts.query);
+    if (opts.include && opts.include.length > 0) {
+      args.push('--');
+      for (const p of opts.include) args.push(p);
+    } else if (opts.exclude && opts.exclude.length > 0) {
+      args.push('--');
+      args.push('.');
+    }
+    for (const p of opts.exclude ?? []) args.push(`:!${p}`);
+    const r = await this.git(args);
+    if (r.code !== 0 && r.code !== 1) {
+      return { hits: [], total: 0, truncated: false };
+    }
+    const hits: Array<{ path: string; line: number; column: number; text: string; matchLength: number }> = [];
+    let truncated = false;
+    for (const line of r.stdout.split('\n')) {
+      if (!line) continue;
+      if (hits.length >= cap) {
+        truncated = true;
+        break;
+      }
+      const m = line.match(/^([^ ]+?):(\d+):(\d+):(.*)$/);
+      if (!m) continue;
+      const filePath = m[1] ?? '';
+      if (!filePath) continue;
+      hits.push({
+        path: filePath,
+        line: parseInt(m[2] ?? '0', 10),
+        column: parseInt(m[3] ?? '1', 10),
+        text: (m[4] ?? '').slice(0, 400),
+        matchLength: opts.query.length,
+      });
+    }
+    return { hits, total: hits.length, truncated };
+  }
 }

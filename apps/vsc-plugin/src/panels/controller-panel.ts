@@ -563,6 +563,26 @@ export class ControllerPanelProvider implements vscode.WebviewViewProvider, Comm
         });
         break;
       }
+      case 'search_files': {
+        const p = (command.payload ?? {}) as Record<string, unknown>;
+        const query = p.query as string | undefined;
+        if (!query) {
+          relay.sendResult(command.id, 'failed', { error: 'Missing query' });
+          break;
+        }
+        ProjectOpsService.searchFiles({
+          query,
+          caseSensitive: p.caseSensitive === true,
+          wholeWord: p.wholeWord === true,
+          regex: p.regex === true,
+          include: Array.isArray(p.include) ? (p.include as string[]) : undefined,
+          exclude: Array.isArray(p.exclude) ? (p.exclude as string[]) : undefined,
+          maxResults: typeof p.maxResults === 'number' ? (p.maxResults as number) : undefined,
+        }).then((res) => {
+          relay.sendResult(command.id, 'completed', res as unknown as Record<string, unknown>);
+        });
+        break;
+      }
       case 'git_status': {
         ProjectOpsService.gitStatus().then((res) => {
           relay.sendResult(command.id, 'completed', res);

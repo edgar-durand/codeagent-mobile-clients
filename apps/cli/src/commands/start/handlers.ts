@@ -25,6 +25,7 @@ import {
   gitPush,
   gitPull,
   gitResolve,
+  searchFiles,
 } from '../../services/project-ops.service';
 import { showInfo } from '../../ui/banner';
 import type { KeepAliveContext } from './keep-alive';
@@ -293,6 +294,23 @@ const listFiles: CommandHandler = async (ctx, cmd, parsed) => {
   await ctx.relay.sendResult(cmd.id, 'completed', result as unknown as Record<string, unknown>);
 };
 
+const searchFilesH: CommandHandler = async (ctx, cmd, parsed) => {
+  if (!parsed.query || typeof parsed.query !== 'string') {
+    await ctx.relay.sendResult(cmd.id, 'failed', { error: 'Missing query' });
+    return;
+  }
+  const result = await searchFiles({
+    query: parsed.query,
+    caseSensitive: parsed.caseSensitive,
+    wholeWord: parsed.wholeWord,
+    regex: parsed.regex,
+    include: Array.isArray(parsed.include) ? parsed.include : undefined,
+    exclude: Array.isArray(parsed.exclude) ? parsed.exclude : undefined,
+    maxResults: typeof parsed.maxResults === 'number' ? parsed.maxResults : undefined,
+  });
+  await ctx.relay.sendResult(cmd.id, 'completed', result as unknown as Record<string, unknown>);
+};
+
 // ─── Git ops ─────────────────────────────────────────────────────
 
 const gitStatusH: CommandHandler = async (ctx, cmd) => {
@@ -363,6 +381,7 @@ export const handlers: Record<string, CommandHandler> = {
   read_file: readFile,
   write_file: writeFile,
   list_files: listFiles,
+  search_files: searchFilesH,
   git_status: gitStatusH,
   git_diff: gitDiffH,
   git_diff_staged: gitDiffStagedH,

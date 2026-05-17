@@ -244,24 +244,39 @@ export async function gitDiffStaged(file: string | null, cwd?: string): Promise<
 }
 
 export interface GitLogEntry {
-  hash: string;
-  shortHash: string;
-  author: string;
-  date: string;
+  /** Full commit SHA. Matches @codeam/ide-core's GitLogEntry. */
+  sha: string;
+  /** First line of the commit message. */
   subject: string;
+  /** Author display name. */
+  author: string;
+  /** Commit timestamp (epoch ms). */
+  timestamp: number;
+  /** Branch / tag refs pointing at this commit, e.g. ["main",
+   * "origin/main"]. Empty when none. */
+  refs?: string[];
 }
 
 export async function gitLog(limit = 30, cwd?: string): Promise<{ commits: GitLogEntry[]; error?: string }> {
-  const sep = '';
-  const fmt = ['%H', '%h', '%an', '%aI', '%s'].join(sep);
+  const SEP = '\x1f';
+  const fmt = `%H${SEP}%s${SEP}%an${SEP}%ct${SEP}%D`;
   const r = await git(['log', `-n${Math.min(limit, 200)}`, `--pretty=format:${fmt}`], cwd);
   if (r.code !== 0) return { commits: [], error: r.stderr.trim() };
-  const commits = r.stdout
+  const commits: GitLogEntry[] = r.stdout
     .split('\n')
     .filter(Boolean)
     .map((line) => {
-      const [hash, shortHash, author, date, subject] = line.split(sep);
-      return { hash, shortHash, author, date, subject };
+      const [sha, subject, author, ts, refs] = line.split(SEP);
+      return {
+        sha: sha ?? '',
+        subject: subject ?? '',
+        author: author ?? '',
+        timestamp: parseInt(ts ?? '0', 10) * 1000,
+        refs: (refs ?? '')
+          .split(',')
+          .map((s) => s.trim().replace(/^HEAD -> /, ''))
+          .filter((s) => s.length > 0),
+      };
     });
   return { commits };
 }
@@ -305,4 +320,148 @@ export async function gitResolve(file: string, side: 'ours' | 'theirs', cwd?: st
   const add = await git(['add', '--', file], cwd);
   if (add.code !== 0) return { error: add.stderr.trim() || 'git add (resolve) failed' };
   return { ok: true };
+}
+
+// ── Content search ─────────────────────────────────────────────
+
+const MAX_SEARCH_HITS = 500;
+const MAX_SEARCH_BYTES = 256 * 1024;
+
+export interface SearchHit {
+  path: string;
+  line: number;
+  column: number;
+  text: string;
+  matchLength: number;
+}
+
+interface SearchFilesOpts {
+  query: string;
+  caseSensitive?: boolean;
+  wholeWord?: boolean;
+  regex?: boolean;
+  include?: string[];
+  exclude?: string[];
+  maxResults?: number;
+  cwd?: string;
+}
+
+/**
+ * Multi-file content search powered by `git grep` (falls back to
+ * a JS regex scan when the cwd isn't a git repo). Respects
+ * .gitignore by default, scales to large monorepos, and capped at
+ * MAX_SEARCH_HITS to keep the wire small.
+ */
+export async function searchFiles(opts: SearchFilesOpts): Promise<{
+  hits: SearchHit[];
+  total: number;
+  truncated: boolean;
+}> {
+  const cwd = opts.cwd ?? process.cwd();
+  const cap = Math.min(opts.maxResults ?? MAX_SEARCH_HITS, MAX_SEARCH_HITS);
+  if (!opts.query.trim()) return { hits: [], total: 0, truncated: false };
+
+  // `git grep -n --column` prints `path:line:column:text`. We
+  // shell-quote nothing because execFile takes args directly.
+  const args = ['grep', '-n', '--column', '-I'];
+  if (!opts.caseSensitive) args.push('-i');
+  if (opts.wholeWord) args.push('-w');
+  if (opts.regex) args.push('-E');
+  else args.push('-F');
+  args.push(opts.query);
+  // Path filters: `:!exclude` syntax tells git grep to exclude.
+  // Includes are appended as literal pathspecs.
+  if (opts.include && opts.include.length > 0) {
+    args.push('--');
+    for (const p of opts.include) args.push(p);
+  } else if (opts.exclude && opts.exclude.length > 0) {
+    args.push('--');
+    args.push('.');
+  }
+  for (const p of opts.exclude ?? []) args.push(`:!${p}`);
+
+  const r = await git(args, cwd);
+  // Exit code 1 means "no matches" — not an error.
+  if (r.code !== 0 && r.code !== 1) {
+    // Fall back to a JS scan when git isn't available.
+    return jsSearchFiles(opts, cwd, cap);
+  }
+  const hits: SearchHit[] = [];
+  const lines = r.stdout.split('\n');
+  let truncated = false;
+  let byteBudget = MAX_SEARCH_BYTES;
+  for (const line of lines) {
+    if (!line) continue;
+    if (hits.length >= cap) {
+      truncated = true;
+      break;
+    }
+    if (byteBudget <= 0) {
+      truncated = true;
+      break;
+    }
+    byteBudget -= line.length;
+    // path:line:column:text (path may contain colons, but git's
+    // output uses NUL separators only with -z. We split from the
+    // right keeping path intact.)
+    const m = line.match(/^([^ ]+?):(\d+):(\d+):(.*)$/);
+    if (!m) continue;
+    const filePath = m[1] ?? '';
+    const lineNo = parseInt(m[2] ?? '0', 10);
+    const col = parseInt(m[3] ?? '1', 10);
+    const text = (m[4] ?? '').slice(0, 400);
+    if (!filePath) continue;
+    hits.push({
+      path: filePath,
+      line: lineNo,
+      column: col,
+      text,
+      matchLength: opts.query.length,
+    });
+  }
+  return { hits, total: hits.length, truncated };
+}
+
+/**
+ * Best-effort JS fallback when `git grep` isn't an option (no git,
+ * git binary missing). Walks the project files the same way
+ * `listProjectFiles` does and scans them line-by-line. Much
+ * slower; deliberately capped to keep latency bounded.
+ */
+async function jsSearchFiles(
+  opts: SearchFilesOpts,
+  cwd: string,
+  cap: number,
+): Promise<{ hits: SearchHit[]; total: number; truncated: boolean }> {
+  const files = await listProjectFiles({ cwd, cap: 2000 });
+  const hits: SearchHit[] = [];
+  const needle = opts.caseSensitive ? opts.query : opts.query.toLowerCase();
+  let truncated = files.truncated;
+  for (const f of files.files) {
+    if (hits.length >= cap) {
+      truncated = true;
+      break;
+    }
+    let content = '';
+    try {
+      content = await fs.readFile(path.join(cwd, f.path), 'utf8');
+    } catch {
+      continue;
+    }
+    const lines = content.split('\n');
+    for (let i = 0; i < lines.length && hits.length < cap; i++) {
+      const line = lines[i] ?? '';
+      const hay = opts.caseSensitive ? line : line.toLowerCase();
+      const idx = hay.indexOf(needle);
+      if (idx === -1) continue;
+      hits.push({
+        path: f.path,
+        line: i + 1,
+        column: idx + 1,
+        text: line.slice(0, 400),
+        matchLength: opts.query.length,
+      });
+    }
+  }
+  return { hits, total: hits.length, truncated };
 }

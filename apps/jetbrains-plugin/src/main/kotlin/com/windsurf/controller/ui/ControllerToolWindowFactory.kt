@@ -530,6 +530,31 @@ class ControllerToolWindowFactory : ToolWindowFactory {
                         val q = command.payload.get("query")?.asString
                         relay.sendResult(command.id, "completed", ProjectOpsService.getInstance().listFiles(q))
                     }
+                    "search_files" -> {
+                        val query = command.payload.get("query")?.asString
+                        if (query.isNullOrBlank()) {
+                            relay.sendResult(command.id, "failed", com.google.gson.JsonObject().apply {
+                                addProperty("error", "Missing query")
+                            })
+                        } else {
+                            val include = command.payload.getAsJsonArray("include")?.mapNotNull { it.asString }
+                            val exclude = command.payload.getAsJsonArray("exclude")?.mapNotNull { it.asString }
+                            val maxResults = command.payload.get("maxResults")?.asInt ?: 500
+                            relay.sendResult(
+                                command.id,
+                                "completed",
+                                ProjectOpsService.getInstance().searchFiles(
+                                    query,
+                                    command.payload.get("caseSensitive")?.asBoolean ?: false,
+                                    command.payload.get("wholeWord")?.asBoolean ?: false,
+                                    command.payload.get("regex")?.asBoolean ?: false,
+                                    include,
+                                    exclude,
+                                    maxResults,
+                                ),
+                            )
+                        }
+                    }
                     "git_status" -> {
                         relay.sendResult(command.id, "completed", ProjectOpsService.getInstance().gitStatus())
                     }
