@@ -12,7 +12,14 @@
  * so a runaway client can't fork the user out of memory.
  */
 import { randomUUID } from 'crypto';
-import * as pty from 'node-pty';
+import path from 'path';
+// Types only — the actual module is required lazily inside
+// `loadNodePty()` so the CLI doesn't blow up at startup when
+// `pty.node` is missing for the running platform (the bug
+// reported on darwin-arm64 in 2.10.x: tsup statically bundled
+// `unixTerminal.js`, which calls `loadNativeModule('pty.node')`
+// at module-eval time and crashes the whole CLI).
+import type * as pty from 'node-pty';
 
 const MAX_CONCURRENT_SESSIONS = 4;
 
@@ -24,6 +31,42 @@ interface Session {
    * can shut down cleanly on close. */
   dataListener: pty.IDisposable;
   exitListener: pty.IDisposable;
+}
+
+/**
+ * Mirror of the loader pattern in `windows-conpty.strategy.ts`:
+ * resolve the vendored slim copy first (the path tsup-built dist
+ * runs from), then fall back to a regular `require('node-pty')`
+ * for the dev path. Returns null on full failure so the caller
+ * can surface a clean error instead of a hard crash — keeping
+ * the CLI alive for users on platforms whose `pty.node` we don't
+ * ship (currently Linux: node-pty 1.1.x has no Linux prebuild).
+ *
+ * `nodePtyModule` is memoized so the lookup + native dlopen runs
+ * at most once per process even when several terminals are
+ * opened back-to-back.
+ */
+type NodePtyModule = typeof import('node-pty');
+let nodePtyModule: NodePtyModule | null | undefined;
+
+function loadNodePty(): NodePtyModule | null {
+  if (nodePtyModule !== undefined) return nodePtyModule;
+  const vendoredPath = path.join(__dirname, 'vendor', 'node-pty');
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    nodePtyModule = require(vendoredPath) as NodePtyModule;
+    return nodePtyModule;
+  } catch {
+    // Dev-mode fallback (tsx running from src/ without a built dist).
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      nodePtyModule = require('node-pty') as NodePtyModule;
+      return nodePtyModule;
+    } catch {
+      nodePtyModule = null;
+      return nodePtyModule;
+    }
+  }
 }
 
 const sessions = new Map<string, Session>();
@@ -94,8 +137,16 @@ export function openTerminal(opts: {
   // node-pty on Windows respects FORCE_COLOR for ANSI passthrough;
   // posix shells need it set explicitly when stdin isn't a real TTY.
   env.FORCE_COLOR = '1';
+  const ptyMod = loadNodePty();
+  if (!ptyMod) {
+    return {
+      error:
+        `node-pty native module unavailable on ${process.platform}-${process.arch}; ` +
+        `terminal feature disabled for this platform`,
+    };
+  }
   try {
-    const term = pty.spawn(shell, [], {
+    const term = ptyMod.spawn(shell, [], {
       name: 'xterm-256color',
       cols: Math.max(1, Math.min(opts.cols ?? 80, 500)),
       rows: Math.max(1, Math.min(opts.rows ?? 24, 200)),

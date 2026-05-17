@@ -86,10 +86,26 @@ fs.copyFileSync(path.join(SRC, 'package.json'), path.join(DST, 'package.json'));
 // Library JS
 copyTree(path.join(SRC, 'lib'), path.join(DST, 'lib'));
 
-// Windows prebuilds (and only Windows — see header).
+// Prebuilds for every platform node-pty 1.1.x ships:
+//   - win32-x64 / win32-arm64 — Windows ConPTY (essential).
+//   - darwin-x64 / darwin-arm64 — Mac. Previously skipped because the
+//     CLI used a Python PTY on posix. With `terminal-ops.service.ts`
+//     spawning node-pty for the IDE terminal panel, Mac users need the
+//     darwin binaries shipped in the tarball — without them the
+//     IDE terminal returns "node-pty unavailable" and only the Python-
+//     based agent PTY (for Claude Code) keeps working.
+//   - linux-* — node-pty 1.1.x ships ZERO Linux prebuilds. Linux users
+//     get the runtime "module unavailable" error and the rest of the
+//     CLI keeps working; fixing this needs a `node-gyp` rebuild at
+//     install time (out of scope for this patch).
 const prebuilds = path.join(SRC, 'prebuilds');
 if (fs.existsSync(prebuilds)) {
-  for (const arch of ['win32-x64', 'win32-arm64']) {
+  for (const arch of [
+    'win32-x64',
+    'win32-arm64',
+    'darwin-x64',
+    'darwin-arm64',
+  ]) {
     const archSrc = path.join(prebuilds, arch);
     if (fs.existsSync(archSrc)) {
       copyTree(archSrc, path.join(DST, 'prebuilds', arch));

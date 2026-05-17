@@ -12,6 +12,15 @@ export default defineConfig([
     target: 'node18',
     clean: true,
     noExternal: ['@clack/prompts', '@clack/core'],
+    // `node-pty` MUST stay external. Bundling it inlines
+    // `unixTerminal.js`, whose top-level `loadNativeModule('pty.node')`
+    // fires the instant `dist/index.js` is required — crashing
+    // the CLI before any command runs (regression observed on
+    // darwin-arm64 in 2.10.x). External keeps `require('node-pty')`
+    // as a runtime call resolved against the vendored copy at
+    // `dist/vendor/node-pty/`, so the dlopen only happens when an
+    // IDE terminal panel actually opens.
+    external: ['node-pty'],
     banner: { js: '#!/usr/bin/env node' },
     define: {
       __CLI_VERSION__: JSON.stringify(pkg.version),
