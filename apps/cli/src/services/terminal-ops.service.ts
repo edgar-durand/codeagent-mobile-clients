@@ -11,6 +11,7 @@
  * write/resize/close. We cap concurrent sessions per cli instance
  * so a runaway client can't fork the user out of memory.
  */
+import { spawn, type ChildProcessWithoutNullStreams } from 'child_process';
 import { randomUUID } from 'crypto';
 import path from 'path';
 // Types only — the actual module is required lazily inside
@@ -23,14 +24,20 @@ import type * as pty from 'node-pty';
 
 const MAX_CONCURRENT_SESSIONS = 4;
 
+/**
+ * Unified session shape so the IDE terminal works on every
+ * platform regardless of whether node-pty has a prebuilt binary
+ * for the host. Two implementations live below: `NodePtySession`
+ * (Windows + Mac, when node-pty's prebuild is available) and
+ * `PythonPtySession` (Linux fallback — node-pty 1.1.x ships no
+ * Linux prebuild). Both expose the same `write` / `kill` shape
+ * the open/write/close/closeAll handlers consume.
+ */
 interface Session {
   id: string;
-  pty: pty.IPty;
-  /** Listeners registered for data + exit events. The relay
-   * pushes each chunk through these; we keep references so we
-   * can shut down cleanly on close. */
-  dataListener: pty.IDisposable;
-  exitListener: pty.IDisposable;
+  write(data: string): void;
+  resize?(cols: number, rows: number): void;
+  kill(): void;
 }
 
 /**
@@ -114,6 +121,179 @@ function defaultShell(): string {
   return process.env.SHELL ?? '/bin/bash';
 }
 
+/**
+ * Inline Python 3 helper that opens a real PTY pair via `pty.openpty`,
+ * forks, execs the requested shell with the PTY slave wired to
+ * stdin/stdout/stderr, and proxies stdin / stdout between the
+ * parent Node process and the shell. Used as the Linux fallback —
+ * node-pty 1.1.x ships zero Linux prebuilds, so without this every
+ * Linux user (cloud codespaces, in particular) would see
+ * "Terminal error: Could not open terminal." Mac users could go
+ * either way; we prefer node-pty when its darwin prebuild is
+ * available, but the Python helper is a complete fallback if not.
+ *
+ * Resize is exposed via a magic byte sequence on stdin:
+ *   `\x00CW <rows> <cols>\n`
+ * The helper intercepts the prefix and calls `TIOCSWINSZ` instead
+ * of forwarding the bytes to the shell. Anything else on stdin is
+ * forwarded verbatim. The marker prefix uses NULs which are
+ * invalid in human-typed terminal input, so collision with real
+ * user keystrokes is impossible.
+ */
+const PYTHON_TERMINAL_HELPER = `import os,pty,sys,select,signal,struct,fcntl,termios,errno,re
+m,s=pty.openpty()
+try:
+    cols=int(os.environ.get('COLUMNS','80'))
+    rows=int(os.environ.get('LINES','24'))
+    fcntl.ioctl(s,termios.TIOCSWINSZ,struct.pack('HHHH',rows,cols,0,0))
+except Exception:pass
+pid=os.fork()
+if pid==0:
+    os.close(m)
+    os.setsid()
+    try:fcntl.ioctl(s,termios.TIOCSCTTY,0)
+    except Exception:pass
+    for fd in[0,1,2]:os.dup2(s,fd)
+    if s>2:os.close(s)
+    os.execvp(sys.argv[1],sys.argv[1:])
+    sys.exit(127)
+os.close(s)
+done=[False]
+def onchld(n,f):
+    try:os.waitpid(pid,os.WNOHANG)
+    except Exception:pass
+    done[0]=True
+signal.signal(signal.SIGCHLD,onchld)
+signal.signal(signal.SIGHUP,signal.SIG_IGN)
+i=sys.stdin.fileno()
+o=sys.stdout.fileno()
+in_buf=b''
+resize_re=re.compile(rb'\\x00CW (\\d+) (\\d+)\\n')
+while not done[0]:
+    try:r,_,_=select.select([i,m],[],[],0.1)
+    except OSError as e:
+        if e.errno==errno.EINTR:continue
+        break
+    if i in r:
+        try:
+            d=os.read(i,4096)
+            if not d:break
+            in_buf+=d
+            while True:
+                mo=resize_re.search(in_buf)
+                if not mo:break
+                try:
+                    rows=int(mo.group(1));cols=int(mo.group(2))
+                    fcntl.ioctl(m,termios.TIOCSWINSZ,struct.pack('HHHH',rows,cols,0,0))
+                except Exception:pass
+                in_buf=in_buf[:mo.start()]+in_buf[mo.end():]
+            if in_buf:
+                # Don't forward a dangling NUL that might be the
+                # start of an incomplete resize marker — hold it
+                # until the next read so the regex matches.
+                nul=in_buf.rfind(b'\\x00')
+                if nul>=0 and len(in_buf)-nul<32:
+                    tail=in_buf[nul:];body=in_buf[:nul]
+                    if body:os.write(m,body)
+                    in_buf=tail
+                else:
+                    os.write(m,in_buf);in_buf=b''
+        except OSError:break
+    if m in r:
+        try:
+            d=os.read(m,4096)
+            if d:os.write(o,d)
+        except OSError:done[0]=True
+try:os.kill(pid,signal.SIGTERM)
+except Exception:pass
+try:
+    _,st=os.waitpid(pid,0)
+    sys.exit((st>>8)&0xFF)
+except Exception:sys.exit(0)
+`;
+
+function findPython3(): string | null {
+  // PATH lookup — we don't ship Python ourselves. Falls back to
+  // `python` only if `python3` isn't on PATH (some minimal Linux
+  // images use the bare name).
+  for (const name of ['python3', 'python']) {
+    try {
+      const out = require('child_process').spawnSync('which', [name], { encoding: 'utf8' });
+      if (out.status === 0 && out.stdout?.trim()) return out.stdout.trim();
+    } catch {
+      /* keep searching */
+    }
+  }
+  return null;
+}
+
+/**
+ * Python-helper backed terminal session. Used on Linux always and
+ * on Mac when node-pty's darwin prebuild isn't available.
+ */
+function createPythonSession(
+  id: string,
+  shell: string,
+  cwd: string,
+  env: NodeJS.ProcessEnv,
+  cols: number,
+  rows: number,
+): Session | { error: string } {
+  const python = findPython3();
+  if (!python) {
+    return { error: 'python3 not found on PATH — required for terminal sessions on Linux/macOS without node-pty.' };
+  }
+  let child: ChildProcessWithoutNullStreams;
+  try {
+    child = spawn(python, ['-c', PYTHON_TERMINAL_HELPER, shell], {
+      cwd,
+      env: { ...env, COLUMNS: String(cols), LINES: String(rows) },
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+  } catch (e) {
+    return { error: e instanceof Error ? e.message : 'python spawn failed' };
+  }
+  child.stdout.on('data', (buf: Buffer) => {
+    onDataHandler?.({ sessionId: id, data: buf.toString('utf8') });
+  });
+  child.stderr.on('data', (buf: Buffer) => {
+    // PTY shells write *everything* to stdout; stderr from the
+    // helper script itself usually means the python child died
+    // mid-fork. Surface it through the same chunk channel so the
+    // user sees it instead of a silent hang.
+    onDataHandler?.({ sessionId: id, data: buf.toString('utf8') });
+  });
+  child.on('exit', (code) => {
+    onExitHandler?.({ sessionId: id, exitCode: code ?? 0 });
+    sessions.delete(id);
+  });
+  return {
+    id,
+    write(data: string) {
+      try {
+        child.stdin.write(data);
+      } catch {
+        /* stdin already closed */
+      }
+    },
+    resize(cs: number, rs: number) {
+      // The helper intercepts this marker — see PYTHON_TERMINAL_HELPER.
+      try {
+        child.stdin.write(`\x00CW ${rs} ${cs}\n`);
+      } catch {
+        /* ignore */
+      }
+    },
+    kill() {
+      try {
+        child.kill('SIGTERM');
+      } catch {
+        /* already dead */
+      }
+    },
+  };
+}
+
 export function openTerminal(opts: {
   cols?: number;
   rows?: number;
@@ -125,58 +305,76 @@ export function openTerminal(opts: {
   }
   const shell = opts.shell ?? defaultShell();
   const cwd = opts.cwd ?? process.cwd();
-  // On Windows we ask ConPTY to emit pure VT100 sequences (the
-  // default) — xterm.js renders these directly. On posix `bash -l`
-  // would also work, but a plain spawn keeps existing shell
-  // configs (rc files, prompts) intact.
   const env: Record<string, string> = {
     ...(process.env as Record<string, string>),
     TERM: 'xterm-256color',
     COLORTERM: 'truecolor',
+    FORCE_COLOR: '1',
   };
-  // node-pty on Windows respects FORCE_COLOR for ANSI passthrough;
-  // posix shells need it set explicitly when stdin isn't a real TTY.
-  env.FORCE_COLOR = '1';
+  const cols = Math.max(1, Math.min(opts.cols ?? 80, 500));
+  const rows = Math.max(1, Math.min(opts.rows ?? 24, 200));
+  const id = randomUUID();
+
+  // Prefer node-pty when its prebuilt binary loads cleanly — best
+  // fidelity (ConPTY on Windows, native pty syscalls on Mac).
+  // Fall back to the Python helper when node-pty isn't available
+  // (Linux always, dev-environment Mac with a broken install).
   const ptyMod = loadNodePty();
-  if (!ptyMod) {
+  if (ptyMod) {
+    try {
+      const term = ptyMod.spawn(shell, [], {
+        name: 'xterm-256color',
+        cols,
+        rows,
+        cwd,
+        env,
+        useConpty: process.platform === 'win32' ? true : undefined,
+      } as pty.IPtyForkOptions & pty.IWindowsPtyForkOptions);
+      const dataListener = term.onData((data) => {
+        onDataHandler?.({ sessionId: id, data });
+      });
+      const exitListener = term.onExit(({ exitCode }) => {
+        onExitHandler?.({ sessionId: id, exitCode });
+        sessions.delete(id);
+      });
+      sessions.set(id, {
+        id,
+        write: (d) => term.write(d),
+        resize: (cs, rs) => term.resize(cs, rs),
+        kill: () => {
+          dataListener.dispose();
+          exitListener.dispose();
+          term.kill();
+        },
+      });
+      return { sessionId: id };
+    } catch (e) {
+      // node-pty failed mid-spawn (often a dlopen mismatch). Don't
+      // give up — fall through to the Python helper if available.
+      if (process.platform === 'win32') {
+        return { error: e instanceof Error ? e.message : 'spawn failed' };
+      }
+    }
+  } else if (process.platform === 'win32') {
+    // Windows REQUIRES node-pty (no Python fallback for ConPTY).
     return {
       error:
         `node-pty native module unavailable on ${process.platform}-${process.arch}; ` +
         `terminal feature disabled for this platform`,
     };
   }
-  try {
-    const term = ptyMod.spawn(shell, [], {
-      name: 'xterm-256color',
-      cols: Math.max(1, Math.min(opts.cols ?? 80, 500)),
-      rows: Math.max(1, Math.min(opts.rows ?? 24, 200)),
-      cwd,
-      env,
-      // Windows-specific: ConPTY is the default on Win 10 1809+
-      // and is what we want. node-pty falls back to winpty
-      // automatically on older builds.
-      useConpty: process.platform === 'win32' ? true : undefined,
-    } as pty.IPtyForkOptions & pty.IWindowsPtyForkOptions);
-    const id = randomUUID();
-    const dataListener = term.onData((data) => {
-      onDataHandler?.({ sessionId: id, data });
-    });
-    const exitListener = term.onExit(({ exitCode }) => {
-      onExitHandler?.({ sessionId: id, exitCode });
-      sessions.delete(id);
-    });
-    sessions.set(id, { id, pty: term, dataListener, exitListener });
-    return { sessionId: id };
-  } catch (e) {
-    return { error: e instanceof Error ? e.message : 'spawn failed' };
-  }
+
+  const sess = createPythonSession(id, shell, cwd, env, cols, rows);
+  if ('error' in sess) return { error: sess.error };
+  sessions.set(id, sess);
+  return { sessionId: id };
 }
 
 export function writeTerminal(sessionId: string, data: string): { ok: boolean; error?: string } {
   const s = sessions.get(sessionId);
   if (!s) return { ok: false, error: 'No such session' };
   try {
-    s.pty.write(data);
+    s.write(data);
     return { ok: true };
   } catch (e) {
     return { ok: false, error: e instanceof Error ? e.message : 'write failed' };
@@ -191,7 +389,7 @@ export function resizeTerminal(
   const s = sessions.get(sessionId);
   if (!s) return { ok: false, error: 'No such session' };
   try {
-    s.pty.resize(Math.max(1, Math.min(cols, 500)), Math.max(1, Math.min(rows, 200)));
+    s.resize?.(Math.max(1, Math.min(cols, 500)), Math.max(1, Math.min(rows, 200)));
     return { ok: true };
   } catch (e) {
     return { ok: false, error: e instanceof Error ? e.message : 'resize failed' };
@@ -202,9 +400,7 @@ export function closeTerminal(sessionId: string): { ok: boolean } {
   const s = sessions.get(sessionId);
   if (!s) return { ok: true };
   try {
-    s.dataListener.dispose();
-    s.exitListener.dispose();
-    s.pty.kill();
+    s.kill();
   } catch {
     /* already dead */
   }
