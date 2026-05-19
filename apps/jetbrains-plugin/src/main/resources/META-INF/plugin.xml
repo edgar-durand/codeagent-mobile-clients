@@ -7,14 +7,31 @@
     </vendor>
 
     <description><![CDATA[
-    Control AI coding agents from your mobile device. Pair your phone with your IDE
-    to start, stop, and monitor AI coding sessions remotely.
+    <b>The workflow-continuity bridge for AI coding agents.</b>
+    Supervise, approve, and redirect the agents running in your JetBrains IDE
+    from any device — async.
+
+    <br/><br/>
+    AI agents now run for hours, not seconds. Most developer workflows still pin
+    you to a single screen while that happens. This plugin turns your IDE into
+    the agent's home base — the agent keeps writing, refactoring, and shipping
+    while a paired phone or browser becomes your remote checkpoint.
 
     <br/><br/>
     <b>Homepage:</b> <a href="https://www.codeagent-mobile.com">https://www.codeagent-mobile.com</a>
 
     <br/><br/>
-    <b>Supported AI Agents:</b>
+    <b>What you can do remotely:</b>
+    <ul>
+        <li>Stay in the loop while a long refactor builds</li>
+        <li>Approve diffs, redirect prompts, or course-correct from anywhere</li>
+        <li>Hand off work between devices without breaking the session</li>
+        <li>Share live agent sessions with teammates in Team Spaces</li>
+        <li>Spin up GitHub Codespaces with Claude Code preinstalled</li>
+    </ul>
+
+    <br/>
+    <b>Works with the agents already in your IDE:</b>
     <ul>
         <li>Claude Code (Anthropic)</li>
         <li>OpenAI Codex</li>
@@ -25,20 +42,10 @@
     </ul>
 
     <br/>
-    <b>Features:</b>
-    <ul>
-        <li>Secure device pairing via 6-digit code</li>
-        <li>Real-time agent status monitoring</li>
-        <li>Remote task control (start, stop, approve, reject)</li>
-        <li>WebSocket-based live communication</li>
-        <li>Multi-session support</li>
-        <li>MCP server configuration</li>
-    </ul>
-
     <b>Get the Companion App:</b>
     <ul>
-        <li><b>Mobile App</b> (recommended) — Download from the App Store or Play Store</li>
-        <li><b>Web Dashboard</b> — Use the browser-based dashboard at <a href="https://www.codeagent-mobile.com/dashboard">codeagent-mobile.com/dashboard</a> (no install required)</li>
+        <li><b>Mobile App</b> (recommended) — App Store or Play Store</li>
+        <li><b>Web Dashboard</b> — <a href="https://www.codeagent-mobile.com/dashboard">codeagent-mobile.com/dashboard</a> (no install)</li>
     </ul>
     ]]></description>
 
