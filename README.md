@@ -1,13 +1,15 @@
 # CodeAgent Mobile — Clients
 
-Public source for the **client-side pieces** of [CodeAgent Mobile](https://www.codeagent-mobile.com):
+Public source for the **client-side bridges** of [CodeAgent Mobile](https://www.codeagent-mobile.com) — the workflow-continuity layer for AI coding agents.
 
-- [`apps/cli`](apps/cli) — `codeam-cli`, the terminal companion that spawns Claude Code under a PTY and relays your mobile prompts
+- [`apps/cli`](apps/cli) — `codeam-cli`, the terminal bridge that wraps Claude Code in a PTY and streams it to any device
 - [`apps/vsc-plugin`](apps/vsc-plugin) — extension for **VS Code**, **Cursor**, and **Windsurf**
-- [`apps/jetbrains-plugin`](apps/jetbrains-plugin) — plugin for the **IntelliJ** family (IntelliJ IDEA, WebStorm, PyCharm, Rider, GoLand, etc.)
+- [`apps/jetbrains-plugin`](apps/jetbrains-plugin) — plugin for the **IntelliJ** family (IntelliJ IDEA, WebStorm, PyCharm, Rider, GoLand, …)
 
 > **What is CodeAgent Mobile?**
-> It lets you drive AI coding agents (Claude Code, OpenAI Codex, Copilot, Cursor, JetBrains AI, etc.) from your phone. Pair your device once, then send prompts, stream responses, and approve interactive commands — from anywhere. See [codeagent-mobile.com](https://www.codeagent-mobile.com).
+> The supervision layer for agents already running in your IDE. Now that AI agents run for hours, not seconds, you no longer need to stare at a terminal — CodeAgent streams the session to your phone or web dashboard so you can approve diffs, redirect prompts, and stay in the loop async. Works with Claude Code, Copilot, Cursor, Windsurf, JetBrains AI, OpenAI Codex, Vertex AI, and any agent in your editor.
+>
+> Install once in your IDE, pair with a QR, your workflow follows you across devices. See [codeagent-mobile.com](https://www.codeagent-mobile.com).
 
 ---
 
