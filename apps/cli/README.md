@@ -5,10 +5,10 @@
 [![license](https://img.shields.io/npm/l/codeam-cli.svg?color=34d399&style=flat-square)](https://github.com/edgar-durand/codeagent-mobile-clients/blob/main/LICENSE)
 [![node](https://img.shields.io/node/v/codeam-cli.svg?color=34d399&style=flat-square)](https://nodejs.org/)
 
-> **Remote control AI coding agents from your phone.**
-> Send prompts, stream responses, and approve commands in real-time — from the subway, the couch, or anywhere away from your desk.
+> **The workflow-continuity bridge for AI coding agents.**
+> Wrap Claude Code or Codex once, then supervise, approve, and redirect from any device — async.
 
-`codeam-cli` is the companion CLI for [**CodeAgent Mobile**](https://codeagent-mobile.com). It wraps AI coding agents inside a pseudo-terminal, relays your mobile prompts to the agent, and streams the output back to your phone in real-time.
+`codeam-cli` is the terminal bridge for [**CodeAgent Mobile**](https://codeagent-mobile.com). It wraps AI coding agents inside a pseudo-terminal and streams the entire session — output, diffs, interactive selectors — to your phone or web dashboard so you can stay in the loop while the agent runs for hours instead of seconds.
 
 Currently supports **[Claude Code](https://claude.ai/code)** (Anthropic) and **[OpenAI Codex](https://github.com/openai/codex)** — start either via `codeam` (Claude Code) or `codeam codex` (OpenAI Codex).
 
@@ -16,9 +16,11 @@ Currently supports **[Claude Code](https://claude.ai/code)** (Anthropic) and **[
 
 ## Why does this exist?
 
-Because sometimes your best ideas happen away from the keyboard. Maybe you're on a walk, on the train, in a meeting, or just want to keep a long-running task going while you step away. `codeam-cli` lets your AI agent keep working — and lets **you** keep shipping — without needing to be at your machine.
+AI agents went async. They write, refactor, test, and ship code on their own — for hours, not seconds. Most CLI workflows still pin you to one screen while that happens.
 
-It works exactly like Claude Code (same terminal, same project, same files), but every prompt and every response is mirrored on your phone. You can even approve interactive selectors and confirmations from mobile.
+`codeam-cli` is the supervision layer on top: run the agent locally exactly like you would today, and a paired phone / browser becomes a remote checkpoint. Approve diffs while you're away from the desk. Redirect a long-running refactor over coffee. Step into a meeting without losing the session.
+
+Same terminal, same project, same files — just no longer chained to the desk.
 
 ---
 
