@@ -1,16 +1,25 @@
-# CodeAgent Mobile - VS Code Extension
+# CodeAgent — Remote AI Supervision
 
-Control your AI coding agents remotely from your mobile device.
+The workflow-continuity bridge for AI coding agents. Supervise, approve, and redirect the agents running in VS Code, Cursor, or Windsurf from any device — async.
 
 🌐 **Homepage**: [https://www.codeagent-mobile.com](https://www.codeagent-mobile.com)
 
+## Why this extension
+
+AI agents now run for hours, not seconds. Most developer workflows still pin you to a single screen while that happens. This extension turns your editor into the agent's home base — the agent keeps writing, refactoring, and shipping while a paired phone / browser becomes your remote checkpoint.
+
+- **Stay in the loop while a long refactor builds**
+- **Approve diffs, redirect prompts, or course-correct from anywhere**
+- **Hand off work between devices without breaking the session**
+- **Share live agent sessions with teammates in Team Spaces**
+
 ## Features
 
-- **Remote Pairing**: Pair your mobile device with VS Code using a 6-digit code
-- **AI Agent Detection**: Automatically detects installed AI extensions (Copilot, Claude, Codeium, etc.)
-- **Prompt Relay**: Send prompts from your phone directly to your IDE's AI assistant
-- **MCP Configuration**: Configure Model Context Protocol servers remotely
-- **Real-time Status**: Monitor connection and agent status from the sidebar
+- **One-tap pairing**: pair your phone with VS Code via QR or 6-digit code
+- **Auto-detect agents**: works with whatever AI extension is already installed (Copilot, Claude, Codeium, etc.)
+- **Async prompt relay**: send prompts from anywhere; agent runs locally in your IDE
+- **MCP server config**: configure Model Context Protocol servers from your phone
+- **Live status**: monitor the paired session + agent state from the sidebar
 
 ## Supported AI Agents
 
