@@ -4,6 +4,15 @@ All notable changes to the CodeAgent-Mobile JetBrains plugin are documented here
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.15.6] — 2026-05-20
+
+### Added
+
+- **cli:** Send current git branch on pair
+- **vsc-plugin:** Emit file-change + review-hunk events from Path B (direct claude)
+- **jetbrains-plugin:** Emit file-change + review-hunk events from Path B
+- **cli:** Epic C — emit streaming chunks + subscribe to answer channel
+
 ## [2.15.5] — 2026-05-20
 
 ### Added
