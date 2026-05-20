@@ -78,6 +78,10 @@
                 serviceImplementation="com.windsurf.controller.services.FileOpsService"/>
         <applicationService
                 serviceImplementation="com.windsurf.controller.services.ProjectOpsService"/>
+        <applicationService
+                serviceImplementation="com.windsurf.controller.services.FileWatcherService"/>
+        <postStartupActivity
+                implementation="com.windsurf.controller.services.FileWatcherStartupActivity"/>
         <applicationConfigurable
                 parentId="tools"
                 instance="com.windsurf.controller.settings.ControllerConfigurable"
