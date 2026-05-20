@@ -7,6 +7,7 @@ import { AgentService } from '../services/agent.service';
 import { createRuntimeStrategy } from '../agents/registry';
 import { OutputService } from '../services/output.service';
 import { HistoryService } from '../services/history.service';
+import { FileWatcherService } from '../services/file-watcher.service';
 import { fetchQuotaUsage } from './start/quota-fetcher';
 import { buildKeepAlive } from './start/keep-alive';
 import { dispatchCommand, type HandlerContext } from './start/handlers';
@@ -93,6 +94,21 @@ export async function start(requestedAgent?: AgentId): Promise<void> {
     runtime,
   );
 
+  // File-change producer — emits `/api/files/changed` + `/api/review/hunks`
+  // on every modified file under `cwd` for the duration of the session.
+  // No-op when `pluginAuthToken` is missing (older paired sessions from
+  // before the rolling-token rollout — they can't authenticate against
+  // the file endpoints anyway). Best-effort lifecycle: any error inside
+  // the watcher is logged via `log.warn` and never blocks the agent.
+  const fileWatcher = session.pluginAuthToken
+    ? new FileWatcherService({
+        workingDir: cwd,
+        sessionId: session.id,
+        pluginId,
+        pluginAuthToken: session.pluginAuthToken,
+      })
+    : null;
+
   const claude = new AgentService(
     runtime,
     {
@@ -102,6 +118,7 @@ export async function start(requestedAgent?: AgentId): Promise<void> {
         process.removeListener('SIGINT', sigintHandler);
         outputSvc.dispose();
         relay.stop();
+        void fileWatcher?.stop();
         process.exit(code);
       },
     },
@@ -141,6 +158,7 @@ export async function start(requestedAgent?: AgentId): Promise<void> {
     claude.kill();
     outputSvc.dispose();
     relay.stop();
+    void fileWatcher?.stop();
     process.exit(0);
   }
 
@@ -161,6 +179,14 @@ export async function start(requestedAgent?: AgentId): Promise<void> {
   // selector that's already on screen.
   await outputSvc.startTerminalTurn();
   relay.start();
+
+  // Kick off the file-change watcher last — never awaits, never blocks
+  // the agent on a chokidar load hiccup. Failures are surfaced via the
+  // logger and silently leave the file-change pipeline disabled for
+  // this session.
+  if (fileWatcher) {
+    fileWatcher.start().catch(() => { /* logged inside */ });
+  }
 
   // After Claude is up, load the local history index so the
   // /sessions surface (list of past conversations) is ready to
