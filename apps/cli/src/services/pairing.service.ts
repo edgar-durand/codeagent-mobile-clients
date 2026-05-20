@@ -3,6 +3,7 @@ import * as http from 'http';
 import * as os from 'os';
 import pkg from '../../package.json';
 import { vercelBypassHeader } from '../lib/backend-headers';
+import { detectCurrentBranch } from '../lib/git-branch';
 import { computePollDelay } from '../lib/poll-delay';
 
 const API_BASE = process.env.CODEAM_API_URL ?? 'https://codeagent-mobile-api.vercel.app';
@@ -32,6 +33,11 @@ export async function requestCode(
     // GitHub Codespaces sets CODESPACES=true and CODESPACE_NAME.
     const runtime = process.env.CODESPACES === 'true' ? 'github-codespaces' : 'local';
     const codespaceName = process.env.CODESPACE_NAME;
+    // Detect the current git branch of the working directory so the
+    // backend can populate `PairedSession.branch`. Re-detected on every
+    // call so re-pairing in the same shell after a `git checkout` picks
+    // up the new branch. Returns `null` on detached HEAD / non-git dirs.
+    const branch = detectCurrentBranch();
     // Call through _transport so vi.spyOn can intercept in tests
     const result = await _transport.postJson(`${API_BASE}/api/pairing/code`, {
       pluginId,
@@ -39,6 +45,7 @@ export async function requestCode(
       ideVersion: pkg.version,
       hostname: os.hostname(),
       runtime,
+      branch,
       ...(codespaceName ? { codespaceName } : {}),
     });
     const data = result?.data as Record<string, unknown> | undefined;

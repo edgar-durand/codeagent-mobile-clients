@@ -4,6 +4,7 @@ import { randomUUID } from 'crypto';
 import { isKnownAgentId } from '@codeagent/shared';
 import { addSession } from '../config';
 import { vercelBypassHeader } from '../lib/backend-headers';
+import { detectCurrentBranch } from '../lib/git-branch';
 import { start } from './start';
 
 /**
@@ -75,6 +76,10 @@ async function claim(token: string, pluginId: string): Promise<ClaimSuccess> {
     ideVersion: process.env.npm_package_version ?? 'unknown',
     hostname: os.hostname(),
     codespaceName: process.env.CODESPACE_NAME ?? '',
+    // Current git branch of the codespace's working directory, so the
+    // backend can populate `PairedSession.branch` for the codespace pair.
+    // `null` when detached HEAD / not a git repo.
+    branch: detectCurrentBranch(),
   };
 
   const res = await fetch(url, {
