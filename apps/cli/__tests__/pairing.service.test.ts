@@ -2,8 +2,11 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 // Use the real module but mock internal http calls with vi.spyOn after import
 import * as pairing from '../src/services/pairing.service';
+import * as gitBranch from '../src/lib/git-branch';
 
 describe('requestCode', () => {
+  afterEach(() => { vi.restoreAllMocks(); });
+
   it('returns code and expiresAt on success', async () => {
     vi.spyOn(pairing._transport, 'postJson').mockResolvedValue({
       data: { code: 'ABC123', expiresAt: 9999999999000 },
@@ -17,6 +20,31 @@ describe('requestCode', () => {
     vi.spyOn(pairing._transport, 'postJson').mockResolvedValue(null);
     const result = await pairing.requestCode('plugin-1');
     expect(result).toBeNull();
+  });
+
+  it('includes the detected git branch in the pair POST body', async () => {
+    vi.spyOn(gitBranch, 'detectCurrentBranch').mockReturnValue('feature/x');
+    const postSpy = vi
+      .spyOn(pairing._transport, 'postJson')
+      .mockResolvedValue({ data: { code: 'C', expiresAt: 1 } } as never);
+
+    await pairing.requestCode('plugin-1');
+
+    expect(postSpy).toHaveBeenCalledTimes(1);
+    const [, body] = postSpy.mock.calls[0];
+    expect(body).toMatchObject({ pluginId: 'plugin-1', branch: 'feature/x' });
+  });
+
+  it('sends branch:null when not in a git repo / detached HEAD', async () => {
+    vi.spyOn(gitBranch, 'detectCurrentBranch').mockReturnValue(null);
+    const postSpy = vi
+      .spyOn(pairing._transport, 'postJson')
+      .mockResolvedValue({ data: { code: 'C', expiresAt: 1 } } as never);
+
+    await pairing.requestCode('plugin-1');
+
+    const [, body] = postSpy.mock.calls[0];
+    expect(body).toMatchObject({ branch: null });
   });
 });
 
