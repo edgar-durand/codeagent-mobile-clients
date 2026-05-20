@@ -96,9 +96,22 @@ jobs:
 
       - name: Publish CLI to npm
         working-directory: apps/cli
-        run: npm publish --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          VERSION: ${{ needs.setup.outputs.version }}
+        run: |
+          # Idempotent publish — skip if this exact version already
+          # exists on the registry. npm itself returns 403 on republish,
+          # which is correct semantics but turns retries (re-tagged
+          # release, hotfix re-push, anything) into red runs. With the
+          # guard, downstream jobs (VS Code, JetBrains, GitHub Release
+          # changelog) still run on retry without us first having to
+          # `git tag -d`.
+          if npm view "codeam-cli@$VERSION" version >/dev/null 2>&1; then
+            echo "::notice::codeam-cli@$VERSION already published — skipping npm publish"
+            exit 0
+          fi
+          npm publish --access public
 
       - name: Upload CLI tarball artifact
         uses: actions/upload-artifact@v7
