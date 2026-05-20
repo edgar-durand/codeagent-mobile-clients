@@ -8,6 +8,7 @@ import { createRuntimeStrategy } from '../agents/registry';
 import { OutputService } from '../services/output.service';
 import { HistoryService } from '../services/history.service';
 import { FileWatcherService } from '../services/file-watcher.service';
+import { StreamingEmitterService } from '../services/streaming-emitter.service';
 import { fetchQuotaUsage } from './start/quota-fetcher';
 import { buildKeepAlive } from './start/keep-alive';
 import { dispatchCommand, type HandlerContext } from './start/handlers';
@@ -109,20 +110,44 @@ export async function start(requestedAgent?: AgentId): Promise<void> {
       })
     : null;
 
+  // Epic C streaming producer — parses Claude/Codex PTY output into
+  // discriminated chunks and pushes them to the backend for the
+  // mobile/web live-view, and detects React Ink interactive prompts to
+  // surface as "awaiting answer" on the mobile side. Same auth gate as
+  // the file-watcher: a session paired before the rolling-token
+  // rollout has no `pluginAuthToken` and can't authenticate against
+  // the Epic C endpoints, so we skip the producer for those.
+  // Late-bound so the closure can reach `claude` for the answer path.
+  let streamingEmitter: StreamingEmitterService | null = null;
+
   const claude = new AgentService(
     runtime,
     {
       cwd,
-      onData(raw) { outputSvc.push(raw); },
+      onData(raw) {
+        outputSvc.push(raw);
+        streamingEmitter?.push(raw);
+      },
       onExit(code) {
         process.removeListener('SIGINT', sigintHandler);
         outputSvc.dispose();
         relay.stop();
         void fileWatcher?.stop();
+        void streamingEmitter?.stop();
         process.exit(code);
       },
     },
   );
+
+  if (session.pluginAuthToken) {
+    streamingEmitter = new StreamingEmitterService({
+      sessionId: session.id,
+      pluginId,
+      pluginAuthToken: session.pluginAuthToken,
+      runtime,
+      ptyInput: claude,
+    });
+  }
 
   // Built EARLY so the closure inside `relay`'s onCommand below has
   // a stable reference. Filled in once the dependent services exist.
@@ -159,6 +184,7 @@ export async function start(requestedAgent?: AgentId): Promise<void> {
     outputSvc.dispose();
     relay.stop();
     void fileWatcher?.stop();
+    void streamingEmitter?.stop();
     process.exit(0);
   }
 
@@ -187,6 +213,12 @@ export async function start(requestedAgent?: AgentId): Promise<void> {
   if (fileWatcher) {
     fileWatcher.start().catch(() => { /* logged inside */ });
   }
+
+  // Epic C streaming producer — start after the relay so the PTY pump
+  // is already wired before the emitter begins POSTing chunks. We
+  // start unconditionally when present; lifecycle is owned by SIGINT /
+  // onExit above.
+  streamingEmitter?.start();
 
   // After Claude is up, load the local history index so the
   // /sessions surface (list of past conversations) is ready to
