@@ -179,6 +179,14 @@ class PairingService {
         currentSessionId = null
         pairedUser = null
         SettingsService.getInstance().setPluginAuthToken(null)
+        // Tear down the Path B file watcher - it would otherwise keep
+        // POSTing to a session that no longer exists. The service is
+        // idempotent on stop(), safe to call when never started.
+        try {
+            FileWatcherService.getInstance().stop()
+        } catch (e: Exception) {
+            logger.debug("Failed to stop FileWatcherService on unpair: ${e.message}")
+        }
     }
 
     fun onReconnected(sessionId: String, user: PairedUserInfo) {
