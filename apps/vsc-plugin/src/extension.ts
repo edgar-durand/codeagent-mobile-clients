@@ -14,6 +14,7 @@ import { ClaudeContextService } from './services/claude-context.service';
 import { ControllerPanelProvider } from './panels/controller-panel';
 
 let log: vscode.OutputChannel;
+let panelProvider: ControllerPanelProvider | null = null;
 
 export function activate(context: vscode.ExtensionContext): void {
   log = vscode.window.createOutputChannel('CodeAgent Mobile');
@@ -34,7 +35,7 @@ export function activate(context: vscode.ExtensionContext): void {
   AgentBridgeService.initialize(log);
 
   // Register webview panel provider
-  const panelProvider = new ControllerPanelProvider(context.extensionUri, log);
+  panelProvider = new ControllerPanelProvider(context.extensionUri, log);
   context.subscriptions.push(
     vscode.window.registerWebviewViewProvider(ControllerPanelProvider.viewType, panelProvider),
   );
@@ -52,6 +53,7 @@ export function activate(context: vscode.ExtensionContext): void {
       relay.reportOffline();
       relay.stopPolling();
       WebSocketService.getInstance().disconnect();
+      panelProvider?.stopFileWatcher();
       PairingService.getInstance().clearCurrentSession();
       vscode.window.showInformationMessage('CodeAgent Mobile: Disconnected');
     }),
@@ -102,6 +104,11 @@ export function deactivate(): void {
   try {
     TerminalAgentService.getInstance().stopMonitoring();
   } catch { /* not initialized */ }
+
+  try {
+    panelProvider?.stopFileWatcher();
+  } catch { /* not initialized */ }
+  panelProvider = null;
 
   log?.appendLine('CodeAgent Mobile extension deactivated');
 }

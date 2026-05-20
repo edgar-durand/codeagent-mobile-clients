@@ -17,12 +17,21 @@ import { ObserverBridgeStrategy } from './ObserverBridgeStrategy';
  * `lastActive` is tracked so `stop()` can tear down the strategy
  * that actually started monitoring on the previous turn, instead
  * of broadcasting `stopMonitoring()` to every service.
+ *
+ * `lastAgentActivityTs` is the Unix-ms timestamp of the most recent
+ * `execute()` dispatch. The file watcher reads it to gate event
+ * emission: only files saved within `AGENT_ACTIVITY_WINDOW_MS` of an
+ * agent turn count as "agent-driven" (Path B has no PTY tool-use
+ * stream to derive this from, so an activity window is the cheapest
+ * heuristic that works). A value of `0` means no agent has ever run
+ * in this VS Code session.
  */
 export class AgentStrategyRegistry {
   private static instance: AgentStrategyRegistry | null = null;
 
   private readonly strategies: readonly AgentStrategy[];
   private lastActive: AgentStrategy | null = null;
+  private _lastAgentActivityTs = 0;
 
   private constructor(private readonly log: OutputChannel) {
     this.strategies = [
@@ -60,7 +69,26 @@ export class AgentStrategyRegistry {
       `[AgentStrategyRegistry] dispatching to ${strategy.name} (agentId=${invocation.agentId ?? '<auto>'})`,
     );
     this.lastActive = strategy;
+    this._lastAgentActivityTs = Date.now();
     return strategy.execute(invocation);
+  }
+
+  /**
+   * Unix-ms timestamp of the most recent `execute()` dispatch, or `0`
+   * if no agent has run yet in this session. Read by the file watcher
+   * to gate event emission to "recently agent-active" windows.
+   */
+  get lastAgentActivityTs(): number {
+    return this._lastAgentActivityTs;
+  }
+
+  /**
+   * Test seam — lets unit tests pin a synthetic activity timestamp
+   * without first dispatching a real strategy. Not exported via the
+   * public surface; production code only ever reads the getter.
+   */
+  /* @internal */ _setLastAgentActivityTsForTest(ts: number): void {
+    this._lastAgentActivityTs = ts;
   }
 
   /**

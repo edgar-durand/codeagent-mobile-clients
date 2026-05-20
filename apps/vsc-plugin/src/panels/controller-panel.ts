@@ -19,11 +19,19 @@ import type { AgentInvocation } from '../services/strategies/AgentStrategy';
 import { ChatHistoryService } from '../services/chat-history.service';
 import { ClaudeContextService } from '../services/claude-context.service';
 import { McpConfigWriterService, McpConfigureRequest, McpEntry } from '../services/mcp-config-writer.service';
+import { FileWatcherService } from '../services/file-watcher.service';
 
 export class ControllerPanelProvider implements vscode.WebviewViewProvider, CommandListener {
   public static readonly viewType = 'codeagent-mobile.panel';
   private view?: vscode.WebviewView;
   private log: vscode.OutputChannel;
+  /**
+   * Per-pairing file watcher. Mirrors Path A (CLI) emission of
+   * `/api/files/changed` + `/api/review/hunks` for Path B (direct
+   * Claude spawn through `claude-pseudoterminal.ts`). Started when
+   * pairing completes; stopped on disconnect or extension teardown.
+   */
+  private fileWatcher: FileWatcherService | null = null;
 
   constructor(
     private readonly extensionUri: vscode.Uri,
@@ -57,6 +65,7 @@ export class ControllerPanelProvider implements vscode.WebviewViewProvider, Comm
         this.log.appendLine(`Paired to session: ${sessionId}`);
         const relay = CommandRelayService.getInstance();
         relay.startPolling();
+        this.startFileWatcher(sessionId);
         const agents = await IdeIntegrationService.getInstance().detectInstalledAgents();
         relay.reportAgents(
           agents.map((a) => ({
@@ -233,9 +242,58 @@ export class ControllerPanelProvider implements vscode.WebviewViewProvider, Comm
     relay.reportOffline();
     relay.stopPolling();
     WebSocketService.getInstance().disconnect();
+    this.stopFileWatcher();
     PairingService.getInstance().clearCurrentSession();
     this.updateStatus();
     this.log.appendLine('Disconnected');
+  }
+
+  /**
+   * Spin up the per-pairing file watcher. Called from `onPaired`
+   * (after the per-pairing `pluginAuthToken` is persisted) and from
+   * the `reconnect` flow via the same pairing listener. Idempotent —
+   * if a previous watcher is still running we tear it down first so
+   * the next session emits with the fresh sessionId / token.
+   */
+  private startFileWatcher(sessionId: string): void {
+    this.stopFileWatcher();
+
+    const settings = SettingsService.getInstance();
+    const token = settings.getPluginAuthToken();
+    if (!token) {
+      this.log.appendLine(
+        '[fileWatcher] no pluginAuthToken — skipping start (legacy pairing flow?)',
+      );
+      return;
+    }
+
+    try {
+      this.fileWatcher = new FileWatcherService({
+        sessionId,
+        pluginId: settings.ensurePluginId(),
+        pluginAuthToken: token,
+        apiBaseUrl: settings.apiBaseUrl,
+        log: this.log,
+      });
+      this.fileWatcher.start();
+    } catch (e) {
+      this.log.appendLine(`[fileWatcher] start failed: ${e}`);
+      this.fileWatcher = null;
+    }
+  }
+
+  /**
+   * Public so `extension.deactivate()` and `handleDisconnect()` can
+   * both call it without reaching into private state. Idempotent.
+   */
+  public stopFileWatcher(): void {
+    if (!this.fileWatcher) return;
+    try {
+      this.fileWatcher.stop();
+    } catch (e) {
+      this.log.appendLine(`[fileWatcher] stop threw: ${e}`);
+    }
+    this.fileWatcher = null;
   }
 
   private async handleRefreshAgents(): Promise<void> {
