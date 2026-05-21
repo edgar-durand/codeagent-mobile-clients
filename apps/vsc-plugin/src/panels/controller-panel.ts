@@ -785,6 +785,34 @@ export class ControllerPanelProvider implements vscode.WebviewViewProvider, Comm
         break;
       }
 
+      case 'install_cli_and_link': {
+        // Sibling of `install_cli_and_pair` for the `codeam link
+        // <agent>` flow. Mobile sends this when the user taps "Continue
+        // with OAuth" inside the Link Agent sheet and a plugin is
+        // available (paired session with the IDE running). The terminal
+        // opens, `codeam-cli` is auto-installed if missing, and
+        // `codeam link <agent>` takes over from there — pair + capture
+        // + upload — without the user touching anything beyond the
+        // browser tab the agent's `<binary> login` opens.
+        //
+        // Payload: { agent: 'claude' | 'codex' } (defaults to 'claude').
+        const linkAgent = (command.payload?.agent as string | undefined) ?? 'claude';
+        const safeAgent = linkAgent === 'codex' ? 'codex' : 'claude';
+        const folder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+        const terminal = vscode.window.createTerminal({
+          name: `codeam link ${safeAgent}`,
+          ...(folder ? { cwd: folder } : {}),
+        });
+        terminal.show(true);
+        terminal.sendText(
+          `npm install -g codeam-cli@latest && codeam link ${safeAgent} || npx -y codeam-cli@latest link ${safeAgent}`,
+        );
+        relay.sendResult(command.id, 'completed', {
+          message: `Terminal opened with codeam link ${safeAgent}`,
+        });
+        break;
+      }
+
       default: {
         relay.sendResult(command.id, 'failed', {
           error: `Unknown command type: ${command.type}`,

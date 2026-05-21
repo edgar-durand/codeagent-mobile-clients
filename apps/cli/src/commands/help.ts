@@ -23,6 +23,7 @@ export function help(): void {
     `     ${pc.white('codeam sessions delete <id>')}  ${pc.dim('remove a specific paired session')}`,
     `     ${pc.white('codeam status')}                ${pc.dim('show connection info')}`,
     `     ${pc.white('codeam logout')}                ${pc.dim('remove all paired sessions')}`,
+    `     ${pc.white('codeam link <agent>')}          ${pc.dim('link an agent (claude, codex) to your CodeAgent account')}`,
     `     ${pc.white('codeam deploy')}                ${pc.dim('provision a cloud workspace (Codespaces) and pair it')}`,
     `     ${pc.white('codeam deploy ls | list')}      ${pc.dim('list deployed cloud workspaces')}`,
     `     ${pc.white('codeam deploy stop | remove')}  ${pc.dim('stop a deployed workspace session')}`,
