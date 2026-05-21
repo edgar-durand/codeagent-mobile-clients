@@ -4,6 +4,12 @@ All notable changes to `codeam-cli` are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.15.7] — 2026-05-21
+
+### Fixed
+
+- **clients:** Point default API URL at api.codeagent-mobile.com + centralize via shared constant (#38)
+
 ## [2.15.6] — 2026-05-20
 
 ### Added
