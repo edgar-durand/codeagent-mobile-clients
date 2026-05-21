@@ -1,5 +1,6 @@
 import { spawn } from 'child_process';
 import * as path from 'path';
+import { DEFAULT_API_BASE_URL } from '@codeagent/shared';
 import type {
   FileChangedEvent,
   PendingReviewHunkEvent,
@@ -42,7 +43,7 @@ import { _transport } from './file-watcher/transport';
  * output on file-change emission; the agent must always feel snappy.
  */
 
-const API_BASE = process.env.CODEAM_API_URL ?? 'https://api.codeagent-mobile.com';
+const API_BASE = process.env.CODEAM_API_URL ?? DEFAULT_API_BASE_URL;
 
 /** Debounce window per file. Rapid sequential writes coalesce. */
 const DEBOUNCE_MS = 250;

@@ -1,9 +1,10 @@
 import * as https from 'https';
 import * as http from 'http';
+import { DEFAULT_API_BASE_URL } from '@codeagent/shared';
 import { vercelBypassHeader } from '../../lib/backend-headers';
 import { log } from '../logger';
 
-const API_BASE = process.env.CODEAM_API_URL ?? 'https://api.codeagent-mobile.com';
+const API_BASE = process.env.CODEAM_API_URL ?? DEFAULT_API_BASE_URL;
 
 /**
  * Hand-rolled HTTP transport for chunk POSTs to

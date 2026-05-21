@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import * as crypto from 'crypto';
+import { DEFAULT_API_BASE_URL } from '@codeagent/shared';
 
 export interface RecentSession {
   sessionId: string;
@@ -30,7 +31,9 @@ export class SettingsService {
   }
 
   get apiBaseUrl(): string {
-    return this.getConfig<string>('apiBaseUrl', 'https://api.codeagent-mobile.com');
+    // SYNC WITH packages/shared/src/api-url.ts and the `default` value in
+    // apps/vsc-plugin/package.json (contributes.configuration.…apiBaseUrl).
+    return this.getConfig<string>('apiBaseUrl', DEFAULT_API_BASE_URL);
   }
 
   get autoConnect(): boolean {

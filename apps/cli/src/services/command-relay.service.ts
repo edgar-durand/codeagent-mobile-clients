@@ -1,12 +1,13 @@
 import * as https from 'https';
 import * as http from 'http';
+import { DEFAULT_API_BASE_URL } from '@codeagent/shared';
 import type { AgentMetadata } from '@codeagent/shared';
 import { _postJson, _getJson } from './pairing.service';
 import { vercelBypassHeader } from '../lib/backend-headers';
 import { computePollDelay } from '../lib/poll-delay';
 import { log } from './logger';
 
-const API_BASE = process.env.CODEAM_API_URL ?? 'https://api.codeagent-mobile.com';
+const API_BASE = process.env.CODEAM_API_URL ?? DEFAULT_API_BASE_URL;
 
 export interface RemoteCommand {
   id: string;

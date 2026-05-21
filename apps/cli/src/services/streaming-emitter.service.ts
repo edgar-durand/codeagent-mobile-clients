@@ -7,7 +7,7 @@ import type {
   SelectPrompt,
   ChromeStep,
 } from '@codeagent/shared';
-import { renderToLines } from '@codeagent/shared';
+import { DEFAULT_API_BASE_URL, renderToLines } from '@codeagent/shared';
 import { log } from './logger';
 import { _transport } from './streaming/transport';
 import type { RuntimeStrategy } from '../agents/strategy';
@@ -48,7 +48,7 @@ import type { RuntimeStrategy } from '../agents/strategy';
  * in the logger and the next tick supersedes the missed chunk.
  */
 
-const API_BASE = process.env.CODEAM_API_URL ?? 'https://api.codeagent-mobile.com';
+const API_BASE = process.env.CODEAM_API_URL ?? DEFAULT_API_BASE_URL;
 
 /** Render + classify cadence while the emitter is active. */
 const TICK_MS = 50;

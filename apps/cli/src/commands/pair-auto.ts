@@ -1,7 +1,7 @@
 import * as fs from 'fs';
 import * as os from 'os';
 import { randomUUID } from 'crypto';
-import { isKnownAgentId } from '@codeagent/shared';
+import { DEFAULT_API_BASE_URL, isKnownAgentId } from '@codeagent/shared';
 import { addSession } from '../config';
 import { vercelBypassHeader } from '../lib/backend-headers';
 import { detectCurrentBranch } from '../lib/git-branch';
@@ -33,7 +33,7 @@ interface ClaimErrorBody {
   error: { code: string; message: string };
 }
 
-const API_BASE = process.env.CODEAM_API_URL ?? 'https://api.codeagent-mobile.com';
+const API_BASE = process.env.CODEAM_API_URL ?? DEFAULT_API_BASE_URL;
 
 function fail(msg: string): never {
   // eslint-disable-next-line no-console
