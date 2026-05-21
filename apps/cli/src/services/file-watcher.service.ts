@@ -42,7 +42,7 @@ import { _transport } from './file-watcher/transport';
  * output on file-change emission; the agent must always feel snappy.
  */
 
-const API_BASE = process.env.CODEAM_API_URL ?? 'https://codeagent-mobile-api.vercel.app';
+const API_BASE = process.env.CODEAM_API_URL ?? 'https://api.codeagent-mobile.com';
 
 /** Debounce window per file. Rapid sequential writes coalesce. */
 const DEBOUNCE_MS = 250;

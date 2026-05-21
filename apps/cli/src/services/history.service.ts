@@ -36,7 +36,7 @@ const historyRecordSchema = z
 
 type HistoryRecord = z.infer<typeof historyRecordSchema>;
 
-const API_BASE = process.env.CODEAM_API_URL ?? 'https://codeagent-mobile-api.vercel.app';
+const API_BASE = process.env.CODEAM_API_URL ?? 'https://api.codeagent-mobile.com';
 
 interface ClaudeSession {
   id: string;

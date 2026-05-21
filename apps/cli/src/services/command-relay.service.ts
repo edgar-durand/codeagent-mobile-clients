@@ -6,7 +6,7 @@ import { vercelBypassHeader } from '../lib/backend-headers';
 import { computePollDelay } from '../lib/poll-delay';
 import { log } from './logger';
 
-const API_BASE = process.env.CODEAM_API_URL ?? 'https://codeagent-mobile-api.vercel.app';
+const API_BASE = process.env.CODEAM_API_URL ?? 'https://api.codeagent-mobile.com';
 
 export interface RemoteCommand {
   id: string;

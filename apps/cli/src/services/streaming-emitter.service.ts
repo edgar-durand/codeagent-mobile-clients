@@ -48,7 +48,7 @@ import type { RuntimeStrategy } from '../agents/strategy';
  * in the logger and the next tick supersedes the missed chunk.
  */
 
-const API_BASE = process.env.CODEAM_API_URL ?? 'https://codeagent-mobile-api.vercel.app';
+const API_BASE = process.env.CODEAM_API_URL ?? 'https://api.codeagent-mobile.com';
 
 /** Render + classify cadence while the emitter is active. */
 const TICK_MS = 50;

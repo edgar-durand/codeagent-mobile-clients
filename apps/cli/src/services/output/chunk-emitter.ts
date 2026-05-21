@@ -3,7 +3,7 @@ import * as http from 'http';
 import { vercelBypassHeader } from '../../lib/backend-headers';
 import { log } from '../logger';
 
-const API_BASE = process.env.CODEAM_API_URL ?? 'https://codeagent-mobile-api.vercel.app';
+const API_BASE = process.env.CODEAM_API_URL ?? 'https://api.codeagent-mobile.com';
 
 /**
  * Hand-rolled HTTP transport for chunk POSTs to

@@ -33,7 +33,7 @@ interface ClaimErrorBody {
   error: { code: string; message: string };
 }
 
-const API_BASE = process.env.CODEAM_API_URL ?? 'https://codeagent-mobile-api.vercel.app';
+const API_BASE = process.env.CODEAM_API_URL ?? 'https://api.codeagent-mobile.com';
 
 function fail(msg: string): never {
   // eslint-disable-next-line no-console
