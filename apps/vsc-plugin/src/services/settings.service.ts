@@ -30,7 +30,7 @@ export class SettingsService {
   }
 
   get apiBaseUrl(): string {
-    return this.getConfig<string>('apiBaseUrl', 'https://codeagent-mobile-api.vercel.app');
+    return this.getConfig<string>('apiBaseUrl', 'https://api.codeagent-mobile.com');
   }
 
   get autoConnect(): boolean {

@@ -101,7 +101,7 @@
       "properties": {
         "codeagent-mobile.apiBaseUrl": {
           "type": "string",
-          "default": "https://codeagent-mobile-api.vercel.app",
+          "default": "https://api.codeagent-mobile.com",
           "description": "API base URL for the CodeAgent Mobile backend"
         },
         "codeagent-mobile.autoConnect": {
