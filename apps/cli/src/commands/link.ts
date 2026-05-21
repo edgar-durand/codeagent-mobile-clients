@@ -6,38 +6,52 @@
  *
  *   1. Anthropic doesn't expose a public OAuth provider, so a web /
  *      mobile "Sign in with Anthropic" flow is impossible.
- *   2. The agent's local auth (`claude login`, `codex login`) is the
- *      ONE place the user can prove they own that account. We capture
- *      the token it writes locally and seal it server-side so future
- *      surfaces (codespace deploy, `@codeagent` group mention,
- *      mobile-driven invocations) can reuse it without re-auth.
+ *   2. The agent's local auth (`claude` REPL + `/login`, `codex
+ *      login`) is the ONE place the user can prove they own that
+ *      account. We capture the token it writes locally and seal it
+ *      server-side so future surfaces (codespace deploy, `@codeagent`
+ *      group mention, mobile-driven invocations) can reuse it
+ *      without re-auth.
  *
- * Flow:
+ * Flow (max-automation, min-friction):
  *
- *   1. Pair the CLI to the mobile app the standard way — 6-digit code
- *      + QR; the user enters the code in mobile. Pair gives us a
- *      pluginAuthToken (HMAC over sessionId+pluginId) that auths the
- *      upload step.
- *   2. If the agent already has a local token (left over from a prior
- *      `<agent> login`), reuse it. Otherwise spawn `<agent> login` as
- *      a foreground subprocess so the user completes the OAuth in
- *      their own browser. Wait for the binary to exit, then re-read.
- *   3. POST the captured blob to /api/plugin/agents/:agentId/link
- *      with the pluginAuthToken. Backend seals it into the vault and
- *      emits `linked_agent_added` so mobile flips to its success card.
- *   4. Print a one-line success summary and exit. The pair session
- *      survives — it doubles as a regular command-relay channel so
- *      the user gets an immediate "you're online" affordance.
+ *   1. Pair the CLI to the mobile app the standard way — 6-digit
+ *      code + QR; the user enters the code in mobile. Pair gives us
+ *      a `pluginAuthToken` (HMAC over sessionId+pluginId) that auths
+ *      the upload step.
+ *   2. Ensure the agent CLI itself is installed. If missing we run
+ *      the official installer non-interactively (no prompt).
+ *   3. Probe known credential locations. If the user is already
+ *      authenticated locally (Claude Pro/Max user with a prior
+ *      `/login`, fresh `codex login`, …) we skip step 4 entirely.
+ *   4. Otherwise: launch the agent's login flow + watch the
+ *      credential paths with chokidar (file) + a 2 s poll loop
+ *      (macOS Keychain). The watcher resolves as soon as the agent
+ *      writes the token; we tear down the subprocess automatically.
+ *   5. POST the captured blob to /api/plugin/agents/:agentId/link
+ *      with the HMAC token in `X-Plugin-Auth-Token`. The backend
+ *      seals it into the vault and emits `linked_agent_added` so the
+ *      mobile UI flips to its success card.
+ *   6. Print a one-line success summary and exit. The pair session
+ *      survives — doubles as a regular command-relay channel so the
+ *      user gets an immediate "you're online" affordance.
  *
- * Failure modes are intentional dead-ends with actionable messages:
- *   - Agent binary missing → "install <agent>-cli first" + link
- *   - Login subprocess non-zero exit → "didn't see a token, try again"
- *   - 401 from /link → pair must have expired; re-run `codeam link`
- *   - 404 NOT_AVAILABLE → backend hasn't enabled the agent yet
+ * Escape hatches the user can take when the auto-flow gets stuck:
+ *   - `--api-key=<key>`        — paste an API key directly, skip
+ *                                the local auth flow entirely.
+ *   - `--reuse-existing`       — force the upload of whatever creds
+ *                                the probe already finds (no relaunch
+ *                                of the agent's login flow).
+ *   - `--token-file=<path>`    — manual credential blob path; useful
+ *                                when the agent stores its token
+ *                                somewhere our probes don't know yet.
  */
 
-import { spawn } from 'node:child_process';
+import { spawn, type ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
+import chokidar from 'chokidar';
 import pc from 'picocolors';
 import { p } from '../ui/prompts';
 import {
@@ -55,34 +69,39 @@ import {
   type PairedUserInfo,
 } from '../services/pairing.service';
 import { addSession, loadCliConfig, saveCliConfig } from '../config';
+import { ensureClaudeInstalled } from '../services/claude-installer';
 import {
   extractLocalClaudeToken,
-  claudeCredentialsMtime,
+  claudeCredentialsPaths,
 } from '../agents/claude/local-token';
 import {
   extractLocalCodexToken,
-  codexCredentialsMtime,
+  codexCredentialsPaths,
 } from '../agents/codex/local-token';
 import type { LocalAgentToken } from '../agents/claude/local-token';
 
 type LinkAgent = 'claude' | 'codex';
 
 interface LinkAgentMeta {
-  /** Internal CLI id — matches `AgentId` from `@codeagent/shared`. */
   internalId: LinkAgent;
-  /** Public id the backend's `/api/plugin/agents/:agentId/link` route
-   *  accepts. Same mapping as `apps/api-v2/src/linked-agents/agent-map.ts`. */
   publicId: 'claude_code' | 'codex';
-  /** Binary name on PATH used to launch the interactive login flow. */
   binary: 'claude' | 'codex';
-  /** Subcommand for the auth flow (`claude login`, `codex login`). */
-  loginArgs: string[];
   displayName: string;
   vendor: string;
-  /** Filesystem hint shown in error messages. */
   credentialsHint: string;
+  /** Paths chokidar watches for `add` / `change` events when the
+   *  agent's auth flow lands a fresh credentials file. */
+  watchPaths: () => string[];
+  /** Read the local token from any known location — file OR macOS
+   *  Keychain. Returns null if no credential exists yet. */
   extract: () => Promise<LocalAgentToken | null>;
-  mtime: () => number | null;
+  /** Ensure the agent's own CLI binary is on PATH. Auto-installs if
+   *  missing (no user prompt — friction is the point we're avoiding). */
+  ensureInstalled: () => Promise<boolean>;
+  /** Launch the agent's interactive login flow as a foreground
+   *  subprocess. Returns the spawned process so the caller can kill
+   *  it once the watcher resolves a credential. */
+  launchLogin: () => ChildProcess;
 }
 
 const AGENT_META: Record<LinkAgent, LinkAgentMeta> = {
@@ -90,32 +109,62 @@ const AGENT_META: Record<LinkAgent, LinkAgentMeta> = {
     internalId: 'claude',
     publicId: 'claude_code',
     binary: 'claude',
-    loginArgs: ['login'],
     displayName: 'Claude Code',
     vendor: 'Anthropic',
-    credentialsHint: '~/.claude/.credentials.json (or macOS Keychain)',
+    credentialsHint: '~/.claude/.credentials.json or the macOS Keychain',
+    watchPaths: claudeCredentialsPaths,
     extract: extractLocalClaudeToken,
-    mtime: claudeCredentialsMtime,
+    ensureInstalled: ensureClaudeInstalled,
+    launchLogin: () => {
+      // Open the Claude REPL and pipe `/login` to its stdin so the
+      // sign-in menu appears without the user having to type the
+      // slash command themselves. `stdio: ['pipe', 'inherit',
+      // 'inherit']` lets the user see Claude's UI + complete the
+      // OAuth in their browser; we capture the token via the file
+      // watcher running in parallel.
+      const child = spawn('claude', [], { stdio: ['pipe', 'inherit', 'inherit'] });
+      child.stdin?.write('/login\n');
+      // Intentionally NOT closing stdin — the REPL stays interactive
+      // so the user can finish any vendor prompts (paste-back code,
+      // menu navigation) without their input being dropped.
+      return child;
+    },
   },
   codex: {
     internalId: 'codex',
     publicId: 'codex',
     binary: 'codex',
-    loginArgs: ['login'],
     displayName: 'Codex',
     vendor: 'OpenAI',
     credentialsHint: '~/.codex/auth.json',
+    watchPaths: codexCredentialsPaths,
     extract: extractLocalCodexToken,
-    mtime: codexCredentialsMtime,
+    ensureInstalled: async () => {
+      // No bundled installer for codex — surface a clear error when
+      // the binary is missing instead of silently failing later.
+      const { findInPath } = await import('../services/pty/types');
+      if (findInPath('codex')) return true;
+      showError(
+        'codex binary not found on PATH. Install it first (https://github.com/openai/codex-cli) then re-run `codeam link codex`.',
+      );
+      return false;
+    },
+    launchLogin: () => {
+      // Codex has a proper non-REPL `codex login` subcommand that
+      // opens a browser, so we can spawn it directly without piping.
+      return spawn('codex', ['login'], { stdio: 'inherit' });
+    },
   },
 };
 
-function parseLinkArgs(args: string[]): {
+interface ParsedArgs {
   agent: LinkAgent;
   reuseExisting: boolean;
-} {
-  // First positional arg is the agent kind. Accept the public id too
-  // ("claude_code") so the mobile copy-paste command works verbatim.
+  apiKey: string | null;
+  tokenFile: string | null;
+}
+
+function parseLinkArgs(args: string[]): ParsedArgs {
   const positional = args.find((a) => !a.startsWith('--'));
   if (!positional) {
     throw new Error(
@@ -129,12 +178,16 @@ function parseLinkArgs(args: string[]): {
     );
   }
   const reuseExisting = args.includes('--reuse-existing');
-  return { agent: normalised, reuseExisting };
+  const apiKeyArg = args.find((a) => a.startsWith('--api-key='));
+  const apiKey = apiKeyArg ? apiKeyArg.slice('--api-key='.length) : null;
+  const tokenFileArg = args.find((a) => a.startsWith('--token-file='));
+  const tokenFile = tokenFileArg ? tokenFileArg.slice('--token-file='.length) : null;
+  return { agent: normalised, reuseExisting, apiKey, tokenFile };
 }
 
 export async function link(args: string[] = []): Promise<void> {
-  const { agent, reuseExisting } = parseLinkArgs(args);
-  const meta = AGENT_META[agent];
+  const parsed = parseLinkArgs(args);
+  const meta = AGENT_META[parsed.agent];
 
   showIntro();
   console.log(
@@ -142,8 +195,7 @@ export async function link(args: string[] = []): Promise<void> {
   );
   console.log('');
 
-  // 1. Pair — exact same shape as `codeam pair`. We need a paired
-  //    session for the HMAC auth on the upload step.
+  // ─── 1. Pair ────────────────────────────────────────────────────
   const pluginId = randomUUID();
   const spin = p.spinner();
   spin.start('Requesting pairing code...');
@@ -197,9 +249,7 @@ export async function link(args: string[] = []): Promise<void> {
   }
 
   // Persist the pair so the session shows up in `codeam sessions`
-  // immediately + the dashboard's "WORKSTATION" pill picks it up.
-  // We do this BEFORE the link upload so a partial run still leaves
-  // the user with a usable pair.
+  // even if the rest of the link flow gets interrupted.
   addSession({
     id: paired.sessionId,
     pluginId,
@@ -212,56 +262,175 @@ export async function link(args: string[] = []): Promise<void> {
   });
   saveCliConfig({ ...loadCliConfig(), preferredAgent: meta.internalId });
 
-  // 2. Token extraction — try local first; fall back to running the
-  //    agent's own login flow interactively.
-  let token = await meta.extract();
-  if (token && reuseExisting) {
-    showInfo(`Reusing existing ${meta.displayName} token at ${pc.bold(meta.credentialsHint)}.`);
-  } else {
-    const beforeMtime = meta.mtime();
-    showInfo(`Launching ${pc.bold(`${meta.binary} ${meta.loginArgs.join(' ')}`)} — complete the sign-in in your browser, then return here.`);
-    console.log('');
-    const code = await runAgentLogin(meta);
-    console.log('');
-    if (code !== 0) {
-      showError(
-        `${meta.binary} ${meta.loginArgs.join(' ')} exited with code ${code}. ` +
-          'Re-run when ready.',
-      );
-      process.exit(1);
-    }
-    // Re-read AFTER login. The interactive flow may have written a
-    // fresh blob to the same path.
-    const refreshed = await meta.extract();
-    const afterMtime = meta.mtime();
-    if (!refreshed) {
-      showError(
-        `${meta.displayName} login finished but no credential was found at ${meta.credentialsHint}. ` +
-          'Re-run when ready.',
-      );
-      process.exit(1);
-    }
-    // Defensive: if mtime didn't move AND the content matches the
-    // pre-login token, the user likely cancelled the flow mid-way.
-    // Surface this rather than uploading stale bytes.
-    if (
-      token &&
-      refreshed.credential === token.credential &&
-      beforeMtime !== null &&
-      afterMtime !== null &&
-      afterMtime <= beforeMtime
-    ) {
-      showError(
-        `${meta.displayName} login didn't produce a fresh token. Re-run when ready, or pass --reuse-existing to keep the current one.`,
-      );
-      process.exit(1);
-    }
-    token = refreshed;
+  // ─── 2. API-key escape hatch ────────────────────────────────────
+  if (parsed.apiKey) {
+    await uploadAndSucceed(meta, paired, pluginId, {
+      method: 'api_key',
+      credential: parsed.apiKey.trim(),
+      source: 'manual',
+    });
+    return;
   }
 
-  // 3. Upload — POSTs to /api/plugin/agents/:publicId/link with the
-  //    HMAC token in `X-Plugin-Auth-Token`. The backend seals + emits
-  //    `linked_agent_added`.
+  // ─── 3. Manual token-file path ──────────────────────────────────
+  if (parsed.tokenFile) {
+    const credential = fs.readFileSync(path.resolve(parsed.tokenFile), 'utf8').trim();
+    if (!credential) {
+      showError(`--token-file ${parsed.tokenFile} is empty.`);
+      process.exit(1);
+    }
+    await uploadAndSucceed(meta, paired, pluginId, {
+      method: 'oauth',
+      credential,
+      source: 'manual',
+    });
+    return;
+  }
+
+  // ─── 4. Ensure binary installed (no prompt) ─────────────────────
+  const installSpin = p.spinner();
+  installSpin.start(`Checking that ${meta.binary} is installed...`);
+  const installed = await meta.ensureInstalled();
+  if (!installed) {
+    installSpin.stop('Failed');
+    showError(`Could not install ${meta.displayName}. Install it manually then re-run.`);
+    process.exit(1);
+  }
+  installSpin.stop(`${meta.displayName} is installed`);
+
+  // ─── 5. Probe existing credentials ──────────────────────────────
+  const existing = await meta.extract();
+  if (existing) {
+    showInfo(`Found existing ${meta.displayName} credentials at ${pc.bold(existing.source)}.`);
+    await uploadAndSucceed(meta, paired, pluginId, existing);
+    return;
+  }
+
+  if (parsed.reuseExisting) {
+    showError(
+      `--reuse-existing set, but no local ${meta.displayName} credentials were found at ${meta.credentialsHint}.`,
+    );
+    process.exit(1);
+  }
+
+  // ─── 6. Launch login + watch for fresh credentials ──────────────
+  showInfo(
+    `No local ${meta.displayName} credentials found. Launching the sign-in — complete it in your browser, the CLI will detect the new token and finish automatically.`,
+  );
+  console.log('');
+
+  const captured = await captureFreshCredentials(meta);
+  console.log('');
+  await uploadAndSucceed(meta, paired, pluginId, captured);
+}
+
+/**
+ * Spawn the agent's interactive auth flow + watch all known
+ * credential locations. Resolves as soon as the watcher reads a
+ * non-empty token at any path (or finds the keychain entry on macOS).
+ *
+ * Cleans up the subprocess + watcher in both success and failure.
+ */
+async function captureFreshCredentials(meta: LinkAgentMeta): Promise<LocalAgentToken> {
+  const watcher = chokidar.watch(meta.watchPaths(), {
+    persistent: true,
+    ignoreInitial: false,
+    awaitWriteFinish: { stabilityThreshold: 500, pollInterval: 100 },
+  });
+
+  let child: ChildProcess | null = null;
+  let keychainPoll: NodeJS.Timeout | null = null;
+
+  const cleanup = (): void => {
+    void watcher.close();
+    if (keychainPoll) clearInterval(keychainPoll);
+    if (child && !child.killed) {
+      // SIGTERM first; the agent's REPL traps it and exits clean.
+      // If it ignores, the user can Ctrl+C out — the process group
+      // exit is enough either way.
+      try { child.kill('SIGTERM'); } catch { /* already gone */ }
+    }
+  };
+
+  try {
+    const token = await new Promise<LocalAgentToken>((resolve, reject) => {
+      let settled = false;
+      const tryExtract = async (): Promise<void> => {
+        if (settled) return;
+        const t = await meta.extract();
+        if (t && !settled) {
+          settled = true;
+          resolve(t);
+        }
+      };
+
+      watcher.on('add', () => void tryExtract());
+      watcher.on('change', () => void tryExtract());
+      // Polling cadence for the macOS Keychain. chokidar can't watch
+      // the keychain, so we re-probe every 2 s. Cheap — one `security`
+      // exec per tick, gated on settled.
+      keychainPoll = setInterval(() => void tryExtract(), 2000);
+      keychainPoll.unref?.();
+
+      const sigint = (): void => {
+        if (settled) return;
+        settled = true;
+        reject(new Error('cancelled'));
+      };
+      process.once('SIGINT', sigint);
+
+      // 5-minute hard timeout. If the user wandered off and never
+      // finished the OAuth, surface a clear timeout rather than
+      // hanging the terminal indefinitely.
+      setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        reject(new Error(`Timed out waiting for ${meta.displayName} sign-in (5 minutes).`));
+      }, 5 * 60_000);
+
+      // Spawn the agent login flow last so any synchronous output
+      // from the agent is bracketed by our watcher.
+      child = meta.launchLogin();
+      child.on('exit', () => {
+        // Give the disk one last chance — the agent may have written
+        // the token just before exiting. If still nothing after the
+        // grace, surface a friendlier error than "child exited".
+        void tryExtract().then(() => {
+          if (!settled) {
+            settled = true;
+            reject(
+              new Error(
+                `${meta.binary} exited but no credentials were written at ${meta.credentialsHint}.`,
+              ),
+            );
+          }
+        });
+      });
+    });
+    cleanup();
+    return token;
+  } catch (err) {
+    cleanup();
+    throw err;
+  }
+}
+
+/**
+ * POST the captured credential to the backend's link endpoint + print
+ * a success summary. Pulled out of the main flow so api_key /
+ * token-file / file-watcher all funnel through the same upload code.
+ */
+async function uploadAndSucceed(
+  meta: LinkAgentMeta,
+  paired: PairedUserInfo,
+  pluginId: string,
+  token: LocalAgentToken,
+): Promise<void> {
+  if (!paired.pluginAuthToken) {
+    // Belt-and-braces — should have been caught earlier.
+    showError('Missing pluginAuthToken; re-run codeam link.');
+    process.exit(1);
+  }
   const uploadSpin = p.spinner();
   uploadSpin.start('Sealing credential in your vault...');
   const result = await postLinkCredential({
@@ -275,13 +444,11 @@ export async function link(args: string[] = []): Promise<void> {
   if (!result.ok) {
     uploadSpin.stop('Failed');
     if (result.status === 401) {
-      showError(
-        'Pair token rejected by the backend (401). Re-run `codeam link` to start fresh.',
-      );
+      showError('Pair token rejected by the backend (401). Re-run `codeam link`.');
     } else if (result.status === 404) {
       showError(
         `${meta.displayName} link endpoint not available on this backend (404). ` +
-          'The api-v2 deployment may not yet include the /api/plugin/agents/:agentId/link route.',
+          'The api-v2 deployment may not yet include the route.',
       );
     } else {
       showError(`Upload failed: ${result.message}`);
@@ -296,32 +463,4 @@ export async function link(args: string[] = []): Promise<void> {
     `Your codespaces and @codeagent mentions can now use ${meta.displayName} without you signing in again.`,
   );
   console.log('');
-}
-
-/**
- * Spawn `<binary> login` as a foreground subprocess. `stdio: 'inherit'`
- * so the user sees the binary's own prompts directly — no buffering,
- * no relay, no spinner fighting for cursor control. Resolves with the
- * exit code; non-zero is reported up.
- *
- * If the binary is missing we surface a friendly error pointing at the
- * agent's install instructions rather than letting Node's ENOENT
- * bubble up as a stack trace.
- */
-function runAgentLogin(meta: LinkAgentMeta): Promise<number> {
-  return new Promise((resolve) => {
-    const child = spawn(meta.binary, meta.loginArgs, { stdio: 'inherit' });
-    child.on('error', (err: NodeJS.ErrnoException) => {
-      if (err.code === 'ENOENT') {
-        showError(
-          `${meta.binary} binary not found on PATH. Install ${meta.displayName} first, then re-run \`codeam link ${meta.internalId}\`.`,
-        );
-        resolve(127);
-        return;
-      }
-      showError(`Failed to launch ${meta.binary}: ${err.message}`);
-      resolve(1);
-    });
-    child.on('exit', (code) => resolve(code ?? 1));
-  });
 }
