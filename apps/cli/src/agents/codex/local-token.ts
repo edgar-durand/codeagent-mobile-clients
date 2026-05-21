@@ -35,6 +35,10 @@ export async function extractLocalCodexToken(): Promise<LocalAgentToken | null> 
   return { method: 'oauth', credential, source: 'flat-file' };
 }
 
+export function codexCredentialsPaths(): string[] {
+  return [codexCredentialsPath()];
+}
+
 export function codexCredentialsMtime(): number | null {
   const file = codexCredentialsPath();
   try {
@@ -42,4 +46,13 @@ export function codexCredentialsMtime(): number | null {
   } catch {
     return null;
   }
+}
+
+/**
+ * Convenience yes/no around `extractLocalCodexToken`. Used by
+ * `codeam link codex` to short-circuit straight to upload when the
+ * user already has a token from a prior `codex login`.
+ */
+export async function hasLocalCodexAuth(): Promise<boolean> {
+  return (await extractLocalCodexToken()) !== null;
 }
