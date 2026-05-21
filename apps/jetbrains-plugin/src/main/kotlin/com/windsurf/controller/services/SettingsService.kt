@@ -22,7 +22,7 @@ class SettingsService : PersistentStateComponent<SettingsService.State> {
     )
 
     data class State(
-        var apiBaseUrl: String = "https://codeagent-mobile-api.vercel.app",
+        var apiBaseUrl: String = "https://api.codeagent-mobile.com",
         var pluginId: String = "",
         var autoConnect: Boolean = true,
         var showNotifications: Boolean = true,
