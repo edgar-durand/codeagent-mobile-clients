@@ -22,19 +22,56 @@ export function showInfo(msg: string): void {
   console.log(`  ${pc.dim('·')} ${msg}`);
 }
 
-export function showPairingCode(code: string, expiresAt: number): void {
-  const secs = Math.max(0, Math.floor((expiresAt - Date.now()) / 1000));
-  const timer = `${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, '0')}`;
-  console.log('  ┌──────────────────────────────┐');
-  const codePad = ' '.repeat(Math.max(0, 19 - code.length));
-  const timerPad = ' '.repeat(Math.max(0, 15 - timer.length));
-  console.log(`  │  Code:  ${pc.bold(pc.yellow(code))}${codePad}│`);
-  console.log(`  │  Expires in: ${pc.dim(timer)}${timerPad}│`);
-  console.log('  └──────────────────────────────┘');
+/**
+ * Width of the box INTERIOR (between the two `│` columns). Must match
+ * the number of `─` characters in the top and bottom borders below.
+ * Changing one without the other misaligns every row — the previous
+ * implementation hand-tuned per-row padding constants (19 / 15) that
+ * didn't sum to this interior width, which is why the right `│` drifted
+ * inward on screen.
+ */
+const BOX_INTERIOR = 30;
+const BOX_BORDER_TOP = `  ┌${'─'.repeat(BOX_INTERIOR)}┐`;
+const BOX_BORDER_BOT = `  └${'─'.repeat(BOX_INTERIOR)}┘`;
+
+/**
+ * Right-pad an interior box row so its visible length (i.e. after
+ * stripping ANSI escapes) is exactly `BOX_INTERIOR`. Ensures the
+ * trailing `│` column line up across every row regardless of the
+ * styled content (which inflates `.length` with ANSI bytes).
+ */
+function boxRow(content: string, visibleLength: number): string {
+  const pad = ' '.repeat(Math.max(0, BOX_INTERIOR - visibleLength));
+  return `  │${content}${pad}│`;
+}
+
+/**
+ * Show the pairing code in a static box. The countdown lives on the
+ * waiting spinner (see `pair.ts`) — rendering it inside the box would
+ * fight clack's spinner for cursor control and never reliably tick,
+ * which is exactly what the previous "Expires in: 4:59" line did (it
+ * printed once and never updated).
+ */
+export function showPairingCode(code: string): void {
+  console.log(BOX_BORDER_TOP);
+  // Visible prefix "  Code:  " = 9 chars; code is 6 chars; total 15
+  // visible, padded out to BOX_INTERIOR. The ANSI bold+yellow wraps the
+  // code AFTER we've computed the visible length so the pad is honest.
+  const codeVisible = `  Code:  ${code}`.length;
+  console.log(
+    boxRow(`  Code:  ${pc.bold(pc.yellow(code))}`, codeVisible),
+  );
+  console.log(BOX_BORDER_BOT);
   console.log('');
 
   qrcode.generate(code, { small: true }, (qr: string) => {
     qr.split('\n').forEach((line) => console.log('  ' + line));
   });
   console.log('');
+}
+
+/** Format a remaining-seconds value as `M:SS`. */
+export function formatRemaining(expiresAt: number): string {
+  const secs = Math.max(0, Math.floor((expiresAt - Date.now()) / 1000));
+  return `${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, '0')}`;
 }

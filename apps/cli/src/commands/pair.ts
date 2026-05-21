@@ -1,7 +1,13 @@
 import { randomUUID } from 'crypto';
 import pc from 'picocolors';
 import { p } from '../ui/prompts';
-import { showIntro, showSuccess, showError, showPairingCode } from '../ui/banner';
+import {
+  showIntro,
+  showSuccess,
+  showError,
+  showPairingCode,
+  formatRemaining,
+} from '../ui/banner';
 import { requestCode, pollStatus } from '../services/pairing.service';
 import { addSession, loadCliConfig, saveCliConfig } from '../config';
 import { start } from './start';
@@ -28,17 +34,34 @@ export async function pair(args: string[] = []): Promise<void> {
   }
 
   spin.stop('Got pairing code');
-  showPairingCode(result.code, result.expiresAt);
+  showPairingCode(result.code);
   console.log(pc.dim('  Scan the QR code or enter the code in CodeAgent Mobile.'));
   console.log('');
 
   const waitSpin = p.spinner();
-  waitSpin.start('Waiting for mobile app...');
+  const waitMessage = (): string =>
+    `Waiting for mobile app... · expires in ${formatRemaining(result.expiresAt)}`;
+  waitSpin.start(waitMessage());
+
+  // Countdown lives on the spinner message — `clack/prompts` ticks
+  // the spinner frame on its own animation loop, so calling
+  // `.message(...)` once per second updates the visible "expires in
+  // M:SS" segment without us having to mess with ANSI cursor moves
+  // (which would fight clack for the same line). When the spinner
+  // stops we clear the interval to avoid leaking a timer that
+  // would write to a stopped spinner.
+  const countdownInterval = setInterval(() => {
+    waitSpin.message(waitMessage());
+  }, 1000);
+  // Make sure the interval doesn't pin the event loop when the
+  // process tries to exit (e.g. on SIGINT).
+  countdownInterval.unref?.();
 
   await new Promise<void>((resolve) => {
     let stopPolling: (() => void) | null = null;
 
     function sigintHandler() {
+      clearInterval(countdownInterval);
       stopPolling?.();
       console.log('');
       process.exit(0);
@@ -48,6 +71,7 @@ export async function pair(args: string[] = []): Promise<void> {
       pluginId,
       (info) => {
         process.removeListener('SIGINT', sigintHandler);
+        clearInterval(countdownInterval);
         waitSpin.stop('Paired!');
         addSession({
           id: info.sessionId,
@@ -66,6 +90,7 @@ export async function pair(args: string[] = []): Promise<void> {
         resolve();
       },
       () => {
+        clearInterval(countdownInterval);
         waitSpin.stop('Timed out');
         showError('Pairing timed out after 5 minutes. Run codeam pair to try again.');
         process.exit(1);
