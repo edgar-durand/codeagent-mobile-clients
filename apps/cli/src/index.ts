@@ -6,6 +6,7 @@ import { status } from './commands/status';
 import { logout } from './commands/logout';
 import { deploy } from './commands/deploy';
 import { deployList, deployStop } from './commands/deploy-manage';
+import { link } from './commands/link';
 import { version } from './commands/version';
 import { help } from './commands/help';
 import { checkForUpdates } from './lib/updateNotifier';
@@ -35,6 +36,7 @@ async function main(): Promise<void> {
     case 'sessions': return sessions(args);
     case 'status':   return status();
     case 'logout':   return logout();
+    case 'link':     return link(args);
     case 'deploy':
       // `codeam deploy`             → start a new deploy
       // `codeam deploy ls|list`     → list deployed workspaces

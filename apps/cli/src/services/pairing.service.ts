@@ -118,7 +118,103 @@ export function pollStatus(
 export const _transport = {
   postJson: _postJson,
   getJson: _getJson,
+  postJsonAuthed: _postJsonAuthed,
 };
+
+/**
+ * POST a credential blob to `/api/plugin/agents/:agentId/link` for
+ * the `codeam link <agent>` CLI handoff flow.
+ *
+ * Auth is the per-pairing `X-Plugin-Auth-Token` minted at pair-time —
+ * NOT a JWT. The backend's `PluginAuthGuard` verifies the HMAC against
+ * the body's `sessionId+pluginId` (so we always send both).
+ */
+export async function postLinkCredential(input: {
+  agentId: 'claude_code' | 'codex';
+  sessionId: string;
+  pluginId: string;
+  pluginAuthToken: string;
+  method: 'oauth' | 'api_key';
+  credential: string;
+  modelPreference?: string;
+}): Promise<{ ok: true } | { ok: false; status: number; message: string }> {
+  const body: Record<string, unknown> = {
+    sessionId: input.sessionId,
+    pluginId: input.pluginId,
+    method: input.method,
+    credential: input.credential,
+  };
+  if (input.modelPreference) {
+    body.modelPreference = input.modelPreference;
+  }
+  try {
+    await _transport.postJsonAuthed(
+      `${API_BASE}/api/plugin/agents/${input.agentId}/link`,
+      body,
+      input.pluginAuthToken,
+    );
+    return { ok: true };
+  } catch (err) {
+    const e = err as Error & { statusCode?: number };
+    return {
+      ok: false,
+      status: typeof e.statusCode === 'number' ? e.statusCode : 0,
+      message: e.message || 'unknown',
+    };
+  }
+}
+
+/**
+ * Variant of `_postJson` that includes the X-Plugin-Auth-Token
+ * header and surfaces the HTTP status code on the rejected error
+ * so the caller can map 401/403/404 to specific user messages.
+ */
+async function _postJsonAuthed(
+  url: string,
+  body: Record<string, unknown>,
+  pluginAuthToken: string,
+): Promise<Record<string, unknown> | null> {
+  return new Promise((resolve, reject) => {
+    const data = JSON.stringify(body);
+    const u = new URL(url);
+    const transport = u.protocol === 'https:' ? https : http;
+    const req = transport.request(
+      {
+        hostname: u.hostname,
+        port: u.port || (u.protocol === 'https:' ? 443 : 80),
+        path: u.pathname + u.search,
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Content-Length': Buffer.byteLength(data),
+          'X-Plugin-Auth-Token': pluginAuthToken,
+          ...vercelBypassHeader(),
+        },
+        timeout: 15000,
+      },
+      (res) => {
+        res.on('error', reject);
+        let responseBody = '';
+        res.on('data', (chunk: Buffer) => { responseBody += chunk.toString(); });
+        res.on('end', () => {
+          if (res.statusCode && res.statusCode >= 400) {
+            const err = new Error(`HTTP ${res.statusCode}: ${responseBody.slice(0, 200)}`) as Error & {
+              statusCode: number;
+            };
+            err.statusCode = res.statusCode;
+            reject(err);
+            return;
+          }
+          try { resolve(JSON.parse(responseBody)); } catch { resolve(null); }
+        });
+      },
+    );
+    req.on('error', reject);
+    req.on('timeout', () => { req.destroy(); reject(new Error('timeout')); });
+    req.write(data);
+    req.end();
+  });
+}
 
 // Exported with underscore prefix so tests can spy on them
 export async function _postJson(

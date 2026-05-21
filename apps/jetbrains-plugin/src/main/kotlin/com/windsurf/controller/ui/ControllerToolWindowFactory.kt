@@ -876,6 +876,40 @@ class ControllerToolWindowFactory : ToolWindowFactory {
                             })
                         }
                     }
+                    "install_cli_and_link" -> {
+                        // Sibling of install_cli_and_pair for the
+                        // `codeam link <agent>` CLI handoff flow.
+                        // Mobile sends this when the user taps "Continue
+                        // with OAuth" on a plugin-paired IDE: terminal
+                        // opens, CLI auto-installs if missing, and
+                        // `codeam link <agent>` takes over (pair +
+                        // capture + upload).
+                        //
+                        // Payload: { agent: "claude" | "codex" }
+                        // (defaults to "claude"). Sanitised so an
+                        // unexpected agent string can't be shell-spliced
+                        // into the command line.
+                        try {
+                            val rawAgent = command.payload.get("agent")?.asString
+                            val safeAgent = if (rawAgent == "codex") "codex" else "claude"
+                            val terminalView = org.jetbrains.plugins.terminal.TerminalToolWindowManager
+                                .getInstance(project)
+                            val widget = terminalView.createLocalShellWidget(
+                                project.basePath,
+                                "codeam link $safeAgent",
+                            )
+                            widget.executeCommand(
+                                "npm install -g codeam-cli@latest && codeam link $safeAgent || npx -y codeam-cli@latest link $safeAgent",
+                            )
+                            relay.sendResult(command.id, "completed", com.google.gson.JsonObject().apply {
+                                addProperty("message", "Terminal opened with codeam link $safeAgent")
+                            })
+                        } catch (e: Exception) {
+                            relay.sendResult(command.id, "failed", com.google.gson.JsonObject().apply {
+                                addProperty("error", "Failed to open terminal: ${e.message}")
+                            })
+                        }
+                    }
 
                     else -> {
                         relay.sendResult(command.id, "failed", com.google.gson.JsonObject().apply {
