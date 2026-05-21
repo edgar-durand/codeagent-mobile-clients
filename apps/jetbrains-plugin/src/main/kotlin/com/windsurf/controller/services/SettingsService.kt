@@ -5,6 +5,7 @@ import com.intellij.openapi.components.PersistentStateComponent
 import com.intellij.openapi.components.Service
 import com.intellij.openapi.components.State
 import com.intellij.openapi.components.Storage
+import com.windsurf.controller.DEFAULT_API_BASE_URL
 
 @Service(Service.Level.APP)
 @State(
@@ -22,7 +23,7 @@ class SettingsService : PersistentStateComponent<SettingsService.State> {
     )
 
     data class State(
-        var apiBaseUrl: String = "https://codeagent-mobile-api.vercel.app",
+        var apiBaseUrl: String = DEFAULT_API_BASE_URL,
         var pluginId: String = "",
         var autoConnect: Boolean = true,
         var showNotifications: Boolean = true,

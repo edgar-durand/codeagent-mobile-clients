@@ -1,12 +1,13 @@
 import * as https from 'https';
 import * as http from 'http';
 import * as os from 'os';
+import { DEFAULT_API_BASE_URL } from '@codeagent/shared';
 import pkg from '../../package.json';
 import { vercelBypassHeader } from '../lib/backend-headers';
 import { detectCurrentBranch } from '../lib/git-branch';
 import { computePollDelay } from '../lib/poll-delay';
 
-const API_BASE = process.env.CODEAM_API_URL ?? 'https://codeagent-mobile-api.vercel.app';
+const API_BASE = process.env.CODEAM_API_URL ?? DEFAULT_API_BASE_URL;
 
 export interface PairedUserInfo {
   sessionId: string;

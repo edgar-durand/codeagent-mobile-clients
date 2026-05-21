@@ -111,7 +111,7 @@ Adding more cloud backends (Gitpod, Coder, your own SSH host, …) is a single n
 
 | Variable | Default | Effect |
 |---|---|---|
-| `CODEAM_API_URL` | `https://codeagent-mobile-api.vercel.app` | Override the backend relay URL. Useful for hitting a staging environment or self-hosted backend. |
+| `CODEAM_API_URL` | `https://api.codeagent-mobile.com` | Override the backend relay URL. Useful for hitting a staging environment or self-hosted backend. |
 | `CODEAM_DISABLE_UPDATE_CHECK` | unset | Set to `1` to suppress the "update available" banner. The check also auto-skips on non-TTY stdout, when `CI=true`, and during tests. |
 | `CODEAM_AUTO_TOKEN` | unset | One-shot pairing token consumed by `codeam pair-auto`. Used by the `codeam deploy` bootstrap; see *Advanced / scripted pairing* below. |
 
