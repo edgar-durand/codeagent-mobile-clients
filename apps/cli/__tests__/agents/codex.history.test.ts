@@ -30,16 +30,30 @@ describe('codex/history (rollouts)', () => {
 
   describe('parseHistoryFile', () => {
     let origCwd: string;
+    const dirsToClean: string[] = [];
 
     beforeEach(() => {
       origCwd = process.cwd();
     });
     afterEach(() => {
+      // Restore cwd BEFORE rmSync — on Windows, `fs.rmSync(dir, …)`
+      // throws EBUSY when `dir` is still the process cwd because the
+      // OS keeps a handle on the current working directory. macOS /
+      // Linux are lenient about this so the bug only surfaces in CI.
       process.chdir(origCwd);
+      while (dirsToClean.length > 0) {
+        const d = dirsToClean.pop()!;
+        try {
+          rmSync(d, { recursive: true, force: true });
+        } catch {
+          /* best-effort */
+        }
+      }
     });
 
     it('emits user + assistant messages from response_item records', () => {
       const dir = mkdtempSync(path.join(tmpdir(), 'codex-rollout-'));
+      dirsToClean.push(dir);
       process.chdir(dir);
 
       const filePath = path.join(dir, 'rollout-2025-05-07T17-24-21-abc.jsonl');
@@ -72,12 +86,12 @@ describe('codex/history (rollouts)', () => {
       expect(out[0]).toMatchObject({ id: 'rollout:0', role: 'user', text: 'hi' });
       expect(out[1]).toMatchObject({ id: 'rollout:1', role: 'agent', text: 'hello back' });
       expect(out[0].timestamp).toBe('2025-05-07T17:24:22.000Z');
-      rmSync(dir, { recursive: true, force: true });
     });
 
     it("returns [] when session_meta.cwd does not match process.cwd()", () => {
       const dir = mkdtempSync(path.join(tmpdir(), 'codex-rollout-'));
       const wrongCwd = mkdtempSync(path.join(tmpdir(), 'codex-other-'));
+      dirsToClean.push(dir, wrongCwd);
       process.chdir(dir);
 
       const filePath = path.join(dir, 'rollout.jsonl');
@@ -100,12 +114,11 @@ describe('codex/history (rollouts)', () => {
       );
 
       expect(parseHistoryFile(filePath)).toEqual([]);
-      rmSync(dir, { recursive: true, force: true });
-      rmSync(wrongCwd, { recursive: true, force: true });
     });
 
     it('skips non-Message response_item variants (tool calls, reasoning)', () => {
       const dir = mkdtempSync(path.join(tmpdir(), 'codex-rollout-'));
+      dirsToClean.push(dir);
       process.chdir(dir);
 
       const filePath = path.join(dir, 'rollout.jsonl');
@@ -143,11 +156,11 @@ describe('codex/history (rollouts)', () => {
       const out = parseHistoryFile(filePath);
       expect(out).toHaveLength(1);
       expect(out[0].text).toBe('done');
-      rmSync(dir, { recursive: true, force: true });
     });
 
     it('skips malformed JSON lines', () => {
       const dir = mkdtempSync(path.join(tmpdir(), 'codex-rollout-'));
+      dirsToClean.push(dir);
       process.chdir(dir);
 
       const filePath = path.join(dir, 'rollout.jsonl');
@@ -173,7 +186,6 @@ describe('codex/history (rollouts)', () => {
       const out = parseHistoryFile(filePath);
       expect(out).toHaveLength(1);
       expect(out[0].text).toBe('keep me');
-      rmSync(dir, { recursive: true, force: true });
     });
   });
 
