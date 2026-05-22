@@ -71,6 +71,25 @@ export function activate(context: vscode.ExtensionContext): void {
     log.appendLine(`Detected ${agents.length} AI agents on activation`);
   });
 
+  // Test-only command — registered ONLY when the extension is hosted
+  // by @vscode/test-electron (CODEAM_VSC_TEST=1 in the env). Lets the
+  // E2E suite probe the pair-backend endpoint against the same code
+  // path the panel's QR button takes, without needing to inject a
+  // postMessage into the sandboxed webview. Returns the raw result of
+  // PairingService.requestPairingCode() so the test can assert on
+  // shape (code / expiresAt).
+  if (process.env.CODEAM_VSC_TEST === '1') {
+    context.subscriptions.push(
+      vscode.commands.registerCommand(
+        'codeagent-mobile.test.probePairBackend',
+        async () => {
+          return PairingService.getInstance().requestPairingCode();
+        },
+      ),
+    );
+    log.appendLine('Test-only command registered: codeagent-mobile.test.probePairBackend');
+  }
+
   // Status bar item
   const statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
   statusBarItem.text = '$(broadcast) CodeAgent';

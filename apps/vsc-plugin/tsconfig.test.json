@@ -1,0 +1,13 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "outDir": "dist-test",
+    "rootDir": "src",
+    "noEmit": false,
+    "module": "commonjs",
+    "target": "ES2021",
+    "types": ["node", "mocha"]
+  },
+  "include": ["src/test/**/*"],
+  "exclude": ["node_modules", "dist", "dist-test"]
+}
