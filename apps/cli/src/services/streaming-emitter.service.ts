@@ -354,7 +354,7 @@ export class StreamingEmitterService {
     const questionId = this.pendingAnswer.questionId;
     try {
       const { statusCode, body } = await _transport.get(
-        `${this.apiBase}/api/sessions/${encodeURIComponent(this.opts.sessionId)}/pending-answer?questionId=${encodeURIComponent(questionId)}`,
+        `${this.apiBase}/api/sessions/${encodeURIComponent(this.opts.sessionId)}/pending-answer?questionId=${encodeURIComponent(questionId)}&pluginId=${encodeURIComponent(this.opts.pluginId)}`,
         this.headers,
       );
       if (statusCode === 204 || statusCode === 404) {
@@ -422,7 +422,16 @@ export class StreamingEmitterService {
     url: string,
     body: StreamingChunkEvent | AwaitingAnswerEvent,
   ): Promise<void> {
-    const payload = JSON.stringify(body);
+    // The backend's PluginAuthGuard expects `sessionId` + `pluginId` in
+    // the JSON body (same convention as the chunk-emitter at
+    // /api/commands/output). Without these the guard rejects with 401
+    // `PLUGIN_TOKEN_REQUIRED` even when X-Plugin-Auth-Token is set and
+    // sessionId is on the URL path.
+    const payload = JSON.stringify({
+      sessionId: this.opts.sessionId,
+      pluginId: this.opts.pluginId,
+      ...body,
+    });
     for (let attempt = 0; attempt <= MAX_RETRIES; attempt += 1) {
       try {
         const { statusCode, body: resBody } = await _transport.post(url, this.headers, payload);
