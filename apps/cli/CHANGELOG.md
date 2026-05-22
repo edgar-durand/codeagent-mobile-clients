@@ -4,6 +4,25 @@ All notable changes to `codeam-cli` are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.17.0] — 2026-05-22
+
+### Added
+
+- Detect OpenAI Codex in VS Code + JetBrains plugins (#46)
+
+### CI
+
+- **vsc-plugin:** VS Code E2E workflow — open panel + pair-backend probe (#45)
+
+### Fixed
+
+- **cli:** Windows EPERM #43 + cross-OS CI smoke matrix + agent-creds tests
+## [2.16.1] — 2026-05-21
+
+### Fixed
+
+- **cli:** Codeam link — auto-install, multi-probe creds, file-watcher login (#42)
+
 ## [2.16.2] — 2026-05-22
 
 ### Chore
