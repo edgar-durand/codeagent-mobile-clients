@@ -7,6 +7,7 @@ import {
   type SelectPrompt,
 } from '@codeagent/shared';
 import { buildClaudeLaunch } from '../../services/claude-resolver';
+import { ensureClaudeInstalled } from '../../services/claude-installer';
 import { fetchClaudeQuota } from './quota';
 import * as history from './history';
 import {
@@ -23,8 +24,24 @@ export class ClaudeRuntimeStrategy implements RuntimeStrategy {
   readonly meta: AgentMetadata = getAgent('claude');
 
   async prepareLaunch(): Promise<{ cmd: string; args: string[]; env?: Record<string, string> }> {
-    const launch = buildClaudeLaunch();
-    if (!launch) throw new Error('claude binary not found in PATH');
+    let launch = buildClaudeLaunch();
+    if (!launch) {
+      // Run Anthropic's official installer inline so pairing → first
+      // prompt stays a single uninterrupted flow on a clean machine.
+      // The installer prompts interactively (TTY) or runs headless
+      // when stdio isn't a TTY.
+      const installed = await ensureClaudeInstalled();
+      if (installed) launch = buildClaudeLaunch();
+    }
+    if (!launch) {
+      const cmd =
+        process.platform === 'win32'
+          ? 'irm https://claude.ai/install.ps1 | iex'
+          : 'curl -fsSL https://claude.ai/install.sh | bash';
+      throw new Error(
+        `Claude Code is required to continue. Install it manually with:\n    ${cmd}\n    Then restart your terminal and run \`codeam pair\` again.`,
+      );
+    }
     return { cmd: launch.cmd, args: launch.args };
   }
 

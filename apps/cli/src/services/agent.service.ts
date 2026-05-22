@@ -2,7 +2,6 @@ import { IPtyStrategy } from './pty/types';
 import { UnixPtyStrategy } from './pty/unix.strategy';
 import { WindowsPtyStrategy } from './pty/windows.strategy';
 import { WindowsConPtyStrategy } from './pty/windows-conpty.strategy';
-import { ensureClaudeInstalled } from './claude-installer';
 import { buildClaudeLaunch } from './claude-resolver';
 import { log } from './logger';
 import type { RuntimeStrategy } from '../agents/strategy';
@@ -71,42 +70,22 @@ export class AgentService {
   }
 
   async spawn(): Promise<void> {
-    // Ask the runtime strategy for the launch descriptor. For Claude,
-    // this calls buildClaudeLaunch() internally; for future agents it
-    // will delegate to their own resolver. If the binary is missing
-    // the strategy throws — we catch and attempt auto-install before
-    // re-trying once, then give up with a user-friendly message.
+    // Each RuntimeStrategy owns its own resolve-or-install flow inside
+    // prepareLaunch(): Claude runs Anthropic's official installer when
+    // the binary is missing, Codex runs `npm install -g @openai/codex`,
+    // and any future agent will follow the same contract. By the time
+    // a strategy throws here, it has already exhausted its install
+    // path — there is nothing generic this layer can do beyond
+    // surfacing the agent-specific error to the user and exiting.
     let launch: { cmd: string; args: string[]; env?: Record<string, string> };
     try {
       launch = await this.runtime.prepareLaunch();
-    } catch {
-      // Inline auto-install via Anthropic's official installer (curl|bash
-      // on macOS/Linux, irm|iex on Windows). After the installer exits,
-      // ensureClaudeInstalled() also prepends the known install dirs to
-      // this process's PATH so the next prepareLaunch() probe sees
-      // the freshly-dropped binary without needing a shell restart.
-      const installed = await ensureClaudeInstalled();
-      if (installed) {
-        try {
-          launch = await this.runtime.prepareLaunch();
-        } catch {
-          launch = null as unknown as typeof launch;
-        }
-      } else {
-        launch = null as unknown as typeof launch;
-      }
-      if (!launch) {
-        const cmd =
-          process.platform === 'win32'
-            ? 'irm https://claude.ai/install.ps1 | iex'
-            : 'curl -fsSL https://claude.ai/install.sh | bash';
-        console.error(
-          '\n  ✗ claude is required to continue. Install it manually with:\n' +
-            `    ${cmd}\n` +
-            '    Then restart your terminal and run `codeam pair` again.\n',
-        );
-        process.exit(1);
-      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(
+        `\n  ✗ ${this.runtime.meta.displayName} could not be launched.\n    ${msg}\n`,
+      );
+      process.exit(1);
     }
 
     if (process.platform === 'win32') {
