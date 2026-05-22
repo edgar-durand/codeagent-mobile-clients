@@ -1,9 +1,8 @@
 import { ClaudeCodeDetector } from './detectors/claude-code.detector';
+import { CodexDetector } from './detectors/codex.detector';
 import type { AgentDetector, DetectionContext, DetectionResult, DetectedAgent } from './types';
 
-export const DETECTORS: readonly AgentDetector[] = [
-  new ClaudeCodeDetector(),
-];
+export const DETECTORS: readonly AgentDetector[] = [new ClaudeCodeDetector(), new CodexDetector()];
 
 export function toDetectedAgent(d: AgentDetector, r: DetectionResult): DetectedAgent {
   const id = r.via === 'extension' ? r.extensionId : `__terminal__:${d.id}`;
