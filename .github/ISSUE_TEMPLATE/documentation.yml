@@ -1,0 +1,46 @@
+name: Documentation issue
+description: Report a problem in the README, CHANGELOG, or any other docs in this repo.
+labels: [documentation]
+body:
+  - type: dropdown
+    id: where
+    attributes:
+      label: Where is the issue?
+      options:
+        - Repo README
+        - apps/cli README / docs
+        - apps/vsc-plugin README / Marketplace listing
+        - apps/jetbrains-plugin README / Marketplace listing
+        - CONTRIBUTING / SECURITY / CODE_OF_CONDUCT
+        - CHANGELOG
+        - Inline code comments / JSDoc
+        - Other / not sure
+    validations:
+      required: true
+
+  - type: input
+    id: location
+    attributes:
+      label: Specific link or file path
+      placeholder: "e.g. apps/cli/README.md#pairing or https://github.com/edgar-durand/codeagent-mobile-clients/blob/main/README.md"
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What's wrong, missing, or unclear?
+    validations:
+      required: true
+
+  - type: textarea
+    id: suggestion
+    attributes:
+      label: Suggested wording or fix
+      description: A draft sentence, bullet, or section is welcome — feel free to open a PR directly if you prefer.
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Final checks
+      options:
+        - label: I checked the latest version of the doc on `main`
+          required: true

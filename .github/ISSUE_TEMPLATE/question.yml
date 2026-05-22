@@ -1,0 +1,56 @@
+name: Question / usage help
+description: Ask how to use, configure, or integrate the CLI or an IDE plugin.
+labels: [question]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this for usage and configuration questions about the CLI or the IDE
+        plugins. Account, login, billing, and mobile-app questions are handled
+        through the in-app Help & FAQ on https://www.codeagent-mobile.com.
+
+  - type: dropdown
+    id: app
+    attributes:
+      label: Which client are you using?
+      options:
+        - codeam-cli
+        - VS Code / Cursor / Windsurf extension
+        - JetBrains plugin
+        - Not sure yet
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Client version
+      placeholder: 2.16.0
+
+  - type: textarea
+    id: question
+    attributes:
+      label: What are you trying to do?
+      description: Describe the outcome you want, not just the command you tried.
+    validations:
+      required: true
+
+  - type: textarea
+    id: tried
+    attributes:
+      label: What have you tried so far?
+      description: Commands, settings, docs you already looked at.
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Environment / context
+      placeholder: "OS, IDE version, corporate proxy, monorepo / multi-root workspace, etc."
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Final checks
+      options:
+        - label: I searched existing issues, discussions, and the README
+          required: true
