@@ -162,6 +162,7 @@ interface ParsedArgs {
   reuseExisting: boolean;
   apiKey: string | null;
   tokenFile: string | null;
+  dryRun: boolean;
 }
 
 function parseLinkArgs(args: string[]): ParsedArgs {
@@ -178,11 +179,12 @@ function parseLinkArgs(args: string[]): ParsedArgs {
     );
   }
   const reuseExisting = args.includes('--reuse-existing');
+  const dryRun = args.includes('--dry-run');
   const apiKeyArg = args.find((a) => a.startsWith('--api-key='));
   const apiKey = apiKeyArg ? apiKeyArg.slice('--api-key='.length) : null;
   const tokenFileArg = args.find((a) => a.startsWith('--token-file='));
   const tokenFile = tokenFileArg ? tokenFileArg.slice('--token-file='.length) : null;
-  return { agent: normalised, reuseExisting, apiKey, tokenFile };
+  return { agent: normalised, reuseExisting, apiKey, tokenFile, dryRun };
 }
 
 export async function link(args: string[] = []): Promise<void> {
@@ -194,6 +196,18 @@ export async function link(args: string[] = []): Promise<void> {
     pc.bold(`  Link ${meta.displayName}`) + pc.dim(`  ·  ${meta.vendor}`),
   );
   console.log('');
+
+  // ─── 0. --dry-run: preflight the backend endpoint and exit ──────
+  //
+  // The CI smoke matrix uses this to validate that
+  // /api/plugin/agents/<agentId>/link still exists and rejects
+  // unauthenticated requests with 401. Catches the same protocol-drift
+  // class of bug as `pair --dry-run` without spawning the agent's
+  // login flow or needing a paired session.
+  if (parsed.dryRun) {
+    await linkDryRunPreflight(meta);
+    return;
+  }
 
   // ─── 1. Pair ────────────────────────────────────────────────────
   const pluginId = randomUUID();
@@ -332,11 +346,26 @@ export async function link(args: string[] = []): Promise<void> {
  * Cleans up the subprocess + watcher in both success and failure.
  */
 async function captureFreshCredentials(meta: LinkAgentMeta): Promise<LocalAgentToken> {
+  const isWin = process.platform === 'win32';
   const watcher = chokidar.watch(meta.watchPaths(), {
     persistent: true,
     ignoreInitial: false,
     awaitWriteFinish: { stabilityThreshold: 500, pollInterval: 100 },
+    // Windows-only: when a credential file's ancestor is missing,
+    // chokidar walks up to the closest existing parent and starts
+    // traversing it. On a default Windows shell that ancestor is
+    // `C:\Users\<u>`, which contains legacy junctions whose ACL makes
+    // `fs.watch` throw EPERM (#43). These flags are no-ops on macOS,
+    // where the user has read access to their entire home.
+    ...(isWin ? { followSymlinks: false, ignorePermissionErrors: true } : {}),
   });
+
+  // chokidar bubbles fs errors as `error` events through Node's
+  // EventEmitter — without a listener, an unhandled error crashes the
+  // process. Swallow it: the link flow can keep waiting on the other
+  // paths / the keychain re-probe loop and will surface a clean
+  // timeout if nothing ever arrives.
+  watcher.on('error', () => { /* logged elsewhere via the watcher's own error events; swallow here */ });
 
   let child: ChildProcess | null = null;
   let keychainPoll: NodeJS.Timeout | null = null;
@@ -463,4 +492,53 @@ async function uploadAndSucceed(
     `Your codespaces and @codeagent mentions can now use ${meta.displayName} without you signing in again.`,
   );
   console.log('');
+}
+
+/**
+ * `--dry-run` preflight for the CI smoke matrix.
+ *
+ * Submits a deliberately-unauthenticated request to the link endpoint
+ * and expects the backend to reject it with HTTP 401. A 401 proves:
+ *   - DNS / TLS / CDN routing to api.codeagent-mobile.com works
+ *   - The /api/plugin/agents/<agentId>/link route still exists in the
+ *     deployed backend
+ *   - The PluginAuthGuard is wired up and rejecting bad tokens
+ *
+ * Anything else (404 → endpoint moved/removed; 5xx → backend down;
+ * network error → connectivity broken) is surfaced as an exit-1.
+ *
+ * No real credential is sent; the body uses stub strings so a server
+ * mis-configured to NOT auth-check would still fail downstream
+ * validation rather than create a database record.
+ */
+async function linkDryRunPreflight(meta: LinkAgentMeta): Promise<void> {
+  const spin = p.spinner();
+  spin.start(`Probing ${meta.publicId} link endpoint...`);
+  const result = await postLinkCredential({
+    agentId: meta.publicId,
+    sessionId: 'dryrun-session',
+    pluginId: 'dryrun-plugin',
+    pluginAuthToken: 'dryrun-token',
+    method: 'oauth',
+    credential: 'dryrun-credential',
+  });
+  if (result.ok) {
+    spin.stop('Unexpected 2xx');
+    showError(
+      'Link dry-run: backend accepted a stub credential (2xx). PluginAuthGuard appears to be disabled — investigate api-v2.',
+    );
+    process.exit(1);
+  }
+  if (result.status === 401) {
+    spin.stop('Endpoint OK');
+    showSuccess(
+      `Link dry-run OK — /api/plugin/agents/${meta.publicId}/link reachable and auth-gated (401 as expected).`,
+    );
+    process.exit(0);
+  }
+  spin.stop('Failed');
+  showError(
+    `Link dry-run: unexpected response from /api/plugin/agents/${meta.publicId}/link (status=${result.status}, message=${result.message}). Expected 401.`,
+  );
+  process.exit(1);
 }

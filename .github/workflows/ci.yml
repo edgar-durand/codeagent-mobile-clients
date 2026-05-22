@@ -28,9 +28,13 @@ jobs:
         with:
           configFile: commitlint.config.mjs
 
-  node:
-    name: CLI + VS Code plugin
-    runs-on: ubuntu-latest
+  cli:
+    name: CLI (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
     steps:
       - uses: actions/checkout@v6
 
@@ -46,13 +50,45 @@ jobs:
         working-directory: apps/cli
         run: npm run typecheck
 
-      - name: CLI tests
+      - name: CLI tests (Vitest)
         working-directory: apps/cli
         run: npm run test
 
       - name: CLI build
         working-directory: apps/cli
         run: npm run build
+
+      # Smoke from the repo workspace. Confirms the freshly-built
+      # binary boots on this OS, the argument parser handles every
+      # `<cmd> --help` we ship, and the live backend at
+      # api.codeagent-mobile.com still speaks the protocol we expect
+      # (pair --dry-run, link --dry-run).
+      - name: CLI smoke (cwd=workspace)
+        working-directory: apps/cli
+        run: node scripts/smoke.mjs
+
+      # Same smoke, but with cwd = $HOME / %USERPROFILE%. On the Windows
+      # runner this exercises C:\Users\runneradmin which contains the
+      # same legacy junctions that crashed Krzysztof in v2.16.1 (#43).
+      - name: CLI smoke (cwd=home, regression for #43)
+        working-directory: apps/cli
+        env:
+          SMOKE_CWD: home
+        run: node scripts/smoke.mjs
+
+  vsc-plugin:
+    name: VS Code plugin
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install workspaces
+        run: npm ci
 
       - name: VS Code plugin build
         working-directory: apps/vsc-plugin

@@ -9,6 +9,7 @@ import { deployList, deployStop } from './commands/deploy-manage';
 import { link } from './commands/link';
 import { version } from './commands/version';
 import { help } from './commands/help';
+import { tryShowSubcommandHelp } from './commands/subcommand-help';
 import { checkForUpdates } from './lib/updateNotifier';
 import { isKnownAgentId } from '@codeagent/shared';
 
@@ -23,6 +24,13 @@ async function main(): Promise<void> {
     command === '--version' || command === '-v' || command === 'version' ||
     command === '--help' || command === '-h' || command === 'help';
   if (!isMetaCommand) checkForUpdates();
+
+  // Per-subcommand --help intercept. Runs BEFORE dispatch so the help
+  // bypass never triggers network calls, agent spawns, or interactive
+  // prompts. The CI smoke matrix relies on this for every subcommand.
+  if (typeof command === 'string' && tryShowSubcommandHelp(command, args)) {
+    return;
+  }
 
   switch (command) {
     case '--version':

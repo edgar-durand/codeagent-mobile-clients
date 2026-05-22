@@ -4,6 +4,8 @@ import * as path from 'path';
 import {
   FileWatcherService,
   _gitSeam,
+  _chokidarSeam,
+  isUnsafeWindowsWatchRoot,
 } from '../src/services/file-watcher.service';
 import { _transport } from '../src/services/file-watcher/transport';
 import { parseUnifiedDiff } from '../src/services/file-watcher/diff-parser';
@@ -131,6 +133,35 @@ describe('parseUnifiedDiff', () => {
     expect(r.hunks.length).toBe(2);
     expect(r.totalLinesAdded).toBe(2);
     expect(r.totalLinesRemoved).toBe(2);
+  });
+});
+
+describe('isUnsafeWindowsWatchRoot', () => {
+  it('returns true for the Windows user-profile root', () => {
+    expect(isUnsafeWindowsWatchRoot('C:\\Users\\Krzysztof', 'C:\\Users\\Krzysztof')).toBe(true);
+  });
+
+  it('returns true regardless of trailing separator / casing', () => {
+    expect(isUnsafeWindowsWatchRoot('C:\\Users\\Krzysztof\\', 'C:\\Users\\KRZYSZTOF')).toBe(true);
+    expect(isUnsafeWindowsWatchRoot('c:\\users\\krzysztof', 'C:\\Users\\Krzysztof')).toBe(true);
+  });
+
+  it('returns true for drive roots', () => {
+    expect(isUnsafeWindowsWatchRoot('C:\\', 'C:\\Users\\bob')).toBe(true);
+    expect(isUnsafeWindowsWatchRoot('D:', 'C:\\Users\\bob')).toBe(true);
+  });
+
+  it('returns true for known Windows system roots', () => {
+    expect(isUnsafeWindowsWatchRoot('C:\\Windows', 'C:\\Users\\bob')).toBe(true);
+    expect(isUnsafeWindowsWatchRoot('C:\\Program Files\\Foo', 'C:\\Users\\bob')).toBe(true);
+    expect(isUnsafeWindowsWatchRoot('C:\\Program Files (x86)', 'C:\\Users\\bob')).toBe(true);
+    expect(isUnsafeWindowsWatchRoot('C:\\ProgramData\\bar', 'C:\\Users\\bob')).toBe(true);
+  });
+
+  it('returns false for a real project directory under the user home', () => {
+    expect(
+      isUnsafeWindowsWatchRoot('C:\\Users\\Krzysztof\\projects\\demo', 'C:\\Users\\Krzysztof'),
+    ).toBe(false);
   });
 });
 
@@ -295,6 +326,111 @@ describe('FileWatcherService', () => {
 
     expect(postSpy).not.toHaveBeenCalled();
     expect(gitSpy).not.toHaveBeenCalled();
+  });
+
+  it('attaches an error handler to chokidar so EPERM does not crash the process (#43)', async () => {
+    vi.useRealTimers();
+
+    const handlers: Record<string, ((arg: unknown) => void)[]> = {};
+    const mockWatcher = {
+      on: vi.fn((event: string, fn: (arg: unknown) => void) => {
+        handlers[event] = handlers[event] ?? [];
+        handlers[event].push(fn);
+        return mockWatcher;
+      }),
+      close: vi.fn().mockResolvedValue(undefined),
+    };
+    const watchSpy = vi.fn().mockReturnValue(mockWatcher);
+    vi.spyOn(_chokidarSeam, 'load').mockReturnValue({ watch: watchSpy });
+
+    const svc = makeService();
+    await svc.start();
+
+    expect(handlers.error).toBeDefined();
+    expect(handlers.error.length).toBeGreaterThan(0);
+
+    // Simulate the exact crash from #43 — chokidar emitting an EPERM
+    // error for a Windows junction. The handler must swallow it.
+    const eperm = Object.assign(new Error('EPERM: operation not permitted, watch'), {
+      code: 'EPERM',
+      path: 'C:\\Users\\Krzysztof\\Application Data',
+    });
+    expect(() => handlers.error[0](eperm)).not.toThrow();
+
+    await svc.stop();
+  });
+
+  it('passes Windows-only chokidar options + ignore patterns when running on win32', async () => {
+    vi.useRealTimers();
+    const originalPlatform = process.platform;
+    Object.defineProperty(process, 'platform', { value: 'win32' });
+
+    try {
+      const mockWatcher = {
+        on: vi.fn().mockReturnThis(),
+        close: vi.fn().mockResolvedValue(undefined),
+      };
+      const watchSpy = vi.fn().mockReturnValue(mockWatcher);
+      vi.spyOn(_chokidarSeam, 'load').mockReturnValue({ watch: watchSpy });
+
+      const svc = new FileWatcherService({
+        // Use a Windows-shaped project path that is NOT a system / home
+        // root so the unsafe-root guard doesn't short-circuit start().
+        workingDir: 'C:\\projects\\demo',
+        sessionId: 'sess-win',
+        pluginId: 'plugin-win',
+        pluginAuthToken: 'token-win',
+        apiBaseUrl: 'https://api.example.test',
+      });
+      await svc.start();
+
+      expect(watchSpy).toHaveBeenCalledTimes(1);
+      const opts = watchSpy.mock.calls[0][1] as {
+        followSymlinks: boolean;
+        ignorePermissionErrors: boolean;
+        ignored: RegExp[];
+      };
+      expect(opts.followSymlinks).toBe(false);
+      expect(opts.ignorePermissionErrors).toBe(true);
+      // The Windows legacy junction list must be in `ignored` so chokidar
+      // never tries to descend into Application Data / Cookies / etc.
+      const ignoredSources = opts.ignored.map((r) => r.source);
+      expect(ignoredSources.some((s) => /Application Data/.test(s))).toBe(true);
+      expect(ignoredSources.some((s) => /Cookies/.test(s))).toBe(true);
+
+      await svc.stop();
+    } finally {
+      Object.defineProperty(process, 'platform', { value: originalPlatform });
+    }
+  });
+
+  it('refuses to watch the Windows user-profile root', async () => {
+    vi.useRealTimers();
+    const originalPlatform = process.platform;
+    Object.defineProperty(process, 'platform', { value: 'win32' });
+
+    try {
+      const watchSpy = vi.fn();
+      vi.spyOn(_chokidarSeam, 'load').mockReturnValue({ watch: watchSpy });
+      // Stub os.homedir indirectly: pass the home value into the
+      // workingDir AND match what os.homedir() returns by spying
+      // through node's `os` module. Simpler: pass workingDir =
+      // os.homedir() on this host — isUnsafeWindowsWatchRoot will
+      // detect equality.
+      const os = await import('os');
+      const svc = new FileWatcherService({
+        workingDir: os.homedir(),
+        sessionId: 'sess-home',
+        pluginId: 'plugin-home',
+        pluginAuthToken: 'token-home',
+        apiBaseUrl: 'https://api.example.test',
+      });
+      await svc.start();
+
+      expect(watchSpy).not.toHaveBeenCalled();
+    } finally {
+      Object.defineProperty(process, 'platform', { value: originalPlatform });
+    }
   });
 
   it('stop() clears pending timers and is idempotent', async () => {

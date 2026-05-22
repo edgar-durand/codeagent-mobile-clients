@@ -1,4 +1,5 @@
 import { spawn } from 'child_process';
+import * as os from 'os';
 import * as path from 'path';
 import { DEFAULT_API_BASE_URL } from '@codeagent/shared';
 import type {
@@ -87,12 +88,84 @@ interface PendingFile {
  */
 interface FileWatcher {
   on(event: 'add' | 'change' | 'unlink', handler: (filePath: string) => void): this;
+  on(event: 'error', handler: (err: unknown) => void): this;
   close(): Promise<void>;
 }
 
 interface ChokidarLike {
   watch(paths: string, opts: Record<string, unknown>): FileWatcher;
 }
+
+/**
+ * Windows-only: directories the legacy WinXP-compat junction layer
+ * created inside every user profile. They are reparse points with a
+ * DENY ACL for the user — `fs.watch` throws EPERM on descent. The
+ * regex matches a path segment (between separators or at the end of
+ * the path), so a real project directory called e.g. `recent-stuff`
+ * won't be filtered.
+ */
+const WINDOWS_LEGACY_JUNCTIONS: RegExp[] = [
+  /[\\/]Application Data([\\/]|$)/i,
+  /[\\/]Cookies([\\/]|$)/i,
+  /[\\/]Local Settings([\\/]|$)/i,
+  /[\\/]My Documents([\\/]|$)/i,
+  /[\\/]NetHood([\\/]|$)/i,
+  /[\\/]PrintHood([\\/]|$)/i,
+  /[\\/]Recent([\\/]|$)/i,
+  /[\\/]SendTo([\\/]|$)/i,
+  /[\\/]Start Menu([\\/]|$)/i,
+  /[\\/]Templates([\\/]|$)/i,
+];
+
+/**
+ * Returns true when `dir` is a Windows path we should never recursively
+ * watch — the user's profile root, a drive root, or a known system
+ * directory. Those locations contain legacy reparse-point junctions
+ * that make chokidar's per-directory `fs.watch` throw EPERM during
+ * traversal (see issue #43).
+ *
+ * Pure / platform-agnostic so it can be exercised in tests on macOS
+ * — the caller decides whether to invoke it (we only run it when
+ * `process.platform === 'win32'`).
+ */
+export function isUnsafeWindowsWatchRoot(dir: string, homedir: string): boolean {
+  const norm = (p: string): string =>
+    p.replace(/\//g, '\\').replace(/\\+$/, '').toLowerCase();
+  const cwd = norm(dir);
+  const home = norm(homedir);
+
+  if (cwd === home) return true;
+
+  // Drive root, e.g. `c:` or `c:\`.
+  if (/^[a-z]:$/.test(cwd)) return true;
+
+  // Known Windows system roots that contain junctions / reparse points.
+  const sysRoots = [
+    'c:\\windows',
+    'c:\\program files',
+    'c:\\program files (x86)',
+    'c:\\programdata',
+  ];
+  for (const root of sysRoots) {
+    if (cwd === root || cwd.startsWith(root + '\\')) return true;
+  }
+  return false;
+}
+
+/**
+ * Test seam — lets vitest stub the chokidar load without going through
+ * Node's module cache. The default loads the real package; tests can
+ * `vi.spyOn(_chokidarSeam, 'load')`.
+ */
+export const _chokidarSeam = {
+  load: (): ChokidarLike | null => {
+    try {
+      return require('chokidar') as ChokidarLike;
+    } catch {
+      return null;
+    }
+  },
+};
 
 export class FileWatcherService {
   private watcher: FileWatcher | null = null;
@@ -118,18 +191,30 @@ export class FileWatcherService {
       throw new Error('FileWatcherService has already been stopped — re-instantiate to restart.');
     }
 
-    // Dynamic require so tests can stub via vi.mock without paying
-    // chokidar's startup cost (native fsevents on darwin) and so a
-    // chokidar load failure (e.g. corrupt install) degrades to a
-    // logged warning rather than crashing the agent boot path.
-    let chokidar: ChokidarLike;
-    try {
-      chokidar = require('chokidar') as ChokidarLike;
-    } catch (err) {
+    const isWin = process.platform === 'win32';
+
+    // Windows users frequently launch a shell at `C:\Users\<name>` — the
+    // default cmd.exe / PowerShell starting directory. Recursively watching
+    // a user profile is both useless for project work and unsafe: the
+    // legacy WinXP-compat junctions (`Application Data`, `Cookies`, …)
+    // have a DENY ACL that makes chokidar's per-directory `fs.watch`
+    // throw EPERM during traversal (issue #43).
+    if (isWin && isUnsafeWindowsWatchRoot(this.opts.workingDir, os.homedir())) {
+      log.warn(
+        'fileWatcher',
+        `refusing to watch ${this.opts.workingDir} — looks like a Windows user-profile or system path. Run codeam from your project folder to enable file change emission.`,
+      );
+      return;
+    }
+
+    // Test seam wraps the dynamic require so a chokidar load failure
+    // (corrupt install, sandboxed environment) degrades to a logged
+    // warning rather than crashing the agent boot path.
+    const chokidar = _chokidarSeam.load();
+    if (!chokidar) {
       log.warn(
         'fileWatcher',
         `chokidar unavailable — file change emission disabled`,
-        err,
       );
       return;
     }
@@ -148,9 +233,22 @@ export class FileWatcherService {
         // Build outputs that aren't a typical "dist" target
         /target\//,
         /__pycache__/,
+        // Windows-only: skip legacy user-profile junctions whose ACLs
+        // throw EPERM during chokidar's recursive traversal.
+        ...(isWin ? WINDOWS_LEGACY_JUNCTIONS : []),
       ],
       ignoreInitial: true, // we only care about post-start changes
       persistent: true,
+      // Windows-only safety net: don't follow reparse points, and let
+      // chokidar swallow EPERM/EACCES on unreadable paths instead of
+      // bubbling them up as fatal errors. Both are no-ops on macOS
+      // (fsevents traversal doesn't fail on permission errors).
+      ...(isWin
+        ? {
+            followSymlinks: false,
+            ignorePermissionErrors: true,
+          }
+        : {}),
       awaitWriteFinish: {
         // Coalesces rapid sequential writes (npm install spam, build
         // tools emitting bursts). Lower than chokidar's default so
@@ -164,6 +262,19 @@ export class FileWatcherService {
     watcher.on('add', (filePath: string) => this.schedule(filePath, 'add'));
     watcher.on('change', (filePath: string) => this.schedule(filePath, 'change'));
     watcher.on('unlink', (filePath: string) => this.schedule(filePath, 'unlink'));
+
+    // chokidar bubbles fs errors through Node's EventEmitter `error`
+    // event. Without a listener Node terminates the process — which is
+    // exactly the v2.16.1 Windows crash (#43) where descending into
+    // `C:\Users\<u>\Application Data` threw EPERM. Logging and
+    // continuing is the right policy for a best-effort file producer.
+    watcher.on('error', (err: unknown) => {
+      const code = (err as { code?: string } | null)?.code ?? 'unknown';
+      log.warn(
+        'fileWatcher',
+        `chokidar error (code=${code}) — watcher continues: ${err}`,
+      );
+    });
 
     this.watcher = watcher;
     log.info(
