@@ -15,8 +15,11 @@ import { parseAgentFlag, promptForAgent } from '../utils/agent-prompt';
 
 export async function pair(args: string[] = []): Promise<void> {
   const config = loadCliConfig();
+  const dryRun = args.includes('--dry-run');
   const flagAgent = parseAgentFlag(args);
-  const agentId = flagAgent ?? (await promptForAgent(config.preferredAgent ?? 'claude'));
+  const agentId = dryRun
+    ? (flagAgent ?? config.preferredAgent ?? 'claude')
+    : (flagAgent ?? (await promptForAgent(config.preferredAgent ?? 'claude')));
 
   showIntro();
 
@@ -34,6 +37,32 @@ export async function pair(args: string[] = []): Promise<void> {
   }
 
   spin.stop('Got pairing code');
+
+  // --dry-run: validate the backend response shape and exit. Used by
+  // the CI smoke matrix to catch protocol drift on /api/pairing/code
+  // without needing a real mobile device to complete the pairing.
+  if (dryRun) {
+    // Lenient shape check on purpose: the dry-run is meant to catch
+    // "endpoint moved / returned 5xx / response totally reshaped" —
+    // not minor encoding choices like base32 codes vs digits, or
+    // expires-in-seconds vs ms. We only require that both fields are
+    // present with the documented types and non-empty / positive.
+    const codeOk = typeof result.code === 'string' && result.code.trim().length > 0;
+    const expiresOk = typeof result.expiresAt === 'number' && result.expiresAt > 0;
+    if (!codeOk || !expiresOk) {
+      // Don't echo `result.code` — even on failure it's a short-lived
+      // bearer secret for pairing.
+      showError(
+        `Pair dry-run: backend response shape unexpected (codeType=${typeof result.code}, codeEmpty=${!codeOk}, expiresType=${typeof result.expiresAt}, expiresPositive=${expiresOk}).`,
+      );
+      process.exit(1);
+    }
+    showSuccess(
+      `Pair dry-run OK — backend reachable, response shape valid (codeLength=${result.code.length}, expiresAt=${result.expiresAt}, agent=${agentId}).`,
+    );
+    process.exit(0);
+  }
+
   showPairingCode(result.code);
   console.log(pc.dim('  Scan the QR code or enter the code in CodeAgent Mobile.'));
   console.log('');
