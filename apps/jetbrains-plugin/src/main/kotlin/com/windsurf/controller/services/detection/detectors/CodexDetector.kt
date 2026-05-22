@@ -14,14 +14,26 @@ class CodexDetector : AgentDetector {
     override val name = "Codex"
     override val icon = "codex"
 
-    // OpenAI Codex was integrated natively into the JetBrains AI Assistant
-    // plugin from v2025.3 onward. The id `com.intellij.ml.llm` is the AI
-    // Assistant plugin id. Third-party Codex plugins (marketplace IDs
-    // 28264 / 31307 / 29342) have unconfirmed string ids and are
-    // intentionally omitted — the official AI Assistant path covers most
-    // installs and the binary + config-dir fallbacks cover the rest.
+    // Plugin candidates, checked in priority order. First match wins.
+    //
+    // 1. Official: OpenAI Codex was integrated natively into the JetBrains
+    //    AI Assistant plugin from v2025.3 onward — `com.intellij.ml.llm`
+    //    is the AI Assistant plugin id. Most installs are here.
+    //
+    // 2-4. Third-party Codex plugins (string ids confirmed against the
+    //    JetBrains Marketplace API at
+    //    `https://plugins.jetbrains.com/api/plugins/<numeric-id>`):
+    //      - 28264 "Codex Launcher" → com.github.x0x0b.codex-launcher
+    //      - 31307 "Codex for JetBrains" → com.github.codexjb
+    //      - 29342 "CC GUI (Claude or Codex)" → com.github.idea-claude-code-gui
+    //
+    // The binary + config-dir fallbacks downstream cover any install
+    // method not represented here.
     private val candidatePlugins = listOf(
         PluginRef(id = "com.intellij.ml.llm", minVersion = "2025.3"),
+        PluginRef(id = "com.github.x0x0b.codex-launcher"),
+        PluginRef(id = "com.github.codexjb"),
+        PluginRef(id = "com.github.idea-claude-code-gui"),
     )
     private val binaryName = "codex"
     private val configDir = "~/.codex"
