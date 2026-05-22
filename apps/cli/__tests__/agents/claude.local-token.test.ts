@@ -1,24 +1,46 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtempSync, writeFileSync, rmSync, mkdirSync, utimesSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import * as os from 'node:os';
 import path from 'node:path';
 import {
   extractLocalClaudeToken,
   claudeCredentialsMtime,
+  claudeCredentialsPaths,
 } from '../../src/agents/claude/local-token';
+
+/**
+ * Override `os.homedir()` for the duration of a test by setting both
+ * `HOME` (Linux + macOS) and `USERPROFILE` (Windows). Without the
+ * USERPROFILE override the credential-extract tests no-op on the
+ * Windows CI runner because `os.homedir()` keeps pointing at
+ * `C:\Users\runneradmin`.
+ */
+function overrideHome(target: string): { restore: () => void } {
+  const origHome = process.env.HOME;
+  const origUserProfile = process.env.USERPROFILE;
+  process.env.HOME = target;
+  process.env.USERPROFILE = target;
+  return {
+    restore: () => {
+      if (origHome === undefined) delete process.env.HOME;
+      else process.env.HOME = origHome;
+      if (origUserProfile === undefined) delete process.env.USERPROFILE;
+      else process.env.USERPROFILE = origUserProfile;
+    },
+  };
+}
 
 describe('claude/local-token extractLocalClaudeToken', () => {
   let home: string;
-  let origHome: string | undefined;
+  let restoreHome: () => void;
 
   beforeEach(() => {
-    home = mkdtempSync(path.join(tmpdir(), 'claude-local-'));
-    origHome = process.env.HOME;
-    process.env.HOME = home;
+    home = mkdtempSync(path.join(os.tmpdir(), 'claude-local-'));
+    ({ restore: restoreHome } = overrideHome(home));
   });
 
   afterEach(() => {
-    if (origHome !== undefined) process.env.HOME = origHome;
+    restoreHome();
     rmSync(home, { recursive: true, force: true });
   });
 
@@ -67,20 +89,72 @@ describe('claude/local-token extractLocalClaudeToken', () => {
       expect(r).toBeNull();
     }
   });
+
+  it('falls back to ~/.config/claude/.credentials.json (XDG layout) when the default path is missing', async () => {
+    const xdgDir = path.join(home, '.config', 'claude');
+    mkdirSync(xdgDir, { recursive: true });
+    const blob = JSON.stringify({ accessToken: 'sk-ant-oauth-xdg', refreshToken: 'rt-xdg' });
+    writeFileSync(path.join(xdgDir, '.credentials.json'), blob);
+
+    const r = await extractLocalClaudeToken();
+    expect(r).not.toBeNull();
+    expect(r?.method).toBe('oauth');
+    expect(r?.source).toBe('flat-file');
+    expect(r?.credential).toBe(blob);
+  });
+
+  it('prefers ~/.claude/.credentials.json over the XDG fallback when both exist', async () => {
+    const primaryDir = path.join(home, '.claude');
+    const xdgDir = path.join(home, '.config', 'claude');
+    mkdirSync(primaryDir, { recursive: true });
+    mkdirSync(xdgDir, { recursive: true });
+    writeFileSync(path.join(primaryDir, '.credentials.json'), 'PRIMARY');
+    writeFileSync(path.join(xdgDir, '.credentials.json'), 'XDG');
+
+    const r = await extractLocalClaudeToken();
+    expect(r?.credential).toBe('PRIMARY');
+  });
+});
+
+describe('claude/local-token claudeCredentialsPaths', () => {
+  let home: string;
+  let restoreHome: () => void;
+
+  beforeEach(() => {
+    home = mkdtempSync(path.join(os.tmpdir(), 'claude-paths-'));
+    ({ restore: restoreHome } = overrideHome(home));
+  });
+
+  afterEach(() => {
+    restoreHome();
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  it('resolves under os.homedir() using the platform-native separator', () => {
+    const paths = claudeCredentialsPaths();
+    expect(paths.length).toBeGreaterThanOrEqual(2);
+    for (const p of paths) {
+      expect(p.startsWith(home)).toBe(true);
+      // Use path.sep so Windows backslash paths pass too. The
+      // resolved path must include the `.claude` or `claude`
+      // directory segment.
+      expect(p).toMatch(/[\\/]\.?claude[\\/]/);
+      expect(p.endsWith('.credentials.json')).toBe(true);
+    }
+  });
 });
 
 describe('claude/local-token claudeCredentialsMtime', () => {
   let home: string;
-  let origHome: string | undefined;
+  let restoreHome: () => void;
 
   beforeEach(() => {
-    home = mkdtempSync(path.join(tmpdir(), 'claude-mtime-'));
-    origHome = process.env.HOME;
-    process.env.HOME = home;
+    home = mkdtempSync(path.join(os.tmpdir(), 'claude-mtime-'));
+    ({ restore: restoreHome } = overrideHome(home));
   });
 
   afterEach(() => {
-    if (origHome !== undefined) process.env.HOME = origHome;
+    restoreHome();
     rmSync(home, { recursive: true, force: true });
   });
 
