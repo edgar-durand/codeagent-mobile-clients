@@ -2,16 +2,10 @@ import * as vscode from 'vscode';
 import { OutputChannel } from 'vscode';
 import { SettingsService } from './settings.service';
 import { TerminalAgentService } from './terminal-agent.service';
+import { DETECTORS, runDetectors } from './agent-detection/registry';
+import type { DetectedAgent } from './agent-detection/types';
 
-export interface DetectedAgent {
-  id: string;
-  name: string;
-  extensionId: string;
-  icon: string;
-  installed: boolean;
-  isTerminalAgent?: boolean;
-  isLmAgent?: boolean;
-}
+export type { DetectedAgent };
 
 interface KnownAgent {
   extensionId: string;
@@ -25,8 +19,6 @@ const KNOWN_AGENTS: KnownAgent[] = [
   { extensionId: 'codeium.codeium', name: 'Codeium', icon: 'codeium' },
   { extensionId: 'codeium.windsurf', name: 'Windsurf', icon: 'codeium' },
   { extensionId: 'Codeium.windsurfPyright', name: 'Windsurf', icon: 'codeium' },
-  { extensionId: 'anthropic.claude-code', name: 'Claude Code', icon: 'claude' },
-  { extensionId: 'anthropics.claude', name: 'Claude', icon: 'claude' },
   { extensionId: 'saoudrizwan.claude-dev', name: 'Cline (Claude Dev)', icon: 'claude' },
   { extensionId: 'rooveterinaryinc.roo-cline', name: 'Roo Code (Cline)', icon: 'claude' },
   { extensionId: 'TabNine.tabnine-vscode', name: 'Tabnine', icon: 'tabnine' },
@@ -109,6 +101,15 @@ export class IdeIntegrationService {
       }
     }
 
+    // NEW: registry-driven detectors (Claude Code today; Codex next).
+    const registryResults = await runDetectors(DETECTORS, {
+      log: this.log,
+      extensions: vscode.extensions.all,
+    });
+    for (const result of registryResults) {
+      detected.push(result);
+    }
+
     // Virtual "VS Code Chat" agent via vscode.lm Language Model API.
     //
     // IMPORTANT quirk: selectChatModels() returns an empty array for
@@ -166,32 +167,6 @@ export class IdeIntegrationService {
       );
     } else {
       this.log.appendLine('vscode.lm API not available (VS Code < 1.90) — skipping VS Code Chat agent');
-    }
-
-    // Register terminal-based agents (Claude Code CLI) even if extension is not installed
-    const terminalService = TerminalAgentService.getInstance();
-    const claudeTerminal = terminalService.findClaudeCodeTerminal();
-    const claudeAlreadyDetected = detected.some(
-      (a) => a.id === 'anthropic.claude-code' || a.name === 'Claude Code',
-    );
-    if (claudeTerminal && !claudeAlreadyDetected) {
-      detected.push({
-        id: '__terminal__:claude_code',
-        name: 'Claude Code',
-        extensionId: 'anthropic.claude-code',
-        icon: 'claude',
-        installed: true,
-        isTerminalAgent: true,
-      });
-      this.log.appendLine('Detected Claude Code via terminal tab');
-    } else if (claudeAlreadyDetected) {
-      const idx = detected.findIndex(
-        (a) => a.id === 'anthropic.claude-code' || a.name === 'Claude Code',
-      );
-      if (idx >= 0) {
-        detected[idx] = { ...detected[idx], isTerminalAgent: true };
-        this.log.appendLine('Marked Claude Code as terminal-routable');
-      }
     }
 
     this.cachedAgents = detected;
