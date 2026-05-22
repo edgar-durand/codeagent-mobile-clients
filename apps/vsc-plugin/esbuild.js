@@ -41,6 +41,28 @@ function copyNodePtyPrebuilds() {
   fs.rmSync(dest, { recursive: true, force: true });
   fs.cpSync(src, dest, { recursive: true });
 
+  // node-pty 1.1.0 only ships darwin/win32 prebuilds — Linux has no
+  // shipped binary, so the prebuilds copy above never produces a
+  // `linux-<arch>/pty.node`. On a Linux runner (CI E2E, or a Linux
+  // contributor packaging locally), `npm rebuild node-pty` compiles
+  // `pty.node` into `node-pty/build/Release/`. Mirror it into the
+  // matching `prebuilds/<platform>-<arch>/` so the bundled extension
+  // can resolve it at the same path it uses everywhere else.
+  const localRelease = path.join(path.dirname(ptyPackageJson), 'build', 'Release');
+  const localPty = path.join(localRelease, 'pty.node');
+  if (fs.existsSync(localPty)) {
+    const platDir = path.join(dest, `${process.platform}-${process.arch}`);
+    fs.mkdirSync(platDir, { recursive: true });
+    fs.cpSync(localPty, path.join(platDir, 'pty.node'));
+    const spawnHelper = path.join(localRelease, 'spawn-helper');
+    if (fs.existsSync(spawnHelper)) {
+      fs.cpSync(spawnHelper, path.join(platDir, 'spawn-helper'));
+    }
+    console.log(
+      `[esbuild] copied locally-built node-pty → dist/prebuilds/${process.platform}-${process.arch}`,
+    );
+  }
+
   const platforms = fs.readdirSync(dest);
   console.log(`[esbuild] copied node-pty prebuilds → dist/prebuilds (${platforms.join(', ')})`);
 }

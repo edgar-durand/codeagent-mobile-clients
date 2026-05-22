@@ -38,6 +38,14 @@ jobs:
       - name: Install workspaces
         run: npm ci
 
+      # node-pty 1.1.0 only ships darwin / win32 prebuilds. The Linux
+      # runner has no `prebuilds/linux-x64/pty.node`, so the extension's
+      # activation throws "Failed to load native module: pty.node" the
+      # moment terminal-ops.service is imported. Compile from source —
+      # ubuntu-latest already has python3 + build-essential.
+      - name: Compile node-pty for the runner (Linux has no prebuild)
+        run: npm rebuild node-pty
+
       - name: Build extension (production bundle)
         working-directory: apps/vsc-plugin
         run: npm run build
