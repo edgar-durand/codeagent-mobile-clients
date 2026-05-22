@@ -1,6 +1,7 @@
 package com.windsurf.controller.services.detection
 
 import com.windsurf.controller.services.DetectedAgent
+import com.windsurf.controller.services.detection.detectors.CodexDetector
 
 object AgentDetectorRegistry {
     /**
@@ -9,7 +10,7 @@ object AgentDetectorRegistry {
      * this registry runs AFTER and only emits agents the legacy passes
      * don't already produce (currently: Codex).
      */
-    val detectors: List<AgentDetector> = emptyList()
+    val detectors: List<AgentDetector> = listOf(CodexDetector())
 
     suspend fun run(detectors: List<AgentDetector>, ctx: DetectionContext): List<DetectedAgent> {
         val out = mutableListOf<DetectedAgent>()
