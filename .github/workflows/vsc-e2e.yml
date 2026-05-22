@@ -1,0 +1,55 @@
+name: VS Code extension E2E
+
+# Spawns a real VS Code (Electron) instance via @vscode/test-electron,
+# loads our extension, opens the CodeAgent panel, and hits the real
+# production pair-backend endpoint at api.codeagent-mobile.com.
+#
+# Runs Linux-only — VS Code Electron needs a display server, and
+# `xvfb-run` is straightforward on ubuntu-latest. The .vsix produced
+# by the regular CI matrix is platform-agnostic, so a single Linux
+# E2E catches webview / activation / backend-shape regressions for
+# every marketplace user.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: vsc-e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  e2e:
+    name: VS Code panel + pair backend (xvfb)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install workspaces
+        run: npm ci
+
+      - name: Build extension (production bundle)
+        working-directory: apps/vsc-plugin
+        run: npm run build
+
+      - name: Compile test suite
+        working-directory: apps/vsc-plugin
+        run: npm run build:test
+
+      # VS Code is Electron; under Linux it needs an X server. `xvfb-run`
+      # provisions a headless one. `-a` picks a free display, `-s
+      # "-screen 0 1280x1024x24"` gives the webview a sane viewport so
+      # any size-dependent layout code doesn't trip on 800x600 defaults.
+      - name: Run E2E (xvfb-run)
+        working-directory: apps/vsc-plugin
+        run: xvfb-run -a -s "-screen 0 1280x1024x24" node ./dist-test/test/runTest.js
