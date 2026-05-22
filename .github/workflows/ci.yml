@@ -77,8 +77,12 @@ jobs:
         run: node scripts/smoke.mjs
 
   vsc-plugin:
-    name: VS Code plugin
-    runs-on: ubuntu-latest
+    name: VS Code plugin (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
     steps:
       - uses: actions/checkout@v6
 
@@ -89,6 +93,14 @@ jobs:
 
       - name: Install workspaces
         run: npm ci
+
+      - name: VS Code plugin typecheck
+        working-directory: apps/vsc-plugin
+        run: npm run typecheck
+
+      - name: VS Code plugin tests (Vitest)
+        working-directory: apps/vsc-plugin
+        run: npm run test
 
       - name: VS Code plugin build
         working-directory: apps/vsc-plugin
