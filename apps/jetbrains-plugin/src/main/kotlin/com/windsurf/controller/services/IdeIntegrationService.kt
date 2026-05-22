@@ -14,6 +14,8 @@ import com.intellij.openapi.project.ProjectManager
 import com.intellij.openapi.util.SystemInfo
 import com.intellij.openapi.wm.ToolWindow
 import com.intellij.openapi.wm.ToolWindowManager
+import com.windsurf.controller.services.detection.AgentDetectorRegistry
+import com.windsurf.controller.services.detection.DetectionContext
 import java.awt.Component
 import java.awt.Container
 import java.awt.datatransfer.StringSelection
@@ -21,6 +23,7 @@ import java.awt.event.KeyEvent
 import java.awt.Robot
 import java.lang.ref.WeakReference
 import java.util.concurrent.atomic.AtomicReference
+import kotlinx.coroutines.runBlocking
 
 data class DetectedAgent(
     val id: String,
@@ -198,6 +201,22 @@ class IdeIntegrationService {
                     installed = true
                 ))
                 logger.info("Added terminal agent: ${config.name}")
+            }
+        }
+
+        // Registry-driven detectors (Codex today; future agents tomorrow).
+        // Runs AFTER the legacy 4-pass detection so the legacy passes win
+        // for any agent they already handle (notably Claude Code). Only
+        // detectors for agents NOT covered by the legacy logic emit here.
+        val registryResults = runBlocking {
+            AgentDetectorRegistry.run(
+                AgentDetectorRegistry.detectors,
+                DetectionContext(logger = logger),
+            )
+        }
+        for (result in registryResults) {
+            if (detected.none { it.id == result.id }) {
+                detected.add(result)
             }
         }
 
