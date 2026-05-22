@@ -4,6 +4,27 @@ All notable changes to `codeam-cli` are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.16.2] — 2026-05-22
+
+### Chore
+
+- **meta:** Expand issue templates with question + documentation forms
+
+### Documentation
+
+- **shared:** Correct prod URL in api-url history comment
+
+### Fixed
+
+- **cli:** Codeam link — auto-install, multi-probe creds, file-watcher login
+- **cli:** Windows EPERM crash from chokidar watching user-profile junctions (#43)
+
+## [2.16.1] — 2026-05-21
+
+### Fixed
+
+- **cli:** Codeam link — auto-install, multi-probe creds, file-watcher login (#42)
+
 ## [2.16.0] — 2026-05-21
 
 ### Added
