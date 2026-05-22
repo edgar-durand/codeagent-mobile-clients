@@ -332,11 +332,26 @@ export async function link(args: string[] = []): Promise<void> {
  * Cleans up the subprocess + watcher in both success and failure.
  */
 async function captureFreshCredentials(meta: LinkAgentMeta): Promise<LocalAgentToken> {
+  const isWin = process.platform === 'win32';
   const watcher = chokidar.watch(meta.watchPaths(), {
     persistent: true,
     ignoreInitial: false,
     awaitWriteFinish: { stabilityThreshold: 500, pollInterval: 100 },
+    // Windows-only: when a credential file's ancestor is missing,
+    // chokidar walks up to the closest existing parent and starts
+    // traversing it. On a default Windows shell that ancestor is
+    // `C:\Users\<u>`, which contains legacy junctions whose ACL makes
+    // `fs.watch` throw EPERM (#43). These flags are no-ops on macOS,
+    // where the user has read access to their entire home.
+    ...(isWin ? { followSymlinks: false, ignorePermissionErrors: true } : {}),
   });
+
+  // chokidar bubbles fs errors as `error` events through Node's
+  // EventEmitter — without a listener, an unhandled error crashes the
+  // process. Swallow it: the link flow can keep waiting on the other
+  // paths / the keychain re-probe loop and will surface a clean
+  // timeout if nothing ever arrives.
+  watcher.on('error', () => { /* logged elsewhere via the watcher's own error events; swallow here */ });
 
   let child: ChildProcess | null = null;
   let keychainPoll: NodeJS.Timeout | null = null;
