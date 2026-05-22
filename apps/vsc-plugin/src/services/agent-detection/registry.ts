@@ -1,8 +1,11 @@
-import type { AgentDetector, DetectionContext, DetectionResult, DetectedAgentLike } from './types';
+import { ClaudeCodeDetector } from './detectors/claude-code.detector';
+import type { AgentDetector, DetectionContext, DetectionResult, DetectedAgent } from './types';
 
-export const DETECTORS: readonly AgentDetector[] = [];
+export const DETECTORS: readonly AgentDetector[] = [
+  new ClaudeCodeDetector(),
+];
 
-export function toDetectedAgent(d: AgentDetector, r: DetectionResult): DetectedAgentLike {
+export function toDetectedAgent(d: AgentDetector, r: DetectionResult): DetectedAgent {
   const id = r.via === 'extension' ? r.extensionId : `__terminal__:${d.id}`;
   return {
     id,
@@ -18,7 +21,7 @@ export function toDetectedAgent(d: AgentDetector, r: DetectionResult): DetectedA
 export async function runDetectors(
   detectors: readonly AgentDetector[],
   ctx: DetectionContext,
-): Promise<DetectedAgentLike[]> {
+): Promise<DetectedAgent[]> {
   const results = await Promise.all(
     detectors.map(async (d) => {
       try {
@@ -30,5 +33,5 @@ export async function runDetectors(
       }
     }),
   );
-  return results.filter((x): x is DetectedAgentLike => x !== null);
+  return results.filter((x): x is DetectedAgent => x !== null);
 }
