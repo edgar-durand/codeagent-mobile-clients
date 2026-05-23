@@ -29,7 +29,12 @@ describe.runIf(isWindows)('buildInstallAndRun — real PowerShell parser', () =>
   const REAL_PS5_PATH =
     'C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe';
 
-  function assertParsesCleanly(cmd: string): void {
+  // PS 7 (`pwsh`) added pipeline chain operators (`&&` / `||`) in
+  // 7.0 — so it WILL parse the legacy buggy command cleanly. The
+  // regression case must target the legacy `powershell.exe` (PS 5.1)
+  // parser explicitly. The positive cases accept either shell since
+  // both parse the new escaped form fine.
+  function assertParsesCleanly(cmd: string, shells: string[] = ['pwsh', 'powershell']): void {
     // Embed the command as a single-quoted PS literal — PowerShell
     // single quotes don't expand variables, only need to escape `'`
     // as `''`. We don't generate any single-quoted strings ourselves
@@ -38,11 +43,6 @@ describe.runIf(isWindows)('buildInstallAndRun — real PowerShell parser', () =>
     // Use `[scriptblock]::Create` so the parser runs but the script
     // doesn't execute. Print 'OK' on success so we can grep for it.
     const psScript = `[scriptblock]::Create('${escaped}') | Out-Null; 'OK'`;
-    // Prefer pwsh (PS 7+) if available — modern Windows CI runners
-    // ship it — and fall back to legacy `powershell.exe` (PS 5.x).
-    // Either parser correctly rejects `&&`/`||` in PS 5 syntax, so
-    // both shells produce the right pass/fail signal for our case.
-    const shells = ['pwsh', 'powershell'];
     let lastErr: unknown;
     for (const shell of shells) {
       try {
@@ -76,12 +76,13 @@ describe.runIf(isWindows)('buildInstallAndRun — real PowerShell parser', () =>
 
   test('Regression — the original buggy form WAS rejected by PS5 parser', () => {
     // Belt-and-braces: confirm the legacy `A && B || C` string PS5
-    // can't parse really does fail. If this ever starts PASSING,
-    // either PowerShell has been updated (we should re-check assumptions)
-    // or the parser is silently swallowing the error (this test got
-    // useless — investigate). Either way, we want a signal.
+    // can't parse really does fail. Pin to `powershell.exe` only —
+    // `pwsh` (PS 7+) accepts `&&` / `||` as pipeline chain operators
+    // and would parse this cleanly, which is the wrong signal here.
+    // If THIS ever starts passing on legacy powershell.exe, the
+    // parser changed and we should re-check the install command.
     const legacy =
       'npm install -g codeam-cli@latest && codeam pair || npx -y codeam-cli@latest pair';
-    expect(() => assertParsesCleanly(legacy)).toThrow();
+    expect(() => assertParsesCleanly(legacy, ['powershell'])).toThrow();
   });
 });
