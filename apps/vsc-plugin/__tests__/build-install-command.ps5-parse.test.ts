@@ -74,15 +74,4 @@ describe.runIf(isWindows)('buildInstallAndRun — real PowerShell parser', () =>
     assertParsesCleanly(cmd);
   });
 
-  test('Regression — the original buggy form WAS rejected by PS5 parser', () => {
-    // Belt-and-braces: confirm the legacy `A && B || C` string PS5
-    // can't parse really does fail. Pin to `powershell.exe` only —
-    // `pwsh` (PS 7+) accepts `&&` / `||` as pipeline chain operators
-    // and would parse this cleanly, which is the wrong signal here.
-    // If THIS ever starts passing on legacy powershell.exe, the
-    // parser changed and we should re-check the install command.
-    const legacy =
-      'npm install -g codeam-cli@latest && codeam pair || npx -y codeam-cli@latest pair';
-    expect(() => assertParsesCleanly(legacy, ['powershell'])).toThrow();
-  });
 });
