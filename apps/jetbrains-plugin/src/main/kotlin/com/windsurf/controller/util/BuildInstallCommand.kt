@@ -37,7 +37,16 @@ object BuildInstallCommand {
     fun forSubcommand(subcommand: String, osName: String): String {
         val isWindows = osName.startsWith("Windows", ignoreCase = true)
         return if (isWindows) {
-            "npm install -g codeam-cli@latest; if (\$LASTEXITCODE -eq 0) { codeam $subcommand } else { npx -y codeam-cli@latest $subcommand }"
+            // Faithful PowerShell equivalent of the bash `A && B || C`
+            // chain: run C (npx) if EITHER A (`npm install`) OR B
+            // (`codeam`) failed. The naïve "if (install ok) { codeam }
+            // else { npx }" form misses the common Windows case where
+            // `npm install -g` succeeds but the freshly-installed
+            // binary isn't yet on `$env:PATH` in the same shell —
+            // `codeam ${subcommand}` then fails with "not recognized"
+            // and there's no fallback. Track success in a local var
+            // and dispatch to npx whenever it stays false.
+            "\$ok = \$false; npm install -g codeam-cli@latest; if (\$LASTEXITCODE -eq 0) { codeam $subcommand; if (\$LASTEXITCODE -eq 0) { \$ok = \$true } }; if (-not \$ok) { npx -y codeam-cli@latest $subcommand }"
         } else {
             "npm install -g codeam-cli@latest && codeam $subcommand || npx -y codeam-cli@latest $subcommand"
         }
