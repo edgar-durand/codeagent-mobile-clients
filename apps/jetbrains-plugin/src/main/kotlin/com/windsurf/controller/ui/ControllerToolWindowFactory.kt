@@ -847,11 +847,26 @@ class ControllerToolWindowFactory : ToolWindowFactory {
                         // Open the IDE's Terminal tool window and run
                         // `codeam pair`, with `npx -y codeam-cli pair`
                         // as the fallback when the binary isn't on
-                        // PATH yet. `;` between the two commands keeps
-                        // this working in both POSIX shells and
-                        // PowerShell (cmd.exe also accepts `;` as a
-                        // command separator).
+                        // PATH yet.
+                        //
+                        // Payload: { agent?: "claude" | "codex" }. The
+                        // mobile pairing wizard lets the user pick the
+                        // agent before tapping "Pair from mobile", so
+                        // we pass it down as `--agent=<id>` and the
+                        // CLI skips its own interactive "Pick an agent"
+                        // prompt — otherwise the user picks twice
+                        // (mobile + terminal) for no reason. Unknown /
+                        // absent agent → no flag → CLI keeps its
+                        // legacy interactive behaviour for older
+                        // mobile builds.
                         try {
+                            val rawAgent = command.payload.get("agent")?.asString
+                            val safeAgent = when (rawAgent) {
+                                "codex" -> "codex"
+                                "claude" -> "claude"
+                                else -> null
+                            }
+                            val subcommand = if (safeAgent != null) "pair --agent=$safeAgent" else "pair"
                             val terminalView = org.jetbrains.plugins.terminal.TerminalToolWindowManager
                                 .getInstance(project)
                             val widget = terminalView.createLocalShellWidget(
@@ -867,7 +882,7 @@ class ControllerToolWindowFactory : ToolWindowFactory {
                             // sudo-restricted environments.
                             widget.executeCommand(
                                 BuildInstallCommand.forSubcommand(
-                                    "pair",
+                                    subcommand,
                                     System.getProperty("os.name"),
                                 ),
                             )
