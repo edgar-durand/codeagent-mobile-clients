@@ -4,6 +4,16 @@ All notable changes to the CodeAgent-Mobile JetBrains plugin are documented here
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.17.5] — 2026-05-23
+
+### Added
+
+- **vsc-plugin,jetbrains-plugin:** Forward selected agent to codeam pair
+
+### Fixed
+
+- **vsc-plugin,jetbrains-plugin:** Npx fallback when codeam fails on PS5
+
 ## [2.17.4] — 2026-05-23
 
 ### Fixed
