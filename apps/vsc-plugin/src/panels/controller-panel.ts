@@ -780,19 +780,6 @@ export class ControllerPanelProvider implements vscode.WebviewViewProvider, Comm
         // `npx -y codeam-cli pair` — npx fetches the package on the
         // fly so the user doesn't need write access to the global
         // node_modules.
-        //
-        // Payload: { agent?: 'claude' | 'codex' }. The mobile pairing
-        // wizard already lets the user pick the agent before tapping
-        // "Pair from mobile", so we pass it down as `--agent=<id>` and
-        // the CLI skips its own interactive "Pick an agent" prompt —
-        // otherwise the user picks twice (once on mobile, again in the
-        // terminal) for no reason. Unknown / absent agent → no flag →
-        // CLI keeps its legacy interactive behaviour for older mobile
-        // builds that don't ship the agent in the payload.
-        const rawAgent = command.payload?.agent as string | undefined;
-        const safeAgent =
-          rawAgent === 'codex' ? 'codex' : rawAgent === 'claude' ? 'claude' : null;
-        const subcommand = safeAgent ? `pair --agent=${safeAgent}` : 'pair';
         const folder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
         const terminal = vscode.window.createTerminal({
           name: 'codeam pair',
@@ -806,7 +793,7 @@ export class ControllerPanelProvider implements vscode.WebviewViewProvider, Comm
         // install; the final `|| npx` fallback handles environments
         // where `npm i -g` would need sudo (npx fetches + runs
         // without touching the global node_modules).
-        terminal.sendText(buildInstallAndRun(subcommand));
+        terminal.sendText(buildInstallAndRun('pair'));
         relay.sendResult(command.id, 'completed', {
           message: 'Terminal opened with codeam pair',
         });
