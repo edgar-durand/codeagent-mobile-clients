@@ -28,6 +28,7 @@ import com.windsurf.controller.services.FileOpsService
 import com.windsurf.controller.services.ProjectOpsService
 import com.windsurf.controller.services.McpServerDef
 import com.windsurf.controller.services.WebSocketService
+import com.windsurf.controller.util.BuildInstallCommand
 import com.windsurf.controller.services.strategies.AgentInvocation
 import com.windsurf.controller.services.strategies.AgentStrategyRegistry
 import com.windsurf.controller.services.strategies.CopilotChatMetadataBridge
@@ -864,7 +865,12 @@ class ControllerToolWindowFactory : ToolWindowFactory {
                             // `&&` so pair only fires after install
                             // succeeds; final `|| npx` fallback handles
                             // sudo-restricted environments.
-                            widget.executeCommand(buildInstallAndRun("pair"))
+                            widget.executeCommand(
+                                BuildInstallCommand.forSubcommand(
+                                    "pair",
+                                    System.getProperty("os.name"),
+                                ),
+                            )
                             relay.sendResult(command.id, "completed", com.google.gson.JsonObject().apply {
                                 addProperty("message", "Terminal opened with codeam pair")
                             })
@@ -896,7 +902,12 @@ class ControllerToolWindowFactory : ToolWindowFactory {
                                 project.basePath,
                                 "codeam link $safeAgent",
                             )
-                            widget.executeCommand(buildInstallAndRun("link $safeAgent"))
+                            widget.executeCommand(
+                                BuildInstallCommand.forSubcommand(
+                                    "link $safeAgent",
+                                    System.getProperty("os.name"),
+                                ),
+                            )
                             relay.sendResult(command.id, "completed", com.google.gson.JsonObject().apply {
                                 addProperty("message", "Terminal opened with codeam link $safeAgent")
                             })
@@ -1621,32 +1632,3 @@ class ControllerToolWindowFactory : ToolWindowFactory {
     }
 }
 
-/**
- * Build the one-liner sent to the freshly-opened IDE terminal for
- * `install_cli_and_pair` / `install_cli_and_link`.
- *
- * Everywhere except legacy PowerShell (bash, zsh, fish, cmd.exe,
- * PowerShell 7+) `&&` and `||` chain commands by exit code, so we
- * keep the original one-liner: install → on success pair, on failure
- * fall back to npx so users without sudo / write-access to global
- * node_modules still get paired.
- *
- * On Windows the JetBrains terminal defaults to PowerShell, and the
- * default PowerShell on Windows 10/11 is 5.x — which predates the
- * `&&` / `||` chain operators (added in PS 7, Sept 2020). PS 5.x
- * parses `&&` as an "invalid statement separator" and the whole
- * command dies before npm even runs. So on Windows we emit semicolon
- * + `$LASTEXITCODE` instead — the equivalent control-flow primitive
- * available in both PS 5.x and PS 7+. Users with PowerShell 7+ get
- * the same correct behaviour; users still on cmd.exe see a malformed
- * command, but PowerShell is the default on modern JetBrains
- * Windows installs.
- */
-private fun buildInstallAndRun(subcommand: String): String {
-    val isWindows = System.getProperty("os.name").startsWith("Windows", ignoreCase = true)
-    return if (isWindows) {
-        "npm install -g codeam-cli@latest; if (\$LASTEXITCODE -eq 0) { codeam $subcommand } else { npx -y codeam-cli@latest $subcommand }"
-    } else {
-        "npm install -g codeam-cli@latest && codeam $subcommand || npx -y codeam-cli@latest $subcommand"
-    }
-}

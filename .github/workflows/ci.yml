@@ -121,6 +121,15 @@ jobs:
           distribution: temurin
           java-version: 17
 
+      # Pure-JVM unit tests first — fast feedback if any util / parser
+      # regresses. The cross-OS install-command builder is one of these
+      # (see `BuildInstallCommandTest`), which means a v2.17.x-style
+      # PowerShell-5 regression now gets caught at PR time instead of
+      # at the user's terminal in Windows.
+      - name: Gradle test
+        working-directory: apps/jetbrains-plugin
+        run: ./gradlew test
+
       - name: Gradle build
         working-directory: apps/jetbrains-plugin
         run: ./gradlew buildPlugin

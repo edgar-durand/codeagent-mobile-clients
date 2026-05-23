@@ -20,45 +20,21 @@ import { ChatHistoryService } from '../services/chat-history.service';
 import { ClaudeContextService } from '../services/claude-context.service';
 import { McpConfigWriterService, McpConfigureRequest, McpEntry } from '../services/mcp-config-writer.service';
 import { FileWatcherService } from '../services/file-watcher.service';
+import { buildInstallAndRun as buildInstallAndRunPure } from '../utils/build-install-command';
 
 /**
- * Build the one-liner sent to the freshly-opened integrated terminal
- * for `install_cli_and_pair` / `install_cli_and_link`.
- *
- * Everywhere except legacy PowerShell (bash, zsh, fish, cmd.exe,
- * PowerShell 7+) `&&` and `||` chain commands by exit code, so we
- * keep the original one-liner: install → on success pair, on failure
- * fall back to npx so users without sudo / write-access to global
- * node_modules still get paired.
- *
- * Windows PowerShell 5.x — the default on every fresh Win10/11 box
- * — predates PS 7 and the `&&`/`||` pipeline-chain operators were
- * only added in PowerShell 7 (Sept 2020). On PS5 the shell parses
- * `&&` as an "invalid statement separator" and the whole command
- * fails before npm even runs. We detect that shell via
- * `vscode.env.shell` (the path ends in `WindowsPowerShell\\v1.0\\
- * powershell.exe`) and emit semicolon + `$LASTEXITCODE` instead,
- * which is the equivalent control-flow primitive available in PS5.
- *
- * Pwsh 7+ paths look like `…\\PowerShell\\7\\pwsh.exe`, NOT
- * `WindowsPowerShell\\v1.0\\powershell.exe`, so they keep the
- * shorter `&&`/`||` form.
+ * Thin adapter that hands the pure builder VS Code's view of the
+ * current shell + platform. Pure logic lives in
+ * `utils/build-install-command.ts` so the CI matrix can hit it on
+ * both ubuntu-latest and windows-latest without booting an
+ * extension host.
  */
 function buildInstallAndRun(subcommand: string): string {
-  const shell = (vscode.env.shell || '').toLowerCase();
-  const isLegacyPowerShell =
-    process.platform === 'win32' &&
-    shell.endsWith('powershell.exe') &&
-    !shell.endsWith('pwsh.exe');
-
-  if (isLegacyPowerShell) {
-    return [
-      'npm install -g codeam-cli@latest;',
-      `if ($LASTEXITCODE -eq 0) { codeam ${subcommand} } else { npx -y codeam-cli@latest ${subcommand} }`,
-    ].join(' ');
-  }
-
-  return `npm install -g codeam-cli@latest && codeam ${subcommand} || npx -y codeam-cli@latest ${subcommand}`;
+  return buildInstallAndRunPure(
+    subcommand,
+    vscode.env.shell || '',
+    process.platform === 'win32',
+  );
 }
 
 export class ControllerPanelProvider implements vscode.WebviewViewProvider, CommandListener {
