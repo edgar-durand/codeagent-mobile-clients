@@ -21,6 +21,46 @@ import { ClaudeContextService } from '../services/claude-context.service';
 import { McpConfigWriterService, McpConfigureRequest, McpEntry } from '../services/mcp-config-writer.service';
 import { FileWatcherService } from '../services/file-watcher.service';
 
+/**
+ * Build the one-liner sent to the freshly-opened integrated terminal
+ * for `install_cli_and_pair` / `install_cli_and_link`.
+ *
+ * Everywhere except legacy PowerShell (bash, zsh, fish, cmd.exe,
+ * PowerShell 7+) `&&` and `||` chain commands by exit code, so we
+ * keep the original one-liner: install → on success pair, on failure
+ * fall back to npx so users without sudo / write-access to global
+ * node_modules still get paired.
+ *
+ * Windows PowerShell 5.x — the default on every fresh Win10/11 box
+ * — predates PS 7 and the `&&`/`||` pipeline-chain operators were
+ * only added in PowerShell 7 (Sept 2020). On PS5 the shell parses
+ * `&&` as an "invalid statement separator" and the whole command
+ * fails before npm even runs. We detect that shell via
+ * `vscode.env.shell` (the path ends in `WindowsPowerShell\\v1.0\\
+ * powershell.exe`) and emit semicolon + `$LASTEXITCODE` instead,
+ * which is the equivalent control-flow primitive available in PS5.
+ *
+ * Pwsh 7+ paths look like `…\\PowerShell\\7\\pwsh.exe`, NOT
+ * `WindowsPowerShell\\v1.0\\powershell.exe`, so they keep the
+ * shorter `&&`/`||` form.
+ */
+function buildInstallAndRun(subcommand: string): string {
+  const shell = (vscode.env.shell || '').toLowerCase();
+  const isLegacyPowerShell =
+    process.platform === 'win32' &&
+    shell.endsWith('powershell.exe') &&
+    !shell.endsWith('pwsh.exe');
+
+  if (isLegacyPowerShell) {
+    return [
+      'npm install -g codeam-cli@latest;',
+      `if ($LASTEXITCODE -eq 0) { codeam ${subcommand} } else { npx -y codeam-cli@latest ${subcommand} }`,
+    ].join(' ');
+  }
+
+  return `npm install -g codeam-cli@latest && codeam ${subcommand} || npx -y codeam-cli@latest ${subcommand}`;
+}
+
 export class ControllerPanelProvider implements vscode.WebviewViewProvider, CommandListener {
   public static readonly viewType = 'codeagent-mobile.panel';
   private view?: vscode.WebviewView;
@@ -763,8 +803,7 @@ export class ControllerPanelProvider implements vscode.WebviewViewProvider, Comm
         // already installed it globally) and fall back to
         // `npx -y codeam-cli pair` — npx fetches the package on the
         // fly so the user doesn't need write access to the global
-        // node_modules. `;` between commands keeps things working in
-        // both POSIX shells and PowerShell.
+        // node_modules.
         const folder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
         const terminal = vscode.window.createTerminal({
           name: 'codeam pair',
@@ -778,7 +817,7 @@ export class ControllerPanelProvider implements vscode.WebviewViewProvider, Comm
         // install; the final `|| npx` fallback handles environments
         // where `npm i -g` would need sudo (npx fetches + runs
         // without touching the global node_modules).
-        terminal.sendText('npm install -g codeam-cli@latest && codeam pair || npx -y codeam-cli@latest pair');
+        terminal.sendText(buildInstallAndRun('pair'));
         relay.sendResult(command.id, 'completed', {
           message: 'Terminal opened with codeam pair',
         });
@@ -804,9 +843,7 @@ export class ControllerPanelProvider implements vscode.WebviewViewProvider, Comm
           ...(folder ? { cwd: folder } : {}),
         });
         terminal.show(true);
-        terminal.sendText(
-          `npm install -g codeam-cli@latest && codeam link ${safeAgent} || npx -y codeam-cli@latest link ${safeAgent}`,
-        );
+        terminal.sendText(buildInstallAndRun(`link ${safeAgent}`));
         relay.sendResult(command.id, 'completed', {
           message: `Terminal opened with codeam link ${safeAgent}`,
         });
