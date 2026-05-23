@@ -48,9 +48,19 @@ export function buildInstallAndRun(
     !lowered.endsWith('pwsh.exe');
 
   if (isLegacyPowerShell) {
+    // Faithful PowerShell equivalent of the bash `A && B || C` chain:
+    // run C (npx) if EITHER A (`npm install`) OR B (`codeam`) failed.
+    // The naïve "if (install ok) { codeam } else { npx }" form misses
+    // the common Windows case where `npm install -g` succeeds but the
+    // freshly-installed binary isn't yet on `$env:PATH` in the same
+    // shell session — `codeam pair` then fails with "not recognized"
+    // and there's no fallback. Track success in a local variable and
+    // dispatch to npx whenever it stays false.
     return [
-      'npm install -g codeam-cli@latest;',
-      `if ($LASTEXITCODE -eq 0) { codeam ${subcommand} } else { npx -y codeam-cli@latest ${subcommand} }`,
+      `$ok = $false;`,
+      `npm install -g codeam-cli@latest;`,
+      `if ($LASTEXITCODE -eq 0) { codeam ${subcommand}; if ($LASTEXITCODE -eq 0) { $ok = $true } };`,
+      `if (-not $ok) { npx -y codeam-cli@latest ${subcommand} }`,
     ].join(' ');
   }
 
