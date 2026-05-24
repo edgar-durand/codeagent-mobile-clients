@@ -75,6 +75,37 @@ export function createInteractiveAgentStrategy(
  */
 export const createRuntimeStrategy = createInteractiveAgentStrategy;
 
+/**
+ * Test-only: enumerate every registered agent id (ignoring the
+ * `enabled` gate). The contract suite (#62) iterates over this to
+ * assert EVERY agent we ship a strategy for satisfies the interface
+ * contract — including agents currently gated behind a feature flag.
+ * Without this surface, the contract would only run against the
+ * handful of agents currently enabled, and a gated agent could
+ * silently rot until its flag flipped.
+ *
+ * Production code uses `createAgentStrategy` (gated) — never this.
+ */
+export function listRegisteredAgentIdsForTests(): AgentId[] {
+  return Object.keys(runtimeBuilders) as AgentId[];
+}
+
+/**
+ * Test-only: instantiate a registered agent strategy bypassing the
+ * `AGENT_REGISTRY.enabled` gate. Used by the contract suite to
+ * validate gated agents.
+ */
+export function createAgentStrategyForTests(
+  agent: AgentId,
+  os: OsStrategy = createOsStrategy(),
+): AgentStrategy {
+  const build = runtimeBuilders[agent];
+  if (!build) {
+    throw new Error(`No runtime strategy registered for agent "${agent}"`);
+  }
+  return build(os);
+}
+
 export function createDeployStrategy(agent: AgentId): DeployStrategy {
   if (!AGENT_REGISTRY[agent]?.enabled) {
     throw new Error(`Agent "${agent}" is not supported in this codeam-cli version.`);
