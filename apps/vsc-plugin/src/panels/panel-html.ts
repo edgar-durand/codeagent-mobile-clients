@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import { cspMeta } from '../utils/webview-security';
 import { brandCssTokens } from '../ui/brand-tokens';
+import { Messages } from '../ui/messages';
 
 /**
  * The pairing webview's full HTML document — markup, brand CSS,
@@ -371,7 +372,7 @@ export function renderPanelHtml(
     function renderAgents(agents) {
       const container = document.getElementById('agents-list');
       if (!agents || agents.length === 0) {
-        container.innerHTML = '<p class="muted">No AI agents detected</p>';
+        container.innerHTML = '<p class="muted">${Messages.EmptyAgentList}</p>';
         return;
       }
       container.innerHTML = agents.map(a =>

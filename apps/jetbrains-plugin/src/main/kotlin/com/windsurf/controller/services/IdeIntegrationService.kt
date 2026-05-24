@@ -16,6 +16,7 @@ import com.intellij.openapi.wm.ToolWindow
 import com.intellij.openapi.wm.ToolWindowManager
 import com.windsurf.controller.services.detection.AgentDetectorRegistry
 import com.windsurf.controller.services.detection.DetectionContext
+import com.windsurf.controller.ui.BrandMessages
 import java.awt.Component
 import java.awt.Container
 import java.awt.datatransfer.StringSelection
@@ -384,7 +385,7 @@ class IdeIntegrationService {
         if (project == null) {
             logger.warn("No project available")
             CopyPasteManager.getInstance().setContents(StringSelection(prompt))
-            showNotification("Prompt copied to clipboard (no project)", prompt)
+            showNotification(BrandMessages.promptCopiedToClipboard("no project window open"), prompt)
             return false
         }
 
@@ -405,7 +406,7 @@ class IdeIntegrationService {
 
         if (targetAgent == null) {
             CopyPasteManager.getInstance().setContents(StringSelection(prompt))
-            showNotification("Prompt copied to clipboard (no AI agent found)", prompt)
+            showNotification(BrandMessages.promptCopiedToClipboard("no AI agent detected"), prompt)
             return false
         }
 
@@ -422,7 +423,7 @@ class IdeIntegrationService {
             .deliverPrompt(invocation)
         if (!sent) {
             CopyPasteManager.getInstance().setContents(StringSelection(prompt))
-            showNotification("Prompt copied to clipboard (delivery failed)", prompt)
+            showNotification(BrandMessages.promptCopiedToClipboard("delivery to the agent failed"), prompt)
             return false
         }
         return true

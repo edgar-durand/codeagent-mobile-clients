@@ -6,6 +6,7 @@ import * as crypto from 'node:crypto';
 import { OutputChannel } from 'vscode';
 import { SettingsService } from './settings.service';
 import { CommandRelayService } from './command-relay.service';
+import { Messages } from '../ui/messages';
 
 export class AgentOutputMonitor {
   private static instance: AgentOutputMonitor;
@@ -123,7 +124,7 @@ export class AgentOutputMonitor {
 
       if (cleaned) {
         const action = await vscode.window.showInformationMessage(
-          'CodeAgent Mobile · Editor restored. Reload to clear the "corrupt installation" warning.',
+          Messages.EditorRestored,
           'Reload Now',
           'Later',
         );

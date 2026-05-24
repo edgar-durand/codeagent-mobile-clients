@@ -18,6 +18,7 @@ import { ChatHistoryService } from '../services/chat-history.service';
 import { ClaudeContextService } from '../services/claude-context.service';
 import { McpConfigWriterService, McpConfigureRequest, McpEntry } from '../services/mcp-config-writer.service';
 import { FileWatcherService } from '../services/file-watcher.service';
+import { Messages } from '../ui/messages';
 import { buildInstallAndRun as buildInstallAndRunPure } from '../utils/build-install-command';
 import {
   generateNonce,
@@ -114,7 +115,7 @@ export class ControllerPanelProvider implements vscode.WebviewViewProvider, Comm
         this.sendRecentSessions();
         if (SettingsService.getInstance().showNotifications) {
           vscode.window.showInformationMessage(
-            `CodeAgent Mobile: Connected to ${PairingService.getInstance().pairedUser?.email || 'user'}`,
+            Messages.ConnectedTo(PairingService.getInstance().pairedUser?.email || 'user'),
           );
         }
 

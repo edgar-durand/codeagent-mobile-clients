@@ -5,6 +5,7 @@ import { TerminalAgentService } from './terminal-agent.service';
 import { AgentOutputMonitor } from './agent-output-monitor';
 import { DETECTORS, runDetectors } from './agent-detection/registry';
 import type { DetectedAgent } from './agent-detection/types';
+import { Messages } from '../ui/messages';
 
 export type { DetectedAgent };
 
@@ -215,9 +216,7 @@ export class IdeIntegrationService {
 
     // Fallback: copy to clipboard and notify user
     await vscode.env.clipboard.writeText(prompt);
-    vscode.window.showWarningMessage(
-      'CodeAgent: Prompt copied to clipboard. Please paste into the AI chat and press Enter.',
-    );
+    vscode.window.showWarningMessage(Messages.PromptCopiedToClipboard);
     this.notify(prompt);
     return false;
   }
@@ -225,7 +224,8 @@ export class IdeIntegrationService {
 
   private notify(prompt: string): void {
     if (SettingsService.getInstance().showNotifications) {
-      vscode.window.showInformationMessage(`Prompt sent to AI: ${prompt.substring(0, 60)}...`);
+      const preview = prompt.length > 60 ? `${prompt.substring(0, 60)}…` : prompt;
+      vscode.window.showInformationMessage(Messages.PromptSent(preview));
     }
   }
 

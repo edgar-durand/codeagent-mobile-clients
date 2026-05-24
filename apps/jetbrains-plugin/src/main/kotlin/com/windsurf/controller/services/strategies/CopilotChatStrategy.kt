@@ -7,6 +7,7 @@ import com.intellij.openapi.wm.ToolWindow
 import com.windsurf.controller.services.AgentOutputMonitor
 import com.windsurf.controller.services.DetectedAgent
 import com.windsurf.controller.services.IdeIntegrationService
+import com.windsurf.controller.ui.BrandMessages
 import java.awt.Component
 import java.awt.datatransfer.StringSelection
 import java.awt.event.KeyEvent
@@ -97,7 +98,7 @@ class CopilotChatStrategy : AgentStrategy {
         val tw = twRef.get()
         if (tw == null) {
             CopyPasteManager.getInstance().setContents(StringSelection(invocation.prompt))
-            ide.showNotification("Prompt copied to clipboard (Copilot Chat not found)", invocation.prompt)
+            ide.showNotification(BrandMessages.promptCopiedToClipboard("Copilot Chat not detected"), invocation.prompt)
             return false
         }
 

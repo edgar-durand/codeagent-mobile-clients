@@ -3,6 +3,7 @@ package com.windsurf.controller.services.strategies
 import com.intellij.openapi.diagnostic.Logger
 import com.windsurf.controller.services.AgentOutputMonitor
 import com.windsurf.controller.services.DetectedAgent
+import com.windsurf.controller.ui.BrandMessages
 
 /**
  * Codeium / Windsurf / Cascade chat. Renders inside a JCEF browser, so
@@ -30,7 +31,7 @@ class WindsurfStrategy : AgentStrategy {
     override fun deliverPrompt(invocation: AgentInvocation): Boolean = deliverPromptViaJcef(
         invocation = invocation,
         notificationTitle = "Prompt sent to Windsurf",
-        notFoundMessage = "Prompt copied to clipboard (Windsurf chat not found)",
+        notFoundMessage = BrandMessages.promptCopiedToClipboard("Windsurf chat not detected"),
         logger = logger,
     )
 

@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import type { OutputChannel } from 'vscode';
 import type { AgentInvocation, AgentStrategy, StrategyResult } from './AgentStrategy';
 import { AgentOutputMonitor } from '../agent-output-monitor';
+import { Messages } from '../../ui/messages';
 
 /**
  * Catch-all strategy for any agent that doesn't match a more
@@ -37,9 +38,7 @@ export class ObserverBridgeStrategy implements AgentStrategy {
     } catch (e) {
       this.log.appendLine(`[${this.name}] observer bridge failed: ${e}`);
       await vscode.env.clipboard.writeText(invocation.prompt);
-      vscode.window.showWarningMessage(
-        'CodeAgent: Prompt copied to clipboard. Please paste into the AI chat and press Enter.',
-      );
+      vscode.window.showWarningMessage(Messages.PromptCopiedToClipboard);
     }
 
     if (delivered) {

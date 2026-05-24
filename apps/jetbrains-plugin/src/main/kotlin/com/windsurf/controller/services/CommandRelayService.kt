@@ -9,6 +9,7 @@ import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.components.Service
 import com.intellij.openapi.diagnostic.Logger
 import com.windsurf.controller.protocol.PROTOCOL_VERSION
+import com.windsurf.controller.ui.BrandMessages
 import okhttp3.Call
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
@@ -436,7 +437,7 @@ class CommandRelayService {
             NotificationGroupManager.getInstance()
                 .getNotificationGroup("CodeAgent-Mobile")
                 .createNotification(
-                    "CodeAgent Mobile · Session expired. Re-pair to continue.",
+                    BrandMessages.SessionExpired,
                     NotificationType.WARNING,
                 )
                 .notify(null)

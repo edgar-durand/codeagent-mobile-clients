@@ -19,6 +19,7 @@ import {
   McpConfigureRequest,
   McpEntry,
 } from '../services/mcp-config-writer.service';
+import { Messages } from '../ui/messages';
 import { buildInstallAndRun as buildInstallAndRunPure } from '../utils/build-install-command';
 
 function buildInstallAndRun(subcommand: string): string {
@@ -87,7 +88,8 @@ export class RemoteCommandRouter {
           setTimeout(() => { tempPaths.forEach((p) => { try { fs.unlinkSync(p); } catch {} }); }, 120000);
         }
 
-        vscode.window.showInformationMessage(`CodeAgent: Prompt received → ${prompt.substring(0, 60)}${prompt.length > 60 ? '...' : ''}`);
+        const promptPreview = prompt.length > 60 ? `${prompt.substring(0, 60)}…` : prompt;
+        vscode.window.showInformationMessage(Messages.PromptReceived(promptPreview));
 
         // Intercept "/model <id>" for LM agents — the mobile's model
         // picker uses this as a portable cross-agent switch. For LM
