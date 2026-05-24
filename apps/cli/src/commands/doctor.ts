@@ -24,7 +24,7 @@ import { randomUUID } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import {
-  DEFAULT_API_BASE_URL,
+  resolveApiBaseUrl,
   AGENT_REGISTRY,
   getEnabledAgents,
 } from '@codeagent/shared';
@@ -269,7 +269,7 @@ export async function doctor(args: string[] = []): Promise<void> {
   const json = args.includes('--json');
   const cliVersion =
     typeof __CLI_VERSION__ !== 'undefined' ? __CLI_VERSION__ : '0.0.0-dev';
-  const apiBase = process.env.CODEAM_API_URL ?? DEFAULT_API_BASE_URL;
+  const apiBase = resolveApiBaseUrl();
   const diagnosticId = randomUUID();
   log.info('doctor', `run id=${diagnosticId} cli=${cliVersion}`);
 
@@ -320,6 +320,13 @@ function printHumanReport(r: DoctorReport): void {
   out.write(`  ${pc.dim('node')}     ${r.node}\n`);
   out.write(`  ${pc.dim('os')}       ${r.platform} ${r.arch}\n`);
   out.write(`  ${pc.dim('api')}      ${r.apiBase}\n`);
+  // Surface the active override so a user reporting "doctor passes
+  // but pair fails" sees immediately whether they're on dev.
+  if (process.env.CODEAM_TEST_MODE === '1' || process.env.CODEAM_TEST_MODE?.toLowerCase() === 'true') {
+    out.write(`  ${pc.dim('mode')}     ${pc.yellow('TEST_MODE — using dev preview')}\n`);
+  } else if (process.env.CODEAM_API_URL) {
+    out.write(`  ${pc.dim('mode')}     ${pc.yellow('CODEAM_API_URL override')}\n`);
+  }
   out.write(`  ${pc.dim('diag id')}  ${r.diagnosticId}\n`);
   out.write('\n');
   for (const c of r.checks) {
