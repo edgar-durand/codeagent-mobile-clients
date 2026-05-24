@@ -1,5 +1,7 @@
 import * as vscode from 'vscode';
 import * as os from 'os';
+import * as http from 'http';
+import * as https from 'https';
 import { SettingsService, RecentSession } from './settings.service';
 import { CommandRelayService } from './command-relay.service';
 import { OutputChannel } from 'vscode';
@@ -163,8 +165,6 @@ export class PairingService {
   }
 
   private async getJson(url: string): Promise<Record<string, unknown> | null> {
-    const https = require('https');
-    const http = require('http');
     return new Promise((resolve, reject) => {
       const urlObj = new URL(url);
       const transport = urlObj.protocol === 'https:' ? https : http;
@@ -176,7 +176,7 @@ export class PairingService {
           method: 'GET',
           timeout: 10000,
         },
-        (res: any) => {
+        (res: http.IncomingMessage) => {
           let body = '';
           res.on('data', (chunk: Buffer) => { body += chunk.toString(); });
           res.on('end', () => {
