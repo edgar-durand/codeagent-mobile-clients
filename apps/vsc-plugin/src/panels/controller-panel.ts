@@ -8,9 +8,7 @@ import { ProjectOpsService } from '../services/project-ops.service';
 import { TerminalOpsService } from '../services/terminal-ops.service';
 import { PairingService } from '../services/pairing.service';
 import { CommandRelayService, RemoteCommand, CommandListener } from '../services/command-relay.service';
-import { WebSocketService } from '../services/websocket.service';
 import { IdeIntegrationService } from '../services/ide-integration.service';
-import { AgentBridgeService } from '../services/agent-bridge.service';
 import { AgentOutputMonitor } from '../services/agent-output-monitor';
 import { TerminalAgentService } from '../services/terminal-agent.service';
 import { CopilotChatService } from '../services/copilot-chat.service';
@@ -279,7 +277,6 @@ export class ControllerPanelProvider implements vscode.WebviewViewProvider, Comm
     const relay = CommandRelayService.getInstance();
     relay.reportOffline();
     relay.stopPolling();
-    WebSocketService.getInstance().disconnect();
     this.stopFileWatcher();
     PairingService.getInstance().clearCurrentSession();
     this.updateStatus();
@@ -350,7 +347,6 @@ export class ControllerPanelProvider implements vscode.WebviewViewProvider, Comm
   private updateStatus(): void {
     const pairing = PairingService.getInstance();
     const relay = CommandRelayService.getInstance();
-    const ws = WebSocketService.getInstance();
 
     this.postMessage({
       type: 'status',
@@ -360,7 +356,6 @@ export class ControllerPanelProvider implements vscode.WebviewViewProvider, Comm
       // succeeded for 60s). The webview renders the dot color and
       // label from this field.
       connectionState: relay.isPolling ? relay.getConnectionState() : 'offline',
-      wsConnected: ws.isConnected,
       sessionId: pairing.currentSessionId,
       user: pairing.pairedUser
         ? {

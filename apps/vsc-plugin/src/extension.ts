@@ -1,11 +1,9 @@
 import * as vscode from 'vscode';
 import { SettingsService } from './services/settings.service';
-import { WebSocketService } from './services/websocket.service';
 import { CommandRelayService } from './services/command-relay.service';
 import { PairingService } from './services/pairing.service';
 import { IdeIntegrationService } from './services/ide-integration.service';
 import { TerminalAgentService } from './services/terminal-agent.service';
-import { AgentBridgeService } from './services/agent-bridge.service';
 import { AgentOutputMonitor } from './services/agent-output-monitor';
 import { McpConfigWriterService } from './services/mcp-config-writer.service';
 import { CopilotChatService } from './services/copilot-chat.service';
@@ -25,7 +23,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   // SecretStorage-backed pluginAuthToken is in the in-memory cache
   // before any HTTP service tries to read it.
   await SettingsService.initialize(context);
-  WebSocketService.initialize(log);
   CommandRelayService.initialize(log);
   PairingService.initialize(log);
   IdeIntegrationService.initialize(log);
@@ -35,7 +32,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   CopilotChatService.initialize(log);
   ChatHistoryService.initialize(context, log);
   ClaudeContextService.initialize(log);
-  AgentBridgeService.initialize(log);
 
   // Register webview panel provider
   panelProvider = new ControllerPanelProvider(context.extensionUri, log);
@@ -55,7 +51,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       const relay = CommandRelayService.getInstance();
       relay.reportOffline();
       relay.stopPolling();
-      WebSocketService.getInstance().disconnect();
       panelProvider?.stopFileWatcher();
       PairingService.getInstance().clearCurrentSession();
       vscode.window.showInformationMessage('CodeAgent Mobile: Disconnected');
@@ -147,10 +142,6 @@ export function deactivate(): void {
   try {
     CommandRelayService.getInstance().reportOffline();
     CommandRelayService.getInstance().stopPolling();
-  } catch { /* not initialized */ }
-
-  try {
-    WebSocketService.getInstance().disconnect();
   } catch { /* not initialized */ }
 
   try {

@@ -6,7 +6,6 @@ import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.diagnostic.Logger
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.wm.ToolWindowManager
-import com.windsurf.controller.services.AgentBridgeService
 import com.windsurf.controller.services.AgentOutputMonitor
 import com.windsurf.controller.services.CommandRelayService
 import com.windsurf.controller.services.FileOpsService
@@ -47,7 +46,6 @@ class RemoteCommandRouter(private val project: Project) {
 
 fun dispatch(command: CommandRelayService.RemoteCommand) {
         SwingUtilities.invokeLater {
-            val agent = AgentBridgeService.getInstance()
             val relay = CommandRelayService.getInstance()
             val ide = IdeIntegrationService.getInstance()
 
@@ -144,7 +142,7 @@ fun dispatch(command: CommandRelayService.RemoteCommand) {
                             prompt = "${refs.joinToString(" ")} $prompt".trim()
                         }
                     }
-                    agent.startTask(prompt)
+                    logger.info("Command: start_task")
                     // Resolve the target agent up front so we can hand a
                     // typed `AgentInvocation` to the strategy registry.
                     // The registry then picks the right strategy based on
@@ -170,26 +168,26 @@ fun dispatch(command: CommandRelayService.RemoteCommand) {
                 }
                 "stop_task" -> {
                     AgentStrategyRegistry.getInstance().stop()
-                    agent.stopCurrentTask()
+                    logger.info("Command: stop_task")
                     relay.sendResult(command.id, "completed", com.google.gson.JsonObject().apply {
                         addProperty("message", "Task stopped")
                     })
                 }
                 "approve_action" -> {
-                    agent.approveCurrentAction()
+                    logger.info("Command: approve_action")
                     relay.sendResult(command.id, "completed", com.google.gson.JsonObject().apply {
                         addProperty("message", "Action approved")
                     })
                 }
                 "reject_action" -> {
-                    agent.rejectCurrentAction()
+                    logger.info("Command: reject_action")
                     relay.sendResult(command.id, "completed", com.google.gson.JsonObject().apply {
                         addProperty("message", "Action rejected")
                     })
                 }
                 "provide_input" -> {
                     val input = command.payload.get("input")?.asString ?: ""
-                    agent.provideInput(input)
+                    logger.info("Command: provide_input (${input.take(50)}…)")
                     ide.sendPromptToIde(input)
                     relay.sendResult(command.id, "completed", com.google.gson.JsonObject().apply {
                         addProperty("message", "Input provided")
@@ -370,7 +368,7 @@ fun dispatch(command: CommandRelayService.RemoteCommand) {
                     })
                 }
                 "cancel_task" -> {
-                    agent.cancelCurrentTask()
+                    logger.info("Command: cancel_task")
                     relay.sendResult(command.id, "completed", com.google.gson.JsonObject().apply {
                         addProperty("message", "Task cancelled")
                     })
@@ -579,7 +577,7 @@ fun dispatch(command: CommandRelayService.RemoteCommand) {
                     // the user can pair fresh without restarting the IDE.
                     try { TerminalAgentService.getInstance().stopMonitoring() } catch (_: Exception) {}
                     try { AgentOutputMonitor.getInstance().stopMonitoring() } catch (_: Exception) {}
-                    try { agent.cancelCurrentTask() } catch (_: Exception) {}
+                    try { logger.info("Command: cancel_task") } catch (_: Exception) {}
                     try { PairingService.getInstance().clearCurrentSession() } catch (_: Exception) {}
                     try { relay.stopPolling() } catch (_: Exception) {}
                     relay.sendResult(command.id, "success", com.google.gson.JsonObject().apply {
