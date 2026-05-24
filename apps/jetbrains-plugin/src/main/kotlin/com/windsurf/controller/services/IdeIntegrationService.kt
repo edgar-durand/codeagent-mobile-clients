@@ -38,7 +38,6 @@ data class DetectedAgent(
 class IdeIntegrationService {
 
     private val logger = Logger.getInstance(IdeIntegrationService::class.java)
-    private var projectRef: WeakReference<Project>? = null
 
     data class KnownAgent(
         val pluginId: String,
@@ -96,8 +95,30 @@ class IdeIntegrationService {
 
     private var cachedAgents: List<DetectedAgent>? = null
 
+    /**
+     * Known-project list, ordered most-recent-first. We're an
+     * @Service.APP singleton multiplexed across all open IDE
+     * windows; tracking every project that's ever called setProject
+     * + falling back to the live ones lets `getProject()` pick a
+     * sensible context per call.
+     *
+     * Previous behaviour was a single `projectRef` that the most
+     * recent `setProject` clobbered. With two IDE windows open,
+     * every later lookup targeted whichever project most recently
+     * rendered its tool window — a real correctness bug
+     * (audit #99). Using an ordered list keyed by identity-hash
+     * keeps both projects available without changing the call shape.
+     */
+    private val projectRefs = mutableListOf<WeakReference<Project>>()
+
     fun setProject(project: Project) {
-        projectRef = WeakReference(project)
+        synchronized(projectRefs) {
+            // Drop any existing entry for this project, then push to the
+            // front. Pruning by identity-hash also evicts collected
+            // entries so the list stays bounded.
+            projectRefs.removeAll { it.get() == null || it.get() === project }
+            projectRefs.add(0, WeakReference(project))
+        }
         cachedAgents = null
     }
 
@@ -111,7 +132,16 @@ class IdeIntegrationService {
     }
 
     private fun getProject(): Project? {
-        return projectRef?.get() ?: ProjectManager.getInstance().openProjects.firstOrNull()
+        // Walk the recency-ordered list; first live entry wins. If the
+        // service hasn't seen any setProject call yet (panel not opened
+        // on any window), fall back to the IDE's open projects.
+        synchronized(projectRefs) {
+            for (ref in projectRefs) {
+                val p = ref.get()
+                if (p != null && !p.isDisposed) return p
+            }
+        }
+        return ProjectManager.getInstance().openProjects.firstOrNull()
     }
 
     fun detectInstalledAgents(): List<DetectedAgent> {
