@@ -10,24 +10,20 @@ import com.windsurf.controller.services.detection.checks.findInstalledPlugin
 import com.windsurf.controller.services.detection.checks.whichBinary
 
 /**
- * OpenAI Codex — terminal agent owned by codeam-cli. Probes the AI
- * Assistant plugin (Codex was integrated natively from v2025.3),
- * known third-party Codex plugins, the `codex` binary on PATH, and
- * the `~/.codex/` config directory.
+ * CodeRabbit — terminal agent owned by codeam-cli's BatchAgentStrategy.
+ * Probes the marketplace plugin (id best-effort), the `coderabbit`
+ * binary, and the `~/.coderabbit/` config directory.
  */
-class CodexDetector : AgentDetector {
-    override val id = "codex"
-    override val name = "Codex"
-    override val icon = "codex"
+class CodeRabbitDetector : AgentDetector {
+    override val id = "coderabbit"
+    override val name = "CodeRabbit"
+    override val icon = "coderabbit"
 
     private val candidatePlugins = listOf(
-        PluginRef(id = "com.intellij.ml.llm", minVersion = "2025.3"),
-        PluginRef(id = "com.github.x0x0b.codex-launcher"),
-        PluginRef(id = "com.github.codexjb"),
-        PluginRef(id = "com.github.idea-claude-code-gui"),
+        PluginRef(id = "com.coderabbit.coderabbit-jetbrains"),
     )
-    private val binaryName = "codex"
-    private val configDir = "~/.codex"
+    private val binaryName = "coderabbit"
+    private val configDir = "~/.coderabbit"
 
     override suspend fun detect(ctx: DetectionContext): List<DetectionResult> {
         val plugin = findInstalledPlugin(candidatePlugins)
@@ -35,13 +31,13 @@ class CodexDetector : AgentDetector {
             whichBinary(binaryName) != null ||
             dirExists(expandHome(configDir))
         if (!installed) return emptyList()
-        ctx.logger.info("[CodexDetector] detected (plugin=${plugin?.id ?: "none"})")
+        ctx.logger.info("[CodeRabbitDetector] detected (plugin=${plugin?.id ?: "none"})")
         return listOf(
             DetectionResult(
                 id = id,
                 name = name,
                 icon = icon,
-                pluginId = plugin?.id ?: "openai.codex",
+                pluginId = plugin?.id ?: "coderabbit.coderabbit",
                 toolWindowId = "__terminal__:$id",
                 isTerminalAgent = true,
             ),
