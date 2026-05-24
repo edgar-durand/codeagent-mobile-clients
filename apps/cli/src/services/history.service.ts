@@ -549,7 +549,7 @@ export class HistoryService {
     // Sort newest first
     sessions.sort((a, b) => b.timestamp - a.timestamp);
 
-    await post('/api/sessions/claude-sessions', { pluginId: this.pluginId, sessions });
+    await post('/api/sessions/list', { pluginId: this.pluginId, sessions });
   }
 
   /**
@@ -572,10 +572,10 @@ export class HistoryService {
       const batch = messages.slice(i * CONVERSATION_BATCH_SIZE, (i + 1) * CONVERSATION_BATCH_SIZE);
       const body = { pluginId: this.pluginId, sessionId, messages: batch, batchIndex: i, totalBatches };
 
-      let ok = await post('/api/sessions/claude-conversation', body);
+      let ok = await post('/api/sessions/conversation', body);
       for (let attempt = 0; !ok && attempt < RETRY_DELAYS.length; attempt++) {
         await new Promise<void>((r) => setTimeout(r, RETRY_DELAYS[attempt]));
-        ok = await post('/api/sessions/claude-conversation', body);
+        ok = await post('/api/sessions/conversation', body);
       }
 
       if (!ok) {
@@ -649,7 +649,7 @@ export class HistoryService {
       mode: 'append' as const,
     };
 
-    const ok = await post('/api/sessions/claude-conversation', body);
+    const ok = await post('/api/sessions/conversation', body);
     if (ok) {
       const last = newMessages[newMessages.length - 1];
       this.lastUploadedUuid.set(sessionId, last.id);
