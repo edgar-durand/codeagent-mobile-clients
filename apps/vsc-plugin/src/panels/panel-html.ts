@@ -114,10 +114,6 @@ export function renderPanelHtml(
       box-shadow: 0 0 12px var(--ca-glow-purple);
     }
     .btn-primary:hover { filter: brightness(1.08); }
-    .btn-primary:focus-visible {
-      outline: 2px solid var(--ca-purple);
-      outline-offset: 2px;
-    }
     .btn-danger {
       background: var(--ca-error);
       color: var(--ca-on-surface);
@@ -125,6 +121,17 @@ export function renderPanelHtml(
     .btn-secondary {
       background: var(--vscode-button-secondaryBackground);
       color: var(--vscode-button-secondaryForeground);
+    }
+    /* A11y: 2-px electric-purple focus ring on every interactive
+       control. We override VS Code's default focus border because
+       its contrast against the panel background is below WCAG AA
+       in dark themes — the brand purple sits well clear of any
+       theme background and matches the panel's accent voice. */
+    .btn:focus-visible,
+    .btn-reconnect:focus-visible,
+    .btn-delete:focus-visible {
+      outline: 2px solid var(--ca-purple);
+      outline-offset: 2px;
     }
     .agents-actions {
       display: flex;
@@ -233,34 +240,37 @@ export function renderPanelHtml(
   </style>
 </head>
 <body>
-  <div id="disconnected-view">
+  <div id="disconnected-view" role="region" aria-label="Pairing">
     <div class="card">
-      <div class="status-row">
-        <div class="dot dot-red"></div>
+      <div class="status-row" role="status" aria-live="polite">
+        <div class="dot dot-red" aria-hidden="true"></div>
         <span class="label">Disconnected</span>
       </div>
       <p class="muted">Pair your mobile device to control AI agents remotely.</p>
-      <button id="btn-generate-pairing" class="btn btn-primary">Generate Pairing Code</button>
+      <button id="btn-generate-pairing" class="btn btn-primary"
+              aria-label="Generate a pairing code to connect a mobile device">
+        Generate Pairing Code
+      </button>
     </div>
 
-    <div id="pairing-section" class="card hidden">
+    <div id="pairing-section" class="card hidden" aria-live="polite">
       <h3>Pairing Code</h3>
-      <div id="qr-container" class="qr-container"></div>
-      <div id="pairing-code" class="pairing-code">------</div>
+      <div id="qr-container" class="qr-container" role="img" aria-label="Pairing QR code"></div>
+      <div id="pairing-code" class="pairing-code" aria-label="Six-character pairing code">------</div>
       <p id="pairing-timer" class="expire-timer">Waiting for connection...</p>
       <p class="muted" style="text-align:center; margin-top:6px;">Enter this code in your mobile app</p>
     </div>
 
-    <div id="recent-sessions-section" class="card hidden">
+    <div id="recent-sessions-section" class="card hidden" role="region" aria-label="Recent sessions">
       <h3>Recent Sessions</h3>
-      <div id="recent-sessions-list"></div>
+      <div id="recent-sessions-list" role="list"></div>
     </div>
   </div>
 
-  <div id="connected-view" class="hidden">
+  <div id="connected-view" class="hidden" role="region" aria-label="Connected session">
     <div class="card">
-      <div class="status-row">
-        <div id="status-dot" class="dot dot-green"></div>
+      <div class="status-row" role="status" aria-live="polite">
+        <div id="status-dot" class="dot dot-green" aria-hidden="true"></div>
         <span id="status-label" class="label">Connected</span>
       </div>
       <div class="user-info">
@@ -268,17 +278,26 @@ export function renderPanelHtml(
         <span id="user-email" class="user-email"></span>
         <span id="user-plan" class="user-plan"></span>
       </div>
-      <button id="btn-disconnect" class="btn btn-danger">Disconnect</button>
+      <button id="btn-disconnect" class="btn btn-danger"
+              aria-label="Disconnect the paired mobile device">
+        Disconnect
+      </button>
     </div>
 
-    <div class="card">
+    <div class="card" role="region" aria-label="Detected agents">
       <h3>Detected AI Agents</h3>
-      <div id="agents-list" class="agents-list">
+      <div id="agents-list" class="agents-list" role="list" aria-live="polite">
         <p class="muted">Loading...</p>
       </div>
       <div class="agents-actions">
-        <button id="btn-refresh-agents" class="btn btn-secondary">Refresh Agents</button>
-        <button id="btn-copy-install" class="btn btn-secondary hidden">Copy Install Command</button>
+        <button id="btn-refresh-agents" class="btn btn-secondary"
+                aria-label="Re-scan installed AI agents">
+          Refresh Agents
+        </button>
+        <button id="btn-copy-install" class="btn btn-secondary hidden"
+                aria-label="Copy the Claude Code install command to the clipboard">
+          Copy Install Command
+        </button>
       </div>
     </div>
   </div>
@@ -286,6 +305,18 @@ export function renderPanelHtml(
   <script nonce="${nonce}">
     const vscode = acquireVsCodeApi();
     let state = { connected: false, user: null, agents: [], connectionState: 'offline' };
+
+    /** Escape user-controlled strings before splicing them into
+     *  innerHTML / aria-label attributes. The backend already
+     *  validates the pairing flow, but defence in depth is cheap. */
+    function escapeHtml(s) {
+      return String(s == null ? '' : s)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+    }
 
     function requestPairing() {
       vscode.postMessage({ type: 'requestPairingCode' });
@@ -318,13 +349,18 @@ export function renderPanelHtml(
       list.innerHTML = sessions.map(function(s) {
         var name = s.userName || s.userEmail || 'Unknown';
         var email = s.userName && s.userEmail ? s.userEmail : '';
-        return '<div class="session-row">' +
+        var who = escapeHtml(name + (email ? ' (' + email + ')' : ''));
+        var sid = escapeHtml(s.sessionId);
+        return '<div class="session-row" role="listitem">' +
           '<div class="session-info">' +
-            '<div class="session-name">' + name + '</div>' +
-            (email ? '<div class="session-email">' + email + '</div>' : '') +
+            '<div class="session-name">' + escapeHtml(name) + '</div>' +
+            (email ? '<div class="session-email">' + escapeHtml(email) + '</div>' : '') +
           '</div>' +
-          '<button class="btn-reconnect" data-sid="' + s.sessionId + '">Reconnect</button>' +
-          '<button class="btn-delete" data-sid="' + s.sessionId + '" title="Delete session">✕</button>' +
+          '<button class="btn-reconnect" data-sid="' + sid + '"' +
+            ' aria-label="Reconnect to session for ' + who + '">Reconnect</button>' +
+          '<button class="btn-delete" data-sid="' + sid + '"' +
+            ' aria-label="Delete session for ' + who + '"' +
+            ' title="Delete session">✕</button>' +
         '</div>';
       }).join('');
       list.querySelectorAll('.btn-reconnect').forEach(function(btn) {
@@ -388,7 +424,7 @@ export function renderPanelHtml(
       }
       copyBtn.classList.add('hidden');
       container.innerHTML = agents.map(a =>
-        '<div class="agent-row"><div class="agent-dot"></div><span>' + a.name + '</span></div>'
+        '<div class="agent-row" role="listitem"><div class="agent-dot" aria-hidden="true"></div><span>' + escapeHtml(a.name) + '</span></div>'
       ).join('');
     }
 

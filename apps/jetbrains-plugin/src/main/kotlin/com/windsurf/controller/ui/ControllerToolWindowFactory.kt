@@ -36,6 +36,7 @@ import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.RequestBody.Companion.toRequestBody
 import java.awt.*
+import java.awt.event.KeyEvent
 import java.awt.geom.*
 import java.awt.image.BufferedImage
 import javax.swing.*
@@ -52,6 +53,11 @@ class ControllerToolWindowFactory : ToolWindowFactory {
         }
         val content = ContentFactory.getInstance().createContent(scrollPane, "", false)
         toolWindow.contentManager.addContent(content)
+        // A11y: when the tool window is first opened, land focus on
+        // the primary action (Generate Code / Disconnect depending
+        // on pairing state) so keyboard-only users start on the
+        // active control instead of the scroll pane.
+        SwingUtilities.invokeLater { panel.focusPrimaryAction() }
     }
 
     private class ControllerPanel(private val project: Project) : JPanel(), PairingService.PairingListener, CommandRelayService.CommandListener {
@@ -116,6 +122,18 @@ class ControllerToolWindowFactory : ToolWindowFactory {
             refreshRecentSessions()
         }
 
+        /**
+         * Focus the primary action for the current pairing state:
+         * `Disconnect` when an active session exists, otherwise the
+         * pairing CTA (`Generate Code`). Called by the factory once
+         * the tool window content is mounted so keyboard-only users
+         * land on the active control.
+         */
+        fun focusPrimaryAction() {
+            val target = if (disconnectButton.isEnabled) disconnectButton else pairButton
+            target.requestFocusInWindow()
+        }
+
         override fun onPaired(sessionId: String) {
             val relay = CommandRelayService.getInstance()
             relay.startPolling()
@@ -151,14 +169,25 @@ class ControllerToolWindowFactory : ToolWindowFactory {
                     // case ("Connected", "Reconnecting…", "Offline").
                     font = BrandFonts.hanken(Font.BOLD, 13f)
                     foreground = primaryText
+                    accessibleContext.accessibleName = "Connection status"
+                    accessibleContext.accessibleDescription =
+                        "Live connection state. Updates when the mobile relay reconnects, drops, or goes offline."
                 })
             }
 
             disconnectButton.apply {
                 font = font.deriveFont(11f)
                 isEnabled = false
-                isFocusPainted = false
+                // Keep the focus ring visible — IntelliJ paints a
+                // theme-aware accent border when isFocusPainted is on,
+                // which a11y users rely on to navigate via Tab.
+                isFocusPainted = true
                 putClientProperty("JButton.buttonType", "roundRect")
+                mnemonic = KeyEvent.VK_D
+                toolTipText = "Disconnect the paired mobile device (Alt+D)"
+                accessibleContext.accessibleName = "Disconnect the paired mobile device"
+                accessibleContext.accessibleDescription =
+                    "Ends the current paired session and stops the relay."
             }
 
             card.add(leftPanel, BorderLayout.WEST)
@@ -186,6 +215,9 @@ class ControllerToolWindowFactory : ToolWindowFactory {
                 horizontalAlignment = SwingConstants.CENTER
                 alignmentX = Component.CENTER_ALIGNMENT
                 isVisible = false
+                accessibleContext.accessibleName = "Pairing QR code"
+                accessibleContext.accessibleDescription =
+                    "Scan this QR code with the CodeAgent Mobile app to pair."
             }
 
             codeLabel.apply {
@@ -198,6 +230,7 @@ class ControllerToolWindowFactory : ToolWindowFactory {
                 horizontalAlignment = SwingConstants.CENTER
                 alignmentX = Component.CENTER_ALIGNMENT
                 isVisible = false
+                accessibleContext.accessibleName = "Pairing code"
             }
 
             codeSeparator.apply {
@@ -211,8 +244,13 @@ class ControllerToolWindowFactory : ToolWindowFactory {
             pairButton.apply {
                 alignmentX = Component.CENTER_ALIGNMENT
                 font = font.deriveFont(Font.BOLD, 13f)
-                isFocusPainted = false
+                isFocusPainted = true
                 putClientProperty("JButton.buttonType", "roundRect")
+                mnemonic = KeyEvent.VK_C
+                toolTipText = "Generate a new pairing code (Alt+C)"
+                accessibleContext.accessibleName = "Generate Pairing Code"
+                accessibleContext.accessibleDescription =
+                    "Generates a six-character code to pair a new mobile device."
             }
             pairButton.addActionListener { onPairClicked() }
 
@@ -287,9 +325,14 @@ class ControllerToolWindowFactory : ToolWindowFactory {
                 val homepageBtn = JButton("Visit Homepage").apply {
                     alignmentX = Component.LEFT_ALIGNMENT
                     font = font.deriveFont(Font.BOLD, 11f)
-                    isFocusPainted = false
+                    isFocusPainted = true
                     putClientProperty("JButton.buttonType", "roundRect")
                     cursor = Cursor.getPredefinedCursor(Cursor.HAND_CURSOR)
+                    mnemonic = KeyEvent.VK_H
+                    toolTipText = "Open codeagent-mobile.com in your browser (Alt+H)"
+                    accessibleContext.accessibleName = "Visit Homepage"
+                    accessibleContext.accessibleDescription =
+                        "Opens codeagent-mobile.com in the system browser."
                     addActionListener {
                         try {
                             java.awt.Desktop.getDesktop().browse(java.net.URI("https://www.codeagent-mobile.com"))
@@ -420,7 +463,7 @@ class ControllerToolWindowFactory : ToolWindowFactory {
                 // FREE user: show upgrade button
                 val upgradeBtn = JButton("Upgrade to Pro").apply {
                     alignmentX = Component.CENTER_ALIGNMENT
-                    isFocusPainted = false
+                    isFocusPainted = true
                     isContentAreaFilled = false
                     isOpaque = true
                     background = accentBlue
@@ -432,6 +475,11 @@ class ControllerToolWindowFactory : ToolWindowFactory {
                     )
                     cursor = Cursor.getPredefinedCursor(Cursor.HAND_CURSOR)
                     maximumSize = Dimension(Int.MAX_VALUE, 34)
+                    mnemonic = KeyEvent.VK_U
+                    toolTipText = "Open the upgrade page in your browser (Alt+U)"
+                    accessibleContext.accessibleName = "Upgrade to Pro"
+                    accessibleContext.accessibleDescription =
+                        "Opens the subscription upgrade page in the system browser."
                     addActionListener { openSubscriptionPage() }
                 }
                 subPanel.add(upgradeBtn)
