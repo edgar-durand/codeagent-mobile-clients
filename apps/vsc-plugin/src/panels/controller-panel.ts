@@ -169,6 +169,9 @@ export class ControllerPanelProvider implements vscode.WebviewViewProvider, Comm
       case 'refreshAgents':
         this.handleRefreshAgents();
         break;
+      case 'copyInstallCommand':
+        await this.handleCopyInstallCommand();
+        break;
       case 'getStatus':
         this.updateStatus();
         this.sendRecentSessions();
@@ -343,6 +346,12 @@ export class ControllerPanelProvider implements vscode.WebviewViewProvider, Comm
       type: 'agents',
       agents: agents.map((a) => ({ id: a.id, name: a.name, icon: a.icon })),
     });
+  }
+
+  private async handleCopyInstallCommand(): Promise<void> {
+    const cmd = 'npm install -g @anthropic-ai/claude-code';
+    await vscode.env.clipboard.writeText(cmd);
+    vscode.window.showInformationMessage(`Copied: ${cmd}`);
   }
 
   private updateStatus(): void {
