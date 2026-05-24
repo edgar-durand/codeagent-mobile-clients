@@ -28,6 +28,9 @@ export default {
         'cli',
         'vsc-plugin',
         'jetbrains-plugin',
+        // Cross-plugin work: protocol-level changes that have to land
+        // in both VS Code and JetBrains plugins in lock-step.
+        'both-plugins',
         'shared',
         'workflow',
         'meta',
