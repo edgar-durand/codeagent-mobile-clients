@@ -6,7 +6,7 @@
   "publisher": "CodeAgentMobile",
   "icon": "resources/icon.png",
   "galleryBanner": {
-    "color": "#A78BFA",
+    "color": "#A855F7",
     "theme": "dark"
   },
   "preview": false,
@@ -44,12 +44,12 @@
   },
   "badges": [
     {
-      "url": "https://img.shields.io/visual-studio-marketplace/v/CodeAgentMobile.codeagent-mobile?color=A78BFA&label=VS%20Code%20Marketplace",
+      "url": "https://img.shields.io/visual-studio-marketplace/v/CodeAgentMobile.codeagent-mobile?color=A855F7&label=VS%20Code%20Marketplace",
       "href": "https://marketplace.visualstudio.com/items?itemName=CodeAgentMobile.codeagent-mobile",
       "description": "VS Code Marketplace version"
     },
     {
-      "url": "https://img.shields.io/open-vsx/v/CodeAgentMobile/codeagent-mobile?color=A78BFA&label=Open%20VSX",
+      "url": "https://img.shields.io/open-vsx/v/CodeAgentMobile/codeagent-mobile?color=A855F7&label=Open%20VSX",
       "href": "https://open-vsx.org/extension/CodeAgentMobile/codeagent-mobile",
       "description": "Open VSX version"
     }
