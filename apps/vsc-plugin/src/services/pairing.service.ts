@@ -120,6 +120,9 @@ export class PairingService {
           const rawToken = data.pluginAuthToken;
           if (typeof rawToken === 'string' && rawToken.length > 0) {
             SettingsService.getInstance().setPluginAuthToken(rawToken);
+            // The new token clears any prior 401 — re-arm the
+            // "session expired" toast for the next failure.
+            CommandRelayService.getInstance().resetAuthFailureGate();
           }
 
           this.currentSessionId = sessionId;

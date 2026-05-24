@@ -3,6 +3,8 @@ package com.windsurf.controller.services
 import com.google.gson.Gson
 import com.google.gson.JsonArray
 import com.google.gson.JsonObject
+import com.intellij.notification.NotificationGroupManager
+import com.intellij.notification.NotificationType
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.components.Service
 import com.intellij.openapi.diagnostic.Logger
@@ -87,6 +89,14 @@ class CommandRelayService {
     // ─── Polling fallback state ──────────────────────────────────────
     private var pollTask: ScheduledFuture<*>? = null
     private var pollFailures: Int = 0
+
+    // ─── Auth-failure state ──────────────────────────────────────────
+    // Set when the backend has returned 401 for the current token. Stops
+    // every transport (SSE, polling, heartbeat) until the user re-pairs,
+    // and throttles the "session expired" notification to once per
+    // process — repeating it every poll would spam.
+    @Volatile
+    private var authFailureSurfaced: Boolean = false
     /**
      * Successive polls that returned no commands. Drives an idle
      * backoff so a plugin sitting on the polling fallback doesn't keep
@@ -177,6 +187,11 @@ class CommandRelayService {
         try {
             val response = call.execute()
             try {
+                if (response.code == 401) {
+                    logger.warn("SSE returned 401 — auth token expired")
+                    handleAuthFailure()
+                    return
+                }
                 if (response.code != 200) {
                     logger.debug("SSE status=${response.code}, will retry/fallback")
                     onSseFailure()
@@ -292,6 +307,10 @@ class CommandRelayService {
 
         try {
             httpClient.newCall(request).execute().use { response ->
+                if (response.code == 401) {
+                    handleAuthFailure()
+                    return
+                }
                 if (!response.isSuccessful) {
                     pollFailures += 1
                     return
@@ -314,6 +333,38 @@ class CommandRelayService {
             pollFailures += 1
             logger.debug("Poll failed (failures=$pollFailures): ${e.message}")
         }
+    }
+
+    /**
+     * Triggered when the backend returns 401 from any HTTP path or SSE
+     * upgrade. The token the plugin holds is dead (rotated server-side
+     * or invalidated from the mobile app), so:
+     *
+     *   - drop the cached token so subsequent calls don't replay it
+     *   - stop every transport: polling, SSE, heartbeat
+     *   - tell the user once per process via the CodeAgent-Mobile
+     *     notification group; pairing re-arms the gate.
+     */
+    private fun handleAuthFailure() {
+        SettingsService.getInstance().setPluginAuthToken(null)
+        stopPolling()
+        if (authFailureSurfaced) return
+        authFailureSurfaced = true
+        logger.warn("Auth failed (401) — token cleared, transports stopped.")
+        ApplicationManager.getApplication().invokeLater {
+            NotificationGroupManager.getInstance()
+                .getNotificationGroup("CodeAgent-Mobile")
+                .createNotification(
+                    "CodeAgent Mobile · Session expired. Re-pair to continue.",
+                    NotificationType.WARNING,
+                )
+                .notify(null)
+        }
+    }
+
+    /** Called from PairingService once a new token has been stored. */
+    fun resetAuthFailureGate() {
+        authFailureSurfaced = false
     }
 
     private fun dispatchCommands(arr: JsonArray) {
