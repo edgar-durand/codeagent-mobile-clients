@@ -2,7 +2,8 @@ import * as fs from 'fs';
 import * as os from 'os';
 import { randomUUID } from 'crypto';
 import { DEFAULT_API_BASE_URL, isKnownAgentId } from '@codeagent/shared';
-import { addSession } from '../config';
+import { addSession, loadCliConfig } from '../config';
+import { capture, identifyUser } from '../services/telemetry.service';
 import { vercelBypassHeader } from '../lib/backend-headers';
 import { detectCurrentBranch } from '../lib/git-branch';
 import { start } from './start';
@@ -172,6 +173,7 @@ async function claim(token: string, pluginId: string): Promise<ClaimSuccess> {
 export async function pairAuto(args: string[]): Promise<void> {
   const token = readTokenFromArgs(args);
   const pluginId = randomUUID();
+  capture('pair_auto_started', { pluginId });
 
   // eslint-disable-next-line no-console
   console.log('  Claiming pairing token…');
@@ -195,6 +197,21 @@ export async function pairAuto(args: string[]): Promise<void> {
     pairedAt: Date.now(),
     pluginAuthToken: claimed.pluginAuthToken,
     agent: claimed.agent,
+  });
+
+  identifyUser({
+    userId: claimed.user.email,
+    email: claimed.user.email,
+    name: claimed.user.name,
+    plan: claimed.user.plan,
+    preferredAgent: claimed.agent,
+    pairedSessionCount: loadCliConfig().sessions.length,
+  });
+  capture('pair_auto_succeeded', {
+    sessionId: claimed.sessionId,
+    pluginId,
+    agentId: claimed.agent,
+    codespaceName: process.env.CODESPACE_NAME ?? undefined,
   });
 
   // eslint-disable-next-line no-console

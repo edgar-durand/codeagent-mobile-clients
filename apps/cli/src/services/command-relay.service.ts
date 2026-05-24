@@ -6,6 +6,7 @@ import { _postJson, _getJson } from './pairing.service';
 import { vercelBypassHeader } from '../lib/backend-headers';
 import { computePollDelay } from '../lib/poll-delay';
 import { log } from './logger';
+import { capture } from './telemetry.service';
 
 const API_BASE = process.env.CODEAM_API_URL ?? DEFAULT_API_BASE_URL;
 
@@ -134,6 +135,12 @@ export class CommandRelayService {
           if (this.sseFailures >= 2) {
             // Switch to polling fallback for this session.
             log.trace('relay', 'sse unavailable, falling back to polling');
+            capture('sse_fallback_to_poll', {
+              pluginId: this.pluginId,
+              agentId: this.agentMeta.id,
+              reason: `status_${res.statusCode}`,
+              failures: this.sseFailures,
+            });
             this.startPollingFallback();
             return;
           }
@@ -167,6 +174,12 @@ export class CommandRelayService {
       log.trace('relay', 'sse req error', err);
       this.sseFailures += 1;
       if (this.sseFailures >= 2) {
+        capture('sse_fallback_to_poll', {
+          pluginId: this.pluginId,
+          agentId: this.agentMeta.id,
+          reason: 'req_error',
+          failures: this.sseFailures,
+        });
         this.startPollingFallback();
         return;
       }

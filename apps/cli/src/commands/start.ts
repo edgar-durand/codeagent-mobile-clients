@@ -1,6 +1,6 @@
 import pc from 'picocolors';
 import { AGENT_REGISTRY, type AgentId } from '@codeagent/shared';
-import { getActiveSession, getActiveSessionForAgent, ensurePluginId } from '../config';
+import { getActiveSession, getActiveSessionForAgent, ensurePluginId, loadCliConfig } from '../config';
 import { showIntro, showInfo } from '../ui/banner';
 import { CommandRelayService } from '../services/command-relay.service';
 import { AgentService } from '../services/agent.service';
@@ -17,6 +17,7 @@ import {
   type HandlerContext,
 } from './start/handlers';
 import { registerTerminalHandlers, closeAllTerminals } from '../services/terminal-ops.service';
+import { capture, identifyUser, shutdownTelemetry } from '../services/telemetry.service';
 
 /**
  * Wires the long-running services (PTY ↔ output relay ↔ command
@@ -58,6 +59,24 @@ export async function start(requestedAgent?: AgentId): Promise<void> {
 
   showInfo(`${session.userName}  ·  ${pc.cyan(session.plan)}`);
   showInfo(`Launching ${AGENT_REGISTRY[session.agent].displayName}...\n`);
+
+  // Telemetry: identify from the persisted session + capture the
+  // agent-spawn event. Returning users (already paired) hit this
+  // path on every `codeam` invocation; the identify is idempotent.
+  identifyUser({
+    userId: session.userEmail,
+    email: session.userEmail,
+    name: session.userName,
+    plan: session.plan,
+    preferredAgent: session.agent,
+    pairedSessionCount: loadCliConfig().sessions.length,
+  });
+  capture('agent_used', {
+    sessionId: session.id,
+    pluginId,
+    agentId: session.agent,
+    requestedAgent: requestedAgent ?? null,
+  });
 
   const cwd = process.cwd();
 
@@ -208,6 +227,10 @@ export async function start(requestedAgent?: AgentId): Promise<void> {
     // 120 s setTimeout cleanup in handlers.ts only fires if the
     // process survives that long — under Ctrl+C we'd leak.
     cleanupAttachmentTempFiles();
+    // Best-effort flush of queued telemetry. fire-and-forget so
+    // process.exit doesn't wait — the SDK already batches +
+    // sends opportunistically.
+    void shutdownTelemetry();
     process.exit(0);
   }
 

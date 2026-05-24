@@ -24,6 +24,16 @@ export default defineConfig([
     banner: { js: '#!/usr/bin/env node' },
     define: {
       __CLI_VERSION__: JSON.stringify(pkg.version),
+      // PostHog ingestion key — public-by-design (same shape mobile +
+      // landing bake at build time). The release pipeline sets
+      // POSTHOG_API_KEY in CI; local builds leave it empty, which the
+      // telemetry service treats as "no-op" (everything captured falls
+      // into the void). __POSTHOG_HOST__ defaults to PostHog's US
+      // ingestion endpoint to match the apps.
+      __POSTHOG_API_KEY__: JSON.stringify(process.env.POSTHOG_API_KEY ?? ''),
+      __POSTHOG_HOST__: JSON.stringify(
+        process.env.POSTHOG_HOST ?? 'https://us.i.posthog.com',
+      ),
     },
   },
   {

@@ -11,6 +11,13 @@ const API_BASE = process.env.CODEAM_API_URL ?? DEFAULT_API_BASE_URL;
 
 export interface PairedUserInfo {
   sessionId: string;
+  /**
+   * Backend user id (`user.id` from the pair response). Stable across
+   * sessions / re-pairs. Used as the PostHog distinct id when telemetry
+   * is on. Optional because older backends didn't emit it; identify
+   * falls back to email in that case.
+   */
+  userId?: string;
   userName: string;
   userEmail: string;
   plan: string;
@@ -81,6 +88,7 @@ export function pollStatus(
         const rawToken = data.pluginAuthToken;
         onPaired({
           sessionId: data.sessionId as string,
+          userId: typeof user.id === 'string' && user.id.length > 0 ? user.id : undefined,
           userName: (user.name as string) || '',
           userEmail: (user.email as string) || '',
           plan: (user.plan as string) || 'FREE',

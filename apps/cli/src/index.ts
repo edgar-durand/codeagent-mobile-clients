@@ -13,6 +13,12 @@ import { help } from './commands/help';
 import { tryShowSubcommandHelp } from './commands/subcommand-help';
 import { checkForUpdates } from './lib/updateNotifier';
 import { isKnownAgentId } from '@codeagent/shared';
+import {
+  initTelemetry,
+  maybePrintFirstRunBanner,
+  capture,
+  shutdownTelemetry,
+} from './services/telemetry.service';
 
 const [,, command, ...args] = process.argv;
 
@@ -25,6 +31,14 @@ async function main(): Promise<void> {
     command === '--version' || command === '-v' || command === 'version' ||
     command === '--help' || command === '-h' || command === 'help';
   if (!isMetaCommand) checkForUpdates();
+
+  // Telemetry boot — gated by opt-out env / no-key-baked. The
+  // first-run banner prints once per machine + writes a marker so
+  // returning users don't see it every invocation.
+  if (initTelemetry()) {
+    maybePrintFirstRunBanner();
+    capture('cli_boot', { command: command ?? '(default)' });
+  }
 
   // Per-subcommand --help intercept. Runs BEFORE dispatch so the help
   // bypass never triggers network calls, agent spawns, or interactive
@@ -66,8 +80,13 @@ async function main(): Promise<void> {
   }
 }
 
-main().catch((err: unknown) => {
-  const msg = err instanceof Error ? err.message : String(err);
-  console.error(`\n  ${msg}\n`);
-  process.exit(1);
-});
+main()
+  .then(() => shutdownTelemetry())
+  .catch(async (err: unknown) => {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error(`\n  ${msg}\n`);
+    // Best-effort flush before exit so the failure event we just
+    // captured upstream isn't dropped on the floor.
+    try { await shutdownTelemetry(); } catch { /* swallow */ }
+    process.exit(1);
+  });

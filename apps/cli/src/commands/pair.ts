@@ -12,6 +12,7 @@ import { requestCode, pollStatus } from '../services/pairing.service';
 import { addSession, loadCliConfig, saveCliConfig } from '../config';
 import { start } from './start';
 import { parseAgentFlag, promptForAgent } from '../utils/agent-prompt';
+import { capture, identifyUser } from '../services/telemetry.service';
 
 export async function pair(args: string[] = []): Promise<void> {
   const config = loadCliConfig();
@@ -26,6 +27,7 @@ export async function pair(args: string[] = []): Promise<void> {
   // Generate a fresh pluginId for this pairing so multiple sessions from the
   // same machine can coexist without overwriting each other.
   const pluginId = randomUUID();
+  capture('pair_started', { agentId, pluginId, dryRun });
   const spin = p.spinner();
   spin.start('Requesting pairing code...');
 
@@ -114,6 +116,24 @@ export async function pair(args: string[] = []): Promise<void> {
         });
         // Persist preferredAgent for next time (reload to pick up activeSessionId written by addSession)
         saveCliConfig({ ...loadCliConfig(), preferredAgent: agentId });
+
+        // Telemetry: identify the user + attach session context to
+        // every subsequent capture. Falls back to email when the
+        // backend response omits user.id (older backends).
+        identifyUser({
+          userId: info.userId ?? info.userEmail,
+          email: info.userEmail,
+          name: info.userName,
+          plan: info.plan,
+          preferredAgent: agentId,
+          pairedSessionCount: loadCliConfig().sessions.length,
+        });
+        capture('pair_succeeded', {
+          sessionId: info.sessionId,
+          pluginId,
+          agentId,
+        });
+
         showSuccess(`Paired with ${info.userName} (${info.plan})`);
         console.log('');
         resolve();
@@ -121,6 +141,7 @@ export async function pair(args: string[] = []): Promise<void> {
       () => {
         clearInterval(countdownInterval);
         waitSpin.stop('Timed out');
+        capture('pair_timed_out', { agentId, pluginId });
         showError('Pairing timed out after 5 minutes. Run codeam pair to try again.');
         process.exit(1);
       },

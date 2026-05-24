@@ -88,6 +88,13 @@ jobs:
 
       - name: Build CLI
         working-directory: apps/cli
+        env:
+          # PostHog ingestion key baked at build time via tsup's
+          # `define` (apps/cli/tsup.config.ts). Public-by-design — same
+          # write-key shape mobile + landing bake. Leave the GitHub
+          # secret blank to disable telemetry across published builds.
+          POSTHOG_API_KEY: ${{ secrets.POSTHOG_API_KEY }}
+          POSTHOG_HOST: ${{ vars.POSTHOG_HOST }}
         run: npm run build
 
       - name: Pack CLI tarball (for GitHub Release artifact)
