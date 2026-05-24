@@ -21,6 +21,7 @@ import { ClaudeContextService } from '../services/claude-context.service';
 import { McpConfigWriterService, McpConfigureRequest, McpEntry } from '../services/mcp-config-writer.service';
 import { FileWatcherService } from '../services/file-watcher.service';
 import { buildInstallAndRun as buildInstallAndRunPure } from '../utils/build-install-command';
+import { generateNonce, cspMeta, renderPairingQrSvg } from '../utils/webview-security';
 
 /**
  * Thin adapter that hands the pure builder VS Code's view of the
@@ -37,10 +38,21 @@ function buildInstallAndRun(subcommand: string): string {
   );
 }
 
+// Session IDs sent by the webview are echoes of UUIDs we previously
+// stored in recentSessions. Reject anything that doesn't match the
+// shape — the webview is a sandboxed iframe behind our CSP, but the
+// downstream services treat sessionId as trusted input.
+function sanitizeSessionId(raw: unknown): string | null {
+  if (typeof raw !== 'string') return null;
+  if (!/^[A-Za-z0-9_-]{1,128}$/.test(raw)) return null;
+  return raw;
+}
+
 export class ControllerPanelProvider implements vscode.WebviewViewProvider, CommandListener {
   public static readonly viewType = 'codeagent-mobile.panel';
   private view?: vscode.WebviewView;
   private log: vscode.OutputChannel;
+  private nonce = generateNonce();
   /**
    * Per-pairing file watcher. Mirrors Path A (CLI) emission of
    * `/api/files/changed` + `/api/review/hunks` for Path B (direct
@@ -68,7 +80,8 @@ export class ControllerPanelProvider implements vscode.WebviewViewProvider, Comm
       localResourceRoots: [this.extensionUri],
     };
 
-    webviewView.webview.html = this.getHtmlContent();
+    this.nonce = generateNonce();
+    webviewView.webview.html = this.getHtmlContent(webviewView.webview, this.nonce);
 
     webviewView.webview.onDidReceiveMessage((msg) => {
       this.handleWebviewMessage(msg);
@@ -157,12 +170,16 @@ export class ControllerPanelProvider implements vscode.WebviewViewProvider, Comm
         this.updateStatus();
         this.sendRecentSessions();
         break;
-      case 'reconnect':
-        this.handleReconnect(msg.sessionId as string);
+      case 'reconnect': {
+        const sessionId = sanitizeSessionId(msg.sessionId);
+        if (sessionId) this.handleReconnect(sessionId);
         break;
-      case 'deleteSession':
-        this.handleDeleteSession(msg.sessionId as string);
+      }
+      case 'deleteSession': {
+        const sessionId = sanitizeSessionId(msg.sessionId);
+        if (sessionId) this.handleDeleteSession(sessionId);
         break;
+      }
     }
   }
 
@@ -181,7 +198,19 @@ export class ControllerPanelProvider implements vscode.WebviewViewProvider, Comm
     const pairing = PairingService.getInstance();
     const result = await pairing.requestPairingCode();
     if (result) {
-      this.postMessage({ type: 'pairingCode', code: result.code, expiresAt: result.expiresAt });
+      let qrSvg: string;
+      try {
+        qrSvg = await renderPairingQrSvg(result.code);
+      } catch (err) {
+        this.log.appendLine(`QR render failed: ${err}`);
+        qrSvg = '';
+      }
+      this.postMessage({
+        type: 'pairingCode',
+        code: result.code,
+        expiresAt: result.expiresAt,
+        qrSvg,
+      });
     } else {
       this.postMessage({ type: 'error', message: 'Failed to generate pairing code' });
     }
@@ -921,11 +950,12 @@ export class ControllerPanelProvider implements vscode.WebviewViewProvider, Comm
     this.view?.webview.postMessage(msg);
   }
 
-  private getHtmlContent(): string {
+  private getHtmlContent(webview: vscode.Webview, nonce: string): string {
     return `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
+  <meta http-equiv="Content-Security-Policy" content="${cspMeta(webview, nonce)}">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -1086,7 +1116,7 @@ export class ControllerPanelProvider implements vscode.WebviewViewProvider, Comm
         <span class="label">Disconnected</span>
       </div>
       <p class="muted">Pair your mobile device to control AI agents remotely.</p>
-      <button class="btn btn-primary" onclick="requestPairing()">Generate Pairing Code</button>
+      <button id="btn-generate-pairing" class="btn btn-primary">Generate Pairing Code</button>
     </div>
 
     <div id="pairing-section" class="card hidden">
@@ -1114,7 +1144,7 @@ export class ControllerPanelProvider implements vscode.WebviewViewProvider, Comm
         <span id="user-email" class="user-email"></span>
         <span id="user-plan" class="user-plan"></span>
       </div>
-      <button class="btn btn-danger" onclick="disconnect()">Disconnect</button>
+      <button id="btn-disconnect" class="btn btn-danger">Disconnect</button>
     </div>
 
     <div class="card">
@@ -1122,11 +1152,11 @@ export class ControllerPanelProvider implements vscode.WebviewViewProvider, Comm
       <div id="agents-list" class="agents-list">
         <p class="muted">Loading...</p>
       </div>
-      <button class="btn btn-secondary" onclick="refreshAgents()">Refresh Agents</button>
+      <button id="btn-refresh-agents" class="btn btn-secondary">Refresh Agents</button>
     </div>
   </div>
 
-  <script>
+  <script nonce="${nonce}">
     const vscode = acquireVsCodeApi();
     let state = { connected: false, user: null, agents: [] };
 
@@ -1224,8 +1254,22 @@ export class ControllerPanelProvider implements vscode.WebviewViewProvider, Comm
           const section = document.getElementById('pairing-section');
           section.classList.remove('hidden');
           document.getElementById('pairing-code').textContent = msg.code;
-          const qrUrl = 'https://api.qrserver.com/v1/create-qr-code/?size=180x180&data=' + encodeURIComponent(msg.code);
-          document.getElementById('qr-container').innerHTML = '<img src="' + qrUrl + '" width="180" height="180" alt="QR Code" />';
+          // SVG is rendered extension-side via the qrcode package and
+          // arrives as a trusted string. We never load the pairing code
+          // through a third-party host — it is a short-lived bearer
+          // secret.
+          const qr = document.getElementById('qr-container');
+          if (msg.qrSvg) {
+            qr.innerHTML = msg.qrSvg;
+            const svg = qr.querySelector('svg');
+            if (svg) {
+              svg.setAttribute('width', '180');
+              svg.setAttribute('height', '180');
+              svg.setAttribute('aria-label', 'QR code for pairing code ' + msg.code);
+            }
+          } else {
+            qr.innerHTML = '<p class="muted">QR unavailable — enter the code manually on your phone.</p>';
+          }
           const timer = document.getElementById('pairing-timer');
           const expiresAt = msg.expiresAt;
           const interval = setInterval(() => {
@@ -1252,6 +1296,12 @@ export class ControllerPanelProvider implements vscode.WebviewViewProvider, Comm
           break;
       }
     });
+
+    // Inline event handlers (onclick="...") are blocked by the webview's
+    // CSP — wire buttons via addEventListener instead.
+    document.getElementById('btn-generate-pairing').addEventListener('click', requestPairing);
+    document.getElementById('btn-disconnect').addEventListener('click', disconnect);
+    document.getElementById('btn-refresh-agents').addEventListener('click', refreshAgents);
 
     vscode.postMessage({ type: 'getStatus' });
   </script>
