@@ -100,9 +100,18 @@ class AgentBridgeService : WebSocketService.WebSocketListener {
                 val auto = inner.get("auto")?.asBoolean ?: false
                 val resumePrompt = if (auto) "--resume $sessionId --dangerously-skip-permissions" else "--resume $sessionId"
                 val terminal = TerminalAgentService.getInstance()
-                terminal.sendRawToTerminal("\u0003") // Ctrl+C
-                Thread.sleep(500)
-                terminal.sendPromptToClaudeCode(resumePrompt)
+                // Don't park the WebSocket reader thread for 500ms — that
+                // blocks every agent event behind this one. Hand the
+                // sequence to a pooled executor so the reader keeps
+                // pulling frames.
+                ApplicationManager.getApplication().executeOnPooledThread {
+                    terminal.sendRawToTerminal("\u0003") // Ctrl+C
+                    try { Thread.sleep(500) } catch (_: InterruptedException) {
+                        Thread.currentThread().interrupt()
+                        return@executeOnPooledThread
+                    }
+                    terminal.sendPromptToClaudeCode(resumePrompt)
+                }
             }
         }
     }

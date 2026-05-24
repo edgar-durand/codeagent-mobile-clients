@@ -5,6 +5,7 @@ import com.google.zxing.BarcodeFormat
 import com.google.zxing.EncodeHintType
 import com.google.zxing.qrcode.QRCodeWriter
 import com.google.zxing.qrcode.decoder.ErrorCorrectionLevel
+import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.wm.ToolWindow
 import com.intellij.openapi.wm.ToolWindowFactory
@@ -696,12 +697,24 @@ class ControllerToolWindowFactory : ToolWindowFactory {
                             val auto = command.payload.get("auto")?.asBoolean ?: false
                             val resumePrompt = if (auto) "--resume $sessionId --dangerously-skip-permissions" else "--resume $sessionId"
                             val terminal = TerminalAgentService.getInstance()
-                            terminal.sendRawToTerminal("\u0003")
-                            Thread.sleep(500)
-                            terminal.sendPromptToClaudeCode(resumePrompt)
-                            relay.sendResult(command.id, "completed", com.google.gson.JsonObject().apply {
-                                addProperty("message", "Resumed session $sessionId")
-                            })
+                            // The Ctrl+C → 500ms pause → resume sequence used
+                            // to run on the EDT. IntelliJ 2024.2+ raises a
+                            // "Slow operations on EDT" red error for any
+                            // sleep on the dispatch thread, and the UI froze
+                            // visibly for half a second. Hop to a pooled
+                            // executor — neither the terminal writes nor
+                            // relay.sendResult need EDT.
+                            ApplicationManager.getApplication().executeOnPooledThread {
+                                terminal.sendRawToTerminal("\u0003")
+                                try { Thread.sleep(500) } catch (_: InterruptedException) {
+                                    Thread.currentThread().interrupt()
+                                    return@executeOnPooledThread
+                                }
+                                terminal.sendPromptToClaudeCode(resumePrompt)
+                                relay.sendResult(command.id, "completed", com.google.gson.JsonObject().apply {
+                                    addProperty("message", "Resumed session $sessionId")
+                                })
+                            }
                         }
                     }
                     "get_context" -> {
