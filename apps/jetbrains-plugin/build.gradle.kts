@@ -35,7 +35,11 @@ intellijPlatform {
     pluginConfiguration {
         ideaVersion {
             sinceBuild = "241"
-            untilBuild = "261.*"
+            // untilBuild deliberately omitted (open-ended). This is a
+            // tool-window + actions plugin that doesn't touch internal
+            // APIs, so capping it would just flag the plugin as
+            // incompatible the moment a new EAP build ships. Re-enable
+            // only if a hard API break forces a divergent release.
         }
 
         changeNotes = provider {
@@ -65,17 +69,17 @@ intellijPlatform {
         // The default failure-level set in IntelliJ Platform Gradle plugin
         // 2.15.0+ flags INTERNAL_API_USAGES + OVERRIDE_ONLY_API_USAGES at
         // failure level, which trips us on auto-generated Kotlin bridge
-        // methods over ToolWindowFactory defaults. PLUGIN_STRUCTURE_WARNINGS
-        // also fails the build on every minor metadata nit (e.g. long
-        // description, until-build pointing at an unreleased EAP), which
-        // shouldn't gate a marketplace push.
+        // methods over ToolWindowFactory defaults.
         //
-        // Keep only the categories that mean "the plugin is actually
-        // broken" — invalid metadata, real binary-compat regressions,
-        // missing required dependencies.
+        // PLUGIN_STRUCTURE_WARNINGS is back in the list — the only
+        // historical trigger ("untilBuild points at an unreleased EAP")
+        // is gone now that the cap is open-ended. Anything else it
+        // catches (missing icon, vendor info, description length…) is
+        // genuine metadata drift we want to know about before push.
         failureLevel = listOf(
             org.jetbrains.intellij.platform.gradle.tasks.VerifyPluginTask.FailureLevel.INVALID_PLUGIN,
             org.jetbrains.intellij.platform.gradle.tasks.VerifyPluginTask.FailureLevel.MISSING_DEPENDENCIES,
+            org.jetbrains.intellij.platform.gradle.tasks.VerifyPluginTask.FailureLevel.PLUGIN_STRUCTURE_WARNINGS,
         )
     }
 }
