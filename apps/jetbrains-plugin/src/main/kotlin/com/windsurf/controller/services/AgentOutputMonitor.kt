@@ -454,7 +454,7 @@ class AgentOutputMonitor {
 
                 for (c in content) {
                     val component = c.component ?: continue
-                    collectSwingText(component, textParts, componentTypes)
+                    AgentOutputCaptureHelpers.collectSwingText(component, textParts, componentTypes)
                 }
 
                 if (pollCount <= 2 && componentTypes.isNotEmpty()) {
@@ -469,7 +469,7 @@ class AgentOutputMonitor {
                 if (captureEmbeddedEditorEnabled) {
                     for (c in content) {
                         val component = c.component ?: continue
-                        collectEmbeddedEditorText(component, textParts, componentTypes)
+                        AgentOutputCaptureHelpers.collectEmbeddedEditorText(component, textParts, componentTypes)
                     }
                 }
 
@@ -478,7 +478,7 @@ class AgentOutputMonitor {
                 } else {
                     for (c in content) {
                         val component = c.component ?: continue
-                        val browser = findJBCefBrowser(component)
+                        val browser = AgentOutputCaptureHelpers.findJBCefBrowser(component)
                         if (browser != null) {
                             setupAndExecuteJcefCapture(browser)
                             jcefRequested.set(true)
@@ -593,7 +593,7 @@ class AgentOutputMonitor {
                 for (c in tw.contentManager.contents) {
                     val component = c.component ?: continue
                     val sb = StringBuilder()
-                    collectAccessibleText(component, sb, 0)
+                    AgentOutputCaptureHelpers.collectAccessibleText(component, sb, 0)
                     val text = sb.toString().trim()
                     if (text.length > 20) {
                         ref.set(text)
@@ -606,114 +606,6 @@ class AgentOutputMonitor {
             try { app.invokeAndWait(task) } catch (_: Exception) {}
         }
         return ref.get()
-    }
-
-    private fun collectAccessibleText(component: Component, sb: StringBuilder, depth: Int) {
-        if (depth > 15) return
-        try {
-            val ctx: AccessibleContext? = component.accessibleContext
-            if (ctx != null) {
-                val at: AccessibleText? = ctx.accessibleText
-                if (at != null) {
-                    val charCount = at.charCount
-                    if (charCount > 0) {
-                        val text = at.getAtIndex(AccessibleText.SENTENCE, 0)
-                        if (text != null && text.length > 5) sb.appendLine(text)
-                    }
-                }
-                val name = ctx.accessibleName
-                if (name != null && name.length > 20) sb.appendLine(name)
-                val desc = ctx.accessibleDescription
-                if (desc != null && desc.length > 20) sb.appendLine(desc)
-            }
-        } catch (_: Exception) {}
-        if (component is Container) {
-            for (i in 0 until component.componentCount) {
-                collectAccessibleText(component.getComponent(i), sb, depth + 1)
-            }
-        }
-    }
-
-    /**
-     * Append the document text of every live `Editor` (IntelliJ's
-     * `EditorEx` / `EditorComponentImpl`) that lives inside the given
-     * Swing root. `JTextComponent.getText()` returns nothing for these,
-     * so without this pass the AIAssistant chat (and any other tool
-     * window that hosts an embedded code editor) looks empty to the
-     * snapshot diff.
-     */
-    private fun collectEmbeddedEditorText(
-        root: Component,
-        textParts: MutableList<String>,
-        types: MutableSet<String>,
-    ) {
-        try {
-            val editors = EditorFactory.getInstance().allEditors
-            for (editor in editors) {
-                val editorComponent = editor.component
-                if (!SwingUtilities.isDescendingFrom(editorComponent, root)) continue
-                types.add(editorComponent.javaClass.name)
-                val text = try { editor.document.text } catch (_: Exception) { "" }
-                if (text.isNotBlank()) textParts.add(text)
-            }
-        } catch (e: Exception) {
-            logger.debug("collectEmbeddedEditorText failed: ${e.message}")
-        }
-    }
-
-    private fun collectSwingText(component: Component, textParts: MutableList<String>, types: MutableSet<String>) {
-        types.add(component.javaClass.name)
-        when (component) {
-            is JEditorPane -> {
-                val text = component.text ?: ""
-                if (text.isNotBlank()) textParts.add(AgentOutputTextUtils.stripHtml(text))
-            }
-            is JTextArea -> {
-                val text = component.text ?: ""
-                if (text.isNotBlank()) textParts.add(text)
-            }
-            is JTextComponent -> {
-                val text = component.text ?: ""
-                if (text.length > 10 && component !is JTextField) {
-                    textParts.add(text)
-                }
-            }
-            is JLabel -> {
-                val text = component.text ?: ""
-                if (text.length > 20) textParts.add(AgentOutputTextUtils.stripHtml(text))
-            }
-        }
-        if (component is Container) {
-            for (i in 0 until component.componentCount) {
-                collectSwingText(component.getComponent(i), textParts, types)
-            }
-        }
-    }
-
-    private fun findJBCefBrowser(component: Component): Any? {
-        val className = component.javaClass.name
-
-        if (className.contains("\$MyPanel") && className.contains("JBCef")) {
-            try {
-                val outerField = component.javaClass.getDeclaredField("this\$0")
-                outerField.isAccessible = true
-                val outer = outerField.get(component)
-                if (outer != null) {
-                    if (pollCount <= 2) logger.info("Found JBCefBrowser via \$MyPanel->this\$0: ${outer.javaClass.name}")
-                    return outer
-                }
-            } catch (e: Exception) {
-                logger.debug("Failed to get outer from \$MyPanel: ${e.message}")
-            }
-        }
-
-        if (component is Container) {
-            for (i in 0 until component.componentCount) {
-                val found = findJBCefBrowser(component.getComponent(i))
-                if (found != null) return found
-            }
-        }
-        return null
     }
 
     /**
