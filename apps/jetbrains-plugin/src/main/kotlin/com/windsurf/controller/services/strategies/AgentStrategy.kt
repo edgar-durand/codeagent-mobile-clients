@@ -60,6 +60,21 @@ interface AgentStrategy {
     fun execute(invocation: AgentInvocation): Boolean
 
     /**
+     * Rich-result version of [execute]. New strategies should override
+     * this so the relay payload can carry per-strategy metadata
+     * (Copilot's `{ sent: true }`, model-switch acks, …). The default
+     * wraps the legacy Boolean return so existing strategies stay
+     * source-compatible.
+     */
+    fun executeWithResult(invocation: AgentInvocation): StrategyResult {
+        val ok = execute(invocation)
+        return StrategyResult(
+            delivered = ok,
+            message = if (ok) "Prompt sent to ${name}" else "Failed to deliver prompt via ${name}",
+        )
+    }
+
+    /**
      * Stop any monitor that this strategy started. Default no-op for
      * fire-and-forget strategies; the chat ones override it to call
      * AgentOutputMonitor / TerminalAgentService stop methods.
@@ -71,12 +86,42 @@ interface AgentStrategy {
 
 /**
  * Immutable bundle of everything a strategy needs to run a single
- * `start_task` invocation. Avoids passing 4-5 positional args around
- * and keeps the interface stable as we add fields (e.g. attachments).
+ * `start_task` invocation. Mirrors the TS-side `AgentInvocation`
+ * (apps/vsc-plugin/src/services/strategies/AgentStrategy.ts) — both
+ * shapes carry the same logical fields so a mobile-side change that
+ * adds e.g. a routing hint lands in one place per plugin without
+ * splaying the interface.
+ *
+ * `project` is JB-specific (no equivalent in VS Code's extension
+ * host) so it stays here. `agentId` / `commandId` / `model` are
+ * nullable for backward compatibility with the legacy in-process
+ * callers (`sendPromptToIde` etc.) that don't have them.
  */
 data class AgentInvocation(
     val project: Project,
     val agent: DetectedAgent?,
     val prompt: String,
     val sessionId: String,
+    /** Raw agent id from the remote command payload. */
+    val agentId: String? = null,
+    /** Command id — used by strategies that push a result back to the relay. */
+    val commandId: String? = null,
+    /** Optional model override from the mobile picker. */
+    val model: String? = null,
+)
+
+/**
+ * Strategy execution outcome. Mirrors the TS-side `StrategyResult`
+ * so the relay payload is byte-compatible regardless of which IDE is
+ * paired. New strategies should override `executeWithResult` and
+ * return a populated StrategyResult; legacy strategies that still
+ * return a bare Boolean get wrapped by the default-impl.
+ */
+data class StrategyResult(
+    /** True if the prompt was delivered (or accepted and now streaming). */
+    val delivered: Boolean,
+    /** Human-facing message for the relay result. */
+    val message: String,
+    /** Extra fields merged into the relay result payload — e.g. Copilot adds `{ sent: Boolean }`. */
+    val extra: Map<String, Any?> = emptyMap(),
 )

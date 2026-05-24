@@ -82,11 +82,19 @@ class AgentStrategyRegistry {
      * a strategy that crashes is logged and treated as a delivery
      * failure; the caller falls back to its own clipboard handling.
      */
-    fun execute(invocation: AgentInvocation): Boolean {
+    fun execute(invocation: AgentInvocation): Boolean = executeWithResult(invocation).delivered
+
+    /**
+     * Rich-result execute — returns the [StrategyResult] shape that
+     * mirrors the TS-side strategies so the relay payload is wire-
+     * compatible across plugins. Callers that need the message + extra
+     * fields (model-switch acks, per-strategy metadata) should use this.
+     */
+    fun executeWithResult(invocation: AgentInvocation): StrategyResult {
         val strategy = strategies.firstOrNull { it.canHandle(invocation.agent) }
         if (strategy == null) {
             logger.warn("No strategy claimed agent=${invocation.agent?.id ?: "<null>"}")
-            return false
+            return StrategyResult(delivered = false, message = "No strategy claimed this agent")
         }
         logger.info(
             "Strategy=${strategy.name} agent=${invocation.agent?.id ?: "<null>"} " +
@@ -100,10 +108,10 @@ class AgentStrategyRegistry {
         lastActive = strategy
         lastActiveAt = System.currentTimeMillis()
         return try {
-            strategy.execute(invocation)
+            strategy.executeWithResult(invocation)
         } catch (e: Exception) {
             logger.warn("Strategy ${strategy.name} threw: ${e.message}", e)
-            false
+            StrategyResult(delivered = false, message = "Strategy ${strategy.name} crashed: ${e.message ?: "unknown"}")
         }
     }
 
