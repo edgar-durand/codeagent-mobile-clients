@@ -532,7 +532,12 @@ export class ControllerPanelProvider implements vscode.WebviewViewProvider, Comm
 
       case 'select_option': {
         const targetIndex = (command.payload.index as number) ?? 0;
-        const currentIndex = (command.payload.currentIndex as number) ?? 0;
+        // Accept both `currentIndex` and `from` — the JetBrains plugin
+        // honors both names and mobile-side senders use one or the other.
+        const currentIndex =
+          (command.payload.currentIndex as number | undefined) ??
+          (command.payload.from as number | undefined) ??
+          0;
         const terminal = TerminalAgentService.getInstance();
         terminal.selectOption(targetIndex, currentIndex).then((ok) => {
           relay.sendResult(command.id, ok ? 'completed' : 'failed', {

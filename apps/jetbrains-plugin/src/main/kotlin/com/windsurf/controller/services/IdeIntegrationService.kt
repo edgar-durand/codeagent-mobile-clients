@@ -101,6 +101,15 @@ class IdeIntegrationService {
         cachedAgents = null
     }
 
+    /**
+     * Force the next detectInstalledAgents() to re-scan instead of
+     * returning the cached list. Mobile-side `list_agents` calls this
+     * so a user installing a new agent mid-session can refresh.
+     */
+    fun clearCache() {
+        cachedAgents = null
+    }
+
     private fun getProject(): Project? {
         return projectRef?.get() ?: ProjectManager.getInstance().openProjects.firstOrNull()
     }
