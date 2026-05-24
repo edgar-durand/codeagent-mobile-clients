@@ -21,7 +21,12 @@ import { ClaudeContextService } from '../services/claude-context.service';
 import { McpConfigWriterService, McpConfigureRequest, McpEntry } from '../services/mcp-config-writer.service';
 import { FileWatcherService } from '../services/file-watcher.service';
 import { buildInstallAndRun as buildInstallAndRunPure } from '../utils/build-install-command';
-import { generateNonce, cspMeta, renderPairingQrSvg } from '../utils/webview-security';
+import {
+  generateNonce,
+  cspMeta,
+  renderPairingQrSvg,
+  sanitizeSessionId,
+} from '../utils/webview-security';
 import { brandCssTokens } from '../ui/brand-tokens';
 
 /**
@@ -37,16 +42,6 @@ function buildInstallAndRun(subcommand: string): string {
     vscode.env.shell || '',
     process.platform === 'win32',
   );
-}
-
-// Session IDs sent by the webview are echoes of UUIDs we previously
-// stored in recentSessions. Reject anything that doesn't match the
-// shape — the webview is a sandboxed iframe behind our CSP, but the
-// downstream services treat sessionId as trusted input.
-function sanitizeSessionId(raw: unknown): string | null {
-  if (typeof raw !== 'string') return null;
-  if (!/^[A-Za-z0-9_-]{1,128}$/.test(raw)) return null;
-  return raw;
 }
 
 export class ControllerPanelProvider implements vscode.WebviewViewProvider, CommandListener {

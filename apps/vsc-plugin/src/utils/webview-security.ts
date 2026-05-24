@@ -25,3 +25,16 @@ export async function renderPairingQrSvg(code: string): Promise<string> {
     color: { dark: '#000000', light: '#ffffff' },
   });
 }
+
+/**
+ * Session IDs sent by the webview are echoes of UUIDs we previously
+ * stored in recentSessions. Reject anything that doesn't match the
+ * shape — the webview is a sandboxed iframe behind our CSP, but the
+ * downstream services treat sessionId as trusted input. Exposed from
+ * this module so it can be unit-tested without booting the panel.
+ */
+export function sanitizeSessionId(raw: unknown): string | null {
+  if (typeof raw !== 'string') return null;
+  if (!/^[A-Za-z0-9_-]{1,128}$/.test(raw)) return null;
+  return raw;
+}
