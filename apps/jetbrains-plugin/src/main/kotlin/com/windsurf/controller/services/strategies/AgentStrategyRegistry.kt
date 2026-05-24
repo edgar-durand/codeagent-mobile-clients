@@ -4,7 +4,6 @@ import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.components.Service
 import com.intellij.openapi.diagnostic.Logger
 import com.windsurf.controller.services.AgentOutputMonitor
-import com.windsurf.controller.services.TerminalAgentService
 
 /**
  * Routes an `AgentInvocation` to the first {@link AgentStrategy} whose
@@ -15,9 +14,9 @@ import com.windsurf.controller.services.TerminalAgentService
  * The registry also remembers the strategy that ran the most recent
  * invocation so a `stop_task` command can call its `stop()` without
  * the caller having to track which one. As a belt-and-suspenders, we
- * also stop the legacy singletons (AgentOutputMonitor, TerminalAgent-
- * Service) directly — if a refactor regression ever leaks a poll
- * loop, the user's "stop" button still kills it.
+ * also stop the AgentOutputMonitor singleton directly — if a refactor
+ * regression ever leaks a poll loop, the user's "stop" button still
+ * kills it.
  */
 @Service(Service.Level.APP)
 class AgentStrategyRegistry {
@@ -25,7 +24,6 @@ class AgentStrategyRegistry {
     private val logger = Logger.getInstance(AgentStrategyRegistry::class.java)
 
     private val strategies: List<AgentStrategy> = listOf(
-        ClaudeCodeTerminalStrategy(),
         WindsurfStrategy(),
         CopilotChatStrategy(),
         JetBrainsAIAssistantStrategy(),
@@ -151,7 +149,6 @@ class AgentStrategyRegistry {
         // Belt-and-suspenders: nuke the singleton monitors directly so a
         // mid-refactor regression can never leave a poll loop running.
         try { AgentOutputMonitor.getInstance().stopMonitoring() } catch (_: Exception) {}
-        try { TerminalAgentService.getInstance().stopMonitoring() } catch (_: Exception) {}
     }
 
     companion object {

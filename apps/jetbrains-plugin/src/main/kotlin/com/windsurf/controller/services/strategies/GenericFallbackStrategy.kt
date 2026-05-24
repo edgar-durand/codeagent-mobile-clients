@@ -24,8 +24,11 @@ class GenericFallbackStrategy : AgentStrategy {
     override fun canHandle(agent: DetectedAgent?): Boolean = true
 
     override fun deliverPrompt(invocation: AgentInvocation): Boolean {
-        // Should never get here for terminal-routed agents — those are
-        // claimed by ClaudeCodeTerminalStrategy. Be defensive.
+        // Terminal agents (Claude / Codex / Cursor / CodeRabbit / Aider)
+        // are owned by codeam-cli — the mobile should never dispatch
+        // their prompts to the IDE plugin. RemoteCommandRouter rejects
+        // these at the entry point; this defensive guard catches any
+        // path that bypasses it.
         val twId = invocation.agent?.toolWindowId ?: ""
         if (twId.startsWith("__terminal__:")) {
             logger.warn("GenericFallbackStrategy got terminal toolWindow=$twId — refusing to dispatch")

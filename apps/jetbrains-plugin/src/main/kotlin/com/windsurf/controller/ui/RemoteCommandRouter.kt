@@ -17,7 +17,6 @@ import com.windsurf.controller.services.McpServerDef
 import com.windsurf.controller.services.PairingService
 import com.windsurf.controller.services.ProjectOpsService
 import com.windsurf.controller.services.SettingsService
-import com.windsurf.controller.services.TerminalAgentService
 import com.windsurf.controller.services.TerminalOpsService
 import com.windsurf.controller.services.strategies.AgentInvocation
 import com.windsurf.controller.services.strategies.AgentStrategyRegistry
@@ -143,6 +142,18 @@ fun dispatch(command: CommandRelayService.RemoteCommand) {
                         }
                     }
                     logger.info("Command: start_task")
+                    // Terminal-agent commands (Claude / Codex / Cursor /
+                    // CodeRabbit / Aider) are owned by codeam-cli — the
+                    // mobile should dispatch them to the CLI's pluginId,
+                    // not the IDE plugin's. Reject explicitly so the
+                    // user sees a clear hint instead of a silent observer
+                    // no-op.
+                    if (agentId != null && agentId.startsWith("__terminal__:")) {
+                        relay.sendResult(command.id, "failed", com.google.gson.JsonObject().apply {
+                            addProperty("error", "Terminal agents are run by codeam-cli. Install it (npm i -g codeam-cli) and run `codeam pair`.")
+                        })
+                        return@invokeLater
+                    }
                     // Resolve the target agent up front so we can hand a
                     // typed `AgentInvocation` to the strategy registry.
                     // The registry then picks the right strategy based on
@@ -152,7 +163,9 @@ fun dispatch(command: CommandRelayService.RemoteCommand) {
                     val targetAgent = if (agentId != null) {
                         ide.detectInstalledAgents().find { it.id == agentId }
                     } else {
-                        ide.detectInstalledAgents().firstOrNull()
+                        ide.detectInstalledAgents().firstOrNull {
+                            !it.toolWindowId.startsWith("__terminal__:")
+                        } ?: ide.detectInstalledAgents().firstOrNull()
                     }
                     val sent = AgentStrategyRegistry.getInstance().execute(
                         AgentInvocation(
@@ -346,36 +359,6 @@ fun dispatch(command: CommandRelayService.RemoteCommand) {
                         relay.sendResult(command.id, "completed", ProjectOpsService.getInstance().gitResolve(p, side))
                     }
                 }
-                "select_option" -> {
-                    // Navigate Claude Code's React Ink selector to the
-                    // chosen index (incl. the trust dialog at first pair).
-                    // The CLI counterpart insists arrows + Enter are paced
-                    // so React Ink batches keypresses correctly — same
-                    // contract honored by `TerminalAgentService.selectOption`.
-                    //
-                    // selectOption sleeps 80 ms per arrow step + 100 ms
-                    // before Enter — for index=10 that's 800 ms+ on the
-                    // calling thread. We hand it to a pooled executor so
-                    // the EDT (which this lambda runs on via
-                    // SwingUtilities.invokeLater) doesn't freeze.
-                    val target = command.payload.get("index")?.asInt ?: 0
-                    val current = command.payload.get("from")?.asInt
-                        ?: command.payload.get("currentIndex")?.asInt
-                        ?: 0
-                    val cmdId = command.id
-                    ApplicationManager.getApplication().executeOnPooledThread {
-                        TerminalAgentService.getInstance().selectOption(target, current)
-                        relay.sendResult(cmdId, "completed", com.google.gson.JsonObject().apply {
-                            addProperty("message", "Option selected")
-                        })
-                    }
-                }
-                "escape_key" -> {
-                    TerminalAgentService.getInstance().sendEscape()
-                    relay.sendResult(command.id, "completed", com.google.gson.JsonObject().apply {
-                        addProperty("message", "Escape sent")
-                    })
-                }
                 "cancel_task" -> {
                     logger.info("Command: cancel_task")
                     relay.sendResult(command.id, "completed", com.google.gson.JsonObject().apply {
@@ -427,27 +410,11 @@ fun dispatch(command: CommandRelayService.RemoteCommand) {
                             addProperty("error", "Missing session id")
                         })
                     } else {
-                        val auto = command.payload.get("auto")?.asBoolean ?: false
-                        val resumePrompt = if (auto) "--resume $sessionId --dangerously-skip-permissions" else "--resume $sessionId"
-                        val terminal = TerminalAgentService.getInstance()
-                        // The Ctrl+C → 500ms pause → resume sequence used
-                        // to run on the EDT. IntelliJ 2024.2+ raises a
-                        // "Slow operations on EDT" red error for any
-                        // sleep on the dispatch thread, and the UI froze
-                        // visibly for half a second. Hop to a pooled
-                        // executor — neither the terminal writes nor
-                        // relay.sendResult need EDT.
-                        ApplicationManager.getApplication().executeOnPooledThread {
-                            terminal.sendRawToTerminal("\u0003")
-                            try { Thread.sleep(500) } catch (_: InterruptedException) {
-                                Thread.currentThread().interrupt()
-                                return@executeOnPooledThread
-                            }
-                            terminal.sendPromptToClaudeCode(resumePrompt)
-                            relay.sendResult(command.id, "completed", com.google.gson.JsonObject().apply {
-                                addProperty("message", "Resumed session $sessionId")
-                            })
-                        }
+                        // Terminal-agent resume is owned by codeam-cli;
+                        // the plugin has no Claude PTY to Ctrl+C + resume.
+                        relay.sendResult(command.id, "failed", com.google.gson.JsonObject().apply {
+                            addProperty("error", "Unknown session id: $sessionId")
+                        })
                     }
                 }
                 "get_context" -> {
@@ -584,7 +551,6 @@ fun dispatch(command: CommandRelayService.RemoteCommand) {
                     // Mobile/web "Delete" or "Stop session". Tear
                     // monitoring down and forget the pairing locally so
                     // the user can pair fresh without restarting the IDE.
-                    try { TerminalAgentService.getInstance().stopMonitoring() } catch (_: Exception) {}
                     try { AgentOutputMonitor.getInstance().stopMonitoring() } catch (_: Exception) {}
                     try { logger.info("Command: cancel_task") } catch (_: Exception) {}
                     try { PairingService.getInstance().clearCurrentSession() } catch (_: Exception) {}

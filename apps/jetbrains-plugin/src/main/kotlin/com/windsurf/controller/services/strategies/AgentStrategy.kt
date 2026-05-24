@@ -77,7 +77,7 @@ interface AgentStrategy {
     /**
      * Stop any monitor that this strategy started. Default no-op for
      * fire-and-forget strategies; the chat ones override it to call
-     * AgentOutputMonitor / TerminalAgentService stop methods.
+     * AgentOutputMonitor's stop method.
      */
     fun stop() {
         // no-op default
