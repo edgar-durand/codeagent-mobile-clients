@@ -56,6 +56,14 @@ export abstract class PosixOsStrategy implements OsStrategy {
     // an arg.
     return `'${s.replace(/'/g, `'\\''`)}'`;
   }
+
+  buildLaunch(binaryPath: string, extraArgs: string[] = []): { cmd: string; args: string[] } {
+    // POSIX: no script-wrapping needed. The binary's shebang
+    // (#!/usr/bin/env node, #!/bin/sh, …) is honored by execve(2)
+    // directly, so spawning the absolute path is correct for
+    // every interpreted + compiled language.
+    return { cmd: binaryPath, args: [...extraArgs] };
+  }
 }
 
 export class DarwinOsStrategy extends PosixOsStrategy {

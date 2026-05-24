@@ -226,6 +226,96 @@ describe('OsStrategy', () => {
   });
 });
 
+describe('OsStrategy.buildLaunch', () => {
+  describe('POSIX', () => {
+    const strat = new LinuxOsStrategy();
+
+    it('returns (binary, args) verbatim — execve handles shebangs', () => {
+      expect(strat.buildLaunch('/usr/local/bin/claude', ['--resume', 'abc'])).toEqual({
+        cmd: '/usr/local/bin/claude',
+        args: ['--resume', 'abc'],
+      });
+    });
+
+    it('handles empty extraArgs', () => {
+      expect(strat.buildLaunch('/bin/sh')).toEqual({ cmd: '/bin/sh', args: [] });
+    });
+
+    it('does NOT wrap .cmd/.ps1 — those are Windows-only', () => {
+      // A binary named foo.cmd on Linux is still just a file; we
+      // don't second-guess the user. (Real Linux installs of agents
+      // wouldn't have .cmd suffixes, but the contract is "spawn what
+      // you were told".)
+      expect(new LinuxOsStrategy().buildLaunch('/opt/strange.cmd')).toEqual({
+        cmd: '/opt/strange.cmd',
+        args: [],
+      });
+    });
+  });
+
+  describe('Win32', () => {
+    const strat = new Win32OsStrategy();
+
+    it('.exe runs directly', () => {
+      const result = strat.buildLaunch('C:\\bin\\claude.exe', ['--resume', 'abc']);
+      expect(result).toEqual({
+        cmd: 'C:\\bin\\claude.exe',
+        args: ['--resume', 'abc'],
+      });
+    });
+
+    it('.cmd wraps with cmd.exe /c', () => {
+      const result = strat.buildLaunch('C:\\bin\\claude.cmd', ['--resume', 'abc']);
+      expect(result).toEqual({
+        cmd: 'cmd.exe',
+        args: ['/c', 'C:\\bin\\claude.cmd', '--resume', 'abc'],
+      });
+    });
+
+    it('.bat wraps the same as .cmd', () => {
+      const result = strat.buildLaunch('C:\\bin\\claude.bat');
+      expect(result).toEqual({
+        cmd: 'cmd.exe',
+        args: ['/c', 'C:\\bin\\claude.bat'],
+      });
+    });
+
+    it('.ps1 wraps with powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File', () => {
+      const result = strat.buildLaunch('C:\\bin\\claude.ps1', ['--resume', 'abc']);
+      expect(result).toEqual({
+        cmd: 'powershell.exe',
+        args: [
+          '-NoProfile',
+          '-NonInteractive',
+          '-ExecutionPolicy',
+          'Bypass',
+          '-File',
+          'C:\\bin\\claude.ps1',
+          '--resume',
+          'abc',
+        ],
+      });
+    });
+
+    it('extension-less binary runs directly', () => {
+      // Rare on Windows but possible (some hand-rolled installers).
+      const result = strat.buildLaunch('C:\\bin\\claude');
+      expect(result).toEqual({
+        cmd: 'C:\\bin\\claude',
+        args: [],
+      });
+    });
+
+    it('extension case-insensitive — .CMD treated as .cmd', () => {
+      const result = strat.buildLaunch('C:\\bin\\claude.CMD');
+      expect(result).toEqual({
+        cmd: 'cmd.exe',
+        args: ['/c', 'C:\\bin\\claude.CMD'],
+      });
+    });
+  });
+});
+
 describe('createOsStrategy', () => {
   beforeEach(() => _resetOsStrategyCacheForTests());
   afterEach(() => _resetOsStrategyCacheForTests());

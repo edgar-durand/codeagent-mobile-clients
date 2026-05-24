@@ -96,4 +96,35 @@ export class Win32OsStrategy implements OsStrategy {
     // on) — `^` neutralises both.
     return `"${escaped.replace(/[&|^<>()%!]/g, '^$&')}"`;
   }
+
+  buildLaunch(binaryPath: string, extraArgs: string[] = []): { cmd: string; args: string[] } {
+    // ConPTY + raw spawn need the WIN32_FIND_DATA executable image —
+    // they don't run .cmd/.bat (those are cmd.exe scripts) or .ps1
+    // (PowerShell scripts). Wrap by hand to bypass `shell: true`,
+    // which would re-tokenise the args via cmd.exe's parser.
+    const ext = path.extname(binaryPath).toLowerCase();
+    if (ext === '.cmd' || ext === '.bat') {
+      return { cmd: 'cmd.exe', args: ['/c', binaryPath, ...extraArgs] };
+    }
+    if (ext === '.ps1') {
+      return {
+        cmd: 'powershell.exe',
+        args: [
+          '-NoProfile',
+          // -NonInteractive ensures the script can't prompt for
+          // input that would stall the spawn — the user's PowerShell
+          // profile (Set-ExecutionPolicy popup, OneDrive auth)
+          // otherwise hangs the agent's first boot.
+          '-NonInteractive',
+          '-ExecutionPolicy',
+          'Bypass',
+          '-File',
+          binaryPath,
+          ...extraArgs,
+        ],
+      };
+    }
+    // .exe or extension-less binary → direct spawn.
+    return { cmd: binaryPath, args: [...extraArgs] };
+  }
 }

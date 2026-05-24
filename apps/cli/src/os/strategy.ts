@@ -61,6 +61,31 @@ export interface OsStrategy {
    * MUST use array args instead of this.
    */
   escapeShellArg(s: string): string;
+
+  /**
+   * Translate a resolved-by-findInPath binary path into a
+   * `(cmd, args)` pair safe to hand to a raw spawn — including
+   * ConPTY, which (unlike `child_process.spawn({ shell: true })`)
+   * does NOT do its own PATH lookup or PATHEXT resolution.
+   *
+   * Cases:
+   *   - POSIX `claude` binary  → spawn the absolute path directly.
+   *   - Windows `claude.exe`   → spawn the absolute path directly.
+   *   - Windows `claude.cmd`   → wrap with `cmd.exe /c <abs-path>`.
+   *   - Windows `claude.bat`   → same as .cmd.
+   *   - Windows `claude.ps1`   → wrap with
+   *     `powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File <abs-path>`.
+   *
+   * Without the wrap on .cmd/.ps1, ConPTY surfaces a `File not
+   * found:` error because it tries to execute the script directly
+   * as a Win32 image. Anthropic's official Windows installer drops
+   * a `claude.cmd` shim into PATH, which is exactly the case that
+   * caused the v2.4.31 boot failure.
+   */
+  buildLaunch(binaryPath: string, extraArgs?: string[]): {
+    cmd: string;
+    args: string[];
+  };
 }
 
 // ─── Shared helpers (used by all concrete impls) ────────────────────
