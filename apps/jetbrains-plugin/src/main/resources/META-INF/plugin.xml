@@ -1,4 +1,4 @@
-<idea-plugin>
+<idea-plugin package="com.windsurf.controller">
     <id>com.codeagent.mobile</id>
     <name>CodeAgent-Mobile</name>
     <version>2.10.8</version>

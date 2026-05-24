@@ -65,6 +65,25 @@ intellijPlatform {
     }
 
     pluginVerification {
+        // The plugin claims compatibility with com.intellij.modules.platform
+        // (= all IntelliJ-family IDEs) and is published to the marketplace
+        // listing for 11 flavours. Verify against the products with the
+        // smallest bundled-API surface (IC / PC / GO) so the verifier
+        // catches missing-dependency errors before publish. Each ide()
+        // call resolves to a cached IDE distribution on first run.
+        ides {
+            // Verifier downloads the IDE distribution per type. Cover the
+            // products with the smallest bundled-API surface so a missing
+            // dependency is caught before a marketplace listing claims
+            // false compatibility.
+            create(org.jetbrains.intellij.platform.gradle.IntelliJPlatformType.IntellijIdeaUltimate, "2024.1")
+            create(org.jetbrains.intellij.platform.gradle.IntelliJPlatformType.IntellijIdeaCommunity, "2024.1")
+            create(org.jetbrains.intellij.platform.gradle.IntelliJPlatformType.WebStorm, "2024.1")
+            create(org.jetbrains.intellij.platform.gradle.IntelliJPlatformType.PyCharmProfessional, "2024.1")
+            create(org.jetbrains.intellij.platform.gradle.IntelliJPlatformType.PyCharmCommunity, "2024.1")
+            create(org.jetbrains.intellij.platform.gradle.IntelliJPlatformType.GoLand, "2024.1")
+        }
+
         // The default failure-level set in IntelliJ Platform Gradle plugin
         // 2.15.0+ flags INTERNAL_API_USAGES + OVERRIDE_ONLY_API_USAGES at
         // failure level, which trips us on auto-generated Kotlin bridge
