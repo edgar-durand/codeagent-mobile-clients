@@ -381,7 +381,13 @@ export class CommandRelayService {
     }).catch(() => {});
   }
 
-  async sendResult(commandId: string, status: string, result: Record<string, unknown>): Promise<void> {
+  // `result` accepts any plain object — the body is JSON-serialised
+  // verbatim. Using `Record<string, unknown>` here forced callers to
+  // sprinkle `as unknown as Record<string, unknown>` over every
+  // strongly-typed result shape (FileOpsService, ProjectOpsService,
+  // MCP, …). `object` removes the cast site without loosening the
+  // wire contract — non-object inputs still fail to type-check.
+  async sendResult(commandId: string, status: string, result: object): Promise<void> {
     const settings = SettingsService.getInstance();
     try {
       await this.postJson(`${settings.apiBaseUrl}/api/commands/result`, {

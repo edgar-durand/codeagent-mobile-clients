@@ -250,7 +250,7 @@ export class RemoteCommandRouter {
         if (this.isClaudeAgent(requestedAgent)) {
           try {
             const snapshot = ClaudeContextService.getInstance().getContextSnapshot();
-            relay.sendResult(command.id, 'completed', snapshot as unknown as Record<string, unknown>);
+            relay.sendResult(command.id, 'completed', snapshot);
           } catch (e) {
             this.log.appendLine(`get_context (claude) error: ${e}`);
             relay.sendResult(command.id, 'completed', {
@@ -264,7 +264,7 @@ export class RemoteCommandRouter {
 
         // VS Code Chat (Copilot via vscode.lm) fallback.
         CopilotChatService.getInstance().getContextSnapshot().then((snapshot) => {
-          relay.sendResult(command.id, 'completed', snapshot as unknown as Record<string, unknown>);
+          relay.sendResult(command.id, 'completed', snapshot);
         }).catch((e) => {
           this.log.appendLine(`get_context error: ${e}`);
           relay.sendResult(command.id, 'completed', {
@@ -378,7 +378,7 @@ export class RemoteCommandRouter {
       case 'list_files': {
         const query = (command.payload as Record<string, unknown>)?.query as string | undefined;
         ProjectOpsService.listFiles(query).then((res) => {
-          relay.sendResult(command.id, 'completed', res as unknown as Record<string, unknown>);
+          relay.sendResult(command.id, 'completed', res);
         });
         break;
       }
@@ -398,7 +398,7 @@ export class RemoteCommandRouter {
           exclude: Array.isArray(p.exclude) ? (p.exclude as string[]) : undefined,
           maxResults: typeof p.maxResults === 'number' ? (p.maxResults as number) : undefined,
         }).then((res) => {
-          relay.sendResult(command.id, 'completed', res as unknown as Record<string, unknown>);
+          relay.sendResult(command.id, 'completed', res);
         });
         break;
       }
@@ -412,7 +412,7 @@ export class RemoteCommandRouter {
           cwd: typeof p.cwd === 'string' ? (p.cwd as string) : undefined,
         });
         if ('error' in r) relay.sendResult(command.id, 'failed', { error: r.error });
-        else relay.sendResult(command.id, 'completed', r as unknown as Record<string, unknown>);
+        else relay.sendResult(command.id, 'completed', r);
         break;
       }
       case 'terminal_write': {
@@ -424,7 +424,7 @@ export class RemoteCommandRouter {
           break;
         }
         const r = TerminalOpsService.getInstance().write(ts, data);
-        relay.sendResult(command.id, r.ok ? 'completed' : 'failed', r as unknown as Record<string, unknown>);
+        relay.sendResult(command.id, r.ok ? 'completed' : 'failed', r);
         break;
       }
       case 'terminal_resize': {
@@ -437,7 +437,7 @@ export class RemoteCommandRouter {
           break;
         }
         const r = TerminalOpsService.getInstance().resize(ts, cols, rows);
-        relay.sendResult(command.id, r.ok ? 'completed' : 'failed', r as unknown as Record<string, unknown>);
+        relay.sendResult(command.id, r.ok ? 'completed' : 'failed', r);
         break;
       }
       case 'terminal_close': {
@@ -448,7 +448,7 @@ export class RemoteCommandRouter {
           break;
         }
         const r = TerminalOpsService.getInstance().close(ts);
-        relay.sendResult(command.id, 'completed', r as unknown as Record<string, unknown>);
+        relay.sendResult(command.id, 'completed', r);
         break;
       }
       case 'git_status': {
@@ -474,7 +474,7 @@ export class RemoteCommandRouter {
       case 'git_log': {
         const limit = (command.payload as Record<string, unknown>)?.limit as number | undefined;
         ProjectOpsService.gitLog(limit ?? 30).then((res) => {
-          relay.sendResult(command.id, 'completed', res as unknown as Record<string, unknown>);
+          relay.sendResult(command.id, 'completed', res);
         });
         break;
       }
