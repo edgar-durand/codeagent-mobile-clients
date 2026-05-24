@@ -4,6 +4,85 @@ All notable changes to the CodeAgent-Mobile JetBrains plugin are documented here
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.19.0] — 2026-05-24
+
+### Added
+
+- **both-plugins:** PostHog telemetry, mirrors the CLI (closes #95) (#142)
+- **both-plugins:** Bundle Hanken Grotesk + JetBrains Mono fonts (closes #96) (#147)
+- **vsc-plugin:** Add Copy Install Command CTA to empty agents state (closes #116) (#166)
+- **vsc-plugin:** 3-state status bar with rich Markdown tooltip (closes #115) (#167)
+- **both-plugins:** All-detector agent discovery; enable cursor/coderabbit/aider (closes #102 follow-up) (#171)
+- **both-plugins:** A11y pass — ARIA, focus rings, mnemonics, focus order (closes #106) (#172)
+- **both-plugins:** FooterStatusStrip — at-a-glance connection summary (closes #114) (#174)
+- **vsc-plugin:** Brand polish — GlassCard + cyberpunk h3 voice (closes #79) (#175)
+
+### CI
+
+- Drop node 18 + skip Vitest on Windows + advisory backend probes (#128)
+
+### Changed
+
+- **vsc-plugin:** Split controller-panel.ts (partial #89) (#143)
+- **jetbrains-plugin:** Extract RemoteCommandRouter (partial #89) (#144)
+- **jetbrains-plugin:** Split AgentOutputMonitor — publisher + text utils (partial #89) (#145)
+- **both-plugins:** Remove dead WebSocketService + AgentBridgeService (closes #90) (#149)
+- **jetbrains-plugin:** Extract RoundedPanel + DeviceConnectionPanel (further #89) (#151)
+- **jetbrains-plugin:** Split TerminalAgentService — publisher + reader (further #89) (#152)
+- **jetbrains-plugin:** Extract Swing-walk helpers from AgentOutputMonitor (further #89) (#153)
+- **jetbrains-plugin:** Extract Cascade JS + Codeium process tap (further #89) (#154)
+- **jetbrains-plugin:** Extract AIAssistant text-extraction helpers (further #89) (#155)
+- **jetbrains-plugin:** Extract JcefCaptureState from AgentOutputMonitor (closes #89 follow-up) (#156)
+- **jetbrains-plugin:** Split ControllerPanel HTTP + QR + row factory (closes #89 follow-up) (#157)
+- **shared:** Centralize PROTOCOL_VERSION + lifecycle constants (closes #97) (#164)
+- **both-plugins:** Lock notification voice to canonical CodeAgent Mobile copy (closes #105) (#165)
+- **vsc-plugin:** Deprecate Claude PTY-directo + Claude handlers (closes #102) (#169)
+- **jetbrains-plugin:** Deprecate Claude PTY-directo + handlers (closes #102) (#170)
+
+### Chore
+
+- **jetbrains-plugin:** Delete dead RobotPasteStrategy (partial #90) (#139)
+- **workflow:** Delete release-single.yml — drift surface (closes #110) (#158)
+- **both-plugins:** Wire logger.trace into every empty catch (closes #111) (#173)
+
+### Fixed
+
+- **ci:** Smoke test reads stderr too — banners moved off stdout in v2.18.x
+- **vsc-plugin:** Add webview CSP + render QR locally (closes #70) (#117)
+- **both-plugins:** Store pluginAuthToken in SecretStorage / PasswordSafe (closes #71) (#118)
+- **vsc-plugin:** Authenticate the observer-bridge on 127.0.0.1:47832 (closes #72) (#119)
+- **vsc-plugin:** Realpath candidate + workspace before sandbox check (closes #73) (#120)
+- **vsc-plugin:** Gate workbench-injection cleanup behind a one-shot flag (closes #74) (#121)
+- **jetbrains-plugin:** Drop untilBuild cap + re-enable plugin-structure warnings (closes #76) (#122)
+- **jetbrains-plugin:** Adopt CodeAgent Mobile brand palette + drop stale strings (closes #80) (#123)
+- **jetbrains-plugin:** Lift resume_session 500ms sleeps off EDT + WS reader (partial #75) (#124)
+- **jetbrains-plugin:** Surface action group under Tools menu (closes #77) (#125)
+- **both-plugins:** 401 recovery — clear token, stop transports, surface re-pair UX (closes #78) (#126)
+- **vsc-plugin:** Adopt CodeAgent brand palette in webview (partial #79) (#127)
+- **cli:** Make tests + parser cross-platform; restore Windows in CI (#129)
+- **both-plugins:** Align clearRemoteOutput on CLI wire shape (closes #83) (#130)
+- **both-plugins:** Honor heartbeatIntervalMs setting in CommandRelayService (closes #84) (#131)
+- **both-plugins:** Cap base64 attachments at 10 MB (closes #92) (#132)
+- **both-plugins:** Refuse to overwrite malformed MCP config (closes #93) (#133)
+- **vsc-plugin:** Exclude .pdb + tests from .vsix (closes #86) (#134)
+- **both-plugins:** De-dup commands by id on SSE reconnect (closes #85) (#135)
+- **both-plugins:** Surface a 3-state Connected/Reconnecting/Offline dot (closes #94) (#136)
+- **both-plugins:** Align strategy contract — same fields + StrategyResult (closes #82) (#137)
+- **vsc-plugin:** Defer eager activation work to first pair (closes #87) (#138)
+- **both-plugins:** Align command-handler surface (closes #81) (#140)
+- **vsc-plugin:** Drop Python PTY helper, route Claude through node-pty (closes #88) (#146)
+- **jetbrains-plugin:** Lift remaining EDT-blocking sites in dispatch (closes #75) (#150)
+- **jetbrains-plugin:** Multi-IDE verifier matrix + dynamic-plugin marker (closes #100, #108) (#159)
+- **jetbrains-plugin:** Track all known projects in IdeIntegrationService (closes #99) (#160)
+- **vsc-plugin:** Per-window port + per-workspace pluginId (closes #103) (#161)
+- **vsc-plugin:** Cache SettingsService config + react to mid-session changes (closes #107) (#162)
+- **vsc-plugin:** Drop \`as unknown as Record<string, unknown>\` casts (closes #104) (#163)
+
+### Tests
+
+- **vsc-plugin:** Cover webview-security helpers + extract sanitizeSessionId (partial #91) (#141)
+- **vsc-plugin:** Cover CommandRelayService dispatch + dedup + state (closes #91) (#148)
+
 ## [2.18.2] — 2026-05-24
 
 ### Fixed
