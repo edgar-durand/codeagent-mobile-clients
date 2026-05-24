@@ -4,6 +4,44 @@ All notable changes to the CodeAgent-Mobile JetBrains plugin are documented here
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.18.1] — 2026-05-24
+
+### Added
+
+- **cli:** Split AgentStrategy into Interactive + Batch shapes (#58)
+- **cli:** CodeRabbit BatchAgentStrategy (#59)
+- **cli:** Cursor agent strategy (InteractiveAgentStrategy) (#60)
+- **cli:** Aider agent strategy (InteractiveAgentStrategy) (#61)
+- **cli:** \`codeam doctor\` diagnostic command (#64)
+- **cli:** PostHog telemetry with full session + user context (#65)
+- **cli:** Log rotation + JSON mode + XDG-aware paths (#66)
+- **cli:** Quick wins bundle — banner→stderr, unknown cmd, exit-codes, --api-key-file, logout heartbeat (#67)
+- **cli:** Unknown-command typo suggester + shell completion command (#68)
+
+### CI
+
+- **cli:** MacOS runner + Node 18/20/22 matrix + coverage gate (#63)
+
+### Changed
+
+- **cli:** Extract OsStrategy interface — pure helpers slice (#48)
+- **cli:** Move buildClaudeLaunch wrap to OsStrategy.buildLaunch (#49)
+- **cli:** Inject OsStrategy into RuntimeStrategy — compose, don't branch (#50)
+- **cli:** Move PTY factories under OsStrategy.createPtyStrategies (#51)
+- **cli:** Relocate claude-resolver + claude-installer to agents/claude/ (#53)
+- **cli:** Extract LinkStrategy + drop link.ts AGENT_META hardcode (#56)
+- **cli:** Switch HistoryService to /api/sessions/conversation + /list (#54)
+
+### Fixed
+
+- **cli:** AgentService.restart routes through RuntimeStrategy (#52)
+- **cli:** Cap PtyBuffer + StreamingEmitter rawBuffer + eager cleanup on exit (#57)
+- **cli:** Doctor marks agent-binary probes as optional
+
+### Tests
+
+- **cli:** Agent contract suite — one spec runs against every registered agent (#62)
+
 ## [2.17.7] — 2026-05-24
 
 ### Fixed
