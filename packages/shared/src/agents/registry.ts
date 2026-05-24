@@ -25,6 +25,18 @@ export const AGENT_REGISTRY: Record<AgentId, AgentMetadata> = {
     supportedAuthKinds: ['oauth_token'],
     preferredAuthKind: 'oauth_token',
   },
+  coderabbit: {
+    id: 'coderabbit',
+    displayName: 'CodeRabbit',
+    binaryName: 'coderabbit',
+    // Gated behind a feature flag until the per-agent contract test +
+    // a real PR review smoke pass on a paid CodeRabbit tenant. Strategy
+    // is fully implemented (BatchAgentStrategy); the flip from false →
+    // true happens in a follow-up release.
+    enabled: false,
+    supportedAuthKinds: ['oauth_token', 'api_key'],
+    preferredAuthKind: 'oauth_token',
+  },
 };
 
 export function getEnabledAgents(): AgentMetadata[] {
@@ -38,5 +50,5 @@ export function getAgent(id: AgentId): AgentMetadata {
 }
 
 export function isKnownAgentId(id: string): id is AgentId {
-  return id === 'claude' || id === 'codex' || id === 'copilot';
+  return id === 'claude' || id === 'codex' || id === 'copilot' || id === 'coderabbit';
 }

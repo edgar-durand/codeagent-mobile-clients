@@ -1,4 +1,4 @@
-export type AgentId = 'claude' | 'codex' | 'copilot';
+export type AgentId = 'claude' | 'codex' | 'copilot' | 'coderabbit';
 
 export type AgentAuthKind = 'oauth_token' | 'api_key';
 

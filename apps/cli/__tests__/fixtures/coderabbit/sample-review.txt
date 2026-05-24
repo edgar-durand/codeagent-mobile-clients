@@ -1,0 +1,23 @@
+## CodeRabbit Review · PR #142
+
+Reviewed 3 files (87 lines changed). Surfaced 5 suggestions.
+
+### Summary
+
+Most changes look clean — one race condition in the SSE retry logic
+and two missing-await issues are worth addressing before merge.
+
+### File annotations
+
+src/services/relay.ts:54 — warning: missing await on async fetch — the promise is fire-and-forget here, swallowing rejections
+src/services/relay.ts:118 [error] race condition: this.connected can be set after a reconnect attempt has already run
+src/services/relay.ts:201: info: prefer URLSearchParams for query string construction
+src/lib/payload.ts:32 — warning: redundant null check — Zod schema already enforces non-null
+apps/cli/src/commands/pair.ts:88: nitpick: consider extracting the 5-minute timeout as a named const
+
+### Next steps
+
+Consider running `npm run lint:strict` to catch the unawaited-promise
+pattern across the rest of the file. The race-condition fix is
+load-bearing — without it, two concurrent reconnect timers can
+double-publish the resume event.
