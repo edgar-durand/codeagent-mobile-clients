@@ -2,18 +2,12 @@ package com.windsurf.controller.services
 
 import com.google.gson.Gson
 import com.google.gson.JsonObject
-import com.intellij.execution.process.ProcessEvent
-import com.intellij.execution.process.ProcessHandler
-import com.intellij.execution.process.ProcessListener
-import com.intellij.ide.plugins.PluginManagerCore
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.components.Service
 import com.intellij.openapi.diagnostic.Logger
 import com.intellij.openapi.editor.EditorFactory
-import com.intellij.openapi.extensions.PluginId
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.project.ProjectManager
-import com.intellij.openapi.util.Key
 import com.intellij.openapi.wm.ToolWindowManager
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
@@ -43,6 +37,7 @@ class AgentOutputMonitor {
 
     private val logger = Logger.getInstance(AgentOutputMonitor::class.java)
     private val gson = Gson()
+    private val processTap = CodeiumProcessTap()
     private val httpClient = OkHttpClient.Builder()
         .connectTimeout(5, TimeUnit.SECONDS)
         .readTimeout(5, TimeUnit.SECONDS)
@@ -67,10 +62,6 @@ class AgentOutputMonitor {
     private var jcefConsoleHandlerInstalled = false
     private var jcefOriginalDisplayHandler: Any? = null
     private var jcefCefClient: Any? = null
-    private var interceptedHandler: ProcessHandler? = null
-    private var processAdapter: ProcessListener? = null
-    private val processOutputBuffer = StringBuilder()
-    private var processInterceptAttached = false
     private var currentPromptText: String = ""
     private var responseDoneSent: Boolean = false
     private var lastSentResponseText: String = ""
@@ -143,7 +134,7 @@ class AgentOutputMonitor {
         jcefHtmlRef.set(null)
         jcefResponseTextRef.set(null)
 
-        attachToLanguageServerProcess()
+        processTap.attach()
 
         previousSnapshot = captureToolWindowContent() ?: ""
         logger.info("Output monitoring started for session=$sessionId, toolWindow=$toolWindowId, baselineLength=${previousSnapshot.length}")
@@ -205,7 +196,7 @@ class AgentOutputMonitor {
         currentExtractor = null
         extractorLastSentMarkdown = ""
         extractorStableCount = 0
-        detachFromProcess()
+        processTap.detach()
         stopCaptureServer()
         cleanupJcefConsoleHandler()
         logger.info("Output monitoring stopped")
@@ -529,7 +520,7 @@ class AgentOutputMonitor {
             return accessibleText
         }
 
-        val processText = readProcessBuffer()
+        val processText = processTap.readBuffer()
         if (processText != null) {
             logStrategy("process-intercept")
             return processText
@@ -722,7 +713,7 @@ class AgentOutputMonitor {
             // Use CefFrame interface (exported) instead of concrete RemoteFrame class
             // (non-exported module). Only the Cascade/Windsurf path uses JCEF; agents
             // with their own MessageExtractor (Copilot, AI Assistant) never reach this.
-            val js = buildCascadeInjectionJs()
+            val js = CASCADE_INJECTION_JS
             val cefFrameIface = Class.forName("org.cef.browser.CefFrame", true, jcefCL)
             val mainFrame = cefBrowserIface.getMethod("getMainFrame").invoke(cefBrowser)
             if (mainFrame != null) {
@@ -877,244 +868,4 @@ class AgentOutputMonitor {
     }
 
 
-    /**
-     * Legacy JS payload for Cascade / Windsurf JCEF panels. Captures the
-     * page text (used by the polling stability heuristic) plus the HTML
-     * of the latest assistant bubble.
-     */
-    private fun buildCascadeInjectionJs(): String = """(function(){
-      try {
-        var t = document.body ? (document.body.innerText || '') : '';
-        if (t.length > 5) console.log('__CAGENT__:' + t);
-
-        // Find last agent response HTML via Cascade DOM structure:
-        // .cascade-scrollbar > div > div > div[many children] > last-child
-        var scroll = document.querySelector('.cascade-scrollbar');
-        if (!scroll) return;
-
-        var msgContainer = null;
-        var candidates = scroll.querySelectorAll('div');
-        for (var i = 0; i < candidates.length; i++) {
-          if (candidates[i].children.length >= 5) {
-            if (!msgContainer || candidates[i].children.length > msgContainer.children.length) {
-              msgContainer = candidates[i];
-            }
-          }
-        }
-        if (!msgContainer || msgContainer.children.length < 2) return;
-
-        var responseEl = null;
-        var skipPatterns = ['Feedback submitted', 'Was this response helpful'];
-        for (var j = msgContainer.children.length - 1; j >= 0; j--) {
-          var child = msgContainer.children[j];
-          var txt = (child.innerText || '').trim();
-          if (txt.length < 10) continue;
-          var isUI = false;
-          for (var k = 0; k < skipPatterns.length; k++) {
-            if (txt.indexOf(skipPatterns[k]) >= 0 && txt.length < 200) { isUI = true; break; }
-          }
-          if (!isUI) { responseEl = child; break; }
-        }
-        if (responseEl && responseEl.innerHTML && responseEl.innerHTML.length > 20) {
-          console.log('__CAGENT_HTML__:' + responseEl.innerHTML);
-          var respText = (responseEl.innerText || '').trim();
-          if (respText.length > 3) {
-            console.log('__CAGENT_RESPONSE__:' + respText);
-          }
-        }
-      } catch(e) {}
-    })();""".trimIndent()
-
-    private fun attachToLanguageServerProcess() {
-        if (processInterceptAttached) return
-        try {
-            val codeiumId = PluginId.getId("com.codeium.intellij")
-            val descriptor = PluginManagerCore.getPlugin(codeiumId)
-            if (descriptor == null) {
-                logger.info("Process intercept: Codeium plugin not found")
-                return
-            }
-            val cl = descriptor.pluginClassLoader ?: return
-
-            tryFieldScanForProcessHandler(cl)
-
-        } catch (e: Exception) {
-            logger.info("Process intercept setup failed: ${e.message}")
-        }
-    }
-
-    private fun findProcessHandlerInObject(obj: Any, maxDepth: Int, visited: MutableSet<Int>): ProcessHandler? {
-        if (maxDepth <= 0) return null
-        val id = System.identityHashCode(obj)
-        if (id in visited) return null
-        visited.add(id)
-        if (obj is ProcessHandler) return obj
-
-        if (obj is AtomicReference<*>) {
-            val inner = obj.get()
-            if (inner is ProcessHandler) return inner
-            if (inner != null) return findProcessHandlerInObject(inner, maxDepth - 1, visited)
-        }
-
-        try {
-            var clazz: Class<*>? = obj.javaClass
-            while (clazz != null && clazz != Any::class.java) {
-                for (field in clazz.declaredFields) {
-                    if (field.type.isPrimitive || field.type == String::class.java
-                        || field.type == Boolean::class.javaPrimitiveType
-                        || field.type == Int::class.javaPrimitiveType
-                        || field.type == Long::class.javaPrimitiveType
-                    ) continue
-                    try {
-                        field.isAccessible = true
-                        val value = field.get(obj) ?: continue
-                        if (value is ProcessHandler) {
-                            logger.info("Process intercept: found handler in ${clazz.name}.${field.name}")
-                            return value
-                        }
-                        if (value is AtomicReference<*>) {
-                            val inner = value.get()
-                            if (inner is ProcessHandler) {
-                                logger.info("Process intercept: found handler in AtomicRef ${clazz.name}.${field.name}")
-                                return inner
-                            }
-                            if (inner != null && maxDepth > 1) {
-                                val found = findProcessHandlerInObject(inner, maxDepth - 1, visited)
-                                if (found != null) return found
-                            }
-                        }
-                        if (maxDepth > 1
-                            && !field.type.isArray
-                            && !field.type.name.startsWith("java.lang.")
-                            && !field.type.name.startsWith("kotlin.")
-                            && !field.type.isEnum
-                        ) {
-                            val found = findProcessHandlerInObject(value, maxDepth - 1, visited)
-                            if (found != null) return found
-                        }
-                    } catch (_: Exception) {}
-                }
-                clazz = clazz.superclass
-            }
-        } catch (_: Exception) {}
-        return null
-    }
-
-    private fun tryFieldScanForProcessHandler(pluginCL: ClassLoader) {
-        try {
-            val handlerClass = Class.forName(
-                "com.codeium.intellij.language_server.LanguageServerProcessHandler",
-                true, pluginCL
-            )
-            logger.info("Process intercept: LanguageServerProcessHandler class loaded")
-
-            val allFields = mutableListOf<String>()
-            var c: Class<*>? = handlerClass
-            while (c != null && c != Any::class.java) {
-                for (field in c.declaredFields) {
-                    val isStatic = java.lang.reflect.Modifier.isStatic(field.modifiers)
-                    allFields.add("${if (isStatic) "static " else ""}${field.type.simpleName} ${field.name}")
-                    if (isStatic) {
-                        try {
-                            field.isAccessible = true
-                            val value = field.get(null)
-                            if (value is ProcessHandler) {
-                                logger.info("Process intercept: found static handler in ${field.name}")
-                                attachProcessListener(value)
-                                return
-                            }
-                        } catch (_: Exception) {}
-                    }
-                }
-                c = c.superclass
-            }
-            logger.info("Process intercept: LanguageServerProcessHandler fields: ${allFields.joinToString(", ")}")
-
-            if (ProcessHandler::class.java.isAssignableFrom(handlerClass)) {
-                logger.info("Process intercept: LanguageServerProcessHandler IS a ProcessHandler subclass")
-            }
-        } catch (_: ClassNotFoundException) {
-            logger.info("Process intercept: LanguageServerProcessHandler class not found")
-        } catch (e: Exception) {
-            logger.debug("Process intercept field scan failed: ${e.message}")
-        }
-    }
-
-    private fun attachProcessListener(handler: ProcessHandler) {
-        val adapter = object : ProcessListener {
-            override fun onTextAvailable(event: ProcessEvent, outputType: Key<*>) {
-                val text = event.text ?: return
-                if (text.isBlank()) return
-                synchronized(processOutputBuffer) {
-                    processOutputBuffer.append(text)
-                }
-            }
-        }
-        try {
-            handler.addProcessListener(adapter)
-            interceptedHandler = handler
-            processAdapter = adapter
-            processInterceptAttached = true
-            logger.info("Process intercept: attached listener to ${handler.javaClass.name}")
-        } catch (e: Exception) {
-            logger.warn("Process intercept: failed to attach listener: ${e.message}")
-        }
-    }
-
-    private fun readProcessBuffer(): String? {
-        if (!processInterceptAttached) return null
-        val text: String
-        synchronized(processOutputBuffer) {
-            if (processOutputBuffer.isEmpty()) return null
-            text = processOutputBuffer.toString()
-            processOutputBuffer.clear()
-        }
-        return extractAgentResponseFromProcessOutput(text)
-    }
-
-    private fun extractAgentResponseFromProcessOutput(raw: String): String? {
-        val sb = StringBuilder()
-        for (line in raw.lines()) {
-            val trimmed = line.trim()
-            if (trimmed.isEmpty()) continue
-            if (trimmed.startsWith("{") && trimmed.contains("\"jsonrpc\"")) {
-                try {
-                    val json = gson.fromJson(trimmed, JsonObject::class.java)
-                    val params = json.getAsJsonObject("params")
-                    if (params != null) {
-                        val data = params.get("data")?.asString
-                        if (data != null && data.length > 10
-                            && !data.contains("MCP")
-                            && !data.startsWith("[")
-                            && !data.contains("readResponses")
-                        ) {
-                            sb.appendLine(data)
-                        }
-                    }
-                } catch (_: Exception) {}
-            } else if (trimmed.length > 20
-                && !trimmed.startsWith("2026")
-                && !trimmed.contains("INFO")
-                && !trimmed.contains("DEBUG")
-            ) {
-                sb.appendLine(trimmed)
-            }
-        }
-        val result = sb.toString().trim()
-        return if (result.length > 10) result else null
-    }
-
-    private fun detachFromProcess() {
-        try {
-            val handler = interceptedHandler
-            val adapter = processAdapter
-            if (handler != null && adapter != null) {
-                handler.removeProcessListener(adapter)
-            }
-        } catch (_: Exception) {}
-        interceptedHandler = null
-        processAdapter = null
-        processInterceptAttached = false
-        synchronized(processOutputBuffer) { processOutputBuffer.clear() }
-    }
 }
