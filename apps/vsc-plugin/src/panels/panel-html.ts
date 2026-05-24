@@ -126,6 +126,12 @@ export function renderPanelHtml(
       background: var(--vscode-button-secondaryBackground);
       color: var(--vscode-button-secondaryForeground);
     }
+    .agents-actions {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+    .agents-actions .btn { flex: 1 1 auto; }
     .pairing-code {
       font-size: 28px;
       font-weight: 700;
@@ -270,7 +276,10 @@ export function renderPanelHtml(
       <div id="agents-list" class="agents-list">
         <p class="muted">Loading...</p>
       </div>
-      <button id="btn-refresh-agents" class="btn btn-secondary">Refresh Agents</button>
+      <div class="agents-actions">
+        <button id="btn-refresh-agents" class="btn btn-secondary">Refresh Agents</button>
+        <button id="btn-copy-install" class="btn btn-secondary hidden">Copy Install Command</button>
+      </div>
     </div>
   </div>
 
@@ -371,10 +380,13 @@ export function renderPanelHtml(
 
     function renderAgents(agents) {
       const container = document.getElementById('agents-list');
+      const copyBtn = document.getElementById('btn-copy-install');
       if (!agents || agents.length === 0) {
         container.innerHTML = '<p class="muted">${Messages.EmptyAgentList}</p>';
+        copyBtn.classList.remove('hidden');
         return;
       }
+      copyBtn.classList.add('hidden');
       container.innerHTML = agents.map(a =>
         '<div class="agent-row"><div class="agent-dot"></div><span>' + a.name + '</span></div>'
       ).join('');
@@ -441,6 +453,9 @@ export function renderPanelHtml(
     document.getElementById('btn-generate-pairing').addEventListener('click', requestPairing);
     document.getElementById('btn-disconnect').addEventListener('click', disconnect);
     document.getElementById('btn-refresh-agents').addEventListener('click', refreshAgents);
+    document.getElementById('btn-copy-install').addEventListener('click', function() {
+      vscode.postMessage({ type: 'copyInstallCommand' });
+    });
 
     vscode.postMessage({ type: 'getStatus' });
   </script>
