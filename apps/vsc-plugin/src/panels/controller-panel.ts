@@ -366,15 +366,34 @@ export class ControllerPanelProvider implements vscode.WebviewViewProvider, Comm
         const agentId = command.payload.agentId as string | undefined;
         const sessionId = command.sessionId;
 
-        // Handle file attachments — save to temp, append @filepath to prompt
+        // Handle file attachments — save to temp, append @filepath to prompt.
+        // Bound each attachment: a 50 MB base64 blob would stall the
+        // extension host on the sync decode + writeFileSync. 10 MB is the
+        // same ceiling the mobile composer enforces today.
+        const MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024;
         const files = command.payload.files as Array<{ filename: string; mimeType: string; base64: string }> | undefined;
         const tempPaths: string[] = [];
+        let oversizedAttachment: string | null = null;
         if (files && files.length > 0) {
           for (const f of files) {
+            const approxBytes = Math.floor((f.base64.length * 3) / 4);
+            if (approxBytes > MAX_ATTACHMENT_BYTES) {
+              oversizedAttachment = `${f.filename} (${approxBytes} bytes > ${MAX_ATTACHMENT_BYTES})`;
+              break;
+            }
             const tmpPath = path.join(os.tmpdir(), `codeagent-${Date.now()}-${f.filename}`);
             fs.writeFileSync(tmpPath, Buffer.from(f.base64, 'base64'));
             tempPaths.push(tmpPath);
             prompt = `@${tmpPath} ${prompt}`;
+          }
+          if (oversizedAttachment) {
+            // Best-effort cleanup of anything we already wrote before
+            // hitting the oversized blob.
+            tempPaths.forEach((p) => { try { fs.unlinkSync(p); } catch { /* ignore */ } });
+            relay.sendResult(command.id, 'failed', {
+              error: `Attachment too large: ${oversizedAttachment}`,
+            });
+            return;
           }
           // Clean up temp files after 2 min
           setTimeout(() => { tempPaths.forEach((p) => { try { fs.unlinkSync(p); } catch {} }); }, 120000);
