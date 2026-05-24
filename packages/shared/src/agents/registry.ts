@@ -50,6 +50,19 @@ export const AGENT_REGISTRY: Record<AgentId, AgentMetadata> = {
     supportedAuthKinds: ['oauth_token', 'api_key'],
     preferredAuthKind: 'oauth_token',
   },
+  aider: {
+    id: 'aider',
+    displayName: 'Aider',
+    binaryName: 'aider',
+    // Gated. Aider is OAuth-less — auth is ANTHROPIC_API_KEY / OPENAI_API_KEY
+    // / etc. env vars. The link flow surfaces this via the existing
+    // --api-key escape hatch in commands/link.ts. Flip false → true
+    // after a real PTY capture lands + the contract test passes.
+    enabled: false,
+    // Aider only supports api_key (raw model-provider key, not OAuth).
+    supportedAuthKinds: ['api_key'],
+    preferredAuthKind: 'api_key',
+  },
 };
 
 export function getEnabledAgents(): AgentMetadata[] {
@@ -68,6 +81,7 @@ export function isKnownAgentId(id: string): id is AgentId {
     id === 'codex' ||
     id === 'copilot' ||
     id === 'coderabbit' ||
-    id === 'cursor'
+    id === 'cursor' ||
+    id === 'aider'
   );
 }
