@@ -587,4 +587,36 @@ export class CommandRelayService {
     this.recentCommandIds.set(id, now);
     return true;
   }
+
+  // ─── Test seam (used by __tests__/command-relay.test.ts only) ───
+  // None of these methods are part of the public contract — they
+  // expose private internals to vitest without polluting the
+  // production surface. The CLI's telemetry service uses the same
+  // `_testHelpers` pattern.
+  readonly _testHelpers = {
+    feedSseFrame: (frame: string): void => this.handleSseFrame(frame),
+    markDispatched: (id: string): boolean => this.markDispatched(id),
+    getConnectionState: (): ConnectionState => this.connectionState,
+    forceConnectionState: (s: ConnectionState): void => this.setConnectionState(s),
+    markTransportSuccess: (s: 'online' | 'reconnecting'): void => this.markTransportSuccess(s),
+    markTransportFailure: (): void => this.markTransportFailure(),
+    isAuthFailureSurfaced: (): boolean => this.authFailureSurfaced,
+    recentCommandIdCount: (): number => this.recentCommandIds.size,
+    resetForTest: (): void => {
+      this.recentCommandIds.clear();
+      this.connectionListeners = [];
+      this.connectionState = 'offline';
+      this.lastSuccessAt = 0;
+      this.authFailureSurfaced = false;
+      this.listeners = [];
+    },
+  };
 }
+
+/** Reset the singleton so a test can construct a clean instance. */
+export const _testResetCommandRelay = (): void => {
+  // The field is `private static` on the class but in JS that's
+  // just a name; vitest specs need to clear it between cases.
+  (CommandRelayService as unknown as { instance: CommandRelayService | undefined }).instance =
+    undefined;
+};
