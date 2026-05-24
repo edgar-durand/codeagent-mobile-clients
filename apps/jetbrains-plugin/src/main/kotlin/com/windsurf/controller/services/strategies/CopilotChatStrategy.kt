@@ -93,7 +93,7 @@ class CopilotChatStrategy : AgentStrategy {
         }
         if (app.isDispatchThread) findTask.run() else try {
             app.invokeAndWait(findTask)
-        } catch (_: Exception) {}
+        } catch (e: Exception) { logger.trace(e) }
 
         val tw = twRef.get()
         if (tw == null) {
@@ -108,12 +108,12 @@ class CopilotChatStrategy : AgentStrategy {
             try {
                 tw.show()
                 tw.activate(null)
-            } catch (_: Exception) {}
+            } catch (e: Exception) { logger.trace(e) }
         }
         if (app.isDispatchThread) {
             activateTask.run()
         } else {
-            try { app.invokeAndWait(activateTask) } catch (_: Exception) {}
+            try { app.invokeAndWait(activateTask) } catch (e: Exception) { logger.trace(e) }
             try { Thread.sleep(1500) } catch (_: InterruptedException) { return false }
         }
 
@@ -136,7 +136,7 @@ class CopilotChatStrategy : AgentStrategy {
         }
         if (app.isDispatchThread) findJcefTask.run() else try {
             app.invokeAndWait(findJcefTask)
-        } catch (_: Exception) {}
+        } catch (e: Exception) { logger.trace(e) }
 
         if (trySwingCopilotPromptInjection(tw, invocation.prompt, maxWaitMs = 3000L)) {
             ide.showNotification("Prompt sent to Copilot Chat", invocation.prompt)
@@ -157,7 +157,7 @@ class CopilotChatStrategy : AgentStrategy {
         }
         if (app.isDispatchThread) cleanupTask.run() else try {
             app.invokeAndWait(cleanupTask)
-        } catch (_: Exception) {}
+        } catch (e: Exception) { logger.trace(e) }
 
         CopyPasteManager.getInstance().setContents(StringSelection(invocation.prompt))
         app.invokeLater {
@@ -207,10 +207,10 @@ class CopilotChatStrategy : AgentStrategy {
                     val (attempted, input) = performCopilotSwingInjection(tw, prompt)
                     sentRef.set(attempted)
                     attemptedRef.set(input)
-                } catch (_: Exception) {}
+                } catch (e: Exception) { logger.trace(e) }
             }
             if (app.isDispatchThread) task.run() else {
-                try { app.invokeAndWait(task) } catch (_: Exception) {}
+                try { app.invokeAndWait(task) } catch (e: Exception) { logger.trace(e) }
             }
 
             val input = attemptedRef.get()
@@ -260,7 +260,7 @@ class CopilotChatStrategy : AgentStrategy {
                 cleared.set(current != expected)
             }
             if (app.isDispatchThread) task.run() else {
-                try { app.invokeAndWait(task) } catch (_: Exception) {}
+                try { app.invokeAndWait(task) } catch (e: Exception) { logger.trace(e) }
             }
             if (cleared.get()) return true
             try { Thread.sleep(100) } catch (_: InterruptedException) { return false }
@@ -277,7 +277,7 @@ class CopilotChatStrategy : AgentStrategy {
             input.dispatchEvent(released)
         }
         if (app.isDispatchThread) task.run() else {
-            try { app.invokeAndWait(task) } catch (_: Exception) {}
+            try { app.invokeAndWait(task) } catch (e: Exception) { logger.trace(e) }
         }
     }
 
@@ -285,7 +285,7 @@ class CopilotChatStrategy : AgentStrategy {
         val app = ApplicationManager.getApplication()
         val task = Runnable { input.text = "" }
         if (app.isDispatchThread) task.run() else {
-            try { app.invokeAndWait(task) } catch (_: Exception) {}
+            try { app.invokeAndWait(task) } catch (e: Exception) { logger.trace(e) }
         }
     }
 }

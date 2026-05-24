@@ -127,7 +127,7 @@ fun dispatch(command: CommandRelayService.RemoteCommand) {
                             writtenPaths.add(tmp)
                             refs.add("@${tmp.absolutePath}")
                             Thread {
-                                try { Thread.sleep(120_000); tmp.delete() } catch (_: Exception) {}
+                                try { Thread.sleep(120_000); tmp.delete() } catch (e: Exception) { logger.trace(e) }
                             }.start()
                         }
                         if (oversized != null) {
@@ -551,10 +551,10 @@ fun dispatch(command: CommandRelayService.RemoteCommand) {
                     // Mobile/web "Delete" or "Stop session". Tear
                     // monitoring down and forget the pairing locally so
                     // the user can pair fresh without restarting the IDE.
-                    try { AgentOutputMonitor.getInstance().stopMonitoring() } catch (_: Exception) {}
-                    try { logger.info("Command: cancel_task") } catch (_: Exception) {}
-                    try { PairingService.getInstance().clearCurrentSession() } catch (_: Exception) {}
-                    try { relay.stopPolling() } catch (_: Exception) {}
+                    try { AgentOutputMonitor.getInstance().stopMonitoring() } catch (e: Exception) { logger.trace(e) }
+                    try { logger.info("Command: cancel_task") } catch (e: Exception) { logger.trace(e) }
+                    try { PairingService.getInstance().clearCurrentSession() } catch (e: Exception) { logger.trace(e) }
+                    try { relay.stopPolling() } catch (e: Exception) { logger.trace(e) }
                     relay.sendResult(command.id, "success", com.google.gson.JsonObject().apply {
                         addProperty("ok", true)
                     })

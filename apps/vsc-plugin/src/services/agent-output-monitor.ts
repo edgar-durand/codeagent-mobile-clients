@@ -440,7 +440,10 @@ export class AgentOutputMonitor {
     window.__codeagent.editorFound = hasEditor;
 
     if (chatEl) {
-      if (obs) { try { obs.disconnect(); } catch(e) {} }
+      if (obs) {
+        try { obs.disconnect(); }
+        catch (e) { console.warn('__CAGENT__:OBS:disconnect failed', e); }
+      }
       obs = new MutationObserver(sendCapture);
       obs.observe(chatEl, { childList: true, subtree: true, characterData: true });
     }

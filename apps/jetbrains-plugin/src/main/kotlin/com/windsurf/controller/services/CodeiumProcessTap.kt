@@ -78,7 +78,7 @@ internal class CodeiumProcessTap {
             if (handler != null && adapter != null) {
                 handler.removeProcessListener(adapter)
             }
-        } catch (_: Exception) {}
+        } catch (e: Exception) { logger.trace(e) }
         interceptedHandler = null
         processAdapter = null
         attached = false
@@ -108,7 +108,7 @@ internal class CodeiumProcessTap {
                                 attachProcessListener(value)
                                 return
                             }
-                        } catch (_: Exception) {}
+                        } catch (e: Exception) { logger.trace(e) }
                     }
                 }
                 c = c.superclass
@@ -174,11 +174,11 @@ internal class CodeiumProcessTap {
                             val found = findProcessHandlerInObject(value, maxDepth - 1, visited)
                             if (found != null) return found
                         }
-                    } catch (_: Exception) {}
+                    } catch (e: Exception) { logger.trace(e) }
                 }
                 clazz = clazz.superclass
             }
-        } catch (_: Exception) {}
+        } catch (e: Exception) { logger.trace(e) }
         return null
     }
 
@@ -222,7 +222,7 @@ internal class CodeiumProcessTap {
                             sb.appendLine(data)
                         }
                     }
-                } catch (_: Exception) {}
+                } catch (e: Exception) { logger.trace(e) }
             } else if (trimmed.length > 20
                 && !trimmed.startsWith("2026")
                 && !trimmed.contains("INFO")

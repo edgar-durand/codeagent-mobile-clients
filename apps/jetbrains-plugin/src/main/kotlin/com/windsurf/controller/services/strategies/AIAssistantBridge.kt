@@ -608,7 +608,7 @@ internal object AIAssistantBridge {
         }
         if (app.isDispatchThread) task.run() else try {
             app.invokeAndWait(task)
-        } catch (_: Exception) {}
+        } catch (e: Exception) { log.trace(e) }
         return ref[0]
     }
 

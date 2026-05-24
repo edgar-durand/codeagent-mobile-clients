@@ -152,14 +152,14 @@ internal class JcefCaptureState {
                     }
                     if (existingHandler != null) {
                         try { return@newProxyInstance method.invoke(existingHandler, *methodArgs) }
-                        catch (_: Exception) {}
+                        catch (e: Exception) { logger.trace(e) }
                     }
                     return@newProxyInstance false
                 }
                 // Delegate all non-Object methods to original handler
                 if (existingHandler != null && method.declaringClass != Any::class.java) {
                     try { return@newProxyInstance method.invoke(existingHandler, *methodArgs) }
-                    catch (_: Exception) {}
+                    catch (e: Exception) { logger.trace(e) }
                 }
                 when (method.returnType) {
                     Boolean::class.javaPrimitiveType -> false
@@ -223,7 +223,7 @@ internal class JcefCaptureState {
                 }
                 addMethod?.invoke(client, original)
             }
-        } catch (_: Exception) {}
+        } catch (e: Exception) { logger.trace(e) }
         consoleHandlerInstalled = false
         originalDisplayHandler = null
         cefClient = null

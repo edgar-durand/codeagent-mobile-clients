@@ -478,10 +478,10 @@ class AgentOutputMonitor {
                 }
             }
             if (app.isDispatchThread) task.run() else {
-                try { app.invokeAndWait(task) } catch (_: Exception) {}
+                try { app.invokeAndWait(task) } catch (e: Exception) { logger.trace(e) }
             }
             bestText = ref.get()
-        } catch (_: Exception) {}
+        } catch (e: Exception) { logger.trace(e) }
         return bestText
     }
 
@@ -501,10 +501,10 @@ class AgentOutputMonitor {
                         return@Runnable
                     }
                 }
-            } catch (_: Exception) {}
+            } catch (e: Exception) { logger.trace(e) }
         }
         if (app.isDispatchThread) task.run() else {
-            try { app.invokeAndWait(task) } catch (_: Exception) {}
+            try { app.invokeAndWait(task) } catch (e: Exception) { logger.trace(e) }
         }
         return ref.get()
     }
@@ -532,7 +532,7 @@ class AgentOutputMonitor {
             twRef.set(ToolWindowManager.getInstance(project).getToolWindow(twId))
         }
         if (app.isDispatchThread) twTask.run() else {
-            try { app.invokeAndWait(twTask) } catch (_: Exception) {}
+            try { app.invokeAndWait(twTask) } catch (e: Exception) { logger.trace(e) }
         }
         val tw = twRef.get() ?: return
 
