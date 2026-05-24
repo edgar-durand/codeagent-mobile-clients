@@ -1,4 +1,4 @@
-import { execSync } from 'child_process';
+import { execFileSync, type ExecFileSyncOptions } from 'child_process';
 
 /**
  * Detect the current git branch of `cwd`. Returns the branch name on
@@ -18,20 +18,21 @@ import { execSync } from 'child_process';
  * root, so this works in subdirectories of the repo (e.g. a user who
  * paired from `apps/cli/` still gets the repo's current branch).
  *
- * The implementation uses `execSync` because:
- *   - the call site (`requestCode` at pair time) is a one-shot
- *     synchronous step, not a hot path,
- *   - the cost is acceptable (a few ms),
- *   - it keeps the helper trivial to unit-test by mocking
- *     `child_process.execSync`.
+ * The implementation uses `execFileSync` (not `execSync`) so the
+ * args are passed as an explicit argv array, never via a shell. On
+ * Windows `execSync('git branch --show-current', …)` is routed
+ * through cmd.exe which re-tokenises the string — today no user
+ * input flows into the command, but the pattern is one careless
+ * `${branch}` interpolation away from injection. `execFileSync`
+ * removes the foot-gun entirely.
  *
  * The seam (`_execSeam.exec`) lets tests stub the underlying call
  * without having to wire `vi.mock('child_process')` (which is awkward
- * because other modules in the codebase use `spawn`/`execSync` too).
+ * because other modules in the codebase use `spawn` / `execFileSync`).
  */
 export function detectCurrentBranch(cwd: string = process.cwd()): string | null {
   try {
-    const raw = _execSeam.exec('git branch --show-current', {
+    const raw = _execSeam.exec('git', ['branch', '--show-current'], {
       cwd,
       // 1 s ceiling is comfortably above normal git latency (<50 ms
       // on a healthy repo) and well below the pair POST's 10 s budget.
@@ -54,13 +55,13 @@ export function detectCurrentBranch(cwd: string = process.cwd()): string | null 
 }
 
 /**
- * Indirection layer that lets tests stub `execSync` without resorting
- * to a `vi.mock('child_process')` that would touch every other module
- * in the dependency graph.
+ * Indirection layer that lets tests stub `execFileSync` without
+ * resorting to a `vi.mock('child_process')` that would touch every
+ * other module in the dependency graph.
  */
 export const _execSeam = {
-  exec: (cmd: string, opts: Parameters<typeof execSync>[1]): string => {
-    const out = execSync(cmd, opts);
+  exec: (file: string, args: readonly string[], opts: ExecFileSyncOptions): string => {
+    const out = execFileSync(file, args, opts);
     return typeof out === 'string' ? out : out.toString('utf8');
   },
 };

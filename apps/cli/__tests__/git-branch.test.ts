@@ -41,11 +41,10 @@ describe('detectCurrentBranch', () => {
       .mockReturnValue('main\n');
     gitBranch.detectCurrentBranch('/some/other/dir');
     expect(spy).toHaveBeenCalledTimes(1);
-    const [, opts] = spy.mock.calls[0];
-    expect(opts).toBeDefined();
-    // Narrow the runtime shape — opts is the second arg to execSync,
-    // which is `ExecSyncOptionsWithStringEncoding` (or similar) at the
-    // call site. We only care that `cwd` is forwarded verbatim.
+    // Signature is (file, args, opts) — file is 'git', args is fixed.
+    const [file, args, opts] = spy.mock.calls[0];
+    expect(file).toBe('git');
+    expect(args).toEqual(['branch', '--show-current']);
     const cwd = (opts as { cwd?: string }).cwd;
     expect(cwd).toBe('/some/other/dir');
   });

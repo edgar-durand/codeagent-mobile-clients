@@ -48,11 +48,15 @@ function appendToFile(line: string): void {
     if (!fileInitialized) {
       fs.mkdirSync(path.dirname(debugFilePath), { recursive: true });
       // Truncate on first write per process so each run starts fresh.
-      fs.writeFileSync(
-        debugFilePath,
+      // Atomic stage-then-rename so a SIGKILL between write and the
+      // first appendFileSync below can't leave the file with a
+      // partial header that confuses log parsers.
+      const header =
         `=== codeam debug log — pid ${process.pid} — ${new Date().toISOString()} ===\n` +
-        `platform=${process.platform} node=${process.version} cwd=${process.cwd()}\n\n`,
-      );
+        `platform=${process.platform} node=${process.version} cwd=${process.cwd()}\n\n`;
+      const tmp = `${debugFilePath}.${process.pid}.tmp`;
+      fs.writeFileSync(tmp, header);
+      fs.renameSync(tmp, debugFilePath);
       fileInitialized = true;
     }
     fs.appendFileSync(debugFilePath, line);

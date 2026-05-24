@@ -63,7 +63,29 @@ export function makeConfig(baseDir?: string) {
 
   function save(c: CliConfig): void {
     fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-    fs.writeFileSync(file, JSON.stringify(c, null, 2), { encoding: 'utf-8', mode: 0o600 });
+    // Atomic write: stage to a sibling temp file then rename. POSIX
+    // and NTFS both guarantee rename atomicity within a single
+    // filesystem, so any reader sees either the previous file or the
+    // new file — never a half-written one. Without this, a SIGKILL
+    // / power loss / laptop sleep mid-`writeFileSync` truncates
+    // config.json and the next CLI launch silently returns
+    // EMPTY_CONFIG → user loses every paired session and has to
+    // re-pair every device.
+    const tmp = `${file}.${process.pid}.${crypto.randomBytes(4).toString('hex')}.tmp`;
+    try {
+      fs.writeFileSync(tmp, JSON.stringify(c, null, 2), {
+        encoding: 'utf-8',
+        mode: 0o600,
+      });
+      fs.renameSync(tmp, file);
+    } catch (err) {
+      // Best-effort cleanup of the orphaned temp file. If we can't
+      // remove it (rare — usually means EACCES on the dir), leave it;
+      // a subsequent successful save() will overwrite-via-rename and
+      // the next clearAll() / boot picks it up.
+      try { fs.unlinkSync(tmp); } catch { /* already gone */ }
+      throw err;
+    }
   }
 
   function getConfig(): CliConfig {

@@ -67,7 +67,28 @@ function readTokenFromArgs(args: string[]): string {
   fail('codeam pair-auto requires --token-file=<path>, --token=<value>, or CODEAM_AUTO_TOKEN env');
 }
 
-async function claim(token: string, pluginId: string): Promise<ClaimSuccess> {
+/**
+ * Single attempt at the claim POST. Wrapped with AbortController so a
+ * stalled backend doesn't hang the codespace bootstrap until the SSH
+ * channel hits its 180 s timeout — bootstrap-side scripts get a clear
+ * NETWORK error within {@link CLAIM_TIMEOUT_MS} instead.
+ */
+const CLAIM_TIMEOUT_MS = 15_000;
+const RETRY_BACKOFF_MS = 2_000;
+
+interface NetworkError extends Error {
+  code: 'NETWORK';
+  cause?: unknown;
+}
+
+function networkError(msg: string, cause?: unknown): NetworkError {
+  const err = new Error(msg) as NetworkError;
+  err.code = 'NETWORK';
+  if (cause !== undefined) err.cause = cause;
+  return err;
+}
+
+async function claimOnce(token: string, pluginId: string): Promise<ClaimSuccess> {
   const url = `${API_BASE}/api/pairing/claim-auto-token`;
   const body = {
     token,
@@ -82,11 +103,34 @@ async function claim(token: string, pluginId: string): Promise<ClaimSuccess> {
     branch: detectCurrentBranch(),
   };
 
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', ...vercelBypassHeader() },
-    body: JSON.stringify(body),
-  });
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), CLAIM_TIMEOUT_MS);
+
+  let res: Response;
+  try {
+    res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...vercelBypassHeader() },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+  } catch (err) {
+    // AbortError, DNS failure, ECONNREFUSED — all surface as
+    // NETWORK so the outer retry loop knows to back off + retry,
+    // and the bootstrap shell can pattern-match on the code.
+    const aborted = (err as { name?: string }).name === 'AbortError';
+    throw networkError(
+      aborted ? `request timed out after ${CLAIM_TIMEOUT_MS}ms` : `fetch failed: ${(err as Error).message}`,
+      err,
+    );
+  } finally {
+    clearTimeout(timer);
+  }
+
+  // 5xx is transient — let the retry loop catch it via NETWORK code.
+  if (res.status >= 500 && res.status < 600) {
+    throw networkError(`server returned ${res.status}`);
+  }
 
   const json = (await res.json()) as { success: boolean; data?: ClaimSuccess } | ClaimErrorBody;
 
@@ -94,6 +138,7 @@ async function claim(token: string, pluginId: string): Promise<ClaimSuccess> {
     const errBody = json as ClaimErrorBody;
     const code = errBody?.error?.code ?? `HTTP_${res.status}`;
     const msg = errBody?.error?.message ?? `Server returned ${res.status}`;
+    // 4xx is deterministic — fail loud immediately instead of retrying.
     fail(`Auto-pair failed (${code}): ${msg}`);
   }
 
@@ -102,6 +147,26 @@ async function claim(token: string, pluginId: string): Promise<ClaimSuccess> {
     fail('Auto-pair response missing sessionId');
   }
   return ok.data;
+}
+
+async function claim(token: string, pluginId: string): Promise<ClaimSuccess> {
+  try {
+    return await claimOnce(token, pluginId);
+  } catch (err) {
+    if ((err as NetworkError).code !== 'NETWORK') throw err;
+    // One retry after a short backoff. The codespace bootstrap is the
+    // primary caller; a single retry covers the common case where
+    // the API container is still cold-starting when the bootstrap
+    // first reaches it. Two attempts is enough — beyond that the
+    // bootstrap shell should re-invoke us.
+    await new Promise((r) => setTimeout(r, RETRY_BACKOFF_MS));
+    try {
+      return await claimOnce(token, pluginId);
+    } catch (retryErr) {
+      const netErr = retryErr as NetworkError;
+      fail(`Auto-pair failed (NETWORK): ${netErr.message}`);
+    }
+  }
 }
 
 export async function pairAuto(args: string[]): Promise<void> {

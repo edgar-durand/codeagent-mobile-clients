@@ -49,7 +49,13 @@ function writeCache(cache: CacheShape): void {
   try {
     const file = cachePath();
     fs.mkdirSync(path.dirname(file), { recursive: true });
-    fs.writeFileSync(file, JSON.stringify(cache));
+    // Atomic stage-then-rename. The update cache is regenerable
+    // (next CLI boot just fetches again), but a half-written JSON
+    // makes readCache fail until it's overwritten — minor papercut
+    // we avoid by mirroring config.ts's atomic pattern.
+    const tmp = `${file}.${process.pid}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(cache));
+    fs.renameSync(tmp, file);
   } catch {
     /* unwritable home dir — give up silently */
   }

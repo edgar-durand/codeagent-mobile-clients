@@ -31,6 +31,15 @@ export class WindowsPtyStrategy implements IPtyStrategy {
   constructor(private readonly opts: PtyStrategyOptions) {}
 
   spawn(cmd: string, cwd: string, args: string[] = []): void {
+    // shell:false is intentional. `buildClaudeLaunch` already pre-wraps
+    // .cmd/.bat with `cmd.exe /c <path>` and .ps1 with `powershell -File
+    // <path>`, so the (cmd, args) we receive is already cmd.exe-safe.
+    // Setting shell:true here would re-wrap in ANOTHER cmd.exe layer,
+    // which re-tokenises args — any path with spaces or arg containing
+    // cmd metacharacters (& | ^ < > ( )) silently mis-executes. This
+    // matters most on the pipe fallback path (ConPTY load failed,
+    // usually because AV quarantined conpty.node) which is exactly
+    // when users need spawn to work.
     this.proc = spawn(cmd, args, {
       stdio: ['pipe', 'pipe', 'inherit'],
       cwd,
@@ -40,7 +49,7 @@ export class WindowsPtyStrategy implements IPtyStrategy {
         COLUMNS: '220',
         LINES: '50',
       },
-      shell: true,
+      shell: false,
     });
 
     this.proc.on('error', (err) => {
