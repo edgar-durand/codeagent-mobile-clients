@@ -1093,10 +1093,23 @@ class AgentOutputMonitor {
 
     private fun clearRemoteOutput(sessionId: String) {
         Thread {
+            // Wire shape matches the CLI's canonical `clear` chunk
+            // (apps/cli/src/services/output.service.ts:126) — POST with
+            // type:"clear" so the backend's chunk router handles it the
+            // same regardless of which client sent it. Was DELETE
+            // /api/commands/output?sessionId=… which the backend
+            // ignored on Pro plans where the chunk buffer is keyed on
+            // sessionId+pluginId.
             val settings = SettingsService.getInstance()
+            val pluginId = settings.ensurePluginId()
+            val body = JsonObject().apply {
+                addProperty("sessionId", sessionId)
+                addProperty("pluginId", pluginId)
+                addProperty("type", "clear")
+            }
             val request = Request.Builder()
-                .url("${settings.state.apiBaseUrl}/api/commands/output?sessionId=$sessionId")
-                .delete()
+                .url("${settings.state.apiBaseUrl}/api/commands/output")
+                .post(gson.toJson(body).toRequestBody("application/json".toMediaType()))
                 .withAuthHeaders()
                 .build()
             try {
