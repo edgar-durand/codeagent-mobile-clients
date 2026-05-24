@@ -68,9 +68,30 @@ export type CommandHandler = (
 // ─── Helpers ─────────────────────────────────────────────────────
 
 /**
+ * Process-wide set of attachment temp files still pending cleanup.
+ * Each `start_task` with attachments registers paths here AND schedules
+ * a 120s setTimeout to unlink them. On hard exit (SIGINT / SIGTERM /
+ * SIGHUP / agent onExit), `cleanupAttachmentTempFiles()` drains the set
+ * eagerly so the user's /tmp doesn't accumulate orphan attachments
+ * across kills. Audit anchor: R12.
+ */
+const pendingAttachmentFiles = new Set<string>();
+
+/** Best-effort eager cleanup of attachment temp files. Called from
+ *  signal handlers + the agent onExit path so /tmp doesn't leak. */
+export function cleanupAttachmentTempFiles(): void {
+  for (const p of pendingAttachmentFiles) {
+    try { fs.unlinkSync(p); } catch { /* already gone */ }
+  }
+  pendingAttachmentFiles.clear();
+}
+
+/**
  * Saves base64-encoded attachments to per-temp-file paths so they
  * can be referenced as `@path` arguments for Claude. Returns the
- * resolved temp paths in the order they were supplied.
+ * resolved temp paths in the order they were supplied. Each path
+ * is registered in `pendingAttachmentFiles` so a SIGINT mid-turn
+ * doesn't leave the files behind.
  */
 function saveFilesTemp(files: FileEntry[]): string[] {
   return files
@@ -79,6 +100,7 @@ function saveFilesTemp(files: FileEntry[]): string[] {
       const safeName = filename.replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 80);
       const tmpPath = path.join(os.tmpdir(), `codeam-${randomUUID()}-${safeName}`);
       fs.writeFileSync(tmpPath, Buffer.from(base64, 'base64'));
+      pendingAttachmentFiles.add(tmpPath);
       return tmpPath;
     });
 }
@@ -99,7 +121,10 @@ const startTask: CommandHandler = (ctx, _cmd, parsed) => {
     ctx.outputSvc.newTurn();
     ctx.agent.sendCommand(`${atRefs} ${effectivePrompt}`.trim());
     setTimeout(() => {
-      for (const p of paths) { try { fs.unlinkSync(p); } catch { /* ignore */ } }
+      for (const p of paths) {
+        try { fs.unlinkSync(p); } catch { /* ignore */ }
+        pendingAttachmentFiles.delete(p);
+      }
     }, 120_000);
   } else if (effectivePrompt) {
     dispatchPrompt(ctx, effectivePrompt);

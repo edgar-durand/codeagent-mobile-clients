@@ -111,6 +111,18 @@ interface PendingAnswer {
   fromIndex?: number;
 }
 
+/**
+ * Hard cap on the streaming raw-byte accumulator. The emitter is
+ * long-lived (entire session, often hours) and never resets
+ * `rawBuffer` — a Claude compaction loop or a Codex tool-call
+ * firehose would otherwise grow it linearly until the CLI OOM-
+ * killed. Truncate from the head (older bytes) so the tail keeps
+ * the current screen frame intact for the next renderToLines pass.
+ * Audit anchor: R2.
+ */
+const MAX_RAW_BYTES = 2 * 1024 * 1024;
+const TAIL_KEEP_BYTES = 1.5 * 1024 * 1024;
+
 export class StreamingEmitterService {
   private readonly apiBase: string;
   private readonly headers: Record<string, string>;
@@ -191,6 +203,19 @@ export class StreamingEmitterService {
   push(raw: string): void {
     if (raw.length === 0) return;
     this.rawBuffer += raw;
+    // Head-truncate when over cap. Drops scroll history; the
+    // renderToLines pass after this still sees the live screen
+    // frame intact in the tail. Logs the truncation so a regression
+    // (e.g. someone making the cap unreachable) shows up in the
+    // debug log.
+    if (this.rawBuffer.length > MAX_RAW_BYTES) {
+      const dropped = this.rawBuffer.length - TAIL_KEEP_BYTES;
+      this.rawBuffer = this.rawBuffer.slice(dropped);
+      log.trace(
+        'streamingEmitter',
+        `rawBuffer cap fired — dropped ${dropped} bytes from head, ${this.rawBuffer.length} retained`,
+      );
+    }
   }
 
   // ─── Tick ──────────────────────────────────────────────────────────

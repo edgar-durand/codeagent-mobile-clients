@@ -1,4 +1,23 @@
 /**
+ * Hard cap on the raw byte accumulator. Above this we drop bytes
+ * from the HEAD of the buffer (older frames) so the most recent
+ * window stays intact — renderToLines is line-anchored, so as long
+ * as the tail contains the current screen frame, dropping older
+ * scroll-history bytes is safe. Without this cap a multi-MB tool
+ * dump inside a single turn (Codex piping a large file, Claude
+ * spitting a verbose stack trace) made `this.raw` grow linearly
+ * until the CLI process OOM-killed. Audit anchor: R2.
+ */
+const MAX_RAW_BYTES = 2 * 1024 * 1024;
+/**
+ * When the cap fires, keep this many bytes so renderToLines still
+ * sees a reasonable amount of scrollback. The 1.5MB / 2MB ratio
+ * means a steady-state firehose only re-truncates every ~512KB of
+ * new input — amortising the substring cost.
+ */
+const TAIL_KEEP_BYTES = 1.5 * 1024 * 1024;
+
+/**
  * Raw PTY byte accumulator + terminal-input detection.
  *
  * Always accumulates. The `active` flag is just a hint to the
@@ -69,6 +88,12 @@ export class PtyBuffer {
    */
   push(raw: string): { active: boolean; terminalInputDetected: boolean } {
     this.raw += raw;
+    // Cap the accumulator at MAX_RAW_BYTES (#57). Truncate from the
+    // head — renderToLines is line-anchored and only the tail
+    // (current screen frame) matters for downstream parsing.
+    if (this.raw.length > MAX_RAW_BYTES) {
+      this.raw = this.raw.slice(this.raw.length - TAIL_KEEP_BYTES);
+    }
     if (hasPrintable(raw)) this.lastPushAt = Date.now();
     if (!this.active) {
       let terminalInputDetected = false;

@@ -11,8 +11,12 @@ import { FileWatcherService } from '../services/file-watcher.service';
 import { StreamingEmitterService } from '../services/streaming-emitter.service';
 import { fetchQuotaUsage } from './start/quota-fetcher';
 import { buildKeepAlive } from './start/keep-alive';
-import { dispatchCommand, type HandlerContext } from './start/handlers';
-import { registerTerminalHandlers } from '../services/terminal-ops.service';
+import {
+  dispatchCommand,
+  cleanupAttachmentTempFiles,
+  type HandlerContext,
+} from './start/handlers';
+import { registerTerminalHandlers, closeAllTerminals } from '../services/terminal-ops.service';
 
 /**
  * Wires the long-running services (PTY ↔ output relay ↔ command
@@ -130,10 +134,20 @@ export async function start(requestedAgent?: AgentId): Promise<void> {
       },
       onExit(code) {
         process.removeListener('SIGINT', sigintHandler);
+        process.removeListener('SIGTERM', sigintHandler);
+        process.removeListener('SIGHUP', sigintHandler);
         outputSvc.dispose();
         relay.stop();
         void fileWatcher?.stop();
         void streamingEmitter?.stop();
+        // Close every IDE terminal spawned during the session so the
+        // child shells don't get orphaned past the parent exit
+        // (audit R11 — closeAllTerminals existed but was never
+        // called).
+        closeAllTerminals();
+        // Eagerly delete in-flight attachment temp files instead of
+        // waiting on the 120 s unlink setTimeout (audit R12).
+        cleanupAttachmentTempFiles();
         process.exit(code);
       },
     },
@@ -185,10 +199,25 @@ export async function start(requestedAgent?: AgentId): Promise<void> {
     relay.stop();
     void fileWatcher?.stop();
     void streamingEmitter?.stop();
+    // IDE terminals (`openTerminal()` sessions) outlive the agent's
+    // PTY by design — but on hard exit we need to reap their child
+    // shells too. closeAllTerminals() is the public reaper; it's
+    // safe to call when no terminals are open. Audit R11.
+    closeAllTerminals();
+    // Drain attachment temp files registered by start_task. The
+    // 120 s setTimeout cleanup in handlers.ts only fires if the
+    // process survives that long — under Ctrl+C we'd leak.
+    cleanupAttachmentTempFiles();
     process.exit(0);
   }
 
+  // SIGINT (Ctrl+C) is the primary interrupt; SIGTERM + SIGHUP fire
+  // on terminal close / `kill <pid>` / parent-shell exit and were
+  // previously unhandled — the backend kept showing the session as
+  // online for ~30 s until heartbeat-timeout (audit R12 / F11).
   process.once('SIGINT', sigintHandler);
+  process.once('SIGTERM', sigintHandler);
+  process.once('SIGHUP', sigintHandler);
   // Spawn Claude FIRST so its strategy is set + the PTY is launching
   // before the relay starts dispatching remote commands.
   await agent.spawn();
