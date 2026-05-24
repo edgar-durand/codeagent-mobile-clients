@@ -221,7 +221,7 @@ class IdeIntegrationService {
         }
 
         // Always register terminal-based agents (they can be launched on demand)
-        for (config in TerminalAgentService.TERMINAL_AGENTS) {
+        for (config in TerminalAgentCatalog.TERMINAL_AGENTS) {
             val existing = detected.find {
                 it.name.equals(config.name, ignoreCase = true) ||
                 it.pluginId == config.pluginId ||
