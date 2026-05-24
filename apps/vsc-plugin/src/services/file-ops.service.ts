@@ -1,4 +1,6 @@
 import * as vscode from 'vscode';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
 
 /**
  * Read & write helpers for the mobile / landing mini-IDE modal.
@@ -81,7 +83,10 @@ export class FileOpsService {
   /**
    * Direct (cwd-relative) write target — used when `resolve()` couldn't
    * find an existing file but the caller wants to create a new one.
-   * Always sandboxed under a workspace folder.
+   * Always sandboxed under a workspace folder, even when intermediate
+   * path components are symlinks (the prior implementation compared
+   * raw fsPath prefixes, letting `<workspace>/link/passwd` where `link`
+   * points outside the tree escape the sandbox).
    */
   private static directWriteTarget(rawPath: string): vscode.Uri | null {
     const folders = vscode.workspace.workspaceFolders ?? [];
@@ -91,11 +96,52 @@ export class FileOpsService {
       const candidate = rawPath.startsWith('/')
         ? vscode.Uri.file(rawPath)
         : vscode.Uri.joinPath(root, rawPath);
-      const candidatePath = candidate.fsPath;
-      const rootPath = root.fsPath.endsWith('/') ? root.fsPath : root.fsPath + '/';
-      if (candidatePath === root.fsPath || candidatePath.startsWith(rootPath)) {
+      if (this.isInsideWorkspace(candidate.fsPath, root.fsPath)) {
         return candidate;
       }
+    }
+    return null;
+  }
+
+  /**
+   * Returns true only when `candidatePath` actually lives under
+   * `rootPath` after both sides are realpath-resolved. The candidate
+   * may not exist yet (new-file write) — walk up to the deepest
+   * existing ancestor, realpath that, and append the rest.
+   */
+  private static isInsideWorkspace(candidatePath: string, rootPath: string): boolean {
+    const realRoot = this.tryRealpath(rootPath);
+    if (!realRoot) return false;
+    const realCandidate = this.resolveSymlinks(candidatePath);
+    if (!realCandidate) return false;
+    const rootWithSep = realRoot.endsWith(path.sep) ? realRoot : realRoot + path.sep;
+    return realCandidate === realRoot || realCandidate.startsWith(rootWithSep);
+  }
+
+  private static tryRealpath(p: string): string | null {
+    try {
+      return fs.realpathSync(p);
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Walks up `candidatePath` to find an existing ancestor, realpaths
+   * that ancestor, then re-attaches the unresolved tail. Returns null
+   * if no ancestor is reachable (covers the "not even the workspace
+   * exists" case).
+   */
+  private static resolveSymlinks(candidatePath: string): string | null {
+    const tail: string[] = [];
+    let current = path.resolve(candidatePath);
+    while (current && current !== path.dirname(current)) {
+      const real = this.tryRealpath(current);
+      if (real) {
+        return tail.length === 0 ? real : path.join(real, ...tail.reverse());
+      }
+      tail.push(path.basename(current));
+      current = path.dirname(current);
     }
     return null;
   }
@@ -139,11 +185,10 @@ export class FileOpsService {
   private static directIn(root: vscode.Uri, rawPath: string): vscode.Uri | null {
     if (rawPath.startsWith('/')) {
       const abs = vscode.Uri.file(rawPath);
-      const rootPath = root.fsPath.endsWith('/') ? root.fsPath : root.fsPath + '/';
-      if (abs.fsPath === root.fsPath || abs.fsPath.startsWith(rootPath)) return abs;
-      return null;
+      return this.isInsideWorkspace(abs.fsPath, root.fsPath) ? abs : null;
     }
-    return vscode.Uri.joinPath(root, rawPath);
+    const candidate = vscode.Uri.joinPath(root, rawPath);
+    return this.isInsideWorkspace(candidate.fsPath, root.fsPath) ? candidate : null;
   }
 
   private static async walk(
