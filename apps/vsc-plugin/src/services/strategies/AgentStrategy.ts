@@ -3,15 +3,18 @@ import type { DetectedAgent } from '../ide-integration.service';
 /**
  * Per-agent strategy pattern, mirroring the JetBrains plugin's
  * `AgentStrategy` interface so both clients dispatch the same way.
- * Each strategy owns:
+ * The lockstep contract:
  *
- *   - the `canHandle` predicate that decides whether it applies to
- *     a given invocation (matched in registry order, first wins);
- *   - the `execute` method that delivers the prompt and starts any
- *     per-agent output monitoring;
- *   - the `stop` method that tears down whatever monitoring it
- *     started, called when the user issues `stop_task` or when a
- *     newer turn supersedes the active strategy.
+ *   - `AgentInvocation` carries the same logical fields on both sides
+ *     (agentId, commandId, prompt, sessionId, optional model). JB
+ *     also carries a `project`; VS Code's extension host has no
+ *     equivalent, so that field stays JB-only.
+ *   - `execute` returns a `StrategyResult` (delivered / message /
+ *     extra) — same shape on both sides so the relay payload is
+ *     byte-compatible regardless of which IDE is paired.
+ *   - `stop` tears down whatever monitoring this strategy started.
+ *
+ * Cross-reference: apps/jetbrains-plugin/.../strategies/AgentStrategy.kt
  *
  * The panel layer (`ControllerPanelProvider`) stays generic — it
  * builds an `AgentInvocation` from the incoming remote command and
