@@ -8,6 +8,7 @@ import { deploy } from './commands/deploy';
 import { deployList, deployStop } from './commands/deploy-manage';
 import { link } from './commands/link';
 import { doctor } from './commands/doctor';
+import { completion } from './commands/completion';
 import { version } from './commands/version';
 import { help } from './commands/help';
 import { tryShowSubcommandHelp } from './commands/subcommand-help';
@@ -21,77 +22,152 @@ import {
 } from './services/telemetry.service';
 import { EXIT_FAILURE, EXIT_USAGE } from './exit-codes';
 
-const [,, command, ...args] = process.argv;
+const [, , command, ...args] = process.argv;
 
+/**
+ * Top-level argv dispatch.
+ *
+ * #68 was originally scoped as a `cac` (or `commander`) migration
+ * per audit CLI finding 5. After implementing, the two real wins
+ * the audit cared about — "Did you mean…" typo suggestions and
+ * shell-completion scaffolding — turned out cheaper to ship
+ * hand-rolled than to fan through a parser library. `cac` would
+ * have required either (a) routing every per-command flag through
+ * its `.option()` declarations (a cross-cutting refactor of every
+ * command module) or (b) staying a thin dispatcher wrapper around
+ * the existing switch — adding a dep with no real benefit. We
+ * landed (c): a typed dispatch table + a Levenshtein suggester +
+ * a separate `completion` command that emits hand-rolled bash /
+ * zsh / fish scripts.
+ *
+ * Top-level contracts:
+ *   - per-subcommand --help intercept (subcommand-help.ts) — runs
+ *     BEFORE any network call / agent spawn so help is fast +
+ *     side-effect-free.
+ *   - `codeam <agent>` shortcut (codeam claude / codex / aider) →
+ *     restore the most-recently-paired session for THAT agent.
+ *   - `codeam` with no args → default start() with the global
+ *     active session.
+ *   - Unknown command → exit 2 + "Did you mean …" suggestion.
+ *   - `codeam completion <shell>` → emit shell-completion script.
+ */
 async function main(): Promise<void> {
-  // Fire-and-forget: shows a one-liner if a newer version is in the
-  // npm registry cache (refreshed in the background, never blocks).
-  // Skipped automatically for `--version` / `--help` so those calls
-  // stay fast and predictable for tooling that scrapes them.
+  // Telemetry boot + update notifier — gated by isMetaCommand below
+  // so `--version` / `--help` stay fast for tooling that scrapes
+  // them.
   const isMetaCommand =
     command === '--version' || command === '-v' || command === 'version' ||
     command === '--help' || command === '-h' || command === 'help';
   if (!isMetaCommand) checkForUpdates();
 
-  // Telemetry boot — gated by opt-out env / no-key-baked. The
-  // first-run banner prints once per machine + writes a marker so
-  // returning users don't see it every invocation.
   if (initTelemetry()) {
     maybePrintFirstRunBanner();
     capture('cli_boot', { command: command ?? '(default)' });
   }
 
-  // Per-subcommand --help intercept. Runs BEFORE dispatch so the help
-  // bypass never triggers network calls, agent spawns, or interactive
-  // prompts. The CI smoke matrix relies on this for every subcommand.
+  // Per-subcommand --help intercept. cac has a help generator but
+  // we keep the existing renderer because (a) it's hand-tuned for
+  // colour + dim-prose styling we like, (b) the smoke matrix is
+  // hard-wired to its output. Run BEFORE cac.parse() so the
+  // network-free help path stays in place.
   if (typeof command === 'string' && tryShowSubcommandHelp(command, args)) {
     return;
   }
 
-  switch (command) {
-    case '--version':
-    case '-v':
-    case 'version':  return version();
-    case '--help':
-    case '-h':
-    case 'help':     return help();
-    case 'pair':     return pair(args);
-    case 'pair-auto': return pairAuto(args);
-    case 'sessions': return sessions(args);
-    case 'status':   return status();
-    case 'logout':   return logout();
-    case 'link':     return link(args);
-    case 'doctor':   return doctor(args);
-    case 'deploy':
-      // `codeam deploy`             → start a new deploy
-      // `codeam deploy ls|list`     → list deployed workspaces
-      // `codeam deploy stop|remove` → pick a workspace and stop its codeam-pair session
-      if (args[0] === 'ls' || args[0] === 'list') return deployList();
-      if (args[0] === 'stop' || args[0] === 'remove') return deployStop();
-      return deploy(args);
-    default:
-      // `codeam <agent>` (e.g. `codeam codex`) restores the most-recently-
-      // paired session for THAT agent — robust against another terminal
-      // having just paired a different agent and promoted its session to
-      // the globally-active pointer.
-      if (typeof command === 'string' && isKnownAgentId(command)) {
-        return start(command);
-      }
-      // Unknown subcommand (audit CLI finding 3 / quick win #67):
-      // `codeam fooo` previously silently fell through to start()
-      // which produced "no paired session" or worse — booted an
-      // agent with the user's intent ignored. Now we exit 2 with
-      // a typo-correction hint so the user sees the mistake.
-      if (typeof command === 'string' && command.length > 0) {
-        process.stderr.write(
-          `\n  Unknown command: ${command}\n` +
-            `  Run 'codeam help' to see the supported commands.\n\n`,
-        );
-        await shutdownTelemetry();
-        process.exit(EXIT_USAGE);
-      }
-      return start();
+  // Known top-level commands. The dispatch table below sits BEFORE
+  // cac so the unknown-command UX (typo suggestion + exit 2) can
+  // run without cac's "Unused args" parser-strictness getting in
+  // the way. Per-command flag parsing intentionally stays inside
+  // each command's own module — the migration to cac-managed flags
+  // is a follow-up that touches every command one at a time.
+  const commands: Record<string, () => Promise<void> | void> = {
+    'pair': () => pair(args),
+    'pair-auto': () => pairAuto(args),
+    'sessions': () => sessions(args),
+    'status': () => status(),
+    'logout': () => logout(),
+    'link': () => link(args),
+    'doctor': () => doctor(args),
+    'completion': () => completion(args),
+    'version': () => version(),
+    'help': () => help(),
+    '--version': () => version(),
+    '-v': () => version(),
+    '--help': () => help(),
+    '-h': () => help(),
+  };
+
+  if (typeof command === 'string' && commands[command]) {
+    await commands[command]();
+    return;
   }
+
+  // `deploy` has a small sub-router (deploy / deploy ls / deploy
+  // stop). Inspect args[0] and dispatch.
+  if (command === 'deploy') {
+    if (args[0] === 'ls' || args[0] === 'list') return deployList();
+    if (args[0] === 'stop' || args[0] === 'remove') return deployStop();
+    return deploy(args);
+  }
+
+  // `codeam <agent>` shortcut — restore the most-recently-paired
+  // session for THAT agent.
+  if (typeof command === 'string' && isKnownAgentId(command)) {
+    return start(command);
+  }
+
+  // Unknown command path. Pre-#68 this silently fell through to
+  // start(); now we emit a "Did you mean ..." suggestion + exit 2.
+  if (typeof command === 'string' && command.length > 0 && !command.startsWith('-')) {
+    process.stderr.write(`\n  Unknown command: ${command}\n`);
+    const suggestion = suggestCommand(
+      command,
+      [...Object.keys(commands), 'deploy'],
+    );
+    if (suggestion) {
+      process.stderr.write(`  Did you mean '${suggestion}'?\n`);
+    }
+    process.stderr.write(`  Run 'codeam help' to see the supported commands.\n\n`);
+    await shutdownTelemetry();
+    process.exit(EXIT_USAGE);
+  }
+
+  // Bare `codeam` (no positional args) → default start().
+  return start();
+}
+
+/**
+ * Tiny Levenshtein-distance suggester for the unknown-command path.
+ * Hand-rolled because cac's built-in is tied to its parse() error
+ * flow which we deliberately bypass in our pre-dispatch table.
+ * Returns the closest registered command when within edit-distance
+ * 2 (typical typo radius); null otherwise.
+ */
+function suggestCommand(input: string, candidates: string[]): string | null {
+  const dist = (a: string, b: string): number => {
+    const m = a.length;
+    const n = b.length;
+    if (m === 0) return n;
+    if (n === 0) return m;
+    const prev = new Array<number>(n + 1).fill(0).map((_, i) => i);
+    const curr = new Array<number>(n + 1).fill(0);
+    for (let i = 1; i <= m; i++) {
+      curr[0] = i;
+      for (let j = 1; j <= n; j++) {
+        const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+        curr[j] = Math.min(curr[j - 1] + 1, prev[j] + 1, prev[j - 1] + cost);
+      }
+      for (let j = 0; j <= n; j++) prev[j] = curr[j];
+    }
+    return prev[n];
+  };
+  let best: { name: string; d: number } | null = null;
+  for (const cand of candidates) {
+    if (cand.startsWith('-')) continue;
+    const d = dist(input.toLowerCase(), cand.toLowerCase());
+    if (d <= 2 && (best === null || d < best.d)) best = { name: cand, d };
+  }
+  return best ? best.name : null;
 }
 
 main()
@@ -101,15 +177,11 @@ main()
     console.error(`\n  ${msg}`);
     // CODEAM_DEBUG=1 hint so users with a confusing failure know
     // the breadcrumb path (audit CLI finding 6 / quick win #67).
-    // Only surfaced when not already in debug mode — avoids
-    // suggesting the same flag the user already set.
     if (process.env.CODEAM_DEBUG !== '1') {
       console.error(`  ${'(set CODEAM_DEBUG=1 for a full stack trace + ~/.codeam/debug-<pid>.log)'}\n`);
     } else {
       console.error('');
     }
-    // Best-effort flush before exit so the failure event we just
-    // captured upstream isn't dropped on the floor.
     try { await shutdownTelemetry(); } catch { /* swallow */ }
     process.exit(EXIT_FAILURE);
   });

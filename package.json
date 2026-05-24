@@ -32,5 +32,9 @@
   "devDependencies": {
     "@commitlint/cli": "^19.5.0",
     "@commitlint/config-conventional": "^19.5.0"
+  },
+  "dependencies": {
+    "cac": "^7.0.0",
+    "posthog-node": "^5.35.1"
   }
 }

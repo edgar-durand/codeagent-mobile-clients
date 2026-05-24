@@ -28,6 +28,7 @@ export function help(): void {
     `     ${pc.white('codeam deploy ls | list')}      ${pc.dim('list deployed cloud workspaces')}`,
     `     ${pc.white('codeam deploy stop | remove')}  ${pc.dim('stop a deployed workspace session')}`,
     `     ${pc.white('codeam doctor')}                ${pc.dim('run diagnostic checks (DNS, /health, binaries, …)')}`,
+    `     ${pc.white('codeam completion <shell>')}    ${pc.dim('emit a bash/zsh/fish completion script')}`,
     '',
     `  ${pc.bold('Flags')}`,
     `     ${pc.white('-v, --version')}                ${pc.dim('print the CLI version')}`,

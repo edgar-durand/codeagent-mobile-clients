@@ -2,7 +2,14 @@
   "compilerOptions": {
     "target": "ES2022",
     "module": "CommonJS",
-    "moduleResolution": "node",
+    // `bundler` resolution honors the `exports` field in dependency
+    // package.json without forcing us to flip `module` to node16
+    // (which would re-shape every relative import). Most modern
+    // npm packages ship via `exports` without a legacy `main`, so
+    // this future-proofs us against an import that worked locally
+    // but failed at typecheck. tsup does its own bundling
+    // resolution, so this is purely a type-checking concern.
+    "moduleResolution": "bundler",
     "ignoreDeprecations": "6.0",
     "strict": true,
     "resolveJsonModule": true,

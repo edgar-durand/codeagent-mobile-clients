@@ -74,6 +74,19 @@ const HELPS: Record<string, HelpRenderer> = {
       `     ${pc.dim('Output never includes tokens or credentials. Paste the diagnostic id')}`,
       `     ${pc.dim('into a bug report so support can grep the server-side logs.')}`,
     ]),
+  completion: () =>
+    print([
+      `  ${pc.bold('codeam completion <shell>')}  ${pc.dim('— emit a shell-completion script for sourcing')}`,
+      '',
+      `     ${pc.cyan('codeam completion bash')}  ${pc.dim('print a bash completion function')}`,
+      `     ${pc.cyan('codeam completion zsh')}   ${pc.dim('print a zsh completion function')}`,
+      `     ${pc.cyan('codeam completion fish')}  ${pc.dim('print a fish completion file')}`,
+      '',
+      `     ${pc.dim('Examples:')}`,
+      `     ${pc.dim('  bash:  codeam completion bash >> ~/.bashrc')}`,
+      `     ${pc.dim('  zsh:   codeam completion zsh >> ~/.zshrc')}`,
+      `     ${pc.dim('  fish:  codeam completion fish > ~/.config/fish/completions/codeam.fish')}`,
+    ]),
 };
 
 function print(lines: string[]): void {
