@@ -40,12 +40,25 @@ const PER_CHECK_TIMEOUT_MS = 30_000;
 
 let failures = 0;
 let passes = 0;
+// Advisory failures don't gate exit code. Used by the backend probes,
+// which can fail for reasons orthogonal to the CLI's own correctness
+// (Vercel edge protection rejecting POSTs from GitHub Actions runner
+// IPs, transient backend deploys, etc.). The local-only probes —
+// `--version`, `--help`, `sessions` — still gate the build.
+let advisoryFailures = 0;
+let advisoryMode = false;
 
 function logPass(label) {
   passes += 1;
   console.log(`  pass  ${label}`);
 }
 function logFail(label, detail) {
+  if (advisoryMode) {
+    advisoryFailures += 1;
+    console.log(`  warn  ${label}  (advisory — does not gate CI)`);
+    if (detail) console.log(detail.split('\n').map((l) => `        ${l}`).join('\n'));
+    return;
+  }
   failures += 1;
   console.log(`  FAIL  ${label}`);
   if (detail) console.log(detail.split('\n').map((l) => `        ${l}`).join('\n'));
@@ -132,11 +145,22 @@ for (const cmd of ['pair', 'pair-auto', 'link', 'sessions', 'deploy', 'status', 
 // crashing on platforms where the home dir contains odd entries.
 checkExitZeroAndStdout('codeam sessions (empty list)', ['sessions'], /session/i);
 
-// ─── Backend checks (real network) ──────────────────────────────────
+// ─── Backend checks (real network — ADVISORY) ──────────────────────
+// These probes are useful when they pass but unreliable as a CI gate:
+// GitHub Actions runner IPs sometimes hit Vercel's edge protection
+// challenge for POSTs to api.codeagent-mobile.com, returning HTML
+// instead of JSON. The local-only probes above already validate the
+// CLI binary; the backend probes are a "did we ship a protocol break?"
+// signal, downgraded to advisory so a Vercel-edge hiccup or a runner
+// IP block doesn't gate the entire matrix.
+//
+// To restore gating set the GitHub Actions secret
+// `CODEAM_VERCEL_BYPASS` and pass it through the workflow env.
 if (process.env.SMOKE_SKIP_BACKEND === '1') {
   console.log('\n[smoke] backend checks: skipped (SMOKE_SKIP_BACKEND=1)');
 } else {
-  console.log('\n[smoke] backend checks:');
+  console.log('\n[smoke] backend checks (advisory — failures do not gate CI):');
+  advisoryMode = true;
 
   // 1. Pair dry-run — POST /api/pairing/code, validate response shape.
   checkExitZeroAndStdout(
@@ -159,12 +183,18 @@ if (process.env.SMOKE_SKIP_BACKEND === '1') {
   await probeUrl(`GET ${API_BASE}/api/health`, `${API_BASE}/api/health`, {
     acceptStatuses: [200, 201, 204, 301, 302, 401, 403, 404],
   });
+  advisoryMode = false;
 }
 
 // ─── Summary ─────────────────────────────────────────────────────────
 console.log('');
 if (failures > 0) {
   console.error(`[smoke] FAILED — ${passes} passed, ${failures} failed.`);
+  if (advisoryFailures > 0) {
+    console.error(`         (${advisoryFailures} advisory backend probe(s) also failed)`);
+  }
   process.exit(1);
 }
-console.log(`[smoke] OK — ${passes} checks passed.`);
+const advisoryNote =
+  advisoryFailures > 0 ? ` (${advisoryFailures} advisory backend probe(s) failed)` : '';
+console.log(`[smoke] OK — ${passes} checks passed.${advisoryNote}`);
