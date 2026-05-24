@@ -72,13 +72,44 @@ export class SettingsService {
     return this.getConfig<number>('heartbeatIntervalMs', 30000);
   }
 
+  /**
+   * Returns a pluginId distinct per (installation + first-workspace).
+   * Two VS Code windows on different projects get distinct ids so the
+   * backend's SSE dispatch routes each command to the right window.
+   *
+   * Migration: the v1 layout used a single `pluginId` globalState
+   * entry shared across every window. On first call we adopt that
+   * value as the current workspace's id (preserves existing pairings)
+   * + leave the legacy entry in place for any caller that still
+   * reads it directly. Subsequent workspaces generate fresh ids.
+   */
   ensurePluginId(): string {
-    let pluginId = this.context.globalState.get<string>('pluginId');
-    if (!pluginId) {
-      pluginId = generateUUID();
+    const key = this.workspaceKey();
+    const map = this.context.globalState.get<Record<string, string>>('pluginIdsByWorkspace') ?? {};
+    const cached = map[key];
+    if (cached) return cached;
+    const legacy = this.context.globalState.get<string>('pluginId');
+    const pluginId = legacy ?? generateUUID();
+    map[key] = pluginId;
+    this.context.globalState.update('pluginIdsByWorkspace', map);
+    if (!legacy) {
+      // First-time install: also seed the legacy slot so any future
+      // call before the workspace map is read still returns the same id.
       this.context.globalState.update('pluginId', pluginId);
     }
     return pluginId;
+  }
+
+  /**
+   * Stable per-workspace identifier. Hashes the first workspace
+   * folder's fsPath; when no workspace is open we fall back to a
+   * "no-workspace" bucket so the id is at least deterministic for
+   * panel-only-without-folder users.
+   */
+  private workspaceKey(): string {
+    const folder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+    if (!folder) return 'no-workspace';
+    return crypto.createHash('sha256').update(folder).digest('hex').slice(0, 16);
   }
 
   /**

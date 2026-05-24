@@ -27,8 +27,11 @@ export class AgentOutputMonitor {
   // on every mutating request. Blocks drive-by sites from POSTing to
   // 127.0.0.1:47832 — they cannot read the token cross-origin.
   private readonly serverToken: string = crypto.randomBytes(32).toString('base64url');
+  // Actual bound port, populated when `listen(0)` resolves. Each VS
+  // Code window picks its own free port so multiple windows on the
+  // same machine don't collide on 47832 (the old fixed port).
+  private capturePort = 0;
 
-  private static readonly CAPTURE_PORT = 47832;
   private static readonly POLL_INTERVAL_MS = 2500;
   private static readonly STABLE_THRESHOLD = 3;
   private static readonly MAX_EMPTY_POLLS = 30;
@@ -228,15 +231,17 @@ export class AgentOutputMonitor {
       });
     });
     this.captureServer.on('error', (e: NodeJS.ErrnoException) => {
+      // EADDRINUSE shouldn't happen anymore (listen(0) picks a free
+      // port) but we keep the handler for defence — log + retry.
+      this.log.appendLine(`[server] Error: ${e.message}`);
       if (e.code === 'EADDRINUSE') {
-        this.log.appendLine(`[server] Port ${AgentOutputMonitor.CAPTURE_PORT} busy, retry in 3s`);
         setTimeout(() => this.startCaptureServer(), 3000);
-      } else {
-        this.log.appendLine(`[server] Error: ${e.message}`);
       }
     });
-    this.captureServer.listen(AgentOutputMonitor.CAPTURE_PORT, '127.0.0.1', () => {
-      this.log.appendLine(`[server] Listening on port ${AgentOutputMonitor.CAPTURE_PORT}`);
+    this.captureServer.listen(0, '127.0.0.1', () => {
+      const addr = this.captureServer?.address();
+      this.capturePort = typeof addr === 'object' && addr ? addr.port : 0;
+      this.log.appendLine(`[server] Listening on port ${this.capturePort}`);
     });
   }
 
@@ -266,7 +271,7 @@ export class AgentOutputMonitor {
   // ── Observer Script (runs inside IDE renderer via workbench.html) ──
 
   private buildObserverScript(): string {
-    const port = AgentOutputMonitor.CAPTURE_PORT;
+    const port = this.capturePort;
     const version = '5.0.0';
     // Embed the bearer token in the same-origin script so only the
     // workbench renderer can talk to the capture server. Drive-by
