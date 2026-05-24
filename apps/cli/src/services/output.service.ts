@@ -97,6 +97,17 @@ export class OutputService {
       summarizeInstruction: () => ({ ptyInput: '' }),
       filterTuiOutput: (lines) => lines,
       detectInteractivePrompt: () => null,
+      credentialLocator: () => ({
+        publicId: 'claude_code',
+        vendor: 'Anthropic',
+        hint: '',
+        watchPaths: () => [],
+        extract: async () => null,
+      }),
+      loginLauncher: () => ({
+        ensureInstalled: async () => false,
+        launch: () => { throw new Error('login launcher not wired in test stub'); },
+      }),
     };
   }
 

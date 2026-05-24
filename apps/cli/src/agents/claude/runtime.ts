@@ -8,6 +8,7 @@ import {
 } from '@codeagent/shared';
 import { buildClaudeLaunch } from './resolver';
 import { ensureClaudeInstalled } from './installer';
+import { claudeCredentialLocator, claudeLoginLauncher } from './link';
 import { fetchClaudeQuota } from './quota';
 import * as history from './history';
 import {
@@ -115,5 +116,13 @@ export class ClaudeRuntimeStrategy implements RuntimeStrategy {
     // list-style `  ❯ label` selector used by /mcp / /model. Mirrors
     // the legacy call order in OutputService.tick().
     return detectSelector(lines) ?? detectListSelector(lines);
+  }
+
+  credentialLocator() {
+    return claudeCredentialLocator();
+  }
+
+  loginLauncher() {
+    return claudeLoginLauncher();
   }
 }

@@ -5,6 +5,7 @@ import type { OsStrategy } from '../../os';
 import * as history from './history';
 import { filterCodexChrome, parseCodexChrome, detectCodexSelector } from './parsing';
 import { renderCodexBuffer } from './renderer';
+import { codexCredentialLocator, codexLoginLauncher } from './link';
 import type { ChangeModelInstruction, RuntimeStrategy } from '../strategy';
 
 const CODEX_CONTEXT_WINDOW = 272_000;
@@ -134,6 +135,14 @@ export class CodexRuntimeStrategy implements RuntimeStrategy {
 
   detectInteractivePrompt(lines: string[]): SelectPrompt | null {
     return detectCodexSelector(lines);
+  }
+
+  credentialLocator() {
+    return codexCredentialLocator();
+  }
+
+  loginLauncher() {
+    return codexLoginLauncher();
   }
 }
 

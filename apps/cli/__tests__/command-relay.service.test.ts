@@ -7,6 +7,12 @@ vi.mock('../src/services/pairing.service', () => ({
 }));
 
 import { CommandRelayService } from '../src/services/command-relay.service';
+import { AGENT_REGISTRY } from '@codeagent/shared';
+
+// Tests historically constructed CommandRelayService with 2 args; as
+// of #56 the agentMeta is required. Reuse the canonical Claude entry
+// from the shared registry so we're not redefining the metadata shape.
+const META = AGENT_REGISTRY.claude;
 
 describe('CommandRelayService', () => {
   const realRandom = Math.random;
@@ -19,7 +25,7 @@ describe('CommandRelayService', () => {
 
   it('calls heartbeat on start', async () => {
     const onCmd = vi.fn();
-    const relay = new CommandRelayService('plugin-1', onCmd);
+    const relay = new CommandRelayService('plugin-1', onCmd, META);
     relay.start();
     await vi.advanceTimersByTimeAsync(10);
     expect(pairing._postJson).toHaveBeenCalledWith(
@@ -37,7 +43,7 @@ describe('CommandRelayService', () => {
     // active (this test runs with NODE_ENV=test so SSE is
     // disabled), it just paces itself when nothing is delivered.
     const onCmd = vi.fn();
-    const relay = new CommandRelayService('plugin-1', onCmd);
+    const relay = new CommandRelayService('plugin-1', onCmd, META);
     relay.start();
     await vi.advanceTimersByTimeAsync(10_100);
     expect(pairing._getJson).toHaveBeenCalledWith(
@@ -56,7 +62,7 @@ describe('CommandRelayService', () => {
       data: [{ id: 'cmd1', sessionId: 's1', type: 'start_task', payload: { prompt: 'hi' } }],
     });
     const onCmd = vi.fn();
-    const relay = new CommandRelayService('plugin-1', onCmd);
+    const relay = new CommandRelayService('plugin-1', onCmd, META);
     relay.start();
     await vi.advanceTimersByTimeAsync(2100);
     expect(onCmd).toHaveBeenCalledWith(
@@ -66,7 +72,7 @@ describe('CommandRelayService', () => {
   });
 
   it('sendResult posts to /api/commands/result', async () => {
-    const relay = new CommandRelayService('plugin-1', vi.fn());
+    const relay = new CommandRelayService('plugin-1', vi.fn(), META);
     await relay.sendResult('cmd1', 'completed', { output: 'done' });
     expect(pairing._postJson).toHaveBeenCalledWith(
       expect.stringContaining('/api/commands/result'),
@@ -75,7 +81,7 @@ describe('CommandRelayService', () => {
   });
 
   it('stop sends offline heartbeat', async () => {
-    const relay = new CommandRelayService('plugin-1', vi.fn());
+    const relay = new CommandRelayService('plugin-1', vi.fn(), META);
     relay.start();
     relay.stop();
     await vi.advanceTimersByTimeAsync(10);

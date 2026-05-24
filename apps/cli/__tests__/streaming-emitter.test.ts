@@ -56,6 +56,17 @@ function makeRuntime(): RuntimeStrategy {
     filterTuiOutput: (lines) => filterChrome(lines),
     detectInteractivePrompt: (lines): SelectPrompt | null =>
       detectSelector(lines) ?? detectListSelector(lines),
+    credentialLocator: () => ({
+      publicId: 'claude_code',
+      vendor: 'Anthropic',
+      hint: '',
+      watchPaths: () => [],
+      extract: async () => null,
+    }),
+    loginLauncher: () => ({
+      ensureInstalled: async () => true,
+      launch: () => { throw new Error('not used in this spec'); },
+    }),
   };
 }
 

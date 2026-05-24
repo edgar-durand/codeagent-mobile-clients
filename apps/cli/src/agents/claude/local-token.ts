@@ -28,15 +28,11 @@ import { promisify } from 'node:util';
 
 const execFileP = promisify(execFile);
 
-export interface LocalAgentToken {
-  /** `'oauth'` for `claude login` output, `'api_key'` only when the
-   *  user explicitly pasted one (see `codeam link claude --api-key`). */
-  method: 'oauth' | 'api_key';
-  /** Opaque token string to seal in the vault. */
-  credential: string;
-  /** Where we found it — drives the user-facing success message. */
-  source: 'flat-file' | 'macos-keychain' | 'manual';
-}
+// Hoisted to `agents/strategy.ts` so both per-agent link strategies
+// and the link command can import a single canonical type. Re-exported
+// here for callers that grew up on the old import path.
+export type { LocalAgentToken } from '../strategy';
+import type { LocalAgentToken } from '../strategy';
 
 /**
  * Every Keychain service name we've observed for the Claude Code OAuth

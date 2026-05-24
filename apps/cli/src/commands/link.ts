@@ -47,12 +47,13 @@
  *                                somewhere our probes don't know yet.
  */
 
-import { spawn, type ChildProcess } from 'node:child_process';
+import { type ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import chokidar from 'chokidar';
 import pc from 'picocolors';
+import { AGENT_REGISTRY, isKnownAgentId, type AgentId } from '@codeagent/shared';
 import { p } from '../ui/prompts';
 import {
   showIntro,
@@ -69,113 +70,70 @@ import {
   type PairedUserInfo,
 } from '../services/pairing.service';
 import { addSession, loadCliConfig, saveCliConfig } from '../config';
-import { ensureClaudeInstalled } from '../agents/claude/installer';
-import {
-  extractLocalClaudeToken,
-  claudeCredentialsPaths,
-} from '../agents/claude/local-token';
-import {
-  extractLocalCodexToken,
-  codexCredentialsPaths,
-} from '../agents/codex/local-token';
-import type { LocalAgentToken } from '../agents/claude/local-token';
+import { createRuntimeStrategy } from '../agents/registry';
+import type {
+  AgentCredentialLocator,
+  AgentLoginLauncher,
+  LocalAgentToken,
+  RuntimeStrategy,
+} from '../agents/strategy';
 
-type LinkAgent = 'claude' | 'codex';
-
-interface LinkAgentMeta {
-  internalId: LinkAgent;
-  publicId: 'claude_code' | 'codex';
-  binary: 'claude' | 'codex';
+/**
+ * Resolved per-agent link surface. Bundles the strategy itself + the
+ * (locator, launcher) it produces so we don't call `runtime.credentialLocator()`
+ * multiple times (the implementations are factory functions; calling
+ * twice produces two distinct objects whose chokidar watchers
+ * wouldn't share state).
+ */
+interface LinkContext {
+  runtime: RuntimeStrategy;
+  locator: AgentCredentialLocator;
+  launcher: AgentLoginLauncher;
   displayName: string;
-  vendor: string;
-  credentialsHint: string;
-  /** Paths chokidar watches for `add` / `change` events when the
-   *  agent's auth flow lands a fresh credentials file. */
-  watchPaths: () => string[];
-  /** Read the local token from any known location — file OR macOS
-   *  Keychain. Returns null if no credential exists yet. */
-  extract: () => Promise<LocalAgentToken | null>;
-  /** Ensure the agent's own CLI binary is on PATH. Auto-installs if
-   *  missing (no user prompt — friction is the point we're avoiding). */
-  ensureInstalled: () => Promise<boolean>;
-  /** Launch the agent's interactive login flow as a foreground
-   *  subprocess. Returns the spawned process so the caller can kill
-   *  it once the watcher resolves a credential. */
-  launchLogin: () => ChildProcess;
+  binary: string;
 }
 
-const AGENT_META: Record<LinkAgent, LinkAgentMeta> = {
-  claude: {
-    internalId: 'claude',
-    publicId: 'claude_code',
-    binary: 'claude',
-    displayName: 'Claude Code',
-    vendor: 'Anthropic',
-    credentialsHint: '~/.claude/.credentials.json or the macOS Keychain',
-    watchPaths: claudeCredentialsPaths,
-    extract: extractLocalClaudeToken,
-    ensureInstalled: ensureClaudeInstalled,
-    launchLogin: () => {
-      // Open the Claude REPL and pipe `/login` to its stdin so the
-      // sign-in menu appears without the user having to type the
-      // slash command themselves. `stdio: ['pipe', 'inherit',
-      // 'inherit']` lets the user see Claude's UI + complete the
-      // OAuth in their browser; we capture the token via the file
-      // watcher running in parallel.
-      const child = spawn('claude', [], { stdio: ['pipe', 'inherit', 'inherit'] });
-      child.stdin?.write('/login\n');
-      // Intentionally NOT closing stdin — the REPL stays interactive
-      // so the user can finish any vendor prompts (paste-back code,
-      // menu navigation) without their input being dropped.
-      return child;
-    },
-  },
-  codex: {
-    internalId: 'codex',
-    publicId: 'codex',
-    binary: 'codex',
-    displayName: 'Codex',
-    vendor: 'OpenAI',
-    credentialsHint: '~/.codex/auth.json',
-    watchPaths: codexCredentialsPaths,
-    extract: extractLocalCodexToken,
-    ensureInstalled: async () => {
-      // No bundled installer for codex — surface a clear error when
-      // the binary is missing instead of silently failing later.
-      const { findInPath } = await import('../services/pty/types');
-      if (findInPath('codex')) return true;
-      showError(
-        'codex binary not found on PATH. Install it first (https://github.com/openai/codex-cli) then re-run `codeam link codex`.',
-      );
-      return false;
-    },
-    launchLogin: () => {
-      // Codex has a proper non-REPL `codex login` subcommand that
-      // opens a browser, so we can spawn it directly without piping.
-      return spawn('codex', ['login'], { stdio: 'inherit' });
-    },
-  },
-};
+function buildLinkContext(agentId: AgentId): LinkContext {
+  const runtime = createRuntimeStrategy(agentId);
+  return {
+    runtime,
+    locator: runtime.credentialLocator(),
+    launcher: runtime.loginLauncher(),
+    displayName: runtime.meta.displayName,
+    binary: runtime.meta.binaryName,
+  };
+}
 
 interface ParsedArgs {
-  agent: LinkAgent;
+  agent: AgentId;
   reuseExisting: boolean;
   apiKey: string | null;
   tokenFile: string | null;
   dryRun: boolean;
 }
 
+function enabledLinkableAgents(): AgentId[] {
+  return Object.values(AGENT_REGISTRY)
+    .filter((m) => m.enabled)
+    .map((m) => m.id);
+}
+
 function parseLinkArgs(args: string[]): ParsedArgs {
   const positional = args.find((a) => !a.startsWith('--'));
+  const valid = enabledLinkableAgents();
   if (!positional) {
     throw new Error(
-      `Usage: codeam link <agent>\n         agent: ${Object.keys(AGENT_META).join(' | ')}`,
+      `Usage: codeam link <agent>\n         agent: ${valid.join(' | ')}`,
     );
   }
+  // Backend-facing publicId aliases — `claude_code` (snake_case) is
+  // the wire shape used by /api/plugin/agents/<publicId>/link, but
+  // users typing `codeam link claude_code` should still work. Normalize
+  // to the internal AgentId.
   const normalised = positional === 'claude_code' ? 'claude' : positional;
-  if (normalised !== 'claude' && normalised !== 'codex') {
+  if (!isKnownAgentId(normalised) || !AGENT_REGISTRY[normalised].enabled) {
     throw new Error(
-      `Unknown agent "${positional}". Valid: ${Object.keys(AGENT_META).join(', ')}`,
+      `Unknown or unsupported agent "${positional}". Valid: ${valid.join(', ')}`,
     );
   }
   const reuseExisting = args.includes('--reuse-existing');
@@ -189,11 +147,11 @@ function parseLinkArgs(args: string[]): ParsedArgs {
 
 export async function link(args: string[] = []): Promise<void> {
   const parsed = parseLinkArgs(args);
-  const meta = AGENT_META[parsed.agent];
+  const ctx = buildLinkContext(parsed.agent);
 
   showIntro();
   console.log(
-    pc.bold(`  Link ${meta.displayName}`) + pc.dim(`  ·  ${meta.vendor}`),
+    pc.bold(`  Link ${ctx.displayName}`) + pc.dim(`  ·  ${ctx.locator.vendor}`),
   );
   console.log('');
 
@@ -205,7 +163,7 @@ export async function link(args: string[] = []): Promise<void> {
   // class of bug as `pair --dry-run` without spawning the agent's
   // login flow or needing a paired session.
   if (parsed.dryRun) {
-    await linkDryRunPreflight(meta);
+    await linkDryRunPreflight(ctx);
     return;
   }
 
@@ -272,13 +230,13 @@ export async function link(args: string[] = []): Promise<void> {
     plan: paired.plan,
     pairedAt: Date.now(),
     pluginAuthToken: paired.pluginAuthToken,
-    agent: meta.internalId,
+    agent: ctx.runtime.id,
   });
-  saveCliConfig({ ...loadCliConfig(), preferredAgent: meta.internalId });
+  saveCliConfig({ ...loadCliConfig(), preferredAgent: ctx.runtime.id });
 
   // ─── 2. API-key escape hatch ────────────────────────────────────
   if (parsed.apiKey) {
-    await uploadAndSucceed(meta, paired, pluginId, {
+    await uploadAndSucceed(ctx, paired, pluginId, {
       method: 'api_key',
       credential: parsed.apiKey.trim(),
       source: 'manual',
@@ -293,7 +251,7 @@ export async function link(args: string[] = []): Promise<void> {
       showError(`--token-file ${parsed.tokenFile} is empty.`);
       process.exit(1);
     }
-    await uploadAndSucceed(meta, paired, pluginId, {
+    await uploadAndSucceed(ctx, paired, pluginId, {
       method: 'oauth',
       credential,
       source: 'manual',
@@ -303,39 +261,39 @@ export async function link(args: string[] = []): Promise<void> {
 
   // ─── 4. Ensure binary installed (no prompt) ─────────────────────
   const installSpin = p.spinner();
-  installSpin.start(`Checking that ${meta.binary} is installed...`);
-  const installed = await meta.ensureInstalled();
+  installSpin.start(`Checking that ${ctx.binary} is installed...`);
+  const installed = await ctx.launcher.ensureInstalled();
   if (!installed) {
     installSpin.stop('Failed');
-    showError(`Could not install ${meta.displayName}. Install it manually then re-run.`);
+    showError(`Could not install ${ctx.displayName}. Install it manually then re-run.`);
     process.exit(1);
   }
-  installSpin.stop(`${meta.displayName} is installed`);
+  installSpin.stop(`${ctx.displayName} is installed`);
 
   // ─── 5. Probe existing credentials ──────────────────────────────
-  const existing = await meta.extract();
+  const existing = await ctx.locator.extract();
   if (existing) {
-    showInfo(`Found existing ${meta.displayName} credentials at ${pc.bold(existing.source)}.`);
-    await uploadAndSucceed(meta, paired, pluginId, existing);
+    showInfo(`Found existing ${ctx.displayName} credentials at ${pc.bold(existing.source)}.`);
+    await uploadAndSucceed(ctx, paired, pluginId, existing);
     return;
   }
 
   if (parsed.reuseExisting) {
     showError(
-      `--reuse-existing set, but no local ${meta.displayName} credentials were found at ${meta.credentialsHint}.`,
+      `--reuse-existing set, but no local ${ctx.displayName} credentials were found at ${ctx.locator.hint}.`,
     );
     process.exit(1);
   }
 
   // ─── 6. Launch login + watch for fresh credentials ──────────────
   showInfo(
-    `No local ${meta.displayName} credentials found. Launching the sign-in — complete it in your browser, the CLI will detect the new token and finish automatically.`,
+    `No local ${ctx.displayName} credentials found. Launching the sign-in — complete it in your browser, the CLI will detect the new token and finish automatically.`,
   );
   console.log('');
 
-  const captured = await captureFreshCredentials(meta);
+  const captured = await captureFreshCredentials(ctx);
   console.log('');
-  await uploadAndSucceed(meta, paired, pluginId, captured);
+  await uploadAndSucceed(ctx, paired, pluginId, captured);
 }
 
 /**
@@ -345,9 +303,9 @@ export async function link(args: string[] = []): Promise<void> {
  *
  * Cleans up the subprocess + watcher in both success and failure.
  */
-async function captureFreshCredentials(meta: LinkAgentMeta): Promise<LocalAgentToken> {
-  const isWin = process.platform === 'win32';
-  const watcher = chokidar.watch(meta.watchPaths(), {
+async function captureFreshCredentials(ctx: LinkContext): Promise<LocalAgentToken> {
+  const isWin = ctx.runtime.os.id === 'win32';
+  const watcher = chokidar.watch(ctx.locator.watchPaths(), {
     persistent: true,
     ignoreInitial: false,
     awaitWriteFinish: { stabilityThreshold: 500, pollInterval: 100 },
@@ -386,7 +344,7 @@ async function captureFreshCredentials(meta: LinkAgentMeta): Promise<LocalAgentT
       let settled = false;
       const tryExtract = async (): Promise<void> => {
         if (settled) return;
-        const t = await meta.extract();
+        const t = await ctx.locator.extract();
         if (t && !settled) {
           settled = true;
           resolve(t);
@@ -414,12 +372,12 @@ async function captureFreshCredentials(meta: LinkAgentMeta): Promise<LocalAgentT
       setTimeout(() => {
         if (settled) return;
         settled = true;
-        reject(new Error(`Timed out waiting for ${meta.displayName} sign-in (5 minutes).`));
+        reject(new Error(`Timed out waiting for ${ctx.displayName} sign-in (5 minutes).`));
       }, 5 * 60_000);
 
       // Spawn the agent login flow last so any synchronous output
       // from the agent is bracketed by our watcher.
-      child = meta.launchLogin();
+      child = ctx.launcher.launch();
       child.on('exit', () => {
         // Give the disk one last chance — the agent may have written
         // the token just before exiting. If still nothing after the
@@ -429,7 +387,7 @@ async function captureFreshCredentials(meta: LinkAgentMeta): Promise<LocalAgentT
             settled = true;
             reject(
               new Error(
-                `${meta.binary} exited but no credentials were written at ${meta.credentialsHint}.`,
+                `${ctx.binary} exited but no credentials were written at ${ctx.locator.hint}.`,
               ),
             );
           }
@@ -450,7 +408,7 @@ async function captureFreshCredentials(meta: LinkAgentMeta): Promise<LocalAgentT
  * token-file / file-watcher all funnel through the same upload code.
  */
 async function uploadAndSucceed(
-  meta: LinkAgentMeta,
+  ctx: LinkContext,
   paired: PairedUserInfo,
   pluginId: string,
   token: LocalAgentToken,
@@ -463,7 +421,7 @@ async function uploadAndSucceed(
   const uploadSpin = p.spinner();
   uploadSpin.start('Sealing credential in your vault...');
   const result = await postLinkCredential({
-    agentId: meta.publicId,
+    agentId: ctx.locator.publicId,
     sessionId: paired.sessionId,
     pluginId,
     pluginAuthToken: paired.pluginAuthToken,
@@ -476,7 +434,7 @@ async function uploadAndSucceed(
       showError('Pair token rejected by the backend (401). Re-run `codeam link`.');
     } else if (result.status === 404) {
       showError(
-        `${meta.displayName} link endpoint not available on this backend (404). ` +
+        `${ctx.displayName} link endpoint not available on this backend (404). ` +
           'The api-v2 deployment may not yet include the route.',
       );
     } else {
@@ -487,9 +445,9 @@ async function uploadAndSucceed(
   uploadSpin.stop('Linked');
 
   console.log('');
-  showSuccess(`${meta.displayName} is now linked to ${paired.userEmail || paired.userName}.`);
+  showSuccess(`${ctx.displayName} is now linked to ${paired.userEmail || paired.userName}.`);
   showInfo(
-    `Your codespaces and @codeagent mentions can now use ${meta.displayName} without you signing in again.`,
+    `Your codespaces and @codeagent mentions can now use ${ctx.displayName} without you signing in again.`,
   );
   console.log('');
 }
@@ -511,11 +469,12 @@ async function uploadAndSucceed(
  * mis-configured to NOT auth-check would still fail downstream
  * validation rather than create a database record.
  */
-async function linkDryRunPreflight(meta: LinkAgentMeta): Promise<void> {
+async function linkDryRunPreflight(ctx: LinkContext): Promise<void> {
+  const publicId = ctx.locator.publicId;
   const spin = p.spinner();
-  spin.start(`Probing ${meta.publicId} link endpoint...`);
+  spin.start(`Probing ${publicId} link endpoint...`);
   const result = await postLinkCredential({
-    agentId: meta.publicId,
+    agentId: publicId,
     sessionId: 'dryrun-session',
     pluginId: 'dryrun-plugin',
     pluginAuthToken: 'dryrun-token',
@@ -532,13 +491,13 @@ async function linkDryRunPreflight(meta: LinkAgentMeta): Promise<void> {
   if (result.status === 401) {
     spin.stop('Endpoint OK');
     showSuccess(
-      `Link dry-run OK — /api/plugin/agents/${meta.publicId}/link reachable and auth-gated (401 as expected).`,
+      `Link dry-run OK — /api/plugin/agents/${publicId}/link reachable and auth-gated (401 as expected).`,
     );
     process.exit(0);
   }
   spin.stop('Failed');
   showError(
-    `Link dry-run: unexpected response from /api/plugin/agents/${meta.publicId}/link (status=${result.status}, message=${result.message}). Expected 401.`,
+    `Link dry-run: unexpected response from /api/plugin/agents/${publicId}/link (status=${result.status}, message=${result.message}). Expected 401.`,
   );
   process.exit(1);
 }

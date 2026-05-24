@@ -59,11 +59,12 @@ export class CommandRelayService {
      * `/api/plugin/agents` so the mobile and web headers can render
      * the correct name + icon for the session.
      *
-     * Optional only so legacy callers (tests, older entry-points)
-     * still compile — they fall back to the Claude defaults that
-     * shipped before multi-agent support.
+     * Required as of #56 — the historical Claude fallback was dead
+     * code (start.ts has always passed an explicit meta since #50)
+     * and it silently mis-labelled non-Claude sessions when tests
+     * forgot to pass one.
      */
-    private readonly agentMeta?: AgentMetadata,
+    private readonly agentMeta: AgentMetadata,
   ) {}
 
   start(): void {
@@ -271,19 +272,20 @@ export class CommandRelayService {
   }
 
   private reportAgents(): void {
-    // Use the agent metadata the CLI was actually launched with so
-    // the mobile / web header shows the correct name + icon. Fall
-    // back to Claude only if the caller didn't pass metadata, which
-    // is the historical behavior tests rely on.
-    const id = this.agentMeta?.id ?? 'claude';
-    const name = this.agentMeta?.displayName ?? 'Claude Code';
     // The mobile + landing AgentIcon components key their per-agent
     // logo map by the agent id, so send the id as the icon key. The
     // emoji that used to ship here was only ever rendered by the
     // landing fallback path and never surfaced to the user.
     _postJson(`${API_BASE}/api/plugin/agents`, {
       pluginId: this.pluginId,
-      agents: [{ id, name, icon: id, installed: true }],
+      agents: [
+        {
+          id: this.agentMeta.id,
+          name: this.agentMeta.displayName,
+          icon: this.agentMeta.id,
+          installed: true,
+        },
+      ],
     })
       .then(() => { this.agentsRegistered = true; })
       .catch(() => { /* retry via agentsTimer */ });

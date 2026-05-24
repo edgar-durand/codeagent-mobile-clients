@@ -1,3 +1,4 @@
+import type { ChildProcess } from 'node:child_process';
 import type { AgentId, AgentMetadata, AgentModel, ChromeStep, NormalizedMessage, SelectPrompt } from '@codeagent/shared';
 import type { OsStrategy } from '../os';
 import type { CloudProvider } from '../services/providers/types';
@@ -6,6 +7,52 @@ export interface ChangeModelInstruction {
   type: 'pty' | 'restart';
   ptyInput?: string;
   restartArgs?: string[];
+}
+
+/**
+ * Local credential blob captured by `codeam link <agent>` and shipped
+ * to the backend vault. Hoisted here from `agents/claude/local-token.ts`
+ * so both per-agent link strategies + the link command share one type.
+ */
+export interface LocalAgentToken {
+  /** OAuth bundle from `<agent> login`, or a raw API key when the
+   *  user explicitly passed --api-key. */
+  method: 'oauth' | 'api_key';
+  /** Opaque token string — the backend stores it verbatim. */
+  credential: string;
+  /** Where we found it — drives the user-facing success message. */
+  source: 'flat-file' | 'macos-keychain' | 'manual';
+}
+
+/**
+ * Per-agent credential probe used by `codeam link <agent>`. The link
+ * command watches `watchPaths()` for fresh writes + polls
+ * `extract()` whenever the agent's sign-in subprocess writes
+ * something (file or macOS Keychain). `publicId` is the backend-
+ * facing identifier for `/api/plugin/agents/<publicId>/link` — it
+ * differs from the internal `AgentId` because the backend uses
+ * `claude_code` (snake_case) for legacy compatibility.
+ */
+export interface AgentCredentialLocator {
+  readonly publicId: string;
+  readonly vendor: string;
+  readonly hint: string;
+  watchPaths(): string[];
+  extract(): Promise<LocalAgentToken | null>;
+}
+
+/**
+ * Per-agent sign-in flow launcher. `ensureInstalled` guarantees the
+ * agent's own binary is on PATH before `launch()` (auto-installing
+ * when the agent ships an installer; surfacing a clear error
+ * otherwise). `launch()` spawns the foreground subprocess that the
+ * user completes in their browser — the link command runs it in
+ * parallel with chokidar+Keychain probes and kills it as soon as
+ * a credential is captured.
+ */
+export interface AgentLoginLauncher {
+  ensureInstalled(): Promise<boolean>;
+  launch(): ChildProcess;
 }
 
 export interface RuntimeStrategy {
@@ -86,6 +133,19 @@ export interface RuntimeStrategy {
    * the agent is showing a multi-choice menu, null otherwise.
    */
   detectInteractivePrompt(lines: string[]): SelectPrompt | null;
+
+  /**
+   * Credential locator for `codeam link <agent>`. Returns the
+   * per-agent probe (file watch paths + extract()). Tests can
+   * subclass and override.
+   */
+  credentialLocator(): AgentCredentialLocator;
+
+  /**
+   * Sign-in subprocess launcher for `codeam link <agent>`. Returns
+   * the per-agent ensureInstalled() + launch() pair.
+   */
+  loginLauncher(): AgentLoginLauncher;
 }
 
 export interface LocalCredentialSource {

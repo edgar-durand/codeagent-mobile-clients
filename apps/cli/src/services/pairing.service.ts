@@ -130,7 +130,13 @@ export const _transport = {
  * the body's `sessionId+pluginId` (so we always send both).
  */
 export async function postLinkCredential(input: {
-  agentId: 'claude_code' | 'codex';
+  /**
+   * Backend-facing publicId for the agent. Widened to `string` from
+   * the original `'claude_code' | 'codex'` union in #56 so any agent
+   * strategy can supply its own without editing this union. Validity
+   * is enforced by the backend (404 on unknown agentId).
+   */
+  agentId: string;
   sessionId: string;
   pluginId: string;
   pluginAuthToken: string;
