@@ -97,6 +97,16 @@ class CommandRelayService {
     // process — repeating it every poll would spam.
     @Volatile
     private var authFailureSurfaced: Boolean = false
+
+    // ─── Command-id dedup ────────────────────────────────────────────
+    // Both SSE reconnect and the polling fallback can re-deliver the
+    // same `commands` batch (the backend re-emits everything pending
+    // until acked), so we skip a second `onCommandReceived` for any id
+    // we've already seen in the past 5 minutes. Same dedup happens on
+    // the VS Code side (command-relay.service.ts).
+    private val recentCommandIds: MutableMap<String, Long> = mutableMapOf()
+    private val dedupLock = Any()
+    private val dedupTtlMs = 5L * 60_000L
     /**
      * Successive polls that returned no commands. Drives an idle
      * backoff so a plugin sitting on the polling fallback doesn't keep
@@ -380,11 +390,38 @@ class CommandRelayService {
                     status = obj.get("status").asString,
                     createdAt = obj.get("createdAt").asLong
                 )
+                if (!markDispatched(cmd.id)) {
+                    logger.debug("Skipping duplicate command: ${cmd.type} (${cmd.id})")
+                    continue
+                }
                 logger.info("Received command: ${cmd.type} (${cmd.id})")
                 listeners.forEach { it.onCommandReceived(cmd) }
             } catch (e: Exception) {
                 logger.debug("Failed to dispatch command: ${e.message}")
             }
+        }
+    }
+
+    /**
+     * Returns true the first time we see a command id, false on every
+     * subsequent re-delivery within dedupTtlMs. Prunes entries older
+     * than the TTL on each call so the map can't grow unbounded.
+     */
+    private fun markDispatched(id: String): Boolean {
+        if (id.isEmpty()) return true
+        synchronized(dedupLock) {
+            val now = System.currentTimeMillis()
+            val expiry = now - dedupTtlMs
+            if (recentCommandIds.size > 256) {
+                val iterator = recentCommandIds.entries.iterator()
+                while (iterator.hasNext()) {
+                    if (iterator.next().value < expiry) iterator.remove()
+                }
+            }
+            val prior = recentCommandIds[id]
+            if (prior != null && prior > expiry) return false
+            recentCommandIds[id] = now
+            return true
         }
     }
 
