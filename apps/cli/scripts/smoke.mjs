@@ -71,14 +71,20 @@ function runCli(argv, opts = {}) {
 
 function checkExitZeroAndStdout(label, argv, expectRe) {
   const r = runCli(argv);
-  const ok = r.status === 0 && expectRe.test(r.stdout ?? '');
+  // Banner / progress lines moved to stderr in v2.18.x (#67 "quick
+  // wins" bundle) so `--json` consumers get a parseable stdout. The
+  // smoke probes still want to assert "the user-visible success line
+  // showed up" — match against the concatenated output so the regex
+  // works whether the CLI line is on stdout or stderr.
+  const combined = `${r.stdout ?? ''}\n${r.stderr ?? ''}`;
+  const ok = r.status === 0 && expectRe.test(combined);
   if (ok) {
     logPass(`${label}  (cwd=${RUNNER_CWD})`);
     return r;
   }
   logFail(
     `${label}  (cwd=${RUNNER_CWD})`,
-    `exit=${r.status}\nexpected stdout match: ${expectRe}\nstdout: ${r.stdout?.slice(0, 600) ?? ''}\nstderr: ${r.stderr?.slice(0, 600) ?? ''}`,
+    `exit=${r.status}\nexpected match (stdout|stderr): ${expectRe}\nstdout: ${r.stdout?.slice(0, 600) ?? ''}\nstderr: ${r.stderr?.slice(0, 600) ?? ''}`,
   );
   return r;
 }
