@@ -45,7 +45,11 @@ describe('CursorRuntimeStrategy contract', () => {
     expect(loc.publicId).toBe('cursor');
     expect(loc.vendor).toBe('Cursor');
     expect(loc.hint).toBe('~/.cursor/auth.json');
-    expect(loc.watchPaths()[0].endsWith('.cursor/auth.json')).toBe(true);
+    // Normalize the OS separator before comparing — on Windows the
+    // joined path is `…\.cursor\auth.json`, on POSIX `…/.cursor/auth.json`.
+    // Both should end at the same logical segment.
+    const tail = loc.watchPaths()[0].replace(/\\/g, '/');
+    expect(tail.endsWith('.cursor/auth.json')).toBe(true);
   });
 
   it('prepareLaunch throws with install guidance when cursor-agent is missing', async () => {
