@@ -9,3 +9,15 @@ tsconfig.test.json
 esbuild.js
 dist-test/**
 **/*.map
+
+# Test infrastructure — bundled in the source tarball, never in the .vsix.
+__tests__/**
+vitest.config.ts
+vitest.config.mts
+
+# Windows PDB debug symbols that ride along with the node-pty prebuilds.
+# The .node binaries load from dist/prebuilds at runtime; the .pdb
+# sidecars are 5-6 MB each and only exist for native-debugger attaches
+# that no real user does in production. Drops the VSIX from ~14 MB to
+# ~3 MB.
+dist/prebuilds/**/*.pdb
