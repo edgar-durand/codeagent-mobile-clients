@@ -116,6 +116,15 @@ class CommandRelayService {
 
     fun getConnectionState(): ConnectionState = connectionState
 
+    /**
+     * Epoch-ms of the last successful transport response (SSE frame
+     * or polling 200). `null` when no transport has succeeded yet
+     * this session. Powers the tool window's FooterStatusStrip
+     * "Last sync: 3s ago" text — mirrors the VS Code plugin's
+     * `CommandRelayService.getLastSuccessfulSyncMs()`.
+     */
+    fun getLastSuccessfulSyncMs(): Long? = if (lastSuccessAt > 0L) lastSuccessAt else null
+
     fun onConnectionChange(listener: (ConnectionState) -> Unit) {
         connectionListeners.add(listener)
     }

@@ -369,6 +369,9 @@ export class ControllerPanelProvider implements vscode.WebviewViewProvider, Comm
       // succeeded for 60s). The webview renders the dot color and
       // label from this field.
       connectionState: relay.isPolling ? relay.getConnectionState() : 'offline',
+      // Powers the footer status strip's "Last sync: 3s ago" text.
+      // Null when no transport has succeeded yet this session.
+      lastSyncMs: relay.getLastSuccessfulSyncMs(),
       sessionId: pairing.currentSessionId,
       user: pairing.pairedUser
         ? {
