@@ -121,19 +121,28 @@ describe('OsStrategy', () => {
       fs.rmSync(tmpDir, { recursive: true, force: true });
     });
 
-    it('POSIX: resolves an executable binary, returns null for non-exec files', () => {
-      const okPath = path.join(tmpDir, 'ok');
-      fs.writeFileSync(okPath, '#!/bin/sh\necho ok\n', { mode: 0o755 });
-      const notExecPath = path.join(tmpDir, 'noexec');
-      fs.writeFileSync(notExecPath, 'data', { mode: 0o644 });
+    it.skipIf(process.platform === 'win32')(
+      'POSIX: resolves an executable binary, returns null for non-exec files',
+      () => {
+        // Pure POSIX semantics: fs.access(_, X_OK) on Windows treats
+        // every readable file as executable (NTFS has no x bit), so
+        // the "no-exec file is null" half of the contract is
+        // unverifiable on Windows. The Win32-specific tests further
+        // down cover the cmd/bat/exe extension-based lookup that's
+        // the actual Windows behavior.
+        const okPath = path.join(tmpDir, 'ok');
+        fs.writeFileSync(okPath, '#!/bin/sh\necho ok\n', { mode: 0o755 });
+        const notExecPath = path.join(tmpDir, 'noexec');
+        fs.writeFileSync(notExecPath, 'data', { mode: 0o644 });
 
-      process.env.PATH = tmpDir;
-      const strat = new LinuxOsStrategy();
-      expect(strat.findInPath('ok')).toBe(okPath);
-      // 0o644 → X_OK fails → no match.
-      expect(strat.findInPath('noexec')).toBeNull();
-      expect(strat.findInPath('missing-binary')).toBeNull();
-    });
+        process.env.PATH = tmpDir;
+        const strat = new LinuxOsStrategy();
+        expect(strat.findInPath('ok')).toBe(okPath);
+        // 0o644 → X_OK fails → no match.
+        expect(strat.findInPath('noexec')).toBeNull();
+        expect(strat.findInPath('missing-binary')).toBeNull();
+      },
+    );
 
     it('POSIX: does NOT fan out PATHEXT — name is name', () => {
       // Drop a file named `foo.exe` in the tmp dir; POSIX should
@@ -374,12 +383,11 @@ describe('findInPath backward-compat re-export', () => {
       const originalPath = process.env.PATH;
       process.env.PATH = tmpDir;
       try {
-        if (process.platform === 'win32') {
-          // Win32 host: requires extension; skip the POSIX assertion.
-          expect(legacyFindInPath('shim')).toBeNull();
-        } else {
-          expect(legacyFindInPath('shim')).toBe(file);
-        }
+        // Win32OsStrategy.findInPath intentionally falls back to the
+        // bare name as the LAST PATHEXT candidate (see win32.ts:37) so
+        // a `claude` shim without an extension still resolves the way
+        // it would on POSIX. Both branches expect the same file path.
+        expect(legacyFindInPath('shim')).toBe(file);
       } finally {
         process.env.PATH = originalPath;
       }

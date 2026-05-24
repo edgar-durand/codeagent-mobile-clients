@@ -50,7 +50,11 @@ export interface ParsedReview {
  */
 export function parseReview(stdout: string): ParsedReview {
   const hunks: ParsedReview['hunks'] = [];
-  const lines = stdout.split('\n');
+  // Tolerate CRLF input — fixtures checked out on Windows via
+  // git's autocrlf get \r\n line endings, and CodeRabbit's stdout
+  // is itself unpredictable on Windows runners. The line-anchored
+  // regex doesn't match when a trailing \r leaks through.
+  const lines = stdout.split(/\r?\n/);
   for (const line of lines) {
     const m = line.match(HUNK_LINE_RE);
     if (!m) continue;

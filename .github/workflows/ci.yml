@@ -59,15 +59,7 @@ jobs:
         working-directory: apps/cli
         run: npm run typecheck
 
-      # Vitest is skipped on Windows: several legacy specs assert
-      # POSIX-only path semantics (`endsWith('.cursor/auth.json')`,
-      # XDG_STATE_HOME, chmod-based exec detection in os/strategy
-      # tests) and fail under PowerShell's `\` separator. The binary
-      # itself runs on Windows — that's what the smoke step below
-      # validates. A cross-platform sweep of the tests is tracked in
-      # the follow-up issue.
       - name: CLI tests (Vitest)
-        if: matrix.os != 'windows-latest'
         working-directory: apps/cli
         run: npm run test
 

@@ -29,7 +29,11 @@ describe('logger path resolution', () => {
   it('honours XDG_STATE_HOME on Linux', () => {
     Object.defineProperty(process, 'platform', { value: 'linux' });
     process.env.XDG_STATE_HOME = '/tmp/xdg-state';
-    expect(resolveLogDir()).toBe('/tmp/xdg-state/codeam');
+    // path.join uses the HOST's separator, so on a Windows runner the
+    // returned dir is `\tmp\xdg-state\codeam`. Normalize before asserting
+    // — the invariant is "XDG_STATE_HOME root + /codeam segment".
+    const dir = resolveLogDir().replace(/\\/g, '/');
+    expect(dir).toBe('/tmp/xdg-state/codeam');
   });
 
   it('honours %LOCALAPPDATA% on Windows', () => {

@@ -1,0 +1,16 @@
+# Force LF for test fixtures so the parser sees the same bytes on
+# Windows CI runners (default git autocrlf=true would otherwise
+# convert these to CRLF on checkout and trip the line-anchored
+# regexes in apps/cli/__tests__).
+apps/cli/__tests__/fixtures/** text eol=lf
+
+# Snapshot files captured by Vitest also need LF for assertion
+# equality to hold cross-platform.
+apps/cli/__tests__/**/*.snap text eol=lf
+
+# Shell scripts must stay LF — Bash chokes on CRLF.
+*.sh text eol=lf
+
+# Kotlin's javadoc-style comments are sensitive to CRLF (Dokka picks
+# up the stray \r as part of the comment body).
+*.kt text eol=lf

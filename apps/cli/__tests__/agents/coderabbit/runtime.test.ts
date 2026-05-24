@@ -20,7 +20,10 @@ describe('CoderabbitRuntimeStrategy contract', () => {
     expect(loc.publicId).toBe('coderabbit');
     expect(loc.vendor).toBe('CodeRabbit');
     expect(loc.hint).toBe('~/.coderabbit/auth.json');
-    expect(loc.watchPaths()[0].endsWith('.coderabbit/auth.json')).toBe(true);
+    // Normalize the OS separator so the suffix match works on Windows
+    // (path.join yields `…\.coderabbit\auth.json`).
+    const tail = loc.watchPaths()[0].replace(/\\/g, '/');
+    expect(tail.endsWith('.coderabbit/auth.json')).toBe(true);
   });
 
   it('prepareInvocation throws when the binary is not on PATH', async () => {
