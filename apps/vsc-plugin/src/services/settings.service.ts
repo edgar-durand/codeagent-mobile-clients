@@ -10,17 +10,24 @@ export interface RecentSession {
   connectedAt: number;
 }
 
+const AUTH_TOKEN_KEY = 'pluginAuthToken';
+
 export class SettingsService {
   private static instance: SettingsService;
   private context: vscode.ExtensionContext;
+  // In-memory cache loaded from SecretStorage during initialize so the
+  // synchronous getPluginAuthToken() can answer without awaiting.
+  private cachedAuthToken: string | null = null;
 
   private constructor(context: vscode.ExtensionContext) {
     this.context = context;
   }
 
-  static initialize(context: vscode.ExtensionContext): SettingsService {
-    SettingsService.instance = new SettingsService(context);
-    return SettingsService.instance;
+  static async initialize(context: vscode.ExtensionContext): Promise<SettingsService> {
+    const instance = new SettingsService(context);
+    SettingsService.instance = instance;
+    await instance.loadAuthTokenFromSecureStorage();
+    return instance;
   }
 
   static getInstance(): SettingsService {
@@ -28,6 +35,23 @@ export class SettingsService {
       throw new Error('SettingsService not initialized');
     }
     return SettingsService.instance;
+  }
+
+  /**
+   * Loads pluginAuthToken from SecretStorage and migrates any plaintext
+   * value still sitting in globalState (older installs). The cache
+   * field is the only sync read path for the rest of the codebase.
+   */
+  private async loadAuthTokenFromSecureStorage(): Promise<void> {
+    const legacy = this.context.globalState.get<string>(AUTH_TOKEN_KEY);
+    if (legacy) {
+      await this.context.secrets.store(AUTH_TOKEN_KEY, legacy);
+      await this.context.globalState.update(AUTH_TOKEN_KEY, undefined);
+      this.cachedAuthToken = legacy;
+      return;
+    }
+    const stored = await this.context.secrets.get(AUTH_TOKEN_KEY);
+    this.cachedAuthToken = stored ?? null;
   }
 
   get apiBaseUrl(): string {
@@ -61,17 +85,20 @@ export class SettingsService {
    * Per-pairing token returned by the backend at `/api/pairing/status`
    * once `paired: true`. Replayed as `X-Plugin-Auth-Token` on every
    * authed POST/GET so the server can authenticate this plugin
-   * after the legacy fallback expires (2026-05-25).
+   * after the legacy fallback expires (2026-05-25). Persisted in
+   * VS Code's SecretStorage (OS keychain on macOS/Win, libsecret on
+   * Linux); the in-memory cache lets callers stay synchronous.
    */
   getPluginAuthToken(): string | null {
-    return this.context.globalState.get<string>('pluginAuthToken') ?? null;
+    return this.cachedAuthToken;
   }
 
   setPluginAuthToken(token: string | null): void {
+    this.cachedAuthToken = token;
     if (token) {
-      this.context.globalState.update('pluginAuthToken', token);
+      void this.context.secrets.store(AUTH_TOKEN_KEY, token);
     } else {
-      this.context.globalState.update('pluginAuthToken', undefined);
+      void this.context.secrets.delete(AUTH_TOKEN_KEY);
     }
   }
 
