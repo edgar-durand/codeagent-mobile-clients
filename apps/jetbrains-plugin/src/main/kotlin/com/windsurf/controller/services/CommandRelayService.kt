@@ -98,6 +98,48 @@ class CommandRelayService {
     @Volatile
     private var authFailureSurfaced: Boolean = false
 
+    // ─── Connection state ────────────────────────────────────────────
+    // Three-state surface so the tool window can render
+    // ONLINE (green) / RECONNECTING (amber) / OFFLINE (red) instead of
+    // the binary "isPolling" flag that stays true through the entire
+    // SSE-drop → polling-fallback cycle. Listeners subscribe via
+    // onConnectionChange().
+    enum class ConnectionState { ONLINE, RECONNECTING, OFFLINE }
+
+    @Volatile
+    private var connectionState: ConnectionState = ConnectionState.OFFLINE
+    private val connectionListeners = CopyOnWriteArrayList<(ConnectionState) -> Unit>()
+    @Volatile
+    private var lastSuccessAt: Long = 0L
+
+    fun getConnectionState(): ConnectionState = connectionState
+
+    fun onConnectionChange(listener: (ConnectionState) -> Unit) {
+        connectionListeners.add(listener)
+    }
+
+    private fun setConnectionState(next: ConnectionState) {
+        if (connectionState == next) return
+        connectionState = next
+        logger.info("Connection state: $next")
+        for (l in connectionListeners) {
+            runCatching { l(next) }
+        }
+    }
+
+    private fun markTransportSuccess(state: ConnectionState) {
+        lastSuccessAt = System.currentTimeMillis()
+        setConnectionState(state)
+    }
+
+    private fun markTransportFailure() {
+        if (lastSuccessAt > 0 && System.currentTimeMillis() - lastSuccessAt > 60_000) {
+            setConnectionState(ConnectionState.OFFLINE)
+        } else if (connectionState == ConnectionState.ONLINE) {
+            setConnectionState(ConnectionState.RECONNECTING)
+        }
+    }
+
     // ─── Command-id dedup ────────────────────────────────────────────
     // Both SSE reconnect and the polling fallback can re-deliver the
     // same `commands` batch (the backend re-emits everything pending
@@ -204,10 +246,12 @@ class CommandRelayService {
                 }
                 if (response.code != 200) {
                     logger.debug("SSE status=${response.code}, will retry/fallback")
+                    setConnectionState(ConnectionState.RECONNECTING)
                     onSseFailure()
                     return
                 }
                 sseFailures = 0
+                markTransportSuccess(ConnectionState.ONLINE)
                 val source = response.body.source()
                 val buffer = StringBuilder()
                 while (isRunning && !Thread.currentThread().isInterrupted) {
@@ -233,7 +277,10 @@ class CommandRelayService {
             }
         } catch (e: Exception) {
             logger.debug("SSE connection error: ${e.message}")
-            if (isRunning) onSseFailure()
+            if (isRunning) {
+                markTransportFailure()
+                onSseFailure()
+            }
         }
     }
 
@@ -323,10 +370,14 @@ class CommandRelayService {
                 }
                 if (!response.isSuccessful) {
                     pollFailures += 1
+                    markTransportFailure()
                     return
                 }
                 val body = response.body.string()
                 pollFailures = 0
+                // HTTP landed — flip out of OFFLINE. RECONNECTING (not
+                // ONLINE) because we're on the polling fallback, not SSE.
+                markTransportSuccess(ConnectionState.RECONNECTING)
                 val json = gson.fromJson(body, JsonObject::class.java)
                 val data = json.getAsJsonArray("data")
                 if (data == null || data.size() == 0) {
@@ -341,6 +392,7 @@ class CommandRelayService {
             }
         } catch (e: Exception) {
             pollFailures += 1
+            markTransportFailure()
             logger.debug("Poll failed (failures=$pollFailures): ${e.message}")
         }
     }

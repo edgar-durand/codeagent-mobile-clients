@@ -359,6 +359,13 @@ class ControllerToolWindowFactory : ToolWindowFactory {
             WebSocketService.getInstance().addListener(this)
             PairingService.getInstance().addListener(this)
             CommandRelayService.getInstance().addListener(this)
+            // Drive the status-dot color from the relay's three-state
+            // signal so SSE drop → polling fallback paints the dot
+            // amber instead of leaving it green and lying about
+            // reachability.
+            CommandRelayService.getInstance().onConnectionChange {
+                SwingUtilities.invokeLater { refreshStatus() }
+            }
             refreshStatus()
             showPairingIdle()
             refreshRecentSessions()
@@ -1640,11 +1647,27 @@ class ControllerToolWindowFactory : ToolWindowFactory {
 
         private fun refreshStatus() {
             val ws = WebSocketService.getInstance()
+            val relay = CommandRelayService.getInstance()
 
             val connected = ws.isConnected
-            statusLabel.text = if (connected) "Connected" else "Disconnected"
-            statusLabel.foreground = if (connected) accentGreen else accentRed
-            statusDot.background = if (connected) accentGreen else accentRed
+            // Three-state surface from CommandRelayService when we're
+            // paired. The legacy ws.isConnected drives the disconnected
+            // case + the button enabled state.
+            val state = if (relay.isPolling) relay.getConnectionState() else null
+            statusLabel.text = when {
+                !connected -> "Disconnected"
+                state == CommandRelayService.ConnectionState.RECONNECTING -> "Reconnecting…"
+                state == CommandRelayService.ConnectionState.OFFLINE -> "Offline"
+                else -> "Connected"
+            }
+            val color = when {
+                !connected -> accentRed
+                state == CommandRelayService.ConnectionState.RECONNECTING -> BrandColors.warningAmber
+                state == CommandRelayService.ConnectionState.OFFLINE -> accentRed
+                else -> accentGreen
+            }
+            statusLabel.foreground = color
+            statusDot.background = color
             statusDot.repaint()
             disconnectButton.isEnabled = connected
         }

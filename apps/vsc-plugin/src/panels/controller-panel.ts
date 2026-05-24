@@ -89,6 +89,12 @@ export class ControllerPanelProvider implements vscode.WebviewViewProvider, Comm
     });
 
     CommandRelayService.getInstance().addListener(this);
+    // Push a fresh status to the webview whenever the relay's
+    // connection state changes — the panel renders the amber
+    // "Reconnecting" dot from this signal.
+    CommandRelayService.getInstance().onConnectionChange(() => {
+      this.updateStatus();
+    });
 
     PairingService.getInstance().addListener({
       onPaired: async (sessionId: string) => {
@@ -954,6 +960,11 @@ export class ControllerPanelProvider implements vscode.WebviewViewProvider, Comm
     this.postMessage({
       type: 'status',
       connected: relay.isPolling,
+      // Three-state surface: online (SSE active), reconnecting
+      // (SSE dropped, on polling fallback), offline (no transport
+      // succeeded for 60s). The webview renders the dot color and
+      // label from this field.
+      connectionState: relay.isPolling ? relay.getConnectionState() : 'offline',
       wsConnected: ws.isConnected,
       sessionId: pairing.currentSessionId,
       user: pairing.pairedUser
@@ -1164,8 +1175,8 @@ export class ControllerPanelProvider implements vscode.WebviewViewProvider, Comm
   <div id="connected-view" class="hidden">
     <div class="card">
       <div class="status-row">
-        <div class="dot dot-green"></div>
-        <span class="label">Connected</span>
+        <div id="status-dot" class="dot dot-green"></div>
+        <span id="status-label" class="label">Connected</span>
       </div>
       <div class="user-info">
         <span id="user-name" class="user-name"></span>
@@ -1186,7 +1197,7 @@ export class ControllerPanelProvider implements vscode.WebviewViewProvider, Comm
 
   <script nonce="${nonce}">
     const vscode = acquireVsCodeApi();
-    let state = { connected: false, user: null, agents: [] };
+    let state = { connected: false, user: null, agents: [], connectionState: 'offline' };
 
     function requestPairing() {
       vscode.postMessage({ type: 'requestPairingCode' });
@@ -1253,6 +1264,26 @@ export class ControllerPanelProvider implements vscode.WebviewViewProvider, Comm
           document.getElementById('user-email').textContent = state.user.email || '';
           document.getElementById('user-plan').textContent = state.user.plan || 'FREE';
         }
+
+        // Drive the dot color + label from the 3-state connectionState
+        // so the user sees an amber "Reconnecting" dot while SSE is
+        // re-establishing instead of a green "Connected" that lies
+        // about reachability.
+        const dot = document.getElementById('status-dot');
+        const label = document.getElementById('status-label');
+        if (dot && label) {
+          dot.classList.remove('dot-green', 'dot-yellow', 'dot-red');
+          if (state.connectionState === 'reconnecting') {
+            dot.classList.add('dot-yellow');
+            label.textContent = 'Reconnecting…';
+          } else if (state.connectionState === 'offline') {
+            dot.classList.add('dot-red');
+            label.textContent = 'Offline';
+          } else {
+            dot.classList.add('dot-green');
+            label.textContent = 'Connected';
+          }
+        }
       } else {
         dv.classList.remove('hidden');
         cv.classList.add('hidden');
@@ -1276,6 +1307,7 @@ export class ControllerPanelProvider implements vscode.WebviewViewProvider, Comm
         case 'status':
           state.connected = msg.connected;
           state.user = msg.user;
+          state.connectionState = msg.connectionState || 'offline';
           updateUI();
           break;
         case 'pairingCode': {

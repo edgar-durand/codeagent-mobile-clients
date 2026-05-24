@@ -18,6 +18,8 @@ export interface CommandListener {
   onCommandReceived(command: RemoteCommand): void;
 }
 
+export type ConnectionState = 'online' | 'reconnecting' | 'offline';
+
 export class CommandRelayService {
   private static instance: CommandRelayService;
   // Polling is the FALLBACK path. SSE is preferred — see
@@ -49,6 +51,16 @@ export class CommandRelayService {
   // and throttles the "session expired" notification to once per
   // process — repeating it every poll would spam.
   private authFailureSurfaced = false;
+  // Three-state connection signal so the panel can render
+  // ONLINE (green) / RECONNECTING (amber) / OFFLINE (red) — replaces
+  // the binary "isPolling" surface that stayed true through the
+  // entire SSE-drop → polling-fallback cycle. Listeners can subscribe
+  // via onConnectionChange().
+  private connectionState: ConnectionState = 'offline';
+  private connectionListeners: Array<(s: ConnectionState) => void> = [];
+  // 60s with no successful transport call → degrade ONLINE/RECONNECTING
+  // to OFFLINE so the panel doesn't lie about reachability.
+  private lastSuccessAt = 0;
 
   private constructor(log: OutputChannel) {
     this.log = log;
@@ -152,10 +164,12 @@ export class CommandRelayService {
             this.startPollingFallback();
             return;
           }
+          this.setConnectionState('reconnecting');
           this.scheduleSseReconnect();
           return;
         }
         this.sseFailures = 0;
+        this.markTransportSuccess('online');
         let buffer = '';
         res.setEncoding('utf8');
         res.on('data', (chunk: string) => {
@@ -170,10 +184,16 @@ export class CommandRelayService {
         res.on('end', () => {
           // Server-initiated close (Vercel timeout). Reconnect
           // on the same path.
-          if (this._running) this.scheduleSseReconnect();
+          if (this._running) {
+            this.setConnectionState('reconnecting');
+            this.scheduleSseReconnect();
+          }
         });
         res.on('error', () => {
-          if (this._running) this.scheduleSseReconnect();
+          if (this._running) {
+            this.setConnectionState('reconnecting');
+            this.scheduleSseReconnect();
+          }
         });
       },
     );
@@ -185,6 +205,7 @@ export class CommandRelayService {
         this.startPollingFallback();
         return;
       }
+      this.setConnectionState('reconnecting');
       this.scheduleSseReconnect();
     });
     req.on('timeout', () => { req.destroy(); });
@@ -264,6 +285,11 @@ export class CommandRelayService {
       const data = await this.getJson(`${settings.apiBaseUrl}/api/commands/pending?pluginId=${pluginId}`);
       const commands = data?.data as Array<Record<string, unknown>> | undefined;
       this.pollFailures = 0;
+      // Reaching this point means at least the HTTP call landed; the
+      // panel can stop nagging the user about reconnecting. State
+      // shows "reconnecting" rather than "online" because we're on
+      // the polling fallback, not SSE.
+      this.markTransportSuccess('reconnecting');
       if (!Array.isArray(commands) || commands.length === 0) {
         this.pollEmptyStreak += 1;
         return;
@@ -288,6 +314,7 @@ export class CommandRelayService {
       }
     } catch {
       this.pollFailures += 1;
+      this.markTransportFailure();
     }
   }
 
@@ -491,6 +518,41 @@ export class CommandRelayService {
   /** Called from PairingService once a new token has been stored. */
   resetAuthFailureGate(): void {
     this.authFailureSurfaced = false;
+  }
+
+  // ─── Connection state ────────────────────────────────────────────
+
+  getConnectionState(): ConnectionState {
+    return this.connectionState;
+  }
+
+  onConnectionChange(listener: (state: ConnectionState) => void): void {
+    this.connectionListeners.push(listener);
+  }
+
+  private setConnectionState(next: ConnectionState): void {
+    if (this.connectionState === next) return;
+    this.connectionState = next;
+    this.log.appendLine(`Connection state: ${next}`);
+    for (const fn of this.connectionListeners) {
+      try { fn(next); } catch { /* listener errors must not stop the relay */ }
+    }
+  }
+
+  private markTransportSuccess(state: 'online' | 'reconnecting'): void {
+    this.lastSuccessAt = Date.now();
+    this.setConnectionState(state);
+  }
+
+  private markTransportFailure(): void {
+    // > 60s with no transport success → user-visible OFFLINE. Until
+    // then we stay in RECONNECTING so the panel shows the amber
+    // dot rather than red.
+    if (this.lastSuccessAt > 0 && Date.now() - this.lastSuccessAt > 60_000) {
+      this.setConnectionState('offline');
+    } else if (this.connectionState === 'online') {
+      this.setConnectionState('reconnecting');
+    }
   }
 
   /**
