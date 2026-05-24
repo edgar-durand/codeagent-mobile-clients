@@ -191,10 +191,28 @@ export class McpConfigWriterService {
 
     let existing: Record<string, unknown> = {};
     if (fs.existsSync(configPath)) {
+      const raw = fs.readFileSync(configPath, 'utf-8');
       try {
-        existing = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
-      } catch {
-        existing = {};
+        const parsed = JSON.parse(raw);
+        if (parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)) {
+          existing = parsed as Record<string, unknown>;
+        } else {
+          // Top-level non-object (array, string, number, …) → refusing
+          // to clobber. Caller surfaces the failed result to mobile.
+          throw new Error(
+            `Existing MCP config at ${configPath} is not a JSON object — refusing to overwrite.`,
+          );
+        }
+      } catch (e) {
+        // Re-throw with a clear, user-actionable message so the
+        // mobile/web side can render it instead of silently
+        // destroying the user's custom MCP servers.
+        if (e instanceof SyntaxError) {
+          throw new Error(
+            `Existing MCP config at ${configPath} does not parse as JSON (${e.message}). Fix or back it up before retrying.`,
+          );
+        }
+        throw e;
       }
     }
 

@@ -281,29 +281,35 @@ class McpConfigWriterService {
     }
 
     private fun mergeWithExisting(file: File, newContent: String): String {
-        return try {
-            val existing = gson.fromJson(file.readText(), JsonObject::class.java)
-            val incoming = gson.fromJson(newContent, JsonObject::class.java)
-
-            val serverKey = when {
-                incoming.has("mcpServers") -> "mcpServers"
-                incoming.has("servers") -> "servers"
-                else -> return newContent
-            }
-
-            val existingServers = existing.getAsJsonObject(serverKey) ?: JsonObject()
-            val newServers = incoming.getAsJsonObject(serverKey) ?: JsonObject()
-
-            for (entry in newServers.entrySet()) {
-                existingServers.add(entry.key, entry.value)
-            }
-
-            existing.add(serverKey, existingServers)
-            gson.toJson(existing)
-        } catch (e: Exception) {
-            logger.warn("Could not merge with existing config, overwriting: ${e.message}")
-            newContent
+        // The previous implementation silently overwrote the file when
+        // the existing JSON didn't parse, destroying any custom MCP
+        // servers the user had set up by hand. Refuse to write instead
+        // so the caller surfaces a `failed` result to mobile/web.
+        val existing: JsonObject = try {
+            gson.fromJson(file.readText(), JsonObject::class.java)
+                ?: throw IllegalStateException("Existing MCP config at ${file.path} parsed as null — refusing to overwrite.")
+        } catch (e: com.google.gson.JsonSyntaxException) {
+            throw IllegalStateException(
+                "Existing MCP config at ${file.path} does not parse as JSON: ${e.message}. " +
+                    "Fix or back it up before retrying.",
+                e,
+            )
         }
+
+        val incoming = gson.fromJson(newContent, JsonObject::class.java)
+        val serverKey = when {
+            incoming.has("mcpServers") -> "mcpServers"
+            incoming.has("servers") -> "servers"
+            else -> return newContent
+        }
+
+        val existingServers = existing.getAsJsonObject(serverKey) ?: JsonObject()
+        val newServers = incoming.getAsJsonObject(serverKey) ?: JsonObject()
+        for (entry in newServers.entrySet()) {
+            existingServers.add(entry.key, entry.value)
+        }
+        existing.add(serverKey, existingServers)
+        return gson.toJson(existing)
     }
 
     private fun readExistingJson(path: String): JsonObject {
