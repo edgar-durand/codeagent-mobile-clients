@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, afterEach } from 'vitest';
 
 /**
  * Logger rotation + JSON + XDG-aware path coverage (#66).

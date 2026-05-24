@@ -4,22 +4,37 @@ import pkg from '../../package.json';
 
 const VERSION: string = pkg.version;
 
+/**
+ * UX banner helpers — all route to stderr (#67) so stdout stays
+ * clean for piping. Concretely: `codeam sessions | jq`, `codeam
+ * status | grep …`, and the smoke matrix that scrapes structured
+ * output from stdout no longer get the cosmetic header lines mixed
+ * in. Errors stay where shell convention expects them (`2>err.log`).
+ *
+ * Machine-readable output (help, version, doctor --json) lives in
+ * the command modules and writes to stdout directly — not through
+ * these helpers.
+ */
+function out(line: string): void {
+  process.stderr.write(`${line}\n`);
+}
+
 export function showIntro(): void {
-  console.log('');
-  console.log(`  ${pc.bold(pc.cyan('codeam'))}  ${pc.dim(`v${VERSION}`)}`);
-  console.log('');
+  out('');
+  out(`  ${pc.bold(pc.cyan('codeam'))}  ${pc.dim(`v${VERSION}`)}`);
+  out('');
 }
 
 export function showSuccess(msg: string): void {
-  console.log(`  ${pc.green('✓')} ${msg}`);
+  out(`  ${pc.green('✓')} ${msg}`);
 }
 
 export function showError(msg: string): void {
-  console.log(`  ${pc.red('✗')} ${msg}`);
+  out(`  ${pc.red('✗')} ${msg}`);
 }
 
 export function showInfo(msg: string): void {
-  console.log(`  ${pc.dim('·')} ${msg}`);
+  out(`  ${pc.dim('·')} ${msg}`);
 }
 
 /**

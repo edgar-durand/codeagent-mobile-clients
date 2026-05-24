@@ -138,8 +138,27 @@ function parseLinkArgs(args: string[]): ParsedArgs {
   }
   const reuseExisting = args.includes('--reuse-existing');
   const dryRun = args.includes('--dry-run');
-  const apiKeyArg = args.find((a) => a.startsWith('--api-key='));
-  const apiKey = apiKeyArg ? apiKeyArg.slice('--api-key='.length) : null;
+  // Two ways to supply an API key:
+  //   --api-key=<key>       — convenient but visible to `ps -ef`
+  //   --api-key-file=<path> — preferred for secrets in CI / scripts
+  //                           (audit CLI finding 19 / quick win #67)
+  // The file path takes precedence when both are passed.
+  const apiKeyFileArg = args.find((a) => a.startsWith('--api-key-file='));
+  let apiKey: string | null = null;
+  if (apiKeyFileArg) {
+    const filePath = apiKeyFileArg.slice('--api-key-file='.length);
+    try {
+      apiKey = fs.readFileSync(path.resolve(filePath), 'utf8').trim();
+    } catch (err) {
+      throw new Error(`Could not read --api-key-file ${filePath}: ${(err as Error).message}`);
+    }
+    if (!apiKey) {
+      throw new Error(`--api-key-file ${filePath} is empty.`);
+    }
+  } else {
+    const apiKeyArg = args.find((a) => a.startsWith('--api-key='));
+    apiKey = apiKeyArg ? apiKeyArg.slice('--api-key='.length) : null;
+  }
   const tokenFileArg = args.find((a) => a.startsWith('--token-file='));
   const tokenFile = tokenFileArg ? tokenFileArg.slice('--token-file='.length) : null;
   return { agent: normalised, reuseExisting, apiKey, tokenFile, dryRun };

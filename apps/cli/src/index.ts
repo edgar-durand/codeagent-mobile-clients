@@ -19,6 +19,7 @@ import {
   capture,
   shutdownTelemetry,
 } from './services/telemetry.service';
+import { EXIT_FAILURE, EXIT_USAGE } from './exit-codes';
 
 const [,, command, ...args] = process.argv;
 
@@ -76,6 +77,19 @@ async function main(): Promise<void> {
       if (typeof command === 'string' && isKnownAgentId(command)) {
         return start(command);
       }
+      // Unknown subcommand (audit CLI finding 3 / quick win #67):
+      // `codeam fooo` previously silently fell through to start()
+      // which produced "no paired session" or worse — booted an
+      // agent with the user's intent ignored. Now we exit 2 with
+      // a typo-correction hint so the user sees the mistake.
+      if (typeof command === 'string' && command.length > 0) {
+        process.stderr.write(
+          `\n  Unknown command: ${command}\n` +
+            `  Run 'codeam help' to see the supported commands.\n\n`,
+        );
+        await shutdownTelemetry();
+        process.exit(EXIT_USAGE);
+      }
       return start();
   }
 }
@@ -84,9 +98,18 @@ main()
   .then(() => shutdownTelemetry())
   .catch(async (err: unknown) => {
     const msg = err instanceof Error ? err.message : String(err);
-    console.error(`\n  ${msg}\n`);
+    console.error(`\n  ${msg}`);
+    // CODEAM_DEBUG=1 hint so users with a confusing failure know
+    // the breadcrumb path (audit CLI finding 6 / quick win #67).
+    // Only surfaced when not already in debug mode — avoids
+    // suggesting the same flag the user already set.
+    if (process.env.CODEAM_DEBUG !== '1') {
+      console.error(`  ${'(set CODEAM_DEBUG=1 for a full stack trace + ~/.codeam/debug-<pid>.log)'}\n`);
+    } else {
+      console.error('');
+    }
     // Best-effort flush before exit so the failure event we just
     // captured upstream isn't dropped on the floor.
     try { await shutdownTelemetry(); } catch { /* swallow */ }
-    process.exit(1);
+    process.exit(EXIT_FAILURE);
   });
