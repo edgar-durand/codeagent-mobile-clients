@@ -5,12 +5,14 @@ import { ClaudeDeployStrategy } from './claude/deploy';
 import { CodexRuntimeStrategy } from './codex/runtime';
 import { CodexDeployStrategy } from './codex/deploy';
 import { CoderabbitRuntimeStrategy } from './coderabbit/runtime';
+import { CursorRuntimeStrategy } from './cursor/runtime';
 import type { AgentStrategy, RuntimeStrategy, DeployStrategy } from './strategy';
 
 const runtimeBuilders: Partial<Record<AgentId, (os: OsStrategy) => AgentStrategy>> = {
   claude: (os) => new ClaudeRuntimeStrategy(os),
   codex: (os) => new CodexRuntimeStrategy(os),
   coderabbit: (os) => new CoderabbitRuntimeStrategy(os),
+  cursor: (os) => new CursorRuntimeStrategy(os),
 };
 
 const deployBuilders: Partial<Record<AgentId, () => DeployStrategy>> = {

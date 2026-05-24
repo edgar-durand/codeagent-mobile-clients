@@ -37,6 +37,19 @@ export const AGENT_REGISTRY: Record<AgentId, AgentMetadata> = {
     supportedAuthKinds: ['oauth_token', 'api_key'],
     preferredAuthKind: 'oauth_token',
   },
+  cursor: {
+    id: 'cursor',
+    displayName: 'Cursor Agent',
+    binaryName: 'cursor-agent',
+    // Gated. Strategy implemented as InteractiveAgentStrategy; TUI
+    // parser borrows the Codex baseline because Cursor's CLI ships a
+    // similar ratatui-style chrome. Real parser fixtures need to be
+    // captured against a paid Cursor account before the flag flips
+    // false → true.
+    enabled: false,
+    supportedAuthKinds: ['oauth_token', 'api_key'],
+    preferredAuthKind: 'oauth_token',
+  },
 };
 
 export function getEnabledAgents(): AgentMetadata[] {
@@ -50,5 +63,11 @@ export function getAgent(id: AgentId): AgentMetadata {
 }
 
 export function isKnownAgentId(id: string): id is AgentId {
-  return id === 'claude' || id === 'codex' || id === 'copilot' || id === 'coderabbit';
+  return (
+    id === 'claude' ||
+    id === 'codex' ||
+    id === 'copilot' ||
+    id === 'coderabbit' ||
+    id === 'cursor'
+  );
 }
