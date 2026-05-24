@@ -1,5 +1,4 @@
-import * as fs from 'fs';
-import * as path from 'path';
+import { createOsStrategy } from '../../os';
 
 export interface PtyStrategyOptions {
   onData: (data: string) => void;
@@ -14,37 +13,15 @@ export interface IPtyStrategy {
 }
 
 /**
- * Scan PATH for an executable; returns the full path or null.
+ * Backward-compat re-export. The canonical home for PATH probing
+ * is `OsStrategy.findInPath` (`src/os/strategy.ts`) — adopted by
+ * agent strategies via constructor-injection per #50. Until every
+ * caller migrates, this helper keeps the existing call sites
+ * unchanged by delegating to the platform's OsStrategy.
  *
- * Windows: if `name` has no extension, also probes `.exe`, `.cmd`,
- * `.bat`, `.ps1` (matching cmd.exe / PATHEXT semantics) and uses
- * F_OK rather than X_OK because Windows doesn't have Unix execute
- * bits — every existing file in a PATH dir is "executable" if the
- * extension is right.
- *
- * Returns the full resolved path (with extension on Windows), so
- * callers can hand the result straight to spawn/ConPTY without
- * relying on the spawned process doing its own PATH resolution.
+ * @deprecated Inject an OsStrategy via the agent strategy
+ * constructor and call `this.os.findInPath(name)` instead.
  */
 export function findInPath(name: string): string | null {
-  const isWin = process.platform === 'win32';
-  const dirs = (process.env.PATH ?? '').split(path.delimiter).filter(Boolean);
-  const hasExt = path.extname(name).length > 0;
-  const candidates =
-    isWin && !hasExt
-      ? [`${name}.exe`, `${name}.cmd`, `${name}.bat`, `${name}.ps1`, name]
-      : [name];
-  const accessFlag = isWin ? fs.constants.F_OK : fs.constants.X_OK;
-  for (const dir of dirs) {
-    for (const candidate of candidates) {
-      const full = path.join(dir, candidate);
-      try {
-        fs.accessSync(full, accessFlag);
-        return full;
-      } catch {
-        /* try next */
-      }
-    }
-  }
-  return null;
+  return createOsStrategy().findInPath(name);
 }

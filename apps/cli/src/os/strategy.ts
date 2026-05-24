@@ -1,0 +1,95 @@
+import * as path from 'node:path';
+
+/**
+ * Per-OS strategy interface.
+ *
+ * The CLI runs on macOS (primary dev surface), Linux (Codespaces +
+ * CI), and Windows (real users on cmd.exe / PowerShell / Windows
+ * Terminal). Today, OS-specific behaviour is scattered as inline
+ * `process.platform === 'win32'` branches in agent runtimes, services,
+ * and commands. The audit catalogued 13 distinct branches across 9
+ * files — exactly the leak this interface eliminates.
+ *
+ * **Contract.** Each method is a side-effect-free probe of the
+ * host environment, OR an explicit pure transformation (path
+ * concatenation, shell-arg escaping). Methods that genuinely require
+ * spawning child processes / loading native modules (PTY creation,
+ * shell installers, secret-store probes) are NOT yet on the
+ * interface — those land in follow-up PRs (#51 PTY, #53 installer)
+ * to keep this PR a no-behaviour-change refactor.
+ *
+ * Agent strategies will COMPOSE an OsStrategy in #50:
+ * `class ClaudeRuntimeStrategy { constructor(readonly os: OsStrategy) }`.
+ * Until that lands, the existing `process.platform` callsites can
+ * adopt this interface one at a time without breaking the others.
+ */
+export interface OsStrategy {
+  /** Stable id used for telemetry + structured logs. */
+  readonly id: 'darwin' | 'linux' | 'win32';
+
+  // ─── Filesystem layout ───────────────────────────────────────────
+
+  /** `os.homedir()` wrapped so tests can stub. */
+  homeDir(): string;
+
+  /**
+   * Per-process throwaway path under the OS temp dir, namespaced
+   * by pid + caller prefix so concurrent CLI processes don't
+   * trample each other's files. Caller is responsible for cleanup.
+   */
+  scratchPath(prefix: string): string;
+
+  /** `/dev/null` on POSIX, `NUL` on Windows. */
+  devNull(): string;
+
+  // ─── PATH + shell discipline ─────────────────────────────────────
+
+  /**
+   * Scan PATH for an executable; returns the full resolved path or
+   * null. Windows probes PATHEXT (.exe/.cmd/.bat/.ps1) and uses
+   * F_OK because Windows has no Unix execute bits.
+   */
+  findInPath(name: string): string | null;
+
+  /** Prepend dirs to `process.env.PATH` using the OS path delimiter. */
+  augmentPath(dirs: string[]): void;
+
+  /**
+   * Quote a single arg for inclusion in a shell-string. Used at
+   * the SSH-to-Linux-remote boundary (providers/*.ts) where we
+   * can't avoid shell-string construction. Direct spawn paths
+   * MUST use array args instead of this.
+   */
+  escapeShellArg(s: string): string;
+}
+
+// ─── Shared helpers (used by all concrete impls) ────────────────────
+
+/**
+ * Common findInPath impl — both Unix and Windows pivot on the same
+ * algorithm with platform-specific candidate-extension + access-flag
+ * sets. Pulled out so the per-platform impls stay one-liners.
+ */
+export function findInPathFor(
+  name: string,
+  opts: {
+    candidates: (name: string) => string[];
+    accessFlag: number;
+    accessSync: (p: string, mode?: number) => void;
+  },
+): string | null {
+  const dirs = (process.env.PATH ?? '').split(path.delimiter).filter(Boolean);
+  const candidates = opts.candidates(name);
+  for (const dir of dirs) {
+    for (const candidate of candidates) {
+      const full = path.join(dir, candidate);
+      try {
+        opts.accessSync(full, opts.accessFlag);
+        return full;
+      } catch {
+        /* try next */
+      }
+    }
+  }
+  return null;
+}
