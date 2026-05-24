@@ -3,6 +3,7 @@ import * as http from 'http';
 import * as vscode from 'vscode';
 import { SettingsService } from './settings.service';
 import { OutputChannel } from 'vscode';
+import { capture } from './telemetry.service';
 
 export interface RemoteCommand {
   id: string;
@@ -503,6 +504,7 @@ export class CommandRelayService {
     if (this.authFailureSurfaced) return;
     this.authFailureSurfaced = true;
     this.log.appendLine('Auth failed (401) — token cleared, polling stopped.');
+    capture('plugin_auth_failed', { surface: 'vscode' });
     void vscode.window
       .showWarningMessage(
         'CodeAgent Mobile · Session expired. Re-pair to continue.',
@@ -532,8 +534,19 @@ export class CommandRelayService {
 
   private setConnectionState(next: ConnectionState): void {
     if (this.connectionState === next) return;
+    const prev = this.connectionState;
     this.connectionState = next;
     this.log.appendLine(`Connection state: ${next}`);
+    // Emit a telemetry pulse only on the meaningful transitions —
+    // healthy/unhealthy edges. Per-tick state stays out of PostHog
+    // (would balloon row counts for nothing).
+    if (next === 'reconnecting' && prev === 'online') {
+      capture('relay_sse_dropped', { surface: 'vscode' });
+    } else if (next === 'offline') {
+      capture('relay_offline', { surface: 'vscode' });
+    } else if (next === 'online' && prev !== 'online') {
+      capture('relay_online', { surface: 'vscode', from: prev });
+    }
     for (const fn of this.connectionListeners) {
       try { fn(next); } catch { /* listener errors must not stop the relay */ }
     }
