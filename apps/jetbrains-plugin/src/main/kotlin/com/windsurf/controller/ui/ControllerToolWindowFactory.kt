@@ -87,6 +87,21 @@ class ControllerToolWindowFactory : ToolWindowFactory {
         private val codeSeparator = JBLabel("Scan QR or enter code in your mobile app")
         private val recentSessionsCard = RoundedPanel(12, cardBg)
 
+        // FooterStatusStrip — sits at the bottom of the tool window
+        // and mirrors the mobile app's surface (state · agents · age).
+        // Reads from the existing CommandRelayService + cachedAgents
+        // — no new wire calls.
+        private val footerDot = JPanel()
+        private val footerStateLabel = JBLabel("Offline")
+        private val footerAgentsLabel = JBLabel("0 agents")
+        private val footerSyncLabel = JBLabel("never")
+        private var footerTickTimer: java.util.Timer? = null
+        // Detector runs are expensive (plugin scan + EDT tool-window
+        // probe). Cache the count + refresh only on pair / agent
+        // events so the 1 Hz footer tick stays O(1).
+        @Volatile
+        private var cachedAgentCount: Int = 0
+
         private val sessionRowFactory by lazy {
             SessionRowFactory(
                 accentGreen = accentGreen,
@@ -108,6 +123,8 @@ class ControllerToolWindowFactory : ToolWindowFactory {
             add(Box.createVerticalStrut(12))
             add(buildRecentSessionsCard())
             add(Box.createVerticalGlue())
+            add(Box.createVerticalStrut(10))
+            add(buildFooterStrip())
 
             PairingService.getInstance().addListener(this)
             CommandRelayService.getInstance().addListener(this)
@@ -116,11 +133,39 @@ class ControllerToolWindowFactory : ToolWindowFactory {
             // amber instead of leaving it green and lying about
             // reachability.
             CommandRelayService.getInstance().onConnectionChange {
-                SwingUtilities.invokeLater { refreshStatus() }
+                SwingUtilities.invokeLater {
+                    refreshStatus()
+                    refreshFooter()
+                }
             }
             refreshStatus()
             showPairingIdle()
             refreshRecentSessions()
+            refreshFooter()
+            startFooterTicker()
+            // Seed the footer agent count off-EDT so the strip doesn't
+            // sit on "0 agents" until the next pair / refresh.
+            Thread {
+                cachedAgentCount = IdeIntegrationService.getInstance().detectInstalledAgents().size
+                SwingUtilities.invokeLater { refreshFooter() }
+            }.start()
+        }
+
+        /**
+         * Once-a-second tick that repaints the footer "Last sync"
+         * age. The underlying timestamp only changes when the relay
+         * gets a fresh frame, but the rendered "3s ago" string has
+         * to keep climbing on every UI tick. Cheap — no I/O.
+         */
+        private fun startFooterTicker() {
+            footerTickTimer?.cancel()
+            footerTickTimer = java.util.Timer("codeagent-footer-tick", true).apply {
+                scheduleAtFixedRate(object : java.util.TimerTask() {
+                    override fun run() {
+                        SwingUtilities.invokeLater { refreshFooter() }
+                    }
+                }, 1000L, 1000L)
+            }
         }
 
         /**
@@ -138,7 +183,14 @@ class ControllerToolWindowFactory : ToolWindowFactory {
         override fun onPaired(sessionId: String) {
             val relay = CommandRelayService.getInstance()
             relay.startPolling()
-            Thread { relay.reportAgents() }.start()
+            Thread {
+                relay.reportAgents()
+                // Capture the same agent list reportAgents just sent
+                // so the footer strip reads the live count without a
+                // second detection run.
+                cachedAgentCount = IdeIntegrationService.getInstance().detectInstalledAgents().size
+                SwingUtilities.invokeLater { refreshFooter() }
+            }.start()
             SwingUtilities.invokeLater {
                 statusLabel.text = "Connected"
                 statusLabel.foreground = accentGreen
@@ -268,6 +320,81 @@ class ControllerToolWindowFactory : ToolWindowFactory {
             pairingCard.maximumSize = Dimension(Int.MAX_VALUE, 400)
             pairingCard.alignmentX = Component.LEFT_ALIGNMENT
             return pairingCard
+        }
+
+        private fun buildFooterStrip(): JComponent {
+            val strip = JPanel(FlowLayout(FlowLayout.LEFT, 8, 0)).apply {
+                isOpaque = true
+                background = cardBg
+                border = BorderFactory.createCompoundBorder(
+                    BorderFactory.createMatteBorder(1, 0, 0, 0, if (isDark) Color(46, 46, 51) else Color(220, 220, 224)),
+                    EmptyBorder(6, 12, 6, 12),
+                )
+                maximumSize = Dimension(Int.MAX_VALUE, 28)
+                alignmentX = Component.LEFT_ALIGNMENT
+                accessibleContext.accessibleName = "Connection summary"
+                accessibleContext.accessibleDescription =
+                    "Live status row: connection state, detected agent count, and last sync age."
+            }
+
+            footerDot.apply {
+                preferredSize = Dimension(7, 7)
+                maximumSize = Dimension(7, 7)
+                isOpaque = false
+            }
+            footerStateLabel.apply {
+                font = BrandFonts.hanken(Font.PLAIN, 11f)
+                foreground = primaryText
+            }
+            footerAgentsLabel.apply {
+                font = BrandFonts.hanken(Font.PLAIN, 11f)
+                foreground = mutedText
+            }
+            footerSyncLabel.apply {
+                font = BrandFonts.jetBrainsMono(Font.PLAIN, 11f)
+                foreground = mutedText
+            }
+
+            strip.add(footerDot)
+            strip.add(footerStateLabel)
+            strip.add(JBLabel("·").apply { foreground = mutedText })
+            strip.add(footerAgentsLabel)
+            strip.add(JBLabel("·").apply { foreground = mutedText })
+            strip.add(footerSyncLabel)
+            return strip
+        }
+
+        private fun refreshFooter() {
+            val relay = CommandRelayService.getInstance()
+            val polling = relay.isPolling
+            val cs = if (polling) relay.getConnectionState() else CommandRelayService.ConnectionState.OFFLINE
+            val (dotColor, label) = when (cs) {
+                CommandRelayService.ConnectionState.ONLINE -> accentGreen to "Connected"
+                CommandRelayService.ConnectionState.RECONNECTING -> BrandColors.warningAmber to "Reconnecting"
+                CommandRelayService.ConnectionState.OFFLINE -> accentRed to "Offline"
+            }
+            footerDot.background = dotColor
+            footerDot.repaint()
+            footerStateLabel.text = label
+
+            // Agent count comes from the panel's cached count (refreshed
+            // on pair / refreshAgents). The 1 Hz footer tick must stay
+            // O(1) — invoking detectInstalledAgents() here would re-run
+            // the full registry every second.
+            val agentCount = cachedAgentCount
+            footerAgentsLabel.text = if (agentCount == 1) "1 agent" else "$agentCount agents"
+
+            footerSyncLabel.text = formatSyncAge(relay.getLastSuccessfulSyncMs())
+        }
+
+        private fun formatSyncAge(lastSyncMs: Long?): String {
+            if (lastSyncMs == null) return "never"
+            val ageSec = ((System.currentTimeMillis() - lastSyncMs) / 1000).coerceAtLeast(0)
+            if (ageSec < 60) return "${ageSec}s ago"
+            val ageMin = ageSec / 60
+            if (ageMin < 60) return "${ageMin}m ago"
+            val ageHr = ageMin / 60
+            return "${ageHr}h ago"
         }
 
         private fun buildRecentSessionsCard(): JComponent {

@@ -237,6 +237,44 @@ export function renderPanelHtml(
       line-height: 1;
     }
     .btn-delete:hover { background: var(--vscode-inputValidation-errorBackground); }
+
+    /* FooterStatusStrip — mirrors the mobile app surface. Fixed to
+       the bottom of the panel viewport (position: sticky) so the
+       summary is visible without scrolling regardless of how tall
+       the agents / sessions cards grow. body padding-bottom leaves
+       room so cards don't sit under the strip. */
+    body { padding-bottom: 36px; }
+    #footer-strip {
+      position: fixed;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      height: 28px;
+      padding: 0 12px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-family: 'Hanken Grotesk', var(--vscode-font-family);
+      font-size: 11px;
+      color: var(--ca-on-surface);
+      background: var(--vscode-sideBar-background);
+      border-top: 1px solid var(--vscode-panel-border, rgba(255, 255, 255, 0.08));
+      z-index: 5;
+    }
+    .footer-dot {
+      display: inline-block;
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+    }
+    .footer-dot-online {
+      background: var(--ca-success);
+      box-shadow: 0 0 6px var(--ca-success);
+    }
+    .footer-dot-reconnecting { background: var(--ca-warning); }
+    .footer-dot-offline { background: var(--ca-error); }
+    .footer-sep { color: var(--vscode-descriptionForeground); }
+    .footer-mono { font-family: 'JetBrains Mono', var(--vscode-editor-font-family), monospace; }
   </style>
 </head>
 <body>
@@ -302,9 +340,30 @@ export function renderPanelHtml(
     </div>
   </div>
 
+  <!--
+    Footer status strip — fixed to the bottom of the panel, mirrors
+    the mobile app's FooterStatusStrip surface (connection dot +
+    agent count + last-sync age). Reads from the same connection-
+    state store the status bar's tooltip uses; no new wire calls.
+  -->
+  <div id="footer-strip" role="status" aria-live="polite" aria-label="Connection summary">
+    <span id="footer-dot" class="footer-dot footer-dot-offline" aria-hidden="true"></span>
+    <span id="footer-state">Offline</span>
+    <span class="footer-sep" aria-hidden="true">·</span>
+    <span id="footer-agents">0 agents</span>
+    <span class="footer-sep" aria-hidden="true">·</span>
+    <span id="footer-sync" class="footer-mono">never</span>
+  </div>
+
   <script nonce="${nonce}">
     const vscode = acquireVsCodeApi();
-    let state = { connected: false, user: null, agents: [], connectionState: 'offline' };
+    let state = {
+      connected: false,
+      user: null,
+      agents: [],
+      connectionState: 'offline',
+      lastSyncMs: null,
+    };
 
     /** Escape user-controlled strings before splicing them into
      *  innerHTML / aria-label attributes. The backend already
@@ -412,7 +471,63 @@ export function renderPanelHtml(
         dv.classList.remove('hidden');
         cv.classList.add('hidden');
       }
+      refreshFooter();
     }
+
+    /**
+     * Mobile FooterStatusStrip analog — connection dot + agent count
+     * + last-sync age. Pulls everything from the local store
+     * (already updated by the status / agents / lastSyncMs message
+     * handlers), so this is cheap to call on every UI tick + every
+     * second from the syncTicker.
+     */
+    function refreshFooter() {
+      const dot = document.getElementById('footer-dot');
+      const stateEl = document.getElementById('footer-state');
+      const agentsEl = document.getElementById('footer-agents');
+      const syncEl = document.getElementById('footer-sync');
+      if (!dot || !stateEl || !agentsEl || !syncEl) return;
+
+      const cs = state.connected ? state.connectionState : 'offline';
+      dot.classList.remove('footer-dot-online', 'footer-dot-reconnecting', 'footer-dot-offline');
+      if (cs === 'reconnecting') {
+        dot.classList.add('footer-dot-reconnecting');
+        stateEl.textContent = 'Reconnecting';
+      } else if (cs === 'offline') {
+        dot.classList.add('footer-dot-offline');
+        stateEl.textContent = 'Offline';
+      } else {
+        dot.classList.add('footer-dot-online');
+        stateEl.textContent = 'Connected';
+      }
+
+      const n = (state.agents || []).length;
+      agentsEl.textContent = n === 1 ? '1 agent' : n + ' agents';
+
+      syncEl.textContent = formatSyncAge(state.lastSyncMs);
+    }
+
+    function formatSyncAge(lastSyncMs) {
+      if (lastSyncMs == null) return 'never';
+      const ageSec = Math.max(0, Math.floor((Date.now() - lastSyncMs) / 1000));
+      if (ageSec < 60) return ageSec + 's ago';
+      const ageMin = Math.floor(ageSec / 60);
+      if (ageMin < 60) return ageMin + 'm ago';
+      const ageHr = Math.floor(ageMin / 60);
+      return ageHr + 'h ago';
+    }
+
+    // Tick the footer "Last sync" age once per second — the syncMs
+    // value itself only updates on SSE frames / polling success,
+    // but the rendered "3s ago" string must keep climbing.
+    setInterval(refreshFooter, 1000);
+
+    // Every 5 s, re-request the latest status so the footer
+    // lastSyncMs field stays current with the relay polling loop.
+    // Without this the age would keep climbing even when the relay
+    // just got a fresh frame, because the panel only emits status
+    // on state transitions.
+    setInterval(function() { vscode.postMessage({ type: 'getStatus' }); }, 5000);
 
     function renderAgents(agents) {
       const container = document.getElementById('agents-list');
@@ -435,6 +550,7 @@ export function renderPanelHtml(
           state.connected = msg.connected;
           state.user = msg.user;
           state.connectionState = msg.connectionState || 'offline';
+          if (typeof msg.lastSyncMs === 'number') state.lastSyncMs = msg.lastSyncMs;
           updateUI();
           break;
         case 'pairingCode': {
@@ -474,7 +590,9 @@ export function renderPanelHtml(
           break;
         }
         case 'agents':
-          renderAgents(msg.agents);
+          state.agents = msg.agents || [];
+          renderAgents(state.agents);
+          refreshFooter();
           break;
         case 'recentSessions':
           renderRecentSessions(msg.sessions);
