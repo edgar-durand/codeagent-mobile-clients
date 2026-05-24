@@ -36,6 +36,14 @@ export class CommandRelayService {
   private listeners: CommandListener[] = [];
   private log: OutputChannel;
   private _running = false;
+  // Recently-dispatched command IDs. Both SSE reconnect and the
+  // polling fallback can re-deliver the same `commands` batch (the
+  // backend re-emits everything pending until the client acks each
+  // one), so we skip a second `onCommandReceived` for any ID we've
+  // already seen in the past 5 minutes. Same dedup happens on the
+  // JetBrains side (CommandRelayService.kt).
+  private static readonly DEDUP_TTL_MS = 5 * 60_000;
+  private recentCommandIds = new Map<string, number>();
   // Set when the backend has returned 401 for the current token. Stops
   // every transport (SSE, polling, heartbeat) until the user re-pairs,
   // and throttles the "session expired" notification to once per
@@ -207,6 +215,7 @@ export class CommandRelayService {
           status: obj.status as string,
           createdAt: obj.createdAt as number,
         };
+        if (!this.markDispatched(cmd.id)) continue;
         this.listeners.forEach((l) => l.onCommandReceived(cmd));
       }
     } catch {
@@ -270,6 +279,10 @@ export class CommandRelayService {
           status: obj.status as string,
           createdAt: obj.createdAt as number,
         };
+        if (!this.markDispatched(cmd.id)) {
+          this.log.appendLine(`Skipping duplicate command: ${cmd.type} (${cmd.id})`);
+          continue;
+        }
         this.log.appendLine(`Received command: ${cmd.type} (${cmd.id})`);
         this.listeners.forEach((l) => l.onCommandReceived(cmd));
       }
@@ -478,5 +491,25 @@ export class CommandRelayService {
   /** Called from PairingService once a new token has been stored. */
   resetAuthFailureGate(): void {
     this.authFailureSurfaced = false;
+  }
+
+  /**
+   * Returns true the first time we see a command id, false on every
+   * subsequent re-delivery within DEDUP_TTL_MS. Prunes entries older
+   * than the TTL on each call so the map can't grow unbounded.
+   */
+  private markDispatched(id: string): boolean {
+    if (!id) return true;
+    const now = Date.now();
+    const expiry = now - CommandRelayService.DEDUP_TTL_MS;
+    if (this.recentCommandIds.size > 256) {
+      for (const [seenId, ts] of this.recentCommandIds) {
+        if (ts < expiry) this.recentCommandIds.delete(seenId);
+      }
+    }
+    const prior = this.recentCommandIds.get(id);
+    if (prior !== undefined && prior > expiry) return false;
+    this.recentCommandIds.set(id, now);
+    return true;
   }
 }
