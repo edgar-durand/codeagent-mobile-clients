@@ -13,7 +13,6 @@ import { ClaudeContextService } from '../services/claude-context.service';
 import { AgentStrategyRegistry } from '../services/strategies/AgentStrategyRegistry';
 import type { AgentInvocation } from '../services/strategies/AgentStrategy';
 import { CopilotChatService } from '../services/copilot-chat.service';
-import { AgentBridgeService } from '../services/agent-bridge.service';
 import { AgentOutputMonitor } from '../services/agent-output-monitor';
 import {
   McpConfigWriterService,
@@ -185,20 +184,23 @@ export class RemoteCommandRouter {
       }
 
       case 'approve_action': {
-        AgentBridgeService.getInstance().approveCurrentAction();
+        // Approve / reject used to fan out to the legacy WebSocket
+        // transport so an external observer could correlate the
+        // decision with the live action stream. That transport is
+        // dead — these are acks only now.
+        this.log.appendLine('Command: approve_action');
         relay.sendResult(command.id, 'completed', { message: 'Action approved' });
         break;
       }
 
       case 'reject_action': {
-        AgentBridgeService.getInstance().rejectCurrentAction();
+        this.log.appendLine('Command: reject_action');
         relay.sendResult(command.id, 'completed', { message: 'Action rejected' });
         break;
       }
 
       case 'stop_task':
       case 'cancel_task': {
-        AgentBridgeService.getInstance().cancelCurrentTask();
         AgentOutputMonitor.getInstance().stopMonitoring();
         TerminalAgentService.getInstance().stopMonitoring();
         relay.sendResult(command.id, 'completed', { message: 'Task cancelled' });
@@ -207,7 +209,6 @@ export class RemoteCommandRouter {
 
       case 'provide_input': {
         const input = (command.payload.input as string) || '';
-        AgentBridgeService.getInstance().provideInput(input);
         ide.sendPromptToAgent(input);
         relay.sendResult(command.id, 'completed', { message: 'Input provided' });
         break;

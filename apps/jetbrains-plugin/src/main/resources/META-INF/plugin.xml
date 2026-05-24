@@ -61,8 +61,6 @@
         <applicationService
                 serviceImplementation="com.windsurf.controller.services.SettingsService"/>
         <applicationService
-                serviceImplementation="com.windsurf.controller.services.WebSocketService"/>
-        <applicationService
                 serviceImplementation="com.windsurf.controller.services.PairingService"/>
         <applicationService
                 serviceImplementation="com.windsurf.controller.services.CommandRelayService"/>

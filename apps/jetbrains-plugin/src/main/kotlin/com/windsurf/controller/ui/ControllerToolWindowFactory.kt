@@ -14,7 +14,6 @@ import com.intellij.ui.components.JBScrollPane
 import com.intellij.ui.content.ContentFactory
 import com.intellij.util.ui.JBUI
 import com.intellij.util.ui.UIUtil
-import com.windsurf.controller.services.AgentBridgeService
 import com.windsurf.controller.services.AgentOutputMonitor
 import com.windsurf.controller.services.CommandRelayService
 import com.windsurf.controller.services.IdeIntegrationService
@@ -28,7 +27,6 @@ import com.windsurf.controller.services.McpEntry
 import com.windsurf.controller.services.FileOpsService
 import com.windsurf.controller.services.ProjectOpsService
 import com.windsurf.controller.services.McpServerDef
-import com.windsurf.controller.services.WebSocketService
 import com.windsurf.controller.util.BuildInstallCommand
 import com.windsurf.controller.services.strategies.AgentInvocation
 import com.windsurf.controller.services.strategies.AgentStrategyRegistry
@@ -321,7 +319,7 @@ class ControllerToolWindowFactory : ToolWindowFactory {
         }
     }
 
-    private class ControllerPanel(private val project: Project) : JPanel(), WebSocketService.WebSocketListener, PairingService.PairingListener, CommandRelayService.CommandListener {
+    private class ControllerPanel(private val project: Project) : JPanel(), PairingService.PairingListener, CommandRelayService.CommandListener {
 
         private val router = RemoteCommandRouter(project)
 
@@ -358,7 +356,6 @@ class ControllerToolWindowFactory : ToolWindowFactory {
             add(buildRecentSessionsCard())
             add(Box.createVerticalGlue())
 
-            WebSocketService.getInstance().addListener(this)
             PairingService.getInstance().addListener(this)
             CommandRelayService.getInstance().addListener(this)
             // Drive the status-dot color from the relay's three-state
@@ -559,8 +556,11 @@ class ControllerToolWindowFactory : ToolWindowFactory {
             } else {
                 val currentSid = PairingService.getInstance().currentSessionId
                 for (session in sessions) {
+                    // Treat the active paired session as "connected" only
+                    // when the relay is actively polling; the WebSocket
+                    // transport this used to read is gone.
                     val isCurrentlyConnected = session.sessionId == currentSid &&
-                        WebSocketService.getInstance().isConnected
+                        CommandRelayService.getInstance().isPolling
                     val row = buildSessionRow(session, isCurrentlyConnected)
                     recentSessionsCard.add(row)
                     recentSessionsCard.add(Box.createVerticalStrut(6))
@@ -931,7 +931,6 @@ class ControllerToolWindowFactory : ToolWindowFactory {
         }
 
         private fun onDisconnectClicked() {
-            WebSocketService.getInstance().disconnect()
             val relay = CommandRelayService.getInstance()
             relay.stopPolling()
             relay.reportOffline()
@@ -977,14 +976,11 @@ class ControllerToolWindowFactory : ToolWindowFactory {
         }
 
         private fun refreshStatus() {
-            val ws = WebSocketService.getInstance()
+            // Single source of truth now: the relay's three-state
+            // connectionState. The legacy WebSocket transport is gone.
             val relay = CommandRelayService.getInstance()
-
-            val connected = ws.isConnected
-            // Three-state surface from CommandRelayService when we're
-            // paired. The legacy ws.isConnected drives the disconnected
-            // case + the button enabled state.
-            val state = if (relay.isPolling) relay.getConnectionState() else null
+            val connected = relay.isPolling
+            val state = if (connected) relay.getConnectionState() else null
             statusLabel.text = when {
                 !connected -> "Disconnected"
                 state == CommandRelayService.ConnectionState.RECONNECTING -> "Reconnecting…"
@@ -1016,14 +1012,9 @@ class ControllerToolWindowFactory : ToolWindowFactory {
             }
         }
 
-        override fun onConnected() = SwingUtilities.invokeLater { refreshStatus() }
         override fun onCommandReceived(command: CommandRelayService.RemoteCommand) {
             router.dispatch(command)
         }
-
-                override fun onDisconnected(reason: String) = SwingUtilities.invokeLater { refreshStatus() }
-        override fun onMessage(type: String, payload: JsonObject) = SwingUtilities.invokeLater { refreshStatus() }
-        override fun onError(error: String) = SwingUtilities.invokeLater { refreshStatus() }
     }
 }
 
