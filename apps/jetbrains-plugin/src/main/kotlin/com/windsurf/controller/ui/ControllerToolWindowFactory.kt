@@ -393,7 +393,12 @@ class ControllerToolWindowFactory : ToolWindowFactory {
                 val ide = IdeIntegrationService.getInstance()
 
                 when (command.type) {
-                    "start_task" -> {
+                    // VS Code aliases `send_prompt` to `start_task`
+                    // (controller-panel.ts) — match the alias here so
+                    // mobile-side senders that use either name dispatch
+                    // identically. The handler body falls through to the
+                    // start_task arm via type munging.
+                    "send_prompt", "start_task" -> {
                         var prompt = command.payload.get("prompt")?.asString ?: ""
                         val agentId = command.payload.get("agentId")?.asString
 
@@ -709,6 +714,41 @@ class ControllerToolWindowFactory : ToolWindowFactory {
                         agent.cancelCurrentTask()
                         relay.sendResult(command.id, "completed", com.google.gson.JsonObject().apply {
                             addProperty("message", "Task cancelled")
+                        })
+                    }
+                    "list_agents" -> {
+                        // Forced re-detection from the mobile side. VS Code's
+                        // controller-panel.ts:418 does the same; without this
+                        // arm the mobile UI couldn't refresh agent state when
+                        // the user installed Copilot or signed in mid-session.
+                        // detectInstalledAgents() runs runBlocking inside; pin
+                        // to a background thread so we don't park the dispatch.
+                        ApplicationManager.getApplication().executeOnPooledThread {
+                            ide.clearCache()
+                            val agents = ide.detectInstalledAgents()
+                            relay.reportAgents()
+                            val payload = com.google.gson.JsonObject()
+                            val arr = com.google.gson.JsonArray()
+                            for (a in agents) {
+                                arr.add(com.google.gson.JsonObject().apply {
+                                    addProperty("id", a.id)
+                                    addProperty("name", a.name)
+                                    addProperty("icon", a.icon)
+                                    addProperty("installed", a.installed)
+                                })
+                            }
+                            payload.add("agents", arr)
+                            relay.sendResult(command.id, "completed", payload)
+                        }
+                    }
+                    "list_sessions" -> {
+                        // VS Code reads its LM chat history here
+                        // (ChatHistoryService.pushSessions). The JB plugin
+                        // doesn't surface that today — return an empty list
+                        // so mobile gets a typed completion instead of an
+                        // "Unknown command" failure.
+                        relay.sendResult(command.id, "completed", com.google.gson.JsonObject().apply {
+                            add("sessions", com.google.gson.JsonArray())
                         })
                     }
                     "resume_session" -> {
