@@ -8,6 +8,7 @@ import com.intellij.notification.NotificationType
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.components.Service
 import com.intellij.openapi.diagnostic.Logger
+import com.windsurf.controller.protocol.PROTOCOL_VERSION
 import okhttp3.Call
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
@@ -24,7 +25,7 @@ import kotlin.math.max
 import kotlin.math.min
 
 fun Request.Builder.withAuthHeaders(): Request.Builder {
-    addHeader("X-Codeam-Protocol-Version", "2.0.0")
+    addHeader("X-Codeam-Protocol-Version", PROTOCOL_VERSION)
     SettingsService.getInstance().getPluginAuthToken()?.let { addHeader("X-Plugin-Auth-Token", it) }
     return this
 }

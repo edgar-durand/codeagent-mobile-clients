@@ -21,6 +21,7 @@ import com.intellij.openapi.vfs.newvfs.events.VFileCreateEvent
 import com.intellij.openapi.vfs.newvfs.events.VFileDeleteEvent
 import com.intellij.openapi.vfs.newvfs.events.VFileEvent
 import com.intellij.openapi.vfs.newvfs.events.VFileMoveEvent
+import com.windsurf.controller.protocol.PROTOCOL_VERSION
 import com.windsurf.controller.services.filewatcher.DiffParser
 import com.windsurf.controller.services.filewatcher.FileChangeStatus
 import com.windsurf.controller.services.filewatcher.FileReviewStatus
@@ -469,7 +470,7 @@ class FileWatcherService {
                 val request = Request.Builder()
                     .url(url)
                     .post(payload.toRequestBody("application/json".toMediaType()))
-                    .addHeader("X-Codeam-Protocol-Version", "2.0.0")
+                    .addHeader("X-Codeam-Protocol-Version", PROTOCOL_VERSION)
                     .also { b ->
                         SettingsService.getInstance().getPluginAuthToken()?.let {
                             b.addHeader("X-Plugin-Auth-Token", it)
