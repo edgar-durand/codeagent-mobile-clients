@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import { OutputChannel } from 'vscode';
 import { SettingsService } from './settings.service';
 import { TerminalAgentService } from './terminal-agent.service';
+import { AgentOutputMonitor } from './agent-output-monitor';
 import { DETECTORS, runDetectors } from './agent-detection/registry';
 import type { DetectedAgent } from './agent-detection/types';
 
@@ -199,12 +200,13 @@ export class IdeIntegrationService {
       this.log.appendLine('[sendPrompt] TerminalAgentService failed, falling back to observer bridge');
     }
 
-    // Submit prompt via the local capture server → observer script injects into Lexical editor.
-    // This avoids all OS-level keyboard simulation and focus/toggle issues.
-    const port = 47832;
+    // Hand the prompt to AgentOutputMonitor's queue — the same-origin
+    // observer script polls /pending-prompt and injects into the
+    // Lexical editor. We're in the extension host, so there's no need
+    // to round-trip through the local HTTP server.
     try {
-      const result = await this.httpPost(`http://127.0.0.1:${port}/submit`, prompt);
-      this.log.appendLine(`[sendPrompt] Submitted via observer bridge: ${result}`);
+      AgentOutputMonitor.getInstance().queuePrompt(prompt);
+      this.log.appendLine('[sendPrompt] Queued via observer bridge');
       this.notify(prompt);
       return true;
     } catch (e) {
@@ -218,27 +220,6 @@ export class IdeIntegrationService {
     );
     this.notify(prompt);
     return false;
-  }
-
-  private httpPost(url: string, body: string): Promise<string> {
-    return new Promise((resolve, reject) => {
-      const http = require('http') as typeof import('http');
-      const parsed = new URL(url);
-      const req = http.request({
-        hostname: parsed.hostname,
-        port: parsed.port,
-        path: parsed.pathname,
-        method: 'POST',
-        headers: { 'Content-Type': 'text/plain' },
-      }, (res) => {
-        let data = '';
-        res.on('data', (chunk: Buffer) => { data += chunk.toString(); });
-        res.on('end', () => resolve(data));
-      });
-      req.on('error', reject);
-      req.write(body);
-      req.end();
-    });
   }
 
 
