@@ -72,12 +72,25 @@ export function renderPanelHtml(
       padding: 12px;
       font-size: 13px;
     }
+    /* GlassCard primitive — mirrors the mobile DLS surface. Layered
+       on top of the host theme: keep the theme-aware background +
+       border for light themes, then add a subtle electric-purple
+       border tint + glow shadow so the card reads as ours, not as a
+       raw VS Code panel. */
     .card {
       background: var(--vscode-editor-background);
       border: 1px solid var(--vscode-widget-border);
-      border-radius: 6px;
-      padding: 12px;
-      margin-bottom: 10px;
+      border-radius: 8px;
+      padding: 14px;
+      margin-bottom: 12px;
+      box-shadow: 0 0 0 1px rgba(168, 85, 247, 0.08) inset,
+                  0 1px 8px rgba(168, 85, 247, 0.05);
+      transition: box-shadow 160ms ease, border-color 160ms ease;
+    }
+    .card:hover {
+      border-color: rgba(168, 85, 247, 0.25);
+      box-shadow: 0 0 0 1px rgba(168, 85, 247, 0.15) inset,
+                  0 0 16px rgba(168, 85, 247, 0.12);
     }
     .status-row {
       display: flex;
@@ -188,11 +201,11 @@ export function renderPanelHtml(
       flex-shrink: 0;
     }
     h3 {
-      font-size: 12px;
+      font-size: 11px;
       text-transform: uppercase;
-      letter-spacing: 0.05em;
-      color: var(--vscode-descriptionForeground);
-      margin-bottom: 8px;
+      letter-spacing: 0.08em;
+      color: var(--ca-purple);
+      margin: 0 0 10px;
       /* DLS rule: uppercase labels in JetBrains Mono. */
       font-family: 'JetBrains Mono', var(--vscode-editor-font-family), monospace;
     }
