@@ -51,8 +51,14 @@ export class ClaudeRuntimeStrategy implements RuntimeStrategy {
     return { cmd: launch.cmd, args: launch.args };
   }
 
-  resumeLaunchArgs(sessionId: string): string[] {
-    return ['--resume', sessionId, '--dangerously-skip-permissions'];
+  resumeLaunchArgs(sessionId: string, opts?: { auto?: boolean }): string[] {
+    const args = ['--resume', sessionId];
+    // `--dangerously-skip-permissions` is the auto-reconnect bypass:
+    // we only include it when the user already consented to the
+    // session and we're re-attaching in the background. User-initiated
+    // relaunches (auto=false) re-prompt — the safe default.
+    if (opts?.auto) args.push('--dangerously-skip-permissions');
+    return args;
   }
 
   resolveHistoryDir(cwd: string): string | null {

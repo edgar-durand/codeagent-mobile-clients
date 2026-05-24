@@ -38,7 +38,7 @@ function makeCtx(overrides: Partial<HandlerContext> = {}): HandlerContext {
 
   return {
     outputSvc: {} as HandlerContext['outputSvc'],
-    claude: { sendRawPtyInput } as unknown as AgentService,
+    agent: { sendRawPtyInput } as unknown as AgentService,
     historySvc: {} as HandlerContext['historySvc'],
     relay: { sendResult } as unknown as CommandRelayService,
     runtime: {
@@ -62,7 +62,7 @@ describe('change_model handler', () => {
     await handlers['change_model'](ctx, cmd, {} as never);
 
     expect(ctx.runtime.changeModelInstruction).toHaveBeenCalledWith('claude-opus-4-7');
-    expect((ctx.claude as unknown as { sendRawPtyInput: ReturnType<typeof vi.fn> }).sendRawPtyInput)
+    expect((ctx.agent as unknown as { sendRawPtyInput: ReturnType<typeof vi.fn> }).sendRawPtyInput)
       .toHaveBeenCalledWith('/model claude-opus-4-7\r');
     expect(ctx.relay.sendResult).toHaveBeenCalledWith('test-cmd-id', 'completed', {});
   });
@@ -74,7 +74,7 @@ describe('change_model handler', () => {
     await handlers['change_model'](ctx, cmd, {} as never);
 
     expect(ctx.relay.sendResult).toHaveBeenCalledWith('test-cmd-id', 'failed', { error: 'modelId required' });
-    expect((ctx.claude as unknown as { sendRawPtyInput: ReturnType<typeof vi.fn> }).sendRawPtyInput)
+    expect((ctx.agent as unknown as { sendRawPtyInput: ReturnType<typeof vi.fn> }).sendRawPtyInput)
       .not.toHaveBeenCalled();
   });
 
@@ -133,7 +133,7 @@ describe('summarize handler', () => {
     await handlers['summarize'](ctx, cmd, {} as never);
 
     expect(ctx.runtime.summarizeInstruction).toHaveBeenCalledWith('normal');
-    expect((ctx.claude as unknown as { sendRawPtyInput: ReturnType<typeof vi.fn> }).sendRawPtyInput)
+    expect((ctx.agent as unknown as { sendRawPtyInput: ReturnType<typeof vi.fn> }).sendRawPtyInput)
       .toHaveBeenCalledWith('/compact\r');
     expect(ctx.relay.sendResult).toHaveBeenCalledWith('test-cmd-id', 'completed', {});
   });
@@ -145,7 +145,7 @@ describe('summarize handler', () => {
     await handlers['summarize'](ctx, cmd, {} as never);
 
     expect(ctx.runtime.summarizeInstruction).toHaveBeenCalledWith('auto');
-    expect((ctx.claude as unknown as { sendRawPtyInput: ReturnType<typeof vi.fn> }).sendRawPtyInput)
+    expect((ctx.agent as unknown as { sendRawPtyInput: ReturnType<typeof vi.fn> }).sendRawPtyInput)
       .toHaveBeenCalledWith('/compact --auto\r');
     expect(ctx.relay.sendResult).toHaveBeenCalledWith('test-cmd-id', 'completed', {});
   });

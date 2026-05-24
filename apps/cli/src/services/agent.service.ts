@@ -1,5 +1,4 @@
 import { IPtyStrategy } from './pty/types';
-import { buildClaudeLaunch } from './claude-resolver';
 import { log } from './logger';
 import type { RuntimeStrategy } from '../agents/strategy';
 
@@ -17,16 +16,25 @@ export class AgentService {
   private readonly strategyOpts: { onData: (d: string) => void; onExit: (c: number) => void };
   /**
    * Set once the PTY emits its FIRST batch of output — proxy for
-   * "Claude has rendered its input box and is ready to read keystrokes."
-   * Before this, remote `sendCommand`s are buffered (`pendingInputs`)
-   * and replayed in order on first data. Without this guard, the very
-   * first prompt right after `codeam pair` on Windows lands while
-   * Claude's React Ink tree is still mounting — the input bytes are
-   * accepted by the PTY but never make it to the input field, and
-   * the prompt silently vanishes.
+   * "the agent has rendered its input box and is ready to read
+   * keystrokes." Before this, remote `sendCommand`s are buffered
+   * (`pendingInputs`) and replayed in order on first data. Without
+   * this guard, the very first prompt right after `codeam pair` on
+   * Windows lands while the agent's TUI (Claude's React Ink tree,
+   * Codex's ratatui mount) is still initialising — the input bytes
+   * are accepted by the PTY but never make it to the input field,
+   * and the prompt silently vanishes.
    */
-  private claudeReady = false;
+  private agentReady = false;
   private readonly pendingInputs: string[] = [];
+  /**
+   * Cached spawn() result so `restart()` can reuse the resolved
+   * binary path without re-running the strategy's install path. The
+   * agent's installer side-effects (Anthropic curl/iwr, npm install)
+   * already happened on initial spawn — we just need to relaunch
+   * the SAME binary with new resume args.
+   */
+  private initialLaunch: { cmd: string; args: string[]; env?: Record<string, string> } | null = null;
 
   constructor(
     private readonly runtime: RuntimeStrategy,
@@ -34,8 +42,8 @@ export class AgentService {
   ) {
     this.strategyOpts = {
       onData: (d) => {
-        if (!this.claudeReady && d.length > 0) {
-          this.claudeReady = true;
+        if (!this.agentReady && d.length > 0) {
+          this.agentReady = true;
           // Wait one tick so the input field finishes mounting before
           // we splat the buffered keystrokes — sending in the same
           // microtask as the data arrival caused React Ink to batch
@@ -84,6 +92,7 @@ export class AgentService {
       );
       process.exit(1);
     }
+    this.initialLaunch = launch;
 
     // Per-OS PTY backends in priority order. POSIX returns one
     // (UnixPtyStrategy); Win32 returns [ConPTY, pipe-fallback]. We
@@ -162,7 +171,7 @@ export class AgentService {
       log.trace('claude', 'sendCommand dropped (no strategy)');
       return;
     }
-    if (!this.claudeReady) {
+    if (!this.agentReady) {
       // Claude's input field hasn't mounted yet. Buffer; we'll
       // replay this in `drainPending()` on first PTY output.
       log.trace('claude', `sendCommand buffered (not ready) text=${text.length}B`);
@@ -257,21 +266,26 @@ export class AgentService {
    * returns [] and `postSpawnInstruction` types the resume command into the PTY.
    */
   restart(sessionId: string, auto = false): void {
-    if (!this.strategy) return;
-    // Source resume args from the runtime strategy so agent-specific flag
-    // conventions (Claude: --resume + --dangerously-skip-permissions) live
-    // in one place. When auto=false we only need --resume without the
-    // permissions bypass, so we fall back to a simple base array.
-    const resumeArgs = auto
-      ? this.runtime.resumeLaunchArgs(sessionId)
-      : ['--resume', sessionId];
-    const launch = buildClaudeLaunch(resumeArgs);
-    if (!launch) return;
+    if (!this.strategy || !this.initialLaunch) return;
+    // Previously this branch hardcoded `buildClaudeLaunch` — for any
+    // non-Claude runtime that silently relaunched Claude (or no-op'd
+    // on Codex installs). Now we reuse the same binary path the
+    // initial spawn resolved + the agent's own resume-args shape.
+    //
+    // Two args shapes the strategy can produce (encoded in
+    // resumeLaunchArgs):
+    //   - CLI-flag style (Claude: `--resume <id>` ± bypass)
+    //   - subcommand style (Codex: `resume <id>`)
+    // Either flows through here unchanged. For agents whose resume
+    // is triggered AFTER spawn via a TUI instruction
+    // (`postSpawnInstruction`), `resumeLaunchArgs` returns [] and the
+    // setTimeout below types the resume command into the PTY.
+    const resumeArgs = this.runtime.resumeLaunchArgs(sessionId, { auto });
     this.strategy.kill();
-    this.strategy.spawn(launch.cmd, this.opts.cwd, launch.args);
-    // For agents whose resume is triggered by a PTY instruction rather than
-    // a CLI flag (resumeArgs.length === 0), send the instruction once the
-    // PTY is ready. Claude always uses flags so this branch is a no-op for now.
+    this.strategy.spawn(this.initialLaunch.cmd, this.opts.cwd, [
+      ...this.initialLaunch.args,
+      ...resumeArgs,
+    ]);
     if (resumeArgs.length === 0 && this.runtime.postSpawnInstruction) {
       const { ptyInput } = this.runtime.postSpawnInstruction(sessionId);
       setTimeout(() => { this.strategy?.write(ptyInput); }, 500);

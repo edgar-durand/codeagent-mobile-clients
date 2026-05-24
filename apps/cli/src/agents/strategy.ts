@@ -21,7 +21,19 @@ export interface RuntimeStrategy {
   readonly os: OsStrategy;
 
   prepareLaunch(): Promise<{ cmd: string; args: string[]; env?: Record<string, string> }>;
-  resumeLaunchArgs(sessionId: string): string[];
+  /**
+   * Args to splice in for a "resume previous session" relaunch. Two
+   * shapes in the wild:
+   *   - Claude: `--resume <id>` CLI flag, optionally with the
+   *     `--dangerously-skip-permissions` bypass for auto-restarts
+   *     (background reconnect — we already had the user's consent).
+   *   - Codex: `resume <id>` subcommand (no bypass equivalent).
+   *
+   * `opts.auto` distinguishes user-initiated relaunches (false) from
+   * background reconnects (true). Agents that don't differentiate
+   * (Codex) ignore the option.
+   */
+  resumeLaunchArgs(sessionId: string, opts?: { auto?: boolean }): string[];
   postSpawnInstruction?(sessionId: string): { ptyInput: string };
 
   resolveHistoryDir(cwd: string): string | null;

@@ -16,11 +16,22 @@ describe('ClaudeRuntimeStrategy', () => {
     expect(runtime.meta.displayName).toBe('Claude Code');
   });
 
-  it('resumeLaunchArgs returns --resume + --dangerously-skip-permissions', () => {
-    expect(runtime.resumeLaunchArgs('sess-abc')).toEqual([
+  it('resumeLaunchArgs default (user-initiated) omits the permissions bypass', () => {
+    expect(runtime.resumeLaunchArgs('sess-abc')).toEqual(['--resume', 'sess-abc']);
+  });
+
+  it('resumeLaunchArgs auto=true includes --dangerously-skip-permissions', () => {
+    expect(runtime.resumeLaunchArgs('sess-abc', { auto: true })).toEqual([
       '--resume',
       'sess-abc',
       '--dangerously-skip-permissions',
+    ]);
+  });
+
+  it('resumeLaunchArgs auto=false omits the bypass (re-prompt for permissions)', () => {
+    expect(runtime.resumeLaunchArgs('sess-abc', { auto: false })).toEqual([
+      '--resume',
+      'sess-abc',
     ]);
   });
 

@@ -120,7 +120,7 @@ export async function start(requestedAgent?: AgentId): Promise<void> {
   // Late-bound so the closure can reach `claude` for the answer path.
   let streamingEmitter: StreamingEmitterService | null = null;
 
-  const claude = new AgentService(
+  const agent = new AgentService(
     runtime,
     {
       cwd,
@@ -145,7 +145,7 @@ export async function start(requestedAgent?: AgentId): Promise<void> {
       pluginId,
       pluginAuthToken: session.pluginAuthToken,
       runtime,
-      ptyInput: claude,
+      ptyInput: agent,
     });
   }
 
@@ -153,7 +153,7 @@ export async function start(requestedAgent?: AgentId): Promise<void> {
   // a stable reference. Filled in once the dependent services exist.
   const ctx: HandlerContext = {
     outputSvc,
-    claude,
+    agent,
     historySvc,
     runtime,
     relay: undefined as unknown as CommandRelayService,
@@ -180,7 +180,7 @@ export async function start(requestedAgent?: AgentId): Promise<void> {
   });
 
   function sigintHandler(): void {
-    claude.kill();
+    agent.kill();
     outputSvc.dispose();
     relay.stop();
     void fileWatcher?.stop();
@@ -191,7 +191,7 @@ export async function start(requestedAgent?: AgentId): Promise<void> {
   process.once('SIGINT', sigintHandler);
   // Spawn Claude FIRST so its strategy is set + the PTY is launching
   // before the relay starts dispatching remote commands.
-  await claude.spawn();
+  await agent.spawn();
   // Eagerly activate the output stream BEFORE the relay starts so
   // Claude's startup screen reaches the mobile / landing client. The
   // trust-this-folder dialog (and any other first-run interactive

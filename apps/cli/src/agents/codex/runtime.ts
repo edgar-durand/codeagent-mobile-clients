@@ -65,8 +65,11 @@ export class CodexRuntimeStrategy implements RuntimeStrategy {
     return this.os.buildLaunch(binary);
   }
 
-  /** `codex resume <SESSION_ID>` — subcommand, not flag. */
-  resumeLaunchArgs(sessionId: string): string[] {
+  /** `codex resume <SESSION_ID>` — subcommand, not flag. Codex has
+   * no permissions-bypass equivalent, so the `opts.auto` flag is
+   * silently ignored (the same args work for both user-initiated
+   * and background relaunches). */
+  resumeLaunchArgs(sessionId: string, _opts?: { auto?: boolean }): string[] {
     return ['resume', sessionId];
   }
 

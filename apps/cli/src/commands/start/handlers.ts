@@ -45,7 +45,7 @@ import type { KeepAliveContext } from './keep-alive';
  */
 export interface HandlerContext {
   outputSvc: OutputService;
-  claude: AgentService;
+  agent: AgentService;
   historySvc: HistoryService;
   relay: CommandRelayService;
   runtime: RuntimeStrategy;
@@ -85,7 +85,7 @@ function saveFilesTemp(files: FileEntry[]): string[] {
 
 function dispatchPrompt(ctx: HandlerContext, prompt: string): void {
   ctx.outputSvc.newTurn();
-  ctx.claude.sendCommand(prompt);
+  ctx.agent.sendCommand(prompt);
 }
 
 // ─── Agent control ───────────────────────────────────────────────
@@ -97,7 +97,7 @@ const startTask: CommandHandler = (ctx, _cmd, parsed) => {
     const paths = saveFilesTemp(files);
     const atRefs = paths.map((p) => `@${p}`).join(' ');
     ctx.outputSvc.newTurn();
-    ctx.claude.sendCommand(`${atRefs} ${effectivePrompt}`.trim());
+    ctx.agent.sendCommand(`${atRefs} ${effectivePrompt}`.trim());
     setTimeout(() => {
       for (const p of paths) { try { fs.unlinkSync(p); } catch { /* ignore */ } }
     }, 120_000);
@@ -117,16 +117,16 @@ const selectOption: CommandHandler = (ctx, _cmd, parsed) => {
   const index = parsed.index ?? 0;
   const from = parsed.from ?? 0;
   ctx.outputSvc.newTurn();
-  ctx.claude.selectOption(index, from);
+  ctx.agent.selectOption(index, from);
 };
 
 const escapeKey: CommandHandler = (ctx) => {
   ctx.outputSvc.newTurn();
-  ctx.claude.sendEscape();
+  ctx.agent.sendEscape();
 };
 
 const stopTask: CommandHandler = (ctx) => {
-  ctx.claude.interrupt();
+  ctx.agent.interrupt();
 };
 
 const resumeSession: CommandHandler = async (ctx, _cmd, parsed) => {
@@ -135,7 +135,7 @@ const resumeSession: CommandHandler = async (ctx, _cmd, parsed) => {
   ctx.historySvc.setCurrentConversationId(id);
   await ctx.historySvc.loadConversation(id);
   await ctx.outputSvc.newTurnResume(id);
-  ctx.claude.restart(id, auto ?? false);
+  ctx.agent.restart(id, auto ?? false);
 };
 
 // ─── Read-only context queries ───────────────────────────────────
@@ -190,7 +190,7 @@ const changeModel: CommandHandler = async (ctx, cmd) => {
       await ctx.relay.sendResult(cmd.id, 'failed', { error: 'no pty input for this agent' });
       return;
     }
-    ctx.claude.sendRawPtyInput(instr.ptyInput);
+    ctx.agent.sendRawPtyInput(instr.ptyInput);
   } else if (instr.type === 'restart') {
     // Restart path — Claude doesn't use this in Phase 1, but the design
     // supports it for future agents. Defer full implementation.
@@ -204,7 +204,7 @@ const summarize: CommandHandler = async (ctx, cmd) => {
   const params = cmd.payload as { mode?: unknown };
   const mode: 'normal' | 'auto' = params.mode === 'auto' ? 'auto' : 'normal';
   const instr = ctx.runtime.summarizeInstruction(mode);
-  ctx.claude.sendRawPtyInput(instr.ptyInput);
+  ctx.agent.sendRawPtyInput(instr.ptyInput);
   await ctx.relay.sendResult(cmd.id, 'completed', {});
 };
 
@@ -233,7 +233,7 @@ const setKeepAlive: CommandHandler = async (ctx, cmd) => {
 const sessionTerminated: CommandHandler = (ctx) => {
   // Mobile/web "Delete session". Tear down everything and exit.
   showInfo('Session was deleted from the app — exiting.');
-  try { ctx.claude.kill(); } catch { /* best-effort */ }
+  try { ctx.agent.kill(); } catch { /* best-effort */ }
   try {
     const proc = spawn('bash', ['-lc', 'pm2 delete codeam-pair >/dev/null 2>&1 || true'], {
       detached: true,
@@ -252,7 +252,7 @@ const shutdownSession: CommandHandler = async (ctx, cmd) => {
   // the workspace itself suspends and the user stops paying for
   // compute hours.
   try { await ctx.relay.sendResult(cmd.id, 'success', { ok: true }); } catch { /* best-effort */ }
-  try { ctx.claude.kill(); } catch { /* best-effort */ }
+  try { ctx.agent.kill(); } catch { /* best-effort */ }
   if (ctx.keepAliveCtx.inCodespace && ctx.keepAliveCtx.codespaceName) {
     try {
       const stopProc = spawn(
