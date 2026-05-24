@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { filterChrome } from '../../../src/agents/claude/parsing';
+import { filterChrome } from '@codeagent/shared';
 
 describe('filterChrome — context compaction and thinking indicators', () => {
   it('filters standalone compaction notice "↓ N tokens"', () => {

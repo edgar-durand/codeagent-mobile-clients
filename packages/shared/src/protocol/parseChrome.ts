@@ -1,17 +1,23 @@
 /**
- * Claude-specific TUI parsers.
+ * Claude-specific TUI parsers — the canonical source for the CLI's
+ * `claude` RuntimeStrategy AND the VS Code extension's terminal-agent
+ * pipeline. Both consumers import from `@codeagent/shared` so a
+ * Claude TUI shape change lands in one place and ships everywhere.
  *
- * Moved verbatim from @codeagent/shared's protocol/{filterChrome,parseChrome,
- * selector}.ts. The logic is exactly what shipped for every prior Claude
- * release — no behavioral changes. It lives here because each agent's TUI
- * conventions are different (glyphs, selector shapes, status-line formats),
- * so the parsers belong next to the agent's RuntimeStrategy rather than in
- * the cross-agent shared package.
+ * Codex / Cursor / Aider parsers stay in the CLI under `apps/cli/src/
+ * agents/<agent>/parsing.ts` for now — they only have one consumer
+ * (the CLI's runtime), so promoting them would just add ceremony.
+ * Once the VS Code extension grows multi-agent support, promote
+ * those parsers here in the same shape.
  *
- * Codex's parsers live at apps/cli/src/agents/codex/parsing.ts.
+ * Kotlin port: `apps/jetbrains-plugin/.../services/ChromeParser.kt`
+ * and `SelectorDetector.kt`. Kotlin can't import an npm package so
+ * those files are intentional copies — when you change a regex here,
+ * mirror it there. The header of those Kotlin files cites this file
+ * as the source of truth.
  */
 
-import type { ChromeStep, SelectPrompt } from '@codeagent/shared';
+import type { ChromeStep, SelectPrompt } from './chrome-types';
 
 // ─── filterChrome ──────────────────────────────────────────────────
 

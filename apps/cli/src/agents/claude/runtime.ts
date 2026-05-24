@@ -1,5 +1,10 @@
 import {
+  detectListSelector,
+  detectSelector,
+  filterChrome,
   getAgent,
+  isChromeLine,
+  parseChromeLine,
   type AgentId,
   type AgentMetadata,
   type AgentModel,
@@ -11,13 +16,6 @@ import { ensureClaudeInstalled } from './installer';
 import { claudeCredentialLocator, claudeLoginLauncher } from './link';
 import { fetchClaudeQuota } from './quota';
 import * as history from './history';
-import {
-  detectListSelector,
-  detectSelector,
-  filterChrome,
-  isChromeLine,
-  parseChromeLine,
-} from './parsing';
 import type { OsStrategy } from '../../os';
 import type { ChangeModelInstruction, RuntimeStrategy } from '../strategy';
 

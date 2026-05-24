@@ -16,7 +16,7 @@ import {
   filterChrome,
   isChromeLine,
   parseChromeLine,
-} from '../src/agents/claude/parsing';
+} from '@codeagent/shared';
 
 const API_BASE = 'https://api.example.test';
 

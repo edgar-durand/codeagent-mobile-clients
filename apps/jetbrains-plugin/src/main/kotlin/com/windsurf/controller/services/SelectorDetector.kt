@@ -1,15 +1,16 @@
 package com.windsurf.controller.services
 
 /**
- * Port of `packages/shared/src/protocol/selector.ts` to Kotlin —
- * detects Claude Code's interactive selectors in the rendered
- * terminal output so the JetBrains plugin can ship `select_prompt`
- * chunks to the mobile / web clients.
+ * Port of `detectSelector` / `detectListSelector` from
+ * `packages/shared/src/protocol/parseChrome.ts` to Kotlin — detects
+ * Claude Code's interactive selectors in the rendered terminal
+ * output so the JetBrains plugin can ship `select_prompt` chunks to
+ * the mobile / web clients.
  *
- * The TypeScript original lives in `@codeagent/shared` and is the
- * canonical implementation; this Kotlin port mirrors it line-for-line.
- * If you change either side, change both. (The shared package note
- * in CLAUDE.md explicitly authorizes deliberate ports here.)
+ * The TypeScript file is the source of truth; this Kotlin port
+ * mirrors it line-for-line. If you change either side, change both.
+ * (The shared-package note in the repo's CLAUDE.md explicitly
+ * authorizes deliberate Kotlin ports here.)
  */
 data class SelectPrompt(
     val question: String,

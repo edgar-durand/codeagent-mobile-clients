@@ -6,12 +6,14 @@ import { CommandRelayService } from './command-relay.service';
 import { ClaudePseudoterminal } from './claude-pseudoterminal';
 import { ClaudeContextService } from './claude-context.service';
 import {
-  renderToLines,
-  detectSelector,
+  ChromeStep,
   detectListSelector,
+  detectSelector,
   filterChrome,
-} from './terminal-output-pipeline';
-import { isChromeLine, parseChromeLine, ChromeStep } from './parseChrome';
+  isChromeLine,
+  parseChromeLine,
+  renderToLines,
+} from '@codeagent/shared';
 
 /**
  * Owns a PTY-wrapped `claude` process displayed inside a VS Code

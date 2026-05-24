@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { isChromeLine, parseChromeLine } from '../../../src/agents/claude/parsing';
+import { isChromeLine, parseChromeLine } from '@codeagent/shared';
 
 describe('isChromeLine', () => {
   it('returns true for spinner-prefixed lines', () => {
