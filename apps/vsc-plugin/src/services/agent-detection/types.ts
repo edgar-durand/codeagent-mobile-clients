@@ -18,6 +18,20 @@ export interface DetectionResult {
   isTerminalAgent?: boolean;
   isLmAgent?: boolean;
   via: 'extension' | 'binary' | 'config-dir' | 'terminal-tab';
+  /**
+   * Optional override for the emitted DetectedAgent's `name` —
+   * lets detectors expose a runtime-computed display name
+   * (e.g. "VS Code Chat (Claude Sonnet 4.6)") without hard-coding
+   * the suffix into the detector's static `name`.
+   */
+  displayNameOverride?: string;
+  /**
+   * Optional override for the emitted DetectedAgent's `id` —
+   * lets detectors pick a wire id distinct from the detector's static
+   * `id` (e.g. VsCodeChatDetector emits `__vscode_lm__:copilot` so
+   * the mobile picker's wire contract is preserved).
+   */
+  idOverride?: string;
 }
 
 /**

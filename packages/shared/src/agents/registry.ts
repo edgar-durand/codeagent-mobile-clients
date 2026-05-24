@@ -29,11 +29,7 @@ export const AGENT_REGISTRY: Record<AgentId, AgentMetadata> = {
     id: 'coderabbit',
     displayName: 'CodeRabbit',
     binaryName: 'coderabbit',
-    // Gated behind a feature flag until the per-agent contract test +
-    // a real PR review smoke pass on a paid CodeRabbit tenant. Strategy
-    // is fully implemented (BatchAgentStrategy); the flip from false →
-    // true happens in a follow-up release.
-    enabled: false,
+    enabled: true,
     supportedAuthKinds: ['oauth_token', 'api_key'],
     preferredAuthKind: 'oauth_token',
   },
@@ -41,12 +37,7 @@ export const AGENT_REGISTRY: Record<AgentId, AgentMetadata> = {
     id: 'cursor',
     displayName: 'Cursor Agent',
     binaryName: 'cursor-agent',
-    // Gated. Strategy implemented as InteractiveAgentStrategy; TUI
-    // parser borrows the Codex baseline because Cursor's CLI ships a
-    // similar ratatui-style chrome. Real parser fixtures need to be
-    // captured against a paid Cursor account before the flag flips
-    // false → true.
-    enabled: false,
+    enabled: true,
     supportedAuthKinds: ['oauth_token', 'api_key'],
     preferredAuthKind: 'oauth_token',
   },
@@ -54,12 +45,10 @@ export const AGENT_REGISTRY: Record<AgentId, AgentMetadata> = {
     id: 'aider',
     displayName: 'Aider',
     binaryName: 'aider',
-    // Gated. Aider is OAuth-less — auth is ANTHROPIC_API_KEY / OPENAI_API_KEY
-    // / etc. env vars. The link flow surfaces this via the existing
-    // --api-key escape hatch in commands/link.ts. Flip false → true
-    // after a real PTY capture lands + the contract test passes.
-    enabled: false,
-    // Aider only supports api_key (raw model-provider key, not OAuth).
+    enabled: true,
+    // Aider is OAuth-less — auth is via ANTHROPIC_API_KEY / OPENAI_API_KEY
+    // / etc. env vars or `~/.aider.conf.yml`. The link flow surfaces
+    // this via the existing --api-key escape hatch in commands/link.ts.
     supportedAuthKinds: ['api_key'],
     preferredAuthKind: 'api_key',
   },

@@ -10,24 +10,26 @@ import com.windsurf.controller.services.detection.checks.findInstalledPlugin
 import com.windsurf.controller.services.detection.checks.whichBinary
 
 /**
- * OpenAI Codex — terminal agent owned by codeam-cli. Probes the AI
- * Assistant plugin (Codex was integrated natively from v2025.3),
- * known third-party Codex plugins, the `codex` binary on PATH, and
- * the `~/.codex/` config directory.
+ * Claude Code — terminal agent owned by codeam-cli. We report
+ * presence so the mobile picker can list Claude as an option; runtime
+ * (start_task / select_option / …) is dispatched to the CLI's pluginId.
+ *
+ * Probes plugin, binary, then `~/.claude/`. Any signal flips the wire
+ * id to `__terminal__:claude_code` so the backend routes commands at
+ * the CLI rather than at this plugin.
  */
-class CodexDetector : AgentDetector {
-    override val id = "codex"
-    override val name = "Codex"
-    override val icon = "codex"
+class ClaudeCodeDetector : AgentDetector {
+    override val id = "claude_code"
+    override val name = "Claude Code"
+    override val icon = "claude"
 
     private val candidatePlugins = listOf(
-        PluginRef(id = "com.intellij.ml.llm", minVersion = "2025.3"),
-        PluginRef(id = "com.github.x0x0b.codex-launcher"),
-        PluginRef(id = "com.github.codexjb"),
-        PluginRef(id = "com.github.idea-claude-code-gui"),
+        PluginRef(id = "com.anthropic.claudecode"),
+        PluginRef(id = "com.anthropic.claude"),
+        PluginRef(id = "anthropic.claude"),
     )
-    private val binaryName = "codex"
-    private val configDir = "~/.codex"
+    private val binaryName = "claude"
+    private val configDir = "~/.claude"
 
     override suspend fun detect(ctx: DetectionContext): List<DetectionResult> {
         val plugin = findInstalledPlugin(candidatePlugins)
@@ -35,13 +37,13 @@ class CodexDetector : AgentDetector {
             whichBinary(binaryName) != null ||
             dirExists(expandHome(configDir))
         if (!installed) return emptyList()
-        ctx.logger.info("[CodexDetector] detected (plugin=${plugin?.id ?: "none"})")
+        ctx.logger.info("[ClaudeCodeDetector] detected (plugin=${plugin?.id ?: "none"})")
         return listOf(
             DetectionResult(
                 id = id,
                 name = name,
                 icon = icon,
-                pluginId = plugin?.id ?: "openai.codex",
+                pluginId = plugin?.id ?: "com.anthropic.claudecode",
                 toolWindowId = "__terminal__:$id",
                 isTerminalAgent = true,
             ),

@@ -36,15 +36,18 @@ describe('AGENT_REGISTRY', () => {
     expect(AGENT_REGISTRY.claude.enabled).toBe(true);
   });
 
-  it('claude + codex are enabled in Phase 2; copilot still disabled', () => {
+  it('all terminal agents are enabled; copilot still disabled (no runtime builder)', () => {
     expect(AGENT_REGISTRY.claude.enabled).toBe(true);
     expect(AGENT_REGISTRY.codex.enabled).toBe(true);
+    expect(AGENT_REGISTRY.cursor.enabled).toBe(true);
+    expect(AGENT_REGISTRY.coderabbit.enabled).toBe(true);
+    expect(AGENT_REGISTRY.aider.enabled).toBe(true);
     expect(AGENT_REGISTRY.copilot.enabled).toBe(false);
   });
 
   it('getEnabledAgents returns only enabled ones', () => {
     const enabled = getEnabledAgents();
-    expect(enabled.map(a => a.id).sort()).toEqual(['claude', 'codex']);
+    expect(enabled.map(a => a.id).sort()).toEqual(['aider', 'claude', 'coderabbit', 'codex', 'cursor']);
   });
 
   it('getAgent throws on unknown id', () => {

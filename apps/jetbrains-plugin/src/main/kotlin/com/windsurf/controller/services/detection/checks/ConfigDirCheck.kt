@@ -12,3 +12,10 @@ fun dirExists(path: String): Boolean {
     val f = File(path)
     return try { f.exists() && f.isDirectory } catch (_: SecurityException) { false }
 }
+
+/** Mirror of `dirExists` for single-file configs (Aider's
+ *  `~/.aider.conf.yml`). */
+fun fileExists(path: String): Boolean {
+    val f = File(path)
+    return try { f.exists() && f.isFile } catch (_: SecurityException) { false }
+}
