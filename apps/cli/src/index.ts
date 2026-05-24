@@ -7,6 +7,7 @@ import { logout } from './commands/logout';
 import { deploy } from './commands/deploy';
 import { deployList, deployStop } from './commands/deploy-manage';
 import { link } from './commands/link';
+import { doctor } from './commands/doctor';
 import { version } from './commands/version';
 import { help } from './commands/help';
 import { tryShowSubcommandHelp } from './commands/subcommand-help';
@@ -45,6 +46,7 @@ async function main(): Promise<void> {
     case 'status':   return status();
     case 'logout':   return logout();
     case 'link':     return link(args);
+    case 'doctor':   return doctor(args);
     case 'deploy':
       // `codeam deploy`             → start a new deploy
       // `codeam deploy ls|list`     → list deployed workspaces

@@ -63,6 +63,16 @@ const HELPS: Record<string, HelpRenderer> = {
     print([
       `  ${pc.bold('codeam logout')}  ${pc.dim('— remove every paired session from this machine')}`,
     ]),
+  doctor: () =>
+    print([
+      `  ${pc.bold('codeam doctor')}  ${pc.dim('— run diagnostic checks for support triage')}`,
+      '',
+      `     ${pc.cyan('codeam doctor')}          ${pc.dim('human-readable report')}`,
+      `     ${pc.cyan('codeam doctor --json')}   ${pc.dim('machine-parseable report (single JSON document on stdout)')}`,
+      '',
+      `     ${pc.dim('Output never includes tokens or credentials. Paste the diagnostic id')}`,
+      `     ${pc.dim('into a bug report so support can grep the server-side logs.')}`,
+    ]),
 };
 
 function print(lines: string[]): void {

@@ -27,6 +27,7 @@ export function help(): void {
     `     ${pc.white('codeam deploy')}                ${pc.dim('provision a cloud workspace (Codespaces) and pair it')}`,
     `     ${pc.white('codeam deploy ls | list')}      ${pc.dim('list deployed cloud workspaces')}`,
     `     ${pc.white('codeam deploy stop | remove')}  ${pc.dim('stop a deployed workspace session')}`,
+    `     ${pc.white('codeam doctor')}                ${pc.dim('run diagnostic checks (DNS, /health, binaries, …)')}`,
     '',
     `  ${pc.bold('Flags')}`,
     `     ${pc.white('-v, --version')}                ${pc.dim('print the CLI version')}`,
