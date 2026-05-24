@@ -18,6 +18,7 @@ import com.windsurf.controller.services.AgentOutputMonitor
 import com.windsurf.controller.services.CommandRelayService
 import com.windsurf.controller.services.IdeIntegrationService
 import com.windsurf.controller.services.PairingService
+import com.windsurf.controller.services.RecentSessionsApi
 import com.windsurf.controller.services.SettingsService
 import com.windsurf.controller.services.TerminalAgentService
 import com.windsurf.controller.services.TerminalOpsService
@@ -79,6 +80,17 @@ class ControllerToolWindowFactory : ToolWindowFactory {
         private val pairingCard = RoundedPanel(12, cardBg)
         private val codeSeparator = JBLabel("Scan QR or enter code in your mobile app")
         private val recentSessionsCard = RoundedPanel(12, cardBg)
+
+        private val sessionRowFactory by lazy {
+            SessionRowFactory(
+                accentGreen = accentGreen,
+                mutedText = mutedText,
+                primaryText = primaryText,
+                parentForDialogs = this,
+                onReconnect = ::reconnectToSession,
+                onDelete = ::deleteSessionFromApi,
+            )
+        }
 
         init {
             layout = BoxLayout(this, BoxLayout.Y_AXIS)
@@ -296,7 +308,7 @@ class ControllerToolWindowFactory : ToolWindowFactory {
                     // transport this used to read is gone.
                     val isCurrentlyConnected = session.sessionId == currentSid &&
                         CommandRelayService.getInstance().isPolling
-                    val row = buildSessionRow(session, isCurrentlyConnected)
+                    val row = sessionRowFactory.build(session, isCurrentlyConnected)
                     recentSessionsCard.add(row)
                     recentSessionsCard.add(Box.createVerticalStrut(6))
                 }
@@ -306,233 +318,67 @@ class ControllerToolWindowFactory : ToolWindowFactory {
             recentSessionsCard.repaint()
         }
 
-        private fun buildSessionRow(
-            session: SettingsService.RecentSession,
-            isCurrentlyConnected: Boolean
-        ): JComponent {
-            val row = JPanel(BorderLayout(8, 0)).apply {
-                isOpaque = false
-                border = EmptyBorder(6, 8, 6, 8)
-                maximumSize = Dimension(Int.MAX_VALUE, 44)
-                alignmentX = Component.LEFT_ALIGNMENT
-            }
-
-            val infoPanel = JPanel().apply {
-                isOpaque = false
-                layout = BoxLayout(this, BoxLayout.Y_AXIS)
-            }
-
-            val nameLabel = JBLabel(session.userName.ifBlank { session.userEmail }).apply {
-                font = font.deriveFont(Font.BOLD, 12f)
-                foreground = primaryText
-                alignmentX = Component.LEFT_ALIGNMENT
-            }
-            infoPanel.add(nameLabel)
-
-            if (session.userName.isNotBlank() && session.userEmail.isNotBlank()) {
-                val emailLabel = JBLabel(session.userEmail).apply {
-                    font = font.deriveFont(10f)
-                    foreground = mutedText
-                    alignmentX = Component.LEFT_ALIGNMENT
-                }
-                infoPanel.add(emailLabel)
-            }
-
-            row.add(infoPanel, BorderLayout.CENTER)
-
-            val actionsPanel = JPanel().apply {
-                isOpaque = false
-                layout = BoxLayout(this, BoxLayout.X_AXIS)
-            }
-
-            if (isCurrentlyConnected) {
-                val connectedLabel = JBLabel("Connected").apply {
-                    font = font.deriveFont(Font.BOLD, 10f)
-                    foreground = accentGreen
-                }
-                actionsPanel.add(connectedLabel)
-            } else {
-                val reconnectBtn = JButton("Reconnect").apply {
-                    font = font.deriveFont(10f)
-                    isFocusPainted = false
-                    putClientProperty("JButton.buttonType", "roundRect")
-                }
-                reconnectBtn.addActionListener {
-                    reconnectToSession(session)
-                }
-                actionsPanel.add(reconnectBtn)
-            }
-
-            actionsPanel.add(Box.createHorizontalStrut(4))
-
-            val deleteBtn = JButton("✕").apply {
-                font = font.deriveFont(10f)
-                isFocusPainted = false
-                toolTipText = "Delete session"
-                putClientProperty("JButton.buttonType", "roundRect")
-                preferredSize = Dimension(28, 28)
-                cursor = Cursor.getPredefinedCursor(Cursor.HAND_CURSOR)
-            }
-            deleteBtn.addActionListener {
-                val confirm = JOptionPane.showConfirmDialog(
-                    this@ControllerPanel,
-                    "Delete this session? This action cannot be undone.",
-                    "Delete Session",
-                    JOptionPane.OK_CANCEL_OPTION,
-                    JOptionPane.WARNING_MESSAGE
-                )
-                if (confirm == JOptionPane.OK_OPTION) {
-                    deleteSessionFromApi(session)
-                }
-            }
-            actionsPanel.add(deleteBtn)
-
-            row.add(actionsPanel, BorderLayout.EAST)
-
-            return row
-        }
-
         private fun reconnectToSession(session: SettingsService.RecentSession) {
             val pairing = PairingService.getInstance()
-            val settings = SettingsService.getInstance()
-
             // Restore session info on the pairing service
             pairing.clearCurrentSession()
-
-            // Re-pair by calling the reconnect API endpoint
-            Thread {
-                try {
-                    val pluginId = settings.ensurePluginId()
-                    val body = JsonObject().apply {
-                        addProperty("pluginId", pluginId)
-                        addProperty("sessionId", session.sessionId)
-                    }
-                    val httpClient = OkHttpClient.Builder()
-                        .connectTimeout(10, java.util.concurrent.TimeUnit.SECONDS)
-                        .readTimeout(10, java.util.concurrent.TimeUnit.SECONDS)
-                        .build()
-                    val request = okhttp3.Request.Builder()
-                        .url("${settings.state.apiBaseUrl}/api/pairing/reconnect")
-                        .post(com.google.gson.Gson().toJson(body)
-                            .toRequestBody("application/json".toMediaType()))
-                        .withAuthHeaders()
-                        .build()
-                    val response = httpClient.newCall(request).execute()
-                    val responseBody = response.body?.string()
-
-                    if (response.isSuccessful && responseBody != null) {
-                        val json = com.google.gson.Gson().fromJson(responseBody, JsonObject::class.java)
-                        val success = json.get("success")?.asBoolean ?: false
-                        if (success) {
-                            val dataObj = json.getAsJsonObject("data")
-                            val userObj = dataObj?.getAsJsonObject("user")
-                            val plan = userObj?.get("plan")?.asString ?: session.userPlan
-                            val periodEnd = userObj?.get("currentPeriodEnd")?.takeIf { !it.isJsonNull }?.asString
-                            // Persist the freshly-replayed plugin auth
-                            // token so post-reconnect calls (e.g. the
-                            // mint-cli-token flow that drives Claude
-                            // Code auto-pair) have it available.
-                            // Sessions paired before plugin v2.x never
-                            // had the token persisted; reconnect is
-                            // their upgrade path.
-                            val refreshedAuthToken = dataObj?.get("pluginAuthToken")
-                                ?.takeIf { !it.isJsonNull }?.asString
-                            if (!refreshedAuthToken.isNullOrEmpty()) {
-                                settings.setPluginAuthToken(refreshedAuthToken)
-                            }
-                            SwingUtilities.invokeLater {
-                                // Trigger pairing flow as if newly paired
-                                pairing.onReconnected(
-                                    session.sessionId,
-                                    PairingService.PairedUserInfo(
-                                        name = session.userName,
-                                        email = session.userEmail,
-                                        plan = plan,
-                                        currentPeriodEnd = periodEnd
-                                    )
-                                )
-                            }
-                        } else {
-                            SwingUtilities.invokeLater {
-                                JOptionPane.showMessageDialog(
-                                    this@ControllerPanel,
-                                    "Session expired. Please generate a new code.",
-                                    "Reconnect Failed",
-                                    JOptionPane.WARNING_MESSAGE
-                                )
-                            }
+            // Re-pair by calling the reconnect API endpoint. The
+            // callback runs on the OkHttp worker — hop to EDT before
+            // touching Swing.
+            RecentSessionsApi.reconnect(session) { result ->
+                SwingUtilities.invokeLater {
+                    when (result) {
+                        is RecentSessionsApi.ReconnectResult.Success -> {
+                            pairing.onReconnected(result.sessionId, result.userInfo)
                         }
-                    } else {
-                        SwingUtilities.invokeLater {
+                        RecentSessionsApi.ReconnectResult.SessionExpired -> {
+                            JOptionPane.showMessageDialog(
+                                this@ControllerPanel,
+                                "Session expired. Please generate a new code.",
+                                "Reconnect Failed",
+                                JOptionPane.WARNING_MESSAGE,
+                            )
+                        }
+                        RecentSessionsApi.ReconnectResult.Failed -> {
                             JOptionPane.showMessageDialog(
                                 this@ControllerPanel,
                                 "Failed to reconnect. Session may have expired.",
                                 "Reconnect Failed",
-                                JOptionPane.WARNING_MESSAGE
+                                JOptionPane.WARNING_MESSAGE,
+                            )
+                        }
+                        is RecentSessionsApi.ReconnectResult.Error -> {
+                            JOptionPane.showMessageDialog(
+                                this@ControllerPanel,
+                                "Connection error: ${result.message}",
+                                "Reconnect Error",
+                                JOptionPane.ERROR_MESSAGE,
                             )
                         }
                     }
-                } catch (e: Exception) {
-                    SwingUtilities.invokeLater {
-                        JOptionPane.showMessageDialog(
-                            this@ControllerPanel,
-                            "Connection error: ${e.message}",
-                            "Reconnect Error",
-                            JOptionPane.ERROR_MESSAGE
-                        )
-                    }
                 }
-            }.start()
+            }
         }
 
         private fun deleteSessionFromApi(session: SettingsService.RecentSession) {
-            val settings = SettingsService.getInstance()
-            Thread {
-                try {
-                    val httpClient = OkHttpClient.Builder()
-                        .connectTimeout(10, java.util.concurrent.TimeUnit.SECONDS)
-                        .readTimeout(10, java.util.concurrent.TimeUnit.SECONDS)
-                        .build()
-                    val request = okhttp3.Request.Builder()
-                        .url("${settings.state.apiBaseUrl}/api/pairing/sessions/${session.sessionId}")
-                        .delete()
-                        .withAuthHeaders()
-                        .build()
-                    val response = httpClient.newCall(request).execute()
-                    response.close()
-
-                    settings.removeRecentSession(session.sessionId)
-                    SwingUtilities.invokeLater { refreshRecentSessions() }
-                } catch (e: Exception) {
+            RecentSessionsApi.deleteSession(
+                session,
+                onDeleted = { SwingUtilities.invokeLater { refreshRecentSessions() } },
+                onError = { msg ->
                     SwingUtilities.invokeLater {
                         JOptionPane.showMessageDialog(
                             this@ControllerPanel,
-                            "Failed to delete session: ${e.message}",
+                            "Failed to delete session: $msg",
                             "Delete Error",
-                            JOptionPane.ERROR_MESSAGE
+                            JOptionPane.ERROR_MESSAGE,
                         )
                     }
-                }
-            }.start()
+                },
+            )
         }
 
-        private fun generateQrImage(text: String, size: Int): BufferedImage {
-            val hints = mapOf(
-                EncodeHintType.ERROR_CORRECTION to ErrorCorrectionLevel.M,
-                EncodeHintType.MARGIN to 1
-            )
-            val writer = QRCodeWriter()
-            val bitMatrix = writer.encode(text, BarcodeFormat.QR_CODE, size, size, hints)
-            val bg = if (isDark) Color(60, 60, 63) else Color.WHITE
-            val fg = if (isDark) Color.WHITE else Color.BLACK
-            val image = BufferedImage(size, size, BufferedImage.TYPE_INT_RGB)
-            for (x in 0 until size) {
-                for (y in 0 until size) {
-                    image.setRGB(x, y, if (bitMatrix.get(x, y)) fg.rgb else bg.rgb)
-                }
-            }
-            return image
-        }
+        private fun generateQrImage(text: String, size: Int): BufferedImage =
+            QrImageRenderer.render(text, size, isDark)
 
         private fun showPairingIdle() {
             qrLabel.isVisible = false
