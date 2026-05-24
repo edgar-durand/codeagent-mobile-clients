@@ -16,12 +16,14 @@ import { ControllerPanelProvider } from './panels/controller-panel';
 let log: vscode.OutputChannel;
 let panelProvider: ControllerPanelProvider | null = null;
 
-export function activate(context: vscode.ExtensionContext): void {
+export async function activate(context: vscode.ExtensionContext): Promise<void> {
   log = vscode.window.createOutputChannel('CodeAgent Mobile');
   log.appendLine('CodeAgent Mobile extension activating...');
 
-  // Initialize all services
-  SettingsService.initialize(context);
+  // Initialize all services. SettingsService is awaited so the
+  // SecretStorage-backed pluginAuthToken is in the in-memory cache
+  // before any HTTP service tries to read it.
+  await SettingsService.initialize(context);
   WebSocketService.initialize(log);
   CommandRelayService.initialize(log);
   PairingService.initialize(log);
