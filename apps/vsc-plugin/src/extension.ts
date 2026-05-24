@@ -12,6 +12,7 @@ import { CopilotChatService } from './services/copilot-chat.service';
 import { ChatHistoryService } from './services/chat-history.service';
 import { ClaudeContextService } from './services/claude-context.service';
 import { ControllerPanelProvider } from './panels/controller-panel';
+import { initTelemetry, capture, identifyUser, shutdownTelemetry } from './services/telemetry.service';
 
 let log: vscode.OutputChannel;
 let panelProvider: ControllerPanelProvider | null = null;
@@ -113,11 +114,35 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     },
   });
 
+  // Telemetry — opt-out via VS Code's global telemetry switch OR the
+  // `codeagent-mobile.telemetryEnabled` setting OR `CODEAM_TELEMETRY=0`.
+  // initTelemetry() returns false on opt-out + when no API key was
+  // baked into the build; every subsequent capture() call is then a
+  // no-op so the wiring below is safe to leave in.
+  if (initTelemetry()) {
+    capture('plugin_activated', { surface: 'vscode' });
+    PairingService.getInstance().addListener({
+      onPaired: () => {
+        const u = PairingService.getInstance().pairedUser;
+        if (u) {
+          identifyUser({
+            userId: u.email, // backend userId not yet exposed to the plugin
+            email: u.email,
+            name: u.name,
+            plan: u.plan,
+          });
+        }
+        capture('plugin_paired', { plan: u?.plan ?? 'unknown' });
+      },
+    });
+  }
+
   log.appendLine('CodeAgent Mobile extension activated');
 }
 
 export function deactivate(): void {
   log?.appendLine('CodeAgent Mobile extension deactivating...');
+  void shutdownTelemetry();
 
   try {
     CommandRelayService.getInstance().reportOffline();

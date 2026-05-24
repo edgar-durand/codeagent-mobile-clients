@@ -94,3 +94,48 @@ changelog {
 kotlin {
     jvmToolchain(17)
 }
+
+// ─── Build-time PostHog config injection ─────────────────────────
+// Mirrors the CLI's tsup `define` (apps/cli/tsup.config.ts) — the API
+// key is read from POSTHOG_API_KEY in CI and baked into a generated
+// Kotlin object that TelemetryService consumes. Local builds with no
+// env var produce an empty key, which TelemetryService treats as
+// "no-op". The generated file is NOT checked in.
+val generatedSourcesDir = layout.buildDirectory.dir("generated/sources/buildconfig/kotlin/main")
+
+val generateBuildConfig by tasks.registering {
+    val key = providers.environmentVariable("POSTHOG_API_KEY").orElse("")
+    val host = providers.environmentVariable("POSTHOG_HOST").orElse("https://us.i.posthog.com")
+    val ver = project.version.toString()
+    inputs.property("posthogKey", key)
+    inputs.property("posthogHost", host)
+    inputs.property("version", ver)
+    outputs.dir(generatedSourcesDir)
+    doLast {
+        val outFile = generatedSourcesDir.get().file("com/windsurf/controller/GeneratedBuildConfig.kt").asFile
+        outFile.parentFile.mkdirs()
+        outFile.writeText(
+            """
+            // GENERATED FILE — DO NOT EDIT. Source: build.gradle.kts (generateBuildConfig task).
+            // Repopulated on every build from POSTHOG_API_KEY / POSTHOG_HOST env vars.
+            package com.windsurf.controller
+
+            object GeneratedBuildConfig {
+                const val POSTHOG_API_KEY: String = ${"\"" + key.get().replace("\"", "\\\"") + "\""}
+                const val POSTHOG_HOST: String = ${"\"" + host.get().replace("\"", "\\\"") + "\""}
+                const val PLUGIN_VERSION: String = ${"\"" + ver.replace("\"", "\\\"") + "\""}
+            }
+            """.trimIndent() + "\n"
+        )
+    }
+}
+
+sourceSets {
+    named("main") {
+        kotlin.srcDir(generatedSourcesDir)
+    }
+}
+
+tasks.named("compileKotlin") {
+    dependsOn(generateBuildConfig)
+}

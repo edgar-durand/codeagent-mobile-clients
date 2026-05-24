@@ -68,6 +68,19 @@ function copyNodePtyPrebuilds() {
 }
 
 async function main() {
+  // PostHog ingestion key — public-by-design (same shape mobile +
+  // landing + cli bake at build time). The release pipeline sets
+  // POSTHOG_API_KEY in CI; local builds leave it empty, which the
+  // telemetry service treats as "no-op" (events fall into the void).
+  const pkg = require('./package.json');
+  const define = {
+    __POSTHOG_API_KEY__: JSON.stringify(process.env.POSTHOG_API_KEY ?? ''),
+    __POSTHOG_HOST__: JSON.stringify(
+      process.env.POSTHOG_HOST ?? 'https://us.i.posthog.com',
+    ),
+    __PLUGIN_VERSION__: JSON.stringify(pkg.version),
+  };
+
   const ctx = await esbuild.context({
     entryPoints: ['src/extension.ts'],
     bundle: true,
@@ -80,6 +93,7 @@ async function main() {
     external: ['vscode'],
     logLevel: 'info',
     mainFields: ['module', 'main'],
+    define,
   });
 
   if (watch) {

@@ -27,6 +27,12 @@ class FileWatcherStartupActivity : ProjectActivity {
         try {
             val watcher = FileWatcherService.getInstance()
             val pairing = PairingService.getInstance()
+            val telemetry = TelemetryService.getInstance()
+            // Use a stable IDE-scoped machine id (UUID-ish, no PII) for
+            // the anonymous distinct id. PostHog stitches to the real
+            // userId on first pair via identify().
+            telemetry.init(com.intellij.openapi.application.PermanentInstallationID.get())
+            telemetry.capture("plugin_activated", mapOf("surface" to "jetbrains"))
 
             // Drive #1 - existing pairing already on disk. We have a
             // token but no in-memory session id yet on plugin reload,
@@ -59,6 +65,18 @@ class FileWatcherStartupActivity : ProjectActivity {
                             e,
                         )
                     }
+                    val u = pairing.pairedUser
+                    if (u != null) {
+                        telemetry.identify(
+                            TelemetryService.IdentifyParams(
+                                userId = u.email,
+                                email = u.email,
+                                name = u.name,
+                                plan = u.plan,
+                            )
+                        )
+                    }
+                    telemetry.capture("plugin_paired", mapOf("plan" to (u?.plan ?: "unknown")))
                 }
             })
         } catch (e: Exception) {

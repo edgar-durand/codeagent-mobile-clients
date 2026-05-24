@@ -118,6 +118,11 @@
           "type": "number",
           "default": 30000,
           "description": "Heartbeat interval in milliseconds"
+        },
+        "codeagent-mobile.telemetryEnabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Send anonymous usage events to PostHog. Disabled automatically when VS Code's global telemetry setting is off. See https://github.com/edgar-durand/codeagent-mobile-clients#telemetry"
         }
       }
     }
@@ -146,6 +151,7 @@
     "esbuild": "^0.28.0",
     "glob": "^11.0.0",
     "mocha": "^11.7.6",
+    "posthog-node": "^5.35.1",
     "qrcode": "^1.5.4",
     "typescript": "^6.0.3",
     "vitest": "^4.1.5"

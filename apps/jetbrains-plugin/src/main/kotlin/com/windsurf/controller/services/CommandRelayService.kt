@@ -120,8 +120,23 @@ class CommandRelayService {
 
     private fun setConnectionState(next: ConnectionState) {
         if (connectionState == next) return
+        val prev = connectionState
         connectionState = next
         logger.info("Connection state: $next")
+        // Telemetry on the meaningful edges only — per-tick state
+        // would flood PostHog for no signal.
+        runCatching {
+            val tele = TelemetryService.getInstance()
+            when {
+                next == ConnectionState.RECONNECTING && prev == ConnectionState.ONLINE ->
+                    tele.capture("relay_sse_dropped", mapOf("surface" to "jetbrains"))
+                next == ConnectionState.OFFLINE ->
+                    tele.capture("relay_offline", mapOf("surface" to "jetbrains"))
+                next == ConnectionState.ONLINE && prev != ConnectionState.ONLINE ->
+                    tele.capture("relay_online", mapOf("surface" to "jetbrains", "from" to prev.name))
+                else -> {}
+            }
+        }
         for (l in connectionListeners) {
             runCatching { l(next) }
         }
@@ -413,6 +428,9 @@ class CommandRelayService {
         if (authFailureSurfaced) return
         authFailureSurfaced = true
         logger.warn("Auth failed (401) — token cleared, transports stopped.")
+        runCatching {
+            TelemetryService.getInstance().capture("plugin_auth_failed", mapOf("surface" to "jetbrains"))
+        }
         ApplicationManager.getApplication().invokeLater {
             NotificationGroupManager.getInstance()
                 .getNotificationGroup("CodeAgent-Mobile")
