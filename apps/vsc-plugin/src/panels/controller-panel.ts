@@ -19,6 +19,7 @@ import { ClaudeContextService } from '../services/claude-context.service';
 import { McpConfigWriterService, McpConfigureRequest, McpEntry } from '../services/mcp-config-writer.service';
 import { FileWatcherService } from '../services/file-watcher.service';
 import { Messages } from '../ui/messages';
+import { StatusBar } from '../ui/status-bar';
 import { buildInstallAndRun as buildInstallAndRunPure } from '../utils/build-install-command';
 import {
   generateNonce,
@@ -107,6 +108,7 @@ export class ControllerPanelProvider implements vscode.WebviewViewProvider, Comm
             installed: a.installed,
           })),
         );
+        StatusBar.getInstance().reportAgents(agents);
         this.postMessage({
           type: 'agents',
           agents: agents.map((a) => ({ id: a.id, name: a.name, icon: a.icon })),
@@ -142,6 +144,7 @@ export class ControllerPanelProvider implements vscode.WebviewViewProvider, Comm
           CommandRelayService.getInstance().reportAgents(
             fresh.map((a) => ({ id: a.id, name: a.name, icon: a.icon, installed: a.installed })),
           );
+          StatusBar.getInstance().reportAgents(fresh);
           this.postMessage({
             type: 'agents',
             agents: fresh.map((a) => ({ id: a.id, name: a.name, icon: a.icon })),
@@ -342,6 +345,7 @@ export class ControllerPanelProvider implements vscode.WebviewViewProvider, Comm
     CommandRelayService.getInstance().reportAgents(
       agents.map((a) => ({ id: a.id, name: a.name, icon: a.icon, installed: a.installed })),
     );
+    StatusBar.getInstance().reportAgents(agents);
     this.postMessage({
       type: 'agents',
       agents: agents.map((a) => ({ id: a.id, name: a.name, icon: a.icon })),

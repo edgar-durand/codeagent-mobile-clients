@@ -12,6 +12,7 @@ import { ClaudeContextService } from './services/claude-context.service';
 import { ControllerPanelProvider } from './panels/controller-panel';
 import { initTelemetry, capture, identifyUser, shutdownTelemetry } from './services/telemetry.service';
 import { Messages } from './ui/messages';
+import { StatusBar } from './ui/status-bar';
 
 let log: vscode.OutputChannel;
 let panelProvider: ControllerPanelProvider | null = null;
@@ -90,13 +91,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     log.appendLine('Test-only command registered: codeagent-mobile.test.probePairBackend');
   }
 
-  // Status bar item
-  const statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
-  statusBarItem.text = '$(broadcast) CodeAgent';
-  statusBarItem.tooltip = 'CodeAgent Mobile - Click to open';
-  statusBarItem.command = 'codeagent-mobile.openPanel';
-  statusBarItem.show();
-  context.subscriptions.push(statusBarItem);
+  // Status bar item — owned by the StatusBar helper which mirrors
+  // the side-panel's 3-state surface (online / reconnecting /
+  // offline) and surfaces agent count + last-sync age + protocol
+  // version in the MarkdownString tooltip.
+  const statusBar = StatusBar.initialize();
+  context.subscriptions.push({ dispose: () => statusBar.dispose() });
 
   // The capture server + legacy workbench cleanup only matter once
   // the user pairs (the observer script in the IDE renderer is what
