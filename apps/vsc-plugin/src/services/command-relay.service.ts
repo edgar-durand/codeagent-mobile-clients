@@ -548,6 +548,16 @@ export class CommandRelayService {
     return this.connectionState;
   }
 
+  /**
+   * Epoch-ms of the last successful transport response (SSE frame
+   * or polling 200). Null if no transport has succeeded yet this
+   * session. Surfaced for the status bar's "Last sync: 3s ago"
+   * tooltip.
+   */
+  getLastSuccessfulSyncMs(): number | null {
+    return this.lastSuccessAt > 0 ? this.lastSuccessAt : null;
+  }
+
   onConnectionChange(listener: (state: ConnectionState) => void): void {
     this.connectionListeners.push(listener);
   }
