@@ -2,7 +2,7 @@ import { spawn as spawnProcess } from 'child_process';
 import * as path from 'path';
 import * as os from 'os';
 import { confirm, isCancel } from '@clack/prompts';
-import { findInPath } from './pty/types';
+import { findInPath } from '../../services/pty/types';
 
 /**
  * Auto-install Claude Code if it isn't on PATH.

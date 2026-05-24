@@ -69,7 +69,7 @@ import {
   type PairedUserInfo,
 } from '../services/pairing.service';
 import { addSession, loadCliConfig, saveCliConfig } from '../config';
-import { ensureClaudeInstalled } from '../services/claude-installer';
+import { ensureClaudeInstalled } from '../agents/claude/installer';
 import {
   extractLocalClaudeToken,
   claudeCredentialsPaths,

@@ -1,4 +1,4 @@
-import { createOsStrategy, type OsStrategy } from '../os';
+import { createOsStrategy, type OsStrategy } from '../../os';
 
 export interface ClaudeLaunch {
   /** Executable to spawn — already an absolute path on Windows. */
@@ -17,9 +17,9 @@ export interface ClaudeLaunch {
  * binary-name probe (`claude` then `claude-code`) and delegates the
  * wrap to the OsStrategy.
  *
- * Will move to `agents/claude/resolver.ts` in #53 — agent-specific
- * code shouldn't live under `services/`. Kept here for now so #49
- * stays a no-behaviour-change refactor.
+ * Moved here from `src/services/` in #53 so agent-specific code
+ * lives under the agent's own folder. The `services/` layer is
+ * now strictly agent-agnostic.
  */
 export function buildClaudeLaunch(
   extraArgs: string[] = [],

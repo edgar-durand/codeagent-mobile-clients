@@ -6,8 +6,8 @@ import {
   type ChromeStep,
   type SelectPrompt,
 } from '@codeagent/shared';
-import { buildClaudeLaunch } from '../../services/claude-resolver';
-import { ensureClaudeInstalled } from '../../services/claude-installer';
+import { buildClaudeLaunch } from './resolver';
+import { ensureClaudeInstalled } from './installer';
 import { fetchClaudeQuota } from './quota';
 import * as history from './history';
 import {
