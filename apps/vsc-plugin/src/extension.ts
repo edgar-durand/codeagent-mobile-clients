@@ -67,11 +67,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     }),
   );
 
-  // Detect and report installed agents on startup
-  const ide = IdeIntegrationService.getInstance();
-  ide.detectInstalledAgents().then((agents) => {
-    log.appendLine(`Detected ${agents.length} AI agents on activation`);
-  });
+  // Agent detection used to fire at activation, which pays the 2s
+  // vscode.lm consent timeout on every cold start whether the user
+  // ever pairs or not. Defer to the first pairing — the panel itself
+  // re-runs detection in its onPaired listener, so dropping this
+  // line just removes the eager work.
+  // (Was: `ide.detectInstalledAgents().then(...)`.)
 
   // Test-only command — registered ONLY when the extension is hosted
   // by @vscode/test-electron (CODEAM_VSC_TEST=1 in the env). Lets the
@@ -100,9 +101,17 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   statusBarItem.show();
   context.subscriptions.push(statusBarItem);
 
-  // Start capture server. The legacy workbench.html cleanup runs at
-  // most once per profile; subsequent activations skip it entirely.
-  AgentOutputMonitor.getInstance().safeStartup(context);
+  // The capture server + legacy workbench cleanup only matter once
+  // the user pairs (the observer script in the IDE renderer is what
+  // talks to that server). Defer to the first pair so cold-start
+  // doesn't spin up an HTTP listener every activation. PairingService
+  // calls this through the panel's `onPaired` listener; here we also
+  // arm it for the next pair that happens while the panel is closed.
+  PairingService.getInstance().addListener({
+    onPaired: () => {
+      void AgentOutputMonitor.getInstance().safeStartup(context);
+    },
+  });
 
   log.appendLine('CodeAgent Mobile extension activated');
 }
