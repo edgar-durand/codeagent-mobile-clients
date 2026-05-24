@@ -29,18 +29,26 @@ jobs:
           configFile: commitlint.config.mjs
 
   cli:
-    name: CLI (${{ matrix.os }})
+    name: CLI (${{ matrix.os }} · node ${{ matrix.node }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        # 3 OS × 3 Node = 9 jobs. macOS added in #63 — covers the
+        # darwin code paths (Keychain probes, /opt/homebrew PATH
+        # augment, Python helper) that previously only ran indirectly
+        # via the Linux runner. Node 18 + 22 bookend the engines.node
+        # range declared in package.json so an accidental Node-22-only
+        # syntax bump (or a Node-18-incompatible API call) gets caught
+        # at PR time instead of after publish.
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        node: ['18', '20', '22']
     steps:
       - uses: actions/checkout@v6
 
       - uses: actions/setup-node@v6
         with:
-          node-version: 20
+          node-version: ${{ matrix.node }}
           cache: npm
 
       - name: Install workspaces
@@ -75,6 +83,55 @@ jobs:
         env:
           SMOKE_CWD: home
         run: node scripts/smoke.mjs
+
+      # macOS-only: pack + global install + --help. Catches the
+      # bin-shim + postinstall + node-pty prebuild combo we'd
+      # otherwise only discover when users `npm i -g` on a fresh
+      # macOS box. Runs on Node 20 only — the other matrix cells
+      # already verify the typecheck/test surface on this OS.
+      - name: macOS install-and-help smoke
+        if: matrix.os == 'macos-latest' && matrix.node == '20'
+        working-directory: apps/cli
+        run: |
+          npm pack
+          npm install -g ./codeam-cli-*.tgz
+          codeam --help
+          codeam --version
+
+  cli-coverage:
+    name: CLI coverage
+    runs-on: ubuntu-latest
+    # Run after the cross-OS matrix passes — no point burning coverage
+    # cycles on a PR that already breaks tests on a target OS.
+    needs: cli
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install workspaces
+        run: npm ci
+
+      # Threshold gate lives in vitest.config.ts — vitest exits
+      # non-zero when the suite drops below the configured floors.
+      - name: CLI coverage (with threshold gate)
+        working-directory: apps/cli
+        run: npm run test:coverage
+
+      # Upload as an artifact so PR authors can browse the HTML
+      # report when the threshold drops. The lcov.info file also
+      # lets future codecov / coveralls integration light up
+      # without a second config pass.
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cli-coverage-${{ github.sha }}
+          path: apps/cli/coverage/
+          retention-days: 14
 
   vsc-plugin:
     name: VS Code plugin (${{ matrix.os }})
