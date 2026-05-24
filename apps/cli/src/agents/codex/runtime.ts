@@ -22,6 +22,7 @@ const CODEX_MODELS: AgentModel[] = [
 export class CodexRuntimeStrategy implements RuntimeStrategy {
   readonly id: AgentId = 'codex';
   readonly meta: AgentMetadata = getAgent('codex');
+  readonly mode = 'interactive' as const;
   readonly os: OsStrategy;
 
   constructor(os: OsStrategy) {

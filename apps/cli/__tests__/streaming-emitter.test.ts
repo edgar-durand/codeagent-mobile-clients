@@ -36,6 +36,7 @@ function makeRuntime(): RuntimeStrategy {
       supportedAuthKinds: ['oauth_token'],
       preferredAuthKind: 'oauth_token',
     },
+    mode: 'interactive' as const,
     // Fake os: the test exercises classify/filter/select paths that
     // never touch the OS, so any concrete impl works. LinuxOsStrategy
     // is chosen for stable behaviour on the CI runner.

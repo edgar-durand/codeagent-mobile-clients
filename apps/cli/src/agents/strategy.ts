@@ -55,17 +55,61 @@ export interface AgentLoginLauncher {
   launch(): ChildProcess;
 }
 
-export interface RuntimeStrategy {
+// ─── Base agent strategy (shared by Interactive + Batch) ─────────────
+
+/**
+ * Fields every agent strategy carries regardless of invocation mode.
+ * Subdivides into:
+ *
+ *   - `InteractiveAgentStrategy` (Claude, Codex, Cursor, Aider): the
+ *     agent runs as a long-lived PTY-wrapped REPL. The CLI surfaces
+ *     its TUI to the mobile / web client, intercepts selectors,
+ *     drives slash commands.
+ *   - `BatchAgentStrategy` (CodeRabbit and any other one-shot agent):
+ *     the agent is invoked once, prints structured output, exits.
+ *     No PTY, no TUI parsing, no live streaming — the CLI surfaces
+ *     the run's outcome (markdown report, file annotations) to the
+ *     mobile feed after the process completes.
+ *
+ * Both kinds share id + meta + os + credential locator + login
+ * launcher; downstream consumers branch on `mode` to route to the
+ * right code path.
+ */
+export interface BaseAgentStrategy {
   readonly id: AgentId;
   readonly meta: AgentMetadata;
   /**
    * Per-OS primitives the strategy composes for spawn / PATH /
    * shell-escape / temp-file work. Each platform impl (darwin,
-   * linux, win32) is interchangeable; no concrete RuntimeStrategy
-   * should branch on `process.platform` — it should ask `this.os`
-   * instead.
+   * linux, win32) is interchangeable; no concrete strategy should
+   * branch on `process.platform` — it should ask `this.os` instead.
    */
   readonly os: OsStrategy;
+  /**
+   * Discriminator for type narrowing at consumer call sites.
+   * `interactive` ⇒ shape matches `InteractiveAgentStrategy`;
+   * `batch` ⇒ shape matches `BatchAgentStrategy`.
+   */
+  readonly mode: 'interactive' | 'batch';
+
+  /**
+   * Credential locator for `codeam link <agent>`. Returns the
+   * per-agent probe (file watch paths + extract()). Tests can
+   * subclass and override.
+   */
+  credentialLocator(): AgentCredentialLocator;
+
+  /**
+   * Sign-in subprocess launcher for `codeam link <agent>`. Returns
+   * the per-agent ensureInstalled() + launch() pair.
+   */
+  loginLauncher(): AgentLoginLauncher;
+}
+
+// ─── Interactive agents (PTY REPL) ───────────────────────────────────
+
+export interface InteractiveAgentStrategy extends BaseAgentStrategy {
+  readonly mode: 'interactive';
 
   prepareLaunch(): Promise<{ cmd: string; args: string[]; env?: Record<string, string> }>;
   /**
@@ -133,20 +177,115 @@ export interface RuntimeStrategy {
    * the agent is showing a multi-choice menu, null otherwise.
    */
   detectInteractivePrompt(lines: string[]): SelectPrompt | null;
-
-  /**
-   * Credential locator for `codeam link <agent>`. Returns the
-   * per-agent probe (file watch paths + extract()). Tests can
-   * subclass and override.
-   */
-  credentialLocator(): AgentCredentialLocator;
-
-  /**
-   * Sign-in subprocess launcher for `codeam link <agent>`. Returns
-   * the per-agent ensureInstalled() + launch() pair.
-   */
-  loginLauncher(): AgentLoginLauncher;
 }
+
+// ─── Batch agents (one-shot CLI tools — CodeRabbit, etc.) ───────────
+
+/**
+ * Input shape for a single batch-agent invocation. Subset of fields
+ * the agent's `prepareInvocation` consumes; concrete agents pick the
+ * ones that make sense for their CLI surface (PR review needs `prMode`,
+ * a file-only reviewer needs `files`, …).
+ */
+export interface BatchInvocationInput {
+  /** Free-form prompt / instruction passed via the agent's input flag
+   *  (e.g. `coderabbit review --message "$prompt"`). */
+  prompt?: string;
+  /** GitHub PR ref the agent should review (e.g. "123" or full URL). */
+  prRef?: string;
+  /** Working-tree-relative paths the agent should focus on. */
+  files?: string[];
+  /** Additional raw args appended verbatim — escape hatch for power
+   *  users. The runtime is responsible for shell-escaping these via
+   *  `os.escapeShellArg` if the agent's launcher takes a shell string. */
+  extraArgs?: string[];
+}
+
+/**
+ * Structured result the runtime returns to the caller after a batch
+ * run completes. Wide enough to capture both "markdown report from a
+ * reviewer" and "diff annotations from a linter".
+ */
+export interface BatchInvocationOutput {
+  /** Exit code from the agent's subprocess (0 = success). */
+  exitCode: number;
+  /** Human-readable markdown the mobile / web client renders as the
+   *  agent's reply. */
+  markdown?: string;
+  /** Per-file hunks for reviewers that emit structured diffs. Empty
+   *  when the agent only produces a single markdown blob. */
+  hunks?: Array<{
+    path: string;
+    line?: number;
+    severity?: 'info' | 'warn' | 'error';
+    message: string;
+  }>;
+  /** Stats the runtime can surface in the UI (lines reviewed, count
+   *  of suggestions, etc.). Free-form key/value. */
+  stats?: Record<string, number | string>;
+  /** Raw stdout/stderr for debugging or to surface verbatim. */
+  rawStdout?: string;
+  rawStderr?: string;
+}
+
+export interface BatchAgentStrategy extends BaseAgentStrategy {
+  readonly mode: 'batch';
+
+  /**
+   * Default args injected before any caller-supplied ones (e.g.
+   * `['--json']` for a reviewer that ships machine output by
+   * default). Pure data — no side effects.
+   */
+  getDefaultArgs(): string[];
+
+  /**
+   * Build the `(cmd, args, env)` triple for one invocation given
+   * caller input. The runtime is responsible for resolving the
+   * binary via `this.os.findInPath(meta.binaryName)` and shell-
+   * wrapping via `this.os.buildLaunch`. Throws when the input is
+   * impossible to honor (e.g. `prMode` set but the agent's CLI
+   * doesn't support it).
+   */
+  prepareInvocation(input: BatchInvocationInput): Promise<{
+    cmd: string;
+    args: string[];
+    env?: Record<string, string>;
+  }>;
+
+  /**
+   * Parse the agent's stdout (and optionally stderr + exit code)
+   * into a structured `BatchInvocationOutput`. Called after the
+   * subprocess exits. Implementations are stateless — multiple
+   * concurrent runs of the same agent share this strategy instance.
+   */
+  parseOutput(args: {
+    exitCode: number;
+    stdout: string;
+    stderr: string;
+  }): BatchInvocationOutput;
+
+  /**
+   * Convenience: spawn the agent, wait for exit, parse output.
+   * Most callers should use this; advanced flows (live progress
+   * streaming, custom timeout) can compose `prepareInvocation +
+   * spawn + parseOutput` directly.
+   */
+  runOneShot(input: BatchInvocationInput): Promise<BatchInvocationOutput>;
+}
+
+/**
+ * Union covering every concrete agent strategy. Consumer code that
+ * needs to operate on "any agent" types its variable as `AgentStrategy`
+ * and narrows on `.mode` before reaching into mode-specific methods.
+ */
+export type AgentStrategy = InteractiveAgentStrategy | BatchAgentStrategy;
+
+/**
+ * Backward-compat alias used pervasively across the codebase. Pre-#58,
+ * `RuntimeStrategy` was the only agent shape — all Interactive. Kept
+ * exported so existing call sites compile unchanged.
+ */
+export type RuntimeStrategy = InteractiveAgentStrategy;
 
 export interface LocalCredentialSource {
   source: 'flat-file' | 'macos-keychain' | 'env-var' | 'none';

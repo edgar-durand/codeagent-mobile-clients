@@ -24,6 +24,7 @@ import type { ChangeModelInstruction, RuntimeStrategy } from '../strategy';
 export class ClaudeRuntimeStrategy implements RuntimeStrategy {
   readonly id: AgentId = 'claude';
   readonly meta: AgentMetadata = getAgent('claude');
+  readonly mode = 'interactive' as const;
   readonly os: OsStrategy;
 
   constructor(os: OsStrategy) {

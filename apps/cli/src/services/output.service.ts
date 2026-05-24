@@ -85,6 +85,7 @@ export class OutputService {
     this.runtime = runtime ?? {
       id: 'claude' as const,
       meta: { } as RuntimeStrategy['meta'],
+      mode: 'interactive' as const,
       os: createOsStrategy(),
       prepareLaunch: async () => ({ cmd: '', args: [] }),
       resumeLaunchArgs: () => [],
