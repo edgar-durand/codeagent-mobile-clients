@@ -164,7 +164,7 @@ class AgentOutputMonitor {
             }
         }
 
-        clearRemoteOutput(sessionId)
+        AgentOutputPublisher.clearRemoteOutput(sessionId)
 
         // Tell the mobile/web client that a new turn is starting so it
         // creates a fresh agent bubble instead of appending to the
@@ -175,7 +175,7 @@ class AgentOutputMonitor {
         // we have to issue the signal up front — otherwise mobile
         // treats the new chunk as a continuation of the old bubble
         // and the user sees "previous response + current response".
-        pushOutput(sessionId, "new_turn", "", done = false)
+        AgentOutputPublisher.pushOutput(sessionId, "new_turn", "", done = false)
 
         // Extractor-driven agents poll a small, scoped subtree (one
         // assistant bubble for Copilot, the Compose accessibility tree
@@ -306,7 +306,7 @@ class AgentOutputMonitor {
 
             if (!hasEverCapturedContent && pollCount >= MAX_EMPTY_POLLS) {
                 logger.warn("No content captured after $MAX_EMPTY_POLLS polls, stopping monitor")
-                pushOutput(sessionId, "status", "Could not capture agent response. The AI panel may use an unsupported renderer.", done = true)
+                AgentOutputPublisher.pushOutput(sessionId, "status", "Could not capture agent response. The AI panel may use an unsupported renderer.", done = true)
                 stopMonitoring()
                 return
             }
@@ -317,11 +317,11 @@ class AgentOutputMonitor {
                 // Send HTML with done=true to avoid race condition (single atomic chunk)
                 val html = jcefHtmlRef.get()
                 if (html != null && html.length > 20) {
-                    val cleanHtml = stripTailwindClasses(html)
+                    val cleanHtml = AgentOutputTextUtils.stripTailwindClasses(html)
                     logger.info("Sending final HTML (${cleanHtml.length} chars)")
-                    pushOutput(sessionId, "html", cleanHtml, done = true)
+                    AgentOutputPublisher.pushOutput(sessionId, "html", cleanHtml, done = true)
                 } else {
-                    pushOutput(sessionId, "status", "", done = true)
+                    AgentOutputPublisher.pushOutput(sessionId, "status", "", done = true)
                 }
                 // Don't stop monitoring — keep watching for new activity from IDE
                 responseDoneSent = true
@@ -345,8 +345,8 @@ class AgentOutputMonitor {
             hasEverCapturedContent = false
             pollCount = 0
             lastSentResponseText = ""
-            clearRemoteOutput(sessionId)
-            pushOutput(sessionId, "new_turn", "", done = false)
+            AgentOutputPublisher.clearRemoteOutput(sessionId)
+            AgentOutputPublisher.pushOutput(sessionId, "new_turn", "", done = false)
         }
 
         // Prefer clean response text from JCEF element, fall back to page extraction
@@ -369,12 +369,12 @@ class AgentOutputMonitor {
             lastSentResponseText = responseSnapshot
             val preview = responseSnapshot.take(80).replace("\n", "\\n")
             logger.info("New output snapshot (${responseSnapshot.length} chars): $preview")
-            pushOutput(sessionId, "text", responseSnapshot, done = false)
+            AgentOutputPublisher.pushOutput(sessionId, "text", responseSnapshot, done = false)
         }
     }
 
     private fun extractResponseSnapshot(currentSnapshot: String): String {
-        val cleanText = cleanCapturedText(currentSnapshot)
+        val cleanText = AgentOutputTextUtils.cleanCapturedText(currentSnapshot)
         if (currentPromptText.isNotBlank()) {
             val response = extractResponseAfterPrompt(cleanText)
             if (response != null) return response
@@ -432,24 +432,6 @@ class AgentOutputMonitor {
             .trim()
 
         return if (result.length >= 3) result else null
-    }
-
-    private fun stripTailwindClasses(html: String): String {
-        // Remove class attributes (Tailwind utility classes won't render in mobile)
-        // Keep semantic HTML structure: p, pre, code, strong, em, table, ul, ol, li, h1-h6, a, br, hr
-        return html
-            .replace(Regex("""\s+class="[^"]*""""), "")
-            .replace(Regex("""\s+class='[^']*'"""), "")
-            .replace(Regex("""\s+style="[^"]*""""), "")
-            .replace(Regex("""\s+data-[a-z-]+="[^"]*""""), "")
-    }
-
-    private fun cleanCapturedText(text: String): String {
-        return text
-            .replace(Regex("Drop to add to \\w+"), "")
-            .replace(Regex("(?m)^\\s*Drop to add.*$"), "")
-            .replace(Regex("\n{3,}"), "\n\n")
-            .trim()
     }
 
     private fun captureToolWindowContent(): String? {
@@ -684,7 +666,7 @@ class AgentOutputMonitor {
         when (component) {
             is JEditorPane -> {
                 val text = component.text ?: ""
-                if (text.isNotBlank()) textParts.add(stripHtml(text))
+                if (text.isNotBlank()) textParts.add(AgentOutputTextUtils.stripHtml(text))
             }
             is JTextArea -> {
                 val text = component.text ?: ""
@@ -698,7 +680,7 @@ class AgentOutputMonitor {
             }
             is JLabel -> {
                 val text = component.text ?: ""
-                if (text.length > 20) textParts.add(stripHtml(text))
+                if (text.length > 20) textParts.add(AgentOutputTextUtils.stripHtml(text))
             }
         }
         if (component is Container) {
@@ -865,21 +847,6 @@ class AgentOutputMonitor {
         }
     }
 
-    private fun stripHtml(html: String): String {
-        var text = html
-        text = text.replace(Regex("(?is)<script[^>]*>.*?</script>"), " ")
-        text = text.replace(Regex("(?is)<style[^>]*>.*?</style>"), " ")
-        text = text.replace(Regex("(?is)<noscript[^>]*>.*?</noscript>"), " ")
-        text = text.replace(Regex("<br\\s*/?>", RegexOption.IGNORE_CASE), "\n")
-        text = text.replace(Regex("</(?:p|div|h[1-6]|li|tr)>", RegexOption.IGNORE_CASE), "\n")
-        text = text.replace(Regex("<[^>]+>"), " ")
-        text = text.replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">")
-            .replace("&quot;", "\"").replace("&#39;", "'").replace("&nbsp;", " ")
-        text = text.replace(Regex("[ \\t]+"), " ")
-        text = text.replace(Regex("\\n{3,}"), "\n\n")
-        return text.trim()
-    }
-
     // ---------------------------------------------------------------
     // Generic extractor-driven poll
     // ---------------------------------------------------------------
@@ -917,7 +884,7 @@ class AgentOutputMonitor {
         if (msg == null) {
             if (!hasEverCapturedContent && pollCount >= MAX_EMPTY_POLLS) {
                 logger.warn("No message captured after $MAX_EMPTY_POLLS polls (extractor=${extractor.javaClass.simpleName})")
-                pushOutput(sessionId, "status", "Could not capture agent response.", done = true)
+                AgentOutputPublisher.pushOutput(sessionId, "status", "Could not capture agent response.", done = true)
                 stopMonitoring()
             }
             return
@@ -936,7 +903,7 @@ class AgentOutputMonitor {
                 extractorLastSentMarkdown = canonical
                 hasEverCapturedContent = true
                 responseDoneSent = true
-                pushOutput(sessionId, "text", canonical, done = true)
+                AgentOutputPublisher.pushOutput(sessionId, "text", canonical, done = true)
                 logger.info("Extractor done (explicit): emitted final chunk (${canonical.length} chars, canonical=${canonical !== md})")
             }
             return
@@ -959,7 +926,7 @@ class AgentOutputMonitor {
                     responseDoneSent = true
                     val canonical = finalizeMarkdown(extractor, project, tw, md)
                     extractorLastSentMarkdown = canonical
-                    pushOutput(sessionId, "text", canonical, done = true)
+                    AgentOutputPublisher.pushOutput(sessionId, "text", canonical, done = true)
                     logger.info("Extractor done (stability): emitted final chunk (${canonical.length} chars, canonical=${canonical !== md})")
                 }
             }
@@ -973,11 +940,11 @@ class AgentOutputMonitor {
             // Reset the chunk pipeline before emitting the first delta.
             responseDoneSent = false
             extractorLastSentMarkdown = ""
-            clearRemoteOutput(sessionId)
+            AgentOutputPublisher.clearRemoteOutput(sessionId)
         }
         extractorLastSentMarkdown = md
         hasEverCapturedContent = true
-        pushOutput(sessionId, "text", md, done = false)
+        AgentOutputPublisher.pushOutput(sessionId, "text", md, done = false)
     }
 
     /**
@@ -1065,60 +1032,6 @@ class AgentOutputMonitor {
         }
       } catch(e) {}
     })();""".trimIndent()
-
-    private fun pushOutput(sessionId: String, type: String, content: String, done: Boolean) {
-        Thread {
-            val settings = SettingsService.getInstance()
-            val pluginId = settings.ensurePluginId()
-            val body = JsonObject().apply {
-                addProperty("sessionId", sessionId)
-                addProperty("pluginId", pluginId)
-                addProperty("type", type)
-                addProperty("content", content)
-                addProperty("done", done)
-            }
-            val request = Request.Builder()
-                .url("${settings.state.apiBaseUrl}/api/commands/output")
-                .post(gson.toJson(body).toRequestBody("application/json".toMediaType()))
-                .withAuthHeaders()
-                .build()
-            try {
-                httpClient.newCall(request).execute().close()
-                logger.info("Pushed output to API: type=$type, done=$done, length=${content.length}")
-            } catch (e: Exception) {
-                logger.debug("Failed to push output: ${e.message}")
-            }
-        }.start()
-    }
-
-    private fun clearRemoteOutput(sessionId: String) {
-        Thread {
-            // Wire shape matches the CLI's canonical `clear` chunk
-            // (apps/cli/src/services/output.service.ts:126) — POST with
-            // type:"clear" so the backend's chunk router handles it the
-            // same regardless of which client sent it. Was DELETE
-            // /api/commands/output?sessionId=… which the backend
-            // ignored on Pro plans where the chunk buffer is keyed on
-            // sessionId+pluginId.
-            val settings = SettingsService.getInstance()
-            val pluginId = settings.ensurePluginId()
-            val body = JsonObject().apply {
-                addProperty("sessionId", sessionId)
-                addProperty("pluginId", pluginId)
-                addProperty("type", "clear")
-            }
-            val request = Request.Builder()
-                .url("${settings.state.apiBaseUrl}/api/commands/output")
-                .post(gson.toJson(body).toRequestBody("application/json".toMediaType()))
-                .withAuthHeaders()
-                .build()
-            try {
-                httpClient.newCall(request).execute().close()
-            } catch (e: Exception) {
-                logger.debug("Failed to clear output: ${e.message}")
-            }
-        }.start()
-    }
 
     private fun attachToLanguageServerProcess() {
         if (processInterceptAttached) return
