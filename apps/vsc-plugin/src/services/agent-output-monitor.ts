@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import * as http from 'http';
 import * as fs from 'fs';
 import * as path from 'path';
+import * as crypto from 'node:crypto';
 import { OutputChannel } from 'vscode';
 import { SettingsService } from './settings.service';
 import { CommandRelayService } from './command-relay.service';
@@ -21,6 +22,11 @@ export class AgentOutputMonitor {
   private captureServer: http.Server | null = null;
   private latestCapturedContent = '';
   private pendingPrompt: string | null = null;
+  // Random token regenerated at each extension launch. Embedded into the
+  // observer JS that the IDE renderer loads (same-origin) and required
+  // on every mutating request. Blocks drive-by sites from POSTing to
+  // 127.0.0.1:47832 — they cannot read the token cross-origin.
+  private readonly serverToken: string = crypto.randomBytes(32).toString('base64url');
 
   private static readonly CAPTURE_PORT = 47832;
   private static readonly POLL_INTERVAL_MS = 2500;
@@ -152,13 +158,24 @@ export class AgentOutputMonitor {
   private startCaptureServer(): void {
     this.stopCaptureServer();
     this.captureServer = http.createServer((req, res) => {
-      res.setHeader('Access-Control-Allow-Origin', '*');
-      res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-      res.setHeader('Access-Control-Allow-Headers', '*');
-      if (req.method === 'OPTIONS') { res.writeHead(204); res.end(); return; }
+      // No wildcard CORS — the only caller is the same-origin observer
+      // script in the IDE renderer. Drive-by sites in the user's
+      // browser cannot read the Bearer token so they cannot replay it.
+      if (req.method === 'OPTIONS') {
+        res.writeHead(204);
+        res.end();
+        return;
+      }
       if (req.method === 'GET' && req.url === '/ping') {
+        // Unauthenticated liveness — leaks nothing, used by the
+        // observer to detect when the extension host comes back online.
         res.writeHead(200, { 'Content-Type': 'text/plain' });
         res.end('pong');
+        return;
+      }
+      if (!this.isAuthorized(req)) {
+        res.writeHead(401, { 'Content-Type': 'text/plain' });
+        res.end('unauthorized');
         return;
       }
       if (req.method === 'GET' && req.url === '/pending-prompt') {
@@ -199,15 +216,40 @@ export class AgentOutputMonitor {
     this.captureServer = null;
   }
 
+  /**
+   * Queue a prompt for the observer to inject into the active chat.
+   * Extension-host callers (strategy/ide-integration) should use this
+   * instead of POSTing to /submit so they don't need to know the
+   * bearer token and avoid an unnecessary HTTP round-trip.
+   */
+  queuePrompt(prompt: string): void {
+    this.pendingPrompt = prompt;
+  }
+
+  private isAuthorized(req: http.IncomingMessage): boolean {
+    const header = req.headers['authorization'];
+    if (typeof header !== 'string') return false;
+    const expected = `Bearer ${this.serverToken}`;
+    if (header.length !== expected.length) return false;
+    return crypto.timingSafeEqual(Buffer.from(header), Buffer.from(expected));
+  }
+
   // ── Observer Script (runs inside IDE renderer via workbench.html) ──
 
   private buildObserverScript(): string {
     const port = AgentOutputMonitor.CAPTURE_PORT;
     const version = '5.0.0';
+    // Embed the bearer token in the same-origin script so only the
+    // workbench renderer can talk to the capture server. Drive-by
+    // sites cannot read the script (CORS) and so cannot forge a POST.
+    const tokenLiteral = JSON.stringify(this.serverToken);
     return `// CodeAgent Chat Observer v${version} — managed by CodeAgent Mobile extension
 (function() {
   var PORT = ${port};
   var BASE = "http://127.0.0.1:" + PORT;
+  var AUTH = "Bearer " + ${tokenLiteral};
+  var AUTH_HEADERS = { "Authorization": AUTH };
+  var AUTH_HEADERS_POST = { "Authorization": AUTH, "Content-Type": "text/plain" };
   var last = "";
   var obs = null;
   var chatEl = null;
@@ -249,7 +291,7 @@ export class AgentOutputMonitor {
     var t = chatEl.innerText || "";
     if (t === last) return;
     last = t;
-    fetch(BASE + "/capture", { method: "POST", body: t })
+    fetch(BASE + "/capture", { method: "POST", headers: AUTH_HEADERS_POST, body: t })
       .then(function() { failCount = 0; })
       .catch(function() { handleDisconnect(); });
   }
@@ -297,7 +339,7 @@ export class AgentOutputMonitor {
 
   function pollPrompts() {
     if (!serverReady) return;
-    fetch(BASE + "/pending-prompt")
+    fetch(BASE + "/pending-prompt", { headers: AUTH_HEADERS })
       .then(function(r) { return r.json(); })
       .then(function(data) {
         if (data.prompt) {
