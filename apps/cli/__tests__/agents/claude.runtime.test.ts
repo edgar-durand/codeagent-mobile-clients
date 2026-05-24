@@ -1,7 +1,13 @@
 import { describe, it, expect } from 'vitest';
 import { ClaudeRuntimeStrategy } from '../../src/agents/claude/runtime';
+import { LinuxOsStrategy } from '../../src/os';
 
-const runtime = new ClaudeRuntimeStrategy();
+// The existing tests below exercise meta + args + slash-command
+// instructions — none of which touch the OS. A LinuxOsStrategy is
+// the stable default; per-OS branches are exercised via the dedicated
+// __tests__/os/ suite plus the unit tests on ClaudeRuntimeStrategy
+// that inject a Win32OsStrategy when they need it.
+const runtime = new ClaudeRuntimeStrategy(new LinuxOsStrategy());
 
 describe('ClaudeRuntimeStrategy', () => {
   it('reports id=claude and pulls meta from AGENT_REGISTRY', () => {

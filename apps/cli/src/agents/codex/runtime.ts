@@ -1,7 +1,7 @@
 import { spawn, spawnSync } from 'node:child_process';
 import * as path from 'node:path';
 import { getAgent, type AgentId, type AgentMetadata, type AgentModel, type ChromeStep, type SelectPrompt } from '@codeagent/shared';
-import { findInPath } from '../../services/pty/types';
+import type { OsStrategy } from '../../os';
 import * as history from './history';
 import { filterCodexChrome, parseCodexChrome, detectCodexSelector } from './parsing';
 import { renderCodexBuffer } from './renderer';
@@ -21,10 +21,15 @@ const CODEX_MODELS: AgentModel[] = [
 export class CodexRuntimeStrategy implements RuntimeStrategy {
   readonly id: AgentId = 'codex';
   readonly meta: AgentMetadata = getAgent('codex');
+  readonly os: OsStrategy;
+
+  constructor(os: OsStrategy) {
+    this.os = os;
+  }
 
   async prepareLaunch(): Promise<{ cmd: string; args: string[]; env?: Record<string, string> }> {
-    let binary = findInPath('codex');
-    if (binary) return { cmd: binary, args: [] };
+    let binary = this.os.findInPath('codex');
+    if (binary) return this.os.buildLaunch(binary);
 
     // Codex isn't on PATH — run the official installer inline so pairing
     // → first prompt is a single uninterrupted flow on a clean machine.
@@ -33,7 +38,7 @@ export class CodexRuntimeStrategy implements RuntimeStrategy {
     // (not silently swallowed).
     console.log('\n  Codex CLI not found — installing via `npm install -g @openai/codex`...\n');
     try {
-      await installCodexViaNpm();
+      await installCodexViaNpm(this.os);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       throw new Error(
@@ -48,16 +53,16 @@ export class CodexRuntimeStrategy implements RuntimeStrategy {
     // this process's PATH (typical for nvm / fnm installs that only set
     // PATH in shell-rc files). Prepend the resolved dir so the
     // post-install probe sees the binary without a shell restart.
-    augmentNpmGlobalBin();
+    augmentNpmGlobalBin(this.os);
 
-    binary = findInPath('codex');
+    binary = this.os.findInPath('codex');
     if (!binary) {
       throw new Error(
         'Codex CLI was installed but the binary is not visible on PATH for this process.\n' +
           '    Restart your terminal and run `codeam pair` again.',
       );
     }
-    return { cmd: binary, args: [] };
+    return this.os.buildLaunch(binary);
   }
 
   /** `codex resume <SESSION_ID>` — subcommand, not flag. */
@@ -129,10 +134,19 @@ export class CodexRuntimeStrategy implements RuntimeStrategy {
   }
 }
 
-async function installCodexViaNpm(): Promise<void> {
+/**
+ * Resolve the `npm` binary path for the current OS. On Windows the
+ * shim is `npm.cmd`; on POSIX it's `npm` on PATH. We probe via the
+ * OsStrategy so any future "npm via nvm under shell-rc only" case
+ * is encapsulated in one place.
+ */
+function resolveNpm(os: OsStrategy): string {
+  return os.id === 'win32' ? 'npm.cmd' : 'npm';
+}
+
+async function installCodexViaNpm(os: OsStrategy): Promise<void> {
   return new Promise((resolve, reject) => {
-    const npm = process.platform === 'win32' ? 'npm.cmd' : 'npm';
-    const proc = spawn(npm, ['install', '-g', '@openai/codex'], {
+    const proc = spawn(resolveNpm(os), ['install', '-g', '@openai/codex'], {
       stdio: 'inherit',
     });
     proc.on('close', (code) => {
@@ -152,10 +166,9 @@ async function installCodexViaNpm(): Promise<void> {
   });
 }
 
-function augmentNpmGlobalBin(): void {
-  const npm = process.platform === 'win32' ? 'npm.cmd' : 'npm';
+function augmentNpmGlobalBin(os: OsStrategy): void {
   try {
-    const result = spawnSync(npm, ['prefix', '-g'], {
+    const result = spawnSync(resolveNpm(os), ['prefix', '-g'], {
       stdio: ['ignore', 'pipe', 'ignore'],
     });
     if (result.status !== 0) return;
@@ -163,13 +176,8 @@ function augmentNpmGlobalBin(): void {
     if (!prefix) return;
     // Unix: <prefix>/bin · Windows: <prefix> (npm drops the .cmd shim
     // directly into the prefix dir, not a `bin/` subdir).
-    const binDir = process.platform === 'win32' ? prefix : path.join(prefix, 'bin');
-    const sep = path.delimiter;
-    const current = process.env.PATH ?? '';
-    const existing = new Set(current.split(sep).filter(Boolean));
-    if (!existing.has(binDir)) {
-      process.env.PATH = binDir + sep + current;
-    }
+    const binDir = os.id === 'win32' ? prefix : path.join(prefix, 'bin');
+    os.augmentPath([binDir]);
   } catch {
     /* best effort — the post-install findInPath will still try the
        unmodified PATH and surface a clear error if codex is missing. */

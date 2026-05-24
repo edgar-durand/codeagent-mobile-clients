@@ -17,25 +17,31 @@ import {
   isChromeLine,
   parseChromeLine,
 } from './parsing';
+import type { OsStrategy } from '../../os';
 import type { ChangeModelInstruction, RuntimeStrategy } from '../strategy';
 
 export class ClaudeRuntimeStrategy implements RuntimeStrategy {
   readonly id: AgentId = 'claude';
   readonly meta: AgentMetadata = getAgent('claude');
+  readonly os: OsStrategy;
+
+  constructor(os: OsStrategy) {
+    this.os = os;
+  }
 
   async prepareLaunch(): Promise<{ cmd: string; args: string[]; env?: Record<string, string> }> {
-    let launch = buildClaudeLaunch();
+    let launch = buildClaudeLaunch([], this.os);
     if (!launch) {
       // Run Anthropic's official installer inline so pairing → first
       // prompt stays a single uninterrupted flow on a clean machine.
       // The installer prompts interactively (TTY) or runs headless
       // when stdio isn't a TTY.
       const installed = await ensureClaudeInstalled();
-      if (installed) launch = buildClaudeLaunch();
+      if (installed) launch = buildClaudeLaunch([], this.os);
     }
     if (!launch) {
       const cmd =
-        process.platform === 'win32'
+        this.os.id === 'win32'
           ? 'irm https://claude.ai/install.ps1 | iex'
           : 'curl -fsSL https://claude.ai/install.sh | bash';
       throw new Error(

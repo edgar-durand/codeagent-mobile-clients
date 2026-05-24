@@ -1,4 +1,5 @@
 import type { AgentId, AgentMetadata, AgentModel, ChromeStep, NormalizedMessage, SelectPrompt } from '@codeagent/shared';
+import type { OsStrategy } from '../os';
 import type { CloudProvider } from '../services/providers/types';
 
 export interface ChangeModelInstruction {
@@ -10,6 +11,14 @@ export interface ChangeModelInstruction {
 export interface RuntimeStrategy {
   readonly id: AgentId;
   readonly meta: AgentMetadata;
+  /**
+   * Per-OS primitives the strategy composes for spawn / PATH /
+   * shell-escape / temp-file work. Each platform impl (darwin,
+   * linux, win32) is interchangeable; no concrete RuntimeStrategy
+   * should branch on `process.platform` — it should ask `this.os`
+   * instead.
+   */
+  readonly os: OsStrategy;
 
   prepareLaunch(): Promise<{ cmd: string; args: string[]; env?: Record<string, string> }>;
   resumeLaunchArgs(sessionId: string): string[];

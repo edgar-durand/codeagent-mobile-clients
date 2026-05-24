@@ -1,7 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import { CodexRuntimeStrategy } from '../../src/agents/codex/runtime';
+import { LinuxOsStrategy } from '../../src/os';
 
-const runtime = new CodexRuntimeStrategy();
+const runtime = new CodexRuntimeStrategy(new LinuxOsStrategy());
 
 describe('CodexRuntimeStrategy', () => {
   it('reports id=codex and pulls meta from AGENT_REGISTRY', () => {

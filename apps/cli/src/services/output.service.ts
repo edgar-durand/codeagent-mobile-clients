@@ -3,6 +3,7 @@ import { ChromeStepTracker } from './output/chrome-tracker';
 import { ChunkEmitter, type SendOutcome } from './output/chunk-emitter';
 import { PtyBuffer } from './output/pty-buffer';
 import { renderLines } from './output/turn-renderer';
+import { createOsStrategy } from '../os';
 import type { RuntimeStrategy } from '../agents/strategy';
 
 /**
@@ -78,9 +79,13 @@ export class OutputService {
     });
     // Fall back to a no-op stub so existing callers that don't pass a
     // runtime (tests, legacy entry-points) keep working unchanged.
+    // TODO(#50 follow-up): drop this fallback per audit F9 — callers
+    // should always pass an explicit runtime. Until then the stub
+    // composes the real OsStrategy so the `runtime.os` shape matches.
     this.runtime = runtime ?? {
       id: 'claude' as const,
       meta: { } as RuntimeStrategy['meta'],
+      os: createOsStrategy(),
       prepareLaunch: async () => ({ cmd: '', args: [] }),
       resumeLaunchArgs: () => [],
       resolveHistoryDir: () => null,

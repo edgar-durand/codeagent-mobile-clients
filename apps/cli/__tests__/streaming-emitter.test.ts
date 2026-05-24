@@ -8,6 +8,7 @@ import {
 } from '../src/services/streaming-emitter.service';
 import type { PtyInput } from '../src/services/streaming-emitter.service';
 import { _transport } from '../src/services/streaming/transport';
+import { LinuxOsStrategy } from '../src/os';
 import type { RuntimeStrategy } from '../src/agents/strategy';
 import {
   detectListSelector,
@@ -35,6 +36,10 @@ function makeRuntime(): RuntimeStrategy {
       supportedAuthKinds: ['oauth_token'],
       preferredAuthKind: 'oauth_token',
     },
+    // Fake os: the test exercises classify/filter/select paths that
+    // never touch the OS, so any concrete impl works. LinuxOsStrategy
+    // is chosen for stable behaviour on the CI runner.
+    os: new LinuxOsStrategy(),
     prepareLaunch: async () => ({ cmd: 'claude', args: [] }),
     resumeLaunchArgs: () => [],
     resolveHistoryDir: () => null,
