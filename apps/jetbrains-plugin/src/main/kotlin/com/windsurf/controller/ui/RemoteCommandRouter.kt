@@ -352,14 +352,23 @@ fun dispatch(command: CommandRelayService.RemoteCommand) {
                     // The CLI counterpart insists arrows + Enter are paced
                     // so React Ink batches keypresses correctly — same
                     // contract honored by `TerminalAgentService.selectOption`.
+                    //
+                    // selectOption sleeps 80 ms per arrow step + 100 ms
+                    // before Enter — for index=10 that's 800 ms+ on the
+                    // calling thread. We hand it to a pooled executor so
+                    // the EDT (which this lambda runs on via
+                    // SwingUtilities.invokeLater) doesn't freeze.
                     val target = command.payload.get("index")?.asInt ?: 0
                     val current = command.payload.get("from")?.asInt
                         ?: command.payload.get("currentIndex")?.asInt
                         ?: 0
-                    TerminalAgentService.getInstance().selectOption(target, current)
-                    relay.sendResult(command.id, "completed", com.google.gson.JsonObject().apply {
-                        addProperty("message", "Option selected")
-                    })
+                    val cmdId = command.id
+                    ApplicationManager.getApplication().executeOnPooledThread {
+                        TerminalAgentService.getInstance().selectOption(target, current)
+                        relay.sendResult(cmdId, "completed", com.google.gson.JsonObject().apply {
+                            addProperty("message", "Option selected")
+                        })
+                    }
                 }
                 "escape_key" -> {
                     TerminalAgentService.getInstance().sendEscape()

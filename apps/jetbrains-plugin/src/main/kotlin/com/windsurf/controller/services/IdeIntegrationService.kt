@@ -217,7 +217,17 @@ class IdeIntegrationService {
         // Runs AFTER the legacy 4-pass detection so the legacy passes win
         // for any agent they already handle (notably Claude Code). Only
         // detectors for agents NOT covered by the legacy logic emit here.
-        val registryResults = runBlocking {
+        //
+        // Caller-thread contract: detectInstalledAgents() is documented to
+        // be a blocking call (it does PluginManager scans + filesystem
+        // checks). All current call sites pin to a pooled executor, so
+        // `runBlocking(Dispatchers.IO)` is correct: the suspending
+        // detectors run on the IO dispatcher while the caller's thread
+        // parks. A previous concern (#75) was that `runBlocking` on the
+        // EDT pegged the dispatch thread; #81's `list_agents` arm + the
+        // panel's onPaired callback both hop to executeOnPooledThread
+        // before calling this method, so the EDT is no longer involved.
+        val registryResults = kotlinx.coroutines.runBlocking(kotlinx.coroutines.Dispatchers.IO) {
             AgentDetectorRegistry.run(
                 AgentDetectorRegistry.detectors,
                 DetectionContext(logger = logger),
