@@ -406,12 +406,18 @@ class CommandRelayService {
     private fun startHeartbeat() {
         stopHeartbeat()
         reportOnline()
+        // Honor the user-configurable `heartbeatIntervalMs` setting
+        // (default 30s). The previous hardcoded 20_000 ignored it
+        // entirely — the setting only affected the legacy WebSocket
+        // path, so a user who bumped it to slow down keep-alives
+        // (battery, paid-plan polling caps) saw no change.
+        val interval = SettingsService.getInstance().state.heartbeatIntervalMs
         heartbeatTimer = Timer("plugin-heartbeat", true).apply {
             scheduleAtFixedRate(object : TimerTask() {
                 override fun run() {
                     reportOnline()
                 }
-            }, 20_000, 20_000)
+            }, interval, interval)
         }
     }
 

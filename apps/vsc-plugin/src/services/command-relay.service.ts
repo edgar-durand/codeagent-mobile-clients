@@ -281,7 +281,13 @@ export class CommandRelayService {
   private startHeartbeat(): void {
     this.stopHeartbeat();
     this.reportOnline();
-    this.heartbeatInterval = setInterval(() => this.reportOnline(), 20000);
+    // Honor the user-configurable `codeagent-mobile.heartbeatIntervalMs`
+    // setting (default 30s). The previous hardcoded 20000 ignored it
+    // entirely — the setting only ever affected the WebSocket legacy
+    // path, which means a user who bumped it to slow down keep-alives
+    // (battery, paid-plan polling limits) saw no change.
+    const interval = SettingsService.getInstance().heartbeatIntervalMs;
+    this.heartbeatInterval = setInterval(() => this.reportOnline(), interval);
   }
 
   private stopHeartbeat(): void {
