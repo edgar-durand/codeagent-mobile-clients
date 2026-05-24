@@ -15,12 +15,9 @@ import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import java.awt.Component
 import java.awt.Container
-import com.sun.net.httpserver.HttpServer
 import java.lang.ref.WeakReference
-import java.net.InetSocketAddress
 import java.util.Timer
 import java.util.TimerTask
-import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
 import javax.accessibility.AccessibleContext
@@ -38,6 +35,7 @@ class AgentOutputMonitor {
     private val logger = Logger.getInstance(AgentOutputMonitor::class.java)
     private val gson = Gson()
     private val processTap = CodeiumProcessTap()
+    private val jcefState = JcefCaptureState()
     private val httpClient = OkHttpClient.Builder()
         .connectTimeout(5, TimeUnit.SECONDS)
         .readTimeout(5, TimeUnit.SECONDS)
@@ -52,16 +50,6 @@ class AgentOutputMonitor {
     private var projectRef: WeakReference<Project>? = null
     private var isMonitoring: Boolean = false
     private var pollCount: Int = 0
-    private var captureServer: HttpServer? = null
-    private var capturePort: Int = 0
-    private val jcefTextRef = AtomicReference<String?>(null)
-    private val jcefHtmlRef = AtomicReference<String?>(null)
-    private val jcefResponseTextRef = AtomicReference<String?>(null)
-    private val jcefLatch = AtomicReference<CountDownLatch?>(null)
-    private var lastCaptureStrategy: String = "none"
-    private var jcefConsoleHandlerInstalled = false
-    private var jcefOriginalDisplayHandler: Any? = null
-    private var jcefCefClient: Any? = null
     private var currentPromptText: String = ""
     private var responseDoneSent: Boolean = false
     private var lastSentResponseText: String = ""
@@ -131,8 +119,7 @@ class AgentOutputMonitor {
         hasEverCapturedContent = false
         responseDoneSent = false
         lastSentResponseText = ""
-        jcefHtmlRef.set(null)
-        jcefResponseTextRef.set(null)
+        jcefState.resetSnapshotsForNewTurn()
 
         processTap.attach()
 
@@ -197,80 +184,8 @@ class AgentOutputMonitor {
         extractorLastSentMarkdown = ""
         extractorStableCount = 0
         processTap.detach()
-        stopCaptureServer()
-        cleanupJcefConsoleHandler()
+        jcefState.stop()
         logger.info("Output monitoring stopped")
-    }
-
-    private fun cleanupJcefConsoleHandler() {
-        if (!jcefConsoleHandlerInstalled) return
-        try {
-            val client = jcefCefClient
-            val original = jcefOriginalDisplayHandler
-            if (client != null && original != null) {
-                val addMethod = client.javaClass.methods.find {
-                    it.name == "addDisplayHandler" && it.parameterCount == 1
-                }
-                addMethod?.invoke(client, original)
-            }
-        } catch (_: Exception) {}
-        jcefConsoleHandlerInstalled = false
-        jcefOriginalDisplayHandler = null
-        jcefCefClient = null
-    }
-
-    private fun ensureCaptureServer() {
-        if (captureServer != null) return
-        try {
-            val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 5)
-            capturePort = server.address.port
-            server.createContext("/capture") { exchange ->
-                try {
-                    exchange.responseHeaders.add("Access-Control-Allow-Origin", "*")
-                    exchange.responseHeaders.add("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-                    exchange.responseHeaders.add("Access-Control-Allow-Headers", "*")
-                    if (exchange.requestMethod == "OPTIONS") {
-                        exchange.sendResponseHeaders(204, -1)
-                        exchange.close()
-                        return@createContext
-                    }
-                    val body = if (exchange.requestMethod == "GET") {
-                        val query = exchange.requestURI.query ?: ""
-                        val params = query.split("&").associate {
-                            val parts = it.split("=", limit = 2)
-                            parts[0] to java.net.URLDecoder.decode(parts.getOrElse(1) { "" }, "UTF-8")
-                        }
-                        params["t"] ?: ""
-                    } else {
-                        exchange.requestBody.bufferedReader().readText()
-                    }
-                    exchange.sendResponseHeaders(200, -1)
-                    exchange.close()
-                    logger.info("JCEF HTTP ${exchange.requestMethod} received: ${body.length} chars, prefix=${body.take(80)}")
-                    if (body.isNotBlank() && !body.startsWith("empty:")) {
-                        jcefTextRef.set(body)
-                        jcefLatch.get()?.countDown()
-                    }
-                } catch (e: Exception) {
-                    logger.debug("Capture server handler error: ${e.message}")
-                    try { exchange.sendResponseHeaders(500, -1); exchange.close() } catch (_: Exception) {}
-                }
-            }
-            server.executor = null
-            server.start()
-            captureServer = server
-            logger.info("JCEF capture server started on port $capturePort")
-        } catch (e: Exception) {
-            logger.warn("Failed to start capture server: ${e.message}")
-        }
-    }
-
-    private fun stopCaptureServer() {
-        try { captureServer?.stop(0) } catch (_: Exception) {}
-        captureServer = null
-        capturePort = 0
-        jcefLatch.set(null)
-        jcefTextRef.set(null)
     }
 
     fun isActive(): Boolean = isMonitoring
@@ -306,7 +221,7 @@ class AgentOutputMonitor {
             if (stableCount >= threshold && hasEverCapturedContent && !responseDoneSent) {
                 logger.info("Agent output stabilized after ${stableCount * POLL_INTERVAL_MS}ms")
                 // Send HTML with done=true to avoid race condition (single atomic chunk)
-                val html = jcefHtmlRef.get()
+                val html = jcefState.consumeHtml()
                 if (html != null && html.length > 20) {
                     val cleanHtml = AgentOutputTextUtils.stripTailwindClasses(html)
                     logger.info("Sending final HTML (${cleanHtml.length} chars)")
@@ -316,7 +231,6 @@ class AgentOutputMonitor {
                 }
                 // Don't stop monitoring — keep watching for new activity from IDE
                 responseDoneSent = true
-                jcefHtmlRef.set(null)
             }
             return
         }
@@ -341,7 +255,7 @@ class AgentOutputMonitor {
         }
 
         // Prefer clean response text from JCEF element, fall back to page extraction
-        val jcefResponse = jcefResponseTextRef.get()
+        val jcefResponse = jcefState.consumeResponseText()
         val responseSnapshot = if (!jcefResponse.isNullOrBlank() && jcefResponse.length >= 3) {
             jcefResponse
         } else {
@@ -471,7 +385,7 @@ class AgentOutputMonitor {
                         val component = c.component ?: continue
                         val browser = AgentOutputCaptureHelpers.findJBCefBrowser(component)
                         if (browser != null) {
-                            setupAndExecuteJcefCapture(browser)
+                            jcefState.setupCapture(browser)
                             jcefRequested.set(true)
                             break
                         }
@@ -494,18 +408,12 @@ class AgentOutputMonitor {
         }
 
         if (jcefRequested.get()) {
-            val latch = jcefLatch.get()
-            if (latch != null) {
-                if (latch.await(3, TimeUnit.SECONDS)) {
-                    val text = jcefTextRef.get()?.trim() ?: ""
-                    if (text.isNotBlank()) {
-                        logStrategy("jcef-console")
-                        return text
-                    }
-                } else {
-                    if (pollCount <= 3) logger.debug("JCEF HTTP callback timed out after 3s")
-                }
+            val text = jcefState.awaitText(3, TimeUnit.SECONDS)
+            if (text != null) {
+                logStrategy("jcef-console")
+                return text
             }
+            if (pollCount <= 3) logger.debug("JCEF HTTP callback timed out after 3s")
         }
 
         val editorText = scanEditorsForAgentOutput()
@@ -528,6 +436,8 @@ class AgentOutputMonitor {
 
         return null
     }
+
+    @Volatile private var lastCaptureStrategy: String = "none"
 
     private fun logStrategy(strategy: String) {
         if (strategy != lastCaptureStrategy) {
@@ -597,137 +507,6 @@ class AgentOutputMonitor {
             try { app.invokeAndWait(task) } catch (_: Exception) {}
         }
         return ref.get()
-    }
-
-    /**
-     * Captures JCEF browser content using CefDisplayHandler.onConsoleMessage().
-     *
-     * This approach is based on the official JetBrains JCEF documentation:
-     * - executeJavaScript() runs code in the existing page context
-     * - console.log() triggers CefDisplayHandler.onConsoleMessage() via IPC
-     * - Works with both in-process and OOP (out-of-process) JCEF
-     * - Does NOT require JBCefJSQuery or JS_QUERY_POOL_SIZE
-     *
-     * @see <a href="https://plugins.jetbrains.com/docs/intellij/embedded-browser-jcef.html">JCEF Docs</a>
-     */
-    private fun setupAndExecuteJcefCapture(browser: Any) {
-        try {
-            val platformCL = browser.javaClass.classLoader
-            val jbCefBaseClass = Class.forName("com.intellij.ui.jcef.JBCefBrowserBase", true, platformCL)
-            val cefBrowser = jbCefBaseClass.getMethod("getCefBrowser").invoke(browser) ?: return
-            val jcefCL = cefBrowser.javaClass.classLoader
-            val cefBrowserIface = Class.forName("org.cef.browser.CefBrowser", true, jcefCL)
-
-            val latch = CountDownLatch(1)
-            jcefLatch.set(latch)
-            jcefTextRef.set(null)
-
-            // Install CefDisplayHandler proxy once to intercept console messages
-            if (!jcefConsoleHandlerInstalled) {
-                try {
-                    val jbCefClient = jbCefBaseClass.getMethod("getJBCefClient").invoke(browser)
-                    val cefClient = jbCefClient.javaClass.getMethod("getCefClient").invoke(jbCefClient)
-                    jcefCefClient = cefClient
-
-                    val cefDisplayHandlerClass = Class.forName("org.cef.handler.CefDisplayHandler", true, jcefCL)
-
-                    // Preserve existing handler so we can delegate and restore later
-                    val getHandlerMethod = cefClient.javaClass.methods.find { it.name == "getDisplayHandler" }
-                    val existingHandler = getHandlerMethod?.invoke(cefClient)
-                    jcefOriginalDisplayHandler = existingHandler
-
-                    val proxy = java.lang.reflect.Proxy.newProxyInstance(
-                        jcefCL, arrayOf(cefDisplayHandlerClass)
-                    ) { _, method, args ->
-                        val methodArgs = args ?: emptyArray<Any>()
-
-                        if (method.name == "onConsoleMessage") {
-                            // Signature: onConsoleMessage(CefBrowser, LogSeverity, String msg, String src, int line)
-                            val message = methodArgs.getOrNull(2) as? String
-                            if (message != null) {
-                                when {
-                                    message.startsWith("__CAGENT__:") -> {
-                                        val text = message.removePrefix("__CAGENT__:")
-                                        if (text.length > 5) {
-                                            jcefTextRef.set(text)
-                                            jcefLatch.get()?.countDown()
-                                            if (pollCount <= 3) logger.info("JCEF console captured: ${text.length} chars")
-                                        }
-                                    }
-                                    message.startsWith("__CAGENT_HTML__:") -> {
-                                        val html = message.removePrefix("__CAGENT_HTML__:")
-                                        if (html.length > 10) {
-                                            jcefHtmlRef.set(html)
-                                            val preview = html.take(150).replace("\n", " ")
-                                            logger.info("JCEF HTML captured: ${html.length} chars — $preview")
-                                        }
-                                    }
-                                    message.startsWith("__CAGENT_RESPONSE__:") -> {
-                                        val text = message.removePrefix("__CAGENT_RESPONSE__:")
-                                        if (text.length > 3) {
-                                            jcefResponseTextRef.set(text)
-                                        }
-                                    }
-                                    message.startsWith("__CAGENT_DOM__:") -> {
-                                        logger.info("JCEF DOM diagnostic: ${message.removePrefix("__CAGENT_DOM__:")}")
-                                    }
-                                }
-                            }
-                            // Delegate to original handler
-                            if (existingHandler != null) {
-                                try { return@newProxyInstance method.invoke(existingHandler, *methodArgs) }
-                                catch (_: Exception) {}
-                            }
-                            return@newProxyInstance false
-                        }
-
-                        // Delegate all non-Object methods to original handler
-                        if (existingHandler != null && method.declaringClass != Any::class.java) {
-                            try { return@newProxyInstance method.invoke(existingHandler, *methodArgs) }
-                            catch (_: Exception) {}
-                        }
-
-                        // Default return values for unhandled methods
-                        when (method.returnType) {
-                            Boolean::class.javaPrimitiveType -> false
-                            else -> null
-                        }
-                    }
-
-                    val addMethod = cefClient.javaClass.methods.find {
-                        it.name == "addDisplayHandler" && it.parameterCount == 1
-                    }
-                    if (addMethod != null) {
-                        addMethod.invoke(cefClient, proxy)
-                        jcefConsoleHandlerInstalled = true
-                        logger.info("JCEF: CefDisplayHandler proxy installed (console message capture)")
-                    } else {
-                        logger.info("JCEF: addDisplayHandler method not found on ${cefClient.javaClass.name}")
-                    }
-                } catch (e: Exception) {
-                    logger.info("JCEF: Console handler setup failed: ${e.javaClass.simpleName}: ${e.message}")
-                }
-            }
-
-            // Execute JS to capture body text + attempt HTML capture of response elements.
-            // Use CefFrame interface (exported) instead of concrete RemoteFrame class
-            // (non-exported module). Only the Cascade/Windsurf path uses JCEF; agents
-            // with their own MessageExtractor (Copilot, AI Assistant) never reach this.
-            val js = CASCADE_INJECTION_JS
-            val cefFrameIface = Class.forName("org.cef.browser.CefFrame", true, jcefCL)
-            val mainFrame = cefBrowserIface.getMethod("getMainFrame").invoke(cefBrowser)
-            if (mainFrame != null) {
-                val execMethod = cefFrameIface.getMethod(
-                    "executeJavaScript", String::class.java, String::class.java, Int::class.javaPrimitiveType
-                )
-                execMethod.invoke(mainFrame, js, "about:blank", 0)
-                if (pollCount <= 2) logger.info("JCEF: JS executed (console capture)")
-            } else {
-                if (pollCount <= 2) logger.info("JCEF: mainFrame is null")
-            }
-        } catch (e: Exception) {
-            logger.warn("JCEF capture failed: ${e.message}")
-        }
     }
 
     // ---------------------------------------------------------------
