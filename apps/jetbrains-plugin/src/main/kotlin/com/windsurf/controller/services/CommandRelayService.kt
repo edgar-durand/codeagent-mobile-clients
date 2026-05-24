@@ -627,24 +627,31 @@ class CommandRelayService {
     }
 
     fun sendResult(commandId: String, status: String, result: JsonObject) {
+        // The dispatcher fans out 30+ command arms and each one calls
+        // sendResult to ack completion. When the dispatch ran on the
+        // EDT (SwingUtilities.invokeLater wrap in RemoteCommandRouter)
+        // every ack was a synchronous HTTP POST blocking the dispatch
+        // thread — IntelliJ 2024.2+ now raises "Slow operations on
+        // EDT" red errors for any sync HTTP call from the dispatch
+        // thread. Hand to a pooled executor so each arm completes
+        // quickly + the ack lands a beat later off-thread.
         val settings = SettingsService.getInstance()
-
         val body = JsonObject().apply {
             addProperty("commandId", commandId)
             addProperty("status", status)
             add("result", result)
         }
-
         val request = Request.Builder()
             .url("${settings.state.apiBaseUrl}/api/commands/result")
             .post(gson.toJson(body).toRequestBody("application/json".toMediaType()))
             .withAuthHeaders()
             .build()
-
-        try {
-            httpClient.newCall(request).execute().close()
-        } catch (e: Exception) {
-            logger.error("Failed to send command result", e)
+        ApplicationManager.getApplication().executeOnPooledThread {
+            try {
+                httpClient.newCall(request).execute().close()
+            } catch (e: Exception) {
+                logger.error("Failed to send command result", e)
+            }
         }
     }
 
