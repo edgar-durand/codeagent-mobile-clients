@@ -4,6 +4,21 @@ All notable changes to the CodeAgent Mobile VS Code extension are documented her
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.17.7] — 2026-05-24
+
+### Fixed
+
+- **cli:** Correctness bug fixes — shell:true, execSync(string), pair-auto hang, non-atomic config
+
+### Tests
+
+- **vsc-plugin:** Pin PS5 regression case to powershell.exe only
+- **vsc-plugin:** Drop flaky PS5 regression case
+
+### Revert
+
+- **vsc-plugin,jetbrains-plugin:** Drop install_cli_and_pair --agent forwarding
+
 ## [2.17.6] — 2026-05-23
 
 ### Revert
