@@ -4,7 +4,7 @@ import * as os from 'os';
 import * as https from 'https';
 import * as http from 'http';
 import { z } from 'zod';
-import { DEFAULT_API_BASE_URL, getContextWindow, getPricing } from '@codeagent/shared';
+import { resolveApiBaseUrl, getContextWindow, getPricing } from '@codeagent/shared';
 import { vercelBypassHeader } from '../lib/backend-headers';
 import { log } from './logger';
 import { encodeCwd } from '../agents/claude/history';
@@ -36,7 +36,7 @@ const historyRecordSchema = z
 
 type HistoryRecord = z.infer<typeof historyRecordSchema>;
 
-const API_BASE = process.env.CODEAM_API_URL ?? DEFAULT_API_BASE_URL;
+const API_BASE = resolveApiBaseUrl();
 
 interface ClaudeSession {
   id: string;

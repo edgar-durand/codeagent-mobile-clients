@@ -1,12 +1,12 @@
 import pc from 'picocolors';
-import { DEFAULT_API_BASE_URL } from '@codeagent/shared';
+import { resolveApiBaseUrl } from '@codeagent/shared';
 import { clearAll, loadCliConfig } from '../config';
 import { showIntro } from '../ui/banner';
 import { confirmAction } from '../ui/prompts';
 import { _postJson } from '../services/pairing.service';
 import { log } from '../services/logger';
 
-const API_BASE = process.env.CODEAM_API_URL ?? DEFAULT_API_BASE_URL;
+const API_BASE = resolveApiBaseUrl();
 
 /**
  * Best-effort offline-heartbeat fan-out before tearing down local

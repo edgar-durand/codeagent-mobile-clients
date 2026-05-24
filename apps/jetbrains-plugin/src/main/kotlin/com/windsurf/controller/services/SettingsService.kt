@@ -10,6 +10,7 @@ import com.intellij.openapi.components.Service
 import com.intellij.openapi.components.State
 import com.intellij.openapi.components.Storage
 import com.windsurf.controller.DEFAULT_API_BASE_URL
+import com.windsurf.controller.resolveApiBaseUrl
 
 @Service(Service.Level.APP)
 @State(
@@ -27,7 +28,7 @@ class SettingsService : PersistentStateComponent<SettingsService.State> {
     )
 
     data class State(
-        var apiBaseUrl: String = DEFAULT_API_BASE_URL,
+        var apiBaseUrl: String = resolveApiBaseUrl(),
         var pluginId: String = "",
         var autoConnect: Boolean = true,
         var showNotifications: Boolean = true,
@@ -67,6 +68,17 @@ class SettingsService : PersistentStateComponent<SettingsService.State> {
 
     override fun loadState(state: State) {
         myState = state
+        // Env-var override wins over persisted state — without this,
+        // a user who flips `CODEAM_TEST_MODE=1` mid-session keeps
+        // hitting prod because the saved `apiBaseUrl` in
+        // windsurf-controller.xml takes precedence on every load.
+        // resolveApiBaseUrl() returns prod when no env var is set,
+        // so prod users still respect any custom override they
+        // configured in Settings.
+        val resolved = resolveApiBaseUrl()
+        if (resolved != DEFAULT_API_BASE_URL && myState.apiBaseUrl != resolved) {
+            myState.apiBaseUrl = resolved
+        }
         val legacy = myState.pluginAuthToken
         if (legacy.isNotEmpty()) {
             writeAuthTokenToPasswordSafe(legacy)

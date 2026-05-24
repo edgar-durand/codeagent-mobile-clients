@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
 import * as crypto from 'crypto';
-import { DEFAULT_API_BASE_URL } from '@codeagent/shared';
+import { resolveApiBaseUrl } from '@codeagent/shared';
 
 export interface RecentSession {
   sessionId: string;
@@ -117,7 +117,10 @@ export class SettingsService {
   private readConfigSnapshot(): ConfigSnapshot {
     const cfg = vscode.workspace.getConfiguration('codeagent-mobile');
     return {
-      apiBaseUrl: cfg.get<string>('apiBaseUrl', DEFAULT_API_BASE_URL),
+      // resolveApiBaseUrl honors `CODEAM_TEST_MODE=1` / `CODEAM_API_URL`
+      // env vars before the user-configured setting default, so a single
+      // env var flips the entire extension host onto the dev preview.
+      apiBaseUrl: cfg.get<string>('apiBaseUrl', resolveApiBaseUrl()),
       autoConnect: cfg.get<boolean>('autoConnect', true),
       showNotifications: cfg.get<boolean>('showNotifications', true),
       heartbeatIntervalMs: cfg.get<number>('heartbeatIntervalMs', 30000),

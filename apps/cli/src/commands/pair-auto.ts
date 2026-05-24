@@ -1,7 +1,7 @@
 import * as fs from 'fs';
 import * as os from 'os';
 import { randomUUID } from 'crypto';
-import { DEFAULT_API_BASE_URL, isKnownAgentId } from '@codeagent/shared';
+import { resolveApiBaseUrl, isKnownAgentId } from '@codeagent/shared';
 import { addSession, loadCliConfig } from '../config';
 import { capture, identifyUser } from '../services/telemetry.service';
 import { vercelBypassHeader } from '../lib/backend-headers';
@@ -34,7 +34,7 @@ interface ClaimErrorBody {
   error: { code: string; message: string };
 }
 
-const API_BASE = process.env.CODEAM_API_URL ?? DEFAULT_API_BASE_URL;
+const API_BASE = resolveApiBaseUrl();
 
 function fail(msg: string): never {
   // eslint-disable-next-line no-console
