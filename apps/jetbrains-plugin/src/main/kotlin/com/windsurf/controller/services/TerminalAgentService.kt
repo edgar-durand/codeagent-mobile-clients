@@ -217,7 +217,7 @@ class TerminalAgentService {
         var success = false
         runOnEdt {
             try {
-                val widget = findTerminalWidget(tab.content.component) ?: return@runOnEdt
+                val widget = TerminalBufferReader.findTerminalWidget(tab.content.component) ?: return@runOnEdt
                 // TtyConnector.write(bytes) — raw, no newline appended
                 val connector = widget.javaClass.getMethod("getTtyConnector").invoke(widget) ?: return@runOnEdt
                 connector.javaClass.getMethod("write", ByteArray::class.java)
@@ -297,7 +297,7 @@ class TerminalAgentService {
         var success = false
         runOnEdt {
             try {
-                val widget = findTerminalWidget(tab.content.component)
+                val widget = TerminalBufferReader.findTerminalWidget(tab.content.component)
                 if (widget != null) {
                     // Try ShellTerminalWidget.executeCommand(String)
                     try {
@@ -345,33 +345,6 @@ class TerminalAgentService {
             }
         }
         return success
-    }
-
-    private fun findTerminalWidget(component: Component): Any? {
-        val targetNames = listOf(
-            "org.jetbrains.plugins.terminal.ShellTerminalWidget",
-            "org.jetbrains.plugins.terminal.JBTerminalWidget",
-            "com.jediterm.terminal.ui.JediTermWidget"
-        )
-        fun isTarget(comp: Component): Boolean {
-            var clazz: Class<*>? = comp.javaClass
-            while (clazz != null) {
-                if (clazz.name in targetNames) return true
-                clazz = clazz.superclass
-            }
-            return false
-        }
-        fun search(comp: Component): Component? {
-            if (isTarget(comp)) return comp
-            if (comp is java.awt.Container) {
-                for (child in comp.components) {
-                    val found = search(child)
-                    if (found != null) return found
-                }
-            }
-            return null
-        }
-        return search(component)
     }
 
     private fun pasteAndExecute(text: String): Boolean {
@@ -422,26 +395,26 @@ class TerminalAgentService {
                 // Log the component tree once for debugging
                 if (!loggedComponentTree) {
                     val tree = StringBuilder()
-                    dumpComponentTree(rootComponent, tree, 0)
+                    TerminalBufferReader.dumpComponentTree(rootComponent, tree, 0)
                     logger.info("Claude Code terminal component tree:\n$tree")
                     loggedComponentTree = true
                 }
 
                 // Strategy 1: Find IntelliJ Editor components (block terminal uses Editor)
-                text = tryReadFromEditors(rootComponent)
+                text = TerminalBufferReader.tryReadFromEditors(rootComponent)
                 if (text != null) {
                     logger.info("readTerminalText: Strategy 1 (Editor) captured ${text?.length} chars")
                     return@Runnable
                 }
 
                 // Strategy 2: Find JediTerm widget and read its text buffer
-                val widget = findTerminalWidget(rootComponent)
+                val widget = TerminalBufferReader.findTerminalWidget(rootComponent)
                 if (widget != null) {
                     if (!loggedWidgetInfo) {
-                        logWidgetDetails(widget)
+                        TerminalBufferReader.logWidgetDetails(widget)
                         loggedWidgetInfo = true
                     }
-                    text = readFromTerminalWidget(widget)
+                    text = TerminalBufferReader.readFromTerminalWidget(widget)
                     if (text != null) {
                         logger.info("readTerminalText: Strategy 2 (TerminalWidget) captured ${text?.length} chars")
                         return@Runnable
@@ -454,14 +427,14 @@ class TerminalAgentService {
                 }
 
                 // Strategy 3: Walk ALL fields of root component looking for text buffers
-                text = tryAggressiveFieldWalk(rootComponent, 0)
+                text = TerminalBufferReader.tryAggressiveFieldWalk(rootComponent, 0)
                 if (text != null) {
                     logger.info("readTerminalText: Strategy 3 (AggressiveFieldWalk) captured ${text?.length} chars")
                     return@Runnable
                 }
 
                 // Strategy 4: Terminal model via deep reflection on component tree
-                text = tryTerminalModelRead(rootComponent)
+                text = TerminalBufferReader.tryTerminalModelRead(rootComponent)
                 if (text != null) {
                     logger.info("readTerminalText: Strategy 4 (TerminalModel) captured ${text?.length} chars")
                     return@Runnable
@@ -469,7 +442,7 @@ class TerminalAgentService {
 
                 // Strategy 5: Find JTextComponent children
                 val textComponents = mutableListOf<JTextComponent>()
-                collectTextComponents(rootComponent, textComponents)
+                TerminalBufferReader.collectTextComponents(rootComponent, textComponents)
                 if (textComponents.isNotEmpty()) {
                     val sb = StringBuilder()
                     for (tc in textComponents) {
@@ -485,7 +458,7 @@ class TerminalAgentService {
 
                 // Strategy 6: Accessible API
                 val accessibleText = StringBuilder()
-                collectAccessibleText(rootComponent, accessibleText, 0)
+                TerminalBufferReader.collectAccessibleText(rootComponent, accessibleText, 0)
                 if (accessibleText.isNotBlank()) {
                     text = accessibleText.toString().trim()
                     logger.info("readTerminalText: Strategy 6 (Accessible) captured ${text?.length} chars")
@@ -493,7 +466,7 @@ class TerminalAgentService {
                 }
 
                 // Strategy 7: Generic reflection
-                text = tryReflectionRead(rootComponent)
+                text = TerminalBufferReader.tryReflectionRead(rootComponent)
                 if (text != null) {
                     logger.info("readTerminalText: Strategy 7 (Reflection) captured ${text?.length} chars")
                 } else {
@@ -506,408 +479,6 @@ class TerminalAgentService {
 
         runOnEdt(task)
         return text
-    }
-
-    private fun logWidgetDetails(widget: Any) {
-        val cls = widget.javaClass
-        val methods = cls.methods.map { it.name }.distinct().sorted()
-        logger.info("Terminal widget class: ${cls.name}")
-        logger.info("Terminal widget methods: ${methods.joinToString(", ")}")
-
-        var parent: Class<*>? = cls.superclass
-        val hierarchy = mutableListOf(cls.name)
-        while (parent != null && parent != Any::class.java) {
-            hierarchy.add(parent.name)
-            parent = parent.superclass
-        }
-        logger.info("Terminal widget hierarchy: ${hierarchy.joinToString(" → ")}")
-    }
-
-    private fun tryReadFromEditors(component: Component): String? {
-        try {
-            val editorClass = Class.forName("com.intellij.openapi.editor.impl.EditorComponentImpl")
-            val editors = mutableListOf<Any>()
-            collectComponentsByClass(component, editorClass, editors)
-            if (editors.isNotEmpty()) {
-                val sb = StringBuilder()
-                for (editor in editors) {
-                    try {
-                        val getEditor = editor.javaClass.getMethod("getEditor")
-                        val editorObj = getEditor.invoke(editor)
-                        val getDocument = editorObj.javaClass.getMethod("getDocument")
-                        val doc = getDocument.invoke(editorObj)
-                        val getText = doc.javaClass.getMethod("getText")
-                        val text = getText.invoke(doc)?.toString()
-                        if (!text.isNullOrBlank()) sb.appendLine(text)
-                    } catch (_: Exception) {}
-                }
-                val result = sb.toString().trim()
-                if (result.length > 5) return result
-            }
-        } catch (_: Exception) {}
-        return null
-    }
-
-    private fun collectComponentsByClass(component: Component, targetClass: Class<*>, result: MutableList<Any>) {
-        if (targetClass.isInstance(component)) {
-            result.add(component)
-        }
-        if (component is java.awt.Container) {
-            for (child in component.components) {
-                collectComponentsByClass(child, targetClass, result)
-            }
-        }
-    }
-
-    private fun readFromTerminalWidget(widget: Any): String? {
-        // Try getTerminalTextBuffer() → TerminalTextBuffer (public API)
-        for (bufferMethod in listOf("getTerminalTextBuffer", "getTextBuffer")) {
-            try {
-                val buffer = widget.javaClass.getMethod(bufferMethod).invoke(widget) ?: continue
-                logger.info("readFromTerminalWidget: found buffer via $bufferMethod → ${buffer.javaClass.name}")
-                val bufferText = readTerminalTextBuffer(buffer)
-                if (!bufferText.isNullOrBlank()) return bufferText
-            } catch (e: Exception) {
-                logger.debug("readFromTerminalWidget: $bufferMethod failed: ${e.message}")
-            }
-        }
-
-        // Try getTerminal() → Terminal → getTextBuffer()
-        try {
-            val terminal = widget.javaClass.getMethod("getTerminal").invoke(widget)
-            if (terminal != null) {
-                logger.info("readFromTerminalWidget: found terminal → ${terminal.javaClass.name}")
-                for (bufferMethod in listOf("getTextBuffer", "getTerminalTextBuffer")) {
-                    try {
-                        val buffer = terminal.javaClass.getMethod(bufferMethod).invoke(terminal) ?: continue
-                        val bufferText = readTerminalTextBuffer(buffer)
-                        if (!bufferText.isNullOrBlank()) return bufferText
-                    } catch (_: Exception) {}
-                }
-            }
-        } catch (_: Exception) {}
-
-        // Try getTerminalPanel() → TerminalPanel → getTerminalTextBuffer()
-        try {
-            val panel = widget.javaClass.getMethod("getTerminalPanel").invoke(widget)
-            if (panel != null) {
-                logger.info("readFromTerminalWidget: found panel → ${panel.javaClass.name}")
-                for (bufferMethod in listOf("getTerminalTextBuffer", "getTextBuffer")) {
-                    try {
-                        val buffer = panel.javaClass.getMethod(bufferMethod).invoke(panel) ?: continue
-                        val bufferText = readTerminalTextBuffer(buffer)
-                        if (!bufferText.isNullOrBlank()) return bufferText
-                    } catch (_: Exception) {}
-                }
-                val bufferText = extractTextFromTerminalObject(panel)
-                if (!bufferText.isNullOrBlank()) return bufferText
-            }
-        } catch (_: Exception) {}
-
-        // Walk declared fields with setAccessible to find buffer objects
-        val visited = mutableSetOf<Int>()
-        return walkFieldsForBuffer(widget, 0, visited)
-    }
-
-    private fun walkFieldsForBuffer(obj: Any, depth: Int, visited: MutableSet<Int>): String? {
-        if (depth > 4) return null
-        val id = System.identityHashCode(obj)
-        if (id in visited) return null
-        visited.add(id)
-
-        var cls: Class<*>? = obj.javaClass
-        while (cls != null && cls != Any::class.java) {
-            for (field in cls.declaredFields) {
-                try {
-                    field.isAccessible = true
-                    val value = field.get(obj) ?: continue
-                    val valClass = value.javaClass.name
-
-                    // Check if this is a text buffer
-                    if (valClass.contains("TextBuffer", ignoreCase = true) ||
-                        valClass.contains("TerminalModel", ignoreCase = true) ||
-                        valClass.contains("OutputModel", ignoreCase = true)) {
-                        logger.info("walkFieldsForBuffer: found ${field.name}: $valClass")
-                        val text = readTerminalTextBuffer(value)
-                        if (!text.isNullOrBlank()) return text
-                        val text2 = extractTextFromTerminalObject(value)
-                        if (!text2.isNullOrBlank()) return text2
-                    }
-
-                    // Recurse into terminal-related objects
-                    if (valClass.contains("Terminal", ignoreCase = true) ||
-                        valClass.contains("Session", ignoreCase = true) ||
-                        valClass.contains("JediTerm", ignoreCase = true)) {
-                        val result = walkFieldsForBuffer(value, depth + 1, visited)
-                        if (result != null) return result
-                    }
-                } catch (_: Exception) {}
-            }
-            cls = cls.superclass
-        }
-        return null
-    }
-
-    private fun tryAggressiveFieldWalk(component: Component, depth: Int): String? {
-        if (depth > 3) return null
-        val visited = mutableSetOf<Int>()
-        val result = walkFieldsForBuffer(component, 0, visited)
-        if (result != null) return result
-
-        if (component is java.awt.Container) {
-            for (child in component.components) {
-                val childResult = tryAggressiveFieldWalk(child, depth + 1)
-                if (childResult != null) return childResult
-            }
-        }
-        return null
-    }
-
-    private fun readTerminalTextBuffer(buffer: Any): String? {
-        // Try getScreenLines() — returns all visible screen content
-        try {
-            val screenLines = buffer.javaClass.getMethod("getScreenLines").invoke(buffer)?.toString()
-            if (!screenLines.isNullOrBlank() && screenLines.length > 3) {
-                logger.info("readTerminalTextBuffer: getScreenLines returned ${screenLines.length} chars")
-                return screenLines
-            }
-        } catch (_: Exception) {}
-
-        // Try lock + getScreenLines for thread-safe access
-        try {
-            val lockMethod = buffer.javaClass.getMethod("lock")
-            val unlockMethod = buffer.javaClass.getMethod("unlock")
-            lockMethod.invoke(buffer)
-            try {
-                val screenLines = buffer.javaClass.getMethod("getScreenLines").invoke(buffer)?.toString()
-                if (!screenLines.isNullOrBlank() && screenLines.length > 3) {
-                    unlockMethod.invoke(buffer)
-                    return screenLines
-                }
-            } finally {
-                try { unlockMethod.invoke(buffer) } catch (_: Exception) {}
-            }
-        } catch (_: Exception) {}
-
-        // Try reading line by line: getHeight() + getLine(int)
-        try {
-            val height = buffer.javaClass.getMethod("getHeight").invoke(buffer) as Int
-            val sb = StringBuilder()
-            for (i in 0 until height) {
-                try {
-                    val line = buffer.javaClass.getMethod("getLine", Int::class.javaPrimitiveType)
-                        .invoke(buffer, i)
-                    if (line != null) sb.appendLine(line.toString())
-                } catch (_: Exception) {}
-            }
-            if (sb.isNotBlank()) return sb.toString().trim()
-        } catch (_: Exception) {}
-
-        // Try historyBuffer + screenBuffer
-        try {
-            val historyText = StringBuilder()
-            for (name in listOf("getHistoryBuffer", "getHistoryLines")) {
-                try {
-                    val history = buffer.javaClass.getMethod(name).invoke(buffer)
-                    if (history != null) historyText.append(history.toString())
-                } catch (_: Exception) {}
-            }
-            val screenText = try {
-                buffer.javaClass.getMethod("getScreenLines").invoke(buffer)?.toString() ?: ""
-            } catch (_: Exception) { "" }
-            val combined = (historyText.toString() + "\n" + screenText).trim()
-            if (combined.length > 3) return combined
-        } catch (_: Exception) {}
-
-        return null
-    }
-
-    private fun dumpComponentTree(component: Component, sb: StringBuilder, depth: Int) {
-        if (depth > 6) return
-        val indent = "  ".repeat(depth)
-        sb.appendLine("$indent${component.javaClass.name} [${component.width}x${component.height}]")
-        if (component is java.awt.Container) {
-            for (child in component.components) {
-                dumpComponentTree(child, sb, depth + 1)
-            }
-        }
-    }
-
-    private fun tryTerminalModelRead(component: Component): String? {
-        try {
-            val cls = component.javaClass
-
-            // BlockTerminalPanel / TerminalPanel — try to get the session or controller
-            for (fieldName in listOf("mySession", "myTerminal", "myController", "myTermWidget",
-                "terminalWidget", "myContent", "myBlockTerminalView")) {
-                try {
-                    val field = findFieldRecursive(cls, fieldName) ?: continue
-                    field.isAccessible = true
-                    val obj = field.get(component) ?: continue
-
-                    // Try getTerminalTextBuffer or similar on the session/terminal object
-                    val bufferText = extractTextFromTerminalObject(obj)
-                    if (bufferText != null && bufferText.length > 10) return bufferText
-                } catch (_: Exception) {}
-            }
-
-            // Try methods on the component itself
-            for (methodName in listOf("getTerminalTextBuffer", "getText", "getOutputModel",
-                "getController", "getSession", "getTerminalModel")) {
-                try {
-                    val method = cls.getMethod(methodName)
-                    val result = method.invoke(component) ?: continue
-                    val bufferText = extractTextFromTerminalObject(result)
-                    if (bufferText != null && bufferText.length > 10) return bufferText
-                } catch (_: Exception) {}
-            }
-        } catch (_: Exception) {}
-
-        // Recurse into child components
-        if (component is java.awt.Container) {
-            for (child in component.components) {
-                val result = tryTerminalModelRead(child)
-                if (result != null) return result
-            }
-        }
-        return null
-    }
-
-    private fun findFieldRecursive(cls: Class<*>, name: String): java.lang.reflect.Field? {
-        var current: Class<*>? = cls
-        while (current != null && current != Any::class.java) {
-            try {
-                return current.getDeclaredField(name)
-            } catch (_: NoSuchFieldException) {}
-            current = current.superclass
-        }
-        return null
-    }
-
-    private fun extractTextFromTerminalObject(obj: Any): String? {
-        // Try common methods to extract text from terminal session/buffer objects
-        for (methodName in listOf("getTerminalTextBuffer", "getTextBuffer", "getText",
-            "getScreenLines", "getHistoryBuffer", "getAllText")) {
-            try {
-                val method = obj.javaClass.getMethod(methodName)
-                val result = method.invoke(obj) ?: continue
-                val text = result.toString()
-                if (text.length > 10 && !text.startsWith("com.") && !text.startsWith("org.")) {
-                    return text
-                }
-                // For buffer objects, try getLines/getText on the result
-                for (subMethod in listOf("getLines", "getText", "toString", "getScreenLines")) {
-                    try {
-                        val sub = result.javaClass.getMethod(subMethod)
-                        val subResult = sub.invoke(result)?.toString()
-                        if (!subResult.isNullOrBlank() && subResult.length > 10) return subResult
-                    } catch (_: Exception) {}
-                }
-            } catch (_: Exception) {}
-        }
-
-        // Try to read all lines from the buffer if it has size/getLine methods
-        try {
-            val lineCountMethod = obj.javaClass.getMethod("getLineCount")
-            val lineCount = lineCountMethod.invoke(obj) as Int
-            if (lineCount > 0) {
-                val getLineMethod = obj.javaClass.getMethod("getLine", Int::class.javaPrimitiveType)
-                val sb = StringBuilder()
-                for (i in 0 until minOf(lineCount, 500)) {
-                    val line = getLineMethod.invoke(obj, i)?.toString()
-                    if (line != null) sb.appendLine(line)
-                }
-                if (sb.isNotBlank()) return sb.toString().trim()
-            }
-        } catch (_: Exception) {}
-
-        return null
-    }
-
-    private fun collectTextComponents(component: Component, result: MutableList<JTextComponent>) {
-        if (component is JTextComponent) {
-            result.add(component)
-        }
-        if (component is java.awt.Container) {
-            for (child in component.components) {
-                collectTextComponents(child, result)
-            }
-        }
-    }
-
-    private fun collectAccessibleText(component: Component, sb: StringBuilder, depth: Int) {
-        if (depth > 15) return
-        try {
-            val ctx = component.accessibleContext
-            if (ctx != null) {
-                val at = ctx.accessibleText
-                if (at != null) {
-                    val charCount = at.getCharCount()
-                    if (charCount > 0) {
-                        val txt = at.getAtIndex(AccessibleText.SENTENCE, 0)
-                        if (txt != null) {
-                            sb.appendLine(txt)
-                        } else {
-                            // Read character by character for short segments
-                            val readLen = minOf(charCount, 5000)
-                            val chars = StringBuilder()
-                            for (i in 0 until readLen) {
-                                val c = at.getAtIndex(AccessibleText.CHARACTER, i)
-                                if (c != null) chars.append(c)
-                            }
-                            if (chars.isNotBlank()) sb.appendLine(chars.toString())
-                        }
-                    }
-                }
-                // Also try accessible name/description
-                val name = ctx.accessibleName
-                val desc = ctx.accessibleDescription
-                if (!name.isNullOrBlank() && name.length > 10) sb.appendLine(name)
-                if (!desc.isNullOrBlank() && desc.length > 10) sb.appendLine(desc)
-            }
-        } catch (_: Exception) {}
-        if (component is java.awt.Container) {
-            for (child in component.components) {
-                collectAccessibleText(child, sb, depth + 1)
-            }
-        }
-    }
-
-    private fun tryReflectionRead(component: Component): String? {
-        // Walk component tree looking for objects with terminal buffer methods
-        try {
-            val cls = component.javaClass
-            // Try getModel() — some terminal views expose output model
-            for (methodName in listOf("getModel", "getSession", "getTerminalTextBuffer",
-                "getTerminal", "getTextBuffer", "getOutput", "getDocument")) {
-                try {
-                    val method = cls.getMethod(methodName)
-                    val result = method.invoke(component)
-                    if (result != null) {
-                        val text = result.toString()
-                        if (text.length > 20 && !text.startsWith("org.") && !text.startsWith("com.")) {
-                            return text
-                        }
-                        // Try toString on children methods
-                        for (subMethod in listOf("getText", "toString", "getTextBuffer")) {
-                            try {
-                                val sub = result.javaClass.getMethod(subMethod)
-                                val subResult = sub.invoke(result)?.toString()
-                                if (!subResult.isNullOrBlank() && subResult.length > 20) return subResult
-                            } catch (_: Exception) {}
-                        }
-                    }
-                } catch (_: Exception) {}
-            }
-        } catch (_: Exception) {}
-
-        if (component is java.awt.Container) {
-            for (child in component.components) {
-                val result = tryReflectionRead(child)
-                if (result != null) return result
-            }
-        }
-        return null
     }
 
     // --- Output monitoring (similar to AgentOutputMonitor but for terminal) ---
@@ -926,7 +497,7 @@ class TerminalAgentService {
         seenChromeSignatures.clear()
         lastSelectorSignature = null
 
-        clearRemoteOutput(sessionId)
+        TerminalOutputPublisher.clearRemoteOutput(sessionId)
 
         monitorTimer = Timer("terminal-output-monitor", true).apply {
             scheduleAtFixedRate(object : TimerTask() {
@@ -974,7 +545,7 @@ class TerminalAgentService {
             ?: SelectorDetector.detectListSelector(selectorLines)
         if (selector != null && lastSelectorSignature != selector.signature()) {
             lastSelectorSignature = selector.signature()
-            pushSelectPrompt(sessionId, selector)
+            TerminalOutputPublisher.pushSelectPrompt(sessionId, selector)
             // Don't follow with a text chunk — the selector is the turn.
             return
         }
@@ -1001,7 +572,7 @@ class TerminalAgentService {
             }
         }
         if (deltaSteps.isNotEmpty()) {
-            pushChromeSteps(sessionId, deltaSteps)
+            TerminalOutputPublisher.pushChromeSteps(sessionId, deltaSteps)
         }
 
         // Extract response: everything after the prompt text
@@ -1016,7 +587,7 @@ class TerminalAgentService {
             stableCount++
             if (stableCount >= STABLE_THRESHOLD && hasContent) {
                 logger.info("Terminal output stabilized after ${stableCount * POLL_INTERVAL_MS}ms")
-                pushOutput(sessionId, "text", responseText, done = true)
+                TerminalOutputPublisher.pushOutput(sessionId, "text", responseText, done = true)
                 // Per-turn conversation upload — mirrors the CLI's
                 // `historySvc.uploadDelta()` from `onTurnComplete`. Posts
                 // the user prompt and the final agent response as the
@@ -1025,7 +596,7 @@ class TerminalAgentService {
                 // mobile sessions-list and canonical-refresh paths see
                 // an empty history for JB-driven turns.
                 try {
-                    pushConversationDelta(sessionId, promptText, responseText)
+                    TerminalOutputPublisher.pushConversationDelta(sessionId, promptText, responseText)
                 } catch (e: Exception) {
                     logger.warn("Conversation delta upload failed: ${e.message}")
                 }
@@ -1040,7 +611,7 @@ class TerminalAgentService {
 
         val preview = responseText.take(80).replace("\n", "\\n")
         logger.info("Terminal output snapshot (${responseText.length} chars): $preview")
-        pushOutput(sessionId, "text", responseText, done = false)
+        TerminalOutputPublisher.pushOutput(sessionId, "text", responseText, done = false)
     }
 
     private fun extractResponseAfterPrompt(terminalText: String): String {
@@ -1095,178 +666,7 @@ class TerminalAgentService {
             .replace(Regex("\n{3,}"), "\n\n")
             .trim()
     }
-
-    // --- API communication (reuse same output API as AgentOutputMonitor) ---
-
-    private fun pushOutput(sessionId: String, type: String, content: String, done: Boolean) {
-        val settings = SettingsService.getInstance()
-        val pluginId = settings.ensurePluginId()
-        val body = JsonObject().apply {
-            addProperty("sessionId", sessionId)
-            addProperty("pluginId", pluginId)
-            addProperty("type", type)
-            addProperty("content", content)
-            addProperty("done", done)
-        }
-        val request = Request.Builder()
-            .url("${settings.state.apiBaseUrl}/api/commands/output")
-            .post(gson.toJson(body).toRequestBody("application/json".toMediaType()))
-            .withAuthHeaders()
-            .build()
-        try {
-            httpClient.newCall(request).execute().close()
-            logger.info("Pushed terminal output to API: type=$type, done=$done, length=${content.length}")
-        } catch (e: Exception) {
-            logger.warn("Failed to push terminal output: ${e.message}")
-        }
-    }
-
-    /**
-     * Ship a `chrome_steps` chunk with only the steps we haven't
-     * sent yet this turn. Mobile / web append these to the active
-     * agent message's thinking timeline (read/edit/bash/search/…).
-     * The wire shape — `appendSteps: ChromeStep[]` — matches the
-     * discriminated `OutputChunk` union the frontends already
-     * understand from CLI emissions.
-     */
-    private fun pushChromeSteps(sessionId: String, steps: List<ChromeStep>) {
-        if (steps.isEmpty()) return
-        val settings = SettingsService.getInstance()
-        val pluginId = settings.ensurePluginId()
-        val arr = com.google.gson.JsonArray()
-        for (s in steps) {
-            arr.add(JsonObject().apply {
-                addProperty("tool", s.tool)
-                addProperty("label", s.label)
-                val detail = s.detail
-                if (detail != null) addProperty("detail", detail)
-                addProperty("status", s.status)
-            })
-        }
-        val body = JsonObject().apply {
-            addProperty("sessionId", sessionId)
-            addProperty("pluginId", pluginId)
-            addProperty("type", "chrome_steps")
-            add("appendSteps", arr)
-        }
-        val request = Request.Builder()
-            .url("${settings.state.apiBaseUrl}/api/commands/output")
-            .post(gson.toJson(body).toRequestBody("application/json".toMediaType()))
-            .withAuthHeaders()
-            .build()
-        try {
-            httpClient.newCall(request).execute().close()
-            logger.info("Pushed ${steps.size} chrome step(s)")
-        } catch (e: Exception) {
-            logger.warn("Failed to push chrome_steps: ${e.message}")
-        }
-    }
-
-    /**
-     * Push the turn's user prompt + agent response as a 2-message
-     * delta to `/api/sessions/claude-conversation` with `mode:'append'`.
-     * Server merges by `id` so a retry of the same turn is a no-op.
-     *
-     * The CLI uploads from the parsed `~/.claude/projects/<id>.jsonl`
-     * which gives it markdown-rich source text (with code fences,
-     * tool blocks, etc.). The JetBrains plugin only sees the rendered
-     * terminal output, so the agent message here is the PTY-cleaned
-     * text — sufficient for the mobile sessions-list and recovery-on-
-     * reentry, but lacks the structured blocks the CLI sessions get.
-     * Documented as a known fidelity gap; full parity would require
-     * porting the JSONL parser and project-dir resolution.
-     */
-    private fun pushConversationDelta(sessionId: String, userPrompt: String, agentResponse: String) {
-        if (userPrompt.isBlank() && agentResponse.isBlank()) return
-        val settings = SettingsService.getInstance()
-        val pluginId = settings.ensurePluginId()
-        val now = System.currentTimeMillis()
-        val msgs = com.google.gson.JsonArray()
-        if (userPrompt.isNotBlank()) {
-            msgs.add(JsonObject().apply {
-                addProperty("id", "jb-${now}-u")
-                addProperty("role", "user")
-                addProperty("text", userPrompt)
-                addProperty("timestamp", now)
-            })
-        }
-        if (agentResponse.isNotBlank()) {
-            msgs.add(JsonObject().apply {
-                addProperty("id", "jb-${now}-a")
-                addProperty("role", "agent")
-                addProperty("text", agentResponse)
-                addProperty("timestamp", now + 1)
-            })
-        }
-        val body = JsonObject().apply {
-            addProperty("pluginId", pluginId)
-            addProperty("sessionId", sessionId)
-            addProperty("mode", "append")
-            add("messages", msgs)
-        }
-        val request = Request.Builder()
-            .url("${settings.state.apiBaseUrl}/api/sessions/claude-conversation")
-            .post(gson.toJson(body).toRequestBody("application/json".toMediaType()))
-            .withAuthHeaders()
-            .build()
-        try {
-            httpClient.newCall(request).execute().close()
-            logger.info("Pushed conversation delta: ${msgs.size()} message(s) to session $sessionId")
-        } catch (e: Exception) {
-            logger.warn("Failed to push conversation delta: ${e.message}")
-        }
-    }
-
-    private fun pushSelectPrompt(sessionId: String, prompt: SelectPrompt) {
-        val settings = SettingsService.getInstance()
-        val pluginId = settings.ensurePluginId()
-        val optsArr = com.google.gson.JsonArray().apply {
-            prompt.options.forEach { add(it) }
-        }
-        val descsArr = com.google.gson.JsonArray().apply {
-            prompt.optionDescriptions.forEach { add(it) }
-        }
-        val body = JsonObject().apply {
-            addProperty("sessionId", sessionId)
-            addProperty("pluginId", pluginId)
-            addProperty("type", "select_prompt")
-            addProperty("content", prompt.question)
-            add("options", optsArr)
-            add("optionDescriptions", descsArr)
-            addProperty("currentIndex", prompt.currentIndex)
-        }
-        val request = Request.Builder()
-            .url("${settings.state.apiBaseUrl}/api/commands/output")
-            .post(gson.toJson(body).toRequestBody("application/json".toMediaType()))
-            .withAuthHeaders()
-            .build()
-        try {
-            httpClient.newCall(request).execute().close()
-            logger.info("Pushed select_prompt: ${prompt.options.size} option(s), currentIndex=${prompt.currentIndex}")
-        } catch (e: Exception) {
-            logger.warn("Failed to push select_prompt: ${e.message}")
-        }
-    }
-
-    private fun clearRemoteOutput(sessionId: String) {
-        val settings = SettingsService.getInstance()
-        val pluginId = settings.ensurePluginId()
-        val body = JsonObject().apply {
-            addProperty("sessionId", sessionId)
-            addProperty("pluginId", pluginId)
-            addProperty("clear", true)
-        }
-        val request = Request.Builder()
-            .url("${settings.state.apiBaseUrl}/api/commands/output")
-            .post(gson.toJson(body).toRequestBody("application/json".toMediaType()))
-            .withAuthHeaders()
-            .build()
-        try {
-            httpClient.newCall(request).execute().close()
-        } catch (_: Exception) {}
-    }
-
-    private fun getProject(): Project? {
+private fun getProject(): Project? {
         return projectRef?.get() ?: ProjectManager.getInstance().openProjects.firstOrNull()
     }
 
