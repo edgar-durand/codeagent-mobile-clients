@@ -4,12 +4,10 @@ import * as path from 'path';
 import * as os from 'os';
 import { CommandRelayService, RemoteCommand } from '../services/command-relay.service';
 import { IdeIntegrationService } from '../services/ide-integration.service';
-import { TerminalAgentService } from '../services/terminal-agent.service';
 import { TerminalOpsService } from '../services/terminal-ops.service';
 import { FileOpsService } from '../services/file-ops.service';
 import { ProjectOpsService } from '../services/project-ops.service';
 import { ChatHistoryService } from '../services/chat-history.service';
-import { ClaudeContextService } from '../services/claude-context.service';
 import { AgentStrategyRegistry } from '../services/strategies/AgentStrategyRegistry';
 import type { AgentInvocation } from '../services/strategies/AgentStrategy';
 import { CopilotChatService } from '../services/copilot-chat.service';
@@ -115,16 +113,27 @@ export class RemoteCommandRouter {
           }
         }
 
-        // Resolve the target agent so strategies can use the full
-        // DetectedAgent (`isTerminalAgent`, etc.) instead of guessing
-        // from the agentId string. Falls back to the agentId-only
-        // path if detection fails or the requested agent isn't
-        // currently installed — strategies still match by id prefix.
+        // Terminal-agent commands (Claude / Codex / Cursor / CodeRabbit
+        // / Aider) are owned by codeam-cli — the mobile should dispatch
+        // them to the CLI's pluginId, not the IDE plugin's. If one slips
+        // through anyway, fail explicitly so the user sees a clear hint
+        // instead of a silent observer-bridge no-op.
+        if (agentId?.startsWith('__terminal__:')) {
+          relay.sendResult(command.id, 'failed', {
+            message: 'Terminal agents are run by codeam-cli. Install it (npm i -g codeam-cli) and run `codeam pair`.',
+          });
+          break;
+        }
+
+        // Resolve the target agent so strategies receive the full
+        // DetectedAgent (Copilot Chat, JCEF observers, etc.). The plugin
+        // no longer manages terminal agents, so default targeting picks
+        // the first installed non-terminal entry.
         ide.detectInstalledAgents()
           .then((agents) => {
             const target = agentId
               ? agents.find((a) => a.id === agentId)
-              : agents.find((a) => a.isTerminalAgent) ?? agents[0];
+              : agents.find((a) => !a.isTerminalAgent) ?? agents[0];
 
             const invocation: AgentInvocation = {
               agent: target,
@@ -165,17 +174,10 @@ export class RemoteCommandRouter {
       }
 
       case 'list_models': {
-        // Route by agentId so the mobile model picker shows options
-        // relevant to the actually-selected agent. Copilot's vscode.lm
-        // models are not accepted by Claude Code's /model command, and
-        // vice versa — mixing them would break the picker.
-        const requestedAgent = (command.payload as Record<string, unknown>)?.agentId as string | undefined;
-        if (this.isClaudeAgent(requestedAgent)) {
-          relay.sendResult(command.id, 'completed', {
-            models: ClaudeContextService.getInstance().listModels(),
-          });
-          break;
-        }
+        // The plugin only owns models for in-IDE LM surfaces (Copilot
+        // via vscode.lm). Terminal agents (Claude / Codex / Cursor /
+        // CodeRabbit / Aider) are owned by codeam-cli — list_models
+        // for those agents is routed to the CLI's pluginId, not here.
         CopilotChatService.getInstance().listAvailableModels().then((models) => {
           relay.sendResult(command.id, 'completed', { models });
         }).catch((e) => {
@@ -203,8 +205,11 @@ export class RemoteCommandRouter {
 
       case 'stop_task':
       case 'cancel_task': {
+        // Stops JCEF / Lexical observer monitoring. Terminal agents
+        // (Claude / Codex / …) are owned by codeam-cli, so a stop_task
+        // for those agents is dispatched to the CLI's pluginId, not
+        // here.
         AgentOutputMonitor.getInstance().stopMonitoring();
-        TerminalAgentService.getInstance().stopMonitoring();
         relay.sendResult(command.id, 'completed', { message: 'Task cancelled' });
         break;
       }
@@ -216,55 +221,11 @@ export class RemoteCommandRouter {
         break;
       }
 
-      case 'select_option': {
-        const targetIndex = (command.payload.index as number) ?? 0;
-        // Accept both `currentIndex` and `from` — the JetBrains plugin
-        // honors both names and mobile-side senders use one or the other.
-        const currentIndex =
-          (command.payload.currentIndex as number | undefined) ??
-          (command.payload.from as number | undefined) ??
-          0;
-        const terminal = TerminalAgentService.getInstance();
-        terminal.selectOption(targetIndex, currentIndex).then((ok) => {
-          relay.sendResult(command.id, ok ? 'completed' : 'failed', {
-            message: ok ? `Selected option ${targetIndex}` : 'Claude Code terminal not found',
-          });
-        });
-        break;
-      }
-
-      case 'escape_key': {
-        const ok = TerminalAgentService.getInstance().sendEscape();
-        relay.sendResult(command.id, ok ? 'completed' : 'failed', {
-          message: ok ? 'Escape sent' : 'Claude Code terminal not found',
-        });
-        break;
-      }
-
       case 'get_context': {
-        const requestedAgent = (command.payload as Record<string, unknown>)?.agentId as string | undefined;
-
-        // Claude Code terminal agent: report the same shape codeam-cli
-        // produces (used/total/percent/model/outputTokens/cacheReadTokens/
-        // monthlyCost/rateLimitReset/quotaPercent) by reading Claude's
-        // own .jsonl session log. This is what mobile's quota/usage UI
-        // expects, including the weekly-quota reset string.
-        if (this.isClaudeAgent(requestedAgent)) {
-          try {
-            const snapshot = ClaudeContextService.getInstance().getContextSnapshot();
-            relay.sendResult(command.id, 'completed', snapshot);
-          } catch (e) {
-            this.log.appendLine(`get_context (claude) error: ${e}`);
-            relay.sendResult(command.id, 'completed', {
-              used: 0, total: 0, percent: 0, model: null,
-              outputTokens: 0, cacheReadTokens: 0, monthlyCost: 0,
-              error: 'No Claude usage data yet — run a prompt first',
-            });
-          }
-          break;
-        }
-
-        // VS Code Chat (Copilot via vscode.lm) fallback.
+        // VS Code Chat (Copilot via vscode.lm) is the only context the
+        // plugin owns. Terminal-agent quota / token snapshots come
+        // from codeam-cli's own history reader, which the mobile
+        // dispatches to the CLI's pluginId.
         CopilotChatService.getInstance().getContextSnapshot().then((snapshot) => {
           relay.sendResult(command.id, 'completed', snapshot);
         }).catch((e) => {
@@ -310,19 +271,15 @@ export class RemoteCommandRouter {
           break;
         }
 
-        const resumePrompt = auto
-          ? `--resume ${sessionCid} --dangerously-skip-permissions`
-          : `--resume ${sessionCid}`;
-        const terminal = TerminalAgentService.getInstance();
-        // Kill current Claude and restart with --resume
-        terminal.sendRawToTerminal('\x03'); // Ctrl+C
-        setTimeout(() => {
-          terminal.sendPromptToClaudeCode(resumePrompt).then((ok) => {
-            relay.sendResult(command.id, ok ? 'completed' : 'failed', {
-              message: ok ? `Resuming session ${sessionCid}` : 'Failed to launch Claude Code',
-            });
-          });
-        }, 500);
+        // Terminal-agent resume (Claude / Codex / …) is owned by
+        // codeam-cli — mobile dispatches it to the CLI's pluginId.
+        // If we reach here the requested session belongs to neither
+        // a Copilot chat history nor a CLI session this plugin knows
+        // about; surface the mismatch rather than silently no-op.
+        void auto;
+        relay.sendResult(command.id, 'failed', {
+          error: `Unknown session id: ${sessionCid}`,
+        });
         break;
       }
 
@@ -643,14 +600,4 @@ export class RemoteCommandRouter {
     }
   }
 
-  /** Whether an agentId identifies a Claude Code terminal agent. */
-  private isClaudeAgent(agentId: string | undefined): boolean {
-    if (!agentId) return false;
-    const lower = agentId.toLowerCase();
-    return (
-      lower.includes('claude') ||
-      lower.includes('anthropic') ||
-      lower.startsWith('__terminal__:')
-    );
-  }
 }

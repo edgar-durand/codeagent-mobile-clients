@@ -10,12 +10,10 @@ import { PairingService } from '../services/pairing.service';
 import { CommandRelayService, RemoteCommand, CommandListener } from '../services/command-relay.service';
 import { IdeIntegrationService } from '../services/ide-integration.service';
 import { AgentOutputMonitor } from '../services/agent-output-monitor';
-import { TerminalAgentService } from '../services/terminal-agent.service';
 import { CopilotChatService } from '../services/copilot-chat.service';
 import { AgentStrategyRegistry } from '../services/strategies/AgentStrategyRegistry';
 import type { AgentInvocation } from '../services/strategies/AgentStrategy';
 import { ChatHistoryService } from '../services/chat-history.service';
-import { ClaudeContextService } from '../services/claude-context.service';
 import { McpConfigWriterService, McpConfigureRequest, McpEntry } from '../services/mcp-config-writer.service';
 import { FileWatcherService } from '../services/file-watcher.service';
 import { Messages } from '../ui/messages';
@@ -50,10 +48,11 @@ export class ControllerPanelProvider implements vscode.WebviewViewProvider, Comm
   private log: vscode.OutputChannel;
   private nonce = generateNonce();
   /**
-   * Per-pairing file watcher. Mirrors Path A (CLI) emission of
-   * `/api/files/changed` + `/api/review/hunks` for Path B (direct
-   * Claude spawn through `claude-pseudoterminal.ts`). Started when
-   * pairing completes; stopped on disconnect or extension teardown.
+   * Per-pairing file watcher. Emits `/api/files/changed` +
+   * `/api/review/hunks` so the mobile shows live edit hunks while
+   * an in-IDE agent (Copilot Chat, JCEF observers) is active.
+   * Started when pairing completes; stopped on disconnect or
+   * extension teardown.
    */
   private fileWatcher: FileWatcherService | null = null;
   private readonly router: RemoteCommandRouter;

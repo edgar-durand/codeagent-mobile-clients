@@ -3,12 +3,10 @@ import { SettingsService } from './services/settings.service';
 import { CommandRelayService } from './services/command-relay.service';
 import { PairingService } from './services/pairing.service';
 import { IdeIntegrationService } from './services/ide-integration.service';
-import { TerminalAgentService } from './services/terminal-agent.service';
 import { AgentOutputMonitor } from './services/agent-output-monitor';
 import { McpConfigWriterService } from './services/mcp-config-writer.service';
 import { CopilotChatService } from './services/copilot-chat.service';
 import { ChatHistoryService } from './services/chat-history.service';
-import { ClaudeContextService } from './services/claude-context.service';
 import { ControllerPanelProvider } from './panels/controller-panel';
 import { initTelemetry, capture, identifyUser, shutdownTelemetry } from './services/telemetry.service';
 import { Messages } from './ui/messages';
@@ -28,12 +26,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   CommandRelayService.initialize(log);
   PairingService.initialize(log);
   IdeIntegrationService.initialize(log);
-  TerminalAgentService.initialize(log);
   AgentOutputMonitor.initialize(log);
   McpConfigWriterService.initialize(log);
   CopilotChatService.initialize(log);
   ChatHistoryService.initialize(context, log);
-  ClaudeContextService.initialize(log);
 
   // Register webview panel provider
   panelProvider = new ControllerPanelProvider(context.extensionUri, log);
@@ -147,10 +143,6 @@ export function deactivate(): void {
 
   try {
     AgentOutputMonitor.getInstance().dispose();
-  } catch { /* not initialized */ }
-
-  try {
-    TerminalAgentService.getInstance().stopMonitoring();
   } catch { /* not initialized */ }
 
   try {

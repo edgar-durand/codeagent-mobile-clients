@@ -1,7 +1,6 @@
 import * as vscode from 'vscode';
 import { OutputChannel } from 'vscode';
 import { SettingsService } from './settings.service';
-import { TerminalAgentService } from './terminal-agent.service';
 import { AgentOutputMonitor } from './agent-output-monitor';
 import { DETECTORS, runDetectors } from './agent-detection/registry';
 import type { DetectedAgent } from './agent-detection/types';
@@ -180,31 +179,16 @@ export class IdeIntegrationService {
     this.cachedAgents = null;
   }
 
-  async sendPromptToAgent(prompt: string, agentId?: string): Promise<boolean> {
+  async sendPromptToAgent(prompt: string, _agentId?: string): Promise<boolean> {
     this.log.appendLine(`[sendPrompt] prompt="${prompt.substring(0, 80)}..." | IDE=${vscode.env.appName}`);
     this.clearCache();
 
-    // Route terminal-based agents (e.g. Claude Code CLI) to TerminalAgentService
-    const agents = await this.detectInstalledAgents();
-    const targetAgent = agentId
-      ? agents.find((a) => a.id === agentId)
-      : agents.find((a) => a.isTerminalAgent) || agents[0];
-
-    if (targetAgent?.isTerminalAgent || agentId?.startsWith('__terminal__:')) {
-      this.log.appendLine(`[sendPrompt] Routing to TerminalAgentService for ${targetAgent?.name || agentId}`);
-      const terminalService = TerminalAgentService.getInstance();
-      const sent = await terminalService.sendPromptToClaudeCode(prompt);
-      if (sent) {
-        this.notify(prompt);
-        return true;
-      }
-      this.log.appendLine('[sendPrompt] TerminalAgentService failed, falling back to observer bridge');
-    }
-
-    // Hand the prompt to AgentOutputMonitor's queue — the same-origin
-    // observer script polls /pending-prompt and injects into the
-    // Lexical editor. We're in the extension host, so there's no need
-    // to round-trip through the local HTTP server.
+    // Terminal agents (Claude / Codex / Cursor / CodeRabbit / Aider) are
+    // owned by codeam-cli, not the plugin — the mobile dispatches their
+    // commands to the CLI's pluginId directly. The only agents this
+    // service still drives are JCEF / Lexical-based chat surfaces
+    // (Copilot Chat, Continue, etc.), which the observer script picks
+    // up via AgentOutputMonitor's pending-prompt queue.
     try {
       AgentOutputMonitor.getInstance().queuePrompt(prompt);
       this.log.appendLine('[sendPrompt] Queued via observer bridge');
