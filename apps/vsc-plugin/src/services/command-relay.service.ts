@@ -1,5 +1,6 @@
 import * as https from 'https';
 import * as http from 'http';
+import * as vscode from 'vscode';
 import { SettingsService } from './settings.service';
 import { OutputChannel } from 'vscode';
 
@@ -35,6 +36,11 @@ export class CommandRelayService {
   private listeners: CommandListener[] = [];
   private log: OutputChannel;
   private _running = false;
+  // Set when the backend has returned 401 for the current token. Stops
+  // every transport (SSE, polling, heartbeat) until the user re-pairs,
+  // and throttles the "session expired" notification to once per
+  // process — repeating it every poll would spam.
+  private authFailureSurfaced = false;
 
   private constructor(log: OutputChannel) {
     this.log = log;
@@ -125,6 +131,11 @@ export class CommandRelayService {
         timeout: 35_000,
       },
       (res) => {
+        if (res.statusCode === 401) {
+          res.resume();
+          this.handleAuthFailure();
+          return;
+        }
         if (res.statusCode !== 200) {
           res.resume();
           this.sseFailures += 1;
@@ -368,6 +379,11 @@ export class CommandRelayService {
           let responseBody = '';
           res.on('data', (chunk: Buffer) => { responseBody += chunk.toString(); });
           res.on('end', () => {
+            if (res.statusCode === 401) {
+              this.handleAuthFailure();
+              resolve(null);
+              return;
+            }
             try {
               resolve(JSON.parse(responseBody));
             } catch {
@@ -402,6 +418,11 @@ export class CommandRelayService {
           let responseBody = '';
           res.on('data', (chunk: Buffer) => { responseBody += chunk.toString(); });
           res.on('end', () => {
+            if (res.statusCode === 401) {
+              this.handleAuthFailure();
+              resolve(null);
+              return;
+            }
             try {
               resolve(JSON.parse(responseBody));
             } catch {
@@ -415,5 +436,41 @@ export class CommandRelayService {
       req.on('timeout', () => { req.destroy(); reject(new Error('Request timeout')); });
       req.end();
     });
+  }
+
+  /**
+   * Triggered when the backend returns 401 from any HTTP path or SSE
+   * upgrade. The token the plugin holds is dead (rotated server-side
+   * or invalidated from the mobile app), so:
+   *
+   *   - drop the cached token so subsequent calls don't replay it
+   *   - stop every transport: polling, SSE, heartbeat
+   *   - tell the user once per process; the action button opens the
+   *     pairing panel
+   *
+   * The dispatcher reads `getPluginAuthToken()` for the next pair
+   * attempt and will receive null until the user re-pairs.
+   */
+  private handleAuthFailure(): void {
+    SettingsService.getInstance().setPluginAuthToken(null);
+    this.stopPolling();
+    if (this.authFailureSurfaced) return;
+    this.authFailureSurfaced = true;
+    this.log.appendLine('Auth failed (401) — token cleared, polling stopped.');
+    void vscode.window
+      .showWarningMessage(
+        'CodeAgent Mobile · Session expired. Re-pair to continue.',
+        'Re-pair',
+      )
+      .then((choice) => {
+        if (choice === 'Re-pair') {
+          void vscode.commands.executeCommand('codeagent-mobile.openPanel');
+        }
+      });
+  }
+
+  /** Called from PairingService once a new token has been stored. */
+  resetAuthFailureGate(): void {
+    this.authFailureSurfaced = false;
   }
 }

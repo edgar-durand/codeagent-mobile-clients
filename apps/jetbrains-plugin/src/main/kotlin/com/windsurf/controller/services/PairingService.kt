@@ -149,6 +149,9 @@ class PairingService {
                     val rawToken = data.get("pluginAuthToken")?.takeIf { !it.isJsonNull }?.asString
                     if (!rawToken.isNullOrEmpty()) {
                         SettingsService.getInstance().setPluginAuthToken(rawToken)
+                        // The new token clears any prior 401 — re-arm the
+                        // "session expired" notification gate for the next failure.
+                        CommandRelayService.getInstance().resetAuthFailureGate()
                     }
                     currentSessionId = sessionId
                     logger.info("Pairing detected! Session: $sessionId, user: ${pairedUser?.email}")
