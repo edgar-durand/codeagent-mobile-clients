@@ -93,8 +93,10 @@
 
     <actions>
         <group id="WindsurfController.ActionGroup"
-               text="CodeAgent-Mobile"
-               description="CodeAgent-Mobile actions">
+               text="CodeAgent Mobile"
+               description="CodeAgent Mobile actions"
+               popup="true">
+            <add-to-group group-id="ToolsMenu" anchor="last"/>
             <action id="WindsurfController.ShowPairingCode"
                     class="com.windsurf.controller.actions.ShowPairingCodeAction"
                     text="Show Pairing Code"
