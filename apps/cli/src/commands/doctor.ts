@@ -40,12 +40,23 @@ interface CheckResult {
   id: string;
   /** Human-readable label printed in the text reporter. */
   label: string;
-  /** Pass / fail. Any false flips the overall exit code to 1. */
+  /** Pass / fail. Counts toward exit code unless `optional` is true. */
   ok: boolean;
   /** Short factual statement of what was observed. */
   detail: string;
   /** Actionable hint shown when ok=false. Omitted on success. */
   hint?: string;
+  /**
+   * When true, an `ok: false` result is informational and does NOT
+   * flip the overall report.ok / exit code. Used for the
+   * agent-binary probes: a missing `claude` / `codex` is something
+   * the user wants to KNOW about, but it's not a CLI failure —
+   * `codeam pair` offers to install the agent on first contact, so
+   * the CLI itself works fine without them. The same logic protects
+   * `codeam doctor` from failing in CI / containerized environments
+   * where the agents aren't installed.
+   */
+  optional?: boolean;
 }
 
 interface DoctorReport {
@@ -177,6 +188,9 @@ function checkAgentBinaries(): CheckResult[] {
       hint: found
         ? undefined
         : `Install ${meta.displayName} — \`codeam pair\` will offer to run the official installer the first time the agent is missing.`,
+      // Missing agent binary is informational, not a CLI failure —
+      // `codeam pair` handles bootstrap.
+      optional: true,
     };
   });
 }
@@ -268,7 +282,9 @@ export async function doctor(args: string[] = []): Promise<void> {
     arch: process.arch,
     apiBase,
     checks,
-    ok: checks.every((c) => c.ok),
+    // Optional checks (e.g. agent-binary probes) report status but
+    // don't gate exit code — see CheckResult.optional.
+    ok: checks.filter((c) => !c.optional).every((c) => c.ok),
   };
 
   if (json) {
@@ -290,7 +306,11 @@ function printHumanReport(r: DoctorReport): void {
   out.write(`  ${pc.dim('diag id')}  ${r.diagnosticId}\n`);
   out.write('\n');
   for (const c of r.checks) {
-    const mark = c.ok ? pc.green('✓') : pc.red('✗');
+    const mark = c.ok
+      ? pc.green('✓')
+      : c.optional
+        ? pc.yellow('!') // informational — doesn't gate exit code
+        : pc.red('✗');
     out.write(`  ${mark} ${c.label}${pc.dim(` — ${c.detail}`)}\n`);
     if (!c.ok && c.hint) {
       // Indent hint two extra spaces so it visually attaches to the
