@@ -196,29 +196,46 @@ function checkAgentBinaries(): CheckResult[] {
 }
 
 function checkNodePty(): CheckResult {
-  // node-pty is vendored under dist/vendor/node-pty/ when the CLI
-  // is built; in dev `require('node-pty')` exercises the same load
-  // path (resolveDynamic uses the vendored bundle when present).
-  try {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    require('node-pty');
+  // `node-pty` is the Windows-only ConPTY backend (see
+  // src/services/pty/windows-conpty.strategy.ts). macOS / Linux
+  // use the Python PTY helper or direct spawn — node-pty isn't
+  // touched at runtime there, so the check is N/A.
+  if (process.platform !== 'win32') {
     return {
       id: 'node-pty',
       label: 'node-pty native module',
       ok: true,
-      detail: 'loaded',
-    };
-  } catch (err) {
-    const msg = (err as Error).message;
-    return {
-      id: 'node-pty',
-      label: 'node-pty native module',
-      ok: false,
-      detail: msg.split('\n')[0],
-      hint:
-        'Reinstall the CLI to fetch the vendored prebuilt binary:\n      npm install -g codeam-cli@latest\n    On Windows, antivirus may have quarantined `conpty.node` — restore it from quarantine or whitelist the install dir.',
+      detail: 'not required on this platform',
     };
   }
+
+  // Mirror the loader in windows-conpty.strategy.ts: in a published
+  // install the binding lives at `<install>/dist/vendor/node-pty/`.
+  // A bare `require('node-pty')` would miss the vendored path and
+  // false-fail because we don't ship node-pty as a runtime dep.
+  const vendoredPath = path.join(__dirname, 'vendor', 'node-pty');
+  for (const target of [vendoredPath, 'node-pty']) {
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      require(target);
+      return {
+        id: 'node-pty',
+        label: 'node-pty native module',
+        ok: true,
+        detail: target === vendoredPath ? 'vendored bundle loaded' : 'loaded',
+      };
+    } catch {
+      /* try next */
+    }
+  }
+  return {
+    id: 'node-pty',
+    label: 'node-pty native module',
+    ok: false,
+    detail: 'vendored bundle missing or unloadable',
+    hint:
+      'Reinstall the CLI to fetch the vendored prebuilt binary:\n      npm install -g codeam-cli@latest\n    On Windows, antivirus may have quarantined `conpty.node` — restore it from quarantine or whitelist the install dir.',
+  };
 }
 
 function checkChokidar(): CheckResult {
