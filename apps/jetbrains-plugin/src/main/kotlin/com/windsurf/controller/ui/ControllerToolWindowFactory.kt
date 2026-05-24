@@ -436,18 +436,38 @@ class ControllerToolWindowFactory : ToolWindowFactory {
                         // gets a chance to consume them.
                         val files = command.payload.getAsJsonArray("files")
                         if (files != null && files.size() > 0) {
+                            // Cap each attachment at 10 MB to match the
+                            // mobile composer + the VS Code plugin. A 50 MB
+                            // base64 blob would stall the EDT on the decode
+                            // + write and risk OOM on smaller heaps.
+                            val maxAttachmentBytes = 10L * 1024L * 1024L
                             val refs = mutableListOf<String>()
-                            for (el in files) {
+                            val writtenPaths = mutableListOf<java.io.File>()
+                            var oversized: String? = null
+                            outer@ for (el in files) {
                                 val f = el.asJsonObject
-                                val filename = f.get("filename")?.asString ?: continue
-                                val base64 = f.get("base64")?.asString ?: continue
+                                val filename = f.get("filename")?.asString ?: continue@outer
+                                val base64 = f.get("base64")?.asString ?: continue@outer
+                                val approxBytes = (base64.length.toLong() * 3L) / 4L
+                                if (approxBytes > maxAttachmentBytes) {
+                                    oversized = "$filename ($approxBytes bytes > $maxAttachmentBytes)"
+                                    break@outer
+                                }
                                 val safeName = filename.replace(Regex("[^a-zA-Z0-9._-]"), "_").take(80)
                                 val tmp = java.io.File(System.getProperty("java.io.tmpdir"), "codeagent-${System.currentTimeMillis()}-$safeName")
                                 tmp.writeBytes(java.util.Base64.getDecoder().decode(base64))
+                                writtenPaths.add(tmp)
                                 refs.add("@${tmp.absolutePath}")
                                 Thread {
                                     try { Thread.sleep(120_000); tmp.delete() } catch (_: Exception) {}
                                 }.start()
+                            }
+                            if (oversized != null) {
+                                writtenPaths.forEach { runCatching { it.delete() } }
+                                relay.sendResult(command.id, "failed", com.google.gson.JsonObject().apply {
+                                    addProperty("error", "Attachment too large: $oversized")
+                                })
+                                return@invokeLater
                             }
                             if (refs.isNotEmpty()) {
                                 prompt = "${refs.joinToString(" ")} $prompt".trim()
