@@ -86,10 +86,13 @@ internal class SessionRowFactory(
             }
             actionsPanel.add(connectedLabel)
         } else {
+            val who = "${session.userName.ifBlank { session.userEmail }} (${session.userEmail})"
             val reconnectBtn = JButton("Reconnect").apply {
                 font = font.deriveFont(10f)
-                isFocusPainted = false
+                isFocusPainted = true
                 putClientProperty("JButton.buttonType", "roundRect")
+                toolTipText = "Reconnect to session for $who"
+                accessibleContext.accessibleName = "Reconnect to session for $who"
             }
             reconnectBtn.addActionListener {
                 onReconnect(session)
@@ -99,13 +102,15 @@ internal class SessionRowFactory(
 
         actionsPanel.add(Box.createHorizontalStrut(4))
 
+        val rowWho = "${session.userName.ifBlank { session.userEmail }} (${session.userEmail})"
         val deleteBtn = JButton("✕").apply {
             font = font.deriveFont(10f)
-            isFocusPainted = false
-            toolTipText = "Delete session"
+            isFocusPainted = true
+            toolTipText = "Delete session for $rowWho"
             putClientProperty("JButton.buttonType", "roundRect")
             preferredSize = Dimension(28, 28)
             cursor = Cursor.getPredefinedCursor(Cursor.HAND_CURSOR)
+            accessibleContext.accessibleName = "Delete session for $rowWho"
         }
         deleteBtn.addActionListener {
             val confirm = JOptionPane.showConfirmDialog(
