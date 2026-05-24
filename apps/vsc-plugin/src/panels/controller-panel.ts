@@ -377,6 +377,6 @@ export class ControllerPanelProvider implements vscode.WebviewViewProvider, Comm
   }
 
   private getHtmlContent(webview: vscode.Webview, nonce: string): string {
-    return renderPanelHtml(webview, nonce);
+    return renderPanelHtml(webview, this.extensionUri, nonce);
   }
 }

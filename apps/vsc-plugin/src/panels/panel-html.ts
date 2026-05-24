@@ -10,8 +10,10 @@ import { brandCssTokens } from '../ui/brand-tokens';
  * lifecycle + dispatch instead of string templates.
  *
  * Inputs:
- *   - `webview` — used for `cspSource` in the Content-Security-Policy
- *     meta tag (img / style / font sources).
+ *   - `webview` — used for `cspSource` in the CSP meta tag (img /
+ *     style / font sources) and `asWebviewUri` for bundled fonts.
+ *   - `extensionUri` — base URI for resolving bundled font assets
+ *     under `resources/fonts/`.
  *   - `nonce` — per-resolve random string; bound to the inline
  *     `<script>` so a malicious string in the postMessage stream
  *     can't inject executable code.
@@ -22,7 +24,17 @@ import { brandCssTokens } from '../ui/brand-tokens';
  * (`script-src 'nonce-...'`) the nonce-tagged inline block is the
  * same security posture with a single template.
  */
-export function renderPanelHtml(webview: vscode.Webview, nonce: string): string {
+export function renderPanelHtml(
+  webview: vscode.Webview,
+  extensionUri: vscode.Uri,
+  nonce: string,
+): string {
+  const hankenUri = webview.asWebviewUri(
+    vscode.Uri.joinPath(extensionUri, 'resources', 'fonts', 'HankenGrotesk[wght].ttf'),
+  );
+  const jbMonoUri = webview.asWebviewUri(
+    vscode.Uri.joinPath(extensionUri, 'resources', 'fonts', 'JetBrainsMono[wght].ttf'),
+  );
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -30,10 +42,30 @@ export function renderPanelHtml(webview: vscode.Webview, nonce: string): string 
   <meta http-equiv="Content-Security-Policy" content="${cspMeta(webview, nonce)}">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <style>
+    /* Brand typography. Variable-axis TTFs ship under
+       resources/fonts/ — webview.cspSource covers font-src so the
+       webview-uri loads through the CSP without an exception. */
+    @font-face {
+      font-family: 'Hanken Grotesk';
+      font-style: normal;
+      font-weight: 100 900;
+      font-display: swap;
+      src: url('${hankenUri}') format('truetype-variations');
+    }
+    @font-face {
+      font-family: 'JetBrains Mono';
+      font-style: normal;
+      font-weight: 100 800;
+      font-display: swap;
+      src: url('${jbMonoUri}') format('truetype-variations');
+    }
     ${brandCssTokens()}
     * { margin: 0; padding: 0; box-sizing: border-box; }
     body {
-      font-family: var(--vscode-font-family);
+      /* Hanken Grotesk is the brand display + body font (mixed
+         case). Fall back to the host's UI font if @font-face fails
+         to load — the layout stays intact, just slightly off-brand. */
+      font-family: 'Hanken Grotesk', var(--vscode-font-family);
       color: var(--vscode-foreground);
       background: var(--vscode-sideBar-background);
       padding: 12px;
@@ -104,7 +136,7 @@ export function renderPanelHtml(webview: vscode.Webview, nonce: string): string 
       border-radius: 6px;
       margin: 8px 0;
       text-shadow: 0 0 14px var(--ca-glow-purple);
-      font-family: var(--vscode-editor-font-family), monospace;
+      font-family: 'JetBrains Mono', var(--vscode-editor-font-family), monospace;
     }
     .user-info {
       display: flex;
@@ -118,10 +150,13 @@ export function renderPanelHtml(webview: vscode.Webview, nonce: string): string 
       font-size: 10px;
       font-weight: 600;
       text-transform: uppercase;
+      letter-spacing: 0.05em;
       padding: 2px 6px;
       border-radius: 3px;
       background: var(--vscode-badge-background);
       color: var(--vscode-badge-foreground);
+      /* JetBrains Mono on uppercase labels mirrors the mobile DLS. */
+      font-family: 'JetBrains Mono', var(--vscode-editor-font-family), monospace;
     }
     .agents-list { margin-top: 8px; }
     .agent-row {
@@ -141,9 +176,11 @@ export function renderPanelHtml(webview: vscode.Webview, nonce: string): string 
     h3 {
       font-size: 12px;
       text-transform: uppercase;
-      letter-spacing: 0.5px;
+      letter-spacing: 0.05em;
       color: var(--vscode-descriptionForeground);
       margin-bottom: 8px;
+      /* DLS rule: uppercase labels in JetBrains Mono. */
+      font-family: 'JetBrains Mono', var(--vscode-editor-font-family), monospace;
     }
     .hidden { display: none; }
     .expire-timer { font-size: 11px; color: var(--vscode-descriptionForeground); text-align: center; }

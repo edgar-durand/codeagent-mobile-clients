@@ -404,7 +404,9 @@ class ControllerToolWindowFactory : ToolWindowFactory {
                 add(statusDot)
                 add(Box.createHorizontalStrut(8))
                 add(statusLabel.apply {
-                    font = font.deriveFont(Font.BOLD, 13f)
+                    // Status label uses Hanken Grotesk per DLS — mixed
+                    // case ("Connected", "Reconnecting…", "Offline").
+                    font = BrandFonts.hanken(Font.BOLD, 13f)
                     foreground = primaryText
                 })
             }
@@ -444,8 +446,12 @@ class ControllerToolWindowFactory : ToolWindowFactory {
             }
 
             codeLabel.apply {
-                font = Font("Monospaced", Font.BOLD, 28)
-                foreground = primaryText
+                // Brand font for the pairing code — JetBrains Mono with
+                // electric-purple foreground mirrors the mobile DLS
+                // pairing-code surface. Falls back to system Monospaced
+                // if the TTF can't be loaded.
+                font = BrandFonts.jetBrainsMono(Font.BOLD, 28f)
+                foreground = BrandColors.electricPurple
                 horizontalAlignment = SwingConstants.CENTER
                 alignmentX = Component.CENTER_ALIGNMENT
                 isVisible = false
