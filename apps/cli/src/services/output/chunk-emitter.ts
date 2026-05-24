@@ -1,6 +1,6 @@
 import * as https from 'https';
 import * as http from 'http';
-import { DEFAULT_API_BASE_URL } from '@codeagent/shared';
+import { DEFAULT_API_BASE_URL, PROTOCOL_VERSION } from '@codeagent/shared';
 import { vercelBypassHeader } from '../../lib/backend-headers';
 import { log } from '../logger';
 
@@ -36,11 +36,7 @@ export class ChunkEmitter {
   constructor(private readonly opts: ChunkEmitterOptions) {
     this.headers = {
       'Content-Type': 'application/json',
-      // Tell the backend which wire-format version we speak so
-      // it can route legacy translations / 426 us when we're
-      // too far behind. Bumped to 2.0.0 with the discriminated-
-      // chunk + delta-chrome refactor in this release.
-      'X-Codeam-Protocol-Version': '2.0.0',
+      'X-Codeam-Protocol-Version': PROTOCOL_VERSION,
       ...vercelBypassHeader(),
     };
     if (opts.pluginAuthToken) {

@@ -3,10 +3,11 @@ import * as path from 'node:path';
 import * as http from 'node:http';
 import * as https from 'node:https';
 import { exec } from 'node:child_process';
-import type {
-  FileChangedEvent,
-  FileChangeStatus,
-  PendingReviewHunkEvent,
+import {
+  PROTOCOL_VERSION,
+  type FileChangedEvent,
+  type FileChangeStatus,
+  type PendingReviewHunkEvent,
 } from '@codeagent/shared';
 import { parseUnifiedDiff } from './file-watcher/diff-parser';
 import { AgentStrategyRegistry } from './strategies/AgentStrategyRegistry';
@@ -391,7 +392,7 @@ export class FileWatcherService {
     const payload = JSON.stringify(body);
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
-      'X-Codeam-Protocol-Version': '2.0.0',
+      'X-Codeam-Protocol-Version': PROTOCOL_VERSION,
       'X-Plugin-Auth-Token': this.opts.pluginAuthToken,
     };
 

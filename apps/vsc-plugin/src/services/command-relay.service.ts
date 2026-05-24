@@ -1,6 +1,7 @@
 import * as https from 'https';
 import * as http from 'http';
 import * as vscode from 'vscode';
+import { PROTOCOL_VERSION, SSE_SOCKET_TIMEOUT_MS } from '@codeagent/shared';
 import { SettingsService } from './settings.service';
 import { OutputChannel } from 'vscode';
 import { capture } from './telemetry.service';
@@ -161,7 +162,7 @@ export class CommandRelayService {
           'Cache-Control': 'no-cache',
           ...this.authHeaders(),
         },
-        timeout: 35_000,
+        timeout: SSE_SOCKET_TIMEOUT_MS,
       },
       (res) => {
         if (res.statusCode === 401) {
@@ -412,7 +413,7 @@ export class CommandRelayService {
    */
   authHeaders(): Record<string, string> {
     const headers: Record<string, string> = {
-      'X-Codeam-Protocol-Version': '2.0.0',
+      'X-Codeam-Protocol-Version': PROTOCOL_VERSION,
     };
     const token = SettingsService.getInstance().getPluginAuthToken();
     if (token) {
