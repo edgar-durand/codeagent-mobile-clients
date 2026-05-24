@@ -323,12 +323,16 @@ class ControllerToolWindowFactory : ToolWindowFactory {
     private class ControllerPanel(private val project: Project) : JPanel(), WebSocketService.WebSocketListener, PairingService.PairingListener, CommandRelayService.CommandListener {
 
         private val isDark = !UIUtil.isUnderIntelliJLaF()
-        private val cardBg = if (isDark) Color(45, 45, 48) else Color(245, 245, 247)
-        private val accentGreen = Color(52, 199, 89)
-        private val accentRed = Color(255, 69, 58)
-        private val accentBlue = Color(0, 122, 255)
-        private val mutedText = if (isDark) Color(142, 142, 147) else Color(108, 108, 112)
-        private val primaryText = if (isDark) Color(255, 255, 255) else Color(0, 0, 0)
+        // Brand palette sourced from BrandColors. Field names match
+        // their semantic role; the literal RGB lives one file over so
+        // a future palette tweak doesn't have to touch this 1500-line
+        // factory.
+        private val cardBg = if (isDark) BrandColors.surfaceGray else BrandColors.surfaceLight
+        private val accentGreen = BrandColors.successGreen
+        private val accentRed = BrandColors.errorRed
+        private val accentBlue = BrandColors.electricPurple
+        private val mutedText = if (isDark) BrandColors.mutedText else Color(108, 108, 112)
+        private val primaryText = if (isDark) BrandColors.onSurface else Color(0, 0, 0)
 
         private val statusDot = JPanel()
         private val statusLabel = JBLabel("Disconnected")

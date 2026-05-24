@@ -84,7 +84,7 @@ class WebSocketService {
                             "pong" -> logger.debug("Heartbeat pong received")
                             "auth_success" -> {
                                 logger.info("WebSocket authenticated")
-                                showNotification("Mobile Controller connected", NotificationType.INFORMATION)
+                                showNotification("CodeAgent Mobile · Connected.", NotificationType.INFORMATION)
                             }
                             "auth_error" -> {
                                 val error = payload.get("message")?.asString ?: "Authentication failed"

@@ -16,7 +16,7 @@ class ControllerConfigurable : Configurable {
     private var notificationsCheckbox: JBCheckBox? = null
     private var mainPanel: JPanel? = null
 
-    override fun getDisplayName(): String = "Windsurf Mobile Controller"
+    override fun getDisplayName(): String = "CodeAgent Mobile"
 
     override fun createComponent(): JComponent {
         val settings = SettingsService.getInstance().state
