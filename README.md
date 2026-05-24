@@ -36,6 +36,29 @@ codeam        # starts Claude Code with mobile control
 
 ---
 
+## Environment variables
+
+Every client (CLI + both plugins) reads the same two env vars to pick which API host it talks to. Priority order — first match wins:
+
+| Variable | Effect |
+|---|---|
+| `CODEAM_API_URL` | Full URL override. Use when pointing at a custom staging endpoint or a self-hosted instance. Example: `CODEAM_API_URL=https://staging-api.example.com codeam pair`. |
+| `CODEAM_TEST_MODE=1` | Shortcut that routes every request at the **dev preview** (`https://dev-api.codeagent-mobile.com`) without you having to know the URL. Use this when pairing from `dev.codeagent-mobile.com`. |
+| _(none)_ | Defaults to production (`https://api.codeagent-mobile.com`). |
+
+The shortcut exists because prod + dev share Redis: a code generated against prod-api is also valid against dev-api, so a pair started in the dev webapp completes silently against prod (heartbeats keep going to the wrong host). `CODEAM_TEST_MODE=1` flips every endpoint — pairing, command relay, SSE, chunk uploads, file watcher, history — in lockstep.
+
+```bash
+# Quick check it's active:
+CODEAM_TEST_MODE=1 codeam doctor
+# api      https://dev-api.codeagent-mobile.com
+# mode     TEST_MODE — using dev preview
+```
+
+VS Code / JetBrains plugins read the same env vars from the host process — set them in your shell before launching the IDE. The `apiBaseUrl` setting in each plugin still works as a manual override (highest priority of all in the plugin context).
+
+---
+
 ## Repository layout
 
 ```
