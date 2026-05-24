@@ -100,8 +100,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   statusBarItem.show();
   context.subscriptions.push(statusBarItem);
 
-  // Start capture server (no workbench.html modification — that causes "corrupt" warnings)
-  AgentOutputMonitor.getInstance().safeStartup();
+  // Start capture server. The legacy workbench.html cleanup runs at
+  // most once per profile; subsequent activations skip it entirely.
+  AgentOutputMonitor.getInstance().safeStartup(context);
 
   log.appendLine('CodeAgent Mobile extension activated');
 }

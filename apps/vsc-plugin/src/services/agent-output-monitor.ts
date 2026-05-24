@@ -55,14 +55,35 @@ export class AgentOutputMonitor {
     return this._isMonitoring;
   }
 
-  // ── Safe startup: start capture server and clean up any previous workbench injection ──
+  // ── Safe startup: start capture server and (at most once) clean up
+  // any past workbench injection from a pre-2026 install ──
 
-  async safeStartup(): Promise<void> {
+  private static readonly CLEANUP_FLAG = 'workbenchCleanedV1';
+
+  async safeStartup(context: vscode.ExtensionContext): Promise<void> {
     this.ensureCaptureServerRunning();
-    await this.cleanupWorkbenchInjection();
+    await this.cleanupWorkbenchInjectionOnce(context);
   }
 
-  private async cleanupWorkbenchInjection(): Promise<void> {
+  /**
+   * Older builds (pre-2026) modified `${appRoot}/out/vs/code/.../workbench.html`
+   * which triggered VS Code's "Your installation appears to be corrupt"
+   * banner and is now grounds for marketplace removal. We keep the
+   * cleanup so users upgrading from an old version recover, but gate it
+   * behind a one-shot globalState flag so:
+   *
+   *   - the appRoot read never runs on a clean install (fresh sessions),
+   *   - the appRoot write only runs once, ever, per profile.
+   *
+   * Once the gate has flipped to true the entire cleanup path becomes a
+   * no-op until a future release deletes it outright.
+   */
+  private async cleanupWorkbenchInjectionOnce(
+    context: vscode.ExtensionContext,
+  ): Promise<void> {
+    if (context.globalState.get<boolean>(AgentOutputMonitor.CLEANUP_FLAG)) {
+      return;
+    }
     try {
       const appRoot = vscode.env.appRoot;
       const workbenchDir = path.join(appRoot, 'out', 'vs', 'code', 'electron-browser', 'workbench');
@@ -70,11 +91,13 @@ export class AgentOutputMonitor {
       const observerJs = path.join(workbenchDir, AgentOutputMonitor.OBSERVER_FILENAME);
 
       let cleaned = false;
+      let touchedAppRoot = false;
 
-      // Remove injected script tag from workbench.html
+      // Read-only probe first so a clean install never writes to appRoot.
       if (fs.existsSync(workbenchHtml)) {
         const html = fs.readFileSync(workbenchHtml, 'utf-8');
         if (html.includes(AgentOutputMonitor.OBSERVER_FILENAME)) {
+          touchedAppRoot = true;
           const restored = html
             .replace(`\t${AgentOutputMonitor.SCRIPT_TAG}\n`, '')
             .replace(AgentOutputMonitor.SCRIPT_TAG, '');
@@ -84,22 +107,28 @@ export class AgentOutputMonitor {
         }
       }
 
-      // Remove injected observer JS file
       if (fs.existsSync(observerJs)) {
+        touchedAppRoot = true;
         fs.unlinkSync(observerJs);
         this.log.appendLine('[cleanup] Removed observer JS file');
         cleaned = true;
       }
 
+      // Whether the file was found or not, mark the gate so the next
+      // activation skips even the read probe.
+      await context.globalState.update(AgentOutputMonitor.CLEANUP_FLAG, true);
+
       if (cleaned) {
         const action = await vscode.window.showInformationMessage(
-          'CodeAgent: Cleaned up previous workbench modification. Reload to fix "corrupt installation" warning.',
+          'CodeAgent Mobile · Editor restored. Reload to clear the "corrupt installation" warning.',
           'Reload Now',
           'Later',
         );
         if (action === 'Reload Now') {
           await vscode.commands.executeCommand('workbench.action.reloadWindow');
         }
+      } else if (!touchedAppRoot) {
+        this.log.appendLine('[cleanup] No prior injection found — gate flipped, will not probe appRoot again.');
       }
     } catch (e) {
       this.log.appendLine(`[cleanup] Failed to clean workbench (non-critical): ${e}`);
