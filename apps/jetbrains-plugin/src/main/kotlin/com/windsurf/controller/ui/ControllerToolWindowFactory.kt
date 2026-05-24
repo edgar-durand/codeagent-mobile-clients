@@ -62,6 +62,7 @@ class ControllerToolWindowFactory : ToolWindowFactory {
 
     private class ControllerPanel(private val project: Project) : JPanel(), PairingService.PairingListener, CommandRelayService.CommandListener {
 
+        private val logger = com.intellij.openapi.diagnostic.Logger.getInstance(ControllerPanel::class.java)
         private val router = RemoteCommandRouter(project)
 
         private val isDark = !UIUtil.isUnderIntelliJLaF()
@@ -336,7 +337,7 @@ class ControllerToolWindowFactory : ToolWindowFactory {
                     addActionListener {
                         try {
                             java.awt.Desktop.getDesktop().browse(java.net.URI("https://www.codeagent-mobile.com"))
-                        } catch (_: Exception) { }
+                        } catch (e: Exception) { logger.trace(e) }
                     }
                 }
                 onboardingPanel.add(homepageBtn)
@@ -497,7 +498,7 @@ class ControllerToolWindowFactory : ToolWindowFactory {
                             font = font.deriveFont(Font.PLAIN, 11f)
                         }
                         subPanel.add(billingLabel)
-                    } catch (_: Exception) { }
+                    } catch (e: Exception) { logger.trace(e) }
                 }
             }
 
@@ -513,7 +514,7 @@ class ControllerToolWindowFactory : ToolWindowFactory {
             val settingsUrl = "$webUrl/app/settings"
             try {
                 java.awt.Desktop.getDesktop().browse(java.net.URI(settingsUrl))
-            } catch (_: Exception) { }
+            } catch (e: Exception) { logger.trace(e) }
         }
 
         private fun onPairClicked() {
@@ -537,7 +538,7 @@ class ControllerToolWindowFactory : ToolWindowFactory {
                         val qrImage = generateQrImage(result.code, 160)
                         qrLabel.icon = ImageIcon(qrImage)
                         qrLabel.isVisible = true
-                    } catch (_: Exception) { }
+                    } catch (e: Exception) { logger.trace(e) }
 
                     pairingCard.revalidate()
                     pairingCard.repaint()

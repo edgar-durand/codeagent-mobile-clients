@@ -45,7 +45,7 @@ fun collectAccessibleText(component: Component, sb: StringBuilder, depth: Int) {
             val desc = ctx.accessibleDescription
             if (desc != null && desc.length > 20) sb.appendLine(desc)
         }
-    } catch (_: Exception) {}
+    } catch (e: Exception) { logger.trace(e) }
     if (component is Container) {
         for (i in 0 until component.componentCount) {
             collectAccessibleText(component.getComponent(i), sb, depth + 1)

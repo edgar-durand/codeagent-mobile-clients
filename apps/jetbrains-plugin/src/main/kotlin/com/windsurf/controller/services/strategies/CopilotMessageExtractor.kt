@@ -123,7 +123,7 @@ class CopilotMessageExtractor : MessageExtractor {
             }
         }
         if (app.isDispatchThread) task.run() else {
-            try { app.invokeAndWait(task) } catch (_: Exception) {}
+            try { app.invokeAndWait(task) } catch (e: Exception) { logger.trace(e) }
         }
         return ref.get()
     }
@@ -140,7 +140,7 @@ class CopilotMessageExtractor : MessageExtractor {
         }
         if (app.isDispatchThread) task.run() else try {
             app.invokeAndWait(task)
-        } catch (_: Exception) {}
+        } catch (e: Exception) { logger.trace(e) }
         return ref.get()
     }
 

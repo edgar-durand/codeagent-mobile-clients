@@ -148,7 +148,7 @@ class AgentStrategyRegistry {
         lastActive = null
         // Belt-and-suspenders: nuke the singleton monitors directly so a
         // mid-refactor regression can never leave a poll loop running.
-        try { AgentOutputMonitor.getInstance().stopMonitoring() } catch (_: Exception) {}
+        try { AgentOutputMonitor.getInstance().stopMonitoring() } catch (e: Exception) { logger.trace(e) }
     }
 
     companion object {

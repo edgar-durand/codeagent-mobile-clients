@@ -211,7 +211,7 @@ class IdeIntegrationService {
                 outerField.isAccessible = true
                 val outer = outerField.get(component)
                 if (outer != null) return outer
-            } catch (_: Exception) {}
+            } catch (e: Exception) { logger.trace(e) }
         }
         if (component is Container) {
             for (i in 0 until component.componentCount) {

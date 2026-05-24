@@ -94,7 +94,7 @@ class JetBrainsAIAssistantStrategy : AgentStrategy {
         if (app.isDispatchThread) {
             activateTask.run()
         } else {
-            try { app.invokeAndWait(activateTask) } catch (_: Exception) {}
+            try { app.invokeAndWait(activateTask) } catch (e: Exception) { logger.trace(e) }
             try { Thread.sleep(1500) } catch (_: InterruptedException) { return false }
         }
 
@@ -123,7 +123,7 @@ class JetBrainsAIAssistantStrategy : AgentStrategy {
         }
         if (app.isDispatchThread) cleanupTask.run() else try {
             app.invokeAndWait(cleanupTask)
-        } catch (_: Exception) {}
+        } catch (e: Exception) { logger.trace(e) }
 
         CopyPasteManager.getInstance().setContents(StringSelection(invocation.prompt))
         app.invokeLater {
@@ -178,7 +178,7 @@ class JetBrainsAIAssistantStrategy : AgentStrategy {
                 }
             }
             if (app.isDispatchThread) task.run() else {
-                try { app.invokeAndWait(task) } catch (_: Exception) {}
+                try { app.invokeAndWait(task) } catch (e: Exception) { logger.trace(e) }
             }
 
             val input = attemptedRef.get()
@@ -206,7 +206,7 @@ class JetBrainsAIAssistantStrategy : AgentStrategy {
                 cleared.set(current != expected)
             }
             if (app.isDispatchThread) task.run() else {
-                try { app.invokeAndWait(task) } catch (_: Exception) {}
+                try { app.invokeAndWait(task) } catch (e: Exception) { logger.trace(e) }
             }
             if (cleared.get()) return true
             try { Thread.sleep(100) } catch (_: InterruptedException) { return false }
@@ -223,7 +223,7 @@ class JetBrainsAIAssistantStrategy : AgentStrategy {
             input.dispatchEvent(released)
         }
         if (app.isDispatchThread) task.run() else {
-            try { app.invokeAndWait(task) } catch (_: Exception) {}
+            try { app.invokeAndWait(task) } catch (e: Exception) { logger.trace(e) }
         }
     }
 
@@ -231,7 +231,7 @@ class JetBrainsAIAssistantStrategy : AgentStrategy {
         val app = ApplicationManager.getApplication()
         val task = Runnable { input.text = "" }
         if (app.isDispatchThread) task.run() else {
-            try { app.invokeAndWait(task) } catch (_: Exception) {}
+            try { app.invokeAndWait(task) } catch (e: Exception) { logger.trace(e) }
         }
     }
 

@@ -83,7 +83,12 @@ export class RemoteCommandRouter {
             return;
           }
           // Clean up temp files after 2 min
-          setTimeout(() => { tempPaths.forEach((p) => { try { fs.unlinkSync(p); } catch {} }); }, 120000);
+          setTimeout(() => {
+            tempPaths.forEach((p) => {
+              try { fs.unlinkSync(p); }
+              catch (e) { this.log.appendLine(`[cleanup] unlink ${p} failed: ${e}`); }
+            });
+          }, 120000);
         }
 
         const promptPreview = prompt.length > 60 ? `${prompt.substring(0, 60)}…` : prompt;

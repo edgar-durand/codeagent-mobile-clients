@@ -1,11 +1,14 @@
 package com.windsurf.controller.services.strategies
 
 import com.intellij.openapi.application.ApplicationManager
+import com.intellij.openapi.diagnostic.Logger
 import com.intellij.openapi.wm.ToolWindow
 import java.awt.Component
 import java.awt.Container
 import javax.swing.AbstractButton
 import javax.swing.text.JTextComponent
+
+private val logger = Logger.getInstance("SwingChatInputDetector")
 
 /**
  * Generic chat input + send-button detector for Swing-rendered chat
@@ -66,7 +69,7 @@ internal fun detectSwingChatTarget(tw: ToolWindow): SwingChatTarget? {
     val app = ApplicationManager.getApplication()
     if (app.isDispatchThread) edtTask.run() else try {
         app.invokeAndWait(edtTask)
-    } catch (_: Exception) {}
+    } catch (e: Exception) { logger.trace(e) }
 
     if (inputs.isEmpty()) return null
 
