@@ -90,6 +90,18 @@ export class CommandRelayService {
   startPolling(): void {
     this.stopPolling();
     this._running = true;
+    // Subscribe to mid-session apiBaseUrl changes so a settings
+    // change tears down + reconnects the SSE against the new host
+    // immediately. Idempotent — addListener guards against repeats
+    // via the SettingsService keeping a single listener registry.
+    SettingsService.getInstance().onApiBaseUrlChanged((prev, next) => {
+      if (!this._running) return;
+      this.log.appendLine(`apiBaseUrl changed (${prev} → ${next}); reconnecting SSE`);
+      this.stopPolling();
+      this._running = true;
+      this.connectSSE();
+      this.startHeartbeat();
+    });
     // Try SSE first; fall back to short polling only if SSE fails
     // twice (counted inside connectSSE / scheduleSseReconnect).
     this.connectSSE();

@@ -12,6 +12,14 @@ export interface RecentSession {
 
 const AUTH_TOKEN_KEY = 'pluginAuthToken';
 
+interface ConfigSnapshot {
+  apiBaseUrl: string;
+  autoConnect: boolean;
+  showNotifications: boolean;
+  heartbeatIntervalMs: number;
+  telemetryEnabled: boolean;
+}
+
 export class SettingsService {
   private static instance: SettingsService;
   private context: vscode.ExtensionContext;
@@ -19,8 +27,31 @@ export class SettingsService {
   // synchronous getPluginAuthToken() can answer without awaiting.
   private cachedAuthToken: string | null = null;
 
+  // Resolved-config snapshot. Refreshed on every
+  // workspace.onDidChangeConfiguration event for our section so the
+  // hot read path (apiBaseUrl on every postJson / SSE reconnect)
+  // doesn't pay a workspace.getConfiguration call each time.
+  private cachedConfig: ConfigSnapshot;
+  // Apply-base-url-changed callbacks. CommandRelayService registers
+  // one so a mid-session apiBaseUrl flip force-reconnects SSE
+  // instead of waiting for the next ~30s reconnect window.
+  private apiBaseUrlListeners: Array<(prev: string, next: string) => void> = [];
+
   private constructor(context: vscode.ExtensionContext) {
     this.context = context;
+    this.cachedConfig = this.readConfigSnapshot();
+    context.subscriptions.push(
+      vscode.workspace.onDidChangeConfiguration((e) => {
+        if (!e.affectsConfiguration('codeagent-mobile')) return;
+        const prev = this.cachedConfig;
+        this.cachedConfig = this.readConfigSnapshot();
+        if (prev.apiBaseUrl !== this.cachedConfig.apiBaseUrl) {
+          for (const fn of this.apiBaseUrlListeners) {
+            try { fn(prev.apiBaseUrl, this.cachedConfig.apiBaseUrl); } catch { /* ignore */ }
+          }
+        }
+      }),
+    );
   }
 
   static async initialize(context: vscode.ExtensionContext): Promise<SettingsService> {
@@ -57,19 +88,41 @@ export class SettingsService {
   get apiBaseUrl(): string {
     // SYNC WITH packages/shared/src/api-url.ts and the `default` value in
     // apps/vsc-plugin/package.json (contributes.configuration.…apiBaseUrl).
-    return this.getConfig<string>('apiBaseUrl', DEFAULT_API_BASE_URL);
+    return this.cachedConfig.apiBaseUrl;
   }
 
   get autoConnect(): boolean {
-    return this.getConfig<boolean>('autoConnect', true);
+    return this.cachedConfig.autoConnect;
   }
 
   get showNotifications(): boolean {
-    return this.getConfig<boolean>('showNotifications', true);
+    return this.cachedConfig.showNotifications;
   }
 
   get heartbeatIntervalMs(): number {
-    return this.getConfig<number>('heartbeatIntervalMs', 30000);
+    return this.cachedConfig.heartbeatIntervalMs;
+  }
+
+  /**
+   * Register a callback fired when the user changes the apiBaseUrl
+   * setting mid-session. CommandRelayService uses this to
+   * tear-down + reconnect the SSE stream against the new host
+   * immediately instead of waiting for the next ~30s reconnect
+   * cycle.
+   */
+  onApiBaseUrlChanged(listener: (prev: string, next: string) => void): void {
+    this.apiBaseUrlListeners.push(listener);
+  }
+
+  private readConfigSnapshot(): ConfigSnapshot {
+    const cfg = vscode.workspace.getConfiguration('codeagent-mobile');
+    return {
+      apiBaseUrl: cfg.get<string>('apiBaseUrl', DEFAULT_API_BASE_URL),
+      autoConnect: cfg.get<boolean>('autoConnect', true),
+      showNotifications: cfg.get<boolean>('showNotifications', true),
+      heartbeatIntervalMs: cfg.get<number>('heartbeatIntervalMs', 30000),
+      telemetryEnabled: cfg.get<boolean>('telemetryEnabled', true),
+    };
   }
 
   /**
@@ -153,10 +206,6 @@ export class SettingsService {
     this.context.globalState.update('recentSessions', sessions);
   }
 
-  private getConfig<T>(key: string, defaultValue: T): T {
-    const config = vscode.workspace.getConfiguration('codeagent-mobile');
-    return config.get<T>(key, defaultValue);
-  }
 }
 
 function generateUUID(): string {
