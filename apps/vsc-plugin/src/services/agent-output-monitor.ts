@@ -555,8 +555,12 @@ export class AgentOutputMonitor {
     const settings = SettingsService.getInstance();
     const relay = CommandRelayService.getInstance();
     const pluginId = settings.ensurePluginId();
+    // Wire shape matches the CLI's canonical `clear` chunk
+    // (apps/cli/src/services/output.service.ts:126) — POST with
+    // type:'clear' so the backend's chunk router treats it the same
+    // way regardless of which client sent it.
     relay.postJson(`${settings.apiBaseUrl}/api/commands/output`, {
-      sessionId, pluginId, clear: true,
+      sessionId, pluginId, type: 'clear',
     }).catch(() => {});
   }
 }
