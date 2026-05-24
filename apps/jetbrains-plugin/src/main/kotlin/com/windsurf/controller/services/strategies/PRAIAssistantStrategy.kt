@@ -3,6 +3,7 @@ package com.windsurf.controller.services.strategies
 import com.intellij.openapi.diagnostic.Logger
 import com.windsurf.controller.services.AgentOutputMonitor
 import com.windsurf.controller.services.DetectedAgent
+import com.windsurf.controller.ui.BrandMessages
 
 /**
  * "PR AI Assistant" tool window — JetBrains' code-review companion to
@@ -33,7 +34,7 @@ class PRAIAssistantStrategy : AgentStrategy {
     override fun deliverPrompt(invocation: AgentInvocation): Boolean = deliverPromptViaJcef(
         invocation = invocation,
         notificationTitle = "Prompt sent to PR AI Assistant",
-        notFoundMessage = "Prompt copied to clipboard (PR AI Assistant not found)",
+        notFoundMessage = BrandMessages.promptCopiedToClipboard("PR AI Assistant not detected"),
         logger = logger,
     )
 

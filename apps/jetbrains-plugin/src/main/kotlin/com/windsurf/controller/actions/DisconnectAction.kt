@@ -5,6 +5,7 @@ import com.intellij.openapi.actionSystem.AnActionEvent
 import com.intellij.openapi.ui.Messages
 import com.windsurf.controller.services.CommandRelayService
 import com.windsurf.controller.services.PairingService
+import com.windsurf.controller.ui.BrandMessages
 
 /**
  * Stops the relay and clears the paired session — backs the
@@ -23,7 +24,7 @@ class DisconnectAction : AnAction() {
             PairingService.getInstance().clearCurrentSession()
             Messages.showInfoMessage(
                 e.project,
-                "CodeAgent Mobile · Disconnected.",
+                BrandMessages.Disconnected,
                 "Disconnected"
             )
         } else {

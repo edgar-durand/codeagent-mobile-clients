@@ -10,6 +10,7 @@ import com.intellij.openapi.wm.ToolWindow
 import com.windsurf.controller.services.AgentOutputMonitor
 import com.windsurf.controller.services.DetectedAgent
 import com.windsurf.controller.services.IdeIntegrationService
+import com.windsurf.controller.ui.BrandMessages
 import java.awt.Component
 import java.awt.Container
 import java.awt.datatransfer.StringSelection
@@ -73,7 +74,7 @@ class JetBrainsAIAssistantStrategy : AgentStrategy {
         val tw = twRef.get()
         if (tw == null) {
             CopyPasteManager.getInstance().setContents(StringSelection(invocation.prompt))
-            ide.showNotification("Prompt copied to clipboard (AI Assistant not found)", invocation.prompt)
+            ide.showNotification(BrandMessages.promptCopiedToClipboard("AI Assistant not detected"), invocation.prompt)
             return false
         }
 

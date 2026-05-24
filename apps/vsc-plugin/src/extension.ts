@@ -11,6 +11,7 @@ import { ChatHistoryService } from './services/chat-history.service';
 import { ClaudeContextService } from './services/claude-context.service';
 import { ControllerPanelProvider } from './panels/controller-panel';
 import { initTelemetry, capture, identifyUser, shutdownTelemetry } from './services/telemetry.service';
+import { Messages } from './ui/messages';
 
 let log: vscode.OutputChannel;
 let panelProvider: ControllerPanelProvider | null = null;
@@ -53,7 +54,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       relay.stopPolling();
       panelProvider?.stopFileWatcher();
       PairingService.getInstance().clearCurrentSession();
-      vscode.window.showInformationMessage('CodeAgent Mobile: Disconnected');
+      vscode.window.showInformationMessage(Messages.Disconnected);
     }),
   );
 

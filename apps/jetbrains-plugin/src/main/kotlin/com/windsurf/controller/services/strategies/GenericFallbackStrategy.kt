@@ -3,6 +3,7 @@ package com.windsurf.controller.services.strategies
 import com.intellij.openapi.diagnostic.Logger
 import com.windsurf.controller.services.AgentOutputMonitor
 import com.windsurf.controller.services.DetectedAgent
+import com.windsurf.controller.ui.BrandMessages
 
 /**
  * Last-resort strategy. Claims any agent that wasn't picked up by a
@@ -33,7 +34,7 @@ class GenericFallbackStrategy : AgentStrategy {
         return deliverPromptViaJcef(
             invocation = invocation,
             notificationTitle = "Prompt sent to AI",
-            notFoundMessage = "Prompt copied to clipboard (no AI agent found)",
+            notFoundMessage = BrandMessages.promptCopiedToClipboard("no AI agent detected"),
             logger = logger,
         )
     }

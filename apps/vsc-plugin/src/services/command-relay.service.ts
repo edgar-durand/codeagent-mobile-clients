@@ -5,6 +5,7 @@ import { PROTOCOL_VERSION, SSE_SOCKET_TIMEOUT_MS } from '@codeagent/shared';
 import { SettingsService } from './settings.service';
 import { OutputChannel } from 'vscode';
 import { capture } from './telemetry.service';
+import { Messages } from '../ui/messages';
 
 export interface RemoteCommand {
   id: string;
@@ -526,7 +527,7 @@ export class CommandRelayService {
     capture('plugin_auth_failed', { surface: 'vscode' });
     void vscode.window
       .showWarningMessage(
-        'CodeAgent Mobile · Session expired. Re-pair to continue.',
+        Messages.SessionExpired,
         'Re-pair',
       )
       .then((choice) => {

@@ -256,7 +256,7 @@ class ControllerToolWindowFactory : ToolWindowFactory {
             recentSessionsCard.add(Box.createVerticalStrut(10))
 
             if (sessions.isEmpty()) {
-                val emptyLabel = JBLabel("No recent sessions").apply {
+                val emptyLabel = JBLabel(BrandMessages.EmptyRecentSessions).apply {
                     font = font.deriveFont(11f)
                     foreground = mutedText
                     alignmentX = Component.LEFT_ALIGNMENT
