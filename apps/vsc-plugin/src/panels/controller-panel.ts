@@ -22,6 +22,7 @@ import { McpConfigWriterService, McpConfigureRequest, McpEntry } from '../servic
 import { FileWatcherService } from '../services/file-watcher.service';
 import { buildInstallAndRun as buildInstallAndRunPure } from '../utils/build-install-command';
 import { generateNonce, cspMeta, renderPairingQrSvg } from '../utils/webview-security';
+import { brandCssTokens } from '../ui/brand-tokens';
 
 /**
  * Thin adapter that hands the pure builder VS Code's view of the
@@ -958,6 +959,7 @@ export class ControllerPanelProvider implements vscode.WebviewViewProvider, Comm
   <meta http-equiv="Content-Security-Policy" content="${cspMeta(webview, nonce)}">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <style>
+    ${brandCssTokens()}
     * { margin: 0; padding: 0; box-sizing: border-box; }
     body {
       font-family: var(--vscode-font-family);
@@ -985,9 +987,9 @@ export class ControllerPanelProvider implements vscode.WebviewViewProvider, Comm
       border-radius: 50%;
       flex-shrink: 0;
     }
-    .dot-green { background: #22c55e; }
-    .dot-red { background: #ef4444; }
-    .dot-yellow { background: #eab308; }
+    .dot-green { background: var(--ca-success); box-shadow: 0 0 6px rgba(0, 255, 160, 0.6); }
+    .dot-red { background: var(--ca-error); box-shadow: 0 0 6px rgba(255, 68, 68, 0.5); }
+    .dot-yellow { background: var(--ca-warning); }
     .label { font-weight: 600; }
     .muted { color: var(--vscode-descriptionForeground); font-size: 11px; }
     .btn {
@@ -1003,13 +1005,18 @@ export class ControllerPanelProvider implements vscode.WebviewViewProvider, Comm
       margin-top: 8px;
     }
     .btn-primary {
-      background: var(--vscode-button-background);
-      color: var(--vscode-button-foreground);
+      background: var(--ca-purple);
+      color: var(--ca-on-surface);
+      box-shadow: 0 0 12px var(--ca-glow-purple);
     }
-    .btn-primary:hover { background: var(--vscode-button-hoverBackground); }
+    .btn-primary:hover { filter: brightness(1.08); }
+    .btn-primary:focus-visible {
+      outline: 2px solid var(--ca-purple);
+      outline-offset: 2px;
+    }
     .btn-danger {
-      background: var(--vscode-inputValidation-errorBackground);
-      color: var(--vscode-errorForeground);
+      background: var(--ca-error);
+      color: var(--ca-on-surface);
     }
     .btn-secondary {
       background: var(--vscode-button-secondaryBackground);
@@ -1020,11 +1027,13 @@ export class ControllerPanelProvider implements vscode.WebviewViewProvider, Comm
       font-weight: 700;
       text-align: center;
       letter-spacing: 6px;
-      color: var(--vscode-textLink-foreground);
+      color: var(--ca-purple);
       padding: 12px;
       background: var(--vscode-textBlockQuote-background);
       border-radius: 6px;
       margin: 8px 0;
+      text-shadow: 0 0 14px var(--ca-glow-purple);
+      font-family: var(--vscode-editor-font-family), monospace;
     }
     .user-info {
       display: flex;
