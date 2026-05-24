@@ -1,17 +1,12 @@
-import { TerminalAgentService } from '../../terminal-agent.service';
 import { findExtension } from '../checks/extension';
 import type { AgentDetector, DetectionContext, DetectionResult } from '../types';
 
 /**
- * Detects Claude Code. Two signals:
- *   - The official VS Code extension(s).
- *   - An open "Claude Code" terminal tab (the user spun up `claude` in a
- *     VS Code terminal — the existing CLI flow this plugin supports).
- *
- * Either signal alone counts as "installed". When both are present the
- * extension id is the wire id and `isTerminalAgent: true` is set on top.
- * The detector id is `claude_code` so the fallback wire id is
- * `__terminal__:claude_code`, identical to the legacy hardcoded value.
+ * Detects Claude Code by the presence of the Anthropic VS Code
+ * extension. Claude itself is a terminal agent owned by codeam-cli,
+ * so we don't introspect a local Claude PTY here — we just report
+ * presence to the mobile, which dispatches runtime commands to the
+ * CLI's pluginId.
  */
 export class ClaudeCodeDetector implements AgentDetector {
   readonly id = 'claude_code';
@@ -22,13 +17,12 @@ export class ClaudeCodeDetector implements AgentDetector {
 
   async detect(ctx: DetectionContext): Promise<DetectionResult | null> {
     const extension = findExtension(ClaudeCodeDetector.CANDIDATE_EXTENSION_IDS, ctx.extensions);
-    const terminalTab = TerminalAgentService.getInstance().findClaudeCodeTerminal();
-    if (!extension && !terminalTab) return null;
+    if (!extension) return null;
     return {
       installed: true,
-      extensionId: extension?.id ?? 'anthropic.claude-code',
-      isTerminalAgent: !!terminalTab,
-      via: extension ? 'extension' : 'terminal-tab',
+      extensionId: extension.id,
+      isTerminalAgent: true,
+      via: 'extension',
     };
   }
 }

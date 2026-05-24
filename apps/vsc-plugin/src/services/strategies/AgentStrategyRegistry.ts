@@ -1,6 +1,5 @@
 import type { OutputChannel } from 'vscode';
 import type { AgentInvocation, AgentStrategy, StrategyResult } from './AgentStrategy';
-import { TerminalClaudeCodeStrategy } from './TerminalClaudeCodeStrategy';
 import { CopilotLmStrategy } from './CopilotLmStrategy';
 import { ObserverBridgeStrategy } from './ObserverBridgeStrategy';
 
@@ -35,7 +34,6 @@ export class AgentStrategyRegistry {
 
   private constructor(private readonly log: OutputChannel) {
     this.strategies = [
-      new TerminalClaudeCodeStrategy(log),
       new CopilotLmStrategy(log),
       // Catch-all — keep last.
       new ObserverBridgeStrategy(log),
