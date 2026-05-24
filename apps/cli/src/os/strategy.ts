@@ -1,4 +1,5 @@
 import * as path from 'node:path';
+import type { IPtyStrategy, PtyStrategyOptions } from '../services/pty/types';
 
 /**
  * Per-OS strategy interface.
@@ -86,6 +87,26 @@ export interface OsStrategy {
     cmd: string;
     args: string[];
   };
+
+  /**
+   * Return the prioritised list of PTY backends to attempt for this
+   * OS. The caller (`AgentService.spawn`) walks the list in order,
+   * calls `.spawn()` on each, and falls back to the next on
+   * exception — typical Win32 path: ConPTY first (real terminal) →
+   * pipe fallback when the vendored conpty.node fails to load
+   * (AV quarantine, missing prebuild).
+   *
+   * Strategies that fail to **construct** are filtered out before
+   * the list is returned (e.g. ConPTY require throws when the
+   * native binding can't load). Strategies that fail at `.spawn()`
+   * time are walked past by the caller. An empty list means PTY
+   * is genuinely unavailable for the host — caller should surface
+   * a clear error.
+   *
+   * The list is ALWAYS non-empty for supported platforms (we don't
+   * want the empty-list ambiguity to silently produce a non-spawn).
+   */
+  createPtyStrategies(opts: PtyStrategyOptions): IPtyStrategy[];
 }
 
 // ─── Shared helpers (used by all concrete impls) ────────────────────

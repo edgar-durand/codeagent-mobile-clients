@@ -1,7 +1,4 @@
 import { IPtyStrategy } from './pty/types';
-import { UnixPtyStrategy } from './pty/unix.strategy';
-import { WindowsPtyStrategy } from './pty/windows.strategy';
-import { WindowsConPtyStrategy } from './pty/windows-conpty.strategy';
 import { buildClaudeLaunch } from './claude-resolver';
 import { log } from './logger';
 import type { RuntimeStrategy } from '../agents/strategy';
@@ -88,50 +85,54 @@ export class AgentService {
       process.exit(1);
     }
 
-    if (process.platform === 'win32') {
-      // Prefer ConPTY (real terminal) so Claude doesn't fall into its
-      // "--print + 3s stdin wait" non-interactive path. The vendored
-      // node-pty bundle (see scripts/vendor-node-pty.js) ships the
-      // prebuilt conpty.node so this load is deterministic. Two
-      // failure modes still possible:
-      //
-      //   1. require throws because the vendored bundle is corrupt or
-      //      missing (e.g. AV quarantined the .node file). tryCreate
-      //      returns null → pipe fallback.
-      //   2. require succeeds but lib.spawn() throws — typically a
-      //      mis-resolved cmd (e.g. a `.cmd` shim handed to ConPTY
-      //      without a cmd.exe wrapper). Caught here → pipe fallback.
-      log.trace('claude', `spawn (win32) cmd=${launch.cmd} args=${launch.args.join(' ')}`);
-      const conpty = WindowsConPtyStrategy.tryCreate(this.strategyOpts);
-      if (conpty) {
-        try {
-          conpty.spawn(launch.cmd, this.opts.cwd, launch.args);
-          this.strategy = conpty;
-          log.trace('claude', 'ConPTY spawn ok');
-          return;
-        } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err);
-          // Best-effort cleanup of half-initialized state.
-          try { conpty.dispose(); } catch { /* ignore */ }
-          console.error(`\n  ⚠ ConPTY launch failed (${msg.split('\n')[0]})`);
-          console.error('    Falling back to pipe mode (limited interactivity)…\n');
+    // Per-OS PTY backends in priority order. POSIX returns one
+    // (UnixPtyStrategy); Win32 returns [ConPTY, pipe-fallback]. We
+    // walk the list, attempt .spawn() on each, and fall back on
+    // exception. The list is filtered for constructable backends —
+    // Win32 may have already dropped ConPTY here if the vendored
+    // conpty.node failed to load (AV quarantine, missing prebuild).
+    const strategies = this.runtime.os.createPtyStrategies(this.strategyOpts);
+    log.trace(
+      'agent',
+      `spawn ${this.runtime.os.id} cmd=${launch.cmd} args=${launch.args.join(' ')} backends=${strategies.length}`,
+    );
+
+    let lastErr: unknown = null;
+    for (let i = 0; i < strategies.length; i++) {
+      const strategy = strategies[i];
+      const isLast = i === strategies.length - 1;
+      try {
+        strategy.spawn(launch.cmd, this.opts.cwd, launch.args);
+        this.strategy = strategy;
+        log.trace('agent', `spawn ok via backend ${i + 1}/${strategies.length}`);
+        // Dispose any unused later-priority backends so we don't leak
+        // file handles / subscriber sockets on those constructors.
+        for (let j = i + 1; j < strategies.length; j++) {
+          try { strategies[j].dispose(); } catch { /* ignore */ }
         }
-      } else {
-        console.error(
-          '\n  ⚠ Windows: node-pty unavailable, falling back to pipe mode.\n' +
-            '    Claude may exit with "no stdin data" / "--print" errors.\n' +
-            '    Reinstall the CLI to fetch the prebuilt ConPTY binary, or run inside WSL.\n',
-        );
+        return;
+      } catch (err) {
+        lastErr = err;
+        const msg = err instanceof Error ? err.message : String(err);
+        try { strategy.dispose(); } catch { /* ignore */ }
+        if (!isLast) {
+          // Surface the fallback so the user understands why TUI
+          // quality drops mid-session (e.g. ConPTY → pipe loses
+          // selectors). Print to stderr to keep stdout parseable.
+          console.error(`\n  ⚠ PTY backend ${i + 1} failed (${msg.split('\n')[0]})`);
+          console.error('    Falling back to next backend…\n');
+        }
       }
-      const pipe = new WindowsPtyStrategy(this.strategyOpts);
-      pipe.spawn(launch.cmd, this.opts.cwd, launch.args);
-      this.strategy = pipe;
-      return;
     }
 
-    const unix = new UnixPtyStrategy(this.strategyOpts);
-    unix.spawn(launch.cmd, this.opts.cwd, launch.args);
-    this.strategy = unix;
+    // Every backend in the priority list failed — there's nothing
+    // generic to recover with. Surface the last error verbatim so
+    // the user can act on it (often a missing native dep or a bad
+    // launch cmd).
+    const finalMsg = lastErr instanceof Error ? lastErr.message : String(lastErr);
+    throw new Error(
+      `${this.runtime.meta.displayName} PTY launch failed across ${strategies.length} backend(s): ${finalMsg}`,
+    );
   }
 
   /**

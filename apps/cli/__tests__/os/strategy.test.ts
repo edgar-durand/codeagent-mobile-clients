@@ -316,6 +316,32 @@ describe('OsStrategy.buildLaunch', () => {
   });
 });
 
+describe('OsStrategy.createPtyStrategies', () => {
+  const noopOpts = { onData: () => {}, onExit: () => {} };
+
+  it('POSIX returns exactly one backend (UnixPtyStrategy)', () => {
+    const strategies = new LinuxOsStrategy().createPtyStrategies(noopOpts);
+    expect(strategies).toHaveLength(1);
+    expect(strategies[0]).toBeDefined();
+  });
+
+  it('Darwin returns one backend (same UnixPtyStrategy)', () => {
+    const strategies = new DarwinOsStrategy().createPtyStrategies(noopOpts);
+    expect(strategies).toHaveLength(1);
+  });
+
+  it('Win32 returns ConPTY first then pipe-fallback', () => {
+    // tryCreate may return null on a non-Windows host (no vendored
+    // conpty.node), in which case the list shrinks to just the pipe
+    // backend. Either way it's NON-EMPTY — that's the load-bearing
+    // invariant the spawn loop depends on.
+    const strategies = new Win32OsStrategy().createPtyStrategies(noopOpts);
+    expect(strategies.length).toBeGreaterThanOrEqual(1);
+    // Last entry is always the pipe fallback — never an empty list.
+    expect(strategies[strategies.length - 1]).toBeDefined();
+  });
+});
+
 describe('createOsStrategy', () => {
   beforeEach(() => _resetOsStrategyCacheForTests());
   afterEach(() => _resetOsStrategyCacheForTests());

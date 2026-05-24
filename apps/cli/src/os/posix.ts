@@ -3,6 +3,8 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { findInPathFor, type OsStrategy } from './strategy';
+import { UnixPtyStrategy } from '../services/pty/unix.strategy';
+import type { IPtyStrategy, PtyStrategyOptions } from '../services/pty/types';
 
 /**
  * Shared base for darwin + linux. The two platforms differ in tiny,
@@ -63,6 +65,15 @@ export abstract class PosixOsStrategy implements OsStrategy {
     // directly, so spawning the absolute path is correct for
     // every interpreted + compiled language.
     return { cmd: binaryPath, args: [...extraArgs] };
+  }
+
+  createPtyStrategies(opts: PtyStrategyOptions): IPtyStrategy[] {
+    // POSIX has one PTY backend: the Python `pty.openpty()` helper
+    // wrapped in `UnixPtyStrategy`. We don't try `spawnDirect` as a
+    // fallback because without a real PTY, Claude / Codex fall into
+    // their `--print` non-interactive paths, which produces a worse
+    // UX than a clean failure that tells the user "install Python 3".
+    return [new UnixPtyStrategy(opts)];
   }
 }
 

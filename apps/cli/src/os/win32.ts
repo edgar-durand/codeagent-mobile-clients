@@ -3,6 +3,9 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { findInPathFor, type OsStrategy } from './strategy';
+import { WindowsConPtyStrategy } from '../services/pty/windows-conpty.strategy';
+import { WindowsPtyStrategy } from '../services/pty/windows.strategy';
+import type { IPtyStrategy, PtyStrategyOptions } from '../services/pty/types';
 
 const WINDOWS_EXEC_EXTS = ['.exe', '.cmd', '.bat', '.ps1'] as const;
 
@@ -126,5 +129,22 @@ export class Win32OsStrategy implements OsStrategy {
     }
     // .exe or extension-less binary → direct spawn.
     return { cmd: binaryPath, args: [...extraArgs] };
+  }
+
+  createPtyStrategies(opts: PtyStrategyOptions): IPtyStrategy[] {
+    // Priority order on Windows: ConPTY (real terminal — Claude /
+    // Codex see stdin.isTTY=true) → pipe fallback (limited TUI but
+    // commands still go through). The vendored conpty.node may fail
+    // to load if AV quarantined the prebuild or the file is missing;
+    // `tryCreate` returns null in that case and we drop it from the
+    // list. A successful construction here still tolerates a
+    // .spawn() failure later — the caller walks past to the next
+    // entry on exception, so this list is the priority order, not
+    // a "must work" list.
+    const list: IPtyStrategy[] = [];
+    const conpty = WindowsConPtyStrategy.tryCreate(opts);
+    if (conpty) list.push(conpty);
+    list.push(new WindowsPtyStrategy(opts));
+    return list;
   }
 }
