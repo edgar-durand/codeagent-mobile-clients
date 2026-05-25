@@ -162,6 +162,7 @@ export async function start(requestedAgent?: AgentId): Promise<void> {
         sessionId: session.id,
         pluginId,
         pluginAuthToken: session.pluginAuthToken,
+        agentId: runtime.meta.id,
         dirtyTracker: dirtyTracker ?? undefined,
       })
     : null;
