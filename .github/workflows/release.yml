@@ -152,6 +152,14 @@ jobs:
 
       - name: Build VS Code plugin
         working-directory: apps/vsc-plugin
+        env:
+          # PostHog ingestion key baked at build time via esbuild's
+          # `define` (apps/vsc-plugin/esbuild.js). Same write-key
+          # shape the CLI bakes. Without this env block esbuild
+          # inlines an empty string and telemetry is silently
+          # disabled in published builds.
+          POSTHOG_API_KEY: ${{ secrets.POSTHOG_API_KEY }}
+          POSTHOG_HOST: ${{ vars.POSTHOG_HOST }}
         run: npm run build
 
       - name: Package VS Code plugin (.vsix)
@@ -207,6 +215,15 @@ jobs:
 
       - name: Build JetBrains plugin
         working-directory: apps/jetbrains-plugin
+        env:
+          # PostHog ingestion key baked at build time via the gradle
+          # task in build.gradle.kts (writes GeneratedBuildConfig.kt
+          # with the key as a const). Without this env block gradle's
+          # `providers.environmentVariable("POSTHOG_API_KEY")` resolves
+          # to empty and telemetry is silently disabled in the
+          # published plugin.
+          POSTHOG_API_KEY: ${{ secrets.POSTHOG_API_KEY }}
+          POSTHOG_HOST: ${{ vars.POSTHOG_HOST }}
         run: ./gradlew clean buildPlugin
 
       - name: Verify JetBrains plugin
