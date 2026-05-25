@@ -5,6 +5,7 @@ import type { AgentMetadata } from '@codeagent/shared';
 import { _postJson, _getJson } from './pairing.service';
 import { vercelBypassHeader } from '../lib/backend-headers';
 import { computePollDelay } from '../lib/poll-delay';
+import { detectCurrentBranch } from '../lib/git-branch';
 import { log } from './logger';
 import { capture } from './telemetry.service';
 
@@ -364,10 +365,18 @@ export class CommandRelayService {
     // server normalizes between the internal id (e.g. `claude`) and
     // the public LinkedAgentId (e.g. `claude_code`). Older backends
     // simply ignore the extra field.
+    //
+    // `branch` re-reads the working dir's git branch on every tick so
+    // `git checkout` propagates to the mobile / web WORKSPACE rail
+    // within one heartbeat (~20 s). detectCurrentBranch is ~10 ms on
+    // a healthy repo (execFileSync `git branch --show-current` with a
+    // 1 s timeout); the backend dedupes — a stable branch costs only
+    // the bytes on the wire.
     await _postJson(`${API_BASE}/api/plugin/heartbeat`, {
       pluginId: this.pluginId,
       online,
       agentId: this.agentMeta.id,
+      branch: detectCurrentBranch(),
     })
       .then(() => log.trace('relay', `heartbeat ok online=${online}`))
       .catch((err: unknown) => log.trace('relay', `heartbeat failed online=${online}`, err));
