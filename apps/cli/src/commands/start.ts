@@ -226,6 +226,9 @@ export async function start(requestedAgent?: AgentId): Promise<void> {
     relay: undefined as unknown as CommandRelayService,
     setKeepAlive,
     keepAliveCtx,
+    pluginId,
+    sessionId: session.id,
+    pluginAuthToken: session.pluginAuthToken ?? undefined,
   };
 
   const relay = new CommandRelayService(pluginId, async (cmd) => {
