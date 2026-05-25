@@ -34,6 +34,7 @@ import {
   closeTerminal,
 } from '../../services/terminal-ops.service';
 import { showInfo } from '../../ui/banner';
+import { applyFileReview } from '../../services/apply-file-review.service';
 import type { KeepAliveContext } from './keep-alive';
 
 /**
@@ -432,6 +433,31 @@ const gitResolveH: CommandHandler = async (ctx, cmd, parsed) => {
   await ctx.relay.sendResult(cmd.id, 'completed', result as Record<string, unknown>);
 };
 
+// Epic B follow-up — backend pushes this when the user clicks
+// APPROVE_CHANGES / REJECT_CHANGES on a file in the diff drawer.
+// `approved` → `git add <filePath>`. `rejected` → `git restore
+// <filePath>` (discards every worktree edit on the file, not just
+// the rejected hunks — drawer surfaces a confirm dialog before
+// firing).
+const applyFileReviewH: CommandHandler = async (ctx, cmd, parsed) => {
+  if (!parsed.filePath || !parsed.action) {
+    await ctx.relay.sendResult(cmd.id, 'failed', {
+      error: 'Missing filePath or action',
+    });
+    return;
+  }
+  const result = await applyFileReview(
+    process.cwd(),
+    parsed.filePath,
+    parsed.action,
+  );
+  await ctx.relay.sendResult(
+    cmd.id,
+    result.ok ? 'completed' : 'failed',
+    result as unknown as Record<string, unknown>,
+  );
+};
+
 // ─── Dispatch table ──────────────────────────────────────────────
 
 export const handlers: Record<string, CommandHandler> = {
@@ -465,6 +491,7 @@ export const handlers: Record<string, CommandHandler> = {
   git_push: gitPushH,
   git_pull: gitPullH,
   git_resolve: gitResolveH,
+  apply_file_review: applyFileReviewH,
 };
 
 /**

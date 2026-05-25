@@ -67,6 +67,14 @@ export const startCommandSchema = z.object({
   cwd: z.string().max(4096).optional(),
   cols: z.number().int().min(1).max(500).optional(),
   rows: z.number().int().min(1).max(200).optional(),
+  // `apply_file_review` (Epic B follow-up — backend pushes this when
+  // the user clicks APPROVE_CHANGES / REJECT_CHANGES in the diff
+  // drawer). `filePath` is relative to the enclosing git repo; the
+  // handler walks up from it to find `.git/` and runs `git add` or
+  // `git restore` from there. `action='approved'` stages the edit,
+  // `action='rejected'` discards every worktree change on the file.
+  filePath: z.string().min(1).max(4096).optional(),
+  action: z.enum(['approved', 'rejected']).optional(),
 });
 
 export type StartCommandPayload = z.infer<typeof startCommandSchema>;
