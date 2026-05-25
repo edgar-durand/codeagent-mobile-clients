@@ -83,7 +83,14 @@ export const startCommandSchema = z.object({
   // a narrow enum) because the web sends internal ids ('claude')
   // while the auto-link backend sends public ids ('claude_code'),
   // and the consuming handlers normalize themselves.
-  agentId: z.string().max(64).optional(),
+  //
+  // `.nullable()` — the web's session page passes the literal value
+  // `null` when no agent has been selected yet for the session
+  // (`currentAgentId` is null before sessionAgents populates).
+  // Without nullable() zod rejects the whole payload, the dispatcher
+  // logs "Ignoring malformed list_models payload" and the model
+  // picker / context never load.
+  agentId: z.string().max(64).nullable().optional(),
   // `request_ai_summary` / `request_ai_insight` — backend fires
   // these on turn-end (+ file selection) when LinkedAgent.
   // aiInsightsEnabled is true. The CLI spawns the agent in
