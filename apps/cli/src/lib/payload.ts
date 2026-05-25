@@ -77,13 +77,13 @@ export const startCommandSchema = z.object({
   action: z.enum(['approved', 'rejected']).optional(),
   // `request_link_credentials` — backend fires this from the
   // heartbeat handler when it notices the user is running an agent
-  // they haven't vaulted yet. We reuse the `codeam link` token-
-  // capture path to push the credential up; if extraction fails
-  // (no local auth, missing file), the handler no-ops silently —
-  // no browser-login surprises during a normal `codeam pair`.
-  agentId: z
-    .enum(['claude_code', 'codex', 'cursor', 'aider', 'coderabbit'])
-    .optional(),
+  // they haven't vaulted yet. Also reused by `get_context` /
+  // `list_models` payloads which carry the currently-selected
+  // agent for that session. We accept any string here (rather than
+  // a narrow enum) because the web sends internal ids ('claude')
+  // while the auto-link backend sends public ids ('claude_code'),
+  // and the consuming handlers normalize themselves.
+  agentId: z.string().max(64).optional(),
 });
 
 export type StartCommandPayload = z.infer<typeof startCommandSchema>;
