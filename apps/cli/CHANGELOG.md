@@ -4,6 +4,16 @@ All notable changes to `codeam-cli` are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.21.1] — 2026-05-25
+
+### Added
+
+- **cli:** Apply_file_review handler — git add / git restore on the worktree
+
+### Fixed
+
+- **cli+vsc-plugin:** CI failures — stop-aware retries + VSC git-root seam
+
 ## [2.21.0] — 2026-05-25
 
 ### Added
