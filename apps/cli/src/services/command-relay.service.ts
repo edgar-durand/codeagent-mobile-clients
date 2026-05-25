@@ -9,6 +9,11 @@ import { log } from './logger';
 import { capture } from './telemetry.service';
 
 const API_BASE = resolveApiBaseUrl();
+// Server emits a `ping` SSE event every 30 s — give it 15 s of grace
+// before declaring the connection zombie. Probes every 10 s so the
+// max detection latency is ~55 s.
+const SSE_LIVENESS_TIMEOUT_MS = 45_000;
+const SSE_WATCHDOG_INTERVAL_MS = 10_000;
 
 export interface RemoteCommand {
   id: string;
@@ -51,6 +56,20 @@ export class CommandRelayService {
   /** Reconnect backoff state for the SSE stream. */
   private sseFailures = 0;
   private sseReconnectTimer: NodeJS.Timeout | null = null;
+  /**
+   * Liveness watchdog for the SSE socket. The server pings every 30 s
+   * (`pending-stream.controller.ts` interval(30_000)). If we go more
+   * than `SSE_LIVENESS_TIMEOUT_MS` without ANY bytes, we assume the
+   * TCP peer died half-open (Cloud Run scaled / redeployed mid-stream,
+   * NAT dropped the conntrack entry, laptop slept) and force a
+   * reconnect. Without this the kernel can keep the socket in a
+   * zombie ESTABLISHED state for HOURS before the default TCP
+   * keepalive triggers — observed live in #190 where a 17:18 redeploy
+   * left CLIs subscribed for >30 minutes without ever receiving a
+   * pushed command.
+   */
+  private sseWatchdog: NodeJS.Timeout | null = null;
+  private sseLastByteAt = 0;
 
   constructor(
     private readonly pluginId: string,
@@ -73,6 +92,7 @@ export class CommandRelayService {
 
     this._running = true;
     this.agentsRegistered = false;
+    log.info('relay', `start pluginId=${this.pluginId.slice(0, 8)} agent=${this.agentMeta.id}`);
     this.sendHeartbeat(true);
     this.heartbeatTimer = setInterval(() => this.sendHeartbeat(true), 20_000);
     this.agentsTimer = setInterval(() => {
@@ -87,6 +107,7 @@ export class CommandRelayService {
     // (real HTTPS would hit production). Tests cover the polling
     // path directly and a separate suite covers the SSE consumer.
     if (process.env.NODE_ENV === 'test' || process.env.CODEAM_DISABLE_SSE_PULL === '1') {
+      log.info('relay', 'SSE disabled — using polling fallback');
       this.startPollingFallback();
     } else {
       this.connectSSE();
@@ -117,7 +138,7 @@ export class CommandRelayService {
     url.searchParams.set('pluginId', this.pluginId);
     const transport = url.protocol === 'https:' ? https : http;
 
-    log.trace('relay', `sse connect ${url.pathname}`);
+    log.info('relay', `sse connect pluginId=${this.pluginId.slice(0, 8)}`);
     const req = transport.request(
       {
         hostname: url.hostname,
@@ -129,12 +150,12 @@ export class CommandRelayService {
       },
       (res) => {
         if (res.statusCode !== 200) {
-          log.trace('relay', `sse status=${res.statusCode}`);
+          log.info('relay', `sse status=${res.statusCode} — backing off`);
           res.resume();
           this.sseFailures += 1;
           if (this.sseFailures >= 2) {
             // Switch to polling fallback for this session.
-            log.trace('relay', 'sse unavailable, falling back to polling');
+            log.info('relay', 'sse unavailable — falling back to polling');
             capture('sse_fallback_to_poll', {
               pluginId: this.pluginId,
               agentId: this.agentMeta.id,
@@ -148,10 +169,14 @@ export class CommandRelayService {
           return;
         }
         // 200 — reset failure counter; consume events.
+        log.info('relay', 'sse connected');
         this.sseFailures = 0;
+        this.armSseWatchdog();
         let buffer = '';
         res.setEncoding('utf8');
         res.on('data', (chunk: string) => {
+          // ANY byte counts as liveness — text, ping events, comments.
+          this.sseLastByteAt = Date.now();
           buffer += chunk;
           let frameEnd: number;
           while ((frameEnd = buffer.indexOf('\n\n')) !== -1) {
@@ -161,17 +186,34 @@ export class CommandRelayService {
           }
         });
         res.on('end', () => {
-          // Server-initiated close (Vercel timeout). Reconnect.
+          log.info('relay', 'sse end — reconnecting');
+          this.disarmSseWatchdog();
           if (this._running) this.scheduleSseReconnect();
         });
-        res.on('error', () => {
+        res.on('error', (err) => {
+          log.info('relay', `sse res error — reconnecting (${(err as Error).message})`);
+          this.disarmSseWatchdog();
           if (this._running) this.scheduleSseReconnect();
         });
       },
     );
 
+    // Aggressive TCP keepalive — default macOS waits 2 hours before the
+    // first keepalive probe. We tell the kernel to start probing after
+    // 30 s of socket inactivity so a half-open peer (Cloud Run scale-
+    // down, NAT drop, laptop sleep) is detected within ~60 s instead
+    // of waiting for the per-spawn 60 s response timeout.
+    req.on('socket', (socket) => {
+      try {
+        socket.setKeepAlive(true, 30_000);
+      } catch {
+        // older Node versions / mock sockets — best-effort
+      }
+    });
+
     req.on('error', (err) => {
-      log.trace('relay', 'sse req error', err);
+      log.info('relay', `sse req error — ${(err as Error).message}`);
+      this.disarmSseWatchdog();
       this.sseFailures += 1;
       if (this.sseFailures >= 2) {
         capture('sse_fallback_to_poll', {
@@ -185,10 +227,48 @@ export class CommandRelayService {
       }
       this.scheduleSseReconnect();
     });
-    req.on('timeout', () => { req.destroy(); });
+    req.on('timeout', () => {
+      log.info('relay', 'sse req timeout — destroying + reconnecting');
+      req.destroy();
+    });
     req.end();
 
     this.sseRequest = req;
+  }
+
+  // ─── SSE liveness watchdog ───────────────────────────────────────
+  //
+  // The server pings every 30 s; if more than SSE_LIVENESS_TIMEOUT_MS
+  // pass without a byte, we assume the TCP peer is dead-zombie and
+  // force the request to destroy → triggers `error`/`end` → standard
+  // reconnect path. Without this, observed in the field: half-open
+  // socket sits ESTABLISHED for 30 + minutes (until macOS default
+  // 2 h TCP keepalive kicks in) and the CLI silently misses every
+  // pushed command.
+  private armSseWatchdog(): void {
+    this.disarmSseWatchdog();
+    this.sseLastByteAt = Date.now();
+    this.sseWatchdog = setInterval(() => {
+      const idle = Date.now() - this.sseLastByteAt;
+      if (idle > SSE_LIVENESS_TIMEOUT_MS) {
+        log.info('relay', `sse watchdog — ${idle}ms since last byte, forcing reconnect`);
+        try {
+          this.sseRequest?.destroy();
+        } catch {
+          // already dead
+        }
+        // destroy() emits error/end which the handlers above reconnect.
+        this.disarmSseWatchdog();
+      }
+    }, SSE_WATCHDOG_INTERVAL_MS);
+    this.sseWatchdog.unref?.();
+  }
+
+  private disarmSseWatchdog(): void {
+    if (this.sseWatchdog) {
+      clearInterval(this.sseWatchdog);
+      this.sseWatchdog = null;
+    }
   }
 
   private handleSseFrame(frame: string): void {
@@ -203,10 +283,13 @@ export class CommandRelayService {
       const parsed = JSON.parse(data) as { commands?: RemoteCommand[] };
       const commands = parsed.commands ?? [];
       if (commands.length === 0) return;
-      log.trace('relay', `sse received ${commands.length} command(s)`);
+      log.info(
+        'relay',
+        `sse received ${commands.length} command(s) types=[${commands.map((c) => c.type).join(',')}]`,
+      );
       void this.dispatchCommands(commands);
     } catch (err) {
-      log.trace('relay', 'sse parse error', err);
+      log.info('relay', 'sse parse error', err);
     }
   }
 
@@ -317,6 +400,7 @@ export class CommandRelayService {
     if (this.heartbeatTimer) { clearInterval(this.heartbeatTimer); this.heartbeatTimer = null; }
     if (this.agentsTimer) { clearInterval(this.agentsTimer); this.agentsTimer = null; }
     if (this.sseReconnectTimer) { clearTimeout(this.sseReconnectTimer); this.sseReconnectTimer = null; }
+    this.disarmSseWatchdog();
     if (this.sseRequest) {
       try { this.sseRequest.destroy(); } catch { /* ignore */ }
       this.sseRequest = null;

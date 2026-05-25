@@ -106,6 +106,16 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           VERSION: ${{ needs.setup.outputs.version }}
+          # `npm publish` triggers `prepublishOnly: "npm run build"`,
+          # which re-runs tsup. Without these env vars present the
+          # second build's `define` substitutes `__POSTHOG_API_KEY__`
+          # with `""` and overwrites the dist/ from the "Build CLI"
+          # step — telemetry silently disabled in every published
+          # build. (#192 root cause: PostHog dashboard showed zero
+          # CLI events for 60 days despite the secret being set on
+          # the repo since 2026-05-24.)
+          POSTHOG_API_KEY: ${{ secrets.POSTHOG_API_KEY }}
+          POSTHOG_HOST: ${{ vars.POSTHOG_HOST }}
         run: |
           # Idempotent publish — skip if this exact version already
           # exists on the registry. npm itself returns 403 on republish,
@@ -242,6 +252,14 @@ jobs:
         run: ./gradlew publishPlugin
         env:
           PUBLISH_TOKEN: ${{ secrets.JETBRAINS_MARKETPLACE_TOKEN }}
+          # `publishPlugin` depends on `buildPlugin`, so gradle will
+          # re-bake `GeneratedBuildConfig.kt` if the up-to-date check
+          # invalidates. Mirror the build step's env so we never ship
+          # a publish with the key stripped out — same root cause as
+          # the CLI's `prepublishOnly` regression that hid CLI events
+          # from PostHog for 60 days.
+          POSTHOG_API_KEY: ${{ secrets.POSTHOG_API_KEY }}
+          POSTHOG_HOST: ${{ vars.POSTHOG_HOST }}
 
       - name: Locate JetBrains plugin archive
         id: jb
