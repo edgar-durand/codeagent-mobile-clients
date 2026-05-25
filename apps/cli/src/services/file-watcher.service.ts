@@ -319,11 +319,17 @@ export class FileWatcherService {
         : {}),
       awaitWriteFinish: {
         // Coalesces rapid sequential writes (npm install spam, build
-        // tools emitting bursts). Lower than chokidar's default so
-        // the user sees their Files screen update within 0.5 s of
-        // saving.
-        stabilityThreshold: 150,
-        pollInterval: 50,
+        // tools emitting bursts). Tuned for monorepo workloads after
+        // observing a CLI process spike to 126% CPU on the codeagent
+        // monorepo: pollInterval=50ms caused thousands of fs.stat
+        // calls per second when many files were being edited
+        // concurrently (agent edits + AI summary subprocess writes +
+        // git status outputs all touching files in the watched tree).
+        // 200ms is still well below the typical user perception
+        // threshold for "the file appeared in the Files screen" while
+        // keeping the polling cost bounded.
+        stabilityThreshold: 300,
+        pollInterval: 200,
       },
     });
 
