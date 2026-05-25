@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as http from 'node:http';
 import * as https from 'node:https';
@@ -115,10 +116,44 @@ export interface FileWatcherServiceOptions {
  * each change, and POSTs the results to the backend. One instance per
  * paired session. Owned by `ControllerPanelProvider`.
  */
+/**
+ * Walk up from `startDir` until we find a directory that contains
+ * a `.git` entry (regular .git dir, or a `gitdir: …` file for
+ * worktrees / submodules). Returns the discovered repo root or
+ * `null` when we reach the filesystem root with no match.
+ *
+ * Mirrors the CLI's `findGitRoot` so a workspace folder that
+ * contains several sub-repos (e.g. an umbrella project opened as
+ * one folder) attributes each file to its enclosing repo instead
+ * of running `git diff` from the umbrella that is itself non-git.
+ */
+export function findGitRoot(startDir: string): string | null {
+  let dir = path.resolve(startDir);
+  const seen = new Set<string>();
+  for (let i = 0; i < 256; i++) {
+    if (seen.has(dir)) return null;
+    seen.add(dir);
+    try {
+      const gitPath = path.join(dir, '.git');
+      const stat = fs.statSync(gitPath, { throwIfNoEntry: false });
+      if (stat && (stat.isDirectory() || stat.isFile())) return dir;
+    } catch {
+      // EACCES / EPERM — keep walking up.
+    }
+    const parent = path.dirname(dir);
+    if (parent === dir) return null;
+    dir = parent;
+  }
+  return null;
+}
+
 export class FileWatcherService {
   private readonly disposables: vscode.Disposable[] = [];
   /** Keyed by absolute file path so multi-root workspaces don't collide. */
   private readonly pending = new Map<string, PendingFile>();
+  /** Lazy cache of (file directory → git root) to avoid re-statting
+   *  parents on every save in a busy editor session. */
+  private readonly gitRootByDir = new Map<string, string | null>();
   private started = false;
   private stopped = false;
 
@@ -248,15 +283,39 @@ export class FileWatcherService {
   ): Promise<void> {
     if (this.stopped) return;
 
-    const relPath = path.relative(folderRoot, absPath);
-    if (!relPath || relPath.startsWith('..')) {
-      // Belt-and-suspenders: a symlink escape would otherwise ship a
-      // path outside the project to the backend.
+    // Resolve the file's enclosing git repo. For workspace folders
+    // that are themselves git repos this collapses to the folder
+    // root; for umbrella workspace folders containing several
+    // sub-repos (common in monorepos / dotfile-style layouts) we
+    // get the actual git root per file instead of running `git diff`
+    // from a non-git parent.
+    const fileDir = path.dirname(absPath);
+    let gitRoot = this.gitRootByDir.get(fileDir);
+    if (gitRoot === undefined) {
+      gitRoot = findGitRoot(fileDir);
+      this.gitRootByDir.set(fileDir, gitRoot);
+    }
+    if (!gitRoot) {
+      // File isn't inside any git repo — drop silently. The backend
+      // rejects zero-stat rows anyway and surfacing a no-diff path
+      // pollutes the rail.
+      this.opts.log.appendLine(
+        `[fileWatcher] no enclosing git repo for ${absPath} — suppressing emit`,
+      );
       return;
     }
 
+    const relPath = path.relative(gitRoot, absPath);
+    if (!relPath || relPath.startsWith('..')) return;
+
+    // `repoPath` is the git root relative to the workspace folder so
+    // the UI can render a repo chip per row. Empty string means
+    // "this workspace folder IS the repo root".
+    const repoPath = path.relative(folderRoot, gitRoot);
+    const repoName = path.basename(gitRoot);
+
     if (changeType === 'unlink') {
-      const diff = await this.gitDiff(folderRoot, relPath);
+      const diff = await this.gitDiff(gitRoot, relPath);
       if (diff !== null && diff.trim().length > 0) {
         const parsed = parseUnifiedDiff(diff);
         const finalStatus: FileChangeStatus = 'deleted';
@@ -269,6 +328,8 @@ export class FileWatcherService {
           linesRemoved: parsed.totalLinesRemoved,
           hunkCount: parsed.hunks.length,
           reviewStatus: parsed.hunks.length > 0 ? 'awaiting_review' : undefined,
+          repoPath,
+          repoName,
         });
         for (const hunk of parsed.hunks) {
           await this.postReviewHunk({
@@ -284,9 +345,8 @@ export class FileWatcherService {
         }
         return;
       }
-      // Untracked-and-removed: nothing to diff against. Best-effort
-      // file-changed event with zero stats so the Files screen still
-      // shows the deletion.
+      // Untracked-and-removed: emit a zero-stat deletion so the rail
+      // can drop the row.
       await this.postFileChanged({
         sessionId: this.opts.sessionId,
         pluginId: this.opts.pluginId,
@@ -295,31 +355,32 @@ export class FileWatcherService {
         linesAdded: 0,
         linesRemoved: 0,
         hunkCount: 0,
+        repoPath,
+        repoName,
       });
       return;
     }
 
-    const diff = await this.gitDiff(folderRoot, relPath);
+    const diff = await this.gitDiff(gitRoot, relPath);
     if (diff === null) {
       this.opts.log.appendLine(
-        `[fileWatcher] git diff unavailable for ${relPath} — emitting file-changed only`,
+        `[fileWatcher] git diff failed for ${relPath} in ${gitRoot} — suppressing emit`,
       );
-      await this.postFileChanged({
-        sessionId: this.opts.sessionId,
-        pluginId: this.opts.pluginId,
-        filePath: relPath,
-        fileStatus: changeType === 'add' ? 'added' : 'modified',
-        linesAdded: 0,
-        linesRemoved: 0,
-        hunkCount: 0,
-      });
       return;
     }
 
     const parsed = parseUnifiedDiff(diff);
-    // Prefer the diff-derived status when available; fall back to the
-    // VS Code event type when the diff is empty (e.g. a save with no
-    // content change).
+    // Suppress no-op touches so file-system syncs (`git pull` of an
+    // already-committed file, format-on-save with no diff) don't
+    // pollute the rail with zero-stat rows.
+    if (
+      parsed.totalLinesAdded === 0 &&
+      parsed.totalLinesRemoved === 0 &&
+      parsed.hunks.length === 0
+    ) {
+      return;
+    }
+
     const finalStatus: FileChangeStatus =
       parsed.fileStatus !== 'modified'
         ? parsed.fileStatus
@@ -338,6 +399,8 @@ export class FileWatcherService {
       linesRemoved: parsed.totalLinesRemoved,
       hunkCount: parsed.hunks.length,
       reviewStatus,
+      repoPath,
+      repoName,
     });
 
     for (const hunk of parsed.hunks) {

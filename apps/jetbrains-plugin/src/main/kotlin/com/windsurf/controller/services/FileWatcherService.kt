@@ -92,6 +92,12 @@ class FileWatcherService {
     // never share session ids or pending debounces.
     private val projects = ConcurrentHashMap<Project, ProjectWatcher>()
 
+    // Cache of (file directory -> enclosing git root). Resolved lazily
+    // per event so sub-repos that appear after pairing light up
+    // automatically; cached so a hot session does not re-stat the
+    // filesystem on every save. Empty string = no enclosing repo.
+    private val gitRootByDir = ConcurrentHashMap<String, String>()
+
     private var busConnection: com.intellij.util.messages.MessageBusConnection? = null
     private var projectMgrConnection: com.intellij.util.messages.MessageBusConnection? = null
 
@@ -288,18 +294,49 @@ class FileWatcherService {
         absPath: String,
         changeType: ChangeType,
     ) {
-        val relPath = relativise(watcher.workingDir, absPath) ?: return
+        // Resolve the file's enclosing git repo. The project basePath
+        // can be an umbrella directory holding several sibling
+        // repositories (each with its own .git/); running git diff
+        // from the umbrella would return null and we'd ship zero-stat
+        // rows. Walk up from the file and cache per directory so a
+        // busy session doesn't re-stat the world.
+        val fileDir = try {
+            Paths.get(absPath).toAbsolutePath().normalize().parent
+        } catch (e: Exception) {
+            logger.debug("resolve parent failed for $absPath: ${e.message}")
+            null
+        } ?: return
+
+        val gitRoot = gitRootByDir.computeIfAbsent(fileDir.toString()) {
+            findGitRoot(fileDir)?.toString() ?: ""
+        }.let { if (it.isEmpty()) null else Paths.get(it) }
+
+        if (gitRoot == null) {
+            logger.debug("no enclosing git repo for $absPath - suppressing emit")
+            return
+        }
+
+        val relPath = relativise(gitRoot, absPath) ?: return
         if (relPath.isEmpty() || relPath.startsWith("..")) return
+
+        // repoPath is the git root relative to the project basePath
+        // so the UI can render a repo chip per row. Empty when the
+        // project basePath IS the repo root.
+        val repoPath = try {
+            watcher.workingDir.relativize(gitRoot).toString().replace(File.separatorChar, '/')
+        } catch (e: Exception) {
+            ""
+        }
+        val repoName = gitRoot.fileName?.toString() ?: ""
 
         val pluginId = SettingsService.getInstance().ensurePluginId()
         val sessionId = watcher.sessionId
 
         if (changeType == ChangeType.UNLINK) {
-            val diff = gitDiff(watcher.workingDir, relPath)
+            val diff = gitDiff(gitRoot, relPath)
             if (diff.isNullOrBlank()) {
-                // Untracked-and-removed: nothing to compute against,
-                // ship a zero-stat deletion so the Files screen still
-                // shows the path.
+                // Untracked-and-removed: ship a zero-stat deletion so
+                // the Files screen drops the row.
                 postFileChanged(
                     sessionId = sessionId,
                     pluginId = pluginId,
@@ -309,6 +346,8 @@ class FileWatcherService {
                     linesRemoved = 0,
                     hunkCount = 0,
                     reviewStatus = null,
+                    repoPath = repoPath,
+                    repoName = repoName,
                 )
                 return
             }
@@ -322,6 +361,8 @@ class FileWatcherService {
                 linesRemoved = parsed.totalLinesRemoved,
                 hunkCount = parsed.hunks.size,
                 reviewStatus = if (parsed.hunks.isNotEmpty()) FileReviewStatus.AWAITING_REVIEW else null,
+                repoPath = repoPath,
+                repoName = repoName,
             )
             for (hunk in parsed.hunks) {
                 postReviewHunk(
@@ -338,29 +379,21 @@ class FileWatcherService {
             return
         }
 
-        val diff = gitDiff(watcher.workingDir, relPath)
+        val diff = gitDiff(gitRoot, relPath)
         if (diff == null) {
-            // git failed entirely (not a repo, or git missing). Emit
-            // a best-effort file-changed so the Files screen surfaces
-            // the path; skip hunks.
-            postFileChanged(
-                sessionId = sessionId,
-                pluginId = pluginId,
-                filePath = relPath,
-                fileStatus = if (changeType == ChangeType.ADD) {
-                    FileChangeStatus.ADDED
-                } else {
-                    FileChangeStatus.MODIFIED
-                },
-                linesAdded = 0,
-                linesRemoved = 0,
-                hunkCount = 0,
-                reviewStatus = null,
-            )
+            // git failed even though we found a .git/ directory.
+            // Skip silently rather than poison the rail with zeros.
+            logger.warn("git diff failed for $relPath in $gitRoot - suppressing emit")
             return
         }
 
         val parsed = DiffParser.parseUnifiedDiff(diff)
+        // Suppress no-op touches so filesystem syncs (git pull, format-
+        // on-save with no diff, IDE indexer) don't pollute the rail.
+        if (parsed.totalLinesAdded == 0 && parsed.totalLinesRemoved == 0 && parsed.hunks.isEmpty()) {
+            return
+        }
+
         val derivedStatus: FileChangeStatus = if (parsed.fileStatus != FileChangeStatus.MODIFIED) {
             parsed.fileStatus
         } else {
@@ -381,6 +414,8 @@ class FileWatcherService {
             linesRemoved = parsed.totalLinesRemoved,
             hunkCount = parsed.hunks.size,
             reviewStatus = reviewStatus,
+            repoPath = repoPath,
+            repoName = repoName,
         )
         for (hunk in parsed.hunks) {
             postReviewHunk(
@@ -407,6 +442,8 @@ class FileWatcherService {
         linesRemoved: Int,
         hunkCount: Int,
         reviewStatus: FileReviewStatus?,
+        repoPath: String = "",
+        repoName: String = "",
     ) {
         val body = JsonObject().apply {
             addProperty("sessionId", sessionId)
@@ -419,6 +456,11 @@ class FileWatcherService {
             if (reviewStatus != null) {
                 addProperty("reviewStatus", reviewStatus.wire)
             }
+            // Optional repo attribution (additive — older backends
+            // ignore these). Skip empty strings so single-repo
+            // workspaces don't lint noise into the payload.
+            if (repoPath.isNotEmpty()) addProperty("repoPath", repoPath)
+            if (repoName.isNotEmpty()) addProperty("repoName", repoName)
         }
         postWithRetries(
             "${SettingsService.getInstance().state.apiBaseUrl}/api/files/changed",
@@ -597,6 +639,29 @@ class FileWatcherService {
     }
 
     // ─── path helpers ──────────────────────────────────────────────────
+
+    // Walk up from startDir until we find a directory that contains a
+    // .git entry (regular .git dir, or a `gitdir: ...` file used by
+    // worktrees / submodules). Returns the discovered repo root or
+    // null when we reach the filesystem root without finding one.
+    //
+    // Mirrors the CLI's findGitRoot helper - matters when the project
+    // basePath is an umbrella directory holding several sibling
+    // repositories so each file gets attributed to its actual repo
+    // instead of the non-git parent.
+    internal fun findGitRoot(startDir: Path): Path? {
+        var dir: Path? = startDir.toAbsolutePath().normalize()
+        var hops = 0
+        while (dir != null && hops < 256) {
+            val gitFile = dir.resolve(".git").toFile()
+            if (gitFile.exists()) return dir
+            val parent = dir.parent
+            if (parent == null || parent == dir) return null
+            dir = parent
+            hops += 1
+        }
+        return null
+    }
 
     private fun isInside(root: Path, absPath: String): Boolean {
         return try {

@@ -5,6 +5,7 @@ import {
   FileWatcherService,
   _gitSeam,
   _chokidarSeam,
+  _findGitRootSeam,
   isUnsafeWindowsWatchRoot,
 } from '../src/services/file-watcher.service';
 import { _transport } from '../src/services/file-watcher/transport';
@@ -165,9 +166,28 @@ describe('isUnsafeWindowsWatchRoot', () => {
   });
 });
 
+// Minimal one-hunk diff. Any of the tests that hit the HTTP path
+// need a real diff body — empty stdout is now suppressed at source
+// (no-op writes don't pollute the rail). Keep this tight so the
+// expected counts in the existing assertions still hold.
+const SAMPLE_DIFF = [
+  '--- a/foo.ts',
+  '+++ b/foo.ts',
+  '@@ -1,1 +1,1 @@',
+  '-old',
+  '+new',
+].join('\n');
+
 describe('FileWatcherService', () => {
   beforeEach(() => {
     vi.useFakeTimers();
+    // Pin the enclosing git root to WORKING_DIR. The production
+    // implementation walks up looking for a real `.git/` directory;
+    // the test fixture doesn't have one, so without this stub
+    // emitForFile would suppress every event.
+    vi.spyOn(_findGitRootSeam, 'resolve').mockImplementation((dir: string) =>
+      dir.startsWith(WORKING_DIR) ? WORKING_DIR : null,
+    );
   });
   afterEach(() => {
     vi.useRealTimers();
@@ -176,7 +196,7 @@ describe('FileWatcherService', () => {
 
   it('debounces rapid sequential change events into one emit', async () => {
     const svc = makeService();
-    const gitSpy = vi.spyOn(_gitSeam, 'run').mockResolvedValue('');
+    const gitSpy = vi.spyOn(_gitSeam, 'run').mockResolvedValue(SAMPLE_DIFF);
     const postSpy = vi.spyOn(_transport, 'post').mockResolvedValue({
       statusCode: 200,
       body: '{}',
@@ -191,10 +211,10 @@ describe('FileWatcherService', () => {
     await vi.advanceTimersByTimeAsync(300);
     await vi.runAllTicks();
 
-    // Expect 1 file-changed POST. Hunks list is empty (we returned
-    // an empty diff) so no /review/hunks call.
+    // Expect 1 file-changed POST + 1 /review/hunks for the single
+    // hunk in SAMPLE_DIFF. The "Aggressive" policy posts every hunk.
     expect(postSpy.mock.calls.filter((c) => c[0].endsWith('/api/files/changed')).length).toBe(1);
-    expect(postSpy.mock.calls.filter((c) => c[0].endsWith('/api/review/hunks')).length).toBe(0);
+    expect(postSpy.mock.calls.filter((c) => c[0].endsWith('/api/review/hunks')).length).toBe(1);
     expect(gitSpy).toHaveBeenCalled();
   });
 
@@ -242,7 +262,7 @@ describe('FileWatcherService', () => {
 
   it('sends X-Plugin-Auth-Token header on every emission', async () => {
     const svc = makeService();
-    vi.spyOn(_gitSeam, 'run').mockResolvedValue('');
+    vi.spyOn(_gitSeam, 'run').mockResolvedValue(SAMPLE_DIFF);
     const postSpy = vi.spyOn(_transport, 'post').mockResolvedValue({
       statusCode: 200,
       body: '{}',
@@ -260,7 +280,7 @@ describe('FileWatcherService', () => {
 
   it('marks watcher as stopped on 410 to drop subsequent emissions', async () => {
     const svc = makeService();
-    vi.spyOn(_gitSeam, 'run').mockResolvedValue('');
+    vi.spyOn(_gitSeam, 'run').mockResolvedValue(SAMPLE_DIFF);
     const postSpy = vi.spyOn(_transport, 'post')
       .mockResolvedValueOnce({ statusCode: 410, body: '{}' });
 
@@ -268,26 +288,34 @@ describe('FileWatcherService', () => {
     await vi.advanceTimersByTimeAsync(300);
     await vi.runAllTicks();
 
-    expect(postSpy).toHaveBeenCalledTimes(1);
+    // First emit fires /files/changed; the 410 short-circuits the
+    // retry loop AND poisons the service before any /review/hunks
+    // post for the same file lands.
+    const firstBatch = postSpy.mock.calls.length;
+    expect(firstBatch).toBeGreaterThanOrEqual(1);
 
     // Schedule another change — service is now in stopped state, no
     // further posts should fire.
     svc._scheduleForTest(path.join(WORKING_DIR, 'b.ts'), 'change');
     await vi.advanceTimersByTimeAsync(300);
     await vi.runAllTicks();
-    expect(postSpy).toHaveBeenCalledTimes(1);
+    expect(postSpy.mock.calls.length).toBe(firstBatch);
   });
 
   it('retries with backoff on 500 then succeeds', async () => {
     const svc = makeService();
-    vi.spyOn(_gitSeam, 'run').mockResolvedValue('');
+    vi.spyOn(_gitSeam, 'run').mockResolvedValue(SAMPLE_DIFF);
     const postSpy = vi.spyOn(_transport, 'post')
       .mockResolvedValueOnce({ statusCode: 500, body: 'oops' })
       .mockResolvedValueOnce({ statusCode: 200, body: '{}' });
 
     svc._scheduleForTest(path.join(WORKING_DIR, 'a.ts'), 'change');
-    // Debounce window (250 ms) + retry backoff (300 ms) + slack.
-    await vi.advanceTimersByTimeAsync(1000);
+    // Debounce (250 ms) + retry backoff on the /files/changed call
+    // (300 ms) + slack for the follow-up /review/hunks chain (whose
+    // mock is exhausted, so it also burns through MAX_RETRIES + 2
+    // backoffs). 3500 ms drains everything so the test doesn't leak
+    // a pending Promise into the next test's spy.
+    await vi.advanceTimersByTimeAsync(3500);
     await vi.runAllTicks();
 
     expect(postSpy.mock.calls.length).toBeGreaterThanOrEqual(2);
@@ -295,6 +323,11 @@ describe('FileWatcherService', () => {
 
   it('emits a deletion event for unlinked files when git diff is empty', async () => {
     const svc = makeService();
+    // Empty diff is the load-bearing input for this test — exercises
+    // the unlink path that still emits a zero-stat deletion so the
+    // mobile Files screen drops the row. Non-unlink events with an
+    // empty diff are suppressed at source (a no-op touch is not a
+    // change worth surfacing).
     vi.spyOn(_gitSeam, 'run').mockResolvedValue('');
     const postSpy = vi.spyOn(_transport, 'post').mockResolvedValue({
       statusCode: 200,
