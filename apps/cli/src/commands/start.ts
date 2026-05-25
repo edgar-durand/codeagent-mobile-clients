@@ -19,6 +19,7 @@ import {
   type HandlerContext,
 } from './start/handlers';
 import { registerTerminalHandlers, closeAllTerminals } from '../services/terminal-ops.service';
+import { killActiveSpawnAndCaptureChildren } from '../services/spawn-and-capture';
 import { capture, identifyUser, shutdownTelemetry } from '../services/telemetry.service';
 
 /**
@@ -202,6 +203,10 @@ export async function start(requestedAgent?: AgentId): Promise<void> {
         // Eagerly delete in-flight attachment temp files instead of
         // waiting on the 120 s unlink setTimeout (audit R12).
         cleanupAttachmentTempFiles();
+        // Same reaper as the sigintHandler — reap any in-flight
+        // `claude -p` / `codex exec` headless children so they
+        // don't survive the parent's hard `process.exit`.
+        killActiveSpawnAndCaptureChildren();
         process.exit(code);
       },
     },
@@ -265,6 +270,12 @@ export async function start(requestedAgent?: AgentId): Promise<void> {
     // 120 s setTimeout cleanup in handlers.ts only fires if the
     // process survives that long — under Ctrl+C we'd leak.
     cleanupAttachmentTempFiles();
+    // Reap any in-flight `claude -p` / `codex exec` headless
+    // children spawned by the AI summary/insight handlers. Without
+    // this they'd get re-parented to init and keep running for up
+    // to 60 s after the user hits Ctrl-C — a small leak but a
+    // visible one if you have `pgrep claude` in your habits.
+    killActiveSpawnAndCaptureChildren();
     // Best-effort flush of queued telemetry. fire-and-forget so
     // process.exit doesn't wait — the SDK already batches +
     // sends opportunistically.
