@@ -35,6 +35,10 @@ import {
 } from '../../services/terminal-ops.service';
 import { showInfo } from '../../ui/banner';
 import { applyFileReview } from '../../services/apply-file-review.service';
+import { buildLinkContext } from '../link';
+import { postLinkCredential } from '../../services/pairing.service';
+import { AGENT_REGISTRY, isKnownAgentId, type AgentId } from '@codeagent/shared';
+import { log } from '../../services/logger';
 import type { KeepAliveContext } from './keep-alive';
 
 /**
@@ -52,6 +56,13 @@ export interface HandlerContext {
   runtime: RuntimeStrategy;
   setKeepAlive: (enabled: boolean) => void;
   keepAliveCtx: KeepAliveContext;
+  /** Paired-session credentials needed by handlers that talk to the
+   *  /api/plugin/* endpoints (e.g. auto-link). Older paired sessions
+   *  from before pluginAuthToken existed leave it undefined — those
+   *  handlers should no-op gracefully. */
+  pluginId: string;
+  sessionId: string;
+  pluginAuthToken?: string;
 }
 
 /**
@@ -458,6 +469,61 @@ const applyFileReviewH: CommandHandler = async (ctx, cmd, parsed) => {
   );
 };
 
+// Backend pushes this from the heartbeat side-effect when the user
+// is running an agent they haven't vaulted yet. We reuse the
+// `codeam link` token-capture path — but ONLY the best-effort
+// disk-read step. If no local credentials are found, the handler
+// no-ops silently — we never spawn the interactive sign-in here
+// because that would surprise the user mid-session. They can still
+// run `codeam link <agent>` manually to opt in.
+const requestLinkCredentialsH: CommandHandler = async (ctx, _cmd, parsed) => {
+  const publicId = parsed.agentId;
+  if (!publicId) return;
+  if (!ctx.pluginAuthToken) {
+    log.trace('auto-link', 'skipped — no pluginAuthToken on this paired session');
+    return;
+  }
+
+  // Public id → internal id (LinkedAgent uses `claude_code`, runtime
+  // factory takes `claude`). Other ids are identical across both.
+  const internalId: AgentId = publicId === 'claude_code' ? 'claude' : (publicId as AgentId);
+  if (!isKnownAgentId(internalId) || !AGENT_REGISTRY[internalId].enabled) {
+    log.trace('auto-link', `unknown / disabled agent: ${internalId}`);
+    return;
+  }
+
+  let linkCtx;
+  try {
+    linkCtx = buildLinkContext(internalId);
+  } catch (err) {
+    log.trace('auto-link', 'buildLinkContext threw', err);
+    return;
+  }
+
+  const token = await linkCtx.locator.extract().catch((err) => {
+    log.trace('auto-link', `locator.extract failed for ${publicId}`, err);
+    return null;
+  });
+  if (!token) {
+    log.trace('auto-link', `no local ${linkCtx.displayName} credentials — skipping`);
+    return;
+  }
+
+  const result = await postLinkCredential({
+    agentId: publicId,
+    sessionId: ctx.sessionId,
+    pluginId: ctx.pluginId,
+    pluginAuthToken: ctx.pluginAuthToken,
+    method: token.method,
+    credential: token.credential,
+  });
+  if (result.ok) {
+    log.trace('auto-link', `vaulted ${publicId} from ${token.source}`);
+  } else {
+    log.trace('auto-link', `upload failed (${result.status}): ${result.message}`);
+  }
+};
+
 // ─── Dispatch table ──────────────────────────────────────────────
 
 export const handlers: Record<string, CommandHandler> = {
@@ -492,6 +558,7 @@ export const handlers: Record<string, CommandHandler> = {
   git_pull: gitPullH,
   git_resolve: gitResolveH,
   apply_file_review: applyFileReviewH,
+  request_link_credentials: requestLinkCredentialsH,
 };
 
 /**

@@ -276,9 +276,15 @@ export class CommandRelayService {
   // ─── Heartbeat + agents ──────────────────────────────────────────
 
   private async sendHeartbeat(online: boolean): Promise<void> {
+    // `agentId` lets the backend fire the auto-link side-effect when
+    // the user hasn't vaulted credentials for this agent yet. The
+    // server normalizes between the internal id (e.g. `claude`) and
+    // the public LinkedAgentId (e.g. `claude_code`). Older backends
+    // simply ignore the extra field.
     await _postJson(`${API_BASE}/api/plugin/heartbeat`, {
       pluginId: this.pluginId,
       online,
+      agentId: this.agentMeta.id,
     })
       .then(() => log.trace('relay', `heartbeat ok online=${online}`))
       .catch((err: unknown) => log.trace('relay', `heartbeat failed online=${online}`, err));

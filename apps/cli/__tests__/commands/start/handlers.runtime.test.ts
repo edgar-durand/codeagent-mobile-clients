@@ -48,6 +48,9 @@ function makeCtx(overrides: Partial<HandlerContext> = {}): HandlerContext {
     } as unknown as RuntimeStrategy,
     setKeepAlive: vi.fn(),
     keepAliveCtx: { inCodespace: false, codespaceName: undefined },
+    pluginId: 'test-plugin',
+    sessionId: 'test-session',
+    pluginAuthToken: 'test-token',
     ...overrides,
   };
 }

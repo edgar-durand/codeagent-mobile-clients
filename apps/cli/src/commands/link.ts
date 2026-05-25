@@ -85,7 +85,7 @@ import type {
  * twice produces two distinct objects whose chokidar watchers
  * wouldn't share state).
  */
-interface LinkContext {
+export interface LinkContext {
   runtime: RuntimeStrategy;
   locator: AgentCredentialLocator;
   launcher: AgentLoginLauncher;
@@ -93,7 +93,7 @@ interface LinkContext {
   binary: string;
 }
 
-function buildLinkContext(agentId: AgentId): LinkContext {
+export function buildLinkContext(agentId: AgentId): LinkContext {
   const runtime = createRuntimeStrategy(agentId);
   return {
     runtime,

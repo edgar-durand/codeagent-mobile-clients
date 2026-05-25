@@ -75,6 +75,15 @@ export const startCommandSchema = z.object({
   // `action='rejected'` discards every worktree change on the file.
   filePath: z.string().min(1).max(4096).optional(),
   action: z.enum(['approved', 'rejected']).optional(),
+  // `request_link_credentials` — backend fires this from the
+  // heartbeat handler when it notices the user is running an agent
+  // they haven't vaulted yet. We reuse the `codeam link` token-
+  // capture path to push the credential up; if extraction fails
+  // (no local auth, missing file), the handler no-ops silently —
+  // no browser-login surprises during a normal `codeam pair`.
+  agentId: z
+    .enum(['claude_code', 'codex', 'cursor', 'aider', 'coderabbit'])
+    .optional(),
 });
 
 export type StartCommandPayload = z.infer<typeof startCommandSchema>;
