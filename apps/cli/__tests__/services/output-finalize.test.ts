@@ -32,6 +32,8 @@ interface StubRuntimeOptions {
   contentLines: string[];
   /** Lines visible in the rendered view — includes the spinner + shortcut prompt. */
   renderedLines: string[];
+  /** What the agent's `detectReadyPrompt` returns this tick. */
+  ready?: boolean;
 }
 
 /**
@@ -65,6 +67,7 @@ function makeRuntime(opts: StubRuntimeOptions): RuntimeStrategy {
     parseTuiChrome: (_line: string): ChromeStep | null => null,
     filterTuiOutput: (_lines) => opts.contentLines,
     detectInteractivePrompt: (_lines): SelectPrompt | null => null,
+    detectReadyPrompt: (_lines): boolean => opts.ready ?? false,
     credentialLocator: () => ({
       publicId: 'claude_code',
       vendor: 'Anthropic',
@@ -117,22 +120,21 @@ describe('OutputService finalize triggers — canonical-refresh fix', () => {
     vi.restoreAllMocks();
   });
 
-  it('finalizes via READY_STABLE_MS when content stable + shortcut prompt visible', async () => {
+  it('finalizes via READY_STABLE_MS when content stable + agent reports ready', async () => {
     const { calls, restore } = captureTransport();
     const runtime = makeRuntime({
       contentLines: ['type User = {', '  id: string;', '};'],
-      // Rendered view includes Claude's "? for shortcuts" line —
-      // i.e. the TUI is back at the input. The new finalize branch
-      // should fire on this signal even though the spinner is still
-      // pushing PTY bytes each tick.
+      // Rendered view includes the spinner — `pty.lastPushTime` will
+      // keep bumping. The agent runtime reports `ready = true`,
+      // simulating Claude's `? for shortcuts` or Codex's `│ › │` box.
       renderedLines: [
         '⏺ type User = {',
         '    id: string;',
         '  };',
         '',
-        '? for shortcuts',
         '✳ Thinking… (still drawing — should NOT block finalize)',
       ],
+      ready: true,
     });
 
     const svc = new OutputService(
@@ -172,18 +174,20 @@ describe('OutputService finalize triggers — canonical-refresh fix', () => {
     restore();
   });
 
-  it('finalizes via CONTENT_STABLE_MS fallback when shortcut prompt never appears', async () => {
+  it('finalizes via CONTENT_STABLE_MS fallback when ready signal never fires', async () => {
     const { calls, restore } = captureTransport();
     const runtime = makeRuntime({
       contentLines: ['function findUser(id) {', '  // …', '}'],
-      // No shortcut line — older TUI / headless run. Only the
-      // hard content-stable fallback can trigger.
+      // No ready signal — older TUI / headless run / agent that
+      // doesn't implement `detectReadyPrompt`. Only the hard
+      // content-stable fallback can trigger.
       renderedLines: [
         '⏺ function findUser(id) {',
         '    // …',
         '  }',
         '✳ thinking (spinner)',
       ],
+      ready: false,
     });
 
     const svc = new OutputService(
@@ -218,7 +222,12 @@ describe('OutputService finalize triggers — canonical-refresh fix', () => {
   });
 
   it('does NOT finalize while content is still changing (long real turn)', async () => {
-    const state = { contentLines: ['line 1'], renderedLines: ['⏺ line 1', '✳ Thinking…'] };
+    const state = {
+      contentLines: ['line 1'],
+      renderedLines: ['⏺ line 1', '✳ Thinking…'],
+      // ready stays false — the agent is actively working.
+      ready: false,
+    };
     const { calls, restore } = captureTransport();
 
     // Drive a fresh runtime each tick by mutating the shared `state`

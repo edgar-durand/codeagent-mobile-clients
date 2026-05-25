@@ -34,15 +34,16 @@ export class OutputService {
   private lastSentContent = '';
   /**
    * Wall-clock of the most recent tick where the rendered + filtered
-   * content actually changed. Claude's TUI keeps redrawing the
-   * spinner + input prompt after the response is settled, which
-   * keeps `pty.lastPushTime` moving and prevents the PTY-idle
-   * heuristic from ever crossing the IDLE_MS threshold — so the
-   * turn never finalises and `done: true` never reaches the
-   * webapp's canonical-refresh path. Tracking content-stability
-   * separately closes that hole: PTY can churn all it wants, but
-   * once the filtered TUI output stops changing for a beat we
-   * know Claude is done.
+   * content actually changed. Most agent TUIs keep redrawing a
+   * spinner + input prompt after the response is settled (Claude:
+   * `? for shortcuts`; Codex: ratatui input bar), which keeps
+   * `pty.lastPushTime` moving and prevents the PTY-idle heuristic
+   * from ever crossing the IDLE_MS threshold — so the turn never
+   * finalises and `done: true` never reaches the webapp's
+   * canonical-refresh path. Tracking content-stability separately
+   * closes that hole: PTY can churn all it wants, but once the
+   * filtered TUI output stops changing for a beat we know the
+   * agent is done.
    */
   private lastContentChangeAt = 0;
   private pollTimer: NodeJS.Timeout | null = null;
@@ -351,10 +352,13 @@ export class OutputService {
     }
     const contentStableMs = this.lastContentChangeAt > 0 ? now - this.lastContentChangeAt : 0;
 
-    // "Claude is back at the input" — the shortcuts prompt re-appears
-    // in the rendered output once the turn is done. Strong signal even
-    // when the spinner is still chewing on PTY bytes.
-    const readyPrompt = lines.some((l) => /^\?\s.*shortcut/i.test(l.trim()));
+    // "Agent is back at the input" — delegated to the per-agent
+    // runtime because the signal shape is agent-specific (Claude's
+    // `? for shortcuts`, Codex's input bar, etc). Agents that don't
+    // implement the detector fall through to the CONTENT_STABLE_MS
+    // fallback below — still correct, just ~7 s slower than the
+    // explicit signal.
+    const readyPrompt = this.runtime.detectReadyPrompt?.(lines) ?? false;
 
     log.trace(
       'outputSvc',

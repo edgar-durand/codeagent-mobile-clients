@@ -177,6 +177,23 @@ export interface InteractiveAgentStrategy extends BaseAgentStrategy {
    * the agent is showing a multi-choice menu, null otherwise.
    */
   detectInteractivePrompt(lines: string[]): SelectPrompt | null;
+
+  /**
+   * Optional "agent is back at the input prompt" heuristic. Returns
+   * true when the rendered view shows the agent's idle / ready-for-
+   * input line — e.g. Claude's `? for shortcuts` footer, Codex's
+   * input bar, Cursor's `>` cursor with no spinner above it.
+   *
+   * Used by `OutputService.tick()` to finalize a turn as soon as
+   * the agent visibly stops working, even when the PTY keeps
+   * pushing bytes (spinner / status redraw). Agents that don't
+   * implement it fall back to the content-stable timeout —
+   * correct, just slower (~8 s vs ~1 s).
+   *
+   * Pure function over already-rendered + already-filtered lines;
+   * MUST be cheap because it runs on every poll tick.
+   */
+  detectReadyPrompt?(lines: string[]): boolean;
 }
 
 // ─── Batch agents (one-shot CLI tools — CodeRabbit, etc.) ───────────

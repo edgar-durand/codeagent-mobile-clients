@@ -138,6 +138,16 @@ export class CodexRuntimeStrategy implements RuntimeStrategy {
     return detectCodexSelector(lines);
   }
 
+  detectReadyPrompt(lines: string[]): boolean {
+    // Codex's ratatui input box reappears at the bottom of the
+    // screen the moment the agent stops working — `│ › │` (box
+    // border + U+203A SINGLE RIGHT-POINTING ANGLE QUOTATION MARK
+    // cursor). The cursor char survives across versions; box
+    // borders may swap (╭╮╰╯ / ┌┐└┘) so we anchor only on the
+    // U+203A + adjacent box-bar.
+    return lines.some((l) => /[│┃]\s*›/u.test(l));
+  }
+
   credentialLocator() {
     return codexCredentialLocator();
   }
