@@ -1,4 +1,5 @@
 import { spawn } from 'child_process';
+import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { resolveApiBaseUrl } from '@codeagent/shared';
@@ -167,10 +168,68 @@ export const _chokidarSeam = {
   },
 };
 
+/**
+ * Walk up from `startDir` until we find a directory that contains
+ * a `.git` entry (regular .git dir, or a `gitdir: …` file for
+ * worktrees / submodules). Returns the discovered repo root or
+ * `null` when we reach the filesystem root with no match.
+ *
+ * Used per-file event so a CLI launched from a multi-repo workspace
+ * (e.g. `~/Documents/codeagent/` containing `codeagent-mobile/`,
+ * `codeagent-mobile-clients/`, `codeagent-mobile-ide/`) correctly
+ * attributes each touched file to its enclosing repo instead of
+ * the (non-git) parent directory. The previous behavior ran
+ * `git diff` from the CLI's cwd, which returned null for non-repo
+ * parents → every event landed on the backend with +0 / −0 / 0
+ * hunks.
+ *
+ * Exposed via `_findGitRootSeam` so tests can short-circuit the
+ * fs.statSync walk and stub a deterministic repo root.
+ */
+export function findGitRoot(startDir: string): string | null {
+  return _findGitRootSeam.resolve(startDir);
+}
+
+export const _findGitRootSeam = {
+  resolve: _defaultFindGitRoot,
+};
+
+function _defaultFindGitRoot(startDir: string): string | null {
+  let dir = path.resolve(startDir);
+  const seen = new Set<string>();
+  // Bounded walk: ~256 hops is well past any plausible nesting and
+  // guarantees we exit even on a pathological symlink loop.
+  for (let i = 0; i < 256; i++) {
+    if (seen.has(dir)) return null;
+    seen.add(dir);
+    try {
+      const gitPath = path.join(dir, '.git');
+      const stat = fs.statSync(gitPath, { throwIfNoEntry: false });
+      // `.git` can be a directory (regular repo) or a file (worktrees,
+      // submodules — contains `gitdir: …`). Either form makes `dir`
+      // a repo root for our purposes.
+      if (stat && (stat.isDirectory() || stat.isFile())) return dir;
+    } catch {
+      // permission denied / EACCES — keep walking up.
+    }
+    const parent = path.dirname(dir);
+    if (parent === dir) return null;
+    dir = parent;
+  }
+  return null;
+}
+
 export class FileWatcherService {
   private watcher: FileWatcher | null = null;
   private readonly pending = new Map<string, PendingFile>();
   private readonly apiBase: string;
+  /**
+   * Cache of (file directory → git root). Resolved lazily on each
+   * file event so brand-new sub-repos under the workingDir light up
+   * automatically; cached so a hot session with thousands of writes
+   * doesn't hammer `fs.statSync` for every event.
+   */
+  private readonly gitRootByDir = new Map<string, string | null>();
   private stopped = false;
 
   constructor(private readonly opts: FileWatcherOptions) {
@@ -347,63 +406,100 @@ export class FileWatcherService {
   private async emitForFile(absPath: string, changeType: 'add' | 'change' | 'unlink'): Promise<void> {
     if (this.stopped) return;
 
-    const relPath = path.relative(this.opts.workingDir, absPath);
-    if (!relPath || relPath.startsWith('..')) {
-      // Belt-and-suspenders: chokidar should only fire under the
-      // watched root, but if a symlink escapes we don't want to
-      // ship a path outside the project to the backend.
+    // Resolve the file's enclosing git repo. Multi-repo workspaces
+    // (a parent dir holding several sibling repos) are common in
+    // dev environments — running `git diff` from the CLI's cwd
+    // would return null and we'd ship zero-stat events. Walk up
+    // from the file itself instead. Cache by directory so a busy
+    // session doesn't re-stat parents per event.
+    const fileDir = path.dirname(absPath);
+    let gitRoot = this.gitRootByDir.get(fileDir);
+    if (gitRoot === undefined) {
+      gitRoot = findGitRoot(fileDir);
+      this.gitRootByDir.set(fileDir, gitRoot);
+    }
+
+    if (!gitRoot) {
+      // The file isn't inside any git repo. Suppress — surfacing a
+      // path with no diff is the polluted-rail behavior we just
+      // fixed. The backend rejects zero-stat rows anyway (PR #N+1).
+      log.trace(
+        'fileWatcher',
+        `no enclosing git repo for ${absPath} — suppressing emit`,
+      );
       return;
     }
+
+    // `filePath` is relative to the git root so the backend can
+    // de-dup on (sessionId, repoPath, filePath) consistently across
+    // sibling repos that share file names (e.g. README.md).
+    const relPathInRepo = path.relative(gitRoot, absPath);
+    if (!relPathInRepo || relPathInRepo.startsWith('..')) return;
+
+    // `repoPath` is the git root's path relative to the CLI's
+    // workingDir, so the UI can render a stable repo chip per row.
+    // Empty string when the CLI itself was launched from inside the
+    // repo (single-repo workspace).
+    const repoPath = path.relative(this.opts.workingDir, gitRoot);
+    const repoName = path.basename(gitRoot);
 
     let diffText = '';
     let fileStatus: FileChangeStatus = 'modified';
 
     if (changeType === 'unlink') {
-      // The file is gone — git diff will work as long as the file
-      // was tracked, otherwise we synthesize a minimal deletion.
-      const diff = await this.gitDiff(relPath);
+      const diff = await this.gitDiff(gitRoot, relPathInRepo);
       if (diff !== null && diff.trim().length > 0) {
         diffText = diff;
       } else {
-        // Untracked-and-removed: nothing to compute against. Just
-        // emit the file-changed event with zero stats.
+        // Untracked-and-removed: nothing to compute against. Emit
+        // the deletion with zero stats so the file leaves the rail.
         await this.postFileChanged({
           sessionId: this.opts.sessionId,
           pluginId: this.opts.pluginId,
-          filePath: relPath,
+          filePath: relPathInRepo,
           fileStatus: 'deleted',
           linesAdded: 0,
           linesRemoved: 0,
           hunkCount: 0,
+          repoPath,
+          repoName,
         });
         return;
       }
       fileStatus = 'deleted';
     } else {
-      const diff = await this.gitDiff(relPath);
+      const diff = await this.gitDiff(gitRoot, relPathInRepo);
       if (diff === null) {
-        // `git diff` failed (e.g. cwd is not a git repo). Skip
-        // hunks; emit a best-effort file-changed event so the Files
-        // screen still surfaces the path.
+        // `git diff` failed even though we found a .git/ directory
+        // — corrupt repo or sandbox blocking spawn. Skip silently
+        // rather than poisoning the rail with a zero-stat row.
         log.warn(
           'fileWatcher',
-          `git diff failed for ${relPath} — emitting file-changed only`,
+          `git diff failed for ${relPathInRepo} in ${gitRoot} — suppressing emit`,
         );
-        await this.postFileChanged({
-          sessionId: this.opts.sessionId,
-          pluginId: this.opts.pluginId,
-          filePath: relPath,
-          fileStatus: changeType === 'add' ? 'added' : 'modified',
-          linesAdded: 0,
-          linesRemoved: 0,
-          hunkCount: 0,
-        });
         return;
       }
       diffText = diff;
     }
 
     const parsed = parseUnifiedDiff(diffText);
+    // Suppress no-op touches (file system event with no actual
+    // content delta). Without this every `git pull` or filesystem
+    // sync of an already-committed file would lint a polluted row
+    // into the rail. Real deletions still get through above.
+    if (
+      changeType !== 'unlink' &&
+      parsed.totalLinesAdded === 0 &&
+      parsed.totalLinesRemoved === 0 &&
+      parsed.hunks.length === 0
+    ) {
+      log.trace(
+        'fileWatcher',
+        `no content delta for ${relPathInRepo} in ${repoName} — suppressing emit`,
+      );
+      return;
+    }
+
     // Prefer the diff-derived status when available; fall back to
     // the chokidar event when the diff is empty (e.g. a touch that
     // didn't change content).
@@ -421,12 +517,14 @@ export class FileWatcherService {
     await this.postFileChanged({
       sessionId: this.opts.sessionId,
       pluginId: this.opts.pluginId,
-      filePath: relPath,
+      filePath: relPathInRepo,
       fileStatus: finalStatus,
       linesAdded: parsed.totalLinesAdded,
       linesRemoved: parsed.totalLinesRemoved,
       hunkCount: parsed.hunks.length,
       reviewStatus,
+      repoPath,
+      repoName,
     });
 
     // Aggressive review policy — every hunk to the queue.
@@ -434,7 +532,7 @@ export class FileWatcherService {
       await this.postReviewHunk({
         sessionId: this.opts.sessionId,
         pluginId: this.opts.pluginId,
-        filePath: relPath,
+        filePath: relPathInRepo,
         fileStatus: finalStatus,
         hunkHeader: hunk.header,
         lines: hunk.lines,
@@ -446,9 +544,11 @@ export class FileWatcherService {
 
   /**
    * Compute the unified diff for a single path relative to the
-   * working dir. Returns `null` when git is unavailable or the cwd
-   * is not a repo. Returns `''` when there's no diff (a touch that
-   * didn't change content).
+   * enclosing git repo (NOT the CLI's workingDir — see
+   * `emitForFile`'s walk-up). Returns `null` when git is unavailable
+   * or the discovered repo root is no longer a repo (race with
+   * external removal). Returns `''` when there's no diff (a touch
+   * that didn't change content).
    *
    * For tracked files we use `git diff --no-color -- <path>` which
    * compares the worktree against HEAD's blob.
@@ -456,13 +556,13 @@ export class FileWatcherService {
    * zero) we use `git diff --no-color --no-index /dev/null <path>`,
    * which produces an "added"-shaped diff against an empty source.
    */
-  private async gitDiff(relPath: string): Promise<string | null> {
+  private async gitDiff(repoRoot: string, relPath: string): Promise<string | null> {
     // First try the tracked-file path. If `git diff` returns empty
     // AND the file is untracked, fall through to the --no-index
     // variant. We don't pre-check with `ls-files` because that's a
     // second subprocess — checking the diff output is cheaper.
     const tracked = await runGit(
-      this.opts.workingDir,
+      repoRoot,
       ['diff', '--no-color', '--', relPath],
     );
     if (tracked === null) return null; // git failed entirely
@@ -475,7 +575,7 @@ export class FileWatcherService {
     // output regardless of exit code.
     const devNull = process.platform === 'win32' ? 'NUL' : '/dev/null';
     const untracked = await runGit(
-      this.opts.workingDir,
+      repoRoot,
       ['diff', '--no-color', '--no-index', '--', devNull, relPath],
       { allowNonZeroExit: true },
     );

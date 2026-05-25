@@ -53,6 +53,23 @@ export interface FileChangedEvent {
    * server-side when omitted.
    */
   reviewStatus?: FileReviewStatus;
+  /**
+   * Optional path of the enclosing git repo, relative to the
+   * producer's workingDir / workspace folder. Empty string when the
+   * producer was launched from inside the repo (single-repo
+   * workspace). Lets the UI attribute each row to its sub-repo when
+   * the user paired from a multi-repo parent directory (e.g.
+   * `~/Documents/codeagent/` containing several sibling repos).
+   * Optional for back-compat with older producers — backend
+   * defaults to null.
+   */
+  repoPath?: string;
+  /**
+   * Optional basename of the enclosing git repo. Provides a short
+   * label the UI can render in a chip without parsing `repoPath`.
+   * Optional for back-compat.
+   */
+  repoName?: string;
 }
 
 export type HunkLineType = 'add' | 'remove' | 'context';
