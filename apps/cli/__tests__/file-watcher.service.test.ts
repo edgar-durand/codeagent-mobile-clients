@@ -190,6 +190,14 @@ describe('FileWatcherService', () => {
     );
   });
   afterEach(() => {
+    // Drain every pending fake timer (HTTP retry backoffs from the
+    // /review/hunks aggressive-policy loop) BEFORE switching the
+    // clock or restoring mocks. Without this, a retry chain scheduled
+    // in test N could fire its setTimeout continuation while test N+1
+    // is busy and call into the new test's `_transport.post` spy,
+    // surfacing as a phantom call. Windows CI hits this consistently
+    // because msec-level timer alignment differs from macOS.
+    vi.clearAllTimers();
     vi.useRealTimers();
     vi.restoreAllMocks();
   });
