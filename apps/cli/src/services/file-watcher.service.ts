@@ -67,6 +67,15 @@ export interface FileWatcherOptions {
   pluginAuthToken: string;
   /** Override the API base URL (defaults to env / prod). Used by tests. */
   apiBaseUrl?: string;
+  /**
+   * Optional hook called once `emitForFile` has resolved the
+   * enclosing git root for an event. Used by the TurnFileAggregator
+   * to mark repos dirty so its end-of-turn flush only spawns git
+   * for paths that actually changed. Plain callback (rather than
+   * importing the tracker type) keeps the file-watcher decoupled
+   * from the turn-files module.
+   */
+  onRepoDirty?: (repoRoot: string) => void;
 }
 
 interface PendingFile {
@@ -429,6 +438,13 @@ export class FileWatcherService {
       );
       return;
     }
+
+    // Notify the aggregator's dirty tracker (if wired) BEFORE the
+    // legacy per-file POST. The aggregator's `flushTurn()` only
+    // spawns git for repos in this set, so marking happens on the
+    // hot filesystem path even if the legacy POST below short-
+    // circuits later (no diff, rate-limit, etc.).
+    this.opts.onRepoDirty?.(gitRoot);
 
     // `filePath` is relative to the git root so the backend can
     // de-dup on (sessionId, repoPath, filePath) consistently across
