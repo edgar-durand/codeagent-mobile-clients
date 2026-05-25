@@ -84,6 +84,28 @@ export const startCommandSchema = z.object({
   // while the auto-link backend sends public ids ('claude_code'),
   // and the consuming handlers normalize themselves.
   agentId: z.string().max(64).optional(),
+  // `request_ai_summary` / `request_ai_insight` — backend fires
+  // these on turn-end (+ file selection) when LinkedAgent.
+  // aiInsightsEnabled is true. The CLI spawns the agent in
+  // headless one-shot mode (`claude -p "..."` / `codex exec`) and
+  // POSTs the response back to /api/plugin/ai-result.
+  //
+  // `prompt` (declared above for start_task) carries the LLM prompt
+  // the backend pre-rendered with the diff context inlined; the
+  // agent receives it verbatim. `turnId` keys the summary,
+  // `fileChangeId` keys the per-file insight, `stats` is echoed
+  // unchanged on the result POST so the backend doesn't have to
+  // recompute (numbers came from file_changes; the agent only
+  // writes the narrative).
+  turnId: z.string().max(128).optional(),
+  fileChangeId: z.string().max(128).optional(),
+  stats: z
+    .object({
+      added: z.number().int(),
+      removed: z.number().int(),
+      complexityShift: z.number().int(),
+    })
+    .optional(),
 });
 
 export type StartCommandPayload = z.infer<typeof startCommandSchema>;

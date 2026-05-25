@@ -179,6 +179,57 @@ export async function postLinkCredential(input: {
 }
 
 /**
+ * POST an AI summary / per-file insight back to the backend after
+ * the agent's headless one-shot completed.
+ *
+ * The backend's `AiInsightsController` caches the result in Redis
+ * and publishes `ai_summary_ready` / `ai_insight_ready` over the
+ * existing per-user SSE bus so the web/mobile clients can flip from
+ * the "Generating insights…" placeholder to the rendered text.
+ */
+export async function postAiResult(input: {
+  sessionId: string;
+  pluginId: string;
+  pluginAuthToken: string;
+  kind: 'summary' | 'insight';
+  summary: string;
+  /** Required when kind === 'summary'. */
+  turnId?: string;
+  stats?: { added: number; removed: number; complexityShift: number };
+  /** Required when kind === 'insight'. */
+  fileChangeId?: string;
+  reasoning?: string;
+  securityNote?: string;
+}): Promise<{ ok: true } | { ok: false; status: number; message: string }> {
+  const body: Record<string, unknown> = {
+    sessionId: input.sessionId,
+    pluginId: input.pluginId,
+    kind: input.kind,
+    summary: input.summary,
+  };
+  if (input.turnId) body.turnId = input.turnId;
+  if (input.stats) body.stats = input.stats;
+  if (input.fileChangeId) body.fileChangeId = input.fileChangeId;
+  if (input.reasoning) body.reasoning = input.reasoning;
+  if (input.securityNote) body.securityNote = input.securityNote;
+  try {
+    await _transport.postJsonAuthed(
+      `${API_BASE}/api/plugin/ai-result`,
+      body,
+      input.pluginAuthToken,
+    );
+    return { ok: true };
+  } catch (err) {
+    const e = err as Error & { statusCode?: number };
+    return {
+      ok: false,
+      status: typeof e.statusCode === 'number' ? e.statusCode : 0,
+      message: e.message || 'unknown',
+    };
+  }
+}
+
+/**
  * Variant of `_postJson` that includes the X-Plugin-Auth-Token
  * header and surfaces the HTTP status code on the rejected error
  * so the caller can map 401/403/404 to specific user messages.

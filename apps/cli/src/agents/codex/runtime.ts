@@ -6,6 +6,7 @@ import * as history from './history';
 import { filterCodexChrome, parseCodexChrome, detectCodexSelector } from './parsing';
 import { renderCodexBuffer } from './renderer';
 import { codexCredentialLocator, codexLoginLauncher } from './link';
+import { spawnAndCapture } from '../../services/spawn-and-capture';
 import type { ChangeModelInstruction, RuntimeStrategy } from '../strategy';
 
 const CODEX_CONTEXT_WINDOW = 272_000;
@@ -154,6 +155,23 @@ export class CodexRuntimeStrategy implements RuntimeStrategy {
 
   loginLauncher() {
     return codexLoginLauncher();
+  }
+
+  async generateOneShot(
+    prompt: string,
+    opts?: { cwd?: string; timeoutMs?: number },
+  ): Promise<string | null> {
+    // `codex exec "<prompt>"` runs Codex CLI in non-interactive mode —
+    // prints the response to stdout and exits. Separate child process
+    // from the user's active session so it can't interfere with their
+    // current turn.
+    const binary = this.os.findInPath('codex');
+    if (!binary) return null;
+    const launch = this.os.buildLaunch(binary, ['exec', prompt]);
+    return spawnAndCapture(launch.cmd, launch.args, {
+      cwd: opts?.cwd,
+      timeoutMs: opts?.timeoutMs,
+    });
   }
 }
 

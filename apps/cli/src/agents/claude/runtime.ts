@@ -10,6 +10,7 @@ import { buildClaudeLaunch } from './resolver';
 import { ensureClaudeInstalled } from './installer';
 import { claudeCredentialLocator, claudeLoginLauncher } from './link';
 import { fetchClaudeQuota } from './quota';
+import { spawnAndCapture } from '../../services/spawn-and-capture';
 import * as history from './history';
 import {
   detectListSelector,
@@ -134,5 +135,22 @@ export class ClaudeRuntimeStrategy implements RuntimeStrategy {
 
   loginLauncher() {
     return claudeLoginLauncher();
+  }
+
+  async generateOneShot(
+    prompt: string,
+    opts?: { cwd?: string; timeoutMs?: number },
+  ): Promise<string | null> {
+    // `claude -p "<prompt>"` is Anthropic's officially-supported print
+    // mode — runs in non-interactive headless mode, prints the response
+    // to stdout, and exits. Safe to spawn alongside the user's primary
+    // interactive session because it's a brand-new child process (no
+    // shared PTY, no state mutation in the user's active conversation).
+    const launch = buildClaudeLaunch(['-p', prompt], this.os);
+    if (!launch) return null;
+    return spawnAndCapture(launch.cmd, launch.args, {
+      cwd: opts?.cwd,
+      timeoutMs: opts?.timeoutMs,
+    });
   }
 }
