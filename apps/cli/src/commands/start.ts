@@ -8,6 +8,7 @@ import { createRuntimeStrategy } from '../agents/registry';
 import { OutputService } from '../services/output.service';
 import { HistoryService } from '../services/history.service';
 import { FileWatcherService } from '../services/file-watcher.service';
+import { TurnFileAggregator } from '../services/turn-files/turn-file-aggregator';
 import { StreamingEmitterService } from '../services/streaming-emitter.service';
 import { fetchQuotaUsage } from './start/quota-fetcher';
 import { buildKeepAlive } from './start/keep-alive';
@@ -103,6 +104,9 @@ export async function start(requestedAgent?: AgentId): Promise<void> {
       setTimeout(() => {
         historySvc.uploadDelta().catch(() => { /* best-effort */ });
       }, 400);
+      // End-of-turn file changeset — fire-and-forget. The aggregator
+      // owns its own outbox + retry so this never throws.
+      turnFiles?.flushTurn().catch(() => { /* logged inside */ });
     },
     () => {
       // Terminal-initiated turn — the user typed directly in their
@@ -126,6 +130,23 @@ export async function start(requestedAgent?: AgentId): Promise<void> {
   // the watcher is logged via `log.warn` and never blocks the agent.
   const fileWatcher = session.pluginAuthToken
     ? new FileWatcherService({
+        workingDir: cwd,
+        sessionId: session.id,
+        pluginId,
+        pluginAuthToken: session.pluginAuthToken,
+      })
+    : null;
+
+  // End-of-turn aggregator — discovers every git repo under `cwd`
+  // at startup and, on each `done:true`, runs `git status` +
+  // `git diff --numstat` ONCE per repo to build a batch POST. Local
+  // outbox covers transient failures with exponential backoff.
+  // Replaces the legacy per-file fan-out for the rail / drawer; the
+  // chokidar watcher stays alive (its upserts are idempotent against
+  // the same composite key) until we're confident enough to remove
+  // it in a follow-up.
+  const turnFiles = session.pluginAuthToken
+    ? new TurnFileAggregator({
         workingDir: cwd,
         sessionId: session.id,
         pluginId,
@@ -158,6 +179,7 @@ export async function start(requestedAgent?: AgentId): Promise<void> {
         outputSvc.dispose();
         relay.stop();
         void fileWatcher?.stop();
+        turnFiles?.stop();
         void streamingEmitter?.stop();
         // Close every IDE terminal spawned during the session so the
         // child shells don't get orphaned past the parent exit
