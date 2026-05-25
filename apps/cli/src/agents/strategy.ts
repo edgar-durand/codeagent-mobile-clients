@@ -104,6 +104,24 @@ export interface BaseAgentStrategy {
    * the per-agent ensureInstalled() + launch() pair.
    */
   loginLauncher(): AgentLoginLauncher;
+
+  /**
+   * Spawn this agent in headless one-shot mode (e.g.
+   * `claude -p "<prompt>"` for Claude, `codex exec "<prompt>"` for
+   * Codex) and return the response text. Used by the backend's
+   * AI Insights flow to generate the Files page review summary +
+   * per-file insight without taking over the user's interactive
+   * session.
+   *
+   * Returns `null` when the agent doesn't support a headless mode,
+   * the binary isn't on PATH, the subprocess fails / times out, or
+   * the agent emitted no usable output. Callers treat any of those
+   * as "skip the AI insight for this turn".
+   */
+  generateOneShot?(
+    prompt: string,
+    opts?: { cwd?: string; timeoutMs?: number },
+  ): Promise<string | null>;
 }
 
 // ─── Interactive agents (PTY REPL) ───────────────────────────────────

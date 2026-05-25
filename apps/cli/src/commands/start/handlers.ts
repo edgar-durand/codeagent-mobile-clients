@@ -36,7 +36,7 @@ import {
 import { showInfo } from '../../ui/banner';
 import { applyFileReview } from '../../services/apply-file-review.service';
 import { buildLinkContext } from '../link';
-import { postLinkCredential } from '../../services/pairing.service';
+import { postLinkCredential, postAiResult } from '../../services/pairing.service';
 import { AGENT_REGISTRY, isKnownAgentId, type AgentId } from '@codeagent/shared';
 import { log } from '../../services/logger';
 import type { KeepAliveContext } from './keep-alive';
@@ -524,6 +524,79 @@ const requestLinkCredentialsH: CommandHandler = async (ctx, _cmd, parsed) => {
   }
 };
 
+// AI Insights — turn-end summary. Backend fires this when the user
+// has aiInsightsEnabled on this agent AND there were file changes in
+// the turn. Runtime strategies that don't implement `generateOneShot`
+// (Cursor / Aider / CodeRabbit today) silently no-op.
+const requestAiSummaryH: CommandHandler = async (ctx, _cmd, parsed) => {
+  if (!ctx.pluginAuthToken) return;
+  if (typeof ctx.runtime.generateOneShot !== 'function') return;
+  if (!parsed.prompt || !parsed.turnId || !parsed.stats) {
+    log.trace('ai-summary', 'missing prompt/turnId/stats — skipping');
+    return;
+  }
+  const text = await ctx.runtime.generateOneShot(parsed.prompt).catch((err) => {
+    log.trace('ai-summary', 'generateOneShot threw', err);
+    return null;
+  });
+  if (!text) return;
+  await postAiResult({
+    sessionId: ctx.sessionId,
+    pluginId: ctx.pluginId,
+    pluginAuthToken: ctx.pluginAuthToken,
+    kind: 'summary',
+    turnId: parsed.turnId,
+    summary: text,
+    stats: parsed.stats,
+  });
+};
+
+// AI Insights — per-file deep dive. Triggered on file selection.
+const requestAiInsightH: CommandHandler = async (ctx, _cmd, parsed) => {
+  if (!ctx.pluginAuthToken) return;
+  if (typeof ctx.runtime.generateOneShot !== 'function') return;
+  if (!parsed.prompt || !parsed.fileChangeId) {
+    log.trace('ai-insight', 'missing prompt/fileChangeId — skipping');
+    return;
+  }
+  const text = await ctx.runtime.generateOneShot(parsed.prompt).catch((err) => {
+    log.trace('ai-insight', 'generateOneShot threw', err);
+    return null;
+  });
+  if (!text) return;
+  // Insight pulls a short summary + a longer reasoning block from the
+  // agent's response. The prompt the backend renders asks the agent
+  // to output `SUMMARY:\n…\n\nREASONING:\n…` so we can split on the
+  // labels. If the format doesn't match, fall back to using the whole
+  // blob as both fields — the UI tolerates duplicates.
+  const { summary, reasoning, securityNote } = parseInsightText(text);
+  await postAiResult({
+    sessionId: ctx.sessionId,
+    pluginId: ctx.pluginId,
+    pluginAuthToken: ctx.pluginAuthToken,
+    kind: 'insight',
+    fileChangeId: parsed.fileChangeId,
+    summary,
+    reasoning,
+    securityNote,
+  });
+};
+
+function parseInsightText(text: string): {
+  summary: string;
+  reasoning: string;
+  securityNote?: string;
+} {
+  const summaryMatch = text.match(/SUMMARY:\s*([\s\S]*?)(?=\n\s*(?:REASONING|SECURITY):|$)/i);
+  const reasoningMatch = text.match(/REASONING:\s*([\s\S]*?)(?=\n\s*SECURITY:|$)/i);
+  const securityMatch = text.match(/SECURITY:\s*([\s\S]*)/i);
+  return {
+    summary: (summaryMatch?.[1] ?? text).trim(),
+    reasoning: (reasoningMatch?.[1] ?? text).trim(),
+    securityNote: securityMatch?.[1]?.trim() || undefined,
+  };
+}
+
 // ─── Dispatch table ──────────────────────────────────────────────
 
 export const handlers: Record<string, CommandHandler> = {
@@ -559,6 +632,8 @@ export const handlers: Record<string, CommandHandler> = {
   git_resolve: gitResolveH,
   apply_file_review: applyFileReviewH,
   request_link_credentials: requestLinkCredentialsH,
+  request_ai_summary: requestAiSummaryH,
+  request_ai_insight: requestAiInsightH,
 };
 
 /**

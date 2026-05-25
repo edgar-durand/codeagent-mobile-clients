@@ -16,6 +16,11 @@ export interface TurnFileAggregatorOptions {
   sessionId: string;
   pluginId: string;
   pluginAuthToken: string;
+  /** The agent currently running this session (e.g. `'claude'` /
+   *  `'codex'`). Sent in the batch payload so the backend can decide
+   *  whether to fire the AI Summary trigger based on the user's
+   *  LinkedAgent.aiInsightsEnabled setting. */
+  agentId?: string;
   /** Override the API base URL — defaults to the resolved prod / dev
    *  URL. Tests pass a fake. */
   apiBaseUrl?: string;
@@ -195,6 +200,7 @@ export class TurnFileAggregator {
       sessionId: entry.sessionId,
       pluginId: entry.pluginId,
       turnId: entry.turnId,
+      agentId: this.opts.agentId,
       files: entry.files,
     });
     try {
