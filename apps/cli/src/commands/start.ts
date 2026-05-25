@@ -9,6 +9,7 @@ import { OutputService } from '../services/output.service';
 import { HistoryService } from '../services/history.service';
 import { FileWatcherService } from '../services/file-watcher.service';
 import { TurnFileAggregator } from '../services/turn-files/turn-file-aggregator';
+import { RepoDirtyTracker } from '../services/turn-files/repo-dirty-tracker';
 import { StreamingEmitterService } from '../services/streaming-emitter.service';
 import { fetchQuotaUsage } from './start/quota-fetcher';
 import { buildKeepAlive } from './start/keep-alive';
@@ -122,6 +123,13 @@ export async function start(requestedAgent?: AgentId): Promise<void> {
     runtime,
   );
 
+  // Shared dirty-flag tracker — the file-watcher writes (per event,
+  // after walk-up), the aggregator reads + clears (per done:true).
+  // Skipping `git status` on chat-only turns is the headline win;
+  // multi-repo workspaces where the agent touches a single sub-repo
+  // also stop scanning the untouched siblings.
+  const dirtyTracker = session.pluginAuthToken ? new RepoDirtyTracker() : null;
+
   // File-change producer — emits `/api/files/changed` + `/api/review/hunks`
   // on every modified file under `cwd` for the duration of the session.
   // No-op when `pluginAuthToken` is missing (older paired sessions from
@@ -134,6 +142,9 @@ export async function start(requestedAgent?: AgentId): Promise<void> {
         sessionId: session.id,
         pluginId,
         pluginAuthToken: session.pluginAuthToken,
+        onRepoDirty: dirtyTracker
+          ? (repoRoot) => dirtyTracker.markDirty(repoRoot)
+          : undefined,
       })
     : null;
 
@@ -151,6 +162,7 @@ export async function start(requestedAgent?: AgentId): Promise<void> {
         sessionId: session.id,
         pluginId,
         pluginAuthToken: session.pluginAuthToken,
+        dirtyTracker: dirtyTracker ?? undefined,
       })
     : null;
 

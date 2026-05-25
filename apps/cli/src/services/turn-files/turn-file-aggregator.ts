@@ -9,6 +9,7 @@ import {
   type RepoDescriptor,
 } from './git-changeset';
 import { FilesOutbox, type OutboxEntry } from './files-outbox';
+import type { RepoDirtyTracker } from './repo-dirty-tracker';
 
 export interface TurnFileAggregatorOptions {
   workingDir: string;
@@ -20,6 +21,24 @@ export interface TurnFileAggregatorOptions {
   apiBaseUrl?: string;
   /** Optional outbox-dir override. Production leaves it null. */
   outboxDir?: string;
+  /**
+   * Disable the outbox's auto-scheduled flush. Tests set this so the
+   * `setTimeout(0)` enqueue chain doesn't leak across spec files
+   * (the in-flight flush could otherwise touch the next file's
+   * `vi.spyOn(_transport, 'post')` after `restoreAllMocks` ran).
+   * Production omits — the flush loop is essential to drain the
+   * outbox after a network blip.
+   */
+  outboxAutoSchedule?: boolean;
+  /**
+   * Optional tracker that records which repos saw filesystem
+   * activity since the last flush. When present, `flushTurn()`
+   * only spawns `git status` / `git diff --numstat` for repos
+   * in the dirty set instead of every discovered repo. Pure
+   * optimisation — leaving it unset (the default) preserves the
+   * "scan everything" behaviour from v2.21.0.
+   */
+  dirtyTracker?: RepoDirtyTracker;
 }
 
 const API_BASE = resolveApiBaseUrl();
@@ -57,12 +76,18 @@ export class TurnFileAggregator {
       sessionId: opts.sessionId,
       baseDir: opts.outboxDir,
       post: (entry) => this.postEntry(entry),
+      autoSchedule: opts.outboxAutoSchedule,
     });
     // Discover repos eagerly but don't block construction — the first
     // `flushTurn()` awaits this Promise so the discovery only blocks
     // if a turn finishes faster than the filesystem walk.
     this.discovering = discoverRepos(opts.workingDir).then((repos) => {
       this.repos = repos;
+      // Seed every discovered repo as dirty so the FIRST flush
+      // captures pre-pair worktree state (un-committed edits made
+      // before the user paired). Subsequent flushes start clean and
+      // grow back via watcher events.
+      opts.dirtyTracker?.markAllDirty(repos);
       log.info(
         'turnFiles',
         `discovered ${repos.length} repo(s) under ${opts.workingDir}: ${repos
@@ -95,8 +120,22 @@ export class TurnFileAggregator {
         return;
       }
 
+      // When a dirty tracker is wired in, narrow the scan to the
+      // repos that saw filesystem activity since the last flush. A
+      // chat-only turn (no edits) leaves the dirty set empty and
+      // short-circuits before spawning git at all. Without a
+      // tracker we fall back to scanning every discovered repo.
+      const reposToScan = this.opts.dirtyTracker
+        ? this.filterByDirty(this.opts.dirtyTracker)
+        : this.repos;
+
+      if (reposToScan.length === 0) {
+        log.trace('turnFiles', 'dirty set empty — skipping flush');
+        return;
+      }
+
       const files: ChangesetEntry[] = [];
-      for (const repo of this.repos) {
+      for (const repo of reposToScan) {
         const entries = await collectRepoChangeset(repo);
         if (entries) files.push(...entries);
       }
@@ -127,6 +166,20 @@ export class TurnFileAggregator {
         `flushTurn failed: ${(err as Error).message ?? String(err)}`,
       );
     }
+  }
+
+  /**
+   * Consume the tracker's dirty set and intersect with the
+   * discovered repos so we never spawn git for a path the watcher
+   * marked outside our discovered set (e.g. a sibling repo that
+   * appeared after construction). Unknown roots get dropped on the
+   * floor — they'll re-mark themselves on the next event if they're
+   * inside `workingDir`.
+   */
+  private filterByDirty(tracker: RepoDirtyTracker): RepoDescriptor[] {
+    const dirty = tracker.consume();
+    if (dirty.size === 0) return [];
+    return this.repos.filter((repo) => dirty.has(repo.repoRoot));
   }
 
   private async postEntry(
