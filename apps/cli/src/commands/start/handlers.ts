@@ -476,14 +476,13 @@ const applyFileReviewH: CommandHandler = async (ctx, cmd, parsed) => {
 // no-ops silently — we never spawn the interactive sign-in here
 // because that would surprise the user mid-session. They can still
 // run `codeam link <agent>` manually to opt in.
-const requestLinkCredentialsH: CommandHandler = async (ctx, _cmd, parsed) => {
+const requestLinkCredentialsH: CommandHandler = (ctx, _cmd, parsed) => {
   const publicId = parsed.agentId;
   if (!publicId) return;
   if (!ctx.pluginAuthToken) {
     log.trace('auto-link', 'skipped — no pluginAuthToken on this paired session');
     return;
   }
-
   // Public id → internal id (LinkedAgent uses `claude_code`, runtime
   // factory takes `claude`). Other ids are identical across both.
   const internalId: AgentId = publicId === 'claude_code' ? 'claude' : (publicId as AgentId);
@@ -491,95 +490,115 @@ const requestLinkCredentialsH: CommandHandler = async (ctx, _cmd, parsed) => {
     log.trace('auto-link', `unknown / disabled agent: ${internalId}`);
     return;
   }
-
-  let linkCtx;
-  try {
-    linkCtx = buildLinkContext(internalId);
-  } catch (err) {
-    log.trace('auto-link', 'buildLinkContext threw', err);
-    return;
-  }
-
-  const token = await linkCtx.locator.extract().catch((err) => {
-    log.trace('auto-link', `locator.extract failed for ${publicId}`, err);
-    return null;
-  });
-  if (!token) {
-    log.trace('auto-link', `no local ${linkCtx.displayName} credentials — skipping`);
-    return;
-  }
-
-  const result = await postLinkCredential({
-    agentId: publicId,
-    sessionId: ctx.sessionId,
-    pluginId: ctx.pluginId,
-    pluginAuthToken: ctx.pluginAuthToken,
-    method: token.method,
-    credential: token.credential,
-  });
-  if (result.ok) {
-    log.trace('auto-link', `vaulted ${publicId} from ${token.source}`);
-  } else {
-    log.trace('auto-link', `upload failed (${result.status}): ${result.message}`);
-  }
+  const pluginAuthToken = ctx.pluginAuthToken;
+  // Fire-and-forget — the locator.extract on macOS hits the keychain
+  // (slow) and postLinkCredential is a network round-trip; awaiting
+  // either would stall the relay's sequential dispatch loop and
+  // block the user's next chat prompt behind a background side-job.
+  void (async () => {
+    let linkCtx;
+    try {
+      linkCtx = buildLinkContext(internalId);
+    } catch (err) {
+      log.trace('auto-link', 'buildLinkContext threw', err);
+      return;
+    }
+    const token = await linkCtx.locator.extract().catch((err) => {
+      log.trace('auto-link', `locator.extract failed for ${publicId}`, err);
+      return null;
+    });
+    if (!token) {
+      log.trace('auto-link', `no local ${linkCtx.displayName} credentials — skipping`);
+      return;
+    }
+    const result = await postLinkCredential({
+      agentId: publicId,
+      sessionId: ctx.sessionId,
+      pluginId: ctx.pluginId,
+      pluginAuthToken,
+      method: token.method,
+      credential: token.credential,
+    });
+    if (result.ok) {
+      log.trace('auto-link', `vaulted ${publicId} from ${token.source}`);
+    } else {
+      log.trace('auto-link', `upload failed (${result.status}): ${result.message}`);
+    }
+  })();
 };
 
 // AI Insights — turn-end summary. Backend fires this when the user
 // has aiInsightsEnabled on this agent AND there were file changes in
 // the turn. Runtime strategies that don't implement `generateOneShot`
 // (Cursor / Aider / CodeRabbit today) silently no-op.
-const requestAiSummaryH: CommandHandler = async (ctx, _cmd, parsed) => {
+//
+// CRITICAL: The CLI's relay dispatches commands SEQUENTIALLY with
+// `await onCommand(cmd)`, so any handler that awaits a long-running
+// operation blocks every subsequent command behind it. The agent's
+// headless one-shot can take 30-60 s — without fire-and-forget we'd
+// stall the user's next `start_task` (their actual chat prompt!)
+// behind the background summary generation. Wrap the work in a
+// `void (async ...)` IIFE so the handler returns immediately.
+const requestAiSummaryH: CommandHandler = (ctx, _cmd, parsed) => {
   if (!ctx.pluginAuthToken) return;
   if (typeof ctx.runtime.generateOneShot !== 'function') return;
   if (!parsed.prompt || !parsed.turnId || !parsed.stats) {
     log.trace('ai-summary', 'missing prompt/turnId/stats — skipping');
     return;
   }
-  const text = await ctx.runtime.generateOneShot(parsed.prompt).catch((err) => {
-    log.trace('ai-summary', 'generateOneShot threw', err);
-    return null;
-  });
-  if (!text) return;
-  await postAiResult({
-    sessionId: ctx.sessionId,
-    pluginId: ctx.pluginId,
-    pluginAuthToken: ctx.pluginAuthToken,
-    kind: 'summary',
-    turnId: parsed.turnId,
-    summary: text,
-    stats: parsed.stats,
-  });
+  const prompt = parsed.prompt;
+  const turnId = parsed.turnId;
+  const stats = parsed.stats;
+  const pluginAuthToken = ctx.pluginAuthToken;
+  void (async () => {
+    const text = await ctx.runtime.generateOneShot!(prompt).catch((err) => {
+      log.trace('ai-summary', 'generateOneShot threw', err);
+      return null;
+    });
+    if (!text) return;
+    await postAiResult({
+      sessionId: ctx.sessionId,
+      pluginId: ctx.pluginId,
+      pluginAuthToken,
+      kind: 'summary',
+      turnId,
+      summary: text,
+      stats,
+    });
+  })();
 };
 
 // AI Insights — per-file deep dive. Triggered on file selection.
-const requestAiInsightH: CommandHandler = async (ctx, _cmd, parsed) => {
+// Same fire-and-forget pattern as the summary handler so the up-to-
+// 60 s headless agent run doesn't block the next user command.
+const requestAiInsightH: CommandHandler = (ctx, _cmd, parsed) => {
   if (!ctx.pluginAuthToken) return;
   if (typeof ctx.runtime.generateOneShot !== 'function') return;
   if (!parsed.prompt || !parsed.fileChangeId) {
     log.trace('ai-insight', 'missing prompt/fileChangeId — skipping');
     return;
   }
-  const text = await ctx.runtime.generateOneShot(parsed.prompt).catch((err) => {
-    log.trace('ai-insight', 'generateOneShot threw', err);
-    return null;
-  });
-  if (!text) return;
-  // Insight pulls a short summary + a longer reasoning block from the
-  // agent's response. The prompt the backend renders asks the agent
-  // to output `SUMMARY:\n…\n\nREASONING:\n…` so we can split on the
-  // labels. If the format doesn't match, fall back to using the whole
-  // blob as both fields — the UI tolerates duplicates.
-  const { summary, reasoning, securityNote } = parseInsightText(text);
-  await postAiResult({
-    sessionId: ctx.sessionId,
-    pluginId: ctx.pluginId,
-    pluginAuthToken: ctx.pluginAuthToken,
-    kind: 'insight',
-    fileChangeId: parsed.fileChangeId,
-    summary,
-    reasoning,
-    securityNote,
-  });
+  const prompt = parsed.prompt;
+  const fileChangeId = parsed.fileChangeId;
+  const pluginAuthToken = ctx.pluginAuthToken;
+  void (async () => {
+    const text = await ctx.runtime.generateOneShot!(prompt).catch((err) => {
+      log.trace('ai-insight', 'generateOneShot threw', err);
+      return null;
+    });
+    if (!text) return;
+    const { summary, reasoning, securityNote } = parseInsightText(text);
+    await postAiResult({
+      sessionId: ctx.sessionId,
+      pluginId: ctx.pluginId,
+      pluginAuthToken,
+      kind: 'insight',
+      fileChangeId,
+      summary,
+      reasoning,
+      securityNote,
+    });
+  })();
 };
 
 function parseInsightText(text: string): {
