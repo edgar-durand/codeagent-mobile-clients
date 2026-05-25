@@ -119,6 +119,15 @@ export class ClaudeRuntimeStrategy implements RuntimeStrategy {
     return detectSelector(lines) ?? detectListSelector(lines);
   }
 
+  detectReadyPrompt(lines: string[]): boolean {
+    // Claude Code redraws `? for shortcuts` at the bottom of the
+    // TUI the moment a turn finishes and the input field is hot
+    // again. Stable signal for "agent stopped working" even when
+    // the spinner keeps the PTY pushing bytes — drives the fast
+    // finalize path in OutputService.tick().
+    return lines.some((l) => /^\?\s.*shortcut/i.test(l.trim()));
+  }
+
   credentialLocator() {
     return claudeCredentialLocator();
   }

@@ -127,6 +127,17 @@ export class AiderRuntimeStrategy implements RuntimeStrategy {
     return detectAiderSelector(lines);
   }
 
+  detectReadyPrompt(lines: string[]): boolean {
+    // Aider's interactive shell prints a bare `>` line for input
+    // OR the `>` followed by a space when the cursor is parked.
+    // Also accept the `... >` continuation prompt that appears
+    // during multi-line edits.
+    return lines.some((l) => {
+      const t = l.replace(/\x1B\[[^@-~]*[@-~]/g, '').trim();
+      return t === '>' || /^>\s*$/.test(t) || /^\.\.\.\s*>\s*$/.test(t);
+    });
+  }
+
   credentialLocator() {
     return aiderCredentialLocator();
   }

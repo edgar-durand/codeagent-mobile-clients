@@ -105,6 +105,15 @@ export class CursorRuntimeStrategy implements RuntimeStrategy {
     return detectCursorSelector(lines);
   }
 
+  detectReadyPrompt(lines: string[]): boolean {
+    // cursor-agent shares ratatui chrome with Codex — same box-
+    // bordered input bar with the `›` cursor at the bottom when
+    // the agent is idle. Conservative regex: any line with a box
+    // bar adjacent to `›` (or the ASCII fallback `>` ratatui shows
+    // when the user's terminal lacks the Unicode glyph).
+    return lines.some((l) => /[│┃]\s*[›>]\s/u.test(l));
+  }
+
   credentialLocator() {
     return cursorCredentialLocator();
   }
