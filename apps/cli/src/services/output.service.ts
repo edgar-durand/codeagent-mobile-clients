@@ -32,6 +32,19 @@ export class OutputService {
   private readonly runtime: RuntimeStrategy;
 
   private lastSentContent = '';
+  /**
+   * Wall-clock of the most recent tick where the rendered + filtered
+   * content actually changed. Claude's TUI keeps redrawing the
+   * spinner + input prompt after the response is settled, which
+   * keeps `pty.lastPushTime` moving and prevents the PTY-idle
+   * heuristic from ever crossing the IDLE_MS threshold — so the
+   * turn never finalises and `done: true` never reaches the
+   * webapp's canonical-refresh path. Tracking content-stability
+   * separately closes that hole: PTY can churn all it wants, but
+   * once the filtered TUI output stops changing for a beat we
+   * know Claude is done.
+   */
+  private lastContentChangeAt = 0;
   private pollTimer: NodeJS.Timeout | null = null;
   private startTime = 0;
   private terminalTurnPending = false;
@@ -47,6 +60,22 @@ export class OutputService {
   private static readonly IDLE_MS = 3000;
   /** Same threshold but tighter for selectors (UI is ready to interact immediately). */
   private static readonly SELECTOR_IDLE_MS = 1500;
+  /**
+   * Content-stable threshold. When the rendered + filtered content
+   * hasn't changed for this long AND we can see Claude's "? for
+   * shortcuts" prompt re-drawn at the bottom (= back to input
+   * state), we know the response is settled even though the PTY
+   * itself is still pushing spinner / status redraws. Tighter than
+   * IDLE_MS because the ready-prompt is a strong signal on its own.
+   */
+  private static readonly READY_STABLE_MS = 800;
+  /**
+   * Hard content-stable fallback. If the filtered content has been
+   * unchanged for this long, finalize regardless of the ready
+   * prompt — covers cases where Claude's TUI doesn't redraw the
+   * shortcuts line (older versions, headless runs).
+   */
+  private static readonly CONTENT_STABLE_MS = 8000;
   /**
    * Grace period before tick processes anything — Claude needs ~100-
    * 200 ms after `\r` to clear the input echo and re-render the TUI.
@@ -193,6 +222,7 @@ export class OutputService {
     this.pty.activate();
     this.steps.reset();
     this.lastSentContent = '';
+    this.lastContentChangeAt = 0;
     this.startTime = Date.now();
     this.pollTimer = setInterval(() => this.tick(), OutputService.POLL_MS);
   }
@@ -307,15 +337,50 @@ export class OutputService {
     }
 
     const idleMs = this.pty.lastPushTime > 0 ? now - this.pty.lastPushTime : elapsed;
-    log.trace(
-      'outputSvc',
-      `tick content (raw=${this.pty.size}B lines=${lines.length} content=${content.length} idleMs=${idleMs})`,
-    );
-    if (idleMs >= OutputService.IDLE_MS) { this.finalize(); return; }
 
+    // Track content-stability separately from PTY-push-idle. Claude's
+    // TUI keeps the spinner / shortcuts redraw bumping
+    // `pty.lastPushTime`, so `idleMs` rarely reaches IDLE_MS in
+    // practice — without this branch a turn that ended cleanly
+    // would never finalise and the webapp's canonical-refresh path
+    // (which is gated on `done: true`) would never fire.
     if (content !== this.lastSentContent) {
+      this.lastContentChangeAt = now;
       this.lastSentContent = content;
       this.send({ type: 'text', content, done: false }).catch(() => {});
+    }
+    const contentStableMs = this.lastContentChangeAt > 0 ? now - this.lastContentChangeAt : 0;
+
+    // "Claude is back at the input" — the shortcuts prompt re-appears
+    // in the rendered output once the turn is done. Strong signal even
+    // when the spinner is still chewing on PTY bytes.
+    const readyPrompt = lines.some((l) => /^\?\s.*shortcut/i.test(l.trim()));
+
+    log.trace(
+      'outputSvc',
+      `tick content (raw=${this.pty.size}B lines=${lines.length} content=${content.length} idleMs=${idleMs} stableMs=${contentStableMs} ready=${readyPrompt})`,
+    );
+
+    // PTY-push idle (legacy heuristic — still kicks in for rare cases
+    // where Claude's TUI fully halts before redrawing).
+    if (idleMs >= OutputService.IDLE_MS) {
+      log.trace('outputSvc', `finalize: idleMs=${idleMs}`);
+      this.finalize();
+      return;
+    }
+    // Content stable + Claude visible at the input prompt — fastest
+    // path. ~800 ms after the response settles.
+    if (readyPrompt && contentStableMs >= OutputService.READY_STABLE_MS) {
+      log.trace('outputSvc', `finalize: readyPrompt + stableMs=${contentStableMs}`);
+      this.finalize();
+      return;
+    }
+    // Hard content-stable fallback — covers older TUIs that don't
+    // redraw the shortcuts hint and headless runs.
+    if (contentStableMs >= OutputService.CONTENT_STABLE_MS) {
+      log.trace('outputSvc', `finalize: stableMs=${contentStableMs} (fallback)`);
+      this.finalize();
+      return;
     }
   }
 
