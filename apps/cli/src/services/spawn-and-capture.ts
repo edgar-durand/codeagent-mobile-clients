@@ -1,4 +1,37 @@
-import { spawn } from 'child_process';
+import { spawn, type ChildProcess } from 'child_process';
+
+/**
+ * Module-level registry of every in-flight child started by
+ * `spawnAndCapture`. The shutdown helper in start.ts walks this set
+ * during sigintHandler / SIGTERM / SIGHUP cleanup and kills each one
+ * with SIGTERM (then SIGKILL after a 250 ms grace). Without this the
+ * parent CLI's hard `process.exit(0)` would leave any mid-flight
+ * `claude -p` / `codex exec` subprocess orphaned and re-parented to
+ * init for up to 60 s (until the per-spawn timeout we already set
+ * fires for the orphan).
+ */
+const activeChildren = new Set<ChildProcess>();
+
+export function killActiveSpawnAndCaptureChildren(): void {
+  for (const child of activeChildren) {
+    try {
+      child.kill('SIGTERM');
+    } catch {
+      // child already exited — fine
+    }
+  }
+  // Escalate to SIGKILL after a short grace so we don't block process
+  // shutdown on a polite SIGTERM the agent ignores.
+  setTimeout(() => {
+    for (const child of activeChildren) {
+      try {
+        child.kill('SIGKILL');
+      } catch {
+        // already dead
+      }
+    }
+  }, 250).unref?.();
+}
 
 /**
  * Spawn a child process, collect its stdout to a string, kill it on
@@ -37,7 +70,7 @@ export async function spawnAndCapture(
       resolve(value);
     };
 
-    let child;
+    let child: ChildProcess;
     try {
       child = spawn(cmd, [...args], {
         cwd: opts.cwd,
@@ -48,6 +81,8 @@ export async function spawnAndCapture(
       settle(null);
       return;
     }
+
+    activeChildren.add(child);
 
     let stdout = '';
     child.stdout?.on('data', (chunk: Buffer) => {
@@ -69,10 +104,12 @@ export async function spawnAndCapture(
 
     child.on('error', () => {
       clearTimeout(timer);
+      activeChildren.delete(child);
       settle(null);
     });
     child.on('exit', (code) => {
       clearTimeout(timer);
+      activeChildren.delete(child);
       if (code !== 0) {
         settle(null);
         return;
