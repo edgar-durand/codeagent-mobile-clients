@@ -126,8 +126,19 @@ export interface FileWatcherServiceOptions {
  * contains several sub-repos (e.g. an umbrella project opened as
  * one folder) attributes each file to its enclosing repo instead
  * of running `git diff` from the umbrella that is itself non-git.
+ *
+ * Exposed via `_findGitRootSeam` so tests can short-circuit the
+ * fs.statSync walk and stub a deterministic repo root.
  */
 export function findGitRoot(startDir: string): string | null {
+  return _findGitRootSeam.resolve(startDir);
+}
+
+export const _findGitRootSeam = {
+  resolve: _defaultFindGitRoot,
+};
+
+function _defaultFindGitRoot(startDir: string): string | null {
   let dir = path.resolve(startDir);
   const seen = new Set<string>();
   for (let i = 0; i < 256; i++) {

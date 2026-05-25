@@ -179,6 +179,18 @@ const SAMPLE_DIFF = [
 ].join('\n');
 
 describe('FileWatcherService', () => {
+  // Track every service the tests create so afterEach can stop them
+  // ALL, not just the local `svc` reference. The retry loop inside
+  // `postWithRetries` now checks `this.stopped` between attempts so
+  // stopping mid-flight aborts the chain — without this teardown,
+  // the previous test's /review/hunks retry would keep firing into
+  // the next test's `_transport.post` spy.
+  const tracked: { stop: () => Promise<void> | void }[] = [];
+  function track<T extends { stop: () => Promise<void> | void }>(svc: T): T {
+    tracked.push(svc);
+    return svc;
+  }
+
   beforeEach(() => {
     vi.useFakeTimers();
     // Pin the enclosing git root to WORKING_DIR. The production
@@ -189,7 +201,12 @@ describe('FileWatcherService', () => {
       dir.startsWith(WORKING_DIR) ? WORKING_DIR : null,
     );
   });
-  afterEach(() => {
+  afterEach(async () => {
+    // Stop every tracked service so any in-flight retry chain bails
+    // (postWithRetries checks `this.stopped` between attempts).
+    for (const svc of tracked.splice(0, tracked.length)) {
+      try { await svc.stop(); } catch { /* ignore */ }
+    }
     // Drain every pending fake timer (HTTP retry backoffs from the
     // /review/hunks aggressive-policy loop) BEFORE switching the
     // clock or restoring mocks. Without this, a retry chain scheduled
@@ -203,7 +220,7 @@ describe('FileWatcherService', () => {
   });
 
   it('debounces rapid sequential change events into one emit', async () => {
-    const svc = makeService();
+    const svc = track(makeService());
     const gitSpy = vi.spyOn(_gitSeam, 'run').mockResolvedValue(SAMPLE_DIFF);
     const postSpy = vi.spyOn(_transport, 'post').mockResolvedValue({
       statusCode: 200,
@@ -227,7 +244,7 @@ describe('FileWatcherService', () => {
   });
 
   it('emits one file-changed + one hunk per parsed hunk', async () => {
-    const svc = makeService();
+    const svc = track(makeService());
     const diff = [
       '--- a/foo.ts',
       '+++ b/foo.ts',
@@ -269,7 +286,7 @@ describe('FileWatcherService', () => {
   });
 
   it('sends X-Plugin-Auth-Token header on every emission', async () => {
-    const svc = makeService();
+    const svc = track(makeService());
     vi.spyOn(_gitSeam, 'run').mockResolvedValue(SAMPLE_DIFF);
     const postSpy = vi.spyOn(_transport, 'post').mockResolvedValue({
       statusCode: 200,
@@ -287,7 +304,7 @@ describe('FileWatcherService', () => {
   });
 
   it('marks watcher as stopped on 410 to drop subsequent emissions', async () => {
-    const svc = makeService();
+    const svc = track(makeService());
     vi.spyOn(_gitSeam, 'run').mockResolvedValue(SAMPLE_DIFF);
     const postSpy = vi.spyOn(_transport, 'post')
       .mockResolvedValueOnce({ statusCode: 410, body: '{}' });
@@ -311,7 +328,7 @@ describe('FileWatcherService', () => {
   });
 
   it('retries with backoff on 500 then succeeds', async () => {
-    const svc = makeService();
+    const svc = track(makeService());
     vi.spyOn(_gitSeam, 'run').mockResolvedValue(SAMPLE_DIFF);
     const postSpy = vi.spyOn(_transport, 'post')
       .mockResolvedValueOnce({ statusCode: 500, body: 'oops' })
@@ -330,7 +347,7 @@ describe('FileWatcherService', () => {
   });
 
   it('emits a deletion event for unlinked files when git diff is empty', async () => {
-    const svc = makeService();
+    const svc = track(makeService());
     // Empty diff is the load-bearing input for this test — exercises
     // the unlink path that still emits a zero-stat deletion so the
     // mobile Files screen drops the row. Non-unlink events with an
@@ -354,7 +371,7 @@ describe('FileWatcherService', () => {
   });
 
   it('ignores symlink-escaped paths outside the working dir', async () => {
-    const svc = makeService();
+    const svc = track(makeService());
     const gitSpy = vi.spyOn(_gitSeam, 'run').mockResolvedValue('');
     const postSpy = vi.spyOn(_transport, 'post').mockResolvedValue({
       statusCode: 200,
@@ -384,7 +401,7 @@ describe('FileWatcherService', () => {
     const watchSpy = vi.fn().mockReturnValue(mockWatcher);
     vi.spyOn(_chokidarSeam, 'load').mockReturnValue({ watch: watchSpy });
 
-    const svc = makeService();
+    const svc = track(makeService());
     await svc.start();
 
     expect(handlers.error).toBeDefined();
@@ -414,7 +431,7 @@ describe('FileWatcherService', () => {
       const watchSpy = vi.fn().mockReturnValue(mockWatcher);
       vi.spyOn(_chokidarSeam, 'load').mockReturnValue({ watch: watchSpy });
 
-      const svc = new FileWatcherService({
+      const svc = track(new FileWatcherService({
         // Use a Windows-shaped project path that is NOT a system / home
         // root so the unsafe-root guard doesn't short-circuit start().
         workingDir: 'C:\\projects\\demo',
@@ -422,7 +439,7 @@ describe('FileWatcherService', () => {
         pluginId: 'plugin-win',
         pluginAuthToken: 'token-win',
         apiBaseUrl: 'https://api.example.test',
-      });
+      }));
       await svc.start();
 
       expect(watchSpy).toHaveBeenCalledTimes(1);
@@ -459,13 +476,13 @@ describe('FileWatcherService', () => {
       // os.homedir() on this host — isUnsafeWindowsWatchRoot will
       // detect equality.
       const os = await import('os');
-      const svc = new FileWatcherService({
+      const svc = track(new FileWatcherService({
         workingDir: os.homedir(),
         sessionId: 'sess-home',
         pluginId: 'plugin-home',
         pluginAuthToken: 'token-home',
         apiBaseUrl: 'https://api.example.test',
-      });
+      }));
       await svc.start();
 
       expect(watchSpy).not.toHaveBeenCalled();
@@ -475,7 +492,7 @@ describe('FileWatcherService', () => {
   });
 
   it('stop() clears pending timers and is idempotent', async () => {
-    const svc = makeService();
+    const svc = track(makeService());
     const gitSpy = vi.spyOn(_gitSeam, 'run').mockResolvedValue('');
     const postSpy = vi.spyOn(_transport, 'post').mockResolvedValue({
       statusCode: 200,

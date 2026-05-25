@@ -618,6 +618,12 @@ export class FileWatcherService {
     };
 
     for (let attempt = 0; attempt <= MAX_RETRIES; attempt += 1) {
+      // Bail the retry loop as soon as the watcher is asked to stop.
+      // Without this, an in-flight retry chain scheduled BEFORE
+      // `stop()` was called would keep hitting the network (and
+      // contaminating subsequent test runs in CI), even though the
+      // outer service has been torn down.
+      if (this.stopped) return;
       try {
         const { statusCode, body: resBody } = await _transport.post(url, headers, payload);
         if (statusCode >= 200 && statusCode < 300) {

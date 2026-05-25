@@ -43,7 +43,12 @@ vi.mock('vscode', () => {
 // Import after the mock so module-level `import * as vscode from 'vscode'`
 // resolves to the stub above.
 import { parseUnifiedDiff } from '../src/services/file-watcher/diff-parser';
-import { _gitDiffSeam, _transport, FileWatcherService } from '../src/services/file-watcher.service';
+import {
+  _findGitRootSeam,
+  _gitDiffSeam,
+  _transport,
+  FileWatcherService,
+} from '../src/services/file-watcher.service';
 import { AgentStrategyRegistry } from '../src/services/strategies/AgentStrategyRegistry';
 
 function makeOutputChannel(): OutputChannel {
@@ -125,6 +130,13 @@ describe('FileWatcherService — agent-activity gate', () => {
       log: makeOutputChannel(),
     });
     svc.start();
+
+    // The production walk-up needs a real `.git/` on disk to
+    // discover an enclosing repo. Stub it so /repo/* is treated as
+    // its own repo root without touching the filesystem.
+    vi.spyOn(_findGitRootSeam, 'resolve').mockImplementation((dir: string) =>
+      dir.startsWith('/repo') ? '/repo' : null,
+    );
 
     postSpy = vi.spyOn(_transport, 'post').mockResolvedValue({ statusCode: 200, body: '' });
     gitDiffSpy = vi.spyOn(_gitDiffSeam, 'run').mockResolvedValue(
