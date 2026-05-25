@@ -4,6 +4,16 @@ All notable changes to the CodeAgent Mobile VS Code extension are documented her
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.20.1] — 2026-05-25
+
+### Documentation
+
+- Document CODEAM_TEST_MODE + CODEAM_API_URL env vars in README (#177)
+
+### Fixed
+
+- **cli:** Finalize turn on content-stable + ready-prompt, not just PTY-idle (#178)
+
 ## [2.20.0] — 2026-05-24
 
 ### Added
