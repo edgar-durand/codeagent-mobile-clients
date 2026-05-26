@@ -64,13 +64,21 @@ export function claudeCredentialsPaths(): string[] {
  * Returns `null` when no probe yields a credential at any known
  * location. The caller (`codeam link`) treats `null` as "user is not
  * yet authenticated locally" and starts the interactive login flow.
+ *
+ * Also captures `~/.claude.json` (UI state + `oauthAccount` identity
+ * block) when present. The backend ships that file into the codespace
+ * at deploy time so Claude Code v2.x can validate the OAuth token
+ * against the same email/orgId the user has locally — without it the
+ * bearer token gets rejected with 401 even when the JSON is fresh.
  */
 export async function extractLocalClaudeToken(): Promise<LocalAgentToken | null> {
+  const agentState = readClaudeAgentState();
+
   for (const flat of claudeCredentialsPaths()) {
     if (!fs.existsSync(flat)) continue;
     const credential = fs.readFileSync(flat, 'utf8').trim();
     if (credential.length > 0) {
-      return { method: 'oauth', credential, source: 'flat-file' };
+      return { method: 'oauth', credential, source: 'flat-file', agentState };
     }
   }
 
@@ -84,7 +92,7 @@ export async function extractLocalClaudeToken(): Promise<LocalAgentToken | null>
         );
         const credential = stdout.trim();
         if (credential.length > 0) {
-          return { method: 'oauth', credential, source: 'macos-keychain' };
+          return { method: 'oauth', credential, source: 'macos-keychain', agentState };
         }
       } catch {
         /* entry missing / access denied — try next service name */
@@ -93,6 +101,31 @@ export async function extractLocalClaudeToken(): Promise<LocalAgentToken | null>
   }
 
   return null;
+}
+
+/**
+ * Read the user's `~/.claude.json` if present. Returns `undefined`
+ * when the file is missing, empty, or unreadable — never throws,
+ * because failing to capture the companion state should NEVER block
+ * a credential link (the backend handles missing state with the
+ * minimal synthesised fallback).
+ *
+ * Hard 256 KB cap matches the backend DTO limit — anything larger is
+ * almost certainly local cache pollution we don't want shipped into
+ * the codespace.
+ */
+function readClaudeAgentState(): string | undefined {
+  const STATE_MAX_BYTES = 256 * 1024;
+  const candidate = path.join(os.homedir(), '.claude.json');
+  try {
+    if (!fs.existsSync(candidate)) return undefined;
+    const buf = fs.readFileSync(candidate);
+    if (buf.length === 0 || buf.length > STATE_MAX_BYTES) return undefined;
+    const text = buf.toString('utf8').trim();
+    return text.length > 0 ? text : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /**

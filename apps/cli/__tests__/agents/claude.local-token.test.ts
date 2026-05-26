@@ -114,6 +114,45 @@ describe('claude/local-token extractLocalClaudeToken', () => {
     const r = await extractLocalClaudeToken();
     expect(r?.credential).toBe('PRIMARY');
   });
+
+  it('captures ~/.claude.json alongside the credential when present', async () => {
+    const claudeDir = path.join(home, '.claude');
+    mkdirSync(claudeDir);
+    writeFileSync(path.join(claudeDir, '.credentials.json'), 'CREDS');
+    const stateBlob = JSON.stringify({
+      hasCompletedOnboarding: true,
+      oauthAccount: { email: 'edgar@example.com', orgId: 'org-123' },
+    });
+    writeFileSync(path.join(home, '.claude.json'), stateBlob);
+
+    const r = await extractLocalClaudeToken();
+    expect(r?.credential).toBe('CREDS');
+    expect(r?.agentState).toBe(stateBlob);
+  });
+
+  it('omits agentState when ~/.claude.json is missing', async () => {
+    const claudeDir = path.join(home, '.claude');
+    mkdirSync(claudeDir);
+    writeFileSync(path.join(claudeDir, '.credentials.json'), 'CREDS');
+
+    const r = await extractLocalClaudeToken();
+    expect(r?.credential).toBe('CREDS');
+    expect(r?.agentState).toBeUndefined();
+  });
+
+  it('drops oversize ~/.claude.json (>256 KB) silently', async () => {
+    const claudeDir = path.join(home, '.claude');
+    mkdirSync(claudeDir);
+    writeFileSync(path.join(claudeDir, '.credentials.json'), 'CREDS');
+    // 300 KB of valid JSON-ish padding so the cap kicks in regardless
+    // of any future content-aware check.
+    const oversize = `{"junk":"${'x'.repeat(300_000)}"}`;
+    writeFileSync(path.join(home, '.claude.json'), oversize);
+
+    const r = await extractLocalClaudeToken();
+    expect(r?.credential).toBe('CREDS');
+    expect(r?.agentState).toBeUndefined();
+  });
 });
 
 describe('claude/local-token claudeCredentialsPaths', () => {

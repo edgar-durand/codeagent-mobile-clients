@@ -446,6 +446,7 @@ async function uploadAndSucceed(
     pluginAuthToken: paired.pluginAuthToken,
     method: token.method,
     credential: token.credential,
+    agentState: token.agentState,
   });
   if (!result.ok) {
     uploadSpin.stop('Failed');
