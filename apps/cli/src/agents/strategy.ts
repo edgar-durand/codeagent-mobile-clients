@@ -22,6 +22,16 @@ export interface LocalAgentToken {
   credential: string;
   /** Where we found it — drives the user-facing success message. */
   source: 'flat-file' | 'macos-keychain' | 'manual';
+  /**
+   * Optional companion local-state blob the link flow captured next
+   * to the credential — typically `~/.claude.json` for Claude. The
+   * backend seals it alongside the credential and ships it into the
+   * codespace at deploy time so the agent boots in the same identity
+   * context the user has locally. Empty / absent means "let the
+   * backend synthesise a minimal default" (works for agents that
+   * don't need an identity file).
+   */
+  agentState?: string;
 }
 
 /**

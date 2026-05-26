@@ -151,6 +151,13 @@ export async function postLinkCredential(input: {
   method: 'oauth' | 'api_key';
   credential: string;
   modelPreference?: string;
+  /**
+   * Optional companion local-state blob (see LocalAgentToken
+   * .agentState). Older backends silently ignore unknown body keys
+   * via class-validator's `whitelist: true`, so this stays
+   * backwards-compatible across the rollout window.
+   */
+  agentState?: string;
 }): Promise<{ ok: true } | { ok: false; status: number; message: string }> {
   const body: Record<string, unknown> = {
     sessionId: input.sessionId,
@@ -160,6 +167,9 @@ export async function postLinkCredential(input: {
   };
   if (input.modelPreference) {
     body.modelPreference = input.modelPreference;
+  }
+  if (input.agentState) {
+    body.agentState = input.agentState;
   }
   try {
     await _transport.postJsonAuthed(
