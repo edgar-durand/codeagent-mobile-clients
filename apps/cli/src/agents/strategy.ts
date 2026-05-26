@@ -212,6 +212,47 @@ export interface InteractiveAgentStrategy extends BaseAgentStrategy {
    * MUST be cheap because it runs on every poll tick.
    */
   detectReadyPrompt?(lines: string[]): boolean;
+
+  /**
+   * Optional per-agent startup-banner detector. Each interactive
+   * agent prints a branded splash when it boots (Claude's box-art
+   * logo + "Sonnet · Claude API" metadata, Codex's banner, …). When
+   * the detector matches, OutputService emits a typed `agent_banner`
+   * OutputChunk and removes the banner lines from the rendered
+   * stream so the downstream `text` chunks don't carry the raw
+   * ASCII art on the wire.
+   *
+   * The wire-shape on the backend lives in
+   * `packages/shared/src/types/api.ts` (`AgentBannerChunk`) and the
+   * companion `ContentBlockKind.AgentBanner` block. Adding a banner
+   * for a new agent is the implementation of this method — there is
+   * no UI branch to write, the renderer already knows how to paint
+   * the card.
+   *
+   * Returns the parsed banner + the inclusive line range it consumed
+   * (so OutputService can slice it out), or `null` when no banner is
+   * visible in this tick. Agents that don't surface a startup banner
+   * leave the method undefined.
+   *
+   * Pure function over already-rendered lines (post-`renderToLines`).
+   * Runs on every tick until the first match — keep it cheap.
+   */
+  detectStartupBanner?(lines: string[]): StartupBanner | null;
+}
+
+/**
+ * Return shape for {@link InteractiveAgentStrategy.detectStartupBanner}.
+ * `title` / `subtitle` / `path` populate the typed `agent_banner`
+ * OutputChunk verbatim; `startIdx` / `endIdx` are the inclusive line
+ * indices OutputService strips from the rendered stream so the
+ * banner art doesn't double-emit as text.
+ */
+export interface StartupBanner {
+  title: string;
+  subtitle: string;
+  path: string;
+  startIdx: number;
+  endIdx: number;
 }
 
 // ─── Batch agents (one-shot CLI tools — CodeRabbit, etc.) ───────────

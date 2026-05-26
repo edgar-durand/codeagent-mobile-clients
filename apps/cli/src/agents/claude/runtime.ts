@@ -15,12 +15,13 @@ import * as history from './history';
 import {
   detectListSelector,
   detectSelector,
+  detectStartupBanner as detectClaudeStartupBanner,
   filterChrome,
   isChromeLine,
   parseChromeLine,
 } from './parsing';
 import type { OsStrategy } from '../../os';
-import type { ChangeModelInstruction, RuntimeStrategy } from '../strategy';
+import type { ChangeModelInstruction, RuntimeStrategy, StartupBanner } from '../strategy';
 
 export class ClaudeRuntimeStrategy implements RuntimeStrategy {
   readonly id: AgentId = 'claude';
@@ -127,6 +128,10 @@ export class ClaudeRuntimeStrategy implements RuntimeStrategy {
     // the spinner keeps the PTY pushing bytes — drives the fast
     // finalize path in OutputService.tick().
     return lines.some((l) => /^\?\s.*shortcut/i.test(l.trim()));
+  }
+
+  detectStartupBanner(lines: string[]): StartupBanner | null {
+    return detectClaudeStartupBanner(lines);
   }
 
   credentialLocator() {
