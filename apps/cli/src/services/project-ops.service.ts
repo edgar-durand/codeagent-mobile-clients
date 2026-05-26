@@ -21,7 +21,12 @@ const PROJECT_IGNORE = new Set([
   '__pycache__', '.DS_Store',
 ]);
 
-const MAX_TREE_FILES = 5000;
+// Upper bound on entries returned from `listProjectFiles`. Sized
+// against the api-v2 body-parser limit (10 MB) and the average
+// entry payload (~150 bytes serialised) — 50 000 gives ~7.5 MB
+// worst case, comfortably under the wire cap. Monorepos with 3-4
+// sibling repos under one parent dir routinely exceed 5 000.
+const MAX_TREE_FILES = 50_000;
 const MAX_DIFF_BYTES = 512 * 1024;
 const MAX_GIT_OUTPUT = 256 * 1024;
 
