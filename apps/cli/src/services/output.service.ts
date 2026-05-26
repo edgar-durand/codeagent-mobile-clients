@@ -33,6 +33,16 @@ export class OutputService {
 
   private lastSentContent = '';
   /**
+   * Per-session latch — emits the agent's startup banner as a typed
+   * `agent_banner` chunk exactly once, then strips the banner lines
+   * from every subsequent rendered frame so the ASCII art never
+   * reaches the `text` chunk. Lives at the OutputService level (not
+   * per-turn) because the banner is a session-boot artifact —
+   * pair/re-pair spawns a fresh service so the latch naturally
+   * resets.
+   */
+  private bannerEmitted = false;
+  /**
    * Wall-clock of the most recent tick where the rendered + filtered
    * content actually changed. Most agent TUIs keep redrawing a
    * spinner + input prompt after the response is settled (Claude:
@@ -228,6 +238,40 @@ export class OutputService {
     this.pollTimer = setInterval(() => this.tick(), OutputService.POLL_MS);
   }
 
+  /**
+   * One-shot banner emit + per-tick strip. Runs the per-agent
+   * `detectStartupBanner` (when the strategy exposes one) and, on
+   * first match, fires a typed `agent_banner` OutputChunk to the
+   * backend. On every tick from then on it slices the banner range
+   * out of the rendered line array so the ASCII / box-art body
+   * doesn't leak into a downstream `text` chunk. Agents that don't
+   * implement the detector pass through unchanged.
+   */
+  private handleStartupBanner(lines: string[]): string[] {
+    const detect = this.runtime.detectStartupBanner?.bind(this.runtime);
+    if (!detect) return lines;
+    const banner = detect(lines);
+    if (!banner) return lines;
+    if (!this.bannerEmitted) {
+      this.bannerEmitted = true;
+      this.send(
+        {
+          type: 'agent_banner',
+          agentId: this.runtime.id,
+          title: banner.title,
+          subtitle: banner.subtitle,
+          path: banner.path,
+          done: true,
+        },
+        { critical: true },
+      ).catch(() => {});
+    }
+    return [
+      ...lines.slice(0, banner.startIdx),
+      ...lines.slice(banner.endIdx + 1),
+    ];
+  }
+
   private async send(
     body: Record<string, unknown>,
     opts: { critical?: boolean } = {},
@@ -287,8 +331,9 @@ export class OutputService {
     // Per-agent renderer when the strategy provides one (Codex needs
     // DECSTBM scroll-region support that the shared renderer lacks);
     // otherwise the shared baseline (Claude).
-    const lines = this.runtime.renderToLines?.(this.pty.content)
+    const rendered = this.runtime.renderToLines?.(this.pty.content)
       ?? renderLines(this.pty.content);
+    const lines = this.handleStartupBanner(rendered);
 
     // Emit chrome-step deltas if any new ones surfaced this tick.
     // Route through the per-agent parseTuiChrome so Codex's `•` reply
@@ -392,8 +437,9 @@ export class OutputService {
     // Per-agent renderer when the strategy provides one (Codex needs
     // DECSTBM scroll-region support that the shared renderer lacks);
     // otherwise the shared baseline (Claude).
-    const lines = this.runtime.renderToLines?.(this.pty.content)
+    const rendered = this.runtime.renderToLines?.(this.pty.content)
       ?? renderLines(this.pty.content);
+    const lines = this.handleStartupBanner(rendered);
     const parseLine = this.runtime.parseTuiChrome?.bind(this.runtime) ?? (() => null);
     this.steps.ingest(lines, parseLine);
     const stepsDelta = this.steps.consumeDelta();

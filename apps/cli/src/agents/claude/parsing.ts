@@ -12,6 +12,7 @@
  */
 
 import type { ChromeStep, SelectPrompt } from '@codeagent/shared';
+import type { StartupBanner } from '../strategy';
 
 // ─── filterChrome ──────────────────────────────────────────────────
 
@@ -400,5 +401,77 @@ export function detectListSelector(lines: string[]): SelectPrompt | null {
     options,
     optionDescriptions: options.map(() => ''),
     currentIndex,
+  };
+}
+
+// ─── detectStartupBanner ───────────────────────────────────────────
+
+// Block-art glyphs the Claude Code splash uses. Covers both the legacy
+// 3-line quadrant set (`▐▛█▜▌▝▘`) and the wider v2.x rectangle / shade
+// set the new CLAUDE letterforms ship with.
+const BANNER_ART_RE = /[█▀▄▌▐▝▘▛▜▙▟▖▗▔▕▮▯▰▱▓▒░◆◇]/;
+
+// "Sonnet 4.6 · Claude API", "Opus 4.7 · API Console", "Claude Code"
+// — metadata line that always sits beneath the art row(s).
+const BANNER_META_RE = /(?:Sonnet|Opus|Haiku|Claude)(?:\s|·|-|\(|$)/i;
+
+/**
+ * Detect Claude Code's startup banner in rendered TUI lines. Two
+ * formats are supported because the CLI shipped a major banner rev
+ * mid-v2:
+ *
+ *   1. **Legacy 3-line** — `▐▛███▜▌` / `▝▜███▛▘` / `▘▘ <path>`.
+ *      Title and subtitle live INSIDE the first two art rows.
+ *
+ *   2. **v2.x multi-row** — ≥2 contiguous block-art lines (the
+ *      stylised CLAUDE letterforms) followed by a metadata line
+ *      ("Sonnet 4.6 · Claude API") and a path line. No title is
+ *      embedded in the art so the chunk carries an empty `title`
+ *      and the UI falls back to the agent's product name.
+ *
+ * Returns the parsed banner + the inclusive index range it covers,
+ * so {@link OutputService} can slice it out of the rendered line
+ * array before the chrome filter + text emit. Returns `null` when
+ * no banner is visible in this tick.
+ */
+export function detectStartupBanner(lines: string[]): StartupBanner | null {
+  // ── Legacy 3-line format ─────────────────────────────────────────
+  for (let i = 0; i + 2 < lines.length; i++) {
+    if (!/^▐▛[█]+▜▌/.test(lines[i])) continue;
+    if (!/^▝▜[█]+▛▘/.test(lines[i + 1])) continue;
+    if (!lines[i + 2].includes('▘▘')) continue;
+    return {
+      title: lines[i].replace(/^▐▛[█]+▜▌\s*/, '').trim(),
+      subtitle: lines[i + 1].replace(/^▝▜[█]+▛▘\s*/, '').trim(),
+      path: lines[i + 2].replace(/.*▝▝\s*/, '').trim(),
+      startIdx: i,
+      endIdx: i + 2,
+    };
+  }
+
+  // ── v2.x multi-row format ────────────────────────────────────────
+  // Find a metadata line first; walk up to count contiguous art rows.
+  // Need ≥2 art rows to reject false matches on inline diff glyphs.
+  const metaIdx = lines.findIndex(
+    (l) =>
+      BANNER_META_RE.test(l) &&
+      /(?:Claude|API|Console)/i.test(l) &&
+      !BANNER_ART_RE.test(l),
+  );
+  if (metaIdx === -1) return null;
+
+  let artStart = metaIdx;
+  while (artStart > 0 && BANNER_ART_RE.test(lines[artStart - 1])) artStart--;
+  if (metaIdx - artStart < 2) return null;
+
+  const pathLine = (lines[metaIdx + 1] ?? '').trim();
+  const path = pathLine && !BANNER_ART_RE.test(pathLine) ? pathLine : '';
+
+  return {
+    title: '',
+    subtitle: lines[metaIdx].trim(),
+    path,
+    startIdx: artStart,
+    endIdx: metaIdx + (path ? 1 : 0),
   };
 }
