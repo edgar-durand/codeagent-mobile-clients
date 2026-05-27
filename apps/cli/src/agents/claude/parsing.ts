@@ -436,14 +436,32 @@ const BANNER_META_RE = /(?:Sonnet|Opus|Haiku|Claude)(?:\s|·|-|\(|$)/i;
  */
 export function detectStartupBanner(lines: string[]): StartupBanner | null {
   // ── Legacy 3-line format ─────────────────────────────────────────
+  // The art glyph triple can live anywhere on the line — Claude v2.1.x
+  // renders the same 3-line banner INSIDE a two-column box-drawn
+  // frame ("│  ...  ▐▛███▜▌  ...  │ Tips for getting started"), so
+  // start-of-line anchors silently miss every v2.1.x welcome. The
+  // glyph triple itself is unique enough to avoid false positives
+  // without anchoring.
   for (let i = 0; i + 2 < lines.length; i++) {
-    if (!/^▐▛[█]+▜▌/.test(lines[i])) continue;
-    if (!/^▝▜[█]+▛▘/.test(lines[i + 1])) continue;
+    if (!/▐▛[█]+▜▌/.test(lines[i])) continue;
+    if (!/▝▜[█]+▛▘/.test(lines[i + 1])) continue;
     if (!lines[i + 2].includes('▘▘')) continue;
+    // Title / subtitle / path live OUTSIDE the art lines in v2.1.x —
+    // "Welcome back Edgar!" sits on the row above the art and the
+    // meta/cwd sit below. When the art is indented inside a frame,
+    // the legacy in-art extraction yields empty strings; that's the
+    // signal to the renderer that the surface-side banner card
+    // should fall back to its agent product name. Keep the
+    // in-art extraction for the unframed case (still common when
+    // claude is invoked via headless / sandbox flows without a
+    // top-of-window banner box).
+    const inArtTitle = lines[i].replace(/^▐▛[█]+▜▌\s*/, '').trim();
+    const inArtSubtitle = lines[i + 1].replace(/^▝▜[█]+▛▘\s*/, '').trim();
+    const inArtPath = lines[i + 2].replace(/.*▝▝\s*/, '').trim();
     return {
-      title: lines[i].replace(/^▐▛[█]+▜▌\s*/, '').trim(),
-      subtitle: lines[i + 1].replace(/^▝▜[█]+▛▘\s*/, '').trim(),
-      path: lines[i + 2].replace(/.*▝▝\s*/, '').trim(),
+      title: inArtTitle === lines[i].trim() ? '' : inArtTitle,
+      subtitle: inArtSubtitle === lines[i + 1].trim() ? '' : inArtSubtitle,
+      path: inArtPath === lines[i + 2].trim() ? '' : inArtPath,
       startIdx: i,
       endIdx: i + 2,
     };
