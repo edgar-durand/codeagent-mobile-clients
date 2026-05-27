@@ -4,6 +4,12 @@ All notable changes to the CodeAgent Mobile VS Code extension are documented her
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.23.9] — 2026-05-27
+
+### Added
+
+- **cli:** Auto-link the chosen agent's creds inside codeam pair (#197)
+
 ## [2.23.8] — 2026-05-26
 
 ### Added
