@@ -216,6 +216,29 @@ export async function pairAuto(args: string[]): Promise<void> {
 
   // eslint-disable-next-line no-console
   console.log(`  Paired with ${claimed.user.name} (${claimed.user.plan})`);
+
+  // Auto-login OFF deploy: the bootstrap shell exported
+  // CODEAM_SKIP_AGENT_LAUNCH=true so we pair the session but do NOT
+  // spawn an agent. The user opts in to install one later from the
+  // dashboard's NoAgentHero — that flow SSHes back in and launches
+  // `codeam` from a fresh login shell that does NOT inherit this var,
+  // so start() runs normally there. The saved session row keeps the
+  // claimed agent id, which the install endpoint targets when the
+  // user clicks "Install in this codespace".
+  if (process.env.CODEAM_SKIP_AGENT_LAUNCH === 'true') {
+    capture('pair_auto_skipped_launch', {
+      sessionId: claimed.sessionId,
+      pluginId,
+      agentId: claimed.agent,
+      codespaceName: process.env.CODESPACE_NAME ?? undefined,
+    });
+    // eslint-disable-next-line no-console
+    console.log(
+      '  Skipping agent launch — install an agent from the dashboard to start chatting.',
+    );
+    return;
+  }
+
   // eslint-disable-next-line no-console
   console.log('  Starting agent loop…');
 
