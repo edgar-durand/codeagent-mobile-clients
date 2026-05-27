@@ -92,6 +92,21 @@ export async function start(requestedAgent?: AgentId): Promise<void> {
   };
   const { apply: setKeepAlive } = buildKeepAlive(keepAliveCtx);
 
+  // Default-ON inside a codespace. Earlier the keep-alive only
+  // engaged when the user explicitly flipped the "Avoid suspend"
+  // toggle from the mobile/web Settings modal — so fresh codespaces
+  // inherited GitHub's 30-min idle window and the in-codespace
+  // `codeam` / `claude` processes died on the first long pause,
+  // leaving the dashboard's next `list_files` / `terminal_open`
+  // command stranded against a session whose plugin was gone.
+  // Calling `setKeepAlive(true)` at startup PATCHes
+  // `idle_timeout_minutes=240` (the GitHub max) and re-applies
+  // every 30 min. Outside a codespace the call is a no-op — the
+  // ctx guard inside `buildKeepAlive` short-circuits.
+  if (keepAliveCtx.inCodespace) {
+    setKeepAlive(true);
+  }
+
   const outputSvc = new OutputService(
     session.id,
     pluginId,
