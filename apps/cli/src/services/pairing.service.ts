@@ -158,6 +158,13 @@ export async function postLinkCredential(input: {
    * backwards-compatible across the rollout window.
    */
   agentState?: string;
+  /**
+   * When `true`, the backend does NOT delete the PairedSession
+   * after sealing the credential. Required when called from
+   * `codeam pair` auto-link (the session is the user's real
+   * pairing, not a throwaway). Older backends ignore the key.
+   */
+  preserveSession?: boolean;
 }): Promise<{ ok: true } | { ok: false; status: number; message: string }> {
   const body: Record<string, unknown> = {
     sessionId: input.sessionId,
@@ -170,6 +177,9 @@ export async function postLinkCredential(input: {
   }
   if (input.agentState) {
     body.agentState = input.agentState;
+  }
+  if (input.preserveSession) {
+    body.preserveSession = true;
   }
   try {
     await _transport.postJsonAuthed(
