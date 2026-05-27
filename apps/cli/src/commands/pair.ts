@@ -8,11 +8,12 @@ import {
   showPairingCode,
   formatRemaining,
 } from '../ui/banner';
-import { requestCode, pollStatus } from '../services/pairing.service';
+import { requestCode, pollStatus, postLinkCredential } from '../services/pairing.service';
 import { addSession, loadCliConfig, saveCliConfig } from '../config';
 import { start } from './start';
 import { parseAgentFlag, promptForAgent } from '../utils/agent-prompt';
 import { capture, identifyUser } from '../services/telemetry.service';
+import { createAgentStrategy } from '../agents/registry';
 
 export async function pair(args: string[] = []): Promise<void> {
   const config = loadCliConfig();
@@ -136,6 +137,25 @@ export async function pair(args: string[] = []): Promise<void> {
 
         showSuccess(`Paired with ${info.userName} (${info.plan})`);
         console.log('');
+
+        // Best-effort auto-link: extract the chosen agent's local
+        // credentials + identity state and seal them into the user's
+        // vault in the same step. Removes the need for a separate
+        // `codeam link <agent>` command — pair just works.
+        //
+        // Silent on every failure (no local install, no Keychain
+        // entry, network blip, older backend without the route).
+        // Pair stays green and the user can run `codeam link
+        // <agent>` later if they want to retry.
+        if (info.pluginAuthToken) {
+          void autoLinkAfterPair({
+            agentId,
+            sessionId: info.sessionId,
+            pluginId,
+            pluginAuthToken: info.pluginAuthToken,
+          });
+        }
+
         resolve();
       },
       () => {
@@ -151,4 +171,68 @@ export async function pair(args: string[] = []): Promise<void> {
   });
 
   await start();
+}
+
+/**
+ * Capture the local credentials for the just-paired agent and seal
+ * them into the user's vault. Sibling of `codeam link <agent>` but
+ * inlined into the pair flow so the user never has to think about
+ * a second command. Everything here is best-effort:
+ *
+ *   - No locally-installed agent / no credentials file / no Keychain
+ *     entry → `extract()` returns null, we no-op.
+ *   - Older backend without the route → 404 from postLinkCredential,
+ *     we no-op.
+ *   - Network blip → catch + no-op.
+ *
+ * Pair must not fail because the user hasn't logged into the agent
+ * yet (they can still pair + drive the agent from mobile without a
+ * vaulted credential — the LinkedAgent is only required for
+ * codespace Auto-login and `@codeagent` mentions).
+ *
+ * `preserveSession: true` tells the backend to keep the
+ * PairedSession that pair just created — the standalone `codeam
+ * link <agent>` flow deletes a throwaway session here, which would
+ * kick the user off the device they just paired.
+ */
+async function autoLinkAfterPair(opts: {
+  agentId: ReturnType<typeof parseAgentFlag>;
+  sessionId: string;
+  pluginId: string;
+  pluginAuthToken: string;
+}): Promise<void> {
+  if (!opts.agentId) return;
+  try {
+    const strategy = createAgentStrategy(opts.agentId);
+    const locator = strategy.credentialLocator();
+    const token = await locator.extract();
+    if (!token) {
+      capture('pair_auto_link_skipped', { agentId: opts.agentId, reason: 'no_local_creds' });
+      return;
+    }
+    const res = await postLinkCredential({
+      agentId: locator.publicId,
+      sessionId: opts.sessionId,
+      pluginId: opts.pluginId,
+      pluginAuthToken: opts.pluginAuthToken,
+      method: token.method,
+      credential: token.credential,
+      agentState: token.agentState,
+      preserveSession: true,
+    });
+    if (res.ok) {
+      capture('pair_auto_link_succeeded', {
+        agentId: opts.agentId,
+        source: token.source,
+        hasState: Boolean(token.agentState),
+      });
+    } else {
+      capture('pair_auto_link_failed', { agentId: opts.agentId, status: res.status });
+    }
+  } catch (err) {
+    capture('pair_auto_link_threw', {
+      agentId: opts.agentId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
 }
