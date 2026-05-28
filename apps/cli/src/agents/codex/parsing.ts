@@ -434,74 +434,133 @@ export function parseCodexChrome(_line: string): ChromeStep | null {
   return null;
 }
 
+// ─── selector regexes (named for readability + reuse) ────────────────────
+//
+// Codex renders both legacy `>` and the curly-quote `›` (U+203A) as the
+// cursor glyph depending on terminal font / Codex build. Treat them
+// identically.
+//
+// Numbered option line: optional cursor prefix, then `<digit>.<space><text>`.
+//   matches: "› 1. Yes, continue"
+//   matches: "  2. No, quit"
+//   matches: "> 1. Yes, proceed (y)"
+const CODEX_OPTION_RE = /^\s*([>›]\s+)?(\d+)\.\s+(.+)/;
+// Same regex but anchored to the START of a STRIPPED line — used by the
+// "is the first non-empty post-question line a numbered option?" check.
+const CODEX_OPTION_START_RE = /^\s*(?:[>›]\s+)?\d+\.\s/;
+// Footer phrases Codex emits below an interactive selector. None of these
+// alone is a strong signal — but their presence reinforces the structural
+// detection below.
+const CODEX_FOOTER_RE = /\bpress\s+enter\s+to\s+(?:confirm|continue|select)\b/i;
+
 /**
- * Detect Codex's numbered-choice prompt (e.g. the "Would you like to run
- * the following command?" shell-approval flow). Codex renders it as:
+ * Detect Codex's numbered-choice prompt. Examples of supported shapes:
  *
- *   Would you like to run the following command?
+ *   Trust-directory dialog (no cursor on `>` rendering, uses `›`):
+ *     Do you trust the contents of this directory? …
+ *     › 1. Yes, continue
+ *       2. No, quit
+ *     Press enter to continue
  *
- *   Reason: …
+ *   Shell-approval flow (cursor on first option, ASCII `>`):
+ *     Would you like to run the following command?
+ *     > 1. Yes, proceed (y)
+ *       2. Yes, and don't ask again for commands that start with `…` (p)
+ *       3. No, and tell Codex what to do differently (esc)
+ *     Press enter to confirm or esc to cancel
  *
- *   $ npm run build:check
+ *   Generic numbered choice:
+ *     What should I do next?
+ *     1. Run the tests
+ *     2. Open a PR
  *
- *   > 1. Yes, proceed (y)
- *     2. Yes, and don't ask again for commands that start with `…` (p)
- *     3. No, and tell Codex what to do differently (esc)
+ * Detection strategy (most-to-least specific):
  *
- *   Press enter to confirm or esc to cancel
+ *   1. STRUCTURAL: at least 2 contiguous numbered lines, starting at
+ *      `1.`. This is the load-bearing signal — narrative numbered lists
+ *      Codex emits inside plans show up the same way at the text level,
+ *      so we lean on context to disambiguate (see #2 + #3).
+ *   2. CONTEXTUAL: AT LEAST ONE of these reinforcers must be present:
+ *        a. A cursor glyph (`>` or `›`) at the start of one of the
+ *           numbered lines — this is what React Ink renders to show
+ *           which option is currently selected, and it NEVER appears
+ *           on narrative numbered lists.
+ *        b. A question-mark-terminated line preceding the options
+ *           AND at least one of the standard "press enter to …"
+ *           footers below them. The `?` + footer combo together
+ *           reach a high-confidence threshold even in the no-cursor
+ *           case (terminal font ate the glyph, PTY rendering pass
+ *           lost it, etc.).
+ *      This split keeps the detector permissive enough to catch the
+ *      trust-directory + similar dialogs while still rejecting
+ *      mid-plan numbered lists.
+ *   3. The first numbered option must be `1.` and there must be ≥2
+ *      consecutive options. Plans that start at e.g. `3.` are
+ *      ignored.
  *
- * The cursored option carries a leading `>` (Codex uses ASCII `>`, not
- * Claude's `❯` glyph). The "Press enter to confirm or esc to cancel"
- * trailer is the strongest disambiguator from narrative numbered lists
- * (which Codex emits often inside plans).
- *
- * Note: only emits a selector if the trailer is present. Codex also
- * uses numbered lists inside ordinary agent replies (e.g. "Plan: 1. … 2.
- * … 3. …") — without the trailer we treat those as plain text, matching
- * the user's intent of tapping a button only when one is actually
- * actionable.
+ * Rationale for moving away from "footer is required":
+ *   The previous detector required `press enter to confirm` literally.
+ *   That missed the trust-directory dialog (which says `press enter to
+ *   continue`) and was brittle against any future Codex copy change.
+ *   The structural cursor signal is what React Ink ALWAYS renders for
+ *   an interactive selector, and it's what truly distinguishes a
+ *   selector from a plain numbered list.
  */
 export function detectCodexSelector(lines: string[]): SelectPrompt | null {
-  // Strong disambiguator: Codex consistently emits this footer for
-  // shell-approval and similar choice prompts. Absent the footer, any
-  // numbered lines are narrative content, not interactive options.
-  const hasConfirmTrailer = lines.some(l =>
-    /press\s+enter\s+to\s+confirm/i.test(l),
-  );
-  if (!hasConfirmTrailer) return null;
+  // Idle composer guard: when Codex is sitting at its input box
+  // (no active prompt), the LAST non-empty line is the user
+  // composer — typically a single `›` glyph on a line of its own
+  // (the React Ink input cursor), or the `▌` block-cursor variant.
+  // If that's visible, any numbered list above is narrative
+  // content from a prior agent reply, NOT an interactive
+  // selector. Codex hides the composer entirely while a real
+  // prompt is awaiting input.
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const t = lines[i].trim();
+    if (!t) continue;
+    // A bare cursor / block-cursor on its own line means the
+    // composer is visible.
+    if (/^[›>]\s*$/.test(t) || /^▌\s*$/.test(t)) return null;
+    // Hint footer Codex prints at the bottom of the idle
+    // composer ("send: ⏎"). Same signal — composer is up.
+    if (/^send:\s*⏎|^esc to interrupt/i.test(t)) return null;
+    break; // last non-empty line is something else — proceed
+  }
 
+  // 1. Locate the first numbered-option line.
   let optionStartIdx = -1;
   for (let i = 0; i < lines.length; i++) {
-    if (/^\s*(?:>\s+)?\d+\.\s/.test(lines[i])) {
+    if (CODEX_OPTION_START_RE.test(lines[i])) {
       optionStartIdx = i;
       break;
     }
   }
   if (optionStartIdx === -1) return null;
 
-  // Question: every non-empty line before the first option, excluding
-  // bare cursor lines (defensive — Codex shouldn't emit them above the
-  // options, but if a future build does we don't want them in the
-  // question text).
-  const questionParts: string[] = [];
-  for (let i = 0; i < optionStartIdx; i++) {
-    const t = lines[i].trim();
-    if (!t) continue;
-    if (/^[>›]\s*$/.test(t)) continue;
-    questionParts.push(t);
-  }
-  const question = questionParts.join('\n').trim();
-
+  // 2. Collect contiguous numbered options after that line. Stop at a
+  //    footer or an unrelated line (lets us treat e.g. an inline plan
+  //    snippet at the bottom of an agent reply correctly).
   const optionLabels = new Map<number, string>();
   let cursorIndex = 0;
   let hasCursor = false;
+  let footerAfterOptions = false;
+  let lastOptionLineIdx = optionStartIdx;
 
   for (let i = optionStartIdx; i < lines.length; i++) {
-    const t = lines[i].trim();
+    const raw = lines[i];
+    const t = raw.trim();
     if (!t) continue;
-    if (/^press\s+enter\s+to\s+confirm/i.test(t)) break;
-    const m = t.match(/^(>\s+)?(\d+)\.\s+(.+)/);
-    if (!m) continue;
+    if (CODEX_FOOTER_RE.test(t)) {
+      footerAfterOptions = true;
+      break;
+    }
+    const m = t.match(CODEX_OPTION_RE);
+    if (!m) {
+      // Non-option, non-footer line. Tolerate one short line (option
+      // descriptions can wrap), but don't keep scanning forever.
+      if (i - lastOptionLineIdx > 2) break;
+      continue;
+    }
     const num = parseInt(m[2], 10);
     if (!optionLabels.has(num)) {
       optionLabels.set(num, m[3].trim());
@@ -510,10 +569,34 @@ export function detectCodexSelector(lines: string[]): SelectPrompt | null {
         hasCursor = true;
       }
     }
+    lastOptionLineIdx = i;
   }
 
   const keys = [...optionLabels.keys()].sort((a, b) => a - b);
+  // Structural baseline: ≥2 options, starting at 1.
   if (keys.length < 2 || keys[0] !== 1) return null;
+
+  // 3. Build the question text from the lines above the options.
+  const questionParts: string[] = [];
+  for (let i = 0; i < optionStartIdx; i++) {
+    const t = lines[i].trim();
+    if (!t) continue;
+    // Bare cursor line (defensive); user-prompt echo line `› hola`
+    // (matches when the optionStart is several lines below — keep the
+    // strict "trim must equal '›'" so we don't drop legit prefixed
+    // question text).
+    if (/^[>›]\s*$/.test(t)) continue;
+    questionParts.push(t);
+  }
+  const question = questionParts.join('\n').trim();
+
+  // 4. Reinforcer check — see the JSDoc above. Either the cursor was
+  //    visible on one of the options, OR the question ends with `?`
+  //    AND a footer line followed.
+  const questionEndsWithQuery = /\?\s*$/.test(question);
+  if (!hasCursor && !(questionEndsWithQuery && footerAfterOptions)) {
+    return null;
+  }
 
   return {
     question,
