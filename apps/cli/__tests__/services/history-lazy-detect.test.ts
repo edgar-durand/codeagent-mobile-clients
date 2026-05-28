@@ -99,6 +99,16 @@ describe('HistoryService — lazy detect on uploadDelta', () => {
     expect(svc.getCurrentConversationId()).toBeNull();
   });
 
+  // Bumped from the default 5 s because `uploadDelta` calls the
+  // private `post()` helper which uses raw `https.request` with a
+  // 15 s socket timeout. The test's `vi.fn(global.fetch)` mock
+  // doesn't intercept raw https calls — so on CI runners where
+  // DNS or network is slow, the post hangs until the 15 s socket
+  // timeout fires. The assertion we care about (`currentConversationId`
+  // becomes set) happens BEFORE the post returns, so we don't
+  // depend on the post completing successfully — we just need to
+  // give the post enough budget to complete or time out. 20 s
+  // covers the helper's 15 s socket timeout + slack.
   it('uploadDelta lazy-detects a JSONL that landed AFTER construction', async () => {
     const svc = new HistoryService(makeTestRuntime(cwd), 'plg-1', cwd);
     expect(svc.getCurrentConversationId()).toBeNull();
@@ -138,7 +148,7 @@ describe('HistoryService — lazy detect on uploadDelta', () => {
     }
 
     expect(svc.getCurrentConversationId()).toBe(uuid);
-  });
+  }, 20_000);
 
   it('uploadDelta ignores a JSONL that existed BEFORE the CLI started (parallel Claude session in the same project dir)', async () => {
     // Repro for: user runs `codeam pair` in a project where a
