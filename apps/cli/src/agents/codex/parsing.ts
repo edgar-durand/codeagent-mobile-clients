@@ -507,25 +507,13 @@ const CODEX_FOOTER_RE = /\bpress\s+enter\s+to\s+(?:confirm|continue|select)\b/i;
  *   selector from a plain numbered list.
  */
 export function detectCodexSelector(lines: string[]): SelectPrompt | null {
-  // Idle composer guard: when Codex is sitting at its input box
-  // (no active prompt), the LAST non-empty line is the user
-  // composer — typically a single `›` glyph on a line of its own
-  // (the React Ink input cursor), or the `▌` block-cursor variant.
-  // If that's visible, any numbered list above is narrative
-  // content from a prior agent reply, NOT an interactive
-  // selector. Codex hides the composer entirely while a real
-  // prompt is awaiting input.
-  for (let i = lines.length - 1; i >= 0; i--) {
-    const t = lines[i].trim();
-    if (!t) continue;
-    // A bare cursor / block-cursor on its own line means the
-    // composer is visible.
-    if (/^[›>]\s*$/.test(t) || /^▌\s*$/.test(t)) return null;
-    // Hint footer Codex prints at the bottom of the idle
-    // composer ("send: ⏎"). Same signal — composer is up.
-    if (/^send:\s*⏎|^esc to interrupt/i.test(t)) return null;
-    break; // last non-empty line is something else — proceed
-  }
+  // Note: we deliberately do NOT use the input-box composer as
+  // a "selector inactive" signal anymore. Codex's TUI keeps the
+  // bottom box rendered (`│ › │`) EVEN while a selector is
+  // pending — different from Claude's React Ink, which hides
+  // its composer during prompts. Anchoring on the structural
+  // cursor + numbered options is what reliably distinguishes a
+  // selector from a narrative numbered list inside Codex.
 
   // 1. Locate the first numbered-option line.
   let optionStartIdx = -1;

@@ -215,11 +215,14 @@ describe('codex/parsing detectCodexSelector', () => {
     expect(sel?.currentIndex).toBe(0);
   });
 
-  it('rejects a narrative numbered list with question mark when the composer is visible (no selector)', () => {
-    // User asked a question, agent replied with a numbered list,
-    // and the input composer (`›` on its own line) is the LAST
-    // visible thing. That means Codex is idle — there's no
-    // active prompt to answer.
+  it('rejects a narrative numbered list with no cursor and no footer even when a composer line follows', () => {
+    // Narrative numbered list in a regular agent reply.
+    // The detector key signals (cursor on a numbered line, or
+    // `?` + "press enter to ..." footer) are absent — composer
+    // visibility doesn't matter because Codex's TUI ALWAYS
+    // keeps the bottom input box rendered, including during
+    // active selectors. Anchoring on cursor / footer is what
+    // distinguishes the cases.
     const lines = [
       'What should I do next?',
       '1. Run the tests',
@@ -227,6 +230,27 @@ describe('codex/parsing detectCodexSelector', () => {
       '›',
     ];
     expect(detectCodexSelector(lines)).toBeNull();
+  });
+
+  it('detects a selector even when Codex composer line is visible below the options (real-prod shape)', () => {
+    // Confirmed empirically against the trust-directory dialog
+    // on 2026-05-28: Codex's TUI keeps `│ › │` rendered at the
+    // bottom of the screen even while waiting for the user to
+    // pick a trust option. The detector MUST treat that as
+    // normal (not a "composer-is-idle → no selector" signal).
+    const lines = [
+      'Do you trust the contents of this directory?',
+      '› 1. Yes, continue',
+      '  2. No, quit',
+      'Press enter to continue',
+      '╭──────────────────╮',
+      '│ › │',
+      '╰──────────────────╯',
+    ];
+    const sel = detectCodexSelector(lines);
+    expect(sel).not.toBeNull();
+    expect(sel?.options).toEqual(['Yes, continue', 'No, quit']);
+    expect(sel?.currentIndex).toBe(0);
   });
 
   it('rejects narrative numbered lists with neither cursor nor footer', () => {

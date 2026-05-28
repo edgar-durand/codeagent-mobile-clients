@@ -135,6 +135,56 @@ jobs:
         with:
           name: cli-tgz
           path: apps/cli/codeam-cli-${{ needs.setup.outputs.version }}.tgz
+
+  trigger-api-integration:
+    # Cross-repo regression gate: as soon as codeam-cli@<version>
+    # is live on npm, dispatch the api-v2-integration workflow in
+    # `codeagent-mobile` so its docker-e2e installs THIS exact
+    # version inside the surrogate container and runs the full
+    # api ↔ CLI integration suite. Without this, CLI tag pushes
+    # never exercised the e2e — verified empirically when v2.23.13
+    # / .14 / .15 each shipped api ↔ CLI breakage that nobody
+    # caught until prod traffic surfaced it.
+    #
+    # `repository_dispatch` is the right tool here (`gh workflow
+    # run` would need a PAT with `actions:write` on the cross-repo;
+    # the dispatch event accepts a `client_payload` and works with
+    # the same `repo` scope on the target's secret).
+    #
+    # Non-blocking by design: this job uses `if: success()` on
+    # `publish-cli` but doesn't block the release flow's `release`
+    # finalisation. A failed e2e shows up as a red dispatch run on
+    # the api-v2 side and notifies the maintainer; we don't
+    # un-publish the npm tag retroactively. The "fail loud" is the
+    # GitHub UI surfacing the integration run as a Check.
+    name: Trigger api-v2 integration tests
+    needs: [setup, publish-cli]
+    runs-on: ubuntu-latest
+    if: ${{ needs.setup.outputs.is_prerelease != 'true' }}
+    permissions:
+      contents: read
+    steps:
+      - name: Dispatch api-v2-integration
+        env:
+          # Same PAT the JetBrains job uses for cross-repo / cross-
+          # marketplace pushes. Needs `repo` scope on
+          # codeagent-mobile (private repo cannot accept a bare
+          # `GITHUB_TOKEN` from this workflow).
+          DISPATCH_TOKEN: ${{ secrets.CROSS_REPO_DISPATCH_TOKEN }}
+          VERSION: ${{ needs.setup.outputs.version }}
+        run: |
+          if [ -z "$DISPATCH_TOKEN" ]; then
+            echo "::warning::CROSS_REPO_DISPATCH_TOKEN not set — skipping api-v2-integration trigger. Add the PAT (repo scope on codeagent-mobile) to enable the regression gate."
+            exit 0
+          fi
+          curl -fsSL \
+            -X POST \
+            -H "Authorization: Bearer $DISPATCH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            https://api.github.com/repos/edgar-durand/codeagent-mobile/dispatches \
+            -d "{\"event_type\":\"cli-released\",\"client_payload\":{\"cliVersion\":\"$VERSION\"}}"
+          echo "::notice::Dispatched api-v2-integration for codeam-cli@$VERSION"
           if-no-files-found: error
 
   publish-vsc:
