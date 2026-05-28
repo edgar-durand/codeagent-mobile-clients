@@ -298,34 +298,41 @@ jobs:
         continue-on-error: true
 
       - name: Validate JetBrains Marketplace token before publish
-        # Tokens issued without the `Marketplace` scope (or expired
-        # ones that look syntactically valid) fail mid-publish with
-        # an unhelpful "Marketplace service scope is missing" error
-        # AFTER gradle has already burned ~2 min building the
-        # plugin. Pre-flight against `/api/auth/me` so we fail fast
-        # with an actionable message naming the exact remediation
-        # (regenerate the token on plugins.jetbrains.com with
-        # Marketplace scope checked).
+        # Tokens generated at the WRONG location (personal
+        # `/author/me/tokens` rather than the vendor's
+        # `/author/<vendor>/tokens`) fail mid-publish with an unhelpful
+        # "Marketplace service scope is missing" error AFTER gradle
+        # has already burned ~2 min building the plugin. Pre-flight
+        # against `/api/users/me` so we fail fast with the exact
+        # remediation surfaced from JetBrains' own response body.
+        #
+        # Two bugs in the prior preflight (fixed here):
+        #   1. URL was `/api/auth/me` which doesn't exist on
+        #      plugins.jetbrains.com → curl returned 404 even for
+        #      valid tokens. The marketplace user endpoint is
+        #      `/api/users/me`.
+        #   2. `-fsS` (fail on HTTP 4xx) combined with `-w '%{http_code}'`
+        #      AND `|| echo "000"` concatenated both writers to STDOUT
+        #      on any 4xx response — the captured `STATUS` came out as
+        #      `404000` (real status code + fallback) instead of `404`.
+        #      Drop `-f`: curl writes the body even on 4xx, `-w` writes
+        #      the actual status, and `|| echo "000"` only fires when
+        #      curl ITSELF fails (network error / DNS / cert).
         env:
           PUBLISH_TOKEN: ${{ secrets.JETBRAINS_MARKETPLACE_TOKEN }}
         run: |
           if [ -z "$PUBLISH_TOKEN" ]; then
-            echo "::error::JETBRAINS_MARKETPLACE_TOKEN is not set. Add a PAT from https://plugins.jetbrains.com/author/me/tokens (Marketplace scope required) and re-run."
+            echo "::error::JETBRAINS_MARKETPLACE_TOKEN is not set. Generate one from the CodeAgent-Mobile vendor's tokens page (Vendors → CodeAgent-Mobile → Tokens — NOT the personal /author/me/tokens page, those lack Marketplace scope)."
             exit 1
           fi
-          STATUS=$(curl -fsS -o /tmp/jb_auth.json -w '%{http_code}' \
+          STATUS=$(curl -sS -o /tmp/jb_auth.json -w '%{http_code}' \
             -H "Authorization: Bearer $PUBLISH_TOKEN" \
-            https://plugins.jetbrains.com/api/auth/me \
+            https://plugins.jetbrains.com/api/users/me \
             || echo "000")
           if [ "$STATUS" != "200" ]; then
-            echo "::error::JetBrains Marketplace token auth failed (HTTP $STATUS). Regenerate at https://plugins.jetbrains.com/author/me/tokens with the Marketplace scope checked and update the JETBRAINS_MARKETPLACE_TOKEN secret."
-            cat /tmp/jb_auth.json 2>/dev/null || true
+            BODY=$(cat /tmp/jb_auth.json 2>/dev/null || echo '')
+            echo "::error::JetBrains Marketplace token auth failed (HTTP $STATUS). Body: ${BODY}. The 'Marketplace service scope is missing' message means the token was created on the user's personal tokens page; publishing needs a token from the vendor's tokens page (Vendors → CodeAgent-Mobile → Tokens). Update the JETBRAINS_MARKETPLACE_TOKEN secret with the new vendor-scoped token."
             exit 1
-          fi
-          # Defensive scope check: the marketplace returns the token's
-          # scope list; bail early if `marketplace` isn't present.
-          if ! grep -qE '"scope"\s*:\s*\[[^]]*"marketplace"' /tmp/jb_auth.json 2>/dev/null; then
-            echo "::warning::Token did not surface a Marketplace scope in the /me response — publishPlugin may still fail. Verify scopes at https://plugins.jetbrains.com/author/me/tokens"
           fi
 
       - name: Publish JetBrains plugin to Marketplace
