@@ -179,6 +179,92 @@ describe('codex/parsing detectCodexSelector', () => {
     ];
     expect(detectCodexSelector(lines)).toBeNull();
   });
+
+  // ── Regression coverage for the 2026-05-28 trust-directory miss.
+  //    Pre-fix the detector required `Press enter to confirm` literally
+  //    and rejected this dialog. New version recognises the structural
+  //    signal (cursor + 2 numbered options at 1..N) plus the
+  //    `continue` footer.
+  it('detects the trust-directory dialog (cursor `›`, "Press enter to continue" footer)', () => {
+    const lines = [
+      'Do you trust the contents of this directory? Working with untrusted contents comes with higher risk of prompt injection. Trusting the directory allows project-local config, hooks, and exec policies to load.',
+      '› 1. Yes, continue',
+      '  2. No, quit',
+      'Press enter to continue',
+    ];
+    const sel = detectCodexSelector(lines);
+    expect(sel).not.toBeNull();
+    expect(sel?.question).toContain('Do you trust the contents of this directory?');
+    expect(sel?.options).toEqual(['Yes, continue', 'No, quit']);
+    expect(sel?.currentIndex).toBe(0);
+  });
+
+  it('accepts a `›` cursor without ANY footer when the structural cursor signal is unambiguous', () => {
+    // Some Codex builds drop the footer when the dialog is
+    // mid-render. The cursor on a numbered option is the only
+    // signal that distinguishes a selector from a narrative
+    // numbered list; if it's present, we trust it.
+    const lines = [
+      'Pick an option:',
+      '› 1. Alpha',
+      '  2. Beta',
+    ];
+    const sel = detectCodexSelector(lines);
+    expect(sel).not.toBeNull();
+    expect(sel?.options).toEqual(['Alpha', 'Beta']);
+    expect(sel?.currentIndex).toBe(0);
+  });
+
+  it('rejects a narrative numbered list with question mark when the composer is visible (no selector)', () => {
+    // User asked a question, agent replied with a numbered list,
+    // and the input composer (`›` on its own line) is the LAST
+    // visible thing. That means Codex is idle — there's no
+    // active prompt to answer.
+    const lines = [
+      'What should I do next?',
+      '1. Run the tests',
+      '2. Open a PR',
+      '›',
+    ];
+    expect(detectCodexSelector(lines)).toBeNull();
+  });
+
+  it('rejects narrative numbered lists with neither cursor nor footer', () => {
+    // Pure plan content from an agent reply. No cursor, no
+    // footer — the detector must not turn this into clickable
+    // buttons.
+    const lines = [
+      'Here is my plan:',
+      '1. Reproduce locally',
+      '2. Add a failing test',
+      '3. Implement the fix',
+    ];
+    expect(detectCodexSelector(lines)).toBeNull();
+  });
+
+  it('detects a footer-less selector via the question + cursor combo on legacy `>` builds', () => {
+    // Older Codex builds use ASCII `>`. The structural signal
+    // (cursor on a numbered option) is the same.
+    const lines = [
+      'Continue?',
+      '> 1. Yes',
+      '  2. No',
+    ];
+    const sel = detectCodexSelector(lines);
+    expect(sel).not.toBeNull();
+    expect(sel?.options).toEqual(['Yes', 'No']);
+  });
+
+  it('accepts the cursor variant `›` (U+203A) the same as ASCII `>`', () => {
+    const lines = [
+      'Which one?',
+      '› 1. Option A',
+      '  2. Option B',
+    ];
+    const sel = detectCodexSelector(lines);
+    expect(sel).not.toBeNull();
+    expect(sel?.currentIndex).toBe(0);
+  });
 });
 
 describe('codex/parsing filterCodexChrome — selector-cursor preservation', () => {
