@@ -86,6 +86,25 @@ export class CommandRelayService {
      * forgot to pass one.
      */
     private readonly agentMeta: AgentMetadata,
+    /**
+     * When set, `reportAgents` posts THIS list to
+     * `/api/plugin/agents` instead of the single-entry default
+     * derived from `agentMeta`. Used by the infra-only / no-agent
+     * codespace path (`codeam pair-auto` with
+     * `CODEAM_SKIP_AGENT_LAUNCH=true`): the CLI is alive +
+     * heartbeating so the session card shows online and the
+     * dashboard's `SessionPage` exits its "Loading session…"
+     * gate, but no agent process is running so the agents list
+     * MUST be empty — otherwise the dashboard renders a chat
+     * surface for an agent that isn't actually there and the
+     * user can't reach the NoAgentHero install CTA.
+     */
+    private readonly agentsOverride?: ReadonlyArray<{
+      id: string;
+      name: string;
+      icon: string;
+      installed: boolean;
+    }>,
   ) {}
 
   start(): void {
@@ -387,16 +406,19 @@ export class CommandRelayService {
     // logo map by the agent id, so send the id as the icon key. The
     // emoji that used to ship here was only ever rendered by the
     // landing fallback path and never surfaced to the user.
+    const agents = this.agentsOverride
+      ? [...this.agentsOverride]
+      : [
+          {
+            id: this.agentMeta.id,
+            name: this.agentMeta.displayName,
+            icon: this.agentMeta.id,
+            installed: true,
+          },
+        ];
     _postJson(`${API_BASE}/api/plugin/agents`, {
       pluginId: this.pluginId,
-      agents: [
-        {
-          id: this.agentMeta.id,
-          name: this.agentMeta.displayName,
-          icon: this.agentMeta.id,
-          installed: true,
-        },
-      ],
+      agents,
     })
       .then(() => { this.agentsRegistered = true; })
       .catch(() => { /* retry via agentsTimer */ });

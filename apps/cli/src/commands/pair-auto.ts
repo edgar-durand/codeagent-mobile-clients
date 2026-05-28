@@ -1,11 +1,12 @@
 import * as fs from 'fs';
 import * as os from 'os';
 import { randomUUID } from 'crypto';
-import { resolveApiBaseUrl, isKnownAgentId } from '@codeagent/shared';
+import { resolveApiBaseUrl, isKnownAgentId, AGENT_REGISTRY } from '@codeagent/shared';
 import { addSession, loadCliConfig } from '../config';
 import { capture, identifyUser } from '../services/telemetry.service';
 import { vercelBypassHeader } from '../lib/backend-headers';
 import { detectCurrentBranch } from '../lib/git-branch';
+import { CommandRelayService } from '../services/command-relay.service';
 import { start } from './start';
 
 /**
@@ -236,6 +237,52 @@ export async function pairAuto(args: string[]): Promise<void> {
     console.log(
       '  Skipping agent launch — install an agent from the dashboard to start chatting.',
     );
+
+    // Stay alive in heartbeat-only mode. Without this, pair-auto
+    // exits cleanly after the claim and the api never sees the
+    // plugin come online → the session card on the dashboard sits
+    // at "OFFLINE" forever, and `SessionPage` gets stuck at
+    // "Loading session…" waiting for `sessionOnline=true` from
+    // the per-user SSE bus. Both regressed visibly on the
+    // infra-only deploy path until this mode was added.
+    //
+    // The relay reports an EMPTY agents list so the dashboard
+    // detects `sessionVariant === 'no-agent'` and renders the
+    // NoAgentHero install CTA instead of a chat surface for an
+    // agent that isn't running. All incoming commands are dropped
+    // — once the user installs an agent via the hero, the install
+    // endpoint SSHes back in and launches `codeam` from a fresh
+    // shell that doesn't inherit `CODEAM_SKIP_AGENT_LAUNCH`, so
+    // `start()` takes over from there with the full agent loop.
+    //
+    // Process termination: SIGINT / SIGTERM exit cleanly (the
+    // codespace's tear-down path uses one of these). No PTY, no
+    // file watcher, nothing else to drain.
+    const heartbeatRelay = new CommandRelayService(
+      pluginId,
+      async () => {
+        // No agent → drop everything. The CLI is just a heartbeat
+        // beacon until the user installs an agent.
+      },
+      AGENT_REGISTRY[claimed.agent],
+      [], // empty agents list
+    );
+    heartbeatRelay.start();
+
+    const sigHandler = (): void => {
+      heartbeatRelay.stop();
+      process.exit(0);
+    };
+    process.once('SIGINT', sigHandler);
+    process.once('SIGTERM', sigHandler);
+    process.once('SIGHUP', sigHandler);
+
+    // Block forever — the heartbeat timer keeps the event loop
+    // alive; we just need to not return so the bootstrap shell's
+    // `disown` keeps this child running.
+    await new Promise<void>(() => {
+      /* never resolves; SIGINT/SIGTERM above is the only exit */
+    });
     return;
   }
 
