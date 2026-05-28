@@ -1,13 +1,13 @@
 import * as fs from 'fs';
 import * as os from 'os';
 import { randomUUID } from 'crypto';
-import { resolveApiBaseUrl, isKnownAgentId, AGENT_REGISTRY } from '@codeagent/shared';
+import { resolveApiBaseUrl, isKnownAgentId } from '@codeagent/shared';
 import { addSession, loadCliConfig } from '../config';
 import { capture, identifyUser } from '../services/telemetry.service';
 import { vercelBypassHeader } from '../lib/backend-headers';
 import { detectCurrentBranch } from '../lib/git-branch';
-import { CommandRelayService } from '../services/command-relay.service';
 import { start } from './start';
+import { startInfraOnly } from './start-infra-only';
 
 /**
  * `codeam pair-auto` — non-interactive pair, used INSIDE a freshly-
@@ -219,13 +219,20 @@ export async function pairAuto(args: string[]): Promise<void> {
   console.log(`  Paired with ${claimed.user.name} (${claimed.user.plan})`);
 
   // Auto-login OFF deploy: the bootstrap shell exported
-  // CODEAM_SKIP_AGENT_LAUNCH=true so we pair the session but do NOT
-  // spawn an agent. The user opts in to install one later from the
-  // dashboard's NoAgentHero — that flow SSHes back in and launches
-  // `codeam` from a fresh login shell that does NOT inherit this var,
-  // so start() runs normally there. The saved session row keeps the
-  // claimed agent id, which the install endpoint targets when the
-  // user clicks "Install in this codespace".
+  // CODEAM_SKIP_AGENT_LAUNCH=true so we pair the session and run
+  // the infra-only loop — same wiring as `start()` (heartbeat +
+  // file watcher + IDE terminal handlers + IDE-safe command
+  // dispatch) MINUS the agent spawn. The dashboard's Files /
+  // terminal / git surfaces all work; only chat-style
+  // `start_task` / `provide_input` / etc. are dropped (no agent
+  // to forward them to). The relay reports an EMPTY agents list
+  // so the dashboard detects `sessionVariant === 'no-agent'` and
+  // renders the NoAgentHero install CTA.
+  //
+  // The user later installs an agent via the hero — that flow
+  // SSHes back in and launches `codeam` from a fresh login shell
+  // that doesn't inherit `CODEAM_SKIP_AGENT_LAUNCH`, so `start()`
+  // takes over there with the full agent loop.
   if (process.env.CODEAM_SKIP_AGENT_LAUNCH === 'true') {
     capture('pair_auto_skipped_launch', {
       sessionId: claimed.sessionId,
@@ -237,52 +244,7 @@ export async function pairAuto(args: string[]): Promise<void> {
     console.log(
       '  Skipping agent launch — install an agent from the dashboard to start chatting.',
     );
-
-    // Stay alive in heartbeat-only mode. Without this, pair-auto
-    // exits cleanly after the claim and the api never sees the
-    // plugin come online → the session card on the dashboard sits
-    // at "OFFLINE" forever, and `SessionPage` gets stuck at
-    // "Loading session…" waiting for `sessionOnline=true` from
-    // the per-user SSE bus. Both regressed visibly on the
-    // infra-only deploy path until this mode was added.
-    //
-    // The relay reports an EMPTY agents list so the dashboard
-    // detects `sessionVariant === 'no-agent'` and renders the
-    // NoAgentHero install CTA instead of a chat surface for an
-    // agent that isn't running. All incoming commands are dropped
-    // — once the user installs an agent via the hero, the install
-    // endpoint SSHes back in and launches `codeam` from a fresh
-    // shell that doesn't inherit `CODEAM_SKIP_AGENT_LAUNCH`, so
-    // `start()` takes over from there with the full agent loop.
-    //
-    // Process termination: SIGINT / SIGTERM exit cleanly (the
-    // codespace's tear-down path uses one of these). No PTY, no
-    // file watcher, nothing else to drain.
-    const heartbeatRelay = new CommandRelayService(
-      pluginId,
-      async () => {
-        // No agent → drop everything. The CLI is just a heartbeat
-        // beacon until the user installs an agent.
-      },
-      AGENT_REGISTRY[claimed.agent],
-      [], // empty agents list
-    );
-    heartbeatRelay.start();
-
-    const sigHandler = (): void => {
-      heartbeatRelay.stop();
-      process.exit(0);
-    };
-    process.once('SIGINT', sigHandler);
-    process.once('SIGTERM', sigHandler);
-    process.once('SIGHUP', sigHandler);
-
-    // Block forever — the heartbeat timer keeps the event loop
-    // alive; we just need to not return so the bootstrap shell's
-    // `disown` keeps this child running.
-    await new Promise<void>(() => {
-      /* never resolves; SIGINT/SIGTERM above is the only exit */
-    });
+    await startInfraOnly(claimed.agent);
     return;
   }
 
