@@ -139,7 +139,22 @@ export interface BaseAgentStrategy {
 export interface InteractiveAgentStrategy extends BaseAgentStrategy {
   readonly mode: 'interactive';
 
-  prepareLaunch(): Promise<{ cmd: string; args: string[]; env?: Record<string, string> }>;
+  prepareLaunch(): Promise<{
+    cmd: string;
+    args: string[];
+    env?: Record<string, string>;
+    /**
+     * Session id the launch will write to, when the agent supports
+     * the caller passing one in (Claude's `--session-id <uuid>`).
+     * Setting this lets the CLI bind `currentConversationId` at
+     * spawn time — eliminates the birthtime/lsof guessing that
+     * would otherwise be needed to find the JSONL the agent ends
+     * up using. Cross-OS by construction (the CLI never inspects
+     * the filesystem to find it). Agents that don't accept a
+     * pre-assigned session id leave this undefined.
+     */
+    sessionId?: string;
+  }>;
   /**
    * Args to splice in for a "resume previous session" relaunch. Two
    * shapes in the wild:

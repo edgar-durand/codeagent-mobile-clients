@@ -6,6 +6,7 @@ import {
   type ChromeStep,
   type SelectPrompt,
 } from '@codeagent/shared';
+import { randomUUID } from 'node:crypto';
 import { buildClaudeLaunch } from './resolver';
 import { ensureClaudeInstalled } from './installer';
 import { claudeCredentialLocator, claudeLoginLauncher } from './link';
@@ -34,15 +35,28 @@ export class ClaudeRuntimeStrategy implements RuntimeStrategy {
     this.os = os;
   }
 
-  async prepareLaunch(): Promise<{ cmd: string; args: string[]; env?: Record<string, string> }> {
-    let launch = buildClaudeLaunch([], this.os);
+  async prepareLaunch(): Promise<{
+    cmd: string;
+    args: string[];
+    env?: Record<string, string>;
+    sessionId?: string;
+  }> {
+    // Pre-mint the session id and pass it to Claude via
+    // `--session-id`. Claude opens / creates a JSONL named after
+    // this id, so the CLI binds `currentConversationId` at spawn
+    // time and never has to inspect the filesystem to figure out
+    // which JSONL is "ours" — works on every OS by construction
+    // (no lsof / procfs / fs.watch races, no birthtime heuristic).
+    const sessionId = randomUUID();
+    const sessionArgs = ['--session-id', sessionId];
+    let launch = buildClaudeLaunch(sessionArgs, this.os);
     if (!launch) {
       // Run Anthropic's official installer inline so pairing → first
       // prompt stays a single uninterrupted flow on a clean machine.
       // The installer prompts interactively (TTY) or runs headless
       // when stdio isn't a TTY.
       const installed = await ensureClaudeInstalled();
-      if (installed) launch = buildClaudeLaunch([], this.os);
+      if (installed) launch = buildClaudeLaunch(sessionArgs, this.os);
     }
     if (!launch) {
       const cmd =
@@ -53,7 +67,7 @@ export class ClaudeRuntimeStrategy implements RuntimeStrategy {
         `Claude Code is required to continue. Install it manually with:\n    ${cmd}\n    Then restart your terminal and run \`codeam pair\` again.`,
       );
     }
-    return { cmd: launch.cmd, args: launch.args };
+    return { cmd: launch.cmd, args: launch.args, sessionId };
   }
 
   resumeLaunchArgs(sessionId: string, opts?: { auto?: boolean }): string[] {

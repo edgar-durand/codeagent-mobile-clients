@@ -62,7 +62,23 @@ export class AgentService {
    * already happened on initial spawn — we just need to relaunch
    * the SAME binary with new resume args.
    */
-  private initialLaunch: { cmd: string; args: string[]; env?: Record<string, string> } | null = null;
+  private initialLaunch: {
+    cmd: string;
+    args: string[];
+    env?: Record<string, string>;
+    sessionId?: string;
+  } | null = null;
+
+  /**
+   * Pre-assigned session id from `prepareLaunch` (Claude:
+   * `--session-id <uuid>`). When the runtime supports it, the CLI
+   * binds the conversation id at spawn time instead of inferring
+   * it from filesystem state. Null for runtimes that don't accept
+   * a pre-assigned id (Codex, Aider, ...).
+   */
+  get spawnedSessionId(): string | null {
+    return this.initialLaunch?.sessionId ?? null;
+  }
 
   constructor(
     private readonly runtime: RuntimeStrategy,

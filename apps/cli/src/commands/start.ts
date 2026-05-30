@@ -308,6 +308,16 @@ export async function start(requestedAgent?: AgentId): Promise<void> {
   // Spawn Claude FIRST so its strategy is set + the PTY is launching
   // before the relay starts dispatching remote commands.
   await agent.spawn();
+  // Bind the conversation id now if the runtime pre-assigned it via
+  // `prepareLaunch` (Claude: `--session-id <uuid>`). Deterministic
+  // across every OS — we never have to inspect the filesystem to
+  // figure out which JSONL Claude is using. Runtimes that don't
+  // pre-assign (Codex, Aider, …) keep using the
+  // detectCurrentConversation birthtime fallback.
+  const spawnedSessionId = agent.spawnedSessionId;
+  if (spawnedSessionId) {
+    historySvc.setCurrentConversationId(spawnedSessionId);
+  }
   // Eagerly activate the output stream BEFORE the relay starts so
   // Claude's startup screen reaches the mobile / landing client. The
   // trust-this-folder dialog (and any other first-run interactive

@@ -10,6 +10,15 @@ export interface IPtyStrategy {
   write(data: string | Buffer): void;
   kill(): void;
   dispose(): void;
+  /**
+   * PID of the spawned child (typically a helper that exec's the
+   * real agent binary). `null` when no process is running or the
+   * backend doesn't expose it. Used by HistoryService to ask the
+   * OS which JSONL the agent has open — a deterministic
+   * alternative to the birthtime heuristic for the case where
+   * Claude auto-resumes a pre-boot session.
+   */
+  pid?: number | null;
 }
 
 /**

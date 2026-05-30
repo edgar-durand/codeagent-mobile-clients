@@ -172,18 +172,9 @@ describe('HistoryService — lazy detect on uploadDelta', () => {
       }),
     ]);
 
-    // Inject a bootTimeMs that's 1 minute in the future relative
-    // to the parallel JSONL's birthtime. This mirrors the real-
-    // world scenario (CLI starts long after the other Claude
-    // session was opened) without making the test wait through
-    // the 5 s grace window.
     const svc = new HistoryService(makeTestRuntime(cwd), 'plg-1', cwd, { bootTimeMs: Date.now() + 60_000 });
     expect(svc.getCurrentConversationId()).toBeNull();
 
-    // Touch the parallel JSONL so its mtime is "now" — the
-    // scenario where a separate Claude session is actively
-    // writing to it. Without the birthtime filter, this would
-    // win the mtime sort.
     const filePath = path.join(encodedProjectDir(), `${parallelUuid}.jsonl`);
     const now = Date.now() / 1000;
     fs.utimesSync(filePath, now, now);
@@ -198,9 +189,6 @@ describe('HistoryService — lazy detect on uploadDelta', () => {
       global.fetch = originalFetch;
     }
 
-    // Detect must have skipped the parallel JSONL — it was
-    // created before bootTimeMs, even though its mtime is
-    // currently the most recent in the dir.
     expect(svc.getCurrentConversationId()).toBeNull();
   });
 
