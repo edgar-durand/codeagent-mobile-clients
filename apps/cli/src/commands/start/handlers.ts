@@ -551,10 +551,19 @@ const requestLinkCredentialsH: CommandHandler = (ctx, _cmd, parsed) => {
 // behind the background summary generation. Wrap the work in a
 // `void (async ...)` IIFE so the handler returns immediately.
 const requestAiSummaryH: CommandHandler = (ctx, _cmd, parsed) => {
-  if (!ctx.pluginAuthToken) return;
-  if (typeof ctx.runtime.generateOneShot !== 'function') return;
+  if (!ctx.pluginAuthToken) {
+    log.info('ai-summary', 'no pluginAuthToken — skipping');
+    return;
+  }
+  if (typeof ctx.runtime.generateOneShot !== 'function') {
+    log.info('ai-summary', `runtime ${ctx.runtime.id} has no generateOneShot — skipping`);
+    return;
+  }
   if (!parsed.prompt || !parsed.turnId || !parsed.stats) {
-    log.trace('ai-summary', 'missing prompt/turnId/stats — skipping');
+    log.info(
+      'ai-summary',
+      `missing fields — prompt=${!!parsed.prompt} turnId=${!!parsed.turnId} stats=${!!parsed.stats}`,
+    );
     return;
   }
   const prompt = parsed.prompt;
@@ -562,12 +571,19 @@ const requestAiSummaryH: CommandHandler = (ctx, _cmd, parsed) => {
   const stats = parsed.stats;
   const pluginAuthToken = ctx.pluginAuthToken;
   void (async () => {
+    log.info('ai-summary', `generateOneShot start turnId=${turnId} promptLen=${prompt.length}`);
+    const startedAt = Date.now();
     const text = await ctx.runtime.generateOneShot!(prompt).catch((err) => {
-      log.trace('ai-summary', 'generateOneShot threw', err);
+      log.info('ai-summary', `generateOneShot threw: ${String(err)}`);
       return null;
     });
-    if (!text) return;
-    await postAiResult({
+    const tookMs = Date.now() - startedAt;
+    if (!text) {
+      log.info('ai-summary', `generateOneShot returned null after ${tookMs}ms — skipping POST`);
+      return;
+    }
+    log.info('ai-summary', `generateOneShot ok turnId=${turnId} took=${tookMs}ms textLen=${text.length}`);
+    const result = await postAiResult({
       sessionId: ctx.sessionId,
       pluginId: ctx.pluginId,
       pluginAuthToken,
@@ -576,6 +592,11 @@ const requestAiSummaryH: CommandHandler = (ctx, _cmd, parsed) => {
       summary: text,
       stats,
     });
+    if (result.ok) {
+      log.info('ai-summary', `postAiResult ok turnId=${turnId}`);
+    } else {
+      log.info('ai-summary', `postAiResult failed status=${result.status} msg=${result.message}`);
+    }
   })();
 };
 
@@ -583,23 +604,39 @@ const requestAiSummaryH: CommandHandler = (ctx, _cmd, parsed) => {
 // Same fire-and-forget pattern as the summary handler so the up-to-
 // 60 s headless agent run doesn't block the next user command.
 const requestAiInsightH: CommandHandler = (ctx, _cmd, parsed) => {
-  if (!ctx.pluginAuthToken) return;
-  if (typeof ctx.runtime.generateOneShot !== 'function') return;
+  if (!ctx.pluginAuthToken) {
+    log.info('ai-insight', 'no pluginAuthToken — skipping');
+    return;
+  }
+  if (typeof ctx.runtime.generateOneShot !== 'function') {
+    log.info('ai-insight', `runtime ${ctx.runtime.id} has no generateOneShot — skipping`);
+    return;
+  }
   if (!parsed.prompt || !parsed.fileChangeId) {
-    log.trace('ai-insight', 'missing prompt/fileChangeId — skipping');
+    log.info(
+      'ai-insight',
+      `missing fields — prompt=${!!parsed.prompt} fileChangeId=${!!parsed.fileChangeId}`,
+    );
     return;
   }
   const prompt = parsed.prompt;
   const fileChangeId = parsed.fileChangeId;
   const pluginAuthToken = ctx.pluginAuthToken;
   void (async () => {
+    log.info('ai-insight', `generateOneShot start fileChangeId=${fileChangeId} promptLen=${prompt.length}`);
+    const startedAt = Date.now();
     const text = await ctx.runtime.generateOneShot!(prompt).catch((err) => {
-      log.trace('ai-insight', 'generateOneShot threw', err);
+      log.info('ai-insight', `generateOneShot threw: ${String(err)}`);
       return null;
     });
-    if (!text) return;
+    const tookMs = Date.now() - startedAt;
+    if (!text) {
+      log.info('ai-insight', `generateOneShot returned null after ${tookMs}ms — skipping POST`);
+      return;
+    }
+    log.info('ai-insight', `generateOneShot ok fileChangeId=${fileChangeId} took=${tookMs}ms textLen=${text.length}`);
     const { summary, reasoning, securityNote } = parseInsightText(text);
-    await postAiResult({
+    const result = await postAiResult({
       sessionId: ctx.sessionId,
       pluginId: ctx.pluginId,
       pluginAuthToken,
@@ -609,6 +646,11 @@ const requestAiInsightH: CommandHandler = (ctx, _cmd, parsed) => {
       reasoning,
       securityNote,
     });
+    if (result.ok) {
+      log.info('ai-insight', `postAiResult ok fileChangeId=${fileChangeId}`);
+    } else {
+      log.info('ai-insight', `postAiResult failed status=${result.status} msg=${result.message}`);
+    }
   })();
 };
 
