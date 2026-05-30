@@ -496,7 +496,46 @@ export class OutputService {
         { critical: true },
       ).catch(() => {});
       this.onTurnComplete?.();
+      // Schedule a delayed input-suggestion check. Claude's TUI
+      // paints the ghost-text completion ~300-500 ms AFTER the
+      // turn settles into the idle prompt, but `finalize()` has
+      // already stopped the poll timer — without this follow-up
+      // `detectInputSuggestion` never runs and mobile's quick-
+      // reply chip stays empty across the entire idle window.
+      this.scheduleSuggestionPoll();
     }
+  }
+
+  /**
+   * Poll for an `input_suggestion` chunk a few times after a
+   * turn finalises. The TUI takes a beat to render the ghost
+   * completion, so a single check at finalize-time would miss
+   * it. Three checks at 400/800/1500 ms cover the window
+   * without burning CPU when there's no suggestion (each tick
+   * is cheap — a regex over the rendered lines).
+   */
+  private scheduleSuggestionPoll(): void {
+    if (!this.runtime.detectInputSuggestion) return;
+    const tryDetect = () => {
+      if (!this.runtime.detectInputSuggestion) return;
+      const rendered = this.runtime.renderToLines?.(this.pty.content)
+        ?? renderLines(this.pty.content);
+      const suggestion = this.runtime.detectInputSuggestion(rendered);
+      if (suggestion !== this.lastSentSuggestion) {
+        this.lastSentSuggestion = suggestion;
+        this.send(
+          {
+            type: 'input_suggestion',
+            content: suggestion ?? '',
+            done: true,
+          },
+          { critical: false },
+        ).catch(() => {});
+      }
+    };
+    setTimeout(tryDetect, 400);
+    setTimeout(tryDetect, 800);
+    setTimeout(tryDetect, 1500);
   }
 
   // ─── Side-channel observation (session id + rate limit) ──────────
