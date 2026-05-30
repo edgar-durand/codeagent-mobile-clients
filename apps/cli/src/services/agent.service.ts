@@ -28,6 +28,34 @@ export class AgentService {
   private agentReady = false;
   private readonly pendingInputs: string[] = [];
   /**
+   * Serialised-submission state. Without this, a second `sendCommand`
+   * arriving while the agent is still rendering its response to the
+   * first lands in Claude Code's input field as a `[Pasted text #N]`
+   * marker (bracketed-paste mode kicks in for multi-line writes). The
+   * `\r` we schedule 50 ms later is consumed as paste content, not
+   * submission, so the prompt sits in the input forever — the user
+   * reported "se queda bloqueado en la terminal".
+   *
+   * The fix is agent-agnostic: track when the PTY last emitted bytes
+   * (see `lastAgentDataAt`); after `QUIET_MS` of silence we consider
+   * the agent idle and drain the next queued prompt. Works for any
+   * PTY-spawned runtime (Claude Code, Codex, future agents) because
+   * "no output in N ms" is a universal idle signal — we don't depend
+   * on Claude's `❯` prompt or Codex's input-box rendering.
+   */
+  private agentBusy = false;
+  private lastAgentDataAt = 0;
+  private quietTimer: ReturnType<typeof setTimeout> | null = null;
+  /**
+   * How long the PTY must be silent before we consider the agent
+   * idle and submit the next queued prompt. 1500 ms is generous
+   * enough that a streamed response with brief mid-token pauses
+   * (tool calls, model latency hiccups) doesn't get cut off, but
+   * short enough that the user doesn't perceive lag between a
+   * normal turn finishing and the next queued comment firing.
+   */
+  private static readonly QUIET_MS = 1500;
+  /**
    * Cached spawn() result so `restart()` can reuse the resolved
    * binary path without re-running the strategy's install path. The
    * agent's installer side-effects (Anthropic curl/iwr, npm install)
@@ -52,26 +80,69 @@ export class AgentService {
           // imperceptible compared with the multi-second cold start.
           setTimeout(() => this.drainPending(), 250);
         }
+        if (d.length > 0) {
+          this.lastAgentDataAt = Date.now();
+          this.scheduleQuietCheck();
+        }
         (opts.onData ?? (() => {}))(d);
       },
       onExit: opts.onExit,
     };
   }
 
+  /**
+   * Debounced "agent went idle" check. Re-arms itself as long as
+   * fresh PTY output keeps arriving. When the gap since the last
+   * byte exceeds `QUIET_MS`, flip `agentBusy=false` and drain the
+   * next queued prompt (if any). Idempotent — a no-op when the
+   * timer is already pending.
+   *
+   * Re-arm uses the REMAINING wait (QUIET_MS - sinceLast), not a
+   * full QUIET_MS — otherwise a single late data byte resets the
+   * waiter to a fresh 1.5 s timer and the queue never drains.
+   */
+  private scheduleQuietCheck(): void {
+    if (this.quietTimer) return;
+    const tick = () => {
+      this.quietTimer = null;
+      const sinceLast = Date.now() - this.lastAgentDataAt;
+      if (sinceLast >= AgentService.QUIET_MS) {
+        if (this.agentBusy) {
+          this.agentBusy = false;
+          log.trace('agent', 'agent went idle — draining next pending');
+        }
+        this.drainPending();
+        return;
+      }
+      // More data came in while waiting — re-arm for the remaining
+      // window so we don't reset to a fresh QUIET_MS each time.
+      this.quietTimer = setTimeout(tick, AgentService.QUIET_MS - sinceLast);
+    };
+    this.quietTimer = setTimeout(tick, AgentService.QUIET_MS);
+  }
+
+  /**
+   * Write one prompt to the PTY using the existing pacing (text →
+   * 50–300 ms → `\r` submit). Marks the agent busy so subsequent
+   * `sendCommand` calls queue instead of stacking pastes.
+   */
+  private submitToPty(text: string): void {
+    if (!this.strategy) return;
+    const s = this.strategy;
+    this.agentBusy = true;
+    log.trace('agent', `submit text=${text.length}B (queued=${this.pendingInputs.length})`);
+    s.write(text);
+    const lineCount = text.split('\n').length;
+    const delay = Math.min(300, 50 + (lineCount - 1) * 40);
+    setTimeout(() => s.write('\r'), delay);
+  }
+
   private drainPending(): void {
     if (!this.strategy || this.pendingInputs.length === 0) return;
-    const s = this.strategy;
-    log.trace('claude', `drain pending=${this.pendingInputs.length}`);
-    // Each buffered input replays the original sendCommand pacing
-    // (text → 50 ms → \r) so React Ink has a fresh tick to absorb the
-    // text into input state before the submit fires.
-    let offset = 0;
-    for (const text of this.pendingInputs) {
-      setTimeout(() => s.write(text), offset);
-      setTimeout(() => s.write('\r'), offset + 50);
-      offset += 200;
-    }
-    this.pendingInputs.length = 0;
+    if (this.agentBusy) return;
+    const next = this.pendingInputs.shift();
+    if (next === undefined) return;
+    this.submitToPty(next);
   }
 
   async spawn(): Promise<void> {
@@ -172,18 +243,23 @@ export class AgentService {
       return;
     }
     if (!this.agentReady) {
-      // Claude's input field hasn't mounted yet. Buffer; we'll
-      // replay this in `drainPending()` on first PTY output.
+      // Agent's input field hasn't mounted yet. Buffer; we'll
+      // replay the FIRST one in `drainPending()` on first PTY output
+      // and the rest will drain as the agent goes idle.
       log.trace('claude', `sendCommand buffered (not ready) text=${text.length}B`);
       this.pendingInputs.push(text);
       return;
     }
-    const s = this.strategy;
-    log.trace('claude', `sendCommand text=${text.length}B`);
-    s.write(text);
-    const lineCount = text.split('\n').length;
-    const delay = Math.min(300, 50 + (lineCount - 1) * 40);
-    setTimeout(() => s.write('\r'), delay);
+    if (this.agentBusy) {
+      // A previous prompt is still being processed. Queueing here
+      // (rather than blindly writing to the PTY) prevents Claude
+      // Code's bracketed-paste mode from converting the second prompt
+      // into a `[Pasted text #N]` marker that never submits.
+      log.trace('claude', `sendCommand queued (agent busy) text=${text.length}B`);
+      this.pendingInputs.push(text);
+      return;
+    }
+    this.submitToPty(text);
   }
 
   /**
