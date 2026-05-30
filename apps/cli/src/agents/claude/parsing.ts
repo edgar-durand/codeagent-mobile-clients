@@ -275,9 +275,18 @@ export function detectSelector(lines: string[]): SelectPrompt | null {
   );
   if (!hasCursor && !looksLikeTrust) return null;
 
+  // Option-start regex: `<digit>.` optionally preceded by the cursor
+  // glyph, then EITHER whitespace OR a non-digit (so `2.Yes` and
+  // `2. Yes` both match, but a decimal like `2.5` does not). Without
+  // the no-space branch, Claude's confirmation dialogs with long
+  // labels that embed a wrapped command (`2.Yes, and don't ask
+  // again: grep -n ...`) collapsed the dot+letter form and the
+  // option fell into the continuation branch — its text leaked into
+  // option 1's description and option 3 was rendered as option 2.
+  const OPTION_RE = /^(?:[❯>]\s*)?(\d+)\.(\s+|(?=\D))(.+)/;
   let optionStartIdx = -1;
   for (let i = 0; i < clean.length; i++) {
-    if (/^(?:[❯>]\s*)?\d+\.\s/.test(clean[i].trim())) { optionStartIdx = i; break; }
+    if (OPTION_RE.test(clean[i].trim())) { optionStartIdx = i; break; }
   }
   if (optionStartIdx === -1) return null;
 
@@ -305,11 +314,14 @@ export function detectSelector(lines: string[]): SelectPrompt | null {
     const t = clean[i].trim();
     if (!t) continue;
 
-    const m = t.match(/^(?:[❯>]\s*)?(\d+)\.\s+(.+)/);
+    const m = t.match(OPTION_RE);
     if (m) {
       const num = parseInt(m[1], 10);
+      // `m[3]` is the label payload — `m[2]` is the (possibly empty)
+      // whitespace separator. Using `m[2]` here would have lost the
+      // label when the no-space form matched (e.g. `2.Yes`).
       if (!optionLabels.has(num)) {
-        optionLabels.set(num, m[2].trim());
+        optionLabels.set(num, m[3].trim());
         optionDescs.set(num, []);
       }
       currentNum = num;
