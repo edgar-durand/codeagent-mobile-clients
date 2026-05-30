@@ -121,6 +121,17 @@ Implementation shape is uniform across the three clients:
 
 Auth header: `X-Plugin-Auth-Token` (the per-pairing secret returned at pair time) + `X-Codeam-Protocol-Version: 2.0.0`.
 
+### No polling for realtime — non-negotiable
+
+SSE (and the PTY data event on the CLI side) is the realtime channel for everything in this repo. **Do not introduce `setTimeout` / `setInterval` polling loops to detect state changes that already flow over an existing event stream.** This applies to chunk emission, suggestion detection, output settling — everything where a stream event is available.
+
+Active examples to mirror:
+- `OutputService.push(raw)` is the PTY data event handler. New idle-window detectors (input_suggestion, ready-prompt, etc.) **react inside `push()`** on the byte the PTY just delivered. They do NOT schedule `setTimeout` callbacks "to check again in 400 ms".
+- `OutputService.tick()` runs at 1 s only while a turn is active and is the existing render-and-emit loop for accumulated PTY frames — not a polling escape hatch. Don't add new periodic checks alongside it; hook them into `push()` instead.
+- The HTTP-polling fallback in `command-relay.service.ts` is the documented exception (older backends / proxies that strip SSE). New features must NOT add similar fallbacks "just in case".
+
+If you find yourself reaching for `setTimeout` to "check again later", you're polling — stop and route the detection off the existing event instead.
+
 ### Shared package (`@codeagent/shared`)
 
 `packages/shared/src/` owns the *protocol* code — anything the CLI and the VS Code extension must agree on byte-for-byte:
