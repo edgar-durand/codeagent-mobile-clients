@@ -237,21 +237,27 @@ export class OutputService {
   }
 
   /**
-   * Idle-window accumulator. PtyBuffer wipes its `raw` on
-   * `deactivate()` to keep next-turn renders clean, so the
-   * post-finalize PTY redraw frames don't live in `this.pty.content`.
-   * We mirror them here only for the suggestion detector — a tiny
-   * window of trailing bytes is enough for renderToLines to surface
-   * the last frame. Cleared on every `beginTurn()`.
+   * Idle-window accumulator. Seeded at finalize() with the current
+   * established screen (`pty.content` BEFORE deactivate wipes it),
+   * then appended-to by every post-finalize push. The seed is
+   * mandatory: Claude paints the ghost-text completion via cursor
+   * positioning ANSI on top of the existing frame, so the virtual
+   * terminal needs the baseline to resolve the target cells.
+   *
+   * Capped at the same size as PtyBuffer's own MAX — head-truncated
+   * on overflow so the most-recent visible state survives.
    */
   private idleBuffer = '';
-  private static readonly IDLE_BUFFER_MAX = 32 * 1024;
+  private static readonly IDLE_BUFFER_MAX = 2 * 1024 * 1024;
+  private static readonly IDLE_BUFFER_KEEP = 1.5 * 1024 * 1024;
 
   private detectIdleSuggestion(raw: string): void {
     if (!this.runtime.detectInputSuggestion) return;
     this.idleBuffer += raw;
     if (this.idleBuffer.length > OutputService.IDLE_BUFFER_MAX) {
-      this.idleBuffer = this.idleBuffer.slice(-OutputService.IDLE_BUFFER_MAX);
+      this.idleBuffer = this.idleBuffer.slice(
+        this.idleBuffer.length - OutputService.IDLE_BUFFER_KEEP,
+      );
     }
     const rendered = this.runtime.renderToLines?.(this.idleBuffer)
       ?? renderLines(this.idleBuffer);
@@ -514,6 +520,15 @@ export class OutputService {
     }
     const selector = this.runtime.detectInteractivePrompt(lines);
     this.stopPoll();
+    // Seed the idle-window detector with the final established screen
+    // BEFORE the PTY buffer wipes itself. Claude paints the
+    // ghost-text completion via cursor positioning ANSI (`\x1b[r;cH` +
+    // dim text), not a full screen redraw — so without the prior
+    // frame context, renderToLines can't resolve the cursor target
+    // and detectInputSuggestion finds nothing. The seed gives the
+    // virtual terminal its baseline; post-finalize pushes layer the
+    // suggestion on top.
+    this.idleBuffer = this.pty.content;
     this.pty.deactivate();
 
     if (selector) {
