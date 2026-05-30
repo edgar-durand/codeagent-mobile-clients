@@ -381,12 +381,17 @@ export function detectInputSuggestion(lines: string[]): string | null {
 
   // Walk the WINDOW just above the hint, looking for a `> <text>`
   // line. Claude's TUI normally puts the cursor 1 line above the
-  // hint; a wrapped suggestion can push it 2-3 lines up. Stop at
-  // the first non-input line so we never reach back into history.
-  const windowStart = Math.max(0, hintIdx - 3);
+  // hint; a wrapped suggestion can push it 2-3 lines up; and
+  // modern Claude wraps the whole input area in a box-drawing
+  // rectangle so the immediate neighbours are `─` borders. Stop at
+  // the first non-input, non-border line so we never reach back
+  // into history.
+  const windowStart = Math.max(0, hintIdx - 5);
   for (let i = hintIdx - 1; i >= windowStart; i--) {
     const t = lines[i].trim();
     if (!t) continue;
+    // Skip box-drawing borders that frame the input area.
+    if (/^[─━═│┌┐└┘├┤┬┴┼]+$/u.test(t)) continue;
     const m = t.match(/^[❯>]\s+(\S.*)$/);
     if (!m) return null; // hit non-input content; no live suggestion
     // Skip selector items (handled by detectSelector / detectListSelector).

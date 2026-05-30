@@ -95,4 +95,35 @@ describe('detectInputSuggestion', () => {
     ];
     expect(detectInputSuggestion(lines)).toBe('Yes, replica el del webapp');
   });
+
+  // Modern Claude TUI wraps the input area in a box-drawing rectangle:
+  //
+  //   ──────────────────────────────────────────────
+  //   ❯ Cerrar el ciclo de push notifications
+  //   ──────────────────────────────────────────────
+  //     ? for shortcuts · ← for agents
+  //
+  // The walker must skip the `─` border lines and look INSIDE the box
+  // rather than aborting on the first non-`>`-prefixed line.
+  test('detects a suggestion wrapped in a box-drawn input rectangle', () => {
+    const lines = [
+      '✻ Cooked for 13s',
+      '',
+      '──────────────────────────────────────────────',
+      '❯ Cerrar el ciclo de push notifications',
+      '──────────────────────────────────────────────',
+      '  ? for shortcuts · ← for agents',
+    ];
+    expect(detectInputSuggestion(lines)).toBe('Cerrar el ciclo de push notifications');
+  });
+
+  test('returns null when the box-drawn input is empty', () => {
+    const lines = [
+      '──────────────────────────────────────────────',
+      '❯',
+      '──────────────────────────────────────────────',
+      '  ? for shortcuts · ← for agents',
+    ];
+    expect(detectInputSuggestion(lines)).toBeNull();
+  });
 });
