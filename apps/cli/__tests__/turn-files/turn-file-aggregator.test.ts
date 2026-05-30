@@ -174,4 +174,125 @@ describe('TurnFileAggregator + RepoDirtyTracker', () => {
 
     agg.stop();
   });
+
+  // ── Pre-pair baseline ───────────────────────────────────────────
+  //
+  // The aggregator captures the worktree's dirty state on the FIRST
+  // flush and treats it as the pre-pair baseline. Subsequent flushes
+  // diff against that baseline so the rail only shows files THIS
+  // session changed, not pre-existing uncommitted edits the user
+  // brought into the pair.
+  describe('pre-pair baseline', () => {
+    function mkEntry(filePath: string, added: number, removed: number) {
+      return {
+        filePath,
+        fileStatus: 'modified' as const,
+        linesAdded: added,
+        linesRemoved: removed,
+        hunkCount: added + removed > 0 ? 1 : 0,
+        repoPath: '',
+        repoName: 'demo',
+      };
+    }
+
+    /** Read the outbox JSONL written by the aggregator. Each line is
+     *  one enqueued batch; an absent / empty file means nothing was
+     *  enqueued, which is exactly the "suppressed POST" assertion. */
+    async function readOutbox(sessionId: string): Promise<
+      Array<{ files: Array<{ filePath: string; linesAdded: number; linesRemoved: number }> }>
+    > {
+      const file = path.join(outboxDir, `${sessionId}.jsonl`);
+      let raw = '';
+      try {
+        raw = await fs.readFile(file, 'utf8');
+      } catch {
+        return [];
+      }
+      return raw
+        .split('\n')
+        .filter((l) => l.length > 0)
+        .map((l) => JSON.parse(l));
+    }
+
+    function mkAggregator(sessionId: string): TurnFileAggregator {
+      return new TurnFileAggregator({
+        workingDir: '/repos',
+        sessionId,
+        pluginId: 'plug-1',
+        pluginAuthToken: 'tok',
+        apiBaseUrl: 'https://api.example.test',
+        outboxDir,
+        outboxAutoSchedule: false,
+      });
+    }
+
+    it('first flush captures baseline silently (no enqueue)', async () => {
+      vi.spyOn(gitChangeset, 'collectRepoChangeset').mockResolvedValue([
+        mkEntry('CLAUDE.md', 8, 0),
+        mkEntry('App.tsx', 20, 2),
+      ]);
+      stubDiscovery([{ repoRoot: '/repos/a', repoPath: '', repoName: 'demo' }]);
+
+      const agg = mkAggregator('sess-baseline-silent');
+      await agg.flushTurn();
+      expect(await readOutbox('sess-baseline-silent')).toEqual([]);
+      agg.stop();
+    });
+
+    it('second flush enqueues a file that appeared after baseline', async () => {
+      vi.spyOn(gitChangeset, 'collectRepoChangeset')
+        .mockResolvedValueOnce([mkEntry('CLAUDE.md', 8, 0)])
+        .mockResolvedValueOnce([
+          mkEntry('CLAUDE.md', 8, 0),
+          mkEntry('new-file.ts', 5, 0),
+        ]);
+      stubDiscovery([{ repoRoot: '/repos/a', repoPath: '', repoName: 'demo' }]);
+
+      const agg = mkAggregator('sess-baseline-new-file');
+      await agg.flushTurn(); // baseline
+      await agg.flushTurn(); // enqueue
+
+      const batches = await readOutbox('sess-baseline-new-file');
+      expect(batches).toHaveLength(1);
+      expect(batches[0].files.map((f) => f.filePath)).toEqual(['new-file.ts']);
+      agg.stop();
+    });
+
+    it('second flush enqueues a baseline file whose diff stats moved', async () => {
+      vi.spyOn(gitChangeset, 'collectRepoChangeset')
+        .mockResolvedValueOnce([mkEntry('CLAUDE.md', 8, 0)])
+        .mockResolvedValueOnce([mkEntry('CLAUDE.md', 14, 2)]);
+      stubDiscovery([{ repoRoot: '/repos/a', repoPath: '', repoName: 'demo' }]);
+
+      const agg = mkAggregator('sess-baseline-stats-moved');
+      await agg.flushTurn(); // baseline
+      await agg.flushTurn(); // enqueue
+
+      const batches = await readOutbox('sess-baseline-stats-moved');
+      expect(batches).toHaveLength(1);
+      expect(batches[0].files).toEqual([
+        expect.objectContaining({ filePath: 'CLAUDE.md', linesAdded: 14, linesRemoved: 2 }),
+      ]);
+      agg.stop();
+    });
+
+    it('second flush suppresses POST when every file matches baseline', async () => {
+      vi.spyOn(gitChangeset, 'collectRepoChangeset')
+        .mockResolvedValueOnce([
+          mkEntry('CLAUDE.md', 8, 0),
+          mkEntry('App.tsx', 20, 2),
+        ])
+        .mockResolvedValueOnce([
+          mkEntry('CLAUDE.md', 8, 0),
+          mkEntry('App.tsx', 20, 2),
+        ]);
+      stubDiscovery([{ repoRoot: '/repos/a', repoPath: '', repoName: 'demo' }]);
+
+      const agg = mkAggregator('sess-baseline-no-delta');
+      await agg.flushTurn(); // baseline
+      await agg.flushTurn(); // exactly matches → suppress
+      expect(await readOutbox('sess-baseline-no-delta')).toEqual([]);
+      agg.stop();
+    });
+  });
 });

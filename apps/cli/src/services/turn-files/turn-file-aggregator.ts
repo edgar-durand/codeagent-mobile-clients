@@ -75,6 +75,29 @@ export class TurnFileAggregator {
   private discovering: Promise<void> | null = null;
   private stopped = false;
 
+  /**
+   * Pre-pair worktree baseline. Captured lazily on the first
+   * `flushTurn()` call by running the same `git status` / `git diff`
+   * scan the regular flush uses, then stashing the result here
+   * WITHOUT enqueuing the outbox. Every subsequent flush diff-checks
+   * its entries against this map and only emits files that are
+   * absent from the baseline OR whose `linesAdded` / `linesRemoved`
+   * have moved.
+   *
+   * Why: the legacy first-flush behaviour shipped the entire dirty
+   * worktree at session start, which attributed pre-existing
+   * uncommitted edits to the brand-new sessionId (and confusingly
+   * showed them on the new session's rail with zero hunks, because
+   * the chokidar watcher never saw the changes — they happened
+   * before the watcher booted). Capturing the baseline silently
+   * keeps the rail honest: it now means "files THIS session changed".
+   *
+   * Key is `${repoPath}|${filePath}` so a sibling repo with the same
+   * relative path doesn't collide with another one.
+   */
+  private baselineByKey: Map<string, ChangesetEntry> = new Map();
+  private baselineCaptured = false;
+
   constructor(private readonly opts: TurnFileAggregatorOptions) {
     this.apiBase = opts.apiBaseUrl ?? API_BASE;
     this.outbox = new FilesOutbox({
@@ -145,8 +168,37 @@ export class TurnFileAggregator {
         if (entries) files.push(...entries);
       }
 
-      if (files.length === 0) {
-        log.trace('turnFiles', 'no changes detected this turn — skipping POST');
+      // FIRST flush after construction — stash the current dirty
+      // state as the pre-pair baseline and skip the POST. The rail
+      // should never claim ownership of files that were already
+      // dirty when the user paired; the chokidar watcher covers
+      // live edits during the session, and subsequent flushes diff
+      // against this baseline so only the deltas reach the backend.
+      if (!this.baselineCaptured) {
+        this.baselineByKey = new Map(files.map((f) => [baselineKey(f), f]));
+        this.baselineCaptured = true;
+        log.info(
+          'turnFiles',
+          `baseline captured: ${files.length} pre-pair file(s) — suppressing initial POST`,
+        );
+        return;
+      }
+
+      const novel = files.filter((f) => {
+        const base = this.baselineByKey.get(baselineKey(f));
+        if (!base) return true; // file appeared after pairing
+        return (
+          base.linesAdded !== f.linesAdded ||
+          base.linesRemoved !== f.linesRemoved ||
+          base.fileStatus !== f.fileStatus
+        );
+      });
+
+      if (novel.length === 0) {
+        log.trace(
+          'turnFiles',
+          `flush matched baseline exactly — skipping POST (scanned=${files.length})`,
+        );
         return;
       }
 
@@ -154,7 +206,7 @@ export class TurnFileAggregator {
       // exceed the backend's per-batch limit. Split into chunks if it
       // does happen; each chunk gets its own turnId so the backend
       // upserts them independently.
-      const chunks = chunkArray(files, MAX_BATCH_SIZE);
+      const chunks = chunkArray(novel, MAX_BATCH_SIZE);
       for (const chunk of chunks) {
         const entry: OutboxEntry = {
           turnId: randomUUID(),
@@ -225,4 +277,11 @@ function chunkArray<T>(arr: T[], size: number): T[][] {
     out.push(arr.slice(i, i + size));
   }
   return out;
+}
+
+/** Composite key for the baseline map. `repoPath` disambiguates a
+ *  sibling repo that happens to ship the same relative path (e.g.
+ *  `README.md` in two sibling repos under a multi-repo workspace). */
+function baselineKey(entry: ChangesetEntry): string {
+  return `${entry.repoPath}|${entry.filePath}`;
 }
