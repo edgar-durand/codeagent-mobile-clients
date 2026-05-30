@@ -248,6 +248,23 @@ export interface InteractiveAgentStrategy extends BaseAgentStrategy {
    * Runs on every tick until the first match — keep it cheap.
    */
   detectStartupBanner?(lines: string[]): StartupBanner | null;
+
+  /**
+   * Optional detector for the agent's idle-prompt input suggestion
+   * (ghost-text autocompletion). Claude Code shows a context-aware
+   * completion in the `> ` input area after a turn finishes; mobile
+   * surfaces it as a tappable quick-reply chip above the composer
+   * so the user can answer in one tap without retyping.
+   *
+   * Returns the suggested text, or `null` when no suggestion is
+   * visible. Pure function over already-rendered lines; runs on
+   * every poll tick — keep it cheap.
+   *
+   * Wire shape: `{ type: 'input_suggestion', content: <text>,
+   * done: true }` chunk emitted by OutputService. Agents that
+   * don't show ghost completions leave the method undefined.
+   */
+  detectInputSuggestion?(lines: string[]): string | null;
 }
 
 /**

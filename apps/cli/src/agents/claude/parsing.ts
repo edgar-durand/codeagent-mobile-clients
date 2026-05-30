@@ -348,6 +348,45 @@ export function detectSelector(lines: string[]): SelectPrompt | null {
 }
 
 /**
+ * Detect Claude's idle-prompt input suggestion — the ghost text
+ * Claude Code shows in the `> ` input area after a turn finishes
+ * (a context-aware completion the user can accept by pressing
+ * Enter, e.g. `> Yes, replica el del webapp`). The mobile surface
+ * elevates this to a tappable quick-reply chip above the composer.
+ *
+ * Returns the suggested text, or `null` when:
+ *   - The TUI isn't currently at the idle prompt (`? for shortcuts`
+ *     hint missing — agent is still working or a selector is up).
+ *   - The `> ` line is empty / cursor-only.
+ *   - A numbered selector is on screen (`❯ 1.` — the selector
+ *     detector owns those).
+ */
+export function detectInputSuggestion(lines: string[]): string | null {
+  const hasIdleHint = lines.some((l) => /\?\s+for\s+shortcuts/i.test(l.trim()));
+  if (!hasIdleHint) return null;
+  // Don't conflict with the numbered selector path.
+  if (lines.some((l) => /^[❯>]\s*\d+\./.test(l.trim()))) return null;
+
+  // The input-area line is `> <text>` (Claude's React Ink renderer
+  // sometimes uses `❯` instead). Strip the cursor glyph + a leading
+  // space, return whatever's left.
+  for (const line of lines) {
+    const t = line.trim();
+    const m = t.match(/^[❯>]\s+(\S.*)$/);
+    if (!m) continue;
+    // Skip lines that are themselves selector items (handled by
+    // detectSelector / detectListSelector).
+    if (/^\d+\.\s/.test(m[1])) continue;
+    // Skip the navigation hint that occasionally shares this shape.
+    if (/^for\s/i.test(m[1])) continue;
+    const text = m[1].trim();
+    if (text.length === 0) return null;
+    return text;
+  }
+  return null;
+}
+
+/**
  * Detect a list-style selector — `/mcp`, `/model` — where the highlighted
  * item is prefixed with `  ❯ ` instead of `❯ N.`.
  *

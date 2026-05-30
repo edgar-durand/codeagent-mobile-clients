@@ -33,6 +33,15 @@ export class OutputService {
 
   private lastSentContent = '';
   /**
+   * Tracks the most recent `input_suggestion` chunk we shipped so
+   * we don't spam the backend with duplicate "ghost text" updates
+   * on every tick. Claude redraws its prompt continuously while
+   * idle, so without de-dup we'd push 10+ identical chunks per
+   * second. Reset to `null` when the prompt area clears (the
+   * suggestion was accepted / dismissed).
+   */
+  private lastSentSuggestion: string | null = null;
+  /**
    * Per-session latch — emits the agent's startup banner as a typed
    * `agent_banner` chunk exactly once, then strips the banner lines
    * from every subsequent rendered frame so the ASCII art never
@@ -396,6 +405,24 @@ export class OutputService {
       this.send({ type: 'text', content, done: false }).catch(() => {});
     }
     const contentStableMs = this.lastContentChangeAt > 0 ? now - this.lastContentChangeAt : 0;
+
+    // Per-agent input-suggestion detector. Claude shows a
+    // ghost-text completion in the `> ` input area after a turn
+    // settles; we surface it as a tappable chip on mobile. Emit
+    // ONLY when the value changes so the backend doesn't accumulate
+    // dozens of identical chunks while the TUI redraws.
+    const suggestion = this.runtime.detectInputSuggestion?.(lines) ?? null;
+    if (suggestion !== this.lastSentSuggestion) {
+      this.lastSentSuggestion = suggestion;
+      this.send(
+        {
+          type: 'input_suggestion',
+          content: suggestion ?? '',
+          done: true,
+        },
+        { critical: false },
+      ).catch(() => {});
+    }
 
     // "Agent is back at the input" — delegated to the per-agent
     // runtime because the signal shape is agent-specific (Claude's

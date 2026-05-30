@@ -13,6 +13,7 @@ import { fetchClaudeQuota } from './quota';
 import { spawnAndCapture } from '../../services/spawn-and-capture';
 import * as history from './history';
 import {
+  detectInputSuggestion,
   detectListSelector,
   detectSelector,
   detectStartupBanner as detectClaudeStartupBanner,
@@ -132,6 +133,10 @@ export class ClaudeRuntimeStrategy implements RuntimeStrategy {
 
   detectStartupBanner(lines: string[]): StartupBanner | null {
     return detectClaudeStartupBanner(lines);
+  }
+
+  detectInputSuggestion(lines: string[]): string | null {
+    return detectInputSuggestion(lines);
   }
 
   credentialLocator() {
