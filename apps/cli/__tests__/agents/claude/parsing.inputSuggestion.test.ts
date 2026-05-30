@@ -63,4 +63,36 @@ describe('detectInputSuggestion', () => {
     ];
     expect(detectInputSuggestion(lines)).toBeNull();
   });
+
+  test('ignores historical user echoes from scrollback', () => {
+    // A previous turn's `> Hola` echo lives high up in the rendered
+    // window but Claude has since responded and is now at an empty
+    // input prompt. The detector must ONLY look at the lines
+    // immediately above `? for shortcuts` — otherwise the chip
+    // shows stale historical text forever.
+    const lines = [
+      '> Hola',
+      '',
+      '● Hola Edgar 👋 ¿En qué te puedo ayudar hoy?',
+      '',
+      '',
+      '* Brewed for 9s',
+      '',
+      '>',
+      '? for shortcuts · ← for agents',
+    ];
+    expect(detectInputSuggestion(lines)).toBeNull();
+  });
+
+  test('detects a live suggestion right above the hint', () => {
+    const lines = [
+      '> Hola',
+      '',
+      '● Hola Edgar 👋',
+      '',
+      '> Yes, replica el del webapp',
+      '? for shortcuts · ← for agents',
+    ];
+    expect(detectInputSuggestion(lines)).toBe('Yes, replica el del webapp');
+  });
 });

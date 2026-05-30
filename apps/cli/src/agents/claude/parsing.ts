@@ -362,23 +362,37 @@ export function detectSelector(lines: string[]): SelectPrompt | null {
  *     detector owns those).
  */
 export function detectInputSuggestion(lines: string[]): string | null {
-  const hasIdleHint = lines.some((l) => /\?\s+for\s+shortcuts/i.test(l.trim()));
-  if (!hasIdleHint) return null;
+  // Anchor on `? for shortcuts` — that line marks the BOTTOM of the
+  // TUI, so the input area is the 1-3 lines immediately above it.
+  // Iterating the entire `lines` array was wrong: a previous user
+  // echo (`> Hola`) sitting in the scrollback would match before we
+  // ever reached the actual input line, and mobile rendered the
+  // stale historical echo as a "suggestion" chip forever.
+  let hintIdx = -1;
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (/\?\s+for\s+shortcuts/i.test(lines[i].trim())) {
+      hintIdx = i;
+      break;
+    }
+  }
+  if (hintIdx === -1) return null;
   // Don't conflict with the numbered selector path.
   if (lines.some((l) => /^[❯>]\s*\d+\./.test(l.trim()))) return null;
 
-  // The input-area line is `> <text>` (Claude's React Ink renderer
-  // sometimes uses `❯` instead). Strip the cursor glyph + a leading
-  // space, return whatever's left.
-  for (const line of lines) {
-    const t = line.trim();
+  // Walk the WINDOW just above the hint, looking for a `> <text>`
+  // line. Claude's TUI normally puts the cursor 1 line above the
+  // hint; a wrapped suggestion can push it 2-3 lines up. Stop at
+  // the first non-input line so we never reach back into history.
+  const windowStart = Math.max(0, hintIdx - 3);
+  for (let i = hintIdx - 1; i >= windowStart; i--) {
+    const t = lines[i].trim();
+    if (!t) continue;
     const m = t.match(/^[❯>]\s+(\S.*)$/);
-    if (!m) continue;
-    // Skip lines that are themselves selector items (handled by
-    // detectSelector / detectListSelector).
-    if (/^\d+\.\s/.test(m[1])) continue;
+    if (!m) return null; // hit non-input content; no live suggestion
+    // Skip selector items (handled by detectSelector / detectListSelector).
+    if (/^\d+\.\s/.test(m[1])) return null;
     // Skip the navigation hint that occasionally shares this shape.
-    if (/^for\s/i.test(m[1])) continue;
+    if (/^for\s/i.test(m[1])) return null;
     const text = m[1].trim();
     if (text.length === 0) return null;
     return text;
