@@ -520,15 +520,17 @@ export class OutputService {
     }
     const selector = this.runtime.detectInteractivePrompt(lines);
     this.stopPoll();
-    // Seed the idle-window detector with the final established screen
-    // BEFORE the PTY buffer wipes itself. Claude paints the
-    // ghost-text completion via cursor positioning ANSI (`\x1b[r;cH` +
-    // dim text), not a full screen redraw — so without the prior
-    // frame context, renderToLines can't resolve the cursor target
-    // and detectInputSuggestion finds nothing. The seed gives the
-    // virtual terminal its baseline; post-finalize pushes layer the
-    // suggestion on top.
-    this.idleBuffer = this.pty.content;
+    // Seed the idle-window detector ONLY for agents whose runtime
+    // opts in to ghost-text detection (currently Claude). Other
+    // agents (Codex's ratatui input bar, etc.) use different idle-
+    // prompt shapes and own their own detection in their parsing
+    // module — this orchestrator stays agnostic. Claude paints the
+    // ghost completion via cursor positioning ANSI on top of the
+    // established frame, so the virtual terminal needs the baseline
+    // to resolve the target cells.
+    if (this.runtime.detectInputSuggestion) {
+      this.idleBuffer = this.pty.content;
+    }
     this.pty.deactivate();
 
     if (selector) {
