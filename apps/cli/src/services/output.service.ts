@@ -217,7 +217,13 @@ export class OutputService {
         this.terminalTurnPending = true;
         this.onTerminalTurnDetected?.();
       }
-      log.trace('outputSvc', `push dropped (inactive, ${raw.length}B)`);
+      // Claude paints its ghost-text completion ~300-500 ms after a
+      // turn settles into the idle prompt — that window lives in the
+      // post-finalize inactive state. The PTY data event IS the
+      // realtime signal; we react on every push instead of polling
+      // with timers. No-op when the rendered frame doesn't carry a
+      // suggestion or when it's unchanged from the last emit.
+      this.detectIdleSuggestion(raw);
       return;
     }
     log.trace(
@@ -228,6 +234,38 @@ export class OutputService {
     // these are side-effect callbacks that don't influence the pump.
     this.tryExtractSessionId(raw);
     this.tryDetectRateLimit(raw);
+  }
+
+  /**
+   * Idle-window accumulator. PtyBuffer wipes its `raw` on
+   * `deactivate()` to keep next-turn renders clean, so the
+   * post-finalize PTY redraw frames don't live in `this.pty.content`.
+   * We mirror them here only for the suggestion detector — a tiny
+   * window of trailing bytes is enough for renderToLines to surface
+   * the last frame. Cleared on every `beginTurn()`.
+   */
+  private idleBuffer = '';
+  private static readonly IDLE_BUFFER_MAX = 32 * 1024;
+
+  private detectIdleSuggestion(raw: string): void {
+    if (!this.runtime.detectInputSuggestion) return;
+    this.idleBuffer += raw;
+    if (this.idleBuffer.length > OutputService.IDLE_BUFFER_MAX) {
+      this.idleBuffer = this.idleBuffer.slice(-OutputService.IDLE_BUFFER_MAX);
+    }
+    const rendered = this.runtime.renderToLines?.(this.idleBuffer)
+      ?? renderLines(this.idleBuffer);
+    const suggestion = this.runtime.detectInputSuggestion(rendered);
+    if (suggestion === this.lastSentSuggestion) return;
+    this.lastSentSuggestion = suggestion;
+    this.send(
+      {
+        type: 'input_suggestion',
+        content: suggestion ?? '',
+        done: true,
+      },
+      { critical: false },
+    ).catch(() => {});
   }
 
   dispose(): void {
@@ -243,6 +281,7 @@ export class OutputService {
     this.steps.reset();
     this.lastSentContent = '';
     this.lastContentChangeAt = 0;
+    this.idleBuffer = '';
     this.startTime = Date.now();
     this.pollTimer = setInterval(() => this.tick(), OutputService.POLL_MS);
   }
@@ -496,46 +535,7 @@ export class OutputService {
         { critical: true },
       ).catch(() => {});
       this.onTurnComplete?.();
-      // Schedule a delayed input-suggestion check. Claude's TUI
-      // paints the ghost-text completion ~300-500 ms AFTER the
-      // turn settles into the idle prompt, but `finalize()` has
-      // already stopped the poll timer — without this follow-up
-      // `detectInputSuggestion` never runs and mobile's quick-
-      // reply chip stays empty across the entire idle window.
-      this.scheduleSuggestionPoll();
     }
-  }
-
-  /**
-   * Poll for an `input_suggestion` chunk a few times after a
-   * turn finalises. The TUI takes a beat to render the ghost
-   * completion, so a single check at finalize-time would miss
-   * it. Three checks at 400/800/1500 ms cover the window
-   * without burning CPU when there's no suggestion (each tick
-   * is cheap — a regex over the rendered lines).
-   */
-  private scheduleSuggestionPoll(): void {
-    if (!this.runtime.detectInputSuggestion) return;
-    const tryDetect = () => {
-      if (!this.runtime.detectInputSuggestion) return;
-      const rendered = this.runtime.renderToLines?.(this.pty.content)
-        ?? renderLines(this.pty.content);
-      const suggestion = this.runtime.detectInputSuggestion(rendered);
-      if (suggestion !== this.lastSentSuggestion) {
-        this.lastSentSuggestion = suggestion;
-        this.send(
-          {
-            type: 'input_suggestion',
-            content: suggestion ?? '',
-            done: true,
-          },
-          { critical: false },
-        ).catch(() => {});
-      }
-    };
-    setTimeout(tryDetect, 400);
-    setTimeout(tryDetect, 800);
-    setTimeout(tryDetect, 1500);
   }
 
   // ─── Side-channel observation (session id + rate limit) ──────────
