@@ -194,7 +194,18 @@ const getContext: CommandHandler = async (ctx, cmd) => {
 };
 
 const getConversation: CommandHandler = async (ctx, cmd) => {
-  const currentId = ctx.historySvc.getCurrentConversationId();
+  // Lazy-detect when the conversation id hasn't been bound yet.
+  // `uploadDelta()` does the same thing on its hot path, but the
+  // mobile autoload can fire BEFORE any turn has triggered an
+  // upload (cold session re-open, Redis TTL expired and no
+  // intermediate write since). Without this, the handler returned
+  // `{ conversationId: null }` and the mobile chat sat empty even
+  // though the JSONL was sitting on disk waiting to be uploaded.
+  let currentId = ctx.historySvc.getCurrentConversationId();
+  if (!currentId) {
+    ctx.historySvc.detectCurrentConversation();
+    currentId = ctx.historySvc.getCurrentConversationId();
+  }
   if (!currentId) {
     await ctx.relay.sendResult(cmd.id, 'completed', { conversationId: null });
     return;
