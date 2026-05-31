@@ -106,3 +106,58 @@ export interface PendingReviewHunkEvent {
   reasoning?: string;
   sessionLogPreview?: string[];
 }
+
+/**
+ * One commit in the file's git log (newest first). `sha` is the full
+ * 40-char hash; consumers truncate for display. `committedAt` is ISO
+ * 8601 in UTC. Mirrors `apps/api-v2/src/review/dto/create-history.dto.ts`
+ * `CommitEntryDto`.
+ */
+export interface CommitEntryWire {
+  sha: string;
+  authorName: string;
+  authorEmail: string;
+  committedAt: string;
+  subject: string;
+}
+
+/**
+ * Body for `POST /api/review/history`. The producer captures `git log
+ * --max-count=N -- <path>` for each touched file at the same point it
+ * pushes hunks, then upserts on `(sessionId, repoPath, filePath)`
+ * server-side. Re-emitting per save is safe.
+ */
+export interface FileHistoryEvent {
+  sessionId: string;
+  pluginId: string;
+  filePath: string;
+  repoPath?: string;
+  repoName?: string;
+  commits: CommitEntryWire[];
+}
+
+/**
+ * One line of `git blame`. `lineNumber` is 1-based and matches the
+ * post-image (current) file gutter.
+ */
+export interface BlameLineWire {
+  lineNumber: number;
+  sha: string;
+  authorName: string;
+  committedAt: string;
+  text: string;
+}
+
+/**
+ * Body for `POST /api/review/blame`. Capped server-side by what the
+ * producer chose to emit — large files get truncated by the CLI so a
+ * single payload stays under the JSON size limit.
+ */
+export interface FileBlameEvent {
+  sessionId: string;
+  pluginId: string;
+  filePath: string;
+  repoPath?: string;
+  repoName?: string;
+  lines: BlameLineWire[];
+}
