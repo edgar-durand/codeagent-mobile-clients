@@ -165,14 +165,17 @@ describe('AgentService — serialised submission queue', () => {
     expect(writeSpy).toHaveBeenCalledWith('boot-3');
   });
 
-  test('multi-line prompt still scheduled with longer \\r delay', () => {
+  test('multi-line prompt wraps in bracketed-paste then sends \\r outside the bracket', () => {
     const multiLine = 'line 1\nline 2\nline 3\nline 4';
     agent.sendCommand(multiLine);
-    expect(writeSpy).toHaveBeenCalledWith(multiLine);
-    // 4 lines → delay = min(300, 50 + 3 * 40) = 170 ms.
+    // Multi-line writes are wrapped in bracketed-paste markers so the
+    // trailing `\r` is interpreted as Submit (outside the paste),
+    // not as paste content.
+    expect(writeSpy).toHaveBeenCalledWith(`\x1b[200~${multiLine}\x1b[201~`);
+    // \r is delayed 80 ms after the bracket closes.
     vi.advanceTimersByTime(50);
     expect(writeSpy).not.toHaveBeenCalledWith('\r');
-    vi.advanceTimersByTime(200);
+    vi.advanceTimersByTime(50);
     expect(writeSpy).toHaveBeenCalledWith('\r');
   });
 });
