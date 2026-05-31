@@ -165,14 +165,40 @@ describe('AgentService — serialised submission queue', () => {
     expect(writeSpy).toHaveBeenCalledWith('boot-3');
   });
 
-  test('multi-line prompt wraps in bracketed-paste then sends \\r outside the bracket', () => {
+  test('default (no strategy override) submits multi-line text directly + \\r at 50 ms', () => {
     const multiLine = 'line 1\nline 2\nline 3\nline 4';
     agent.sendCommand(multiLine);
-    // Multi-line writes are wrapped in bracketed-paste markers so the
-    // trailing `\r` is interpreted as Submit (outside the paste),
-    // not as paste content.
+    // Default contract — strategy without `prepareInputWrites`
+    // gets the agent-agnostic path: one write of the raw text plus
+    // a `\r` 50 ms later. Per-agent wire formatting (bracketed paste,
+    // etc.) is the strategy's responsibility, not AgentService's.
+    expect(writeSpy).toHaveBeenCalledWith(multiLine);
+    vi.advanceTimersByTime(40);
+    expect(writeSpy).not.toHaveBeenCalledWith('\r');
+    vi.advanceTimersByTime(20);
+    expect(writeSpy).toHaveBeenCalledWith('\r');
+  });
+
+  test('strategy override (e.g. Claude bracketed-paste) controls the wire shape', () => {
+    // A strategy that wraps text in bracketed-paste markers — the
+    // Claude Code shape. AgentService just executes whatever the
+    // strategy returns; the per-agent quirks live in the strategy.
+    const runtimeWithOverride = {
+      meta: { id: 'claude', displayName: 'Claude Code' },
+      prepareInputWrites: (text: string) => ({
+        writes: [`\x1b[200~${text}\x1b[201~`],
+        submitDelayMs: 80,
+      }),
+    } as unknown as RuntimeStrategy;
+    const customAgent = new AgentService(runtimeWithOverride, {
+      cwd: '/tmp/test',
+      onExit: vi.fn(),
+    });
+    Object.assign(customAgent, { strategy, agentReady: true });
+
+    const multiLine = 'line 1\nline 2\nline 3';
+    customAgent.sendCommand(multiLine);
     expect(writeSpy).toHaveBeenCalledWith(`\x1b[200~${multiLine}\x1b[201~`);
-    // \r is delayed 80 ms after the bracket closes.
     vi.advanceTimersByTime(50);
     expect(writeSpy).not.toHaveBeenCalledWith('\r');
     vi.advanceTimersByTime(50);

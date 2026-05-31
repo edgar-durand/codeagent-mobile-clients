@@ -139,6 +139,29 @@ export interface BaseAgentStrategy {
 export interface InteractiveAgentStrategy extends BaseAgentStrategy {
   readonly mode: 'interactive';
 
+  /**
+   * Optional per-agent override of how a prompt is written to the
+   * PTY and submitted. The default behavior (used when undefined)
+   * is `[text]` then a `\r` 50 ms later — fine for plain REPL
+   * agents that treat raw bytes as keystrokes.
+   *
+   * Agents whose TUI requires special wire formatting override
+   * this. Claude Code's react-ink TUI, for example, enables
+   * bracketed-paste mode at boot — a naïve `text + \r` write
+   * lands the `\r` INSIDE the paste boundary as content instead
+   * of submitting. Claude's strategy returns the text wrapped in
+   * `\x1b[200~ ... \x1b[201~` so the trailing `\r` arrives after
+   * the bracket closes.
+   *
+   * Returns the sequence of PTY writes (emitted in order, all in
+   * one frame) plus the delay before the `\r` submission. The
+   * caller appends the `\r` itself so the contract is uniform.
+   */
+  prepareInputWrites?(text: string): {
+    writes: string[];
+    submitDelayMs: number;
+  };
+
   prepareLaunch(): Promise<{
     cmd: string;
     args: string[];
