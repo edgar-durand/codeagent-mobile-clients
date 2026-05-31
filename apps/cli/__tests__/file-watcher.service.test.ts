@@ -233,7 +233,7 @@ describe('FileWatcherService', () => {
     svc._scheduleForTest(absPath, 'change');
 
     // Debounce window = 250 ms — only one emit should fire after.
-    await vi.advanceTimersByTimeAsync(300);
+    await vi.advanceTimersByTimeAsync(600);
     await vi.runAllTicks();
 
     // Expect 1 file-changed POST + 1 /review/hunks for the single
@@ -260,7 +260,7 @@ describe('FileWatcherService', () => {
     });
 
     svc._scheduleForTest(path.join(WORKING_DIR, 'foo.ts'), 'change');
-    await vi.advanceTimersByTimeAsync(300);
+    await vi.advanceTimersByTimeAsync(600);
     await vi.runAllTicks();
 
     const filesCalls = postSpy.mock.calls.filter((c) => c[0].endsWith('/api/files/changed'));
@@ -294,7 +294,7 @@ describe('FileWatcherService', () => {
     });
 
     svc._scheduleForTest(path.join(WORKING_DIR, 'foo.ts'), 'change');
-    await vi.advanceTimersByTimeAsync(300);
+    await vi.advanceTimersByTimeAsync(600);
     await vi.runAllTicks();
 
     const headers = postSpy.mock.calls[0][1];
@@ -310,7 +310,7 @@ describe('FileWatcherService', () => {
       .mockResolvedValueOnce({ statusCode: 410, body: '{}' });
 
     svc._scheduleForTest(path.join(WORKING_DIR, 'a.ts'), 'change');
-    await vi.advanceTimersByTimeAsync(300);
+    await vi.advanceTimersByTimeAsync(600);
     await vi.runAllTicks();
 
     // First emit fires /files/changed; the 410 short-circuits the
@@ -322,7 +322,7 @@ describe('FileWatcherService', () => {
     // Schedule another change — service is now in stopped state, no
     // further posts should fire.
     svc._scheduleForTest(path.join(WORKING_DIR, 'b.ts'), 'change');
-    await vi.advanceTimersByTimeAsync(300);
+    await vi.advanceTimersByTimeAsync(600);
     await vi.runAllTicks();
     expect(postSpy.mock.calls.length).toBe(firstBatch);
   });
@@ -360,7 +360,7 @@ describe('FileWatcherService', () => {
     });
 
     svc._scheduleForTest(path.join(WORKING_DIR, 'gone.ts'), 'unlink');
-    await vi.advanceTimersByTimeAsync(300);
+    await vi.advanceTimersByTimeAsync(600);
     await vi.runAllTicks();
 
     const fileCall = postSpy.mock.calls.find((c) => c[0].endsWith('/api/files/changed'));
@@ -379,7 +379,7 @@ describe('FileWatcherService', () => {
     });
 
     svc._scheduleForTest('/etc/passwd', 'change');
-    await vi.advanceTimersByTimeAsync(300);
+    await vi.advanceTimersByTimeAsync(600);
     await vi.runAllTicks();
 
     expect(postSpy).not.toHaveBeenCalled();
@@ -502,7 +502,7 @@ describe('FileWatcherService', () => {
     svc._scheduleForTest(path.join(WORKING_DIR, 'a.ts'), 'change');
     await svc.stop();
     await svc.stop(); // second call should not throw
-    await vi.advanceTimersByTimeAsync(500);
+    await vi.advanceTimersByTimeAsync(800);
     await vi.runAllTicks();
 
     expect(postSpy).not.toHaveBeenCalled();

@@ -54,6 +54,28 @@ const API_BASE = resolveApiBaseUrl();
 /** Debounce window per file. Rapid sequential writes coalesce. */
 const DEBOUNCE_MS = 250;
 
+/**
+ * Cross-file coalescing window. After a per-file debounce fires, the
+ * emit is added to a shared buffer and the actual network POSTs run
+ * once the buffer has been quiet for this duration. The aggregate
+ * effect: a Claude turn that edits 10 files within a second produces
+ * one tight burst of emissions instead of 10 staggered bursts, and
+ * the mobile-side SSE batcher (apps/mobile/src/hooks/useUserEventsSSE)
+ * can collapse the resulting events into a single store mutation.
+ *
+ * The window is paired with the mobile batcher's window so a single
+ * mobile flush typically catches the whole CLI burst.
+ */
+const COALESCE_WINDOW_MS = 250;
+
+/**
+ * Hard cap on how long a file can sit in the buffer waiting for the
+ * coalesce window to drain. If the agent is continuously editing
+ * (window keeps resetting), this forces a flush so the UI isn't
+ * starved of updates for more than ~2 s.
+ */
+const COALESCE_MAX_HOLD_MS = 2_000;
+
 /** Max retries on transient network failure (per emission). */
 const MAX_RETRIES = 2;
 
@@ -260,6 +282,21 @@ export class FileWatcherService {
   private readonly gitRootByDir = new Map<string, string | null>();
   private stopped = false;
 
+  /**
+   * Cross-file coalescing buffer. Keyed by absPath so multiple
+   * scheduled emits for the same file collapse to the latest
+   * `changeType`. The buffer drains via `coalesceTimer` after
+   * `COALESCE_WINDOW_MS` of quiescence, or forcibly after
+   * `COALESCE_MAX_HOLD_MS` so the UI never starves during a long
+   * continuous edit.
+   */
+  private readonly coalesceBuffer = new Map<
+    string,
+    { absPath: string; changeType: 'add' | 'change' | 'unlink' }
+  >();
+  private coalesceTimer: ReturnType<typeof setTimeout> | null = null;
+  private coalesceMaxHoldTimer: ReturnType<typeof setTimeout> | null = null;
+
   constructor(private readonly opts: FileWatcherOptions) {
     this.apiBase = opts.apiBaseUrl ?? API_BASE;
   }
@@ -388,6 +425,15 @@ export class FileWatcherService {
       clearTimeout(entry.timer);
     }
     this.pending.clear();
+    if (this.coalesceTimer) {
+      clearTimeout(this.coalesceTimer);
+      this.coalesceTimer = null;
+    }
+    if (this.coalesceMaxHoldTimer) {
+      clearTimeout(this.coalesceMaxHoldTimer);
+      this.coalesceMaxHoldTimer = null;
+    }
+    this.coalesceBuffer.clear();
     if (this.watcher) {
       try {
         await this.watcher.close();
@@ -418,7 +464,7 @@ export class FileWatcherService {
 
     const timer = setTimeout(() => {
       this.pending.delete(absPath);
-      void this.emitForFile(absPath, changeType);
+      this.enqueueForCoalesce(absPath, changeType);
     }, DEBOUNCE_MS);
 
     this.pending.set(absPath, {
@@ -426,6 +472,58 @@ export class FileWatcherService {
       timer,
       changeType,
     });
+  }
+
+  /**
+   * Drop the file into the cross-file coalescing buffer. The buffer
+   * flushes after `COALESCE_WINDOW_MS` of quiescence (resets on each
+   * new enqueue) or after `COALESCE_MAX_HOLD_MS` regardless. Same
+   * file enqueued twice in a row keeps only the latest `changeType`
+   * (typically the most recent FS event wins).
+   */
+  private enqueueForCoalesce(
+    absPath: string,
+    changeType: 'add' | 'change' | 'unlink',
+  ): void {
+    if (this.stopped) return;
+    this.coalesceBuffer.set(absPath, { absPath, changeType });
+
+    // Reset the quiescence timer.
+    if (this.coalesceTimer) clearTimeout(this.coalesceTimer);
+    this.coalesceTimer = setTimeout(() => {
+      void this.flushCoalesceBuffer();
+    }, COALESCE_WINDOW_MS);
+
+    // Arm the hard-cap timer on the first enqueue of a flush cycle.
+    if (!this.coalesceMaxHoldTimer) {
+      this.coalesceMaxHoldTimer = setTimeout(() => {
+        void this.flushCoalesceBuffer();
+      }, COALESCE_MAX_HOLD_MS);
+    }
+  }
+
+  /**
+   * Drain the coalesce buffer. Snapshots the entries up-front so any
+   * emissions that arrive mid-flush (chokidar fires again, agent
+   * keeps writing) land in a fresh buffer rather than competing with
+   * the in-flight one.
+   */
+  private async flushCoalesceBuffer(): Promise<void> {
+    if (this.coalesceTimer) {
+      clearTimeout(this.coalesceTimer);
+      this.coalesceTimer = null;
+    }
+    if (this.coalesceMaxHoldTimer) {
+      clearTimeout(this.coalesceMaxHoldTimer);
+      this.coalesceMaxHoldTimer = null;
+    }
+    if (this.coalesceBuffer.size === 0) return;
+    const entries = Array.from(this.coalesceBuffer.values());
+    this.coalesceBuffer.clear();
+    for (const entry of entries) {
+      if (this.stopped) return;
+      await this.emitForFile(entry.absPath, entry.changeType);
+    }
   }
 
   /**
