@@ -276,7 +276,7 @@ export class HistoryService {
    * Poll the JSONL until a new user message appears after previousCount entries.
    * Returns the text of the new user message, or null if not found within timeoutMs.
    */
-  async waitForNewUserMessage(previousCount: number, timeoutMs = 4000): Promise<string | null> {
+  async waitForNewUserMessage(previousCount: number, timeoutMs = 60_000): Promise<string | null> {
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
       if (!this.currentConversationId) return null;

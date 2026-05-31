@@ -130,10 +130,28 @@ export async function start(requestedAgent?: AgentId): Promise<void> {
       // local terminal. Wait for Claude Code to flush the user
       // message into the JSONL, then start the relay turn with:
       // clear → user_message → new_turn → response.
+      //
+      // On timeout / error: do NOT open a turn. The detection
+      // fires on the first printable byte after the buffer
+      // deactivates, which Claude's ghost-text completion (painted
+      // 300-500 ms after the previous turn settles) trips before
+      // the user actually types. Calling `startTerminalTurn` with
+      // no userText would emit `clear` + `new_turn`, activate the
+      // PTY buffer, and the tick poll would render the still-
+      // visible previous response as fresh `text` chunks → a
+      // duplicate agent bubble on mobile. Resetting the gate
+      // instead lets the next legitimate keystroke re-fire
+      // detection cleanly.
       const prevCount = historySvc.getCurrentMessageCount();
       historySvc.waitForNewUserMessage(prevCount)
-        .then((userText) => outputSvc.startTerminalTurn(userText ?? undefined))
-        .catch(() => outputSvc.startTerminalTurn(undefined));
+        .then((userText) => {
+          if (userText) {
+            void outputSvc.startTerminalTurn(userText);
+          } else {
+            outputSvc.resetTerminalTurnGate();
+          }
+        })
+        .catch(() => outputSvc.resetTerminalTurnGate());
     },
     session.pluginAuthToken,
     runtime,

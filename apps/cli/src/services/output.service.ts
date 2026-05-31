@@ -195,6 +195,23 @@ export class OutputService {
   }
 
   /**
+   * Re-arm the terminal-turn detection gate without opening a bogus
+   * turn. Called by the orchestrator when `waitForNewUserMessage`
+   * times out — Claude's ghost-text completion (painted between
+   * turns) trips the printable-byte detector before the user has
+   * actually typed anything. Calling `startTerminalTurn` here would
+   * emit `clear` + `new_turn` to mobile and then `beginTurn` would
+   * activate the PTY buffer; the tick poll would render the still-
+   * visible previous response as fresh `text` chunks → a duplicate
+   * agent bubble on mobile. Resetting the gates instead means the
+   * next legitimate keystroke re-fires detection cleanly.
+   */
+  resetTerminalTurnGate(): void {
+    this.terminalTurnPending = false;
+    this.pty.resetTerminalInputGate();
+  }
+
+  /**
    * Begin a turn after a `resume_session` request. Includes the
    * `resumedSessionId` so the client wipes its history and
    * re-fetches from the JSONL via `get_conversation`.

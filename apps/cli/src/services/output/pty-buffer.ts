@@ -79,6 +79,22 @@ export class PtyBuffer {
   }
 
   /**
+   * Re-arm the terminal-input detector without flipping `active`.
+   * Called by the orchestrator when a pending terminal-turn signal
+   * doesn't pan out — the JSONL polling timed out without finding a
+   * new user message, so whatever produced the printable byte (most
+   * commonly Claude's ghost-text completion painted ~300-500 ms after
+   * the previous turn settled) was NOT a real user keystroke. We
+   * need detection to fire again on the next legitimate keystroke,
+   * otherwise the human's eventual CLI prompt is lost and only the
+   * agent's reply lands on mobile (the duplicate-response /
+   * missing-user-bubble class of bug the user reported).
+   */
+  resetTerminalInputGate(): void {
+    this.terminalInputPending = false;
+  }
+
+  /**
    * Ingest a raw PTY frame. Always accumulates so cold-startup
    * frames aren't lost. Returns whether the buffer was active at
    * the time (caller may render now, vs. wait) and whether this
