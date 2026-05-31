@@ -4,9 +4,13 @@ import * as os from 'os';
 import * as path from 'path';
 import { resolveApiBaseUrl } from '@codeagent/shared';
 import type {
+  BlameLineWire,
+  CommitEntryWire,
+  FileBlameEvent,
   FileChangedEvent,
-  PendingReviewHunkEvent,
   FileChangeStatus,
+  FileHistoryEvent,
+  PendingReviewHunkEvent,
 } from '@codeagent/shared';
 import { log } from './logger';
 import { parseUnifiedDiff } from './file-watcher/diff-parser';
@@ -55,6 +59,21 @@ const MAX_RETRIES = 2;
 
 /** Backoff between retries (linear: 300 / 600 ms). */
 const RETRY_BACKOFF_MS = 300;
+
+/**
+ * Cap on the number of commits the producer ships in the history
+ * snapshot. The mobile UI only renders a scrollable list — 50 is
+ * enough context for "who last touched this file" without making the
+ * payload unbounded for files like README.md with thousands of edits.
+ */
+const HISTORY_MAX_COMMITS = 50;
+
+/**
+ * Cap on the number of blame lines per file. Large generated files
+ * (lockfiles, bundled JS) would otherwise produce multi-MB payloads.
+ * The UI shows a "first N lines blamed" hint when truncated.
+ */
+const BLAME_MAX_LINES = 500;
 
 export interface FileWatcherOptions {
   /** Working directory to watch — typically `process.cwd()` at start time. */
@@ -562,6 +581,52 @@ export class FileWatcherService {
         linesRemoved: hunk.linesRemoved,
       });
     }
+
+    // History + blame snapshots — feed the matching tabs in the file
+    // detail view. Fire-and-forget so a slow `git blame` on a big file
+    // never blocks the hot diff emission. Deletions skip blame (no
+    // current file to blame), but still emit history (the log of the
+    // file before it was deleted).
+    await this.emitGitEnrichment(gitRoot, relPathInRepo, repoPath, repoName, fileStatus);
+  }
+
+  private async emitGitEnrichment(
+    gitRoot: string,
+    relPathInRepo: string,
+    repoPath: string,
+    repoName: string,
+    fileStatus: FileChangeStatus,
+  ): Promise<void> {
+    // Re-check `stopped` between every async step. emitForFile's
+    // initial guard doesn't cover the case where stop() runs while a
+    // previously-scheduled emit is mid-flight — without these checks
+    // the in-flight chain would keep spawning git and POSTing into a
+    // torn-down session.
+    if (this.stopped) return;
+
+    const commits = await captureHistory(gitRoot, relPathInRepo, HISTORY_MAX_COMMITS);
+    if (this.stopped) return;
+    await this.postReviewHistory({
+      sessionId: this.opts.sessionId,
+      pluginId: this.opts.pluginId,
+      filePath: relPathInRepo,
+      repoPath,
+      repoName,
+      commits,
+    });
+
+    if (this.stopped || fileStatus === 'deleted') return;
+
+    const blameLines = await captureBlame(gitRoot, relPathInRepo, BLAME_MAX_LINES);
+    if (this.stopped) return;
+    await this.postReviewBlame({
+      sessionId: this.opts.sessionId,
+      pluginId: this.opts.pluginId,
+      filePath: relPathInRepo,
+      repoPath,
+      repoName,
+      lines: blameLines,
+    });
   }
 
   /**
@@ -612,9 +677,21 @@ export class FileWatcherService {
     await this.postWithRetries(`${this.apiBase}/api/review/hunks`, body);
   }
 
+  private async postReviewHistory(body: FileHistoryEvent): Promise<void> {
+    await this.postWithRetries(`${this.apiBase}/api/review/history`, body);
+  }
+
+  private async postReviewBlame(body: FileBlameEvent): Promise<void> {
+    await this.postWithRetries(`${this.apiBase}/api/review/blame`, body);
+  }
+
   private async postWithRetries(
     url: string,
-    body: FileChangedEvent | PendingReviewHunkEvent,
+    body:
+      | FileChangedEvent
+      | PendingReviewHunkEvent
+      | FileHistoryEvent
+      | FileBlameEvent,
   ): Promise<void> {
     const payload = JSON.stringify(body);
     const headers: Record<string, string> = {
@@ -674,6 +751,120 @@ export class FileWatcherService {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
+}
+
+/**
+ * Capture the file's commit history via `git log`. Tab-separated
+ * format string is unambiguous to parse and matches what the wire DTO
+ * needs. Returns an empty array on git failure, untracked file, or
+ * "not a git repo" — the producer still POSTs an empty snapshot so
+ * stale entries get cleared on the backend.
+ */
+async function captureHistory(
+  repoRoot: string,
+  relPath: string,
+  maxCommits: number,
+): Promise<CommitEntryWire[]> {
+  const out = await runGit(repoRoot, [
+    'log',
+    `--max-count=${maxCommits}`,
+    '--no-color',
+    '--format=%H%x09%an%x09%ae%x09%aI%x09%s',
+    '--',
+    relPath,
+  ]);
+  if (!out) return [];
+  const commits: CommitEntryWire[] = [];
+  for (const line of out.split('\n')) {
+    if (!line) continue;
+    const cols = line.split('\t');
+    if (cols.length < 5) continue;
+    const [sha, authorName, authorEmail, committedAt, ...subjectParts] = cols;
+    commits.push({
+      sha,
+      authorName: authorName ?? '',
+      authorEmail: authorEmail ?? '',
+      committedAt: committedAt ?? '',
+      subject: subjectParts.join('\t'),
+    });
+  }
+  return commits;
+}
+
+/**
+ * Capture per-line blame via `git blame --line-porcelain`. The
+ * porcelain format starts each block with `<sha> <orig> <final>
+ * <count>`, then KV metadata lines, then a tab-prefixed content line.
+ * `--line-porcelain` repeats the metadata for every line (no
+ * compression of consecutive lines from the same commit), making the
+ * parse trivial.
+ *
+ * Lines past `maxLines` are dropped via `-L 1,<max>`. For files
+ * shorter than `maxLines`, git blames the whole file.
+ */
+async function captureBlame(
+  repoRoot: string,
+  relPath: string,
+  maxLines: number,
+): Promise<BlameLineWire[]> {
+  const out = await runGit(repoRoot, [
+    'blame',
+    '--line-porcelain',
+    '--no-progress',
+    '-L',
+    `1,${maxLines}`,
+    '--',
+    relPath,
+  ]);
+  if (!out) return [];
+
+  const lines: BlameLineWire[] = [];
+  // A porcelain block looks like:
+  //   <40-char-sha> <orig-line> <final-line> <lines-in-group>
+  //   author <name>
+  //   author-mail <<email>>
+  //   author-time <epoch>
+  //   author-tz <+0200>
+  //   committer ...
+  //   summary <subject>
+  //   filename <path>
+  //   <TAB><line content>
+  // and the next block starts with another header line.
+  const blocks = out.split(/(?=^[0-9a-f]{40} )/m);
+  for (const block of blocks) {
+    if (!block) continue;
+    const blockLines = block.split('\n');
+    const headerMatch = blockLines[0].match(/^([0-9a-f]{40}) \d+ (\d+)/);
+    if (!headerMatch) continue;
+    const sha = headerMatch[1];
+    const lineNumber = parseInt(headerMatch[2], 10);
+
+    let authorName = '';
+    let authorTime: number | null = null;
+    let text = '';
+    for (let i = 1; i < blockLines.length; i += 1) {
+      const bl = blockLines[i];
+      if (bl.startsWith('author ')) {
+        authorName = bl.slice(7);
+      } else if (bl.startsWith('author-time ')) {
+        const parsed = parseInt(bl.slice(12), 10);
+        if (!Number.isNaN(parsed)) authorTime = parsed;
+      } else if (bl.startsWith('\t')) {
+        text = bl.slice(1);
+        break; // content line is always last in the block
+      }
+    }
+    const committedAt =
+      authorTime !== null ? new Date(authorTime * 1000).toISOString() : '';
+    lines.push({
+      lineNumber,
+      sha,
+      authorName,
+      committedAt,
+      text,
+    });
+  }
+  return lines;
 }
 
 /**
