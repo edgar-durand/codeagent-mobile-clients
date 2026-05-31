@@ -35,6 +35,32 @@ export class ClaudeRuntimeStrategy implements RuntimeStrategy {
     this.os = os;
   }
 
+  /**
+   * Claude Code's react-ink TUI enables bracketed-paste mode at
+   * boot (`ESC[?2004h`). When a multi-line write arrives, Claude
+   * opens a paste boundary that stays open until it sees the
+   * matching `ESC[201~` end marker. A naïve `text + \r` lands the
+   * `\r` INSIDE the open bracket as paste CONTENT, and the prompt
+   * sits in the input forever (the user's mobile COMMENT flow was
+   * stacking `[Pasted text #N]` markers with no submit).
+   *
+   * Fix: wrap multi-line prompts in the bracket markers ourselves
+   * so the end marker closes the paste deterministically. The
+   * caller emits `\r` 80 ms later — now OUTSIDE the bracket — and
+   * Claude's input handler treats it as a normal Submit. Single-
+   * line prompts don't trigger paste mode so we keep the bare
+   * `text + \r` path for that case.
+   */
+  prepareInputWrites(text: string): { writes: string[]; submitDelayMs: number } {
+    if (text.includes('\n')) {
+      return {
+        writes: [`\x1b[200~${text}\x1b[201~`],
+        submitDelayMs: 80,
+      };
+    }
+    return { writes: [text], submitDelayMs: 50 };
+  }
+
   async prepareLaunch(): Promise<{
     cmd: string;
     args: string[];

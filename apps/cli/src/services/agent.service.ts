@@ -140,21 +140,13 @@ export class AgentService {
   /**
    * Write one prompt to the PTY and submit it.
    *
-   * For multi-line text (or any text > 1 line), Claude Code's TUI
-   * triggers bracketed-paste mode and treats the write as a paste:
-   * a `[Pasted text #N]` marker lands in the input field, and any
-   * `\r` we send while the paste boundary is still open is swallowed
-   * as part of the paste content — never reaching the submit
-   * handler. The result is the prompt sitting in the input forever
-   * (the user reported stacking `[Pasted text #N]` markers with no
-   * agent reply).
-   *
-   * Fix: explicitly bracket the paste ourselves (`ESC[200~ <text>
-   * ESC[201~`) so the end marker closes the paste deterministically.
-   * A short delay later we send `\r` — now OUTSIDE the bracket — so
-   * Claude's input handler treats it as Submit, not paste content.
-   * Single-line text doesn't trigger paste mode, so we keep the
-   * legacy `text + \r` path for that case (cheaper, no markers).
+   * Per-agent input wire formatting (e.g. Claude Code's bracketed-
+   * paste markers) lives in the runtime strategy's
+   * `prepareInputWrites(text)`. This method only knows the generic
+   * contract: emit N writes in order, wait `submitDelayMs`, then
+   * send `\r` to submit. The default (when the strategy doesn't
+   * override) is one `s.write(text)` followed by `\r` after 50 ms,
+   * which works for plain REPL agents (Aider).
    *
    * Marks the agent busy so subsequent `sendCommand` calls queue
    * instead of stacking pastes.
@@ -165,21 +157,12 @@ export class AgentService {
     this.agentBusy = true;
     log.trace('agent', `submit text=${text.length}B (queued=${this.pendingInputs.length})`);
 
-    const isMultiline = text.includes('\n');
-    if (isMultiline) {
-      // Bracketed paste: start marker, content, end marker. Single
-      // write so the markers + content land in the same PTY frame
-      // (Claude's paste detector needs contiguous bytes).
-      s.write(`\x1b[200~${text}\x1b[201~`);
-      // Enter follows AFTER the bracketed paste closes — outside the
-      // paste boundary it's a regular submit keystroke. The delay is
-      // small but non-zero so the TUI has time to commit the paste
-      // and place the cursor after it.
-      setTimeout(() => s.write('\r'), 80);
-    } else {
-      s.write(text);
-      setTimeout(() => s.write('\r'), 50);
-    }
+    const prep = this.runtime.prepareInputWrites?.(text) ?? {
+      writes: [text],
+      submitDelayMs: 50,
+    };
+    for (const w of prep.writes) s.write(w);
+    setTimeout(() => s.write('\r'), prep.submitDelayMs);
   }
 
   private drainPending(): void {
