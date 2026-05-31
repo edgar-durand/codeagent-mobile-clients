@@ -14,6 +14,7 @@ import type {
 } from '@codeagent/shared';
 import { log } from './logger';
 import { parseUnifiedDiff } from './file-watcher/diff-parser';
+import { isIgnoredFilePath } from './file-watcher/ignored-paths';
 import { _transport } from './file-watcher/transport';
 
 /**
@@ -458,6 +459,15 @@ export class FileWatcherService {
    */
   private schedule(absPath: string, changeType: 'add' | 'change' | 'unlink'): void {
     if (this.stopped) return;
+
+    // Defensive ignore at the earliest point. chokidar's `ignored`
+    // option is the primary filter, but it has macOS fsevents /
+    // Windows ReadDirectoryChangesW edge cases where freshly-
+    // created `node_modules/` paths can slip past. Catch them
+    // here before paying the debounce timer + git diff + POST cost.
+    // See ignored-paths.ts for the prod incident (3k vendor headers
+    // queued during an `npm install`).
+    if (isIgnoredFilePath(absPath)) return;
 
     const existing = this.pending.get(absPath);
     if (existing) clearTimeout(existing.timer);

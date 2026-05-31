@@ -1,6 +1,7 @@
 import { spawn } from 'child_process';
 import * as path from 'path';
 import { log } from '../logger';
+import { isIgnoredFilePath } from '../file-watcher/ignored-paths';
 
 /**
  * One file entry produced by collecting a repo's end-of-turn delta.
@@ -67,6 +68,13 @@ export async function collectRepoChangeset(
 
   const entries: ChangesetEntry[] = [];
   for (const row of parseStatus(status)) {
+    // Defensive ignore. `git status --porcelain` already respects
+    // `.gitignore`, but repos in the wild are missing entries for
+    // `node_modules` / `dist` / `Pods` more often than you'd think
+    // — and when they are, the rail explodes with vendor headers.
+    // Drop before the API hop; api-v2's `isIgnoredFilePath` would
+    // reject these anyway, this just saves the round-trip.
+    if (isIgnoredFilePath(row.filePath)) continue;
     const stats = numstat.get(row.filePath) ?? { added: 0, removed: 0 };
     entries.push({
       filePath: row.filePath,
