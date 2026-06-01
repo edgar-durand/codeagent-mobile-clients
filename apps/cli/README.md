@@ -49,14 +49,18 @@ That's it. Open the [CodeAgent Mobile app](https://codeagent-mobile.com), enter 
 | `codeam <agent>` | Start a specific agent — `codeam claude`, `codeam codex`, … |
 | `codeam pair` | Pair a new mobile device (6-character code or QR, interactive agent picker) |
 | `codeam pair --agent <id>` | Pair non-interactively for a specific agent (`claude`, `codex`, …) — useful in scripts |
+| `codeam pair-auto` | redeem a one-shot auto-pair token from `--token`, `--token-file`, or `CODEAM_AUTO_TOKEN` |
+| `codeam link <agent>` | capture local credentials for `<agent>` and store them for cloud workspace reuse |
 | `codeam sessions` | List all paired devices |
 | `codeam sessions switch` | Choose which paired session the next `codeam` invocation will use |
 | `codeam sessions delete <session-id>` | Forget a specific paired session (leaves the others intact) |
 | `codeam status` | Show connection status |
+| `codeam doctor` | run environment, install, and pairing diagnostics (`--json` for machine-readable output) |
 | `codeam logout` | Remove all paired sessions |
 | `codeam deploy` | Provision a cloud workspace (GitHub Codespaces) and pair it to your phone |
 | `codeam deploy ls` (alias `list`) | List the cloud workspaces you've deployed (and which still have a session running) |
 | `codeam deploy stop` (alias `remove`) | Pick a deployed workspace and stop its codeam session (and optionally the workspace itself) |
+| `codeam completion <shell>` | print shell completions for `<shell>` (`bash`, `zsh`, or `fish`) |
 | `codeam --version`, `-v` | Print the installed CLI version |
 | `codeam --help`, `-h` | Show usage and the full command list |
 
