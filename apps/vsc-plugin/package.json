@@ -148,7 +148,7 @@
     "@types/vscode": "^1.93.0",
     "@vscode/test-electron": "^2.5.2",
     "esbuild": "^0.28.0",
-    "glob": "^11.0.0",
+    "glob": "^13.0.6",
     "mocha": "^11.7.6",
     "posthog-node": "^5.35.1",
     "qrcode": "^1.5.4",
