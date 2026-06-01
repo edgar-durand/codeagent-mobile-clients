@@ -28,10 +28,18 @@ class FileWatcherStartupActivity : ProjectActivity {
             val watcher = FileWatcherService.getInstance()
             val pairing = PairingService.getInstance()
             val telemetry = TelemetryService.getInstance()
-            // Use a stable IDE-scoped machine id (UUID-ish, no PII) for
-            // the anonymous distinct id. PostHog stitches to the real
-            // userId on first pair via identify().
-            telemetry.init(com.intellij.openapi.application.PermanentInstallationID.get())
+            // Use the plugin's own per-install UUID as the anonymous
+            // distinct id. `PermanentInstallationID.get()` was the
+            // earlier anchor but returns the literal "0" when the
+            // user hasn't opted into JetBrains' data-sharing policy —
+            // and most devs don't. That collapsed every "private"
+            // install into a single PostHog person (`jetbrains-0`),
+            // hiding ~all real plugin_activated traffic behind one
+            // distinct_id. `ensurePluginId()` is a per-install UUID
+            // we already persist via SettingsService for backend
+            // pairing, so the analytics ride the same identity the
+            // server already knows about.
+            telemetry.init(SettingsService.getInstance().ensurePluginId())
             telemetry.capture("plugin_activated", mapOf("surface" to "jetbrains"))
 
             // Drive #1 - existing pairing already on disk. We have a
