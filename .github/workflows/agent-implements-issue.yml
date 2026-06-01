@@ -1,0 +1,259 @@
+name: Agent implements issue
+
+# Trigger pipeline
+# ─────────────────
+# Fires on `issues: labeled` when ANY of the six gating labels are
+# applied. The label is intended as the explicit "please implement
+# this" signal — opening or editing an issue alone does NOT run
+# Codex. Removing the label or applying others is ignored.
+#
+# Gating labels (must be one of):
+#   - codex          → explicit manual trigger; the most direct "go"
+#   - bug            → real defects
+#   - small-fix      → contained changes the agent can handle end-to-end
+#   - documentation  → README / inline docs only
+#   - testing        → adding tests, no production code change
+#   - ui-polish      → cosmetic / DLS / spacing tweaks
+#
+# `codex`, `small-fix`, and `ui-polish` were created for this
+# workflow; the other three are pre-existing repo labels.
+#
+# Safety stance
+# ─────────────
+# The action opens a DRAFT PR — never auto-merges. A maintainer
+# reviews the diff + CI before marking it ready and merging. Codex
+# runs with `workspace-write` so it can edit files, but the
+# `safety-strategy: drop-sudo` default keeps it from escalating
+# privileges inside the runner.
+
+on:
+  issues:
+    types: [labeled]
+
+# Concurrency: one in-flight agent run per issue. If a second label
+# event lands while a run is active, the older one gets cancelled —
+# whoever wins re-opens the PR from scratch with the latest state.
+concurrency:
+  group: agent-implements-issue-${{ github.event.issue.number }}
+  cancel-in-progress: true
+
+jobs:
+  implement:
+    name: Codex implements issue #${{ github.event.issue.number }}
+    runs-on: ubuntu-latest
+    # Filter at job level so the workflow page shows clearly when
+    # an unrelated label was applied (the job just skips). Cheaper
+    # than a workflow-level `if:` because GitHub still renders the
+    # gating decision in the UI.
+    if: >-
+      github.event.label.name == 'codex' ||
+      github.event.label.name == 'bug' ||
+      github.event.label.name == 'small-fix' ||
+      github.event.label.name == 'documentation' ||
+      github.event.label.name == 'testing' ||
+      github.event.label.name == 'ui-polish'
+    permissions:
+      contents: write       # commit + push the agent's branch
+      pull-requests: write  # open the draft PR
+      issues: write         # comment back on the issue
+    steps:
+      - name: Checkout default branch
+        uses: actions/checkout@v6
+        with:
+          # Full history so Codex can branch off main cleanly and
+          # so commit-message conventions / lint-config can resolve
+          # parents during pre-push hooks.
+          fetch-depth: 0
+          # Persist credentials so the post-Codex `git push` below
+          # uses the workflow token without a separate auth step.
+          persist-credentials: true
+
+      - name: Configure git identity
+        run: |
+          git config user.name "codex-agent[bot]"
+          git config user.email "[email protected]"
+
+      - name: Create agent branch
+        id: branch
+        env:
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          ISSUE_TITLE: ${{ github.event.issue.title }}
+        run: |
+          # Slug the issue title — lowercase, strip non-alphanumerics,
+          # collapse runs of dashes, trim to ~40 chars. Branch name
+          # ends up like `agent/108-jetbrains-dynamic-plugin-loading`.
+          slug=$(printf '%s' "$ISSUE_TITLE" \
+            | tr '[:upper:]' '[:lower:]' \
+            | sed -E 's/[^a-z0-9]+/-/g; s/^-+|-+$//g' \
+            | cut -c1-40 \
+            | sed -E 's/-+$//')
+          branch="agent/${ISSUE_NUMBER}-${slug}"
+          git checkout -b "$branch"
+          echo "name=$branch" >> "$GITHUB_OUTPUT"
+
+      - name: Run Codex
+        id: run_codex
+        uses: openai/codex-action@v1
+        with:
+          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          # workspace-write lets Codex edit files in the checkout;
+          # network is still sandboxed off so it can't reach out
+          # past the runner. Matches the action's documented
+          # secure default for code-mod workflows.
+          sandbox: workspace-write
+          # Reasoning effort: `high` for `codex` / `bug` (open-ended
+          # debugging), `medium` for everything else. We can ratchet
+          # later by inspecting outcomes.
+          effort: ${{ (github.event.label.name == 'codex' || github.event.label.name == 'bug') && 'high' || 'medium' }}
+          prompt: |
+            You are picking up GitHub issue #${{ github.event.issue.number }}
+            in ${{ github.repository }}, which was just labelled
+            `${{ github.event.label.name }}` by `${{ github.actor }}`.
+
+            ## Issue title
+            ${{ github.event.issue.title }}
+
+            ## Issue body
+            ${{ github.event.issue.body }}
+
+            ## How to work this issue
+            1. Read the repository's `CLAUDE.md` (if any) before
+               touching code — it owns the conventions, scope, and
+               the lockstep rules between CLI / VS Code / JetBrains.
+            2. You are already on a fresh branch cut off `main`. Edit
+               files in place; the workflow commits + pushes after
+               you exit.
+            3. Implement the smallest end-to-end change that
+               resolves the issue. If the request is ambiguous or
+               clearly larger than the gating label suggests
+               (`small-fix` / `ui-polish` / `documentation` are
+               low-risk markers — DO NOT expand scope past them),
+               STOP and explain what's missing in your final
+               message. The workflow will leave a clarification
+               comment on the issue instead of opening a PR.
+            4. Where the affected app has a typecheck or lint
+               command (`npm run typecheck`, `npm run lint`,
+               `./gradlew buildPlugin`), run it after each
+               substantial change and only consider yourself done
+               when it passes.
+            5. Conventional Commits — pick the type that fits the
+               actual change (commit will happen via the workflow,
+               but the COMMIT MESSAGE is yours to write in your
+               final summary):
+                 - `bug` → `fix(<scope>): …`
+                 - `small-fix` → `fix(<scope>): …` or `refactor(<scope>): …`
+                 - `documentation` → `docs(<scope>): …`
+                 - `testing` → `test(<scope>): …`
+                 - `ui-polish` → `style(<scope>): …` or `fix(<scope>): …`
+                 - `codex` → pick the closest type that fits the
+                   actual change.
+               Scopes available are listed in `commitlint.config.js`.
+            6. Do not delete or rename existing files unless the
+               issue explicitly asks for it.
+            7. Do not change `package.json` versions, CI configs,
+               or release-pipeline scripts. Those are owner-only
+               surfaces.
+
+            Stay within the `${{ github.event.label.name }}` scope.
+            When unsure, say so in your final message — do not
+            guess.
+
+            ## Final message format
+            End your run with a single message that contains:
+              - A one-line commit subject (Conventional Commits).
+              - A short body explaining what changed.
+              - A "Verify" section listing the commands the
+                reviewer should re-run.
+              - If you bailed out, instead say `NEEDS_CLARIFICATION:`
+                followed by the specific question for the reporter.
+
+      - name: Check for changes
+        id: diff
+        run: |
+          if [ -n "$(git status --porcelain)" ]; then
+            echo "has_changes=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_changes=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Commit + push agent changes
+        id: push
+        if: steps.diff.outputs.has_changes == 'true'
+        env:
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          ISSUE_TITLE: ${{ github.event.issue.title }}
+          BRANCH: ${{ steps.branch.outputs.name }}
+        run: |
+          git add -A
+          # The commit subject is derived from the issue title
+          # because Codex's final message lands in the PR body, not
+          # the commit. Conventional-Commits-compatible scopes are
+          # repo-wide so we leave it loose; the reviewer adjusts on
+          # squash if needed.
+          git commit -m "agent: implement issue #${ISSUE_NUMBER} — ${ISSUE_TITLE}" \
+                     -m "Generated by openai/codex-action via the agent-implements-issue workflow. Closes #${ISSUE_NUMBER}."
+          git push origin "$BRANCH"
+
+      - name: Open draft pull request
+        if: steps.diff.outputs.has_changes == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          ISSUE_TITLE: ${{ github.event.issue.title }}
+          BRANCH: ${{ steps.branch.outputs.name }}
+          CODEX_FINAL: ${{ steps.run_codex.outputs.final-message }}
+          LABEL: ${{ github.event.label.name }}
+        run: |
+          # Body is intentionally short — Codex's final summary is
+          # embedded so the reviewer sees the agent's own commit
+          # subject + verification commands without scrolling.
+          body=$(cat <<EOF
+          Closes #${ISSUE_NUMBER}.
+
+          Triggered by label \`${LABEL}\` on the issue. The branch
+          was authored end-to-end by \`openai/codex-action@v1\` —
+          review the diff carefully before marking the PR ready.
+
+          ## Codex summary
+
+          \`\`\`
+          ${CODEX_FINAL:-No final summary captured.}
+          \`\`\`
+          EOF
+          )
+          gh pr create \
+            --draft \
+            --base main \
+            --head "$BRANCH" \
+            --title "agent: ${ISSUE_TITLE}" \
+            --body "$body"
+
+      - name: Comment on issue (changes opened)
+        if: steps.diff.outputs.has_changes == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          BRANCH: ${{ steps.branch.outputs.name }}
+        run: |
+          gh issue comment "$ISSUE_NUMBER" --body "🤖 Opened a draft PR from branch \`$BRANCH\`. A maintainer will review the diff before merging."
+
+      - name: Comment on issue (no diff produced)
+        if: steps.diff.outputs.has_changes == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          CODEX_FINAL: ${{ steps.run_codex.outputs.final-message }}
+        run: |
+          body=$(cat <<EOF
+          🤖 The agent ran but didn't produce a diff. Most likely
+          reason: the issue needs clarification or sits outside the
+          scope of an automated change.
+
+          ### Codex's note
+
+          \`\`\`
+          ${CODEX_FINAL:-No final summary captured.}
+          \`\`\`
+          EOF
+          )
+          gh issue comment "$ISSUE_NUMBER" --body "$body"
