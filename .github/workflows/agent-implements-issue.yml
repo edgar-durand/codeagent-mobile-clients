@@ -96,6 +96,12 @@ jobs:
         uses: openai/codex-action@v1
         with:
           openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          # Bug reports come from external users (read access on the
+          # public repo); without this the action exits with "Actor
+          # must have write access". Safety still relies on the
+          # `workspace-write` sandbox below + the draft-PR review
+          # gate downstream.
+          allow-users: '*'
           # workspace-write lets Codex edit files in the checkout;
           # network is still sandboxed off so it can't reach out
           # past the runner. Matches the action's documented
