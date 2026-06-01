@@ -53,7 +53,39 @@ jobs:
     permissions:
       issues: write
     steps:
+      - name: Skip if already forwarded
+        id: gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          # Idempotency gate. Re-labelling an already-forwarded issue
+          # (label removed + re-added, or a second forward/* label
+          # toggled on) would otherwise spawn a duplicate Codex run
+          # on the private side. The first successful forward applies
+          # the `forwarded` marker label — its presence short-circuits
+          # subsequent labelings.
+          labels=$(gh --repo "$REPO" issue view "$ISSUE_NUMBER" \
+            --json labels --jq '.labels[].name')
+          if echo "$labels" | grep -qxF 'forwarded'; then
+            echo "already=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "already=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Comment when already forwarded
+        if: steps.gate.outputs.already == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          gh --repo "$REPO" issue comment "$ISSUE_NUMBER" \
+            --body "🛈 This issue was already forwarded to the private repo. Remove the \`forwarded\` label first if you intentionally want to re-dispatch."
+
       - name: Cross-repo dispatch
+        if: steps.gate.outputs.already == 'false'
         env:
           CROSS_REPO_PAT: ${{ secrets.CROSS_REPO_PAT }}
           PRIVATE_REPO: edgar-durand/codeagent-mobile
@@ -94,6 +126,7 @@ jobs:
                 -d @-
 
       - name: Comment on the issue
+        if: steps.gate.outputs.already == 'false'
         env:
           GH_TOKEN: ${{ github.token }}
           ISSUE_NUMBER: ${{ github.event.issue.number }}
@@ -106,6 +139,15 @@ jobs:
           # otherwise and fails with "not a git repository".
           gh --repo "$REPO" issue comment "$ISSUE_NUMBER" \
             --body "🤖 This bug looks like it lives in the mobile app or backend API, not in the CLI/plugin code in this repo. Forwarded to the private repo (label: \`$LABEL\`) — a draft PR will appear there shortly and the link will be posted back here."
+
+      - name: Mark issue as forwarded
+        if: steps.gate.outputs.already == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          gh --repo "$REPO" issue edit "$ISSUE_NUMBER" --add-label 'forwarded'
 
   implement:
     name: Codex implements issue #${{ github.event.issue.number }}
