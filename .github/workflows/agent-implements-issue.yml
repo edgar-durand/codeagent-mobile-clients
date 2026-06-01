@@ -98,8 +98,14 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           ISSUE_NUMBER: ${{ github.event.issue.number }}
           LABEL: ${{ github.event.label.name }}
+          REPO: ${{ github.repository }}
         run: |
-          gh issue comment "$ISSUE_NUMBER" --body "🤖 This bug looks like it lives in the mobile app or backend API, not in the CLI/plugin code in this repo. Forwarded to the private repo (label: \`$LABEL\`) — a draft PR will appear there shortly and the link will be posted back here."
+          # The `forward` job runs without checking out the repo
+          # (saves ~3 s of git fetch). `gh issue comment` needs an
+          # explicit `--repo` because it falls back to `git remote`
+          # otherwise and fails with "not a git repository".
+          gh --repo "$REPO" issue comment "$ISSUE_NUMBER" \
+            --body "🤖 This bug looks like it lives in the mobile app or backend API, not in the CLI/plugin code in this repo. Forwarded to the private repo (label: \`$LABEL\`) — a draft PR will appear there shortly and the link will be posted back here."
 
   implement:
     name: Codex implements issue #${{ github.event.issue.number }}
