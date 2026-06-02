@@ -3,6 +3,7 @@ import { ChromeStepTracker } from './output/chrome-tracker';
 import { ChunkEmitter, type SendOutcome } from './output/chunk-emitter';
 import { PtyBuffer } from './output/pty-buffer';
 import { renderLines } from './output/turn-renderer';
+import { buildSelectPromptPayload } from './select-prompt-payload';
 import { createOsStrategy } from '../os';
 import type { RuntimeStrategy } from '../agents/strategy';
 
@@ -427,13 +428,12 @@ export class OutputService {
       if (idleMs >= OutputService.SELECTOR_IDLE_MS) {
         this.stopPoll();
         this.pty.deactivate();
+        const promptPayload = buildSelectPromptPayload(selector);
         this.send(
           {
             type: 'select_prompt',
-            content: selector.question,
-            options: selector.options,
-            optionDescriptions: selector.optionDescriptions,
-            currentIndex: selector.currentIndex,
+            content: promptPayload.prompt,
+            ...promptPayload,
             done: true,
           },
           { critical: true },
@@ -551,13 +551,12 @@ export class OutputService {
     this.pty.deactivate();
 
     if (selector) {
+      const promptPayload = buildSelectPromptPayload(selector);
       this.send(
         {
           type: 'select_prompt',
-          content: selector.question,
-          options: selector.options,
-          optionDescriptions: selector.optionDescriptions,
-          currentIndex: selector.currentIndex,
+          content: promptPayload.prompt,
+          ...promptPayload,
           done: true,
         },
         { critical: true },

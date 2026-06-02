@@ -27,6 +27,13 @@ interface PostCall {
   payload: string;
 }
 
+interface OutputChunkForTest {
+  type?: string;
+  content?: string;
+  done?: boolean;
+  [key: string]: unknown;
+}
+
 interface StubRuntimeOptions {
   /** Filtered lines returned each tick (drives the content-stability clock). */
   contentLines: string[];
@@ -34,6 +41,8 @@ interface StubRuntimeOptions {
   renderedLines: string[];
   /** What the agent's `detectReadyPrompt` returns this tick. */
   ready?: boolean;
+  /** Optional interactive selector visible in the rendered view. */
+  selector?: SelectPrompt | null;
 }
 
 /**
@@ -66,7 +75,7 @@ function makeRuntime(opts: StubRuntimeOptions): RuntimeStrategy {
     renderToLines: (_raw: string) => opts.renderedLines,
     parseTuiChrome: (_line: string): ChromeStep | null => null,
     filterTuiOutput: (_lines) => opts.contentLines,
-    detectInteractivePrompt: (_lines): SelectPrompt | null => null,
+    detectInteractivePrompt: (_lines): SelectPrompt | null => opts.selector ?? null,
     detectReadyPrompt: (_lines): boolean => opts.ready ?? false,
     credentialLocator: () => ({
       publicId: 'claude_code',
@@ -101,13 +110,27 @@ function lastTextChunk(calls: PostCall[]): {
   content?: string;
   done?: boolean;
 } | null {
+  const chunk = lastChunkByType(calls, 'text');
+  if (!chunk) return null;
+  return {
+    type: 'text',
+    content: chunk.content,
+    done: chunk.done,
+  };
+}
+
+function lastChunkByType(calls: PostCall[], type: string): OutputChunkForTest | null {
   for (let i = calls.length - 1; i >= 0; i--) {
     try {
-      const body = JSON.parse(calls[i].payload);
-      if (body.type === 'text') return body;
+      const body: unknown = JSON.parse(calls[i].payload);
+      if (isOutputChunk(body) && body.type === type) return body;
     } catch { /* skip malformed */ }
   }
   return null;
+}
+
+function isOutputChunk(value: unknown): value is OutputChunkForTest {
+  return typeof value === 'object' && value !== null;
 }
 
 describe('OutputService finalize triggers — canonical-refresh fix', () => {
@@ -266,6 +289,49 @@ describe('OutputService finalize triggers — canonical-refresh fix', () => {
     const final = lastTextChunk(calls);
     expect(final).not.toBeNull();
     expect(final!.done).toBeFalsy();
+    svc.dispose();
+    restore();
+  });
+
+  it('sends full selector prompt context for approval chunks', async () => {
+    const { calls, restore } = captureTransport();
+    const runtime = makeRuntime({
+      contentLines: [],
+      renderedLines: ['approval prompt'],
+      selector: {
+        question: 'Bash command\n\n$ git init\n\nDo you want to proceed?',
+        options: ['Yes', 'No'],
+        optionDescriptions: ['', ''],
+        currentIndex: 0,
+      },
+    });
+
+    const svc = new OutputService(
+      'sess-selector',
+      'plg-1',
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      runtime,
+    );
+    svc.newTurn();
+    svc.push('selector frame');
+
+    await vi.advanceTimersByTimeAsync(2500);
+    await vi.runAllTicks();
+
+    const promptChunk = lastChunkByType(calls, 'select_prompt');
+    expect(promptChunk).not.toBeNull();
+    expect(promptChunk!.content).toContain('Bash command');
+    expect(promptChunk!.prompt).toBe(promptChunk!.content);
+    expect(promptChunk!.promptContext).toBe(promptChunk!.content);
+    expect(promptChunk!.options).toEqual(['Yes', 'No']);
+    expect(promptChunk!.optionDescriptions).toEqual(['', '']);
+    expect(promptChunk!.currentIndex).toBe(0);
+    expect(promptChunk!.done).toBe(true);
+
     svc.dispose();
     restore();
   });

@@ -11,6 +11,7 @@ import { resolveApiBaseUrl, renderToLines } from '@codeagent/shared';
 import { log } from './logger';
 import { _transport } from './streaming/transport';
 import type { RuntimeStrategy } from '../agents/strategy';
+import { buildSelectPromptPayload } from './select-prompt-payload';
 
 /**
  * Epic C — CLI streaming producer.
@@ -360,15 +361,20 @@ export class StreamingEmitterService {
     // `options`; free-form `question`-only prompts (currently unused
     // by Claude but supported by the wire shape) omit it.
     const questionId = randomUUID();
+    const payload = buildSelectPromptPayload(selector);
     this.pendingAnswer = {
       questionId,
-      options: selector.options.length > 0 ? selector.options : undefined,
+      options: payload.options,
       fromIndex: selector.currentIndex,
     };
     const event: AwaitingAnswerEvent = {
       questionId,
-      prompt: selector.question,
-      ...(selector.options.length > 0 ? { options: selector.options } : {}),
+      prompt: payload.prompt,
+      content: payload.prompt,
+      promptContext: payload.promptContext,
+      ...(payload.options ? { options: payload.options } : {}),
+      optionDescriptions: payload.optionDescriptions,
+      currentIndex: payload.currentIndex,
     };
     void this.postAwaitingAnswer(event);
   }

@@ -310,6 +310,46 @@ describe('StreamingEmitterService — awaiting answer', () => {
     expect(body.options).toEqual(['Yes, trust them', 'No, exit']);
   });
 
+  it('includes full prompt context and compatibility aliases for approval prompts', async () => {
+    const { svc } = makeService();
+    const postSpy = vi
+      .spyOn(_transport, 'post')
+      .mockResolvedValue({ statusCode: 200, body: '{}' });
+
+    svc.start();
+    svc.push([
+      'Bash command',
+      '',
+      '$ git init',
+      '',
+      'Do you want to proceed?',
+      '',
+      '❯ 1. Yes',
+      '  2. No',
+      '',
+      'Esc to cancel · Tab to amend · ctrl+e to explain',
+    ].join('\n'));
+    svc._tickForTest();
+    vi.setSystemTime(Date.now() + 1500);
+    svc._tickForTest();
+    await vi.runAllTicks();
+    await svc.stop();
+
+    const awaitingPosts = postSpy.mock.calls.filter((c) =>
+      c[0].endsWith(`/api/sessions/sess-abc/awaiting-answer`),
+    );
+    expect(awaitingPosts.length).toBe(1);
+    const body = JSON.parse(awaitingPosts[0][2]);
+    expect(body.prompt).toContain('Bash command');
+    expect(body.prompt).toContain('$ git init');
+    expect(body.prompt).toContain('Do you want to proceed?');
+    expect(body.content).toBe(body.prompt);
+    expect(body.promptContext).toBe(body.prompt);
+    expect(body.options).toEqual(['Yes', 'No']);
+    expect(body.optionDescriptions).toEqual(['', '']);
+    expect(body.currentIndex).toBe(0);
+  });
+
   it('drives selectOption when the backend resolves a selector answer', async () => {
     const { svc, log } = makeService();
     let capturedQuestionId = '';

@@ -67,8 +67,22 @@ export interface StreamingChunkEvent {
  */
 export interface AwaitingAnswerEvent {
   questionId: string;
+  /**
+   * Question text for clients that render the prompt header.
+   * `content` is a compatibility alias for older output-chunk
+   * renderers that key selector prompts off the chunk content field.
+   */
   prompt: string;
+  content?: string;
+  /**
+   * Full context captured from the CLI prompt, including wrapped
+   * option details when the terminal rendered additional explanation
+   * below a choice label.
+   */
+  promptContext?: string;
   options?: string[];
+  optionDescriptions?: string[];
+  currentIndex?: number;
 }
 
 /**
