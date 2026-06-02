@@ -7,13 +7,23 @@
  * Each test builds a minimal mock HandlerContext; only the fields
  * exercised by the handler under test are populated.
  */
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
 import type { HandlerContext } from '../../../src/commands/start/handlers';
+
+vi.mock('child_process', () => ({
+  spawn: vi.fn(() => ({ unref: vi.fn() })),
+}));
+
+vi.mock('../../../src/config', () => ({
+  removeSession: vi.fn(),
+}));
+
 import { handlers } from '../../../src/commands/start/handlers';
 import type { RemoteCommand } from '../../../src/services/command-relay.service';
 import type { RuntimeStrategy } from '../../../src/agents/strategy';
 import type { AgentService } from '../../../src/services/agent.service';
 import type { CommandRelayService } from '../../../src/services/command-relay.service';
+import { removeSession } from '../../../src/config';
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
@@ -24,6 +34,8 @@ function makeCmd(type: string, payload: Record<string, unknown> = {}): RemoteCom
 function makeCtx(overrides: Partial<HandlerContext> = {}): HandlerContext {
   const sendResult = vi.fn().mockResolvedValue(undefined);
   const sendRawPtyInput = vi.fn();
+  const kill = vi.fn();
+  const dispose = vi.fn();
   const listModels = vi.fn().mockResolvedValue([
     { id: 'claude-opus-4-7', label: 'Claude Opus 4.7', contextWindow: 200000 },
     { id: 'claude-sonnet-4-6', label: 'Claude Sonnet 4.6', contextWindow: 200000 },
@@ -37,8 +49,8 @@ function makeCtx(overrides: Partial<HandlerContext> = {}): HandlerContext {
   }));
 
   return {
-    outputSvc: {} as HandlerContext['outputSvc'],
-    agent: { sendRawPtyInput } as unknown as AgentService,
+    outputSvc: { dispose } as unknown as HandlerContext['outputSvc'],
+    agent: { sendRawPtyInput, kill } as unknown as AgentService,
     historySvc: {} as HandlerContext['historySvc'],
     relay: { sendResult } as unknown as CommandRelayService,
     runtime: {
@@ -54,6 +66,11 @@ function makeCtx(overrides: Partial<HandlerContext> = {}): HandlerContext {
     ...overrides,
   };
 }
+
+afterEach(() => {
+  vi.restoreAllMocks();
+  vi.clearAllMocks();
+});
 
 // ─── change_model ────────────────────────────────────────────────────────────
 
@@ -198,5 +215,26 @@ describe('list_models handler', () => {
       'completed',
       { models: customModels },
     );
+  });
+});
+
+// ─── session_terminated ─────────────────────────────────────────────────────
+
+describe('session_terminated handler', () => {
+  it('acknowledges delete before tearing down the local session', async () => {
+    const ctx = makeCtx();
+    const cmd = makeCmd('session_terminated');
+    const exit = vi.spyOn(process, 'exit').mockImplementation(((code?: string | number | null) => {
+      throw new Error(`process.exit:${code}`);
+    }) as never);
+
+    await expect(handlers['session_terminated'](ctx, cmd, {} as never))
+      .rejects.toThrow('process.exit:0');
+
+    expect(ctx.relay.sendResult).toHaveBeenCalledWith('test-cmd-id', 'success', { ok: true });
+    expect(removeSession).toHaveBeenCalledWith('test-session');
+    expect((ctx.agent as unknown as { kill: ReturnType<typeof vi.fn> }).kill).toHaveBeenCalled();
+    expect((ctx.outputSvc as unknown as { dispose: ReturnType<typeof vi.fn> }).dispose).toHaveBeenCalled();
+    expect(exit).toHaveBeenCalledWith(0);
   });
 });

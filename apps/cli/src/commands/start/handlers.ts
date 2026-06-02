@@ -40,6 +40,7 @@ import { postLinkCredential, postAiResult } from '../../services/pairing.service
 import { AGENT_REGISTRY, isKnownAgentId, type AgentId } from '@codeagent/shared';
 import { log } from '../../services/logger';
 import type { KeepAliveContext } from './keep-alive';
+import { removeSession } from '../../config';
 
 /**
  * Shared dependency container for command handlers.
@@ -278,9 +279,11 @@ const setKeepAlive: CommandHandler = async (ctx, cmd) => {
   } catch { /* ignore */ }
 };
 
-const sessionTerminated: CommandHandler = (ctx) => {
+const sessionTerminated: CommandHandler = async (ctx, cmd) => {
   // Mobile/web "Delete session". Tear down everything and exit.
   showInfo('Session was deleted from the app — exiting.');
+  try { await ctx.relay.sendResult(cmd.id, 'success', { ok: true }); } catch { /* best-effort */ }
+  try { removeSession(ctx.sessionId); } catch { /* best-effort */ }
   try { ctx.agent.kill(); } catch { /* best-effort */ }
   try {
     const proc = spawn('bash', ['-lc', 'pm2 delete codeam-pair >/dev/null 2>&1 || true'], {
