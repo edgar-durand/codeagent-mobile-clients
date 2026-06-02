@@ -567,12 +567,28 @@ fun dispatch(command: CommandRelayService.RemoteCommand) {
                     // this working in both POSIX shells and
                     // PowerShell (cmd.exe also accepts `;` as a
                     // command separator).
+                    //
+                    // Optional payload: { agent: "claude" | "codex" }.
+                    // When the mobile/web surface knows which agent
+                    // the user wanted (tapped Claude Code on the
+                    // session screen), it forwards the id so the
+                    // pairing CLI skips its own interactive picker.
+                    // Sanitised so an unexpected agent string can't
+                    // be shell-spliced into the command line.
                     try {
+                        val rawAgent = command.payload.get("agent")?.asString
+                        val pairAgent = when (rawAgent) {
+                            "claude" -> "claude"
+                            "codex" -> "codex"
+                            else -> null
+                        }
+                        val subcommand = if (pairAgent != null) "pair --agent=$pairAgent" else "pair"
+                        val terminalName = if (pairAgent != null) "codeam pair $pairAgent" else "codeam pair"
                         val terminalView = org.jetbrains.plugins.terminal.TerminalToolWindowManager
                             .getInstance(project)
                         val widget = terminalView.createLocalShellWidget(
                             project.basePath,
-                            "codeam pair",
+                            terminalName,
                         )
                         // Always install/upgrade codeam-cli to
                         // latest, THEN pair. `npm install -g
@@ -583,12 +599,18 @@ fun dispatch(command: CommandRelayService.RemoteCommand) {
                         // sudo-restricted environments.
                         widget.executeCommand(
                             BuildInstallCommand.forSubcommand(
-                                "pair",
+                                subcommand,
                                 System.getProperty("os.name"),
                             ),
                         )
                         relay.sendResult(command.id, "completed", com.google.gson.JsonObject().apply {
-                            addProperty("message", "Terminal opened with codeam pair")
+                            addProperty(
+                                "message",
+                                if (pairAgent != null)
+                                    "Terminal opened with codeam pair --agent=$pairAgent"
+                                else
+                                    "Terminal opened with codeam pair",
+                            )
                         })
                     } catch (e: Exception) {
                         relay.sendResult(command.id, "failed", com.google.gson.JsonObject().apply {

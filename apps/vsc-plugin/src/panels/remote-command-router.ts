@@ -488,9 +488,19 @@ export class RemoteCommandRouter {
         // `npx -y codeam-cli pair` — npx fetches the package on the
         // fly so the user doesn't need write access to the global
         // node_modules.
+        //
+        // Optional payload: { agent: 'claude' | 'codex' }. When the
+        // mobile/web surface knew which agent the user wanted (e.g.
+        // they tapped Claude Code on the session screen), it forwards
+        // the id so the freshly-paired CLI session opens that agent
+        // directly — no second interactive picker.
+        const pairAgentRaw = command.payload?.agent;
+        const pairAgent =
+          pairAgentRaw === 'claude' || pairAgentRaw === 'codex' ? pairAgentRaw : null;
+        const subcommand = pairAgent ? `pair --agent=${pairAgent}` : 'pair';
         const folder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
         const terminal = vscode.window.createTerminal({
-          name: 'codeam pair',
+          name: pairAgent ? `codeam pair ${pairAgent}` : 'codeam pair',
           ...(folder ? { cwd: folder } : {}),
         });
         terminal.show(true);
@@ -501,9 +511,11 @@ export class RemoteCommandRouter {
         // install; the final `|| npx` fallback handles environments
         // where `npm i -g` would need sudo (npx fetches + runs
         // without touching the global node_modules).
-        terminal.sendText(buildInstallAndRun('pair'));
+        terminal.sendText(buildInstallAndRun(subcommand));
         relay.sendResult(command.id, 'completed', {
-          message: 'Terminal opened with codeam pair',
+          message: pairAgent
+            ? `Terminal opened with codeam pair --agent=${pairAgent}`
+            : 'Terminal opened with codeam pair',
         });
         break;
       }
