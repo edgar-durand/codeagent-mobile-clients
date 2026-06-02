@@ -4,6 +4,32 @@ All notable changes to `codeam-cli` are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.24.0] — 2026-06-02
+
+### Added
+
+- **vsc-plugin,jetbrains-plugin:** Honor agent payload on install_cli_and_pair (#215)
+
+### CI
+
+- **workflow:** Agent-implements-issue — Codex picks up labelled issues (#200)
+- **workflow:** Allow external reporters to trigger codex-action (#211)
+- **workflow:** Forward mobile-app + api bugs to the private repo (#212)
+- **workflow:** Pass --repo to gh issue comment in the forward job (#213)
+- **workflow:** Forward — idempotent re-dispatch (#214)
+
+### Chore
+
+- **deps-dev:** Bump glob from 11.1.0 to 13.0.6 in /apps/vsc-plugin (#199)
+
+### Fixed
+
+- **jetbrains-plugin:** Use ensurePluginId for telemetry distinct_id
+
+### Agent
+
+- Implement issue #201 — docs(cli): document missing subcommands in README Commands table (#202)
+
 ## [2.23.37] — 2026-05-31
 
 ### Fixed
