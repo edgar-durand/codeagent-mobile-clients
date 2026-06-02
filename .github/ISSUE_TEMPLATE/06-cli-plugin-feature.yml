@@ -1,0 +1,33 @@
+name: CLI / IDE plugin — Feature request
+description: Suggest a capability for `codeam-cli`, the VS Code extension, or the JetBrains plugin.
+labels: [enhancement]
+body:
+  - type: dropdown
+    id: client
+    attributes:
+      label: Which client?
+      options:
+        - codeam-cli
+        - VS Code / Cursor / Windsurf extension
+        - JetBrains plugin
+        - All / cross-cutting
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem are you trying to solve?
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution (optional)
+      description: CLI signature, setting key, command name — whatever sketches the shape.
+
+  - type: textarea
+    id: usecase
+    attributes:
+      label: Concrete situation where this matters (optional)

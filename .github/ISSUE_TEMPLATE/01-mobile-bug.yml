@@ -1,0 +1,45 @@
+name: Mobile app — Bug
+description: Something is broken in the iOS or Android app.
+labels: [bug, forward/mobile-app]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Just the symptom and a screenshot are enough. A maintainer
+        asks for versions / logs if they need more.
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: What happened?
+      description: A sentence or two is fine. Drag in screenshots or a screen recording.
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce (optional)
+      placeholder: |
+        1. Open the app
+        2. Tap …
+        3. …
+
+  - type: input
+    id: build
+    attributes:
+      label: App build (optional)
+      description: Settings → About, or the Profile screen.
+      placeholder: "3.0.0 (build 68)"
+
+  - type: input
+    id: device
+    attributes:
+      label: Device + OS (optional)
+      placeholder: "Pixel 7 / Android 16 — iPhone 15 / iOS 18"
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: Anything else? (optional)
+      description: Account email, network conditions, anything that could help.

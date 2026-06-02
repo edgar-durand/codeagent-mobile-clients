@@ -1,0 +1,22 @@
+name: Backend / API — Feature request
+description: Suggest a new endpoint, response field, or capability for the backend / API.
+labels: [enhancement, forward/api]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem are you trying to solve?
+      description: The use case — not a specific implementation yet.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed API shape (optional)
+      description: Method + path + request / response sketch, if you have one in mind.
+
+  - type: textarea
+    id: usecase
+    attributes:
+      label: Concrete situation where this matters (optional)
