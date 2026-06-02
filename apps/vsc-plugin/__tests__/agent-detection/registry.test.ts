@@ -85,7 +85,23 @@ describe('runDetectors', () => {
 });
 
 describe('toDetectedAgent', () => {
-  test('returns extensionId as id when via is "extension"', () => {
+  test('returns extensionId as id for non-terminal extension agents', () => {
+    const detector: AgentDetector = {
+      id: 'chat-agent',
+      name: 'Chat Agent',
+      icon: 'chat',
+      detect: async () => null,
+    };
+    const out = toDetectedAgent(detector, {
+      installed: true,
+      extensionId: 'publisher.chat-agent',
+      via: 'extension',
+    });
+    expect(out.id).toBe('publisher.chat-agent');
+    expect(out.extensionId).toBe('publisher.chat-agent');
+  });
+
+  test('synthesises __terminal__:<detectorId> for terminal agents detected via extension', () => {
     const detector: AgentDetector = {
       id: 'claude_code',
       name: 'Claude Code',
@@ -95,10 +111,12 @@ describe('toDetectedAgent', () => {
     const out = toDetectedAgent(detector, {
       installed: true,
       extensionId: 'anthropic.claude-code',
+      isTerminalAgent: true,
       via: 'extension',
     });
-    expect(out.id).toBe('anthropic.claude-code');
+    expect(out.id).toBe('__terminal__:claude_code');
     expect(out.extensionId).toBe('anthropic.claude-code');
+    expect(out.isTerminalAgent).toBe(true);
   });
 
   test('synthesises __terminal__:<detectorId> when via is not "extension"', () => {
