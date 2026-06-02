@@ -71,6 +71,22 @@ describe('CommandRelayService', () => {
     relay.stop();
   });
 
+  it('skips redelivered command ids from the pending queue', async () => {
+    const cmd = { id: 'cmd1', sessionId: 's1', type: 'start_task', payload: { prompt: 'hi' } };
+    vi.mocked(pairing._getJson).mockResolvedValue({ data: [cmd, cmd] });
+    const onCmd = vi.fn();
+    const relay = new CommandRelayService('plugin-1', onCmd, META);
+    relay.start();
+
+    await vi.advanceTimersByTimeAsync(10);
+    expect(onCmd).toHaveBeenCalledTimes(1);
+
+    await vi.advanceTimersByTimeAsync(2100);
+    expect(vi.mocked(pairing._getJson).mock.calls.length).toBeGreaterThanOrEqual(2);
+    expect(onCmd).toHaveBeenCalledTimes(1);
+    relay.stop();
+  });
+
   it('sendResult posts to /api/commands/result', async () => {
     const relay = new CommandRelayService('plugin-1', vi.fn(), META);
     await relay.sendResult('cmd1', 'completed', { output: 'done' });

@@ -37,6 +37,7 @@ export interface RemoteCommand {
  * same `onCommand` dispatch.
  */
 export class CommandRelayService {
+  private static readonly DEDUP_TTL_MS = 5 * 60_000;
   private _running = false;
   private heartbeatTimer: NodeJS.Timeout | null = null;
   private agentsTimer: NodeJS.Timeout | null = null;
@@ -71,6 +72,11 @@ export class CommandRelayService {
    */
   private sseWatchdog: NodeJS.Timeout | null = null;
   private sseLastByteAt = 0;
+  // Recently-dispatched command IDs. SSE reconnects and the polling
+  // fallback can re-deliver the same pending command until the backend
+  // observes its result, so dispatch each command id once per short TTL.
+  // Mirrors the VS Code and JetBrains relay dedup behavior.
+  private recentCommandIds = new Map<string, number>();
 
   constructor(
     private readonly pluginId: string,
@@ -368,12 +374,36 @@ export class CommandRelayService {
   private async dispatchCommands(commands: RemoteCommand[]): Promise<void> {
     for (const cmd of commands) {
       try {
+        if (!this.markDispatched(cmd.id)) {
+          log.trace('relay', `skip duplicate type=${cmd.type} id=${cmd.id}`);
+          continue;
+        }
         log.trace('relay', `dispatch type=${cmd.type} id=${cmd.id}`);
         await this.onCommand(cmd);
       } catch (err) {
         log.trace('relay', 'command handler threw', err);
       }
     }
+  }
+
+  /**
+   * Returns true the first time we see a command id, false on every
+   * subsequent re-delivery within DEDUP_TTL_MS. Prunes entries older
+   * than the TTL on each call so the map can't grow unbounded.
+   */
+  private markDispatched(id: string): boolean {
+    if (!id) return true;
+    const now = Date.now();
+    const expiry = now - CommandRelayService.DEDUP_TTL_MS;
+    if (this.recentCommandIds.size > 256) {
+      for (const [seenId, ts] of this.recentCommandIds) {
+        if (ts < expiry) this.recentCommandIds.delete(seenId);
+      }
+    }
+    const prior = this.recentCommandIds.get(id);
+    if (prior !== undefined && prior > expiry) return false;
+    this.recentCommandIds.set(id, now);
+    return true;
   }
 
   // ─── Heartbeat + agents ──────────────────────────────────────────
