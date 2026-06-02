@@ -1,111 +1,25 @@
 name: Bug report
-description: Something is broken in the CLI or one of the IDE plugins.
+description: Something is broken — in the mobile app, on the backend, in the CLI, or in one of the IDE plugins.
 labels: [bug]
 body:
   - type: markdown
     attributes:
       value: |
-        Thanks for taking the time to file a bug. Mobile-app, account, or billing
-        problems are handled through the in-app Help & FAQ — please use the link
-        on the issue chooser for those. This template is for the CLI and IDE plugins.
+        Just the basics — title, where it broke, what you expected, what
+        actually happened. Everything else is optional; a maintainer will
+        ask for versions / logs if they need them.
 
   - type: dropdown
     id: app
     attributes:
-      label: Which client is affected?
+      label: Where did this happen?
       options:
+        - Mobile app (iOS / Android)
+        - Backend / API
         - codeam-cli
         - VS Code / Cursor / Windsurf extension
         - JetBrains plugin
-    validations:
-      required: true
-
-  - type: dropdown
-    id: area
-    attributes:
-      label: Which area is affected?
-      options:
-        - Pairing / device linking
-        - Command relay (SSE / polling)
-        - Claude Code PTY / output streaming
-        - Agent strategies (Copilot, Cursor, Windsurf, JetBrains AI, …)
-        - Selector / interactive prompt handling
-        - Pricing / usage / context window
-        - Install / update / autoupdate
-        - Other / not sure
-    validations:
-      required: true
-
-  - type: input
-    id: version
-    attributes:
-      label: Client version
-      description: Run `codeam --version` or check the extension/plugin page.
-      placeholder: 2.16.0
-    validations:
-      required: true
-
-  - type: input
-    id: os
-    attributes:
-      label: Operating system
-      placeholder: "macOS 14.4 / Ubuntu 22.04 / Windows 11"
-    validations:
-      required: true
-
-  - type: input
-    id: ide
-    attributes:
-      label: IDE version (plugin bugs only)
-      placeholder: "VS Code 1.95 / IntelliJ IDEA 2024.1 / Cursor 0.42"
-
-  - type: input
-    id: node
-    attributes:
-      label: Node version (CLI bugs only)
-      description: Run `node --version`.
-      placeholder: v20.11.1
-
-  - type: dropdown
-    id: severity
-    attributes:
-      label: Severity
-      options:
-        - Blocker — client is unusable
-        - Major — core feature broken, no workaround
-        - Minor — feature broken but has a workaround
-        - Cosmetic — wrong output, typo, UX nit
-    validations:
-      required: true
-
-  - type: dropdown
-    id: frequency
-    attributes:
-      label: How often does it happen?
-      options:
-        - Every time
-        - Often (most of the time)
-        - Sometimes (intermittent)
-        - Once / could not reproduce
-    validations:
-      required: true
-
-  - type: textarea
-    id: repro
-    attributes:
-      label: Steps to reproduce
-      placeholder: |
-        1. Run `codeam pair`
-        2. Enter the code in the mobile app
-        3. Send "hello" from the phone
-        4. …
-    validations:
-      required: true
-
-  - type: textarea
-    id: expected
-    attributes:
-      label: What did you expect to happen?
+        - Not sure
     validations:
       required: true
 
@@ -113,27 +27,67 @@ body:
     id: actual
     attributes:
       label: What actually happened?
+      description: A sentence or two is fine. Screenshots and screen recordings welcome — drag them in.
     validations:
       required: true
 
   - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: How can someone else trigger the same bug? Skip if you can't reproduce it.
+      placeholder: |
+        1. Open the mobile app
+        2. Tap Sessions → Codespaces
+        3. …
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect?
+      description: Optional — only fill in if it adds something the "what happened" doesn't already convey.
+
+  - type: input
+    id: version
+    attributes:
+      label: Version (optional)
+      description: Mobile build number, `codeam --version`, extension version — whatever you can grab quickly.
+      placeholder: "Mobile 3.0.0 (build 68) / codeam-cli 2.24.0 / VS Code extension 2.24.0"
+
+  - type: input
+    id: os
+    attributes:
+      label: Operating system (optional)
+      placeholder: "iOS 18 / Android 16 / macOS 14.4 / Ubuntu 22.04 / Windows 11"
+
+  - type: dropdown
+    id: severity
+    attributes:
+      label: Severity (optional)
+      options:
+        - Not set
+        - Blocker — feature is unusable
+        - Major — core feature broken, no workaround
+        - Minor — feature broken but has a workaround
+        - Cosmetic — wrong copy, typo, UX nit
+
+  - type: textarea
     id: logs
     attributes:
-      label: Logs (CLI stderr, VS Code "CodeAgent Mobile" output channel, or IDE log)
+      label: Logs (optional)
+      description: CLI stderr, VS Code "CodeAgent Mobile" output channel, IDE log, server response body, anything else that helps.
       render: shell
 
   - type: textarea
     id: extra
     attributes:
-      label: Additional context
-      description: Screenshots, screen recordings, network conditions (corporate proxy / VPN), anything else that could help.
+      label: Anything else? (optional)
+      description: Corporate proxy, VPN, A/B flag you toggled, account email if support has to look it up — anything you'd mention in chat.
 
   - type: checkboxes
     id: checks
     attributes:
-      label: Final checks
+      label: One quick check
       options:
-        - label: I searched existing issues and could not find a duplicate
-          required: true
-        - label: I am on the latest version of the affected client
+        - label: I searched existing issues and didn't find a duplicate
           required: true

@@ -1,19 +1,14 @@
 name: Question / usage help
-description: Ask how to use, configure, or integrate the CLI or an IDE plugin.
+description: Ask how to use, configure, or integrate any part of CodeAgent.
 labels: [question]
 body:
-  - type: markdown
-    attributes:
-      value: |
-        Use this for usage and configuration questions about the CLI or the IDE
-        plugins. Account, login, billing, and mobile-app questions are handled
-        through the in-app Help & FAQ on https://www.codeagent-mobile.com.
-
   - type: dropdown
     id: app
     attributes:
-      label: Which client are you using?
+      label: Where's your question about?
       options:
+        - Mobile app (iOS / Android)
+        - Backend / API
         - codeam-cli
         - VS Code / Cursor / Windsurf extension
         - JetBrains plugin
@@ -21,36 +16,30 @@ body:
     validations:
       required: true
 
-  - type: input
-    id: version
-    attributes:
-      label: Client version
-      placeholder: 2.16.0
-
   - type: textarea
     id: question
     attributes:
       label: What are you trying to do?
-      description: Describe the outcome you want, not just the command you tried.
+      description: The outcome you want — not just the command you tried.
     validations:
       required: true
 
   - type: textarea
     id: tried
     attributes:
-      label: What have you tried so far?
+      label: What have you tried so far? (optional)
       description: Commands, settings, docs you already looked at.
 
   - type: textarea
     id: context
     attributes:
-      label: Environment / context
-      placeholder: "OS, IDE version, corporate proxy, monorepo / multi-root workspace, etc."
+      label: Environment / context (optional)
+      placeholder: "Mobile build / OS / IDE / corporate proxy / monorepo / etc."
 
   - type: checkboxes
     id: checks
     attributes:
-      label: Final checks
+      label: One quick check
       options:
         - label: I searched existing issues, discussions, and the README
           required: true
