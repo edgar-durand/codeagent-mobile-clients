@@ -19,6 +19,7 @@ import {
 } from '../services/mcp-config-writer.service';
 import { Messages } from '../ui/messages';
 import { buildInstallAndRun as buildInstallAndRunPure } from '../utils/build-install-command';
+import { normalizeCliAgentId } from '../utils/cli-agent-id';
 
 function buildInstallAndRun(subcommand: string): string {
   return buildInstallAndRunPure(
@@ -27,6 +28,9 @@ function buildInstallAndRun(subcommand: string): string {
     process.platform === 'win32',
   );
 }
+
+const TERMINAL_AGENT_MESSAGE =
+  'Terminal agents are run by codeam-cli. Install it (npm i -g codeam-cli) and run `codeam pair`.';
 
 /**
  * Routes a single RemoteCommand to the right service. Extracted from
@@ -125,7 +129,13 @@ export class RemoteCommandRouter {
         // instead of a silent observer-bridge no-op.
         if (agentId?.startsWith('__terminal__:')) {
           relay.sendResult(command.id, 'failed', {
-            message: 'Terminal agents are run by codeam-cli. Install it (npm i -g codeam-cli) and run `codeam pair`.',
+            message: TERMINAL_AGENT_MESSAGE,
+          });
+          break;
+        }
+        if (agentId && normalizeCliAgentId(agentId)) {
+          relay.sendResult(command.id, 'failed', {
+            message: TERMINAL_AGENT_MESSAGE,
           });
           break;
         }
@@ -139,6 +149,13 @@ export class RemoteCommandRouter {
             const target = agentId
               ? agents.find((a) => a.id === agentId)
               : agents.find((a) => !a.isTerminalAgent) ?? agents[0];
+
+            if (target?.isTerminalAgent) {
+              return {
+                delivered: false,
+                message: TERMINAL_AGENT_MESSAGE,
+              };
+            }
 
             const invocation: AgentInvocation = {
               agent: target,
@@ -489,14 +506,13 @@ export class RemoteCommandRouter {
         // fly so the user doesn't need write access to the global
         // node_modules.
         //
-        // Optional payload: { agent: 'claude' | 'codex' }. When the
-        // mobile/web surface knew which agent the user wanted (e.g.
-        // they tapped Claude Code on the session screen), it forwards
-        // the id so the freshly-paired CLI session opens that agent
-        // directly — no second interactive picker.
-        const pairAgentRaw = command.payload?.agent;
-        const pairAgent =
-          pairAgentRaw === 'claude' || pairAgentRaw === 'codex' ? pairAgentRaw : null;
+        // Optional payload: { agent: 'claude' | '__terminal__:claude_code' | ... }
+        // or { agentId: ... }.
+        // When the mobile/web surface knew which agent the user
+        // wanted, normalize the picker id back to the CLI id so the
+        // freshly-paired CLI session opens that agent directly.
+        const pairAgentRaw = command.payload?.agent ?? command.payload?.agentId;
+        const pairAgent = normalizeCliAgentId(pairAgentRaw);
         const subcommand = pairAgent ? `pair --agent=${pairAgent}` : 'pair';
         const folder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
         const terminal = vscode.window.createTerminal({

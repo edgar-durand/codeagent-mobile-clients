@@ -127,7 +127,7 @@ export const DETECTORS: readonly AgentDetector[] = [
 
 export function toDetectedAgent(d: AgentDetector, r: DetectionResult): DetectedAgent {
   const id = r.idOverride
-    ?? (r.via === 'extension' ? r.extensionId : `__terminal__:${d.id}`);
+    ?? (r.isTerminalAgent ? `__terminal__:${d.id}` : r.extensionId);
   return {
     id,
     name: r.displayNameOverride ?? d.name,
