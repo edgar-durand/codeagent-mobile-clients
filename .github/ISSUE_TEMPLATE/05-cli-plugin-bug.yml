@@ -1,0 +1,54 @@
+name: CLI / IDE plugin — Bug
+description: Something is broken in `codeam-cli`, the VS Code / Cursor / Windsurf extension, or the JetBrains plugin.
+labels: [bug]
+body:
+  - type: dropdown
+    id: client
+    attributes:
+      label: Which client?
+      options:
+        - codeam-cli
+        - VS Code / Cursor / Windsurf extension
+        - JetBrains plugin
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: What happened?
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce (optional)
+      placeholder: |
+        1. Run `codeam pair`
+        2. …
+
+  - type: input
+    id: version
+    attributes:
+      label: Client version (optional)
+      description: "`codeam --version` or the extension/plugin page."
+      placeholder: 2.24.0
+
+  - type: input
+    id: os
+    attributes:
+      label: Operating system (optional)
+      placeholder: "macOS 14.4 / Ubuntu 22.04 / Windows 11"
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs (optional)
+      description: CLI stderr, VS Code "CodeAgent Mobile" output channel, IDE log.
+      render: shell
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: Anything else? (optional)

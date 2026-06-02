@@ -1,0 +1,38 @@
+name: Mobile app — UI/UX feedback or feature request
+description: Suggest a UX polish, layout change, missing affordance, or new capability for the mobile app.
+labels: [enhancement, forward/mobile-app]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Tell us the friction you hit and the shape of the fix you'd
+        like to see. Screenshots / mockups welcome — drag them in.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What's the friction?
+      description: The user pain — skip jumping to a specific implementation.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed change (optional)
+      description: Rough sketches, mockups, copy, layout notes.
+
+  - type: textarea
+    id: usecase
+    attributes:
+      label: Concrete situation where this matters (optional)
+
+  - type: dropdown
+    id: impact
+    attributes:
+      label: How much does this affect you? (optional)
+      options:
+        - Not set
+        - Nice to have
+        - Slows me down
+        - Blocks something I'm trying to do

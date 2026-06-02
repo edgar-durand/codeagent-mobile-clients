@@ -1,0 +1,35 @@
+name: Backend / API — Bug
+description: Something the backend or the API is doing wrong (5xx, wrong response shape, missing data, etc.).
+labels: [bug, forward/api]
+body:
+  - type: textarea
+    id: actual
+    attributes:
+      label: What happened?
+      description: What did you call / what response did you see?
+    validations:
+      required: true
+
+  - type: input
+    id: endpoint
+    attributes:
+      label: Endpoint or area (optional)
+      placeholder: "POST /api/agents/install · GET /api/users/me · websocket /api/users/me/stream"
+
+  - type: input
+    id: when
+    attributes:
+      label: Approximate time the issue happened (optional)
+      description: Helps a maintainer find the matching log line.
+      placeholder: "2026-06-02 11:30 UTC"
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Response body / log snippet (optional)
+      render: shell
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: Anything else? (optional)
