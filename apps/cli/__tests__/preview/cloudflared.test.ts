@@ -30,7 +30,9 @@ describe('resolveCloudflared', () => {
     vi.mocked(which).mockRejectedValue(new Error('not found'));
     vi.mocked(fs.access).mockResolvedValue(undefined);
     const result = await resolveCloudflared({ skipDownload: true });
-    expect(result).toMatch(/\.codeam\/bin\/cloudflared$/);
+    // Windows uses backslashes — match either separator so the
+    // assertion is OS-agnostic.
+    expect(result).toMatch(/[/\\]\.codeam[/\\]bin[/\\]cloudflared$/);
   });
 
   it('throws a clear error when binary missing and skipDownload=true', async () => {
