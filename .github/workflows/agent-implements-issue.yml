@@ -156,13 +156,23 @@ jobs:
     # an unrelated label was applied (the job just skips). Cheaper
     # than a workflow-level `if:` because GitHub still renders the
     # gating decision in the UI.
+    #
+    # The `!contains(...)` guards are LOAD-BEARING — when an issue is
+    # created with multiple auto-applied labels (e.g. mobile-bug
+    # template applies BOTH `bug` AND `forward/mobile-app`), GitHub
+    # fires one `labeled` event per label and both jobs in this
+    # workflow can race. Without the guards, the local-implement job
+    # would create a clients-repo PR for an issue that the forward
+    # job ALSO dispatched to codeagent-mobile.
     if: >-
-      github.event.label.name == 'codex' ||
-      github.event.label.name == 'bug' ||
-      github.event.label.name == 'small-fix' ||
-      github.event.label.name == 'documentation' ||
-      github.event.label.name == 'testing' ||
-      github.event.label.name == 'ui-polish'
+      (github.event.label.name == 'codex' ||
+       github.event.label.name == 'bug' ||
+       github.event.label.name == 'small-fix' ||
+       github.event.label.name == 'documentation' ||
+       github.event.label.name == 'testing' ||
+       github.event.label.name == 'ui-polish') &&
+      !contains(github.event.issue.labels.*.name, 'forward/mobile-app') &&
+      !contains(github.event.issue.labels.*.name, 'forward/api')
     permissions:
       contents: write       # commit + push the agent's branch
       pull-requests: write  # open the draft PR
