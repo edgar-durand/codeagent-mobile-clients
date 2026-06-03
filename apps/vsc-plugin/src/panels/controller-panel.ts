@@ -105,6 +105,7 @@ export class ControllerPanelProvider implements vscode.WebviewViewProvider, Comm
             name: a.name,
             icon: a.icon,
             installed: a.installed,
+            isTerminalAgent: a.isTerminalAgent,
           })),
         );
         StatusBar.getInstance().reportAgents(agents);
@@ -141,7 +142,13 @@ export class ControllerPanelProvider implements vscode.WebviewViewProvider, Comm
           ide.clearCache();
           const fresh = await ide.detectInstalledAgents();
           CommandRelayService.getInstance().reportAgents(
-            fresh.map((a) => ({ id: a.id, name: a.name, icon: a.icon, installed: a.installed })),
+            fresh.map((a) => ({
+              id: a.id,
+              name: a.name,
+              icon: a.icon,
+              installed: a.installed,
+              isTerminalAgent: a.isTerminalAgent,
+            })),
           );
           StatusBar.getInstance().reportAgents(fresh);
           this.postMessage({
@@ -342,7 +349,13 @@ export class ControllerPanelProvider implements vscode.WebviewViewProvider, Comm
     ide.clearCache();
     const agents = await ide.detectInstalledAgents();
     CommandRelayService.getInstance().reportAgents(
-      agents.map((a) => ({ id: a.id, name: a.name, icon: a.icon, installed: a.installed })),
+      agents.map((a) => ({
+        id: a.id,
+        name: a.name,
+        icon: a.icon,
+        installed: a.installed,
+        isTerminalAgent: a.isTerminalAgent,
+      })),
     );
     StatusBar.getInstance().reportAgents(agents);
     this.postMessage({

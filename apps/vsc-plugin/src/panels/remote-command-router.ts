@@ -115,7 +115,13 @@ export class RemoteCommandRouter {
             ide.clearCache();
             ide.detectInstalledAgents().then((fresh) => {
               relay.reportAgents(
-                fresh.map((a) => ({ id: a.id, name: a.name, icon: a.icon, installed: a.installed })),
+                fresh.map((a) => ({
+                  id: a.id,
+                  name: a.name,
+                  icon: a.icon,
+                  installed: a.installed,
+                  isTerminalAgent: a.isTerminalAgent,
+                })),
               );
             });
             break;
