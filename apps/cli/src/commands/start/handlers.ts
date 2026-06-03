@@ -50,6 +50,7 @@ import {
   resolveCloudflared,
   safeParseDetection,
   setPortPublic,
+  waitForCloudflaredReady,
   waitForCodespacePortReady,
   writePreviewConfig,
 } from '../../services/preview';
@@ -959,10 +960,20 @@ const previewStartH: CommandHandler = (ctx, _cmd, parsed) => {
       const onTunnelChunk = (chunk: Buffer): void => {
         const s = chunk.toString();
         if (!parsedUrl) parsedUrl = parseCloudflaredUrl(s);
+        // Log cloudflared output under [preview] so tunnel issues are
+        // post-hoc debuggable without re-running. Trim trailing
+        // newlines so one log line == one cloudflared chunk.
+        const trimmed = s.replace(/\n+$/g, '');
+        if (trimmed.length > 0) log.info('preview', `cloudflared: ${trimmed}`);
       };
       tunnel.stderr!.on('data', onTunnelChunk);
       tunnel.stdout!.on('data', onTunnelChunk);
-      const tunnelDeadline = Date.now() + 15_000;
+      // 45 s for the URL to land — cold launches on a fresh
+      // cloudflared binary (binary download finishing, QUIC handshake
+      // negotiation) used to occasionally miss the previous 15 s
+      // budget. The local connector usually prints the URL in <5 s
+      // once it's warm.
+      const tunnelDeadline = Date.now() + 45_000;
       while (!parsedUrl && Date.now() < tunnelDeadline) {
         await new Promise((r) => setTimeout(r, 250));
       }
@@ -974,7 +985,27 @@ const previewStartH: CommandHandler = (ctx, _cmd, parsed) => {
           pluginId: ctx.pluginId,
           pluginAuthToken,
           type: 'preview_error',
-          payload: { stage: 'tunnel', message: 'cloudflared did not emit a URL within 15s.' },
+          payload: { stage: 'tunnel', message: 'cloudflared did not emit a URL within 45s.' },
+        });
+        return;
+      }
+      // cloudflared prints its URL the moment the LOCAL connector is
+      // up, but the public `*.trycloudflare.com` hostname takes ~3–10s
+      // for DNS to propagate to the mobile device. Without this gate
+      // the WebView fires before DNS resolves and shows -1003
+      // ("hostname not found"). Probing here moves the wait into the
+      // loading state, which is the right surface for it.
+      try {
+        await waitForCloudflaredReady(parsedUrl, 30_000);
+      } catch (e) {
+        try { tunnel.kill('SIGTERM'); } catch { /* already dead */ }
+        try { devServer.kill('SIGTERM'); } catch { /* already dead */ }
+        void postPreviewEvent({
+          sessionId: ctx.sessionId,
+          pluginId: ctx.pluginId,
+          pluginAuthToken,
+          type: 'preview_error',
+          payload: { stage: 'tunnel', message: (e as Error).message },
         });
         return;
       }
@@ -1019,6 +1050,15 @@ const previewStopH: CommandHandler = (ctx) => {
   })();
 };
 
+/**
+ * Run a single setup command (e.g. `npm install`, `prisma generate`)
+ * detached from the CLI's stdout. Output is captured to the
+ * `[preview]` log so it's still debuggable, but the host terminal
+ * stays clean — the user's `codeam pair` session shouldn't fill up
+ * with `npm WARN` lines every time they tap Start Preview. Earlier
+ * versions used `stdio: 'inherit'` and that pollution is exactly
+ * what the mobile UI's "contaminated terminal" report flagged.
+ */
 function runOnce(
   cmd: string,
   args: string[],
@@ -1029,8 +1069,18 @@ function runOnce(
     const child = spawn(cmd, args, {
       cwd,
       env: { ...process.env, ...(env ?? {}) },
-      stdio: 'inherit',
+      stdio: ['ignore', 'pipe', 'pipe'],
     });
+    const tag = `setup:${cmd}`;
+    const onChunk = (chunk: Buffer): void => {
+      // Trim trailing newlines so each captured chunk lands as one
+      // log line. Empty payloads (just `\n`) get dropped.
+      const text = chunk.toString().replace(/\n+$/g, '');
+      if (text.length === 0) return;
+      log.info('preview', `${tag}: ${text}`);
+    };
+    child.stdout?.on('data', onChunk);
+    child.stderr?.on('data', onChunk);
     child.once('exit', (code) => resolve(code));
     child.once('error', () => resolve(-1));
   });
