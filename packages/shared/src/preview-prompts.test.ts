@@ -9,7 +9,10 @@ describe('PREVIEW_DETECT_PROMPT', () => {
   });
 
   it('mentions the Expo special case', () => {
-    expect(PREVIEW_DETECT_PROMPT).toContain('expo start --tunnel');
+    // The Expo guidance is rendered as a JSON args literal in the
+    // prompt body (`args=["expo","start","--tunnel"]`), not the
+    // shell-quoted form.
+    expect(PREVIEW_DETECT_PROMPT).toContain('"expo","start","--tunnel"');
     expect(PREVIEW_DETECT_PROMPT).toContain('Expo Go');
   });
 

@@ -250,6 +250,53 @@ export async function postAiResult(input: {
 }
 
 /**
+ * POST an in-app preview lifecycle event to the backend so mobile +
+ * web SessionDetail's Preview surface reacts without polling. The
+ * `PreviewController` re-publishes the event on the per-user SSE bus
+ * and mirrors the derived state into Redis (1 h TTL) so reconnecting
+ * dashboards re-derive without waiting for the next live event.
+ *
+ * Fire-and-forget: the caller logs failures but doesn't surface them
+ * — preview UX degrades gracefully when the backend is unreachable
+ * (the user's dev server + tunnel keep running, they just can't see
+ * the state in the mobile / web client).
+ */
+export async function postPreviewEvent(input: {
+  sessionId: string;
+  pluginId: string;
+  pluginAuthToken: string;
+  type:
+    | 'preview_detection_pending'
+    | 'preview_detection_ready'
+    | 'preview_starting'
+    | 'preview_ready'
+    | 'preview_stopped'
+    | 'preview_error';
+  payload?: Record<string, unknown>;
+}): Promise<{ ok: true } | { ok: false; status: number; message: string }> {
+  try {
+    await _transport.postJsonAuthed(
+      `${API_BASE}/api/preview/events`,
+      {
+        sessionId: input.sessionId,
+        pluginId: input.pluginId,
+        type: input.type,
+        payload: input.payload ?? {},
+      },
+      input.pluginAuthToken,
+    );
+    return { ok: true };
+  } catch (err) {
+    const e = err as Error & { statusCode?: number };
+    return {
+      ok: false,
+      status: typeof e.statusCode === 'number' ? e.statusCode : 0,
+      message: e.message || 'unknown',
+    };
+  }
+}
+
+/**
  * Variant of `_postJson` that includes the X-Plugin-Auth-Token
  * header and surfaces the HTTP status code on the rejected error
  * so the caller can map 401/403/404 to specific user messages.
