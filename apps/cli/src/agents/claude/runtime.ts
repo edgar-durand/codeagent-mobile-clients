@@ -118,6 +118,10 @@ export class ClaudeRuntimeStrategy implements RuntimeStrategy {
     return history.getCurrentUsage(historyDir);
   }
 
+  listResumableSessions(cwd: string) {
+    return history.listResumableSessions(cwd);
+  }
+
   async fetchWeeklyUsage() {
     return fetchClaudeQuota();
   }

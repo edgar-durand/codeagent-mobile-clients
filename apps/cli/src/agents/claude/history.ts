@@ -236,3 +236,67 @@ export function parseHistoryFile(filePath: string): NormalizedMessage[] {
   }
   return out;
 }
+
+/**
+ * Enumerate every resumable Claude session under
+ * `~/.claude/projects/<cwd-encoded>/`. One file per session; `id` is
+ * the JSONL filename without the `.jsonl` extension. `summary` is the
+ * first user message (trimmed to 120 chars) so the Conversations
+ * sheet has a label; `timestamp` is the file's mtime in ms.
+ *
+ * Lifted out of `HistoryService.load()` so the surface lives next to
+ * the agent it belongs to (per the per-agent-parser encapsulation
+ * rule). The behaviour is byte-for-byte identical to what the legacy
+ * inline implementation did.
+ */
+export function listResumableSessions(cwd: string): Array<{
+  id: string;
+  summary: string;
+  timestamp: number;
+}> {
+  const dir = resolveHistoryDir(cwd);
+  if (!dir) return [];
+  let entries: fs.Dirent[];
+  try {
+    entries = fs.readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+  const out: Array<{ id: string; summary: string; timestamp: number }> = [];
+  for (const entry of entries) {
+    if (!entry.isFile() || !entry.name.endsWith('.jsonl')) continue;
+    const id = entry.name.slice(0, -'.jsonl'.length);
+    const filePath = path.join(dir, entry.name);
+    let timestamp = Date.now();
+    try {
+      timestamp = fs.statSync(filePath).mtimeMs;
+    } catch {
+      /* ignore */
+    }
+    let summary = '';
+    try {
+      const raw = fs.readFileSync(filePath, 'utf8');
+      for (const line of raw.split('\n')) {
+        if (!line.trim()) continue;
+        try {
+          const record = JSON.parse(line) as Record<string, unknown>;
+          if (record['type'] === 'user') {
+            const msg = record['message'] as Record<string, unknown> | undefined;
+            const text = extractText(msg?.['content']).trim();
+            if (text) {
+              summary = text.slice(0, 120);
+              break;
+            }
+          }
+        } catch {
+          /* skip malformed line */
+        }
+      }
+    } catch {
+      /* skip */
+    }
+    if (summary) out.push({ id, summary, timestamp });
+  }
+  out.sort((a, b) => b.timestamp - a.timestamp);
+  return out;
+}

@@ -88,6 +88,10 @@ export class CodexRuntimeStrategy implements RuntimeStrategy {
     return history.getCurrentUsage(historyDir);
   }
 
+  listResumableSessions(cwd: string) {
+    return history.listResumableSessions(cwd);
+  }
+
   /**
    * Codex's quota lives behind the `account/get_account_rate_limits` RPC,
    * not a TUI slash command. Phase 2 ships with this stubbed to null so the

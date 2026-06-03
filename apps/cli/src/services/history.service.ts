@@ -493,63 +493,32 @@ export class HistoryService {
   }
 
   /**
-   * Read session list from disk and POST it to the API.
-   * Called once ~2 s after Claude spawns (non-blocking).
+   * Push the active agent's resumable-sessions list to the backend.
+   * Delegates the per-agent JSONL/rollout walk to
+   * `runtime.listResumableSessions(cwd)` so each agent reads its own
+   * on-disk format (Claude's JSONL files vs Codex's date-bucketed
+   * rollouts). Strategies that don't yet expose the helper (Cursor,
+   * Aider) cause this to no-op — the Conversations sheet on mobile
+   * just shows the empty state for those agents until each one's
+   * `listResumableSessions` lands.
+   *
+   * The push body now includes `agentId` so the backend keys by
+   * (pluginId, agentId). Old CLI clients that omit `agentId` continue
+   * to land in the `claude-code` slot via the backend's default.
+   *
+   * Called once ~2 s after the agent spawns (non-blocking).
    */
   async load(): Promise<void> {
-    const dir = this.projectDir;
-    let entries: fs.Dirent[];
-    try {
-      entries = fs.readdirSync(dir, { withFileTypes: true });
-    } catch {
-      return; // no sessions dir — skip silently
+    if (!this.runtime.listResumableSessions) {
+      return; // Strategy hasn't opted in to per-agent listing yet.
     }
-
-    const sessions: ClaudeSession[] = [];
-    for (const entry of entries) {
-      if (!entry.isFile() || !entry.name.endsWith('.jsonl')) continue;
-      const id = path.basename(entry.name, '.jsonl');
-      const filePath = path.join(dir, entry.name);
-      let mtime = Date.now();
-      try {
-        mtime = fs.statSync(filePath).mtimeMs;
-      } catch {
-        /* ignore */
-      }
-
-      // Get summary from first user message
-      let summary = '';
-      try {
-        const raw = fs.readFileSync(filePath, 'utf8');
-        for (const line of raw.split('\n')) {
-          if (!line.trim()) continue;
-          try {
-            const record = JSON.parse(line) as Record<string, unknown>;
-            if (record['type'] === 'user') {
-              const msg = record['message'] as Record<string, unknown> | undefined;
-              const text = extractText(msg?.['content']).trim();
-              if (text) {
-                summary = text.slice(0, 120);
-                break;
-              }
-            }
-          } catch {
-            /* skip */
-          }
-        }
-      } catch {
-        /* skip */
-      }
-
-      if (summary) sessions.push({ id, summary, timestamp: mtime });
-    }
-
+    const sessions = this.runtime.listResumableSessions(this.cwd);
     if (sessions.length === 0) return;
-
-    // Sort newest first
-    sessions.sort((a, b) => b.timestamp - a.timestamp);
-
-    await post('/api/sessions/list', { pluginId: this.pluginId, sessions });
+    await post('/api/sessions/list', {
+      pluginId: this.pluginId,
+      agentId: this.runtime.id,
+      sessions,
+    });
   }
 
   /**
