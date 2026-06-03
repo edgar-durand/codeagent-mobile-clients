@@ -3,6 +3,7 @@ package com.windsurf.controller.services
 import com.google.gson.Gson
 import com.google.gson.JsonArray
 import com.google.gson.JsonObject
+import com.google.gson.JsonParser
 import com.intellij.notification.NotificationGroupManager
 import com.intellij.notification.NotificationType
 import com.intellij.openapi.application.ApplicationManager
@@ -107,12 +108,22 @@ class CommandRelayService {
     private var pollFailures: Int = 0
 
     // ─── Auth-failure state ──────────────────────────────────────────
-    // Set when the backend has returned 401 for the current token. Stops
-    // every transport (SSE, polling, heartbeat) until the user re-pairs,
-    // and throttles the "session expired" notification to once per
-    // process — repeating it every poll would spam.
+    // Set when the backend has returned 401 for the current token AND
+    // the silent refresh path failed (session genuinely deleted server-
+    // side). When clear we still attempt /api/pairing/reconnect to
+    // mint a fresh HMAC token from the same (sessionId, pluginId)
+    // tuple — workflow continuity is a hard product invariant so
+    // surfacing "Session expired" is the last resort, never the
+    // default reaction to a stale token.
     @Volatile
     private var authFailureSurfaced: Boolean = false
+
+    // Throttle silent refresh attempts so a persistently failing
+    // backend doesn't spin reconnect calls. Same 5s window the
+    // VSC plugin + CLI use.
+    @Volatile
+    private var lastAuthRefreshAt: Long = 0L
+    private val authRefreshCooldownMs: Long = 5_000L
 
     // ─── Connection state ────────────────────────────────────────────
     // Three-state surface so the tool window can render
@@ -438,21 +449,53 @@ class CommandRelayService {
     }
 
     /**
-     * Triggered when the backend returns 401 from any HTTP path or SSE
-     * upgrade. The token the plugin holds is dead (rotated server-side
-     * or invalidated from the mobile app), so:
+     * Triggered when the backend returns 401 from any HTTP path or
+     * SSE upgrade. Goal: keep the session alive transparently.
+     * Workflow continuity is the whole product — surfacing
+     * "Session expired" to the user must be the last resort.
      *
-     *   - drop the cached token so subsequent calls don't replay it
-     *   - stop every transport: polling, SSE, heartbeat
-     *   - tell the user once per process via the CodeAgent-Mobile
-     *     notification group; pairing re-arms the gate.
+     * Recovery ladder (matches VSC plugin + CLI):
+     *   1. Throttle — at most one refresh every 5s. Persistently
+     *      failing backends don't spin reconnect calls.
+     *   2. POST `/api/pairing/reconnect` with the saved sessionId +
+     *      pluginId. Backend re-derives the HMAC token statelessly;
+     *      session row stays intact (agents list / chat history /
+     *      SSE subscriptions all survive).
+     *   3. Cache the new token, restart transports so SSE reconnects
+     *      with the fresh `X-Plugin-Auth-Token`.
+     *   4. Only if reconnect 404s (session truly deleted) or
+     *      repeatedly fails do we clear the token + surface the
+     *      re-pair notification.
      */
     private fun handleAuthFailure() {
+        // Spawn the recovery off the calling thread so SSE/polling
+        // event handlers don't block on a synchronous reconnect POST.
+        Thread({ refreshAuthOrSurface() }, "codeagent-auth-refresh").start()
+    }
+
+    private fun refreshAuthOrSurface() {
+        val now = System.currentTimeMillis()
+        synchronized(this) {
+            if (now - lastAuthRefreshAt < authRefreshCooldownMs) return
+            lastAuthRefreshAt = now
+        }
+        val refreshed = attemptSilentReconnect()
+        if (refreshed) {
+            logger.info("[auth] Refreshed pluginAuthToken silently via /api/pairing/reconnect")
+            authFailureSurfaced = false
+            stopPolling()
+            startPolling()
+            return
+        }
+        // Refresh failed — surface the re-pair notification exactly
+        // once per process. This is the genuine "session is gone"
+        // path (mobile-side delete, JWT_SECRET rotation without a
+        // matching session, etc.).
         SettingsService.getInstance().setPluginAuthToken(null)
         stopPolling()
         if (authFailureSurfaced) return
         authFailureSurfaced = true
-        logger.warn("Auth failed (401) — token cleared, transports stopped.")
+        logger.warn("Auth failed (401) — silent refresh failed, asking user to re-pair.")
         runCatching {
             TelemetryService.getInstance().capture("plugin_auth_failed", mapOf("surface" to "jetbrains"))
         }
@@ -464,6 +507,60 @@ class CommandRelayService {
                     NotificationType.WARNING,
                 )
                 .notify(null)
+        }
+    }
+
+    /**
+     * Hit `/api/pairing/reconnect` with the persisted (sessionId,
+     * pluginId). Returns true when a fresh token is back in the
+     * cache, false when the session is gone or the call fails.
+     *
+     * Uses a fresh OkHttp call rather than going through the
+     * polling-path HTTP wrapper — `handleAuthFailure` is reached
+     * FROM that path on 401, so re-entering it would loop.
+     */
+    private fun attemptSilentReconnect(): Boolean {
+        val settings = SettingsService.getInstance()
+        val sessionId = PairingService.getInstance().currentSessionId
+        val pluginId = settings.ensurePluginId()
+        if (sessionId.isNullOrEmpty()) {
+            logger.info("[auth] No sessionId stored — cannot refresh")
+            return false
+        }
+        return try {
+            val payload = JsonObject().apply {
+                addProperty("sessionId", sessionId)
+                addProperty("pluginId", pluginId)
+            }
+            val request = Request.Builder()
+                .url("${settings.state.apiBaseUrl}/api/pairing/reconnect")
+                .post(payload.toString().toRequestBody("application/json".toMediaType()))
+                .header("X-Codeam-Protocol-Version", PROTOCOL_VERSION)
+                .build()
+            httpClient.newCall(request).execute().use { response ->
+                if (response.code == 404) {
+                    logger.warn("[auth] Reconnect 404 — session deleted server-side")
+                    return@use false
+                }
+                if (response.code >= 400) {
+                    logger.warn("[auth] Reconnect failed status=${response.code}")
+                    return@use false
+                }
+                val body = response.body.string()
+                if (body.isEmpty()) return@use false
+                val parsed = JsonParser.parseString(body).asJsonObject
+                val data = parsed.getAsJsonObject("data") ?: return@use false
+                val fresh = data.get("pluginAuthToken")?.asString
+                if (fresh.isNullOrEmpty()) {
+                    logger.warn("[auth] Reconnect response missing pluginAuthToken")
+                    return@use false
+                }
+                settings.setPluginAuthToken(fresh)
+                true
+            }
+        } catch (e: Exception) {
+            logger.warn("[auth] Reconnect threw: ${e.message}")
+            false
         }
     }
 
