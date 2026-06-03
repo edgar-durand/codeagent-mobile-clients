@@ -3,6 +3,7 @@ import * as http from 'http';
 import * as vscode from 'vscode';
 import { PROTOCOL_VERSION, SSE_SOCKET_TIMEOUT_MS } from '@codeagent/shared';
 import { SettingsService } from './settings.service';
+import { PairingService } from './pairing.service';
 import { OutputChannel } from 'vscode';
 import { capture } from './telemetry.service';
 import { Messages } from '../ui/messages';
@@ -526,34 +527,163 @@ export class CommandRelayService {
 
   /**
    * Triggered when the backend returns 401 from any HTTP path or SSE
-   * upgrade. The token the plugin holds is dead (rotated server-side
-   * or invalidated from the mobile app), so:
+   * upgrade. Goal: keep the session alive transparently. Workflow
+   * continuity is the whole product — surfacing "Session expired" to
+   * the user must be the last resort, never the default reaction to
+   * a stale token.
    *
-   *   - drop the cached token so subsequent calls don't replay it
-   *   - stop every transport: polling, SSE, heartbeat
-   *   - tell the user once per process; the action button opens the
-   *     pairing panel
-   *
-   * The dispatcher reads `getPluginAuthToken()` for the next pair
-   * attempt and will receive null until the user re-pairs.
+   * Recovery ladder:
+   *   1. Throttle — at most one refresh attempt every
+   *      `AUTH_REFRESH_COOLDOWN_MS`. Otherwise an SSE stream that
+   *      401s on every reconnect would spin reconnect calls.
+   *   2. Try `/api/pairing/reconnect` with the persisted sessionId +
+   *      pluginId. The backend re-derives the HMAC token (it's
+   *      stateless against JWT_SECRET) and returns a fresh one. The
+   *      session row stays intact; the user's chat history, agents
+   *      list, and live SSE subscriptions all survive.
+   *   3. Store the new token, reset the auth gate, restart transports
+   *      so SSE reconnects with the fresh `X-Plugin-Auth-Token`. The
+   *      caller's failed request is NOT retried in-band — the
+   *      transport that gets the next 200 reads the new token from
+   *      `authHeaders()` and the user never notices.
+   *   4. If reconnect itself 404s (session genuinely deleted from
+   *      the mobile app's "Sessions" tab) or 5xxs repeatedly, THEN
+   *      and only then do we clear the token + surface the re-pair
+   *      toast.
    */
+  private static readonly AUTH_REFRESH_COOLDOWN_MS = 5_000;
+  private lastAuthRefreshAt = 0;
+  private authRefreshInFlight: Promise<boolean> | null = null;
+
   private handleAuthFailure(): void {
+    void this.refreshAuthOrSurface();
+  }
+
+  private async refreshAuthOrSurface(): Promise<void> {
+    const now = Date.now();
+    if (now - this.lastAuthRefreshAt < CommandRelayService.AUTH_REFRESH_COOLDOWN_MS) {
+      // Recent refresh attempt — let it propagate before trying
+      // again. Avoids tight loops on a persistently-failing backend.
+      return;
+    }
+    this.lastAuthRefreshAt = now;
+
+    if (this.authRefreshInFlight) {
+      await this.authRefreshInFlight;
+      return;
+    }
+
+    this.authRefreshInFlight = this.attemptSilentReconnect();
+    const refreshed = await this.authRefreshInFlight;
+    this.authRefreshInFlight = null;
+
+    if (refreshed) {
+      this.log.appendLine('[auth] Refreshed pluginAuthToken silently via /api/pairing/reconnect');
+      this.authFailureSurfaced = false;
+      // Restart transports so the next SSE / heartbeat / output POST
+      // picks up the fresh token from `authHeaders()`.
+      this.stopPolling();
+      this.startPolling();
+      return;
+    }
+
+    // Refresh failed — fall back to the legacy surface-the-toast path
+    // exactly once per process so the user knows to re-pair.
     SettingsService.getInstance().setPluginAuthToken(null);
     this.stopPolling();
     if (this.authFailureSurfaced) return;
     this.authFailureSurfaced = true;
-    this.log.appendLine('Auth failed (401) — token cleared, polling stopped.');
+    this.log.appendLine('Auth failed (401) — silent refresh failed, asking user to re-pair.');
     capture('plugin_auth_failed', { surface: 'vscode' });
     void vscode.window
-      .showWarningMessage(
-        Messages.SessionExpired,
-        'Re-pair',
-      )
+      .showWarningMessage(Messages.SessionExpired, 'Re-pair')
       .then((choice) => {
         if (choice === 'Re-pair') {
           void vscode.commands.executeCommand('codeagent-mobile.openPanel');
         }
       });
+  }
+
+  /**
+   * Hit `/api/pairing/reconnect` with the saved sessionId + pluginId.
+   * Returns true when a fresh `pluginAuthToken` is back in the cache,
+   * false when the session is gone or the call repeatedly fails.
+   *
+   * Mirrors the CLI's would-be refresh path so both clients heal the
+   * same way against a JWT_SECRET rotation, session re-pair, or any
+   * other source of token drift.
+   */
+  private async attemptSilentReconnect(): Promise<boolean> {
+    const settings = SettingsService.getInstance();
+    const sessionId = PairingService.getInstance().currentSessionId;
+    const pluginId = settings.ensurePluginId();
+    if (!sessionId) {
+      this.log.appendLine('[auth] No sessionId stored — cannot refresh');
+      return false;
+    }
+    try {
+      const url = `${settings.apiBaseUrl}/api/pairing/reconnect`;
+      const payload = JSON.stringify({ sessionId, pluginId });
+      const res = await this.rawPost(url, payload);
+      if (res.statusCode === 404) {
+        this.log.appendLine('[auth] Reconnect 404 — session deleted server-side');
+        return false;
+      }
+      if (res.statusCode >= 400) {
+        this.log.appendLine(`[auth] Reconnect failed status=${res.statusCode}`);
+        return false;
+      }
+      let parsed: { data?: { pluginAuthToken?: unknown } } = {};
+      try { parsed = JSON.parse(res.body) as typeof parsed; } catch { return false; }
+      const fresh = parsed.data?.pluginAuthToken;
+      if (typeof fresh !== 'string' || fresh.length === 0) {
+        this.log.appendLine('[auth] Reconnect response missing pluginAuthToken');
+        return false;
+      }
+      settings.setPluginAuthToken(fresh);
+      return true;
+    } catch (e) {
+      this.log.appendLine(`[auth] Reconnect threw: ${e}`);
+      return false;
+    }
+  }
+
+  /**
+   * Stripped-down POST helper that doesn't go through `postJson` (which
+   * itself hits `handleAuthFailure` on 401, creating a loop). Returns
+   * status code + raw body so the refresh path can inspect both.
+   */
+  private rawPost(
+    url: string,
+    payload: string,
+  ): Promise<{ statusCode: number; body: string }> {
+    return new Promise((resolve, reject) => {
+      const urlObj = new URL(url);
+      const transport = urlObj.protocol === 'https:' ? https : http;
+      const req = transport.request(
+        {
+          hostname: urlObj.hostname,
+          port: urlObj.port,
+          path: urlObj.pathname + urlObj.search,
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Content-Length': Buffer.byteLength(payload),
+            'X-Codeam-Protocol-Version': PROTOCOL_VERSION,
+          },
+          timeout: 10_000,
+        },
+        (res) => {
+          let body = '';
+          res.on('data', (c: Buffer) => { body += c.toString(); });
+          res.on('end', () => resolve({ statusCode: res.statusCode ?? 0, body }));
+        },
+      );
+      req.on('error', reject);
+      req.on('timeout', () => { req.destroy(); reject(new Error('timeout')); });
+      req.write(payload);
+      req.end();
+    });
   }
 
   /** Called from PairingService once a new token has been stored. */
