@@ -61,7 +61,11 @@ export class AgentStrategyRegistry {
       this.log.appendLine(
         `[AgentStrategyRegistry] no strategy matched (agentId=${invocation.agentId ?? '<none>'}) — registry mis-ordered?`,
       );
-      return { delivered: false, message: 'No matching agent strategy' };
+      const fallback: StrategyResult = {
+        delivered: false,
+        message: 'No matching agent strategy',
+      };
+      return fallback;
     }
     this.log.appendLine(
       `[AgentStrategyRegistry] dispatching to ${strategy.name} (agentId=${invocation.agentId ?? '<auto>'})`,

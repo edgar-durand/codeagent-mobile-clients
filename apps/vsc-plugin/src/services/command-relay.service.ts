@@ -361,17 +361,36 @@ export class CommandRelayService {
     }).catch(() => {});
   }
 
-  reportAgents(agents: Array<{ id: string; name: string; icon: string; installed: boolean }>): void {
+  reportAgents(
+    agents: Array<{
+      id: string;
+      name: string;
+      icon: string;
+      installed: boolean;
+      isTerminalAgent?: boolean;
+    }>,
+  ): void {
     const settings = SettingsService.getInstance();
     const pluginId = settings.ensurePluginId();
-    this.postJson(`${settings.apiBaseUrl}/api/plugin/agents`, {
+    const payload = {
       pluginId,
-      agents,
-    }).then(() => {
-      this.log.appendLine(`Reported ${agents.length} agents to API`);
-    }).catch((e) => {
-      this.log.appendLine(`Failed to report agents: ${e}`);
-    });
+      agents: agents.map((a) => ({
+        id: a.id,
+        name: a.name,
+        icon: a.icon,
+        installed: a.installed,
+        ...(typeof a.isTerminalAgent === 'boolean'
+          ? { isTerminal: a.isTerminalAgent }
+          : {}),
+      })),
+    };
+    this.postJson(`${settings.apiBaseUrl}/api/plugin/agents`, payload)
+      .then(() => {
+        this.log.appendLine(`Reported ${agents.length} agents to API`);
+      })
+      .catch((e) => {
+        this.log.appendLine(`Failed to report agents: ${e}`);
+      });
   }
 
   reportOffline(): void {

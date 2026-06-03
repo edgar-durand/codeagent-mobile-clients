@@ -31,6 +31,20 @@ fun Request.Builder.withAuthHeaders(): Request.Builder {
     return this
 }
 
+internal fun buildAgentsPayload(agents: List<DetectedAgent>): JsonArray {
+    val agentsArray = JsonArray()
+    for (agent in agents) {
+        agentsArray.add(JsonObject().apply {
+            addProperty("id", agent.id)
+            addProperty("name", agent.name)
+            addProperty("icon", agent.icon)
+            addProperty("installed", agent.installed)
+            addProperty("isTerminal", agent.isTerminal)
+        })
+    }
+    return agentsArray
+}
+
 /**
  * Bidirectional command relay. The modern path is an SSE pull stream that
  * the backend pushes commands down — backend wakes the plugin within ~50 ms
@@ -586,15 +600,7 @@ class CommandRelayService {
         val ide = IdeIntegrationService.getInstance()
         val agents = ide.detectInstalledAgents()
 
-        val agentsArray = JsonArray()
-        for (agent in agents) {
-            agentsArray.add(JsonObject().apply {
-                addProperty("id", agent.id)
-                addProperty("name", agent.name)
-                addProperty("icon", agent.icon)
-                addProperty("installed", agent.installed)
-            })
-        }
+        val agentsArray = buildAgentsPayload(agents)
         val body = JsonObject().apply {
             addProperty("pluginId", pluginId)
             add("agents", agentsArray)

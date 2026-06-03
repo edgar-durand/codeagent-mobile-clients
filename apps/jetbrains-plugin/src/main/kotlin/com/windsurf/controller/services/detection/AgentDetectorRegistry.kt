@@ -131,5 +131,6 @@ object AgentDetectorRegistry {
         toolWindowId = r.toolWindowId,
         icon = r.icon,
         installed = true,
+        isTerminal = r.isTerminalAgent,
     )
 }
