@@ -184,7 +184,6 @@ jobs:
             https://api.github.com/repos/edgar-durand/codeagent-mobile/dispatches \
             -d "{\"event_type\":\"cli-released\",\"client_payload\":{\"cliVersion\":\"$VERSION\"}}"
           echo "::notice::Dispatched api-v2-integration for codeam-cli@$VERSION"
-          if-no-files-found: error
 
   publish-vsc:
     name: Publish VS Code plugin
