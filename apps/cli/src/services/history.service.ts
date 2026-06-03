@@ -539,7 +539,18 @@ export class HistoryService {
 
     for (let i = 0; i < totalBatches; i++) {
       const batch = messages.slice(i * CONVERSATION_BATCH_SIZE, (i + 1) * CONVERSATION_BATCH_SIZE);
-      const body = { pluginId: this.pluginId, sessionId, messages: batch, batchIndex: i, totalBatches };
+      const body = {
+        pluginId: this.pluginId,
+        // `agentId` keys the backend's per-agent conversation cache.
+        // Older backends that don't recognise the field silently
+        // ignore it and default to `claude-code` server-side — same
+        // outcome as before the per-agent split.
+        agentId: this.runtime.id,
+        sessionId,
+        messages: batch,
+        batchIndex: i,
+        totalBatches,
+      };
 
       let ok = await post('/api/sessions/conversation', body);
       for (let attempt = 0; !ok && attempt < RETRY_DELAYS.length; attempt++) {
@@ -613,6 +624,7 @@ export class HistoryService {
 
     const body = {
       pluginId: this.pluginId,
+      agentId: this.runtime.id,
       sessionId,
       messages: newMessages,
       mode: 'append' as const,
