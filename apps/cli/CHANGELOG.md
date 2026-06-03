@@ -4,6 +4,13 @@ All notable changes to `codeam-cli` are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.26.1] — 2026-06-03
+
+### Fixed
+
+- **workflow:** Drop stray `if-no-files-found: error` line from api-v2 dispatch step (#233)
+- **vsc-plugin:** Event-driven AgentOutputMonitor + auth guard on output push (#234)
+
 ## [2.26.0] — 2026-06-03
 
 ### Added
