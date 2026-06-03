@@ -2,6 +2,7 @@ import type { ChildProcess } from 'child_process';
 
 export * from './cloudflared';
 export * from './codespace';
+export * from './config-file';
 export * from './parser';
 
 /**

@@ -45,11 +45,13 @@ import {
   killPreview,
   parseCloudflaredUrl,
   parseExpoUrl,
+  readPreviewConfig,
   registerPreview,
   resolveCloudflared,
   safeParseDetection,
   setPortPublic,
   waitForCodespacePortReady,
+  writePreviewConfig,
 } from '../../services/preview';
 import { log } from '../../services/logger';
 import type { KeepAliveContext } from './keep-alive';
@@ -722,6 +724,23 @@ const requestPreviewDetectH: CommandHandler = (ctx) => {
   }
   const pluginAuthToken = ctx.pluginAuthToken;
   void (async () => {
+    // `.codeam/preview.json` short-circuits the agent step entirely
+    // when a repo has been pinned. Saves the user 30-90 s + the LLM
+    // tokens, and lets a team commit the override so every dev gets
+    // an instant preview on first try.
+    const fromFile = await readPreviewConfig(process.cwd());
+    if (fromFile) {
+      log.info('preview', `detect: using .codeam/preview.json (${fromFile.framework})`);
+      void postPreviewEvent({
+        sessionId: ctx.sessionId,
+        pluginId: ctx.pluginId,
+        pluginAuthToken,
+        type: 'preview_detection_ready',
+        payload: { detection: fromFile },
+      });
+      return;
+    }
+
     void postPreviewEvent({
       sessionId: ctx.sessionId,
       pluginId: ctx.pluginId,
@@ -1017,6 +1036,24 @@ function runOnce(
   });
 }
 
+/**
+ * Save the confirmed detection to `.codeam/preview.json` so the next
+ * `request_preview_detect` short-circuits the agent step. Mobile /
+ * web call this when the user toggles "Remember for this project"
+ * on the confirmation sheet. Fire-and-forget — failure to write the
+ * file is non-fatal (the agent step still works next time).
+ */
+const savePreviewConfigH: CommandHandler = (_ctx, _cmd, parsed) => {
+  const detection = parsed.detection as PreviewDetection | undefined;
+  if (!detection) {
+    log.info('preview', 'save_preview_config: no detection in payload');
+    return;
+  }
+  void writePreviewConfig(process.cwd(), detection).catch((err) => {
+    log.info('preview', `save_preview_config failed: ${String(err)}`);
+  });
+};
+
 // Re-export for sigintHandler in start.ts so it can walk every active
 // preview on session shutdown.
 export { activePreviews };
@@ -1059,6 +1096,7 @@ export const handlers: Record<string, CommandHandler> = {
   request_preview_detect: requestPreviewDetectH,
   preview_start: previewStartH,
   preview_stop: previewStopH,
+  save_preview_config: savePreviewConfigH,
 };
 
 /**
