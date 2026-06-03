@@ -808,6 +808,29 @@ const previewStartH: CommandHandler = (ctx, _cmd, parsed) => {
   }
   const pluginAuthToken = ctx.pluginAuthToken;
 
+  /**
+   * Fire-and-forget progress emitter — used by `previewStartH` to ship
+   * one realtime milestone per step the dev-server bring-up traverses
+   * (ENV_DETECTED → SETUP_RUN → BOOT_SEQUENCE → BIND_PORT →
+   * WAITING_FOR_READY → READY_DETECTED → TUNNEL_STARTING →
+   * TUNNEL_READY). The mobile + landing `PreviewStartingLog`
+   * subscribes to these on the per-user SSE bus and renders the
+   * HANDSHAKE_LOG card — replaces the previous bare-spinner UX with
+   * the same realtime cadence the Codespace deploy wizard uses.
+   *
+   * Errors are swallowed: the dev server brings itself up regardless;
+   * the progress log is best-effort UX, not load-bearing.
+   */
+  const emitProgress = (step: string, message: string): void => {
+    void postPreviewEvent({
+      sessionId: ctx.sessionId,
+      pluginId: ctx.pluginId,
+      pluginAuthToken,
+      type: 'preview_progress',
+      payload: { step, message, timestamp: Date.now() },
+    });
+  };
+
   void (async () => {
     void postPreviewEvent({
       sessionId: ctx.sessionId,
@@ -816,9 +839,11 @@ const previewStartH: CommandHandler = (ctx, _cmd, parsed) => {
       type: 'preview_starting',
       payload: { framework: detection.framework, port: detection.port },
     });
+    emitProgress('ENV_DETECTED', `${detection.framework}`);
 
     // 1. Setup commands (npm install, etc.) — run sequentially.
     for (const setup of detection.setup_commands ?? []) {
+      emitProgress('SETUP_RUN', `${setup.cmd} ${setup.args.join(' ')}`);
       const exitCode = await runOnce(setup.cmd, setup.args, process.cwd(), detection.env);
       if (exitCode !== 0) {
         void postPreviewEvent({
@@ -836,11 +861,17 @@ const previewStartH: CommandHandler = (ctx, _cmd, parsed) => {
     }
 
     // 2. Spawn the dev server.
+    emitProgress(
+      'BOOT_SEQUENCE',
+      `${detection.command} ${detection.args.join(' ')}`,
+    );
     const devServer = spawn(detection.command, detection.args, {
       cwd: process.cwd(),
       env: { ...process.env, ...(detection.env ?? {}) },
       stdio: ['ignore', 'pipe', 'pipe'],
     });
+    emitProgress('BIND_PORT', String(detection.port));
+    emitProgress('WAITING_FOR_READY', detection.ready_pattern);
     let readyMatched = false;
     let expoUrl: string | null = null;
     const readyRe = new RegExp(detection.ready_pattern);
@@ -882,8 +913,17 @@ const previewStartH: CommandHandler = (ctx, _cmd, parsed) => {
       });
       return;
     }
+    emitProgress('READY_DETECTED', `port ${detection.port}`);
 
     // 4. Tunnel — three branches per the user's session environment.
+    emitProgress(
+      'TUNNEL_STARTING',
+      detection.framework === 'Expo'
+        ? 'Expo (self-tunnelled)'
+        : isCodespaceSession()
+          ? 'GitHub Codespaces public port'
+          : 'cloudflared quick tunnel',
+    );
     let tunnel: ReturnType<typeof spawn> | null = null;
     let url: string;
 
@@ -1010,6 +1050,7 @@ const previewStartH: CommandHandler = (ctx, _cmd, parsed) => {
     }
 
     // 5. Register + announce.
+    emitProgress('TUNNEL_READY', url);
     registerPreview(ctx.sessionId, {
       sessionId: ctx.sessionId,
       devServer,

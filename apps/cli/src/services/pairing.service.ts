@@ -271,7 +271,8 @@ export async function postPreviewEvent(input: {
     | 'preview_starting'
     | 'preview_ready'
     | 'preview_stopped'
-    | 'preview_error';
+    | 'preview_error'
+    | 'preview_progress';
   payload?: Record<string, unknown>;
 }): Promise<{ ok: true } | { ok: false; status: number; message: string }> {
   try {
