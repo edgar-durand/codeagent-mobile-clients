@@ -113,6 +113,33 @@ export const startCommandSchema = z.object({
       complexityShift: z.number().int(),
     })
     .optional(),
+  // `preview_start` carries the agent-detected `PreviewDetection`
+  // shape from the mobile / web confirmation sheet. Mirrors
+  // `@codeagent/shared`'s `PreviewDetection` byte-for-byte. Kept
+  // loose (`unknown` for env / setup_commands) so a CLI version
+  // running against a newer backend that adds optional fields still
+  // accepts the payload; the handler validates the shape it needs
+  // before spawning.
+  detection: z
+    .object({
+      framework: z.string().max(64),
+      command: z.string().min(1).max(256),
+      args: z.array(z.string().max(1024)).max(64),
+      port: z.number().int().min(1).max(65535),
+      ready_pattern: z.string().min(1).max(4096),
+      env: z.record(z.string(), z.string().max(8192)).optional(),
+      setup_commands: z
+        .array(
+          z.object({
+            cmd: z.string().min(1).max(256),
+            args: z.array(z.string().max(1024)).max(64),
+          }),
+        )
+        .max(32)
+        .optional(),
+      notes: z.string().max(4096).nullable().optional(),
+    })
+    .optional(),
 });
 
 export type StartCommandPayload = z.infer<typeof startCommandSchema>;

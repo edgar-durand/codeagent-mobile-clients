@@ -92,6 +92,29 @@ export class ProjectOpsService {
     }
   }
 
+  /**
+   * Detect the current git branch for the open workspace. Used by the
+   * pairing payload + the heartbeat so the mobile / web SessionDetail
+   * shows the same branch the CLI reports via `detectCurrentBranch`.
+   * Returns `null` on detached HEAD / non-git workspaces.
+   */
+  static async detectCurrentBranch(): Promise<string | null> {
+    const root = this.workspaceRoot();
+    if (!root) return null;
+    try {
+      const { stdout } = await execFileP(
+        'git',
+        ['rev-parse', '--abbrev-ref', 'HEAD'],
+        { cwd: root, timeout: 10_000, maxBuffer: 64 * 1024 },
+      );
+      const trimmed = stdout.trim();
+      if (!trimmed || trimmed === 'HEAD') return null;
+      return trimmed;
+    } catch {
+      return null;
+    }
+  }
+
   static async gitStatus(): Promise<Record<string, unknown>> {
     const r = await this.git(['status', '--porcelain=v2', '--branch']);
     if (r.code !== 0) {

@@ -36,8 +36,23 @@ import {
 import { showInfo } from '../../ui/banner';
 import { applyFileReview } from '../../services/apply-file-review.service';
 import { buildLinkContext } from '../link';
-import { postLinkCredential, postAiResult } from '../../services/pairing.service';
-import { AGENT_REGISTRY, isKnownAgentId, type AgentId } from '@codeagent/shared';
+import { postLinkCredential, postAiResult, postPreviewEvent } from '../../services/pairing.service';
+import { AGENT_REGISTRY, isKnownAgentId, PREVIEW_DETECT_PROMPT, type AgentId, type PreviewDetection } from '@codeagent/shared';
+import {
+  activePreviews,
+  buildCodespaceUrl,
+  isCodespaceSession,
+  killPreview,
+  parseCloudflaredUrl,
+  parseExpoUrl,
+  readPreviewConfig,
+  registerPreview,
+  resolveCloudflared,
+  safeParseDetection,
+  setPortPublic,
+  waitForCodespacePortReady,
+  writePreviewConfig,
+} from '../../services/preview';
 import { log } from '../../services/logger';
 import type { KeepAliveContext } from './keep-alive';
 import { removeSession } from '../../config';
@@ -674,6 +689,375 @@ function parseInsightText(text: string): {
 
 // ─── Dispatch table ──────────────────────────────────────────────
 
+// ─────────────────────────────────────────── In-app preview handlers
+//
+// Same fire-and-forget pattern as the AI summary / insight handlers
+// (lines 556-708 above): the relay dispatches commands SEQUENTIALLY,
+// so any handler that blocks behind a 60-90 s agent run or a
+// long-lived tunnel spawn stalls the next user command. Each handler
+// wraps its body in `void (async … )()` and returns immediately —
+// progress flows back to the user via the `preview_*` events on the
+// per-user SSE bus.
+//
+// Authoritative state lives on this plugin process via
+// `activePreviews` (services/preview/index.ts). The backend's
+// PreviewController is a thin SSE-fanout + Redis-snapshot mirror.
+
+const requestPreviewDetectH: CommandHandler = (ctx) => {
+  if (!ctx.pluginAuthToken) {
+    log.info('preview', 'no pluginAuthToken — skipping detect');
+    return;
+  }
+  if (typeof ctx.runtime.generateOneShot !== 'function') {
+    log.info('preview', `runtime ${ctx.runtime.id} has no generateOneShot — emitting unsupported`);
+    void postPreviewEvent({
+      sessionId: ctx.sessionId,
+      pluginId: ctx.pluginId,
+      pluginAuthToken: ctx.pluginAuthToken,
+      type: 'preview_error',
+      payload: {
+        stage: 'detection',
+        message: `Preview detection isn't available on ${ctx.runtime.id} sessions yet — link a Claude or Codex agent.`,
+      },
+    });
+    return;
+  }
+  const pluginAuthToken = ctx.pluginAuthToken;
+  void (async () => {
+    // `.codeam/preview.json` short-circuits the agent step entirely
+    // when a repo has been pinned. Saves the user 30-90 s + the LLM
+    // tokens, and lets a team commit the override so every dev gets
+    // an instant preview on first try.
+    const fromFile = await readPreviewConfig(process.cwd());
+    if (fromFile) {
+      log.info('preview', `detect: using .codeam/preview.json (${fromFile.framework})`);
+      void postPreviewEvent({
+        sessionId: ctx.sessionId,
+        pluginId: ctx.pluginId,
+        pluginAuthToken,
+        type: 'preview_detection_ready',
+        payload: { detection: fromFile },
+      });
+      return;
+    }
+
+    void postPreviewEvent({
+      sessionId: ctx.sessionId,
+      pluginId: ctx.pluginId,
+      pluginAuthToken,
+      type: 'preview_detection_pending',
+    });
+    log.info('preview', 'detect: invoking generateOneShot');
+    const startedAt = Date.now();
+    const raw = await ctx.runtime.generateOneShot!(PREVIEW_DETECT_PROMPT).catch((err) => {
+      log.info('preview', `detect: generateOneShot threw: ${String(err)}`);
+      return null;
+    });
+    const tookMs = Date.now() - startedAt;
+    const detection = safeParseDetection(raw);
+    if (!detection) {
+      log.info('preview', `detect: invalid agent output after ${tookMs}ms`);
+      void postPreviewEvent({
+        sessionId: ctx.sessionId,
+        pluginId: ctx.pluginId,
+        pluginAuthToken,
+        type: 'preview_error',
+        payload: {
+          stage: 'detection',
+          message:
+            'Agent returned invalid JSON. Try again, or add a .codeam/preview.json override.',
+        },
+      });
+      return;
+    }
+    if (detection.framework === 'unsupported') {
+      log.info('preview', 'detect: framework=unsupported');
+      void postPreviewEvent({
+        sessionId: ctx.sessionId,
+        pluginId: ctx.pluginId,
+        pluginAuthToken,
+        type: 'preview_error',
+        payload: {
+          stage: 'unsupported',
+          message: detection.notes ?? 'No dev server applies to this project.',
+        },
+      });
+      return;
+    }
+    log.info('preview', `detect: ${detection.framework} on :${detection.port} (took ${tookMs}ms)`);
+    void postPreviewEvent({
+      sessionId: ctx.sessionId,
+      pluginId: ctx.pluginId,
+      pluginAuthToken,
+      type: 'preview_detection_ready',
+      payload: { detection },
+    });
+  })();
+};
+
+const previewStartH: CommandHandler = (ctx, _cmd, parsed) => {
+  if (!ctx.pluginAuthToken) {
+    log.info('preview', 'no pluginAuthToken — skipping start');
+    return;
+  }
+  const detection = parsed.detection as PreviewDetection | undefined;
+  if (!detection) {
+    log.info('preview', 'start: no detection in payload');
+    return;
+  }
+  const pluginAuthToken = ctx.pluginAuthToken;
+
+  void (async () => {
+    void postPreviewEvent({
+      sessionId: ctx.sessionId,
+      pluginId: ctx.pluginId,
+      pluginAuthToken,
+      type: 'preview_starting',
+      payload: { framework: detection.framework, port: detection.port },
+    });
+
+    // 1. Setup commands (npm install, etc.) — run sequentially.
+    for (const setup of detection.setup_commands ?? []) {
+      const exitCode = await runOnce(setup.cmd, setup.args, process.cwd(), detection.env);
+      if (exitCode !== 0) {
+        void postPreviewEvent({
+          sessionId: ctx.sessionId,
+          pluginId: ctx.pluginId,
+          pluginAuthToken,
+          type: 'preview_error',
+          payload: {
+            stage: 'spawn',
+            message: `Setup failed (${setup.cmd} ${setup.args.join(' ')}, exit ${exitCode}).`,
+          },
+        });
+        return;
+      }
+    }
+
+    // 2. Spawn the dev server.
+    const devServer = spawn(detection.command, detection.args, {
+      cwd: process.cwd(),
+      env: { ...process.env, ...(detection.env ?? {}) },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let readyMatched = false;
+    let expoUrl: string | null = null;
+    const readyRe = new RegExp(detection.ready_pattern);
+    const onChunk = (chunk: Buffer): void => {
+      const s = chunk.toString();
+      if (!readyMatched && readyRe.test(s)) readyMatched = true;
+      if (!expoUrl && detection.framework === 'Expo') expoUrl = parseExpoUrl(s);
+    };
+    devServer.stdout!.on('data', onChunk);
+    devServer.stderr!.on('data', onChunk);
+
+    // 3. Wait for the ready_pattern. Bail if the server exits early
+    //    or the 120 s deadline passes.
+    const readyDeadline = Date.now() + 120_000;
+    while (!readyMatched && Date.now() < readyDeadline) {
+      if (devServer.exitCode !== null) {
+        void postPreviewEvent({
+          sessionId: ctx.sessionId,
+          pluginId: ctx.pluginId,
+          pluginAuthToken,
+          type: 'preview_error',
+          payload: {
+            stage: 'spawn',
+            message: `Dev server exited (code ${devServer.exitCode}).`,
+          },
+        });
+        return;
+      }
+      await new Promise((r) => setTimeout(r, 250));
+    }
+    if (!readyMatched) {
+      try { devServer.kill('SIGTERM'); } catch { /* already dead */ }
+      void postPreviewEvent({
+        sessionId: ctx.sessionId,
+        pluginId: ctx.pluginId,
+        pluginAuthToken,
+        type: 'preview_error',
+        payload: { stage: 'ready_timeout', message: "Server didn't signal ready in 120s." },
+      });
+      return;
+    }
+
+    // 4. Tunnel — three branches per the user's session environment.
+    let tunnel: ReturnType<typeof spawn> | null = null;
+    let url: string;
+
+    if (detection.framework === 'Expo') {
+      // Expo manages its own tunnel. We just parsed the URL above —
+      // wait a touch longer if it hasn't landed yet.
+      if (!expoUrl) {
+        const expoDeadline = Date.now() + 15_000;
+        while (!expoUrl && Date.now() < expoDeadline) {
+          await new Promise((r) => setTimeout(r, 250));
+        }
+      }
+      if (!expoUrl) {
+        try { devServer.kill('SIGTERM'); } catch { /* already dead */ }
+        void postPreviewEvent({
+          sessionId: ctx.sessionId,
+          pluginId: ctx.pluginId,
+          pluginAuthToken,
+          type: 'preview_error',
+          payload: { stage: 'tunnel', message: 'Expo did not report a tunnel URL.' },
+        });
+        return;
+      }
+      url = expoUrl;
+    } else if (isCodespaceSession()) {
+      const codespaceName = process.env.CODESPACE_NAME!;
+      try {
+        await setPortPublic(codespaceName, detection.port);
+      } catch (e) {
+        try { devServer.kill('SIGTERM'); } catch { /* already dead */ }
+        void postPreviewEvent({
+          sessionId: ctx.sessionId,
+          pluginId: ctx.pluginId,
+          pluginAuthToken,
+          type: 'preview_error',
+          payload: { stage: 'tunnel', message: `Failed to flip port public: ${(e as Error).message}` },
+        });
+        return;
+      }
+      url = buildCodespaceUrl(codespaceName, detection.port);
+      try {
+        await waitForCodespacePortReady(url, 15_000);
+      } catch (e) {
+        try { devServer.kill('SIGTERM'); } catch { /* already dead */ }
+        void postPreviewEvent({
+          sessionId: ctx.sessionId,
+          pluginId: ctx.pluginId,
+          pluginAuthToken,
+          type: 'preview_error',
+          payload: { stage: 'tunnel', message: (e as Error).message },
+        });
+        return;
+      }
+    } else {
+      // Local — Cloudflare Quick Tunnel via `cloudflared`.
+      let bin: string;
+      try {
+        bin = await resolveCloudflared();
+      } catch (e) {
+        try { devServer.kill('SIGTERM'); } catch { /* already dead */ }
+        void postPreviewEvent({
+          sessionId: ctx.sessionId,
+          pluginId: ctx.pluginId,
+          pluginAuthToken,
+          type: 'preview_error',
+          payload: { stage: 'tunnel', message: (e as Error).message },
+        });
+        return;
+      }
+      tunnel = spawn(bin, ['tunnel', '--url', `http://localhost:${detection.port}`], {
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      let parsedUrl: string | null = null;
+      const onTunnelChunk = (chunk: Buffer): void => {
+        const s = chunk.toString();
+        if (!parsedUrl) parsedUrl = parseCloudflaredUrl(s);
+      };
+      tunnel.stderr!.on('data', onTunnelChunk);
+      tunnel.stdout!.on('data', onTunnelChunk);
+      const tunnelDeadline = Date.now() + 15_000;
+      while (!parsedUrl && Date.now() < tunnelDeadline) {
+        await new Promise((r) => setTimeout(r, 250));
+      }
+      if (!parsedUrl) {
+        try { tunnel.kill('SIGTERM'); } catch { /* already dead */ }
+        try { devServer.kill('SIGTERM'); } catch { /* already dead */ }
+        void postPreviewEvent({
+          sessionId: ctx.sessionId,
+          pluginId: ctx.pluginId,
+          pluginAuthToken,
+          type: 'preview_error',
+          payload: { stage: 'tunnel', message: 'cloudflared did not emit a URL within 15s.' },
+        });
+        return;
+      }
+      url = parsedUrl;
+    }
+
+    // 5. Register + announce.
+    registerPreview(ctx.sessionId, {
+      sessionId: ctx.sessionId,
+      devServer,
+      tunnel,
+      url,
+      framework: detection.framework,
+    });
+    log.info('preview', `ready: ${detection.framework} at ${url}`);
+    void postPreviewEvent({
+      sessionId: ctx.sessionId,
+      pluginId: ctx.pluginId,
+      pluginAuthToken,
+      type: 'preview_ready',
+      payload: { url, framework: detection.framework, port: detection.port },
+    });
+  })();
+};
+
+const previewStopH: CommandHandler = (ctx) => {
+  if (!ctx.pluginAuthToken) {
+    log.info('preview', 'no pluginAuthToken — skipping stop');
+    return;
+  }
+  const pluginAuthToken = ctx.pluginAuthToken;
+  void (async () => {
+    await killPreview(ctx.sessionId);
+    log.info('preview', `stopped session=${ctx.sessionId}`);
+    void postPreviewEvent({
+      sessionId: ctx.sessionId,
+      pluginId: ctx.pluginId,
+      pluginAuthToken,
+      type: 'preview_stopped',
+      payload: { reason: 'user' },
+    });
+  })();
+};
+
+function runOnce(
+  cmd: string,
+  args: string[],
+  cwd: string,
+  env?: Record<string, string>,
+): Promise<number | null> {
+  return new Promise((resolve) => {
+    const child = spawn(cmd, args, {
+      cwd,
+      env: { ...process.env, ...(env ?? {}) },
+      stdio: 'inherit',
+    });
+    child.once('exit', (code) => resolve(code));
+    child.once('error', () => resolve(-1));
+  });
+}
+
+/**
+ * Save the confirmed detection to `.codeam/preview.json` so the next
+ * `request_preview_detect` short-circuits the agent step. Mobile /
+ * web call this when the user toggles "Remember for this project"
+ * on the confirmation sheet. Fire-and-forget — failure to write the
+ * file is non-fatal (the agent step still works next time).
+ */
+const savePreviewConfigH: CommandHandler = (_ctx, _cmd, parsed) => {
+  const detection = parsed.detection as PreviewDetection | undefined;
+  if (!detection) {
+    log.info('preview', 'save_preview_config: no detection in payload');
+    return;
+  }
+  void writePreviewConfig(process.cwd(), detection).catch((err) => {
+    log.info('preview', `save_preview_config failed: ${String(err)}`);
+  });
+};
+
+// Re-export for sigintHandler in start.ts so it can walk every active
+// preview on session shutdown.
+export { activePreviews };
+
 export const handlers: Record<string, CommandHandler> = {
   start_task: startTask,
   provide_input: provideInput,
@@ -709,6 +1093,10 @@ export const handlers: Record<string, CommandHandler> = {
   request_link_credentials: requestLinkCredentialsH,
   request_ai_summary: requestAiSummaryH,
   request_ai_insight: requestAiInsightH,
+  request_preview_detect: requestPreviewDetectH,
+  preview_start: previewStartH,
+  preview_stop: previewStopH,
+  save_preview_config: savePreviewConfigH,
 };
 
 /**

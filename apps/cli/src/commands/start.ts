@@ -20,6 +20,7 @@ import {
 } from './start/handlers';
 import { registerTerminalHandlers, closeAllTerminals } from '../services/terminal-ops.service';
 import { killActiveSpawnAndCaptureChildren } from '../services/spawn-and-capture';
+import { killAllPreviews } from '../services/preview';
 import { capture, identifyUser, shutdownTelemetry } from '../services/telemetry.service';
 
 /**
@@ -309,6 +310,11 @@ export async function start(requestedAgent?: AgentId): Promise<void> {
     // to 60 s after the user hits Ctrl-C — a small leak but a
     // visible one if you have `pgrep claude` in your habits.
     killActiveSpawnAndCaptureChildren();
+    // In-app preview lifecycle reaper — kills every active dev
+    // server + tunnel (cloudflared / Expo) so they don't outlive the
+    // CLI process. Fire-and-forget; the registry walks tunnels
+    // first, then dev servers, with a 250 ms SIGKILL fallback.
+    void killAllPreviews();
     // Best-effort flush of queued telemetry. fire-and-forget so
     // process.exit doesn't wait — the SDK already batches +
     // sends opportunistically.

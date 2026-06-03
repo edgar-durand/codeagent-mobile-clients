@@ -74,6 +74,7 @@
     "chokidar": "^3.6.0",
     "picocolors": "^1.1.0",
     "qrcode-terminal": "^0.12.0",
+    "which": "^2.0.2",
     "ws": "^8.18.0",
     "zod": "^4.3.6"
   },
@@ -81,6 +82,7 @@
     "@codeagent/shared": "*",
     "@types/node": "^22.0.0",
     "@types/qrcode-terminal": "^0.12.0",
+    "@types/which": "^3.0.4",
     "@types/ws": "^8.5.0",
     "@vitest/coverage-v8": "^4.1.7",
     "node-pty": "^1.1.0",

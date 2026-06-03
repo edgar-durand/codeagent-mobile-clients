@@ -52,12 +52,27 @@ export class PairingService {
     const pluginId = settings.ensurePluginId();
     const relay = CommandRelayService.getInstance();
 
+    // Detect the current git branch up-front so the backend can
+    // populate `PairedSession.branch` on the very first pair — the
+    // mobile / web SessionDetail surfaces it next to the session name
+    // exactly the way the CLI's `detectCurrentBranch` payload does.
+    let branch: string | null = null;
+    try {
+      const { ProjectOpsService } = await import('./project-ops.service');
+      branch = await ProjectOpsService.detectCurrentBranch();
+    } catch {
+      // Workspace closed mid-handshake / git not on PATH — fall back
+      // to null. The backend treats it as "branch unknown" the same
+      // way it does for legacy clients.
+    }
+
     try {
       const result = await relay.postJson(`${settings.apiBaseUrl}/api/pairing/code`, {
         pluginId,
         ideName: 'VS Code',
         ideVersion: vscode.version,
         hostname: os.hostname(),
+        branch,
       });
 
       if (result?.data) {
