@@ -31,10 +31,19 @@ export class CopilotLmStrategy implements AgentStrategy {
   readonly name = 'CopilotLmStrategy';
 
   // Lower-cased once at module load so the canHandle check is a
-  // simple Set lookup per dispatch.
+  // simple Set lookup per dispatch. Includes:
+  //   - the canonical `__vscode_lm__:<vendor>` prefix
+  //   - the marketplace extension ids the ExtensionOnlyDetector
+  //     registers (github.copilot, github.copilot-chat)
+  //   - the normalised short id the mobile picker sends after
+  //     `normalizeRuntimeAgentId` collapses `github.copilot-chat` →
+  //     `copilot` (any id whose lowercase form contains "copilot"
+  //     resolves to plain `copilot` per
+  //     packages/shared/src/lib/runtime-agent.ts)
   private static readonly COPILOT_EXTENSION_IDS = new Set([
     'github.copilot-chat',
     'github.copilot',
+    'copilot',
   ]);
 
   constructor(private readonly log: OutputChannel) {}
