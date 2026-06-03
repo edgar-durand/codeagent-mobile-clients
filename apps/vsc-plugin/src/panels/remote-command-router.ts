@@ -9,7 +9,7 @@ import { FileOpsService } from '../services/file-ops.service';
 import { ProjectOpsService } from '../services/project-ops.service';
 import { ChatHistoryService } from '../services/chat-history.service';
 import { AgentStrategyRegistry } from '../services/strategies/AgentStrategyRegistry';
-import type { AgentInvocation } from '../services/strategies/AgentStrategy';
+import type { AgentInvocation, StrategyResult } from '../services/strategies/AgentStrategy';
 import { CopilotChatService } from '../services/copilot-chat.service';
 import { AgentOutputMonitor } from '../services/agent-output-monitor';
 import {
@@ -157,10 +157,11 @@ export class RemoteCommandRouter {
               : agents.find((a) => !a.isTerminalAgent) ?? agents[0];
 
             if (target?.isTerminalAgent) {
-              return {
+              const terminalResult: StrategyResult = {
                 delivered: false,
                 message: TERMINAL_AGENT_MESSAGE,
               };
+              return terminalResult;
             }
 
             const invocation: AgentInvocation = {
