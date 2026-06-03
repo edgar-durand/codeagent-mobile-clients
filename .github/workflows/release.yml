@@ -166,15 +166,14 @@ jobs:
     steps:
       - name: Dispatch api-v2-integration
         env:
-          # Same PAT the JetBrains job uses for cross-repo / cross-
-          # marketplace pushes. Needs `repo` scope on
-          # codeagent-mobile (private repo cannot accept a bare
-          # `GITHUB_TOKEN` from this workflow).
-          DISPATCH_TOKEN: ${{ secrets.CROSS_REPO_DISPATCH_TOKEN }}
+          # Same PAT the issue-forwarding workflow uses. Needs `repo`
+          # scope on codeagent-mobile (private repo doesn't accept a
+          # bare `GITHUB_TOKEN` from this workflow).
+          DISPATCH_TOKEN: ${{ secrets.CROSS_REPO_PAT }}
           VERSION: ${{ needs.setup.outputs.version }}
         run: |
           if [ -z "$DISPATCH_TOKEN" ]; then
-            echo "::warning::CROSS_REPO_DISPATCH_TOKEN not set — skipping api-v2-integration trigger. Add the PAT (repo scope on codeagent-mobile) to enable the regression gate."
+            echo "::warning::CROSS_REPO_PAT not set — skipping api-v2-integration trigger. Add a PAT (repo scope on codeagent-mobile) to enable the regression gate."
             exit 0
           fi
           curl -fsSL \
