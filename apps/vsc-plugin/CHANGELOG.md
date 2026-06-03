@@ -4,6 +4,12 @@ All notable changes to the CodeAgent Mobile VS Code extension are documented her
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.26.10] — 2026-06-03
+
+### Fixed
+
+- **cli:** Cloudflared DNS probe is best-effort, no longer fails the preview (#243)
+
 ## [2.26.9] — 2026-06-03
 
 ### Added
