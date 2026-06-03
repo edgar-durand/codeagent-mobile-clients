@@ -38,6 +38,32 @@ describe('safeParseDetection', () => {
       '```json\n{"framework":"Vite","command":"npm","args":["run","dev"],"port":5173,"ready_pattern":"Local:"}\n```';
     expect(safeParseDetection(wrapped)).toMatchObject({ framework: 'Vite' });
   });
+
+  it('extracts a JSON object surrounded by agent prose', () => {
+    const noisy = `Here is the detection for this project:
+
+{"framework":"Next.js","command":"npm","args":["run","dev"],"port":3000,"ready_pattern":"ready in"}
+
+Let me know if you need adjustments.`;
+    expect(safeParseDetection(noisy)).toMatchObject({
+      framework: 'Next.js',
+      port: 3000,
+    });
+  });
+
+  it('handles JSON with nested objects + braces in string values', () => {
+    const detection =
+      'Sure — {"framework":"Custom","command":"node","args":["server.js"],"port":4000,"ready_pattern":"Server \\u007B ready \\u007D","env":{"HOST":"0.0.0.0"}}';
+    const result = safeParseDetection(detection);
+    expect(result).toMatchObject({ framework: 'Custom' });
+    expect(result?.env).toEqual({ HOST: '0.0.0.0' });
+  });
+
+  it('handles leading whitespace + trailing newlines from headless mode', () => {
+    const padded =
+      '\n\n   {"framework":"Vite","command":"npm","args":["run","dev"],"port":5173,"ready_pattern":"Local:"}\n\n';
+    expect(safeParseDetection(padded)).toMatchObject({ framework: 'Vite' });
+  });
 });
 
 describe('parseCloudflaredUrl', () => {
