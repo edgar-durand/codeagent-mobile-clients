@@ -26,6 +26,7 @@ data class DetectedAgent(
     val toolWindowId: String,
     val icon: String,
     val installed: Boolean,
+    val isTerminal: Boolean = false,
 )
 
 /**
