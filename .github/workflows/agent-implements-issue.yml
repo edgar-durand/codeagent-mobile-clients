@@ -34,7 +34,12 @@ on:
 # event lands while a run is active, the older one gets cancelled —
 # whoever wins re-opens the PR from scratch with the latest state.
 concurrency:
-  group: agent-implements-issue-${{ github.event.issue.number }}
+  # Include the label name in the group so multi-label issue templates
+  # (mobile-bug applies BOTH `bug` and `forward/mobile-app`) don't have
+  # the two `labeled` events race each other — without this, the
+  # second event cancels the first mid-flight and only one of the
+  # forward / local-implement jobs ever completes for the same issue.
+  group: agent-implements-issue-${{ github.event.issue.number }}-${{ github.event.label.name }}
   cancel-in-progress: true
 
 jobs:
