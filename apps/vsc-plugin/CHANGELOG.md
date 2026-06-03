@@ -4,6 +4,22 @@ All notable changes to the CodeAgent Mobile VS Code extension are documented her
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.25.0] — 2026-06-03
+
+### Added
+
+- **plugins:** Report PluginAgent.isTerminal for the 5 terminal agents (#229)
+
+### Chore
+
+- **templates:** Drop required fields QA flagged as friction (#216)
+- **meta:** Split issue templates by surface — auto-applied labels (#224)
+
+### Agent
+
+- Implement issue #220 — Deleted session remains visible on Home screen until a manual refresh occurs (#222)
+- Implement issue #218 — VS Code connection succeeds but messages remain stuck in "thinking" state and are never processed (#219)
+
 ## [2.24.0] — 2026-06-02
 
 ### Added
