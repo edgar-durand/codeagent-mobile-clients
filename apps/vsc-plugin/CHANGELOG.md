@@ -4,6 +4,17 @@ All notable changes to the CodeAgent Mobile VS Code extension are documented her
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.26.0] — 2026-06-03
+
+### Added
+
+- **workflow:** Cross-PR review by Claude Code on codex-authored PRs (#231)
+- **cli,vsc-plugin:** Preview lifecycle + branch reporting (Phase 1B for #438) (#232)
+
+### Fixed
+
+- **workflow:** Use existing CROSS_REPO_PAT for api-v2 dispatch (#230)
+
 ## [2.25.0] — 2026-06-03
 
 ### Added
