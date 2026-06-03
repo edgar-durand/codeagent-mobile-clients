@@ -1,17 +1,30 @@
 import * as vscode from 'vscode';
 import type { OutputChannel } from 'vscode';
 import type { AgentInvocation, AgentStrategy, StrategyResult } from './AgentStrategy';
-import { AgentOutputMonitor } from '../agent-output-monitor';
 import { Messages } from '../../ui/messages';
 
 /**
- * Catch-all strategy for any agent that doesn't match a more
- * specific one. Equivalent to the JetBrains `GenericFallbackStrategy`,
- * but uses VS Code's transport stack instead of JCEF — VS Code is
- * built on Electron's renderer, not Chromium-embedded, so we hand
- * the prompt to AgentOutputMonitor's pending-prompt queue, which the
- * same-origin observer script picks up and injects into the
- * Lexical-based chat editor.
+ * Catch-all strategy for agents we have no native dispatch for —
+ * Cursor (running outside VS Code), Windsurf, third-party
+ * extensions that don't expose a `vscode.lm` model or a programmatic
+ * "submit prompt" API.
+ *
+ * Historical context: this used to inject an observer script into
+ * VS Code's `workbench.html` that scraped chat panels via DOM
+ * mutations and POSTed the agent's reply back to a localhost
+ * server. Microsoft's marketplace now treats workbench tampering as
+ * grounds for removal (see `AgentOutputMonitor.cleanupWorkbenchInjectionOnce`),
+ * so the injection path was deleted and the queue + monitor it
+ * fed went silent. Pretending to dispatch (`queuePrompt` +
+ * `startMonitoring`) just made the mobile UI hang on "Thinking…"
+ * for the full 75 s `NO_CONTENT_TIMEOUT_MS` budget.
+ *
+ * Current behaviour: copy the prompt to the user's clipboard,
+ * surface a single warning toast, and report `delivered: false`
+ * upstream so the mobile chat doesn't claim the agent received the
+ * prompt. The user pastes manually into the agent's UI — slower
+ * but honest. Copilot Chat is routed through `CopilotLmStrategy`
+ * via the `vscode.lm` API so it never hits this fallback.
  *
  * Always returns true from `canHandle`, so it MUST be registered
  * last in the registry.
@@ -26,29 +39,23 @@ export class ObserverBridgeStrategy implements AgentStrategy {
   }
 
   async execute(invocation: AgentInvocation): Promise<StrategyResult> {
-    const monitor = AgentOutputMonitor.getInstance();
-    let delivered = false;
-    let message = 'Prompt copied to clipboard';
-
     try {
-      monitor.queuePrompt(invocation.prompt);
-      this.log.appendLine(`[${this.name}] queued via observer bridge`);
-      delivered = true;
-      message = 'Prompt sent to AI agent';
-    } catch (e) {
-      this.log.appendLine(`[${this.name}] observer bridge failed: ${e}`);
       await vscode.env.clipboard.writeText(invocation.prompt);
-      vscode.window.showWarningMessage(Messages.PromptCopiedToClipboard);
+    } catch (e) {
+      this.log.appendLine(`[${this.name}] clipboard write failed: ${e}`);
     }
-
-    if (delivered) {
-      monitor.startMonitoring(invocation.sessionId, invocation.prompt);
-    }
-
-    return { delivered, message, extra: { sent: delivered } };
+    this.log.appendLine(
+      `[${this.name}] No native dispatch for agentId=${invocation.agentId ?? '<none>'} — prompt copied to clipboard, user pastes manually`,
+    );
+    void vscode.window.showWarningMessage(Messages.PromptCopiedToClipboard);
+    return {
+      delivered: false,
+      message: 'Prompt copied to clipboard — paste it into the agent manually',
+      extra: { sent: false, fallback: 'clipboard' },
+    };
   }
 
   stop(): void {
-    AgentOutputMonitor.getInstance().stopMonitoring();
+    // No-op — clipboard write is synchronous, nothing to cancel.
   }
 }
