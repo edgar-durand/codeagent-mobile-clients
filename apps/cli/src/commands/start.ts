@@ -20,7 +20,8 @@ import {
 } from './start/handlers';
 import { registerTerminalHandlers, closeAllTerminals } from '../services/terminal-ops.service';
 import { killActiveSpawnAndCaptureChildren } from '../services/spawn-and-capture';
-import { killAllPreviews } from '../services/preview';
+import { activePreviewSessionIds, killAllPreviews } from '../services/preview';
+import { postPreviewEvent } from '../services/pairing.service';
 import { capture, identifyUser, shutdownTelemetry } from '../services/telemetry.service';
 
 /**
@@ -289,7 +290,12 @@ export async function start(requestedAgent?: AgentId): Promise<void> {
     },
   });
 
-  function sigintHandler(): void {
+  // Re-entry guard — SIGHUP can fire repeatedly during a clean
+  // terminal close. Only run the cleanup once.
+  let shuttingDown = false;
+  async function sigintHandler(): Promise<void> {
+    if (shuttingDown) return;
+    shuttingDown = true;
     agent.kill();
     outputSvc.dispose();
     relay.stop();
@@ -310,11 +316,42 @@ export async function start(requestedAgent?: AgentId): Promise<void> {
     // to 60 s after the user hits Ctrl-C — a small leak but a
     // visible one if you have `pgrep claude` in your habits.
     killActiveSpawnAndCaptureChildren();
-    // In-app preview lifecycle reaper — kills every active dev
-    // server + tunnel (cloudflared / Expo) so they don't outlive the
-    // CLI process. Fire-and-forget; the registry walks tunnels
-    // first, then dev servers, with a 250 ms SIGKILL fallback.
-    void killAllPreviews();
+
+    // ── In-app preview shutdown — graceful, awaited ────────────────
+    // The previous `void killAllPreviews()` was fire-and-forget +
+    // `process.exit(0)` immediately after. killPreview has a 100 ms
+    // SIGTERM grace window inside it; process.exit aborted the
+    // event loop before that microtask ran, so the dev server +
+    // tunnel were never sent SIGTERM. They got re-parented to launchd
+    // and kept running long after the CLI exited.
+    //
+    // Snapshot the active session ids BEFORE the kill drains the
+    // registry, then emit `preview_stopped` to the backend per
+    // session AFTER the locals are reaped so the mobile / web
+    // PreviewTab returns to idle without waiting for the 1 h Redis
+    // TTL to expire. Both awaited — process.exit waits for them.
+    const previewSessionIds = activePreviewSessionIds();
+    try {
+      await killAllPreviews();
+    } catch {
+      // best-effort — the SIGKILL safety timer inside killPreview
+      // still fires regardless of any await rejection here.
+    }
+    const previewAuthToken = session?.pluginAuthToken;
+    if (previewAuthToken && previewSessionIds.length > 0) {
+      await Promise.allSettled(
+        previewSessionIds.map((sid) =>
+          postPreviewEvent({
+            sessionId: sid,
+            pluginId,
+            pluginAuthToken: previewAuthToken,
+            type: 'preview_stopped',
+            payload: { reason: 'session_end' },
+          }),
+        ),
+      );
+    }
+
     // Best-effort flush of queued telemetry. fire-and-forget so
     // process.exit doesn't wait — the SDK already batches +
     // sends opportunistically.
@@ -326,6 +363,10 @@ export async function start(requestedAgent?: AgentId): Promise<void> {
   // on terminal close / `kill <pid>` / parent-shell exit and were
   // previously unhandled — the backend kept showing the session as
   // online for ~30 s until heartbeat-timeout (audit R12 / F11).
+  // Node's signal listeners want `() => void`; our async handler
+  // returns Promise<void>. `void sigintHandler()` discards the
+  // returned promise — but `await`-ing inside the handler before
+  // process.exit IS what guarantees `killAllPreviews` finishes.
   process.once('SIGINT', sigintHandler);
   process.once('SIGTERM', sigintHandler);
   process.once('SIGHUP', sigintHandler);

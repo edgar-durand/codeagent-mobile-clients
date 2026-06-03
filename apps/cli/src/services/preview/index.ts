@@ -78,3 +78,14 @@ export async function killAllPreviews(): Promise<void> {
   const ids = Array.from(activePreviews.keys());
   await Promise.all(ids.map((id) => killPreview(id)));
 }
+
+/**
+ * Snapshot the active preview ids BEFORE killAllPreviews drains the
+ * registry. The sigintHandler needs this list to emit a
+ * `preview_stopped` event per session AFTER the local processes are
+ * dead — otherwise the mobile / web dashboard keeps showing the
+ * preview as running until the Redis TTL expires (1 h).
+ */
+export function activePreviewSessionIds(): string[] {
+  return Array.from(activePreviews.keys());
+}
