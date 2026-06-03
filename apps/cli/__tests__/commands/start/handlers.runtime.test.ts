@@ -12,6 +12,10 @@ import type { HandlerContext } from '../../../src/commands/start/handlers';
 
 vi.mock('child_process', () => ({
   spawn: vi.fn(() => ({ unref: vi.fn() })),
+  execFile: vi.fn((_cmd: string, _args: string[], cb?: (err: unknown, stdout: string, stderr: string) => void) => {
+    cb?.(null, '', '');
+    return { unref: vi.fn() };
+  }),
 }));
 
 vi.mock('../../../src/config', () => ({
@@ -52,7 +56,7 @@ function makeCtx(overrides: Partial<HandlerContext> = {}): HandlerContext {
     outputSvc: { dispose } as unknown as HandlerContext['outputSvc'],
     agent: { sendRawPtyInput, kill } as unknown as AgentService,
     historySvc: {} as HandlerContext['historySvc'],
-    relay: { sendResult } as unknown as CommandRelayService,
+    relay: { sendResult, stop: vi.fn() } as unknown as CommandRelayService,
     runtime: {
       listModels,
       changeModelInstruction,
