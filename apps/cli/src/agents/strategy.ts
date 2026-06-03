@@ -197,6 +197,27 @@ export interface InteractiveAgentStrategy extends BaseAgentStrategy {
   parseHistoryFile(filePath: string): NormalizedMessage[];
   getCurrentUsage(historyDir: string): { used: number; total: number; percent: number; model?: string } | null;
 
+  /**
+   * Enumerate every resumable session on disk for the given working
+   * directory. Used by `HistoryService.load()` to push the
+   * Conversations-sheet list to the backend under the (pluginId,
+   * agentId) slot. The returned shape matches the `/api/sessions/list`
+   * wire body — `id` is the agent's own session identifier (Claude's
+   * UUID, Codex's rollout id), `summary` is the first user message
+   * trimmed, `timestamp` is the file's mtime in ms.
+   *
+   * Optional: agents that don't yet expose a per-project resume list
+   * (Cursor, Aider) leave this undefined and HistoryService skips
+   * the push. The Conversations sheet just shows an empty state for
+   * those agents — opt in incrementally as each agent's strategy
+   * grows the helper.
+   */
+  listResumableSessions?(cwd: string): Array<{
+    id: string;
+    summary: string;
+    timestamp: number;
+  }>;
+
   fetchWeeklyUsage(): Promise<{ percent: number; resetAt?: string } | null>;
 
   listModels(): Promise<AgentModel[]>;

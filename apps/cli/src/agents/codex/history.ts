@@ -167,6 +167,118 @@ export function parseHistoryFile(filePath: string): NormalizedMessage[] {
 }
 
 /**
+ * Enumerate Codex rollouts for the given cwd as resumable sessions.
+ * Walks the last 7 days of date buckets under `~/.codex/sessions/`,
+ * picks each rollout whose `session_meta.cwd` matches the current
+ * cwd, and emits one row per rollout:
+ *
+ *   - `id`: the rollout's session_meta.id (Codex's resume token)
+ *   - `summary`: the first user message text (trimmed to 120 chars)
+ *   - `timestamp`: the file's mtime in ms
+ *
+ * Returns `[]` when the sessions root doesn't exist (first-ever
+ * Codex pair) — same convention as `resolveHistoryDir`. Reads are
+ * defensive: any per-file error skips that rollout but keeps the
+ * rest.
+ *
+ * 7 days is a deliberate cap. Codex's daily buckets accumulate
+ * indefinitely; scanning every day on every push wastes I/O without
+ * meaningful UI benefit (the Conversations sheet shows the most
+ * recent sessions anyway). If a user has older rollouts they want
+ * to resume, the Codex CLI's own `codex resume` still works.
+ */
+export function listResumableSessions(
+  cwd: string,
+  homeOverride?: string,
+): Array<{ id: string; summary: string; timestamp: number }> {
+  const home = homeOverride ?? os.homedir();
+  const sessionsRoot = path.join(home, '.codex', 'sessions');
+  if (!fs.existsSync(sessionsRoot)) return [];
+
+  let resolvedCurrent: string;
+  try {
+    resolvedCurrent = fs.realpathSync(cwd);
+  } catch {
+    resolvedCurrent = path.resolve(cwd);
+  }
+
+  const out: Array<{ id: string; summary: string; timestamp: number }> = [];
+  const now = new Date();
+  for (let dayOffset = 0; dayOffset < 7; dayOffset += 1) {
+    const d = new Date(now.getTime() - dayOffset * 24 * 60 * 60 * 1000);
+    const yyyy = String(d.getUTCFullYear());
+    const mm = String(d.getUTCMonth() + 1).padStart(2, '0');
+    const dd = String(d.getUTCDate()).padStart(2, '0');
+    const dayDir = path.join(sessionsRoot, yyyy, mm, dd);
+    if (!fs.existsSync(dayDir)) continue;
+    let dayFiles: fs.Dirent[];
+    try {
+      dayFiles = fs.readdirSync(dayDir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of dayFiles) {
+      if (!entry.isFile()) continue;
+      if (!entry.name.startsWith('rollout-') || !entry.name.endsWith('.jsonl')) {
+        continue;
+      }
+      const filePath = path.join(dayDir, entry.name);
+      let timestamp = Date.now();
+      try {
+        timestamp = fs.statSync(filePath).mtimeMs;
+      } catch {
+        /* keep default */
+      }
+
+      let metaCwd: string | undefined;
+      let metaId: string | undefined;
+      let summary = '';
+      try {
+        const raw = fs.readFileSync(filePath, 'utf8');
+        for (const line of raw.split('\n')) {
+          if (!line.trim()) continue;
+          const rec = parseLine(line);
+          if (!rec) continue;
+          if (rec.type === 'session_meta') {
+            const meta = rec.payload as SessionMetaPayload | undefined;
+            metaCwd = typeof meta?.cwd === 'string' ? meta.cwd : undefined;
+            metaId = typeof meta?.id === 'string' ? meta.id : undefined;
+            continue;
+          }
+          if (!summary && rec.type === 'response_item') {
+            const payload = rec.payload as
+              | ResponseItemPayloadWithMessage
+              | undefined;
+            const msg = payload?.Message;
+            if (msg && msg.role === 'user') {
+              const text = extractMessageText(msg.content).trim();
+              if (text) summary = text.slice(0, 120);
+            }
+          }
+          if (metaCwd !== undefined && summary) break;
+        }
+      } catch {
+        continue;
+      }
+      if (!metaCwd || !metaId || !summary) continue;
+      // realpath + resolve to normalise macOS symlink prefixes (/var
+      // ↔ /private/var) before comparing — same dance parseHistoryFile
+      // does for the body-fetch path.
+      let resolvedMeta: string;
+      try {
+        resolvedMeta = fs.realpathSync(metaCwd);
+      } catch {
+        resolvedMeta = path.resolve(metaCwd);
+      }
+      if (resolvedMeta !== resolvedCurrent) continue;
+      out.push({ id: metaId, summary, timestamp });
+    }
+  }
+  out.sort((a, b) => b.timestamp - a.timestamp);
+  return out;
+}
+
+/**
  * Aggregated token usage for the most recent rollout in the given dir.
  * Returns null if no rollout files or no TokenCount events found.
  */
