@@ -353,11 +353,21 @@ jobs:
           \`\`\`
           EOF
           )
+          # Ensure the gating label exists (idempotent — `--force`
+          # updates color/description without erroring on re-runs).
+          # The `cross-pr-review.yml` workflow listens for this label
+          # and dispatches Claude Code to review + auto-merge the PR.
+          gh label create codex-authored \
+            --description "PR authored by Codex via agent-implements-issue — auto-reviewed by Claude Code" \
+            --color "8B5CF6" \
+            --force || true
+
           gh pr create \
             --draft \
             --base main \
             --head "$BRANCH" \
             --title "agent: ${ISSUE_TITLE}" \
+            --label codex-authored \
             --body "$body"
 
       - name: Comment on issue (changes opened)

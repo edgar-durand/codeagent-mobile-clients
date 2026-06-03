@@ -1,0 +1,151 @@
+name: Cross-PR review (Claude Code)
+
+# Fires when a PR is opened (or made ready, or synchronized) with the
+# `codex-authored` label applied by `agent-implements-forwarded-issue.yml`.
+# Claude Code reads the linked issue, runs typecheck/tests, fixes any
+# defects in place, and — if everything checks out — approves + merges
+# the PR onto `dev`.
+#
+# Only PRs explicitly labeled `codex-authored` enter this loop. Human
+# or manual PRs are untouched. Once the PR merges, this workflow is no
+# longer triggered for it (the PR is closed).
+
+on:
+  pull_request:
+    types: [opened, ready_for_review, synchronize, labeled]
+
+concurrency:
+  # Per-PR lane so Claude's fixup pushes (which fire `synchronize`)
+  # cancel any in-flight review and rerun against the latest tree.
+  # Without this, two consecutive synchronize events could race and
+  # double-review the same head SHA.
+  group: cross-pr-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    # Only react to PRs that carry the `codex-authored` label. For
+    # `labeled` events GitHub fires once per label, so we additionally
+    # gate on the just-applied label being the one we care about (or
+    # any other event type where the full label set carries it).
+    if: >-
+      contains(github.event.pull_request.labels.*.name, 'codex-authored')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      pull-requests: write
+      contents: write
+      issues: write
+    steps:
+      - name: Checkout PR head
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+          # CROSS_REPO_PAT (not GITHUB_TOKEN) so Claude's fixup pushes
+          # AND the eventual merge cascade into downstream workflows
+          # (close-external-issue-on-merge, deploy, …). Actions
+          # triggered by GITHUB_TOKEN do NOT fire follow-on workflows.
+          token: ${{ secrets.CROSS_REPO_PAT }}
+          persist-credentials: true
+
+      - name: Configure git identity
+        run: |
+          git config user.name "claude-code-reviewer[bot]"
+          git config user.email "[email protected]"
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Claude Code CLI
+        run: npm install -g @anthropic-ai/claude-code
+
+      - name: Run Claude review + merge
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          # `gh` defaults to GITHUB_TOKEN; we override with the PAT so
+          # the merge step triggers downstream workflows.
+          GH_TOKEN: ${{ secrets.CROSS_REPO_PAT }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          PR_BASE: ${{ github.event.pull_request.base.ref }}
+          PR_HEAD: ${{ github.event.pull_request.head.ref }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if [ -z "${ANTHROPIC_API_KEY:-}" ]; then
+            echo "::error::ANTHROPIC_API_KEY secret not configured — cannot run Claude Code review."
+            exit 1
+          fi
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "::error::CROSS_REPO_PAT secret not configured — required for merge to cascade downstream workflows."
+            exit 1
+          fi
+
+          # The prompt drives a single non-interactive Claude Code run.
+          # `--dangerously-skip-permissions` bypasses tool-use prompts
+          # which would block forever in CI. `--print` returns the
+          # final assistant text on stdout. We hand the PR metadata in
+          # via env vars (rendered into the prompt with envsubst-like
+          # heredoc expansion) instead of mounting files.
+          claude --print --dangerously-skip-permissions <<PROMPT
+          You are an automated code reviewer for PR #${PR_NUMBER} on ${REPO}.
+          The PR was authored end-to-end by Codex via the issue-forwarding workflow.
+          Title: ${PR_TITLE}
+          Head branch: ${PR_HEAD} (already checked out)
+          Base branch: ${PR_BASE}
+
+          PR body (read for context — usually contains a "Closes <repo>#<n>" link):
+          ---
+          ${PR_BODY}
+          ---
+
+          ## Your job
+
+          1. **Read the linked issue** the PR claims to close (parse the "Closes" reference in the body). Use \`gh issue view <repo>#<n>\` to fetch it. Understand exactly what bug/feature the PR is supposed to address.
+
+          2. **Read the diff**: \`git diff origin/${PR_BASE}..HEAD\`. Identify every file changed and what the change is intended to do.
+
+          3. **Run quality gates** for the touched packages:
+             - \`npm run typecheck\` (root)
+             - For each touched package (\`apps/api-v2\`, \`apps/landing\`, \`apps/mobile\`, \`packages/shared\`, \`packages/core\`, \`apps/vsc-plugin\`, \`apps/jetbrains-plugin\`): \`(cd <pkg> && npm test)\` if a test script exists, plus build/typecheck where applicable.
+             - For JetBrains: \`(cd apps/jetbrains-plugin && ./gradlew test)\`.
+
+          4. **Review correctness against the issue**:
+             - Does the diff actually resolve the reported bug or implement the requested feature?
+             - Are edge cases handled?
+             - Are there regressions in adjacent code paths?
+             - Is the test coverage proportional to the change's surface?
+             - Are types correct (no unsafe casts, no \`as any\`)?
+             - Does it follow the repo conventions (read CLAUDE.md if needed for context)?
+
+          5. **If you find defects** (real ones — not stylistic nits):
+             - Fix them in place with focused commits.
+             - Each commit message starts with the appropriate conventional prefix and references the original PR's intent.
+             - Run the relevant tests again to confirm the fix works.
+             - \`git push origin ${PR_HEAD}\` to publish your fixes. The synchronize event will re-trigger this workflow on the new SHA, so be efficient — finish your fixes in one push when possible.
+             - Do NOT exit after pushing; the workflow will cancel itself via concurrency and the re-run will start fresh with your fixes already applied.
+
+          6. **If everything is OK** (after any fixes you applied):
+             - Mark the PR ready for review if it's still draft: \`gh pr ready ${PR_NUMBER}\`.
+             - Approve the PR: \`gh pr review ${PR_NUMBER} --approve --body "🤖 Claude Code automated review — LGTM. Tests pass, diff resolves the linked issue, no defects found."\`. If the GITHUB_TOKEN cannot approve (because the PR is from the same account), comment with the LGTM body instead via \`gh pr comment\`.
+             - Merge the PR: \`gh pr merge ${PR_NUMBER} --squash --delete-branch\`. This is the FINAL step; after merge the workflow stops.
+
+          7. **If you cannot resolve the defects** (e.g., the fix requires architectural decisions you don't have authority for, or your push attempt fails):
+             - Comment on the PR with a clear summary of what's wrong + what you tried + what a human reviewer needs to decide.
+             - Do NOT approve. Do NOT merge. Exit gracefully.
+
+          ## Constraints
+
+          - Keep fixes scoped to what the issue requires. Do NOT refactor unrelated code, add new features, or improve unrelated tests.
+          - Respect the repo's PR-only workflow: never push directly to main; only push to the PR head branch (${PR_HEAD}).
+          - Trust your judgment but be conservative on the merge decision — when in doubt, comment + leave for human review.
+
+          Begin now.
+          PROMPT
