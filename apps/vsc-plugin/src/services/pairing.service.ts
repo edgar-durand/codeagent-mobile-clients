@@ -137,9 +137,21 @@ export class PairingService {
           const rawToken = data.pluginAuthToken;
           if (typeof rawToken === 'string' && rawToken.length > 0) {
             SettingsService.getInstance().setPluginAuthToken(rawToken);
+            this.log.appendLine(
+              `[pairing] Stored pluginAuthToken (${rawToken.length} chars)`,
+            );
             // The new token clears any prior 401 — re-arm the
             // "session expired" toast for the next failure.
             CommandRelayService.getInstance().resetAuthFailureGate();
+          } else {
+            // Diagnostic — earlier reports of "[fileWatcher] no
+            // pluginAuthToken" trace back to here. Surface the actual
+            // shape we got so we can tell whether the backend stopped
+            // returning the field, returned it under a different
+            // name, or sent something non-string.
+            this.log.appendLine(
+              `[pairing] WARN no pluginAuthToken on status response — rawToken=${typeof rawToken} keys=${Object.keys(data).join(',')}`,
+            );
           }
 
           this.currentSessionId = sessionId;

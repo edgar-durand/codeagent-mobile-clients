@@ -3,6 +3,7 @@ import * as http from 'http';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as crypto from 'node:crypto';
+import { EventEmitter } from 'node:events';
 import { OutputChannel } from 'vscode';
 import { SettingsService } from './settings.service';
 import { CommandRelayService } from './command-relay.service';
@@ -11,13 +12,20 @@ import { Messages } from '../ui/messages';
 export class AgentOutputMonitor {
   private static instance: AgentOutputMonitor;
   private log: OutputChannel;
-  private monitorTimer: NodeJS.Timeout | null = null;
+  // Event-driven push pipeline (no `setInterval` polling — per
+  // CLAUDE.md the local capture server's POST receive acts as the
+  // equivalent of the CLI's PTY data event). The monitor subscribes
+  // to `content` and debounces with a SINGLE setTimeout that gets
+  // reset on every new event so a stabilised payload pushes once
+  // instead of mid-stream half-strings.
+  private readonly emitter = new EventEmitter();
+  private debounceTimer: NodeJS.Timeout | null = null;
+  private noContentTimer: NodeJS.Timeout | null = null;
   private stableCount = 0;
   private hasEverCapturedContent = false;
   private currentSessionId: string | null = null;
   private currentPromptText = '';
   private _isMonitoring = false;
-  private pollCount = 0;
   private lastSentResponseText = '';
   private responseDoneSent = false;
   private captureServer: http.Server | null = null;
@@ -33,9 +41,16 @@ export class AgentOutputMonitor {
   // same machine don't collide on 47832 (the old fixed port).
   private capturePort = 0;
 
-  private static readonly POLL_INTERVAL_MS = 2500;
-  private static readonly STABLE_THRESHOLD = 3;
-  private static readonly MAX_EMPTY_POLLS = 30;
+  // Debounce window: how long to wait for additional observer-bridge
+  // writes before treating the latest payload as stable. 2.5 s matches
+  // the old POLL_INTERVAL_MS feel so an in-flight agent reply isn't
+  // pushed mid-stream.
+  private static readonly DEBOUNCE_MS = 2500;
+  // Maximum wall-clock time to wait for the FIRST content event after
+  // a prompt is dispatched. If the observer bridge never delivers,
+  // we publish an empty "done" chunk and stop. Mirrors the old
+  // MAX_EMPTY_POLLS * POLL_INTERVAL_MS budget (~75 s).
+  private static readonly NO_CONTENT_TIMEOUT_MS = 75_000;
   private static readonly OBSERVER_FILENAME = 'codeagent-observer.js';
   private static readonly SCRIPT_TAG = '<script src="./codeagent-observer.js"></script>';
 
@@ -147,7 +162,6 @@ export class AgentOutputMonitor {
     this.currentPromptText = promptText.trim();
     this._isMonitoring = true;
     this.stableCount = 0;
-    this.pollCount = 0;
     this.hasEverCapturedContent = false;
     this.responseDoneSent = false;
     this.lastSentResponseText = '';
@@ -156,25 +170,54 @@ export class AgentOutputMonitor {
     this.clearRemoteOutput(sessionId);
     this.ensureCaptureServerRunning();
 
-    this.monitorTimer = setInterval(() => {
-      this.checkForChanges();
-    }, AgentOutputMonitor.POLL_INTERVAL_MS);
+    // Subscribe to the capture server's `content` events instead of
+    // polling. Each event resets the debounce timer; when the timer
+    // fires we evaluate whether to push (stabilised) or wait for more.
+    this.emitter.on('content', this.onContentEvent);
 
-    this.log.appendLine(`[monitor] Started for session=${sessionId}`);
+    // If the observer bridge never produces a single event within
+    // NO_CONTENT_TIMEOUT_MS we publish an empty `done` chunk and
+    // stop so the mobile / web client doesn't hang on a perpetual
+    // "Agent is typing…" state.
+    this.noContentTimer = setTimeout(() => {
+      if (!this._isMonitoring) return;
+      if (!this.hasEverCapturedContent) {
+        this.log.appendLine('[monitor] No content within budget, stopping');
+        this.pushOutput(sessionId, 'status', '', true);
+        this.stopMonitoring();
+      }
+    }, AgentOutputMonitor.NO_CONTENT_TIMEOUT_MS);
+
+    this.log.appendLine(`[monitor] Started for session=${sessionId} (event-driven)`);
   }
 
   stopMonitoring(): void {
-    if (this.monitorTimer) {
-      clearInterval(this.monitorTimer);
-      this.monitorTimer = null;
+    if (this.debounceTimer) {
+      clearTimeout(this.debounceTimer);
+      this.debounceTimer = null;
     }
+    if (this.noContentTimer) {
+      clearTimeout(this.noContentTimer);
+      this.noContentTimer = null;
+    }
+    this.emitter.off('content', this.onContentEvent);
     this._isMonitoring = false;
     this.stableCount = 0;
-    this.pollCount = 0;
     this.hasEverCapturedContent = false;
     this.responseDoneSent = false;
     this.log.appendLine('[monitor] Stopped');
   }
+
+  /**
+   * Fires whenever the capture server receives a fresh observer-bridge
+   * write. Resets the debounce timer so a continuous stream of writes
+   * collapses into ONE backend push per stabilisation window.
+   */
+  private readonly onContentEvent = (): void => {
+    if (!this._isMonitoring) return;
+    if (this.debounceTimer) clearTimeout(this.debounceTimer);
+    this.debounceTimer = setTimeout(() => this.evaluateAndPush(), AgentOutputMonitor.DEBOUNCE_MS);
+  };
 
   dispose(): void {
     this.stopMonitoring();
@@ -227,7 +270,12 @@ export class AgentOutputMonitor {
           res.writeHead(200); res.end('queued');
           return;
         }
-        if (body.length > 0) { this.latestCapturedContent = body; }
+        if (body.length > 0) {
+          this.latestCapturedContent = body;
+          // Wake the event-driven push pipeline — no polling, just a
+          // local event the monitor subscribes to in startMonitoring.
+          this.emitter.emit('content');
+        }
         res.writeHead(200); res.end('ok');
       });
     });
@@ -457,35 +505,34 @@ export class AgentOutputMonitor {
 `;
   }
 
-  // ── Content Polling ──
+  // ── Stabilisation + push ──
+  //
+  // Called on each debounce-timer expiry, which fires DEBOUNCE_MS
+  // after the most recent observer-bridge write. The pattern is the
+  // same as the CLI's chunk-emitter: extract the agent response from
+  // the latest snapshot, skip echoes of the user's own prompt, push
+  // text chunks as they accrue, and emit a final `done: true` once
+  // the stream has fallen silent.
 
-  private checkForChanges(): void {
-    if (!this._isMonitoring) { return; }
+  private evaluateAndPush(): void {
+    if (!this._isMonitoring) return;
     const sessionId = this.currentSessionId;
-    if (!sessionId) { return; }
-    this.pollCount++;
+    if (!sessionId) return;
 
     const currentContent = this.latestCapturedContent;
-
-    if (!currentContent || currentContent.length < 5) {
-      if (!this.hasEverCapturedContent && this.pollCount >= AgentOutputMonitor.MAX_EMPTY_POLLS) {
-        this.log.appendLine(`[monitor] No content after ${this.pollCount} polls, stopping`);
-        this.pushOutput(sessionId, 'status', '', true);
-        this.stopMonitoring();
-      }
-      return;
-    }
+    if (!currentContent || currentContent.length < 5) return;
 
     const response = this.extractResponseAfterPrompt(currentContent);
 
     if (!response || response === this.lastSentResponseText) {
-      this.stableCount++;
-      const threshold = this.hasEverCapturedContent
-        ? AgentOutputMonitor.STABLE_THRESHOLD
-        : AgentOutputMonitor.STABLE_THRESHOLD * 3;
-
-      if (this.stableCount >= threshold && this.hasEverCapturedContent && !this.responseDoneSent) {
-        this.log.appendLine(`[monitor] Stabilized (${this.lastSentResponseText.length} chars), stopping`);
+      // No new content since the last push. If we already saw real
+      // content earlier, treat this as the stabilisation signal and
+      // emit a final `done: true` chunk so the mobile UI marks the
+      // agent reply complete.
+      if (this.hasEverCapturedContent && !this.responseDoneSent) {
+        this.log.appendLine(
+          `[monitor] Stabilised (${this.lastSentResponseText.length} chars), finalising`,
+        );
         this.pushOutput(sessionId, 'text', this.lastSentResponseText, true);
         this.responseDoneSent = true;
         this.stopMonitoring();
@@ -493,13 +540,11 @@ export class AgentOutputMonitor {
       return;
     }
 
-    this.stableCount = 0;
-
-    const isEcho = this.currentPromptText.length > 0 && (
-      response.trim() === this.currentPromptText.trim() ||
-      this.currentPromptText.trim().endsWith(response.trim())
-    );
-    if (isEcho) { return; }
+    const isEcho =
+      this.currentPromptText.length > 0 &&
+      (response.trim() === this.currentPromptText.trim() ||
+        this.currentPromptText.trim().endsWith(response.trim()));
+    if (isEcho) return;
 
     this.hasEverCapturedContent = true;
     this.lastSentResponseText = response;
@@ -551,25 +596,53 @@ export class AgentOutputMonitor {
 
   private pushOutput(sessionId: string, type: string, content: string, done: boolean): void {
     const settings = SettingsService.getInstance();
+    const token = settings.getPluginAuthToken();
+    if (!token) {
+      // The /api/commands/output endpoint is PluginAuthGuard-gated —
+      // a token-less POST 401s and `command-relay.handleAuthFailure`
+      // would then clear the token + raise the "Session expired"
+      // toast (#440 path). Skip + log instead so a pre-auth observer
+      // event isn't mistaken for a real auth failure. The CLI's
+      // chunk-emitter guards on `pluginAuthToken` the same way.
+      this.log.appendLine(
+        `[monitor] Skipping push (${type}, ${content.length} chars) — no pluginAuthToken yet`,
+      );
+      return;
+    }
     const relay = CommandRelayService.getInstance();
     const pluginId = settings.ensurePluginId();
-    relay.postJson(`${settings.apiBaseUrl}/api/commands/output`, {
-      sessionId, pluginId, type, content, done,
-    }).catch((e) => {
-      this.log.appendLine(`[monitor] Push failed: ${e}`);
-    });
+    relay
+      .postJson(`${settings.apiBaseUrl}/api/commands/output`, {
+        sessionId,
+        pluginId,
+        type,
+        content,
+        done,
+      })
+      .catch((e) => {
+        this.log.appendLine(`[monitor] Push failed: ${e}`);
+      });
   }
 
   private clearRemoteOutput(sessionId: string): void {
     const settings = SettingsService.getInstance();
+    const token = settings.getPluginAuthToken();
+    if (!token) {
+      this.log.appendLine('[monitor] Skipping clear — no pluginAuthToken yet');
+      return;
+    }
     const relay = CommandRelayService.getInstance();
     const pluginId = settings.ensurePluginId();
     // Wire shape matches the CLI's canonical `clear` chunk
     // (apps/cli/src/services/output.service.ts:126) — POST with
     // type:'clear' so the backend's chunk router treats it the same
     // way regardless of which client sent it.
-    relay.postJson(`${settings.apiBaseUrl}/api/commands/output`, {
-      sessionId, pluginId, type: 'clear',
-    }).catch(() => {});
+    relay
+      .postJson(`${settings.apiBaseUrl}/api/commands/output`, {
+        sessionId,
+        pluginId,
+        type: 'clear',
+      })
+      .catch(() => {});
   }
 }
