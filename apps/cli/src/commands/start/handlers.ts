@@ -990,25 +990,22 @@ const previewStartH: CommandHandler = (ctx, _cmd, parsed) => {
         return;
       }
       // cloudflared prints its URL the moment the LOCAL connector is
-      // up, but the public `*.trycloudflare.com` hostname takes ~3–10s
-      // for DNS to propagate to the mobile device. Without this gate
-      // the WebView fires before DNS resolves and shows -1003
-      // ("hostname not found"). Probing here moves the wait into the
-      // loading state, which is the right surface for it.
-      try {
-        await waitForCloudflaredReady(parsedUrl, 30_000);
-      } catch (e) {
-        try { tunnel.kill('SIGTERM'); } catch { /* already dead */ }
-        try { devServer.kill('SIGTERM'); } catch { /* already dead */ }
-        void postPreviewEvent({
-          sessionId: ctx.sessionId,
-          pluginId: ctx.pluginId,
-          pluginAuthToken,
-          type: 'preview_error',
-          payload: { stage: 'tunnel', message: (e as Error).message },
-        });
-        return;
-      }
+      // up, but the public `*.trycloudflare.com` hostname can take
+      // anywhere from ~3 s to a couple of minutes to propagate to
+      // every DNS resolver on the planet. Reachability from the CLI
+      // host doesn't predict reachability from the user's mobile
+      // network — different recursive resolvers, different caching.
+      // So this probe is best-effort, log-only, and never blocks the
+      // ready signal: emit `preview_ready` immediately, let the
+      // mobile WebView absorb the propagation race with its own
+      // retry-on-DNS-failure loop. Earlier versions of this handler
+      // failed the whole preview on a 30 s probe timeout, which was
+      // strictly worse than letting the WebView retry — the tunnel
+      // process was already up and would have served the page a few
+      // seconds later.
+      void waitForCloudflaredReady(parsedUrl, 30_000)
+        .then(() => log.info('preview', `cloudflared probe: ${parsedUrl} reachable from CLI host`))
+        .catch((e) => log.info('preview', `cloudflared probe: ${String((e as Error).message)} (non-fatal)`));
       url = parsedUrl;
     }
 
