@@ -4,6 +4,19 @@ All notable changes to the CodeAgent-Mobile JetBrains plugin are documented here
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.26.14] — 2026-06-04
+
+### Chore
+
+- **deps:** Bump actions/setup-node from 4 to 6 (#246)
+- **deps:** Bump actions/checkout from 4 to 6 (#247)
+- **deps:** Bump org.jetbrains.kotlin.jvm in /apps/jetbrains-plugin (#248)
+- **cli:** Bump which 2.0.2 → 5.0.0 (#251)
+
+### Fixed
+
+- **cli:** Drop redundant install from agent setup_commands + warn agent (#256)
+
 ## [2.26.13] — 2026-06-04
 
 ### Added
