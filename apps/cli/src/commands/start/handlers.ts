@@ -1029,23 +1029,47 @@ const previewStartH: CommandHandler = (ctx, _cmd, parsed) => {
         });
         return;
       }
-      // cloudflared prints its URL the moment the LOCAL connector is
-      // up, but the public `*.trycloudflare.com` hostname can take
-      // anywhere from ~3 s to a couple of minutes to propagate to
-      // every DNS resolver on the planet. Reachability from the CLI
-      // host doesn't predict reachability from the user's mobile
-      // network — different recursive resolvers, different caching.
-      // So this probe is best-effort, log-only, and never blocks the
-      // ready signal: emit `preview_ready` immediately, let the
-      // mobile WebView absorb the propagation race with its own
-      // retry-on-DNS-failure loop. Earlier versions of this handler
-      // failed the whole preview on a 30 s probe timeout, which was
-      // strictly worse than letting the WebView retry — the tunnel
-      // process was already up and would have served the page a few
-      // seconds later.
-      void waitForCloudflaredReady(parsedUrl, 30_000)
-        .then(() => log.info('preview', `cloudflared probe: ${parsedUrl} reachable from CLI host`))
-        .catch((e) => log.info('preview', `cloudflared probe: ${String((e as Error).message)} (non-fatal)`));
+      // cloudflared prints its URL the moment its LOCAL connector
+      // is up, but the public `*.trycloudflare.com` hostname needs
+      // a few seconds for DNS to propagate. Empirically the URL
+      // appears in stderr at ~3–5 s and DNS resolves from this host
+      // at ~7–12 s.
+      //
+      // We MUST block on DNS reachability before announcing
+      // `preview_ready`. Mobile WebViews (and Chrome / Safari) cache
+      // NXDOMAIN aggressively on first load — if the WebView opens
+      // the URL before DNS lands, every subsequent reload inside
+      // that WebView session keeps showing "server IP could not be
+      // found" because the negative DNS cache hasn't expired. An
+      // older version of this handler made the probe fire-and-forget
+      // on the theory that the WebView would retry; it doesn't. The
+      // user has to fully tear the preview down and reopen it to
+      // recover.
+      //
+      // Why DNS-only: cloudflared's edge serves `*.trycloudflare.com`
+      // over HTTP/2 (ALPN-negotiated, no h1 path), and Node's built-in
+      // `fetch` (undici) does not speak h2. An HTTP HEAD probe times
+      // out 100% of the time even when the tunnel is fully reachable
+      // from curl/WebViews. The NXDOMAIN cache is the actual failure
+      // mode we're guarding against, and DNS resolution is the gate.
+      try {
+        await waitForCloudflaredReady(parsedUrl, 60_000);
+        log.info('preview', `cloudflared probe: ${parsedUrl} reachable from CLI host`);
+      } catch (e) {
+        try { tunnel.kill('SIGTERM'); } catch { /* already dead */ }
+        try { devServer.kill('SIGTERM'); } catch { /* already dead */ }
+        void postPreviewEvent({
+          sessionId: ctx.sessionId,
+          pluginId: ctx.pluginId,
+          pluginAuthToken,
+          type: 'preview_error',
+          payload: {
+            stage: 'tunnel',
+            message: `Tunnel ${parsedUrl} did not become reachable within 60s (${(e as Error).message}). Cloudflare Quick Tunnels occasionally fail to register — retry usually succeeds.`,
+          },
+        });
+        return;
+      }
       url = parsedUrl;
     }
 
