@@ -4,6 +4,12 @@ All notable changes to the CodeAgent-Mobile JetBrains plugin are documented here
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.26.12] — 2026-06-04
+
+### Fixed
+
+- **cli:** Gate preview_ready on DNS resolution via c-ares + 1.1.1.1 (#249)
+
 ## [2.26.11] — 2026-06-03
 
 ### Added
