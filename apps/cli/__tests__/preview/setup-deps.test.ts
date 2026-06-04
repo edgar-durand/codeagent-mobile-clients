@@ -2,7 +2,10 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { detectMissingNodeDeps } from '../../src/services/preview/setup-deps';
+import {
+  detectMissingNodeDeps,
+  isJsInstallCommand,
+} from '../../src/services/preview/setup-deps';
 
 describe('detectMissingNodeDeps', () => {
   let dir: string;
@@ -65,5 +68,34 @@ describe('detectMissingNodeDeps', () => {
     fs.writeFileSync(path.join(dir, 'pnpm-lock.yaml'), '');
     fs.writeFileSync(path.join(dir, 'yarn.lock'), '');
     expect(detectMissingNodeDeps(dir)).toEqual({ cmd: 'pnpm', args: ['install'] });
+  });
+});
+
+describe('isJsInstallCommand', () => {
+  it.each([
+    ['npm', ['install'], true],
+    ['npm', ['i'], true],
+    ['npm', ['ci'], true],
+    ['pnpm', ['install'], true],
+    ['pnpm', ['i'], true],
+    ['yarn', ['install'], true],
+    ['yarn', [], true],
+    ['bun', ['install'], true],
+    ['bun', ['i'], true],
+  ])('detects %s %s as an install command', (cmd, args, expected) => {
+    expect(isJsInstallCommand(cmd, args as string[])).toBe(expected);
+  });
+
+  it.each([
+    ['npx', ['prisma', 'generate']],
+    ['npm', ['run', 'build']],
+    ['pnpm', ['run', 'prebuild']],
+    ['yarn', ['build']],
+    ['bun', ['run', 'setup']],
+    ['make', []],
+    ['cargo', ['build']],
+    ['python', ['-m', 'pip', 'install', '-r', 'requirements.txt']],
+  ])('does not detect %s %s as an install command', (cmd, args) => {
+    expect(isJsInstallCommand(cmd, args as string[])).toBe(false);
   });
 });
