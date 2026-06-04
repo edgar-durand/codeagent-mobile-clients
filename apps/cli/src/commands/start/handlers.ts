@@ -43,6 +43,7 @@ import {
   buildCodespaceUrl,
   detectMissingNodeDeps,
   isCodespaceSession,
+  isJsInstallCommand,
   killPreview,
   parseCloudflaredUrl,
   parseExpoUrl,
@@ -850,6 +851,7 @@ const previewStartH: CommandHandler = (ctx, _cmd, parsed) => {
     //    we trust an existing `node_modules/` rather than running a
     //    slow no-op install on every preview boot.
     const missingDeps = detectMissingNodeDeps(process.cwd());
+    let preflightRan = false;
     if (missingDeps) {
       emitProgress(
         'SETUP_RUN',
@@ -874,10 +876,27 @@ const previewStartH: CommandHandler = (ctx, _cmd, parsed) => {
         });
         return;
       }
+      preflightRan = true;
     }
 
-    // 1. Setup commands (npm install, etc.) — run sequentially.
-    for (const setup of detection.setup_commands ?? []) {
+    // 1. Setup commands from the agent — but skip any install command
+    //    when the pre-flight just installed deps. The agent
+    //    occasionally emits `npm install` for a pnpm-lock project (or
+    //    vice versa) and running a second install with a different
+    //    package manager on top of a just-populated `node_modules/`
+    //    crashes — pnpm's `.pnpm/` symlinked layout breaks npm's tree
+    //    resolver and npm errors out after ~3 min of ERESOLVE warnings
+    //    (observed in prod with `Cannot read properties of null
+    //    (reading 'matches')`). Lockfile-based pre-flight detection is
+    //    authoritative — the agent's install is at best redundant, at
+    //    worst destructive. Non-install setup steps (`prisma generate`,
+    //    `prebuild`, etc.) still run.
+    const agentSetupCommands = preflightRan
+      ? (detection.setup_commands ?? []).filter(
+          (s) => !isJsInstallCommand(s.cmd, s.args),
+        )
+      : (detection.setup_commands ?? []);
+    for (const setup of agentSetupCommands) {
       emitProgress('SETUP_RUN', `${setup.cmd} ${setup.args.join(' ')}`);
       const exitCode = await runOnce(setup.cmd, setup.args, process.cwd(), detection.env);
       if (exitCode !== 0) {

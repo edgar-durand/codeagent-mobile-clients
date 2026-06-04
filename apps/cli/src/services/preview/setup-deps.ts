@@ -48,3 +48,30 @@ export function detectMissingNodeDeps(
   }
   return { cmd: 'npm', args: ['install'] };
 }
+
+/**
+ * Detect whether a `PreviewDetection.setup_commands` entry is a
+ * package-install command from any supported JS package manager.
+ *
+ * Used to skip the agent's install when the pre-flight already
+ * ran one — the agent occasionally emits `npm install` for a
+ * `pnpm-lock.yaml` project (or vice versa), and running a second
+ * install with a different package manager on top of a
+ * just-populated `node_modules/` crashes (pnpm's `.pnpm/` simlinked
+ * layout breaks npm's tree resolver, npm errors with
+ * `Cannot read properties of null (reading 'matches')` after
+ * several minutes of `ERESOLVE` warnings — observed in prod).
+ *
+ * Returns true for: `npm install`, `npm i`, `npm ci`, `pnpm install`,
+ * `pnpm i`, `yarn install`, plain `yarn` (yarn classic shortcut),
+ * `bun install`, `bun i`. False for anything else (`prisma generate`,
+ * `prebuild`, `make`, etc.) so non-install setup steps still run.
+ */
+export function isJsInstallCommand(cmd: string, args: string[]): boolean {
+  const known = ['npm', 'pnpm', 'yarn', 'bun'];
+  if (!known.includes(cmd)) return false;
+  // `yarn` with no args == yarn classic "install everything"
+  if (cmd === 'yarn' && args.length === 0) return true;
+  const verb = args[0];
+  return verb === 'install' || verb === 'i' || verb === 'ci';
+}
