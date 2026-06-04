@@ -1,4 +1,5 @@
 import { spawn } from 'child_process';
+import { Resolver } from 'dns/promises';
 import { createWriteStream } from 'fs';
 import fs from 'fs/promises';
 import os from 'os';
@@ -9,36 +10,51 @@ import which from 'which';
 const CACHED_BINARY = path.join(os.homedir(), '.codeam', 'bin', 'cloudflared');
 
 /**
- * Poll a Cloudflare Quick Tunnel URL until it returns ANY response
- * (status < 500). cloudflared prints its URL the moment the local
- * connector is up, but the public `*.trycloudflare.com` hostname
- * needs ~3–10 s for DNS to propagate to the user's device — the
- * mobile WebView otherwise hits NSURLErrorDomain -1003 ("hostname
- * could not be found") on first load. Probing from the CLI host
- * before emitting `preview_ready` shifts that wait to the loading
- * state, which is the right surface for it.
+ * Block until a Cloudflare Quick Tunnel URL is DNS-resolvable.
+ * cloudflared prints its URL the moment its local connector is up,
+ * but the public `*.trycloudflare.com` hostname needs a few seconds
+ * for DNS to propagate. If the mobile WebView opens the URL during
+ * that window it gets NXDOMAIN and caches the negative result —
+ * `webview.reload()` does NOT bypass the cache, so a "server IP
+ * could not be found" page persists until the user fully tears the
+ * preview down and reopens it. Blocking `preview_ready` on DNS
+ * resolution gives the WebView a non-poisoned first load.
  *
- * On `ENOTFOUND` / network-blip errors we keep retrying inside the
- * deadline — those are exactly the propagation transients we're
- * trying to absorb.
+ * Why c-ares + Cloudflare's 1.1.1.1 (not `dns.lookup` or `fetch`):
+ *
+ *   1. `dns.lookup` calls the OS resolver (`getaddrinfo`), which
+ *      caches NEGATIVE responses for its own TTL. Polling rapidly
+ *      during the propagation window poisons the OS cache with
+ *      NXDOMAIN — the lookup keeps returning ENOTFOUND for many
+ *      seconds even after DNS has actually propagated.
+ *   2. `fetch` (undici) doesn't speak HTTP/2, and `*.trycloudflare.com`
+ *      serves h2 via ALPN with no h1 fallback path. A HEAD probe
+ *      times out 100% of the time even when the tunnel is reachable
+ *      from curl / WebViews.
+ *   3. `dns.resolve4` uses c-ares directly over UDP — no OS cache
+ *      involvement — and pointing it at `1.1.1.1` (Cloudflare,
+ *      authoritative for `trycloudflare.com`) gives us the earliest
+ *      possible positive signal for a freshly-registered tunnel.
  */
 export async function waitForCloudflaredReady(
   url: string,
-  timeoutMs = 30_000,
+  timeoutMs = 60_000,
 ): Promise<void> {
+  const hostname = new URL(url).hostname;
+  const resolver = new Resolver();
+  resolver.setServers(['1.1.1.1', '1.0.0.1']);
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
     try {
-      const res = await fetch(url, { method: 'HEAD' });
-      if (res.status < 500) return;
+      const addrs = await resolver.resolve4(hostname);
+      if (addrs.length > 0) return;
     } catch {
-      // DNS not propagated yet / TLS handshake racing / generic
-      // network blip — retry inside the deadline.
+      // DNS not propagated yet — retry inside the deadline.
     }
     await new Promise((r) => setTimeout(r, 500));
   }
   throw new Error(
-    `Tunnel URL ${url} not reachable after ${timeoutMs}ms (DNS may still be propagating).`,
+    `DNS for ${hostname} did not resolve within ${timeoutMs}ms (Cloudflare Quick Tunnel registration may have failed).`,
   );
 }
 

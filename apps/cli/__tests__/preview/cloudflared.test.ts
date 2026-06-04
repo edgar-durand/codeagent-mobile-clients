@@ -1,7 +1,19 @@
 import fs from 'fs/promises';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import which from 'which';
-import { resolveCloudflared } from '../../src/services/preview/cloudflared';
+import {
+  resolveCloudflared,
+  waitForCloudflaredReady,
+} from '../../src/services/preview/cloudflared';
+
+const resolve4Mock = vi.fn();
+const setServersMock = vi.fn();
+
+vi.mock('dns/promises', () => ({
+  Resolver: function MockResolver() {
+    return { resolve4: resolve4Mock, setServers: setServersMock };
+  },
+}));
 
 vi.mock('which');
 vi.mock('fs/promises', async () => {
@@ -41,5 +53,51 @@ describe('resolveCloudflared', () => {
     await expect(resolveCloudflared({ skipDownload: true })).rejects.toThrow(
       /cloudflared not installed/,
     );
+  });
+});
+
+describe('waitForCloudflaredReady', () => {
+  beforeEach(() => {
+    resolve4Mock.mockReset();
+    setServersMock.mockReset();
+  });
+
+  it('resolves as soon as c-ares returns an address', async () => {
+    resolve4Mock.mockResolvedValueOnce(['104.16.230.132']);
+    await expect(
+      waitForCloudflaredReady('https://example.trycloudflare.com', 1_000),
+    ).resolves.toBeUndefined();
+    expect(resolve4Mock).toHaveBeenCalledTimes(1);
+    expect(resolve4Mock).toHaveBeenCalledWith('example.trycloudflare.com');
+  });
+
+  it('uses 1.1.1.1 (Cloudflare authoritative) as the DNS server', async () => {
+    resolve4Mock.mockResolvedValueOnce(['104.16.230.132']);
+    await waitForCloudflaredReady('https://example.trycloudflare.com', 1_000);
+    expect(setServersMock).toHaveBeenCalledWith(['1.1.1.1', '1.0.0.1']);
+  });
+
+  it('retries past ENOTFOUND while DNS propagates', async () => {
+    const enotfound = Object.assign(new Error('queryA ENOTFOUND'), {
+      code: 'ENOTFOUND',
+    });
+    resolve4Mock
+      .mockRejectedValueOnce(enotfound)
+      .mockRejectedValueOnce(enotfound)
+      .mockResolvedValueOnce(['104.16.231.132']);
+    await expect(
+      waitForCloudflaredReady('https://example.trycloudflare.com', 5_000),
+    ).resolves.toBeUndefined();
+    expect(resolve4Mock).toHaveBeenCalledTimes(3);
+  });
+
+  it('throws when the deadline expires before DNS resolves', async () => {
+    const enotfound = Object.assign(new Error('queryA ENOTFOUND'), {
+      code: 'ENOTFOUND',
+    });
+    resolve4Mock.mockRejectedValue(enotfound);
+    await expect(
+      waitForCloudflaredReady('https://example.trycloudflare.com', 200),
+    ).rejects.toThrow(/did not resolve within 200ms/);
   });
 });
