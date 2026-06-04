@@ -4,6 +4,7 @@ export * from './cloudflared';
 export * from './codespace';
 export * from './config-file';
 export * from './parser';
+export * from './setup-deps';
 
 /**
  * One running preview slot, keyed by sessionId. The plugin process is

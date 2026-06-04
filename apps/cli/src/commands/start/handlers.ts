@@ -41,6 +41,7 @@ import { AGENT_REGISTRY, isKnownAgentId, PREVIEW_DETECT_PROMPT, type AgentId, ty
 import {
   activePreviews,
   buildCodespaceUrl,
+  detectMissingNodeDeps,
   isCodespaceSession,
   killPreview,
   parseCloudflaredUrl,
@@ -840,6 +841,40 @@ const previewStartH: CommandHandler = (ctx, _cmd, parsed) => {
       payload: { framework: detection.framework, port: detection.port },
     });
     emitProgress('ENV_DETECTED', `${detection.framework}`);
+
+    // 0. Pre-flight: install Node deps if `package.json` exists but
+    //    `node_modules/` is missing. Safety net for when the agent's
+    //    `setup_commands` doesn't include an install — the dev server
+    //    would otherwise crash on first spawn with "Cannot find
+    //    module …". Returns null (no-op) when deps already present;
+    //    we trust an existing `node_modules/` rather than running a
+    //    slow no-op install on every preview boot.
+    const missingDeps = detectMissingNodeDeps(process.cwd());
+    if (missingDeps) {
+      emitProgress(
+        'SETUP_RUN',
+        `${missingDeps.cmd} ${missingDeps.args.join(' ')} (pre-flight — node_modules missing)`,
+      );
+      const exitCode = await runOnce(
+        missingDeps.cmd,
+        missingDeps.args,
+        process.cwd(),
+        detection.env,
+      );
+      if (exitCode !== 0) {
+        void postPreviewEvent({
+          sessionId: ctx.sessionId,
+          pluginId: ctx.pluginId,
+          pluginAuthToken,
+          type: 'preview_error',
+          payload: {
+            stage: 'spawn',
+            message: `Dependency install failed (${missingDeps.cmd} ${missingDeps.args.join(' ')}, exit ${exitCode}). Run it manually in this project and try again.`,
+          },
+        });
+        return;
+      }
+    }
 
     // 1. Setup commands (npm install, etc.) — run sequentially.
     for (const setup of detection.setup_commands ?? []) {
