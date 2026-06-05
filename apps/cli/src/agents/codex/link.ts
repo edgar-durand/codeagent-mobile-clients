@@ -13,11 +13,13 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import {
   extractLocalCodexToken,
   codexCredentialsPaths,
+  validateLocalCodexToken,
 } from './local-token';
 import { createOsStrategy } from '../../os';
 import type {
   AgentCredentialLocator,
   AgentLoginLauncher,
+  LocalAgentTokenValidation,
 } from '../strategy';
 
 export function codexCredentialLocator(): AgentCredentialLocator {
@@ -27,6 +29,10 @@ export function codexCredentialLocator(): AgentCredentialLocator {
     hint: '~/.codex/auth.json',
     watchPaths: codexCredentialsPaths,
     extract: extractLocalCodexToken,
+    validate: (token): LocalAgentTokenValidation => {
+      const result = validateLocalCodexToken(token.credential);
+      return { status: result.status, reason: result.reason };
+    },
   };
 }
 

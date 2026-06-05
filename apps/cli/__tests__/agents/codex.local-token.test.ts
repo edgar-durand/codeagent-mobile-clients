@@ -6,7 +6,16 @@ import {
   extractLocalCodexToken,
   codexCredentialsMtime,
   codexCredentialsPaths,
+  validateLocalCodexToken,
 } from '../../src/agents/codex/local-token';
+
+function makeJwt(claims: Record<string, unknown>): string {
+  const header = Buffer.from(JSON.stringify({ alg: 'none', typ: 'JWT' })).toString(
+    'base64url',
+  );
+  const payload = Buffer.from(JSON.stringify(claims)).toString('base64url');
+  return `${header}.${payload}.`;
+}
 
 /**
  * Override `os.homedir()` for the duration of a test by setting both
@@ -131,5 +140,77 @@ describe('codex/local-token codexCredentialsMtime', () => {
     const m = codexCredentialsMtime();
     expect(m).not.toBeNull();
     expect(m).toBeGreaterThan(0);
+  });
+});
+
+describe('validateLocalCodexToken', () => {
+  it('returns unknown for a raw OPENAI_API_KEY (non-JSON credential)', () => {
+    expect(validateLocalCodexToken('sk-test-key')).toEqual({ status: 'unknown' });
+  });
+
+  it('returns unknown when no expiry signal is present anywhere', () => {
+    const blob = JSON.stringify({ tokens: { access_token: 'sk-x' } });
+    expect(validateLocalCodexToken(blob)).toEqual({ status: 'unknown' });
+  });
+
+  it('detects expiry from top-level expires_at (legacy auth.json)', () => {
+    const past = Math.floor(Date.now() / 1000) - 60;
+    const result = validateLocalCodexToken(JSON.stringify({ expires_at: past }));
+    expect(result.status).toBe('expired');
+    expect(result.reason).toMatch(/expired/i);
+  });
+
+  it('detects expiry from tokens.expires_at (intermediate auth.json)', () => {
+    const past = Math.floor(Date.now() / 1000) - 60;
+    const result = validateLocalCodexToken(
+      JSON.stringify({ tokens: { expires_at: past } }),
+    );
+    expect(result.status).toBe('expired');
+  });
+
+  it('detects expiry from tokens.id_token JWT exp claim (current auth.json)', () => {
+    const past = Math.floor(Date.now() / 1000) - 60;
+    const jwt = makeJwt({ exp: past, sub: 'user-1' });
+    const result = validateLocalCodexToken(
+      JSON.stringify({ tokens: { id_token: jwt } }),
+    );
+    expect(result.status).toBe('expired');
+    expect(result.expiresAt).toBe(past * 1000);
+  });
+
+  it('returns valid when id_token JWT exp is in the future', () => {
+    const future = Math.floor(Date.now() / 1000) + 3600;
+    const jwt = makeJwt({ exp: future });
+    const result = validateLocalCodexToken(
+      JSON.stringify({ tokens: { id_token: jwt } }),
+    );
+    expect(result.status).toBe('valid');
+    expect(result.expiresAt).toBe(future * 1000);
+  });
+
+  it('prefers explicit expires_at over the id_token JWT exp when both present', () => {
+    const expired = Math.floor(Date.now() / 1000) - 60;
+    const future = Math.floor(Date.now() / 1000) + 3600;
+    const jwt = makeJwt({ exp: future });
+    const result = validateLocalCodexToken(
+      JSON.stringify({ expires_at: expired, tokens: { id_token: jwt } }),
+    );
+    expect(result.status).toBe('expired');
+  });
+
+  it('returns unknown when the JWT has wrong segment count', () => {
+    expect(
+      validateLocalCodexToken(
+        JSON.stringify({ tokens: { id_token: 'not-a-jwt' } }),
+      ).status,
+    ).toBe('unknown');
+  });
+
+  it('returns unknown when the JWT payload is not parseable JSON', () => {
+    expect(
+      validateLocalCodexToken(
+        JSON.stringify({ tokens: { id_token: 'a.b.c' } }),
+      ).status,
+    ).toBe('unknown');
   });
 });

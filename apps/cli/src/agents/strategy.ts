@@ -43,12 +43,37 @@ export interface LocalAgentToken {
  * differs from the internal `AgentId` because the backend uses
  * `claude_code` (snake_case) for legacy compatibility.
  */
+/**
+ * Pre-upload validation verdict from {@link AgentCredentialLocator}.
+ *   - `valid`:    upload proceeds normally.
+ *   - `expired`:  link command refuses the upload with `reason` shown
+ *                 to the user (typical Codex case — refresh tokens
+ *                 rotate, snapshots stored stale would land in the
+ *                 vault as immediately-dead credentials).
+ *   - `unknown`:  signal not present (raw API keys, never-seen
+ *                 auth.json shapes); upload proceeds and defers to
+ *                 the server's own validation.
+ */
+export interface LocalAgentTokenValidation {
+  status: 'valid' | 'expired' | 'unknown';
+  reason?: string;
+}
+
 export interface AgentCredentialLocator {
   readonly publicId: string;
   readonly vendor: string;
   readonly hint: string;
   watchPaths(): string[];
   extract(): Promise<LocalAgentToken | null>;
+  /**
+   * Optional pre-upload validation. When set, the link command calls
+   * this on the captured token before POSTing it and aborts on
+   * `expired` so a stale snapshot doesn't land in the vault.
+   * Locators that have no good way to detect staleness (raw API key
+   * agents) leave this undefined — the link command treats that as
+   * `unknown` and proceeds.
+   */
+  validate?(token: LocalAgentToken): LocalAgentTokenValidation;
 }
 
 /**
