@@ -173,7 +173,7 @@ export class ControllerPanelProvider implements vscode.WebviewViewProvider, Comm
         await this.handleRequestPairingCode();
         break;
       case 'disconnect':
-        this.handleDisconnect();
+        await this.handleDisconnect();
         break;
       case 'refreshAgents':
         this.handleRefreshAgents();
@@ -261,37 +261,79 @@ export class ControllerPanelProvider implements vscode.WebviewViewProvider, Comm
     }
   }
 
-  private async handleDeleteSession(sessionId: string): Promise<void> {
+  /**
+   * Call the backend's plugin-authed unpair endpoint. Uses
+   * X-Plugin-Auth-Token (not user JWT) because the plugin has no
+   * user credentials. Backend deletes the PairedSession + emits
+   * `paired_session_removed` so the mobile app drops the card.
+   *
+   * Best-effort: any failure (no token, network, 4xx, 5xx) only
+   * logs — local cleanup proceeds regardless so the user is never
+   * stuck with a stale plugin pairing.
+   */
+  private async unpairOnBackend(sessionId: string): Promise<void> {
     const settings = SettingsService.getInstance();
-    const url = `${settings.apiBaseUrl}/api/pairing/sessions/${sessionId}`;
+    const token = settings.getPluginAuthToken();
+    if (!token) {
+      this.log.appendLine(`unpair skipped — no pluginAuthToken (legacy pairing?)`);
+      return;
+    }
+    const url = `${settings.apiBaseUrl}/api/pairing/unpair`;
+    const body = JSON.stringify({ sessionId, pluginId: settings.ensurePluginId() });
 
     try {
       const urlObj = new URL(url);
       const transport = urlObj.protocol === 'https:' ? await import('https') : await import('http');
       await new Promise<void>((resolve, reject) => {
         const req = transport.request(
-          { hostname: urlObj.hostname, port: urlObj.port, path: urlObj.pathname, method: 'DELETE', timeout: 10000 },
+          {
+            hostname: urlObj.hostname,
+            port: urlObj.port,
+            path: urlObj.pathname,
+            method: 'POST',
+            timeout: 10000,
+            headers: {
+              'Content-Type': 'application/json',
+              'Content-Length': Buffer.byteLength(body),
+              'X-Plugin-Auth-Token': token,
+            },
+          },
           (res) => { res.on('data', () => {}); res.on('end', resolve); },
         );
         req.on('error', reject);
         req.on('timeout', () => { req.destroy(); reject(new Error('timeout')); });
+        req.write(body);
         req.end();
       });
     } catch (e) {
-      this.log.appendLine(`Delete session API error (non-critical): ${e}`);
+      this.log.appendLine(`Unpair API error (non-critical): ${e}`);
     }
+  }
 
+  private async handleDeleteSession(sessionId: string): Promise<void> {
+    await this.unpairOnBackend(sessionId);
+    const settings = SettingsService.getInstance();
     settings.removeRecentSession(sessionId);
     this.sendRecentSessions();
     this.log.appendLine(`Deleted session: ${sessionId}`);
   }
 
-  private handleDisconnect(): void {
+  private async handleDisconnect(): Promise<void> {
+    // Tear down local relay state first so we stop heartbeating
+    // immediately — then tell the backend to drop the session so
+    // the mobile app's card disappears without waiting for offline
+    // detection.
     const relay = CommandRelayService.getInstance();
     relay.reportOffline();
     relay.stopPolling();
     this.stopFileWatcher();
+    const sessionId = PairingService.getInstance().currentSessionId;
+    if (sessionId) {
+      await this.unpairOnBackend(sessionId);
+      SettingsService.getInstance().removeRecentSession(sessionId);
+    }
     PairingService.getInstance().clearCurrentSession();
+    this.sendRecentSessions();
     this.updateStatus();
     this.log.appendLine('Disconnected');
   }
