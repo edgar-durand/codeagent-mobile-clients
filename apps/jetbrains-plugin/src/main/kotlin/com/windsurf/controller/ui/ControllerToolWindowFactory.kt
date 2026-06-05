@@ -9,6 +9,8 @@ import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.wm.ToolWindow
 import com.intellij.openapi.wm.ToolWindowFactory
+import com.intellij.openapi.wm.ToolWindowManager
+import com.intellij.openapi.wm.ex.ToolWindowManagerListener
 import com.intellij.ui.components.JBLabel
 import com.intellij.ui.components.JBScrollPane
 import com.intellij.ui.content.ContentFactory
@@ -58,6 +60,27 @@ class ControllerToolWindowFactory : ToolWindowFactory {
         // on pairing state) so keyboard-only users start on the
         // active control instead of the scroll pane.
         SwingUtilities.invokeLater { panel.focusPrimaryAction() }
+
+        // Auto-show pairing code while the tool window is visible
+        // + not paired — eliminates the "click Generate Code"
+        // friction step. The first show fires here; subsequent
+        // toggles go through the message bus listener below. Code
+        // is rendered behind a "Click to reveal" button so an idle
+        // panel doesn't leak a scannable QR onto a screen share.
+        SwingUtilities.invokeLater { panel.onToolWindowVisibilityChanged(true) }
+
+        // Parent the subscription to the project so it tears down on
+        // project close. The ToolWindow id is captured via the
+        // outer scope; we look it up by id each time because
+        // ToolWindowManagerListener fires `stateChanged` for ALL
+        // tool windows in the project, not just ours.
+        project.messageBus.connect(project)
+            .subscribe(ToolWindowManagerListener.TOPIC, object : ToolWindowManagerListener {
+                override fun stateChanged(toolWindowManager: ToolWindowManager) {
+                    val target = toolWindowManager.getToolWindow(toolWindow.id) ?: return
+                    panel.onToolWindowVisibilityChanged(target.isVisible)
+                }
+            })
     }
 
     private class ControllerPanel(private val project: Project) : JPanel(), PairingService.PairingListener, CommandRelayService.CommandListener {
@@ -85,7 +108,24 @@ class ControllerToolWindowFactory : ToolWindowFactory {
         private val codeLabel = JBLabel("")
         private val pairingCard = RoundedPanel(12, cardBg)
         private val codeSeparator = JBLabel("Scan QR or enter code in your mobile app")
+        // Sits in place of the QR + code when the panel auto-generated
+        // the pairing code (vs the user clicking Generate explicitly).
+        // Click → revealSecret() swaps it for the real QR / digits.
+        // This is the JetBrains equivalent of the VS Code webview's
+        // CSS blur — Swing's lack of cheap filter-blur makes the
+        // "hidden behind a button" treatment the pragmatic call.
+        private val revealButton = JButton("👁  Click to reveal pairing code")
         private val recentSessionsCard = RoundedPanel(12, cardBg)
+
+        /** Drives the auto-show pairing flow: when the tool window
+         *  is visible and the user isn't paired, we keep a fresh
+         *  pairing code waiting under the reveal button. Cleared on
+         *  pair, when the tool window goes hidden, or when the panel
+         *  is disposed. Refresh ~30 s before TTL expiry so the QR is
+         *  always usable while the user is looking at it. */
+        private var autoPairingActive: Boolean = false
+        private var pairingRefreshTimer: Timer? = null
+        private var secretRevealed: Boolean = false
 
         // FooterStatusStrip — sits at the bottom of the tool window
         // and mirrors the mobile app's surface (state · agents · age).
@@ -181,6 +221,7 @@ class ControllerToolWindowFactory : ToolWindowFactory {
         }
 
         override fun onPaired(sessionId: String) {
+            stopAutoPairing()
             val relay = CommandRelayService.getInstance()
             relay.startPolling()
             Thread {
@@ -307,6 +348,23 @@ class ControllerToolWindowFactory : ToolWindowFactory {
             }
             pairButton.addActionListener { onPairClicked() }
 
+            revealButton.apply {
+                alignmentX = Component.CENTER_ALIGNMENT
+                font = BrandFonts.jetBrainsMono(Font.PLAIN, 11f)
+                foreground = primaryText
+                background = BrandColors.glowPurple
+                isFocusPainted = true
+                isContentAreaFilled = true
+                isOpaque = true
+                isVisible = false
+                putClientProperty("JButton.buttonType", "roundRect")
+                toolTipText = "Reveal the pairing code (kept hidden so it doesn't leak on a screen share)"
+                accessibleContext.accessibleName = "Reveal pairing code"
+                accessibleContext.accessibleDescription =
+                    "Show the QR and six-character code so they can be entered on a mobile device."
+            }
+            revealButton.addActionListener { revealSecret() }
+
             pairingCard.add(titleLabel)
             pairingCard.add(Box.createVerticalStrut(16))
             pairingCard.add(qrLabel)
@@ -314,6 +372,7 @@ class ControllerToolWindowFactory : ToolWindowFactory {
             pairingCard.add(codeLabel)
             pairingCard.add(Box.createVerticalStrut(6))
             pairingCard.add(codeSeparator)
+            pairingCard.add(revealButton)
             pairingCard.add(Box.createVerticalStrut(16))
             pairingCard.add(pairButton)
 
@@ -554,7 +613,121 @@ class ControllerToolWindowFactory : ToolWindowFactory {
             qrLabel.isVisible = false
             codeLabel.isVisible = false
             codeSeparator.isVisible = false
+            revealButton.isVisible = false
             pairButton.text = "Generate Code"
+        }
+
+        /** Swap the QR + code visibility against the reveal button.
+         *  Manual generate → reveal button hidden, QR/code shown.
+         *  Auto generate   → reveal button shown over a hidden
+         *                    QR/code (still rendered in memory, just
+         *                    not laid out — so the click → reveal
+         *                    flip is instant). */
+        private fun applySecretVisibility() {
+            val showSecret = secretRevealed
+            qrLabel.isVisible = showSecret
+            codeLabel.isVisible = showSecret
+            codeSeparator.isVisible = showSecret
+            revealButton.isVisible = !showSecret
+            pairingCard.revalidate()
+            pairingCard.repaint()
+        }
+
+        private fun revealSecret() {
+            secretRevealed = true
+            applySecretVisibility()
+        }
+
+        /** Kick off the auto-pair loop: render a fresh code under the
+         *  reveal button + schedule the next refresh before TTL
+         *  expiry. Idempotent — no-op if already running or already
+         *  paired. */
+        private fun triggerAutoPairing() {
+            if (autoPairingActive) return
+            if (PairingService.getInstance().currentSessionId != null) return
+            autoPairingActive = true
+            secretRevealed = false
+            generatePairingCode(autoMode = true)
+        }
+
+        private fun stopAutoPairing() {
+            autoPairingActive = false
+            pairingRefreshTimer?.stop()
+            pairingRefreshTimer = null
+        }
+
+        /** Shared code-fetch path. `autoMode=true` keeps the new code
+         *  hidden behind the reveal button (privacy default); `false`
+         *  shows it immediately (the user explicitly clicked
+         *  Generate / Refresh). */
+        private fun generatePairingCode(autoMode: Boolean) {
+            pairButton.isEnabled = false
+            pairButton.text = "Generating..."
+            // Don't touch visibility yet — let the result handler set
+            // it once the code (and reveal button) are populated.
+
+            SwingUtilities.invokeLater {
+                val result = PairingService.getInstance().requestPairingCode()
+                if (result != null) {
+                    pairButton.text = "Refresh Code"
+
+                    val spaced = result.code.take(3) + " " + result.code.drop(3)
+                    codeLabel.text = spaced
+
+                    try {
+                        val qrImage = generateQrImage(result.code, 160)
+                        qrLabel.icon = ImageIcon(qrImage)
+                    } catch (e: Exception) { logger.trace(e) }
+
+                    if (!autoMode) {
+                        secretRevealed = true
+                    }
+                    applySecretVisibility()
+
+                    // Schedule the next refresh ~30 s before expiry
+                    // while the auto loop is active. Clamp the delay
+                    // so a misconfigured short TTL can't pin us into
+                    // a tight loop.
+                    pairingRefreshTimer?.stop()
+                    if (autoPairingActive) {
+                        val delay = maxOf(15_000L, result.expiresAt - System.currentTimeMillis() - 30_000L)
+                        pairingRefreshTimer = Timer(delay.toInt()) {
+                            if (autoPairingActive) {
+                                secretRevealed = false
+                                generatePairingCode(autoMode = true)
+                            }
+                        }.apply { isRepeats = false; start() }
+                    }
+                } else {
+                    showPairingIdle()
+                    if (!autoMode) {
+                        JOptionPane.showMessageDialog(
+                            this,
+                            "Failed to generate code. Check API settings.",
+                            "Pairing Error",
+                            JOptionPane.ERROR_MESSAGE
+                        )
+                    } else {
+                        // Auto loop failure — try again in 10 s.
+                        pairingRefreshTimer?.stop()
+                        pairingRefreshTimer = Timer(10_000) {
+                            if (autoPairingActive) generatePairingCode(autoMode = true)
+                        }.apply { isRepeats = false; start() }
+                    }
+                }
+                pairButton.isEnabled = true
+            }
+        }
+
+        /** Called by `ControllerToolWindowFactory` when the tool
+         *  window is shown / hidden so the auto-pair loop only burns
+         *  cycles while the panel is actually on screen. */
+        fun onToolWindowVisibilityChanged(visible: Boolean) {
+            if (visible) {
+                triggerAutoPairing()
+            } else {
+                stopAutoPairing()
+            }
         }
 
         private fun showPairedUserInfo() {
@@ -645,45 +818,16 @@ class ControllerToolWindowFactory : ToolWindowFactory {
         }
 
         private fun onPairClicked() {
-            pairButton.isEnabled = false
-            pairButton.text = "Generating..."
-            qrLabel.isVisible = false
-            codeLabel.isVisible = false
-            codeSeparator.isVisible = false
-
-            SwingUtilities.invokeLater {
-                val result = PairingService.getInstance().requestPairingCode()
-                if (result != null) {
-                    pairButton.text = "Refresh Code"
-
-                    val spaced = result.code.take(3) + " " + result.code.drop(3)
-                    codeLabel.text = spaced
-                    codeLabel.isVisible = true
-                    codeSeparator.isVisible = true
-
-                    try {
-                        val qrImage = generateQrImage(result.code, 160)
-                        qrLabel.icon = ImageIcon(qrImage)
-                        qrLabel.isVisible = true
-                    } catch (e: Exception) { logger.trace(e) }
-
-                    pairingCard.revalidate()
-                    pairingCard.repaint()
-
-                    Timer(300_000) {
-                        SwingUtilities.invokeLater { showPairingIdle() }
-                    }.apply { isRepeats = false; start() }
-                } else {
-                    showPairingIdle()
-                    JOptionPane.showMessageDialog(
-                        this,
-                        "Failed to generate code. Check API settings.",
-                        "Pairing Error",
-                        JOptionPane.ERROR_MESSAGE
-                    )
-                }
-                pairButton.isEnabled = true
-            }
+            // User clicked Generate / Refresh — surface the code
+            // immediately (no reveal step). The shared path then
+            // also arms the auto-refresh loop so the code stays
+            // current without another click.
+            secretRevealed = true
+            generatePairingCode(autoMode = false)
+            // Promote to "auto" semantics so the timer keeps it
+            // fresh — the explicit click counts as the user being
+            // present and wanting a usable code.
+            autoPairingActive = true
         }
 
         private fun onDisconnectClicked() {
@@ -707,12 +851,13 @@ class ControllerToolWindowFactory : ToolWindowFactory {
             statusDot.repaint()
             disconnectButton.isEnabled = false
 
-            // Restore pairing card and auto-generate a new QR code
+            // Restore pairing card and auto-generate a new QR code,
+            // hidden behind the reveal button so a user disconnecting
+            // mid-screen-share doesn't expose the next code.
             restorePairingCard()
             refreshRecentSessions()
 
-            // Auto-generate new QR code so the plugin is ready for a new device
-            onPairClicked()
+            triggerAutoPairing()
         }
 
         private fun restorePairingCard() {
@@ -731,6 +876,7 @@ class ControllerToolWindowFactory : ToolWindowFactory {
             pairingCard.add(codeLabel)
             pairingCard.add(Box.createVerticalStrut(6))
             pairingCard.add(codeSeparator)
+            pairingCard.add(revealButton)
             pairingCard.add(Box.createVerticalStrut(16))
             pairingCard.add(pairButton)
 

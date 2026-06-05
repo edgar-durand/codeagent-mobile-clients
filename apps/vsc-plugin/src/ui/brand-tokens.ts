@@ -19,6 +19,12 @@ export function brandCssTokens(): string {
       --ca-purple: #A855F7;
       --ca-lavender: #D0BCFF;
       --ca-glow-purple: rgba(168, 85, 247, 0.45);
+      /* Soft purple tints derived from --ca-purple — used for
+         translucent overlays (reveal pills, status chips, etc.)
+         where a solid color would feel too heavy. Names follow the
+         mobile design system's `electricPurple/<opacity>` shape. */
+      --ca-purple-soft: rgba(168, 85, 247, 0.18);
+      --ca-purple-glow-soft: rgba(168, 85, 247, 0.25);
 
       --ca-success: #00FFA0;
       --ca-warning: #FFC107;
