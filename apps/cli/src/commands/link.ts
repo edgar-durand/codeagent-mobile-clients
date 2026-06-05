@@ -292,6 +292,7 @@ export async function link(args: string[] = []): Promise<void> {
   // ─── 5. Probe existing credentials ──────────────────────────────
   const existing = await ctx.locator.extract();
   if (existing) {
+    if (refuseIfStale(ctx, existing)) return;
     showInfo(`Found existing ${ctx.displayName} credentials at ${pc.bold(existing.source)}.`);
     await uploadAndSucceed(ctx, paired, pluginId, existing);
     return;
@@ -312,7 +313,35 @@ export async function link(args: string[] = []): Promise<void> {
 
   const captured = await captureFreshCredentials(ctx);
   console.log('');
+  if (refuseIfStale(ctx, captured)) return;
   await uploadAndSucceed(ctx, paired, pluginId, captured);
+}
+
+/**
+ * Run the locator's optional `validate()` on the captured token and
+ * refuse the upload when it reports `expired`. The error message
+ * tells the user exactly how to recover (logout + login on the agent
+ * CLI, then re-run `codeam link`) since silently uploading a stale
+ * snapshot would land in the vault and break every subsequent
+ * codespace bootstrap until the user re-links cleanly.
+ *
+ * Returns `true` when the link command should abort (and has already
+ * exited via `process.exit(1)`); `false` to continue with the upload.
+ */
+function refuseIfStale(ctx: LinkContext, token: LocalAgentToken): boolean {
+  const verdict = ctx.locator.validate?.(token);
+  if (!verdict || verdict.status !== 'expired') return false;
+  const reason = verdict.reason ?? 'Token expired';
+  showError(
+    `Your local ${ctx.displayName} credentials at ${pc.bold(ctx.locator.hint)} are already expired:\n` +
+      `   ${reason}\n\n` +
+      `Uploading them would land a dead snapshot in the vault — every codespace bootstrapped from it would immediately return 401.\n\n` +
+      `Run on your machine, then re-link:\n` +
+      `   ${pc.cyan(`${ctx.binary} logout`)}\n` +
+      `   ${pc.cyan(`${ctx.binary} login`)}\n` +
+      `   ${pc.cyan(`codeam link ${ctx.locator.publicId}`)}`,
+  );
+  process.exit(1);
 }
 
 /**
