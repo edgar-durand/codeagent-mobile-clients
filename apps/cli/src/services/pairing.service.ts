@@ -199,6 +199,42 @@ export async function postLinkCredential(input: {
 }
 
 /**
+ * POST the CLI-side abort signal when `codeam link <agent>` refuses
+ * to upload a stale credential snapshot (or hits a fatal upload
+ * error). Hits `/api/plugin/agents/:agentId/link-error` so the
+ * backend publishes `linked_agent_link_failed` on the user-events
+ * bus — the LinkAgent flow on mobile / landing then flips from its
+ * waiting spinner to an actionable error card instead of timing out
+ * silently.
+ *
+ * Best-effort: any network / backend failure swallows; the CLI
+ * still surfaces the error to the user via stderr and exits.
+ */
+export async function postLinkErrorSignal(input: {
+  agentId: string;
+  sessionId: string;
+  pluginId: string;
+  pluginAuthToken: string;
+  code: string;
+  reason: string;
+}): Promise<void> {
+  try {
+    await _transport.postJsonAuthed(
+      `${API_BASE}/api/plugin/agents/${input.agentId}/link-error`,
+      {
+        sessionId: input.sessionId,
+        pluginId: input.pluginId,
+        code: input.code,
+        reason: input.reason,
+      },
+      input.pluginAuthToken,
+    );
+  } catch {
+    /* best-effort — CLI surfaces the error locally regardless */
+  }
+}
+
+/**
  * POST an AI summary / per-file insight back to the backend after
  * the agent's headless one-shot completed.
  *
