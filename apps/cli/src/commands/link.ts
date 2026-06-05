@@ -67,6 +67,7 @@ import {
   requestCode,
   pollStatus,
   postLinkCredential,
+  postLinkErrorSignal,
   type PairedUserInfo,
 } from '../services/pairing.service';
 import { addSession, loadCliConfig, saveCliConfig } from '../config';
@@ -292,7 +293,7 @@ export async function link(args: string[] = []): Promise<void> {
   // ─── 5. Probe existing credentials ──────────────────────────────
   const existing = await ctx.locator.extract();
   if (existing) {
-    if (refuseIfStale(ctx, existing)) return;
+    if (await refuseIfStale(ctx, paired, pluginId, existing)) return;
     showInfo(`Found existing ${ctx.displayName} credentials at ${pc.bold(existing.source)}.`);
     await uploadAndSucceed(ctx, paired, pluginId, existing);
     return;
@@ -313,25 +314,41 @@ export async function link(args: string[] = []): Promise<void> {
 
   const captured = await captureFreshCredentials(ctx);
   console.log('');
-  if (refuseIfStale(ctx, captured)) return;
+  if (await refuseIfStale(ctx, paired, pluginId, captured)) return;
   await uploadAndSucceed(ctx, paired, pluginId, captured);
 }
 
 /**
  * Run the locator's optional `validate()` on the captured token and
- * refuse the upload when it reports `expired`. The error message
- * tells the user exactly how to recover (logout + login on the agent
- * CLI, then re-run `codeam link`) since silently uploading a stale
- * snapshot would land in the vault and break every subsequent
- * codespace bootstrap until the user re-links cleanly.
+ * refuse the upload when it reports `expired`. Before bailing, POSTs
+ * `linked_agent_link_failed` to the backend so the LinkAgent flow on
+ * mobile / landing flips from its waiting spinner to an actionable
+ * error card — otherwise the user would sit on the spinner forever
+ * since the upload that would normally trigger the success SSE event
+ * never happens.
  *
- * Returns `true` when the link command should abort (and has already
- * exited via `process.exit(1)`); `false` to continue with the upload.
+ * Returns `true` when the link command aborted (and has already
+ * called `process.exit(1)`); `false` to continue with the upload.
  */
-function refuseIfStale(ctx: LinkContext, token: LocalAgentToken): boolean {
+async function refuseIfStale(
+  ctx: LinkContext,
+  paired: PairedUserInfo,
+  pluginId: string,
+  token: LocalAgentToken,
+): Promise<boolean> {
   const verdict = ctx.locator.validate?.(token);
   if (!verdict || verdict.status !== 'expired') return false;
   const reason = verdict.reason ?? 'Token expired';
+  if (paired.pluginAuthToken) {
+    await postLinkErrorSignal({
+      agentId: ctx.locator.publicId,
+      sessionId: paired.sessionId,
+      pluginId,
+      pluginAuthToken: paired.pluginAuthToken,
+      code: 'credentials_expired',
+      reason,
+    });
+  }
   showError(
     `Your local ${ctx.displayName} credentials at ${pc.bold(ctx.locator.hint)} are already expired:\n` +
       `   ${reason}\n\n` +
