@@ -22,7 +22,7 @@ export function brandCssTokens(): string {
       /* Soft purple tints derived from --ca-purple — used for
          translucent overlays (reveal pills, status chips, etc.)
          where a solid color would feel too heavy. Names follow the
-         mobile design system's `electricPurple/<opacity>` shape. */
+         mobile design system's electricPurple/<opacity> shape. */
       --ca-purple-soft: rgba(168, 85, 247, 0.18);
       --ca-purple-glow-soft: rgba(168, 85, 247, 0.25);
 
