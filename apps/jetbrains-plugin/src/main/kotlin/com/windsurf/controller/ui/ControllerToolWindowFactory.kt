@@ -687,6 +687,15 @@ class ControllerToolWindowFactory : ToolWindowFactory {
         }
 
         private fun onDisconnectClicked() {
+            // Tell the backend to drop the session before we clear local
+            // state — fires `paired_session_removed` on the SSE bus so
+            // the mobile app's device card disappears immediately
+            // instead of waiting for offline detection to kick in.
+            val sessionId = PairingService.getInstance().currentSessionId
+            if (sessionId != null) {
+                RecentSessionsApi.unpairAsync(sessionId)
+                SettingsService.getInstance().removeRecentSession(sessionId)
+            }
             val relay = CommandRelayService.getInstance()
             relay.stopPolling()
             relay.reportOffline()

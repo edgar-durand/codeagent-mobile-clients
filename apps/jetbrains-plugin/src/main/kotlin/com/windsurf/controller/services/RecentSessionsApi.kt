@@ -115,7 +115,14 @@ internal object RecentSessionsApi {
     }
 
     /**
-     * Fire the `DELETE /api/pairing/sessions/<id>` in the background.
+     * Fire the plugin-authed unpair (`POST /api/pairing/unpair`) in
+     * the background. The legacy DELETE on `/sessions/<id>` is
+     * JWT-authed and unreachable from a plugin process, so the
+     * server-side row never got deleted — mobile kept showing the
+     * stale device. POSTing here with `X-Plugin-Auth-Token` + body
+     * `{ sessionId, pluginId }` deletes the row and fires
+     * `paired_session_removed` on the SSE bus.
+     *
      * On success, the SettingsService recent-sessions entry is also
      * removed before `onDeleted` fires. `onError` is invoked on a
      * non-2xx or thrown exception with the message.
@@ -126,20 +133,43 @@ internal object RecentSessionsApi {
         onError: (String) -> Unit,
     ) {
         Thread {
-            val settings = SettingsService.getInstance()
-            val request = Request.Builder()
-                .url("${settings.state.apiBaseUrl}/api/pairing/sessions/${session.sessionId}")
-                .delete()
-                .withAuthHeaders()
-                .build()
             try {
-                client.newCall(request).execute().close()
-                settings.removeRecentSession(session.sessionId)
+                postUnpair(session.sessionId)
+                SettingsService.getInstance().removeRecentSession(session.sessionId)
                 onDeleted()
             } catch (e: Exception) {
-                logger.debug("Delete threw: ${e.message}")
+                logger.debug("Unpair threw: ${e.message}")
                 onError(e.message ?: e.javaClass.simpleName)
             }
         }.start()
+    }
+
+    /**
+     * Fire-and-forget plugin-authed unpair for the current session.
+     * Used by the Disconnect button so the mobile-app card drops
+     * the moment the plugin asks to disconnect, instead of waiting
+     * for offline detection. Local cleanup (clearCurrentSession,
+     * remove from recent) is the caller's responsibility.
+     */
+    fun unpairAsync(sessionId: String) {
+        Thread {
+            try { postUnpair(sessionId) } catch (e: Exception) {
+                logger.debug("unpairAsync threw: ${e.message}")
+            }
+        }.start()
+    }
+
+    private fun postUnpair(sessionId: String) {
+        val settings = SettingsService.getInstance()
+        val body = JsonObject().apply {
+            addProperty("sessionId", sessionId)
+            addProperty("pluginId", settings.ensurePluginId())
+        }
+        val request = Request.Builder()
+            .url("${settings.state.apiBaseUrl}/api/pairing/unpair")
+            .post(gson.toJson(body).toRequestBody("application/json".toMediaType()))
+            .withAuthHeaders()
+            .build()
+        client.newCall(request).execute().close()
     }
 }
