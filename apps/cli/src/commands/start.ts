@@ -5,6 +5,8 @@ import { showIntro, showInfo } from '../ui/banner';
 import { CommandRelayService } from '../services/command-relay.service';
 import { AgentService } from '../services/agent.service';
 import { createRuntimeStrategy } from '../agents/registry';
+import { getAcpAdapter } from '../agents/acp/adapters';
+import { runAcpSession } from '../agents/acp/runner';
 import { OutputService } from '../services/output.service';
 import { HistoryService } from '../services/history.service';
 import { FileWatcherService } from '../services/file-watcher.service';
@@ -84,6 +86,32 @@ export async function start(requestedAgent?: AgentId): Promise<void> {
   });
 
   const cwd = process.cwd();
+
+  // ACP fork — when `CODEAM_ACP_ENABLED=1` AND we ship an ACP
+  // adapter for this agent (claude / codex / cursor today; more
+  // as vendors publish adapters), short-circuit the PTY pipeline
+  // and run the session over the typed protocol instead. The
+  // runner owns its own lifecycle (signal handlers, relay,
+  // process.exit on shutdown), so this branch never returns —
+  // the existing PTY orchestration code below is dead in this
+  // mode.
+  if (process.env.CODEAM_ACP_ENABLED === '1' && session.pluginAuthToken) {
+    const adapter = getAcpAdapter(session.agent);
+    if (adapter) {
+      await runAcpSession({
+        agent: session.agent,
+        sessionId: session.id,
+        pluginId,
+        pluginAuthToken: session.pluginAuthToken,
+        adapter,
+        cwd,
+      });
+      return;
+    }
+    showInfo(
+      `CODEAM_ACP_ENABLED is set but no ACP adapter is registered for "${session.agent}" — falling back to PTY runtime.`,
+    );
+  }
 
   const runtime = createRuntimeStrategy(session.agent);
   const historySvc = new HistoryService(runtime, pluginId, cwd);
