@@ -64,6 +64,36 @@ export async function requestCode(
   }
 }
 
+/**
+ * One-shot fetch of the current pluginAuthToken for an already-paired
+ * pluginId. Used by `start.ts` on every CLI boot to make sure the
+ * cached token still HMAC-validates against the backend's current
+ * JWT_SECRET — without this, a backend secret rotation (the api-v1 →
+ * api-v2 cutover for example) leaves the CLI replaying a stale token
+ * and every `/api/commands/output` POST 401s with
+ * `INVALID_PLUGIN_TOKEN`, stranding the mobile session on "Thinking…"
+ * forever even though the agent itself answered fine.
+ *
+ * Returns `null` when the backend says the pairing is gone or the
+ * status endpoint is unreachable — callers should fall back to the
+ * persisted token (steady state) rather than aborting the session.
+ */
+export async function fetchCurrentPluginAuthToken(
+  pluginId: string,
+): Promise<string | null> {
+  try {
+    const result = await _transport.getJson(
+      `${API_BASE}/api/pairing/status?pluginId=${encodeURIComponent(pluginId)}`,
+    );
+    const data = result?.data as Record<string, unknown> | undefined;
+    if (!data?.paired) return null;
+    const token = data.pluginAuthToken;
+    return typeof token === 'string' && token.length > 0 ? token : null;
+  } catch {
+    return null;
+  }
+}
+
 export function pollStatus(
   pluginId: string,
   onPaired: (info: PairedUserInfo) => void,

@@ -1,6 +1,6 @@
 import pc from 'picocolors';
 import { AGENT_REGISTRY, type AgentId } from '@codeagent/shared';
-import { getActiveSession, getActiveSessionForAgent, ensurePluginId, loadCliConfig } from '../config';
+import { addSession, getActiveSession, getActiveSessionForAgent, ensurePluginId, loadCliConfig } from '../config';
 import { showIntro, showInfo } from '../ui/banner';
 import { CommandRelayService } from '../services/command-relay.service';
 import { AgentService } from '../services/agent.service';
@@ -23,7 +23,10 @@ import {
 import { registerTerminalHandlers, closeAllTerminals } from '../services/terminal-ops.service';
 import { killActiveSpawnAndCaptureChildren } from '../services/spawn-and-capture';
 import { activePreviewSessionIds, killAllPreviews } from '../services/preview';
-import { postPreviewEvent } from '../services/pairing.service';
+import {
+  fetchCurrentPluginAuthToken,
+  postPreviewEvent,
+} from '../services/pairing.service';
 import { capture, identifyUser, shutdownTelemetry } from '../services/telemetry.service';
 
 /**
@@ -86,6 +89,20 @@ export async function start(requestedAgent?: AgentId): Promise<void> {
   });
 
   const cwd = process.cwd();
+
+  // Refresh pluginAuthToken on every boot. The token is HMAC-derived
+  // from JWT_SECRET on the backend; a secret rotation (or the
+  // historical api-v1 → api-v2 cutover) leaves the cached token
+  // mismatched and every /api/commands/output POST 401s with
+  // INVALID_PLUGIN_TOKEN — mobile then sits on "Thinking…" forever
+  // even though the agent answered correctly. Falling back to the
+  // persisted token on lookup failure keeps offline / flaky-net
+  // sessions working unchanged.
+  const refreshed = await fetchCurrentPluginAuthToken(pluginId);
+  if (refreshed && refreshed !== session.pluginAuthToken) {
+    addSession({ ...session, pluginAuthToken: refreshed });
+    session.pluginAuthToken = refreshed;
+  }
 
   // ACP fork — default ON since v2.27.13. Runs the session over the
   // typed protocol whenever:
