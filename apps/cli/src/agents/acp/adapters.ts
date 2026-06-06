@@ -94,15 +94,28 @@ const REGISTRY: Partial<Record<AgentId, () => AdapterSpec | null>> = {
       requiresAgentBinary: 'codex',
     };
   },
-  cursor: () => {
-    const bin = resolveBin('cursor-agent-acp', 'cursor-agent-acp');
-    if (!bin) return null;
-    return {
-      command: process.execPath,
-      args: [bin],
-      requiresAgentBinary: 'cursor-agent',
-    };
-  },
+  // Cursor is intentionally NOT bundled right now. The only published
+  // ACP adapter (`cursor-agent-acp@0.1.1`) still depends on the
+  // deprecated `@zed-industries/agent-client-protocol` SDK; pulling it
+  // back into the install would surface the deprecation warning to
+  // every user of `codeam-cli`. The community forks (`cursor-acp`,
+  // `fzx-cursor-acp`) use the current `@agentclientprotocol/sdk` but
+  // are single-maintainer with no security track record we trust to
+  // auto-bundle.
+  //
+  // Re-add this entry the moment an `@agentclientprotocol/cursor-acp`
+  // ships under the official namespace, or upstream cursor-agent-acp
+  // publishes a release that uses the new SDK:
+  //
+  //   cursor: () => {
+  //     const bin = resolveBin('@agentclientprotocol/cursor-acp', 'cursor-acp');
+  //     if (!bin) return null;
+  //     return { command: process.execPath, args: [bin], requiresAgentBinary: 'cursor-agent' };
+  //   },
+  //
+  // Until then `getAcpAdapter('cursor')` returns null and the dispatch
+  // in start.ts falls back to the legacy PTY runtime — same behaviour
+  // cursor users had before ACP was added.
   // Gemini speaks ACP natively via `gemini --acp` — no npm adapter
   // package, just the user-installed `gemini` binary on PATH. Same
   // {@link AdapterSpec} shape; the only difference is `command` is

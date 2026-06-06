@@ -14,8 +14,10 @@ ACP gives us typed messages straight from the agent — `session/update`, `sessi
 | ------ | ------------------------------------------ | :-----: |
 | Claude | `@agentclientprotocol/claude-agent-acp`    |    ✅    |
 | Codex  | `@agentclientprotocol/codex-acp`           |    ✅    |
-| Cursor | `cursor-agent-acp`                         |    ✅    |
+| Cursor | (none — see note below)                    |    ⏸    |
 | Gemini | native (`gemini --acp`)                    |    ✅    |
+
+**Cursor (⏸ paused):** the only published adapter (`cursor-agent-acp@0.1.1`) still depends on the deprecated `@zed-industries/agent-client-protocol` SDK. We dropped it from the bundle in v2.27.5 to keep `npm i -g codeam-cli` warning-free. Cursor pairings fall back to the legacy PTY runtime — same behaviour they had before ACP existed. Re-add the registry entry the moment an `@agentclientprotocol/cursor-acp` ships under the official namespace, or upstream cursor-agent-acp publishes a release against the new SDK.
 
 Phase 1 supports:
 
