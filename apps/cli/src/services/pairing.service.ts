@@ -65,25 +65,36 @@ export async function requestCode(
 }
 
 /**
- * One-shot fetch of the current pluginAuthToken for an already-paired
- * pluginId. Used by `start.ts` on every CLI boot to make sure the
- * cached token still HMAC-validates against the backend's current
- * JWT_SECRET — without this, a backend secret rotation (the api-v1 →
- * api-v2 cutover for example) leaves the CLI replaying a stale token
- * and every `/api/commands/output` POST 401s with
- * `INVALID_PLUGIN_TOKEN`, stranding the mobile session on "Thinking…"
- * forever even though the agent itself answered fine.
+ * Reconnect an existing pairing and pick up a fresh pluginAuthToken.
  *
- * Returns `null` when the backend says the pairing is gone or the
- * status endpoint is unreachable — callers should fall back to the
- * persisted token (steady state) rather than aborting the session.
+ * `/api/pairing/reconnect` is unauthenticated (the trust is the
+ * already-paired `(sessionId, pluginId)` tuple) and does THREE things
+ * in one round-trip:
+ *
+ *   1. Mints a token signed by the backend's CURRENT JWT_SECRET, so
+ *      we survive secret rotations / api-v1 → api-v2 cutovers that
+ *      would otherwise leave the persisted token replaying as a 401
+ *      INVALID_PLUGIN_TOKEN on every `/api/commands/output` POST.
+ *   2. Flips `PairedSession.status` back to `ACTIVE` if it had drifted
+ *      to `PAUSED` / `DISCONNECTED` (e.g. the user left codeam off
+ *      overnight) so the mobile session card un-greys instead of
+ *      staying on "Reconnect".
+ *   3. Sets the Redis pluginStatus key to `online`, eliminating the
+ *      30-second window where the dashboard would otherwise render
+ *      OFFLINE between boot and the first heartbeat.
+ *
+ * Used by `start.ts` on every CLI boot for a resumed session. Returns
+ * `null` on network failure or 404 — callers fall back to the
+ * persisted token (steady state) rather than aborting.
  */
 export async function fetchCurrentPluginAuthToken(
+  sessionId: string,
   pluginId: string,
 ): Promise<string | null> {
   try {
-    const result = await _transport.getJson(
-      `${API_BASE}/api/pairing/status?pluginId=${encodeURIComponent(pluginId)}`,
+    const result = await _transport.postJson(
+      `${API_BASE}/api/pairing/reconnect`,
+      { sessionId, pluginId },
     );
     const data = result?.data as Record<string, unknown> | undefined;
     if (!data?.paired) return null;

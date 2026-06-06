@@ -98,10 +98,16 @@ export async function start(requestedAgent?: AgentId): Promise<void> {
   // even though the agent answered correctly. Falling back to the
   // persisted token on lookup failure keeps offline / flaky-net
   // sessions working unchanged.
-  const refreshed = await fetchCurrentPluginAuthToken(pluginId);
+  const refreshed = await fetchCurrentPluginAuthToken(session.id, pluginId);
   if (refreshed && refreshed !== session.pluginAuthToken) {
     addSession({ ...session, pluginAuthToken: refreshed });
     session.pluginAuthToken = refreshed;
+    showInfo('Reconnected — refreshed plugin auth token.');
+  } else if (refreshed) {
+    // Token unchanged but reconnect succeeded — backend has flipped
+    // session.status to ACTIVE + set the Redis online flag, so the
+    // mobile dashboard un-greys without waiting for the next heartbeat.
+    showInfo('Reconnected previous session.');
   }
 
   // ACP fork — default ON since v2.27.13. Runs the session over the
