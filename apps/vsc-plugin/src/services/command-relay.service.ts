@@ -24,6 +24,8 @@ export interface CommandListener {
 
 export type ConnectionState = 'online' | 'reconnecting' | 'offline';
 
+type SsePayload = Record<string, unknown>;
+
 export class CommandRelayService {
   private static instance: CommandRelayService;
   // Polling is the FALLBACK path. SSE is preferred — see
@@ -237,6 +239,14 @@ export class CommandRelayService {
       if (line.startsWith('event: ')) event = line.slice(7).trim();
       else if (line.startsWith('data: ')) data += line.slice(6);
     }
+    if (event === 'paired_session_added') {
+      this.handlePairedSessionAddedFrame(data);
+      return;
+    }
+    if (event === 'lifecycle') {
+      this.handleLifecycleFrame(data);
+      return;
+    }
     if (event !== 'commands' || !data) return;
     try {
       const parsed = JSON.parse(data) as { commands?: Array<Record<string, unknown>> };
@@ -258,6 +268,40 @@ export class CommandRelayService {
     } catch {
       /* malformed frame — wait for the next one */
     }
+  }
+
+  private handleLifecycleFrame(data: string): void {
+    const payload = parseSseJson(data);
+    if (!payload) return;
+    const type = readString(payload, 'type') ?? readString(payload, 'event');
+    if (type !== 'paired_session_added') return;
+    this.handlePairedSessionAdded(payload);
+  }
+
+  private handlePairedSessionAddedFrame(data: string): void {
+    const payload = parseSseJson(data);
+    if (!payload) return;
+    this.handlePairedSessionAdded(payload);
+  }
+
+  private handlePairedSessionAdded(payload: SsePayload): void {
+    const localPluginId = SettingsService.getInstance().ensurePluginId();
+    const session = asRecord(payload.session) ?? asRecord(payload.payload) ?? payload;
+    const eventPluginId = readString(session, 'pluginId') ?? readString(payload, 'pluginId');
+
+    if (!eventPluginId) {
+      this.log.appendLine('[pairing] WARN paired_session_added missing pluginId');
+      return;
+    }
+    if (eventPluginId !== localPluginId) {
+      this.log.appendLine(
+        `[pairing] WARN paired_session_added pluginId mismatch local=${localPluginId} event=${eventPluginId}`,
+      );
+      return;
+    }
+
+    this.log.appendLine(`paired_session_added received for pluginId=${localPluginId}`);
+    PairingService.getInstance().onPairedSessionAddedFromRelay(payload);
   }
 
   private scheduleSseReconnect(): void {
@@ -779,6 +823,7 @@ export class CommandRelayService {
     forceConnectionState: (s: ConnectionState): void => this.setConnectionState(s),
     markTransportSuccess: (s: 'online' | 'reconnecting'): void => this.markTransportSuccess(s),
     markTransportFailure: (): void => this.markTransportFailure(),
+    forceRunning: (running: boolean): void => { this._running = running; },
     isAuthFailureSurfaced: (): boolean => this.authFailureSurfaced,
     recentCommandIdCount: (): number => this.recentCommandIds.size,
     resetForTest: (): void => {
@@ -788,8 +833,29 @@ export class CommandRelayService {
       this.lastSuccessAt = 0;
       this.authFailureSurfaced = false;
       this.listeners = [];
+      this._running = false;
     },
   };
+}
+
+function parseSseJson(data: string): SsePayload | null {
+  if (!data) return null;
+  try {
+    const parsed = JSON.parse(data) as unknown;
+    return asRecord(parsed);
+  } catch {
+    return null;
+  }
+}
+
+function asRecord(value: unknown): SsePayload | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  return value as SsePayload;
+}
+
+function readString(obj: SsePayload, key: string): string | undefined {
+  const value = obj[key];
+  return typeof value === 'string' && value.length > 0 ? value : undefined;
 }
 
 /** Reset the singleton so a test can construct a clean instance. */

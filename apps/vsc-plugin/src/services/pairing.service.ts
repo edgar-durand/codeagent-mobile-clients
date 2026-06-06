@@ -17,6 +17,10 @@ export interface PairingListener {
   onPaired(sessionId: string): void;
 }
 
+export interface PairedSessionLifecyclePayload {
+  [key: string]: unknown;
+}
+
 export class PairingService {
   private static instance: PairingService;
   private pollInterval: NodeJS.Timeout | null = null;
@@ -184,6 +188,58 @@ export class PairingService {
     SettingsService.getInstance().setPluginAuthToken(null);
   }
 
+  onPairedSessionAddedFromRelay(payload: PairedSessionLifecyclePayload): boolean {
+    const session = asRecord(payload.session) ?? asRecord(payload.payload) ?? payload;
+    const pluginId = readString(session, 'pluginId') ?? readString(payload, 'pluginId');
+    const expectedPluginId = SettingsService.getInstance().ensurePluginId();
+    if (pluginId !== expectedPluginId) return false;
+
+    const sessionId =
+      readString(session, 'sessionId') ??
+      readString(session, 'id') ??
+      readString(payload, 'sessionId');
+    if (!sessionId) {
+      this.log.appendLine('[pairing] WARN paired_session_added missing sessionId; refreshing status');
+      void this.checkPairingStatus();
+      return true;
+    }
+
+    const userObj = asRecord(session.user) ?? asRecord(payload.user);
+    const userName =
+      (userObj ? readString(userObj, 'name') : undefined) ??
+      readString(session, 'userName');
+    const userEmail =
+      (userObj ? readString(userObj, 'email') : undefined) ??
+      readString(session, 'userEmail');
+    const userPlan =
+      (userObj ? readString(userObj, 'plan') : undefined) ??
+      readString(session, 'userPlan');
+    if (userObj || userName || userEmail || userPlan) {
+      this.pairedUser = {
+        name: userName ?? '',
+        email: userEmail ?? '',
+        plan: userPlan ?? 'FREE',
+        currentPeriodEnd: userObj ? readString(userObj, 'currentPeriodEnd') : undefined,
+      };
+    }
+
+    const rawToken =
+      readString(session, 'pluginAuthToken') ??
+      readString(payload, 'pluginAuthToken');
+    if (rawToken) {
+      SettingsService.getInstance().setPluginAuthToken(rawToken);
+      CommandRelayService.getInstance().resetAuthFailureGate();
+    } else {
+      this.log.appendLine('[pairing] WARN paired_session_added missing pluginAuthToken');
+    }
+
+    this.currentSessionId = sessionId;
+    this.stopPolling();
+    this.saveCurrentSession();
+    this.listeners.forEach((l) => l.onPaired(sessionId));
+    return true;
+  }
+
   onReconnected(sessionId: string, user: PairedUserInfo): void {
     this.currentSessionId = sessionId;
     this.pairedUser = user;
@@ -216,4 +272,14 @@ export class PairingService {
       req.end();
     });
   }
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  return value as Record<string, unknown>;
+}
+
+function readString(obj: Record<string, unknown>, key: string): string | undefined {
+  const value = obj[key];
+  return typeof value === 'string' && value.length > 0 ? value : undefined;
 }
