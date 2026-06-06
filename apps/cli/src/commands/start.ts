@@ -28,6 +28,7 @@ import {
   postPreviewEvent,
 } from '../services/pairing.service';
 import { capture, identifyUser, shutdownTelemetry } from '../services/telemetry.service';
+import { log } from '../services/logger';
 
 /**
  * Wires the long-running services (PTY ↔ output relay ↔ command
@@ -109,6 +110,14 @@ export async function start(requestedAgent?: AgentId): Promise<void> {
     // mobile dashboard un-greys without waiting for the next heartbeat.
     showInfo('Reconnected previous session.');
   }
+  // Diagnostic for token-mismatch reports: prints the exact triple
+  // the publisher will send so we can compare against the server-side
+  // mint. Trace-only (CODEAM_DEBUG=1).
+  const tokenForLog = session.pluginAuthToken ?? '(unset)';
+  log.trace(
+    'pluginAuth',
+    `boot triple sessionId=${session.id} pluginId=${pluginId} tokenLen=${tokenForLog.length} tokenHead=${tokenForLog.slice(0, 12)} tokenTail=${tokenForLog.slice(-8)} mintedEqualsCached=${refreshed === session.pluginAuthToken}`,
+  );
 
   // ACP fork — default ON since v2.27.13. Runs the session over the
   // typed protocol whenever:

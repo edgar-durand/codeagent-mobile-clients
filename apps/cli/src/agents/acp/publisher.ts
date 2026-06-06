@@ -88,9 +88,10 @@ export class AcpPublisher {
         this.envelope(body),
       );
       if (statusCode < 200 || statusCode >= 300) {
+        const tok = this.opts.pluginAuthToken;
         log.warn(
           'acpPublisher',
-          `output type=${String(body.type)} done=${body.done === true} status=${statusCode} body=${resBody.slice(0, 200)}`,
+          `output type=${String(body.type)} done=${body.done === true} status=${statusCode} body=${resBody.slice(0, 200)} | sentSessionId=${this.opts.sessionId} sentPluginId=${this.opts.pluginId} tokenLen=${tok.length} tokenHead=${tok.slice(0, 12)} tokenTail=${tok.slice(-8)}`,
         );
       }
     } catch (err) {
