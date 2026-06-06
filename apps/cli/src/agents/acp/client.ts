@@ -49,6 +49,16 @@ import { log } from '../../services/logger';
 const PROTOCOL_VERSION = 1;
 
 /**
+ * Ceiling for a single `session/prompt` round-trip. Sized to a value
+ * Claude can plausibly need for a long reasoning turn (90 s ≫ typical
+ * Sonnet response) so we don't false-trip on slow legitimate work,
+ * but small enough that a silently-stuck adapter doesn't strand the
+ * relay command forever. Mobile sees the timeout as a normal
+ * "failed" command result, not a permanent "Thinking…" spinner.
+ */
+const PROMPT_TIMEOUT_MS = 90_000;
+
+/**
  * Capabilities we advertise to the agent. Phase 1 supports:
  *   - fs.readTextFile / writeTextFile — implemented below against
  *     local node:fs, so the agent can read / write files in the
@@ -107,6 +117,10 @@ export class AcpClient {
     if (this.child) throw new Error('AcpClient already started');
 
     const { adapter, cwd } = this.opts;
+    log.info(
+      'acpClient',
+      `spawn cmd=${adapter.command} args=[${adapter.args.join(',')}] cwd=${cwd}`,
+    );
     const child = spawn(adapter.command, adapter.args, {
       cwd,
       env: process.env,
@@ -118,7 +132,14 @@ export class AcpClient {
     child.stderr?.on('data', (chunk: string) => {
       for (const line of chunk.split(/\r?\n/)) {
         const trimmed = line.trim();
-        if (trimmed) this.opts.onStderr?.(trimmed);
+        if (trimmed) {
+          // Bump to info — adapter stderr is the primary signal when
+          // the agent's auth / install / config is wrong and the
+          // protocol just stalls. Trace-level suppression hid the
+          // root cause on every smoke test up to v2.27.6.
+          log.info('acpAdapter', trimmed);
+          this.opts.onStderr?.(trimmed);
+        }
       }
     });
 
@@ -146,16 +167,23 @@ export class AcpClient {
       stream,
     );
 
+    log.info('acpClient', 'initialize → sending');
     const initialize = await this.connection.initialize({
       protocolVersion: PROTOCOL_VERSION,
       clientCapabilities: CLIENT_CAPABILITIES,
     });
+    log.info(
+      'acpClient',
+      `initialize ← ok protocolVersion=${initialize.protocolVersion} agentCaps=${JSON.stringify(initialize.agentCapabilities ?? {}).slice(0, 200)}`,
+    );
 
+    log.info('acpClient', 'newSession → sending');
     const newSession = await this.connection.newSession({
       cwd,
       mcpServers: [],
     });
     this.sessionId = newSession.sessionId;
+    log.info('acpClient', `newSession ← ok sessionId=${newSession.sessionId.slice(0, 8)}`);
 
     return { sessionId: newSession.sessionId, initialize };
   }
@@ -165,15 +193,51 @@ export class AcpClient {
    * {@link PromptResponse} which carries the agent's stop reason
    * once the turn finishes. Session/update notifications keep
    * arriving on `onSessionUpdate` while the turn streams.
+   *
+   * Wrapped in a hard timeout because adapters CAN hang silently
+   * when their underlying agent's auth/network is broken — without
+   * a ceiling the relay command sits "pending" forever and mobile
+   * shows a permanent "Thinking…" spinner with no way to recover.
    */
   async prompt(text: string): Promise<PromptResponse> {
     if (!this.connection || !this.sessionId) {
       throw new Error('AcpClient.prompt called before start()');
     }
-    return this.connection.prompt({
+    log.info(
+      'acpClient',
+      `prompt → session=${this.sessionId.slice(0, 8)} chars=${text.length}`,
+    );
+    const t0 = Date.now();
+    const send = this.connection.prompt({
       sessionId: this.sessionId,
       prompt: [{ type: 'text', text }],
     });
+    const timeout = new Promise<PromptResponse>((_resolve, reject) => {
+      const id = setTimeout(() => {
+        reject(
+          new Error(
+            `ACP prompt timed out after ${PROMPT_TIMEOUT_MS / 1000}s — adapter never responded. ` +
+              `Likely the underlying agent's auth or network is misconfigured; check the adapter stderr ` +
+              `lines above (acpAdapter tag) for the actual error.`,
+          ),
+        );
+      }, PROMPT_TIMEOUT_MS);
+      void send.finally(() => clearTimeout(id));
+    });
+    try {
+      const result = await Promise.race([send, timeout]);
+      log.info(
+        'acpClient',
+        `prompt ← ok stopReason=${result.stopReason ?? '?'} elapsedMs=${Date.now() - t0}`,
+      );
+      return result;
+    } catch (err) {
+      log.warn(
+        'acpClient',
+        `prompt ← failed elapsedMs=${Date.now() - t0} err=${err instanceof Error ? err.message : String(err)}`,
+      );
+      throw err;
+    }
   }
 
   /**
