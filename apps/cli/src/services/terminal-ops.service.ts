@@ -14,6 +14,7 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'child_process';
 import { randomUUID } from 'crypto';
 import path from 'path';
+import { log } from './logger';
 // Types only — the actual module is required lazily inside
 // `loadNodePty()` so the CLI doesn't blow up at startup when
 // `pty.node` is missing for the running platform (the bug
@@ -243,6 +244,7 @@ function createPythonSession(
   if (!python) {
     return { error: 'python3 not found on PATH — required for terminal sessions on Linux/macOS without node-pty.' };
   }
+  log.trace('terminal', `python helper spawn python=${python} shell=${shell} cwd=${cwd}`);
   let child: ChildProcessWithoutNullStreams;
   try {
     child = spawn(python, ['-c', PYTHON_TERMINAL_HELPER, shell], {
@@ -251,7 +253,9 @@ function createPythonSession(
       stdio: ['pipe', 'pipe', 'pipe'],
     });
   } catch (e) {
-    return { error: e instanceof Error ? e.message : 'python spawn failed' };
+    const msg = e instanceof Error ? e.message : 'python spawn failed';
+    log.warn('terminal', `python helper spawn failed: ${msg}`);
+    return { error: msg };
   }
   child.stdout.on('data', (buf: Buffer) => {
     onDataHandler?.({ sessionId: id, data: buf.toString('utf8') });
@@ -322,6 +326,7 @@ export function openTerminal(opts: {
   const ptyMod = loadNodePty();
   if (ptyMod) {
     try {
+      log.trace('terminal', `node-pty spawn shell=${shell} cwd=${cwd} cols=${cols} rows=${rows}`);
       const term = ptyMod.spawn(shell, [], {
         name: 'xterm-256color',
         cols,
@@ -351,21 +356,29 @@ export function openTerminal(opts: {
     } catch (e) {
       // node-pty failed mid-spawn (often a dlopen mismatch). Don't
       // give up — fall through to the Python helper if available.
+      const msg = e instanceof Error ? e.message : 'spawn failed';
+      log.warn('terminal', `node-pty spawn failed: ${msg} (falling back to Python helper on ${process.platform})`);
       if (process.platform === 'win32') {
-        return { error: e instanceof Error ? e.message : 'spawn failed' };
+        return { error: msg };
       }
     }
-  } else if (process.platform === 'win32') {
-    // Windows REQUIRES node-pty (no Python fallback for ConPTY).
-    return {
-      error:
-        `node-pty native module unavailable on ${process.platform}-${process.arch}; ` +
-        `terminal feature disabled for this platform`,
-    };
+  } else {
+    log.warn('terminal', `node-pty unavailable on ${process.platform}-${process.arch}; falling back to Python helper`);
+    if (process.platform === 'win32') {
+      // Windows REQUIRES node-pty (no Python fallback for ConPTY).
+      return {
+        error:
+          `node-pty native module unavailable on ${process.platform}-${process.arch}; ` +
+          `terminal feature disabled for this platform`,
+      };
+    }
   }
 
   const sess = createPythonSession(id, shell, cwd, env, cols, rows);
-  if ('error' in sess) return { error: sess.error };
+  if ('error' in sess) {
+    log.warn('terminal', `createPythonSession failed: ${sess.error}`);
+    return { error: sess.error };
+  }
   sessions.set(id, sess);
   return { sessionId: id };
 }

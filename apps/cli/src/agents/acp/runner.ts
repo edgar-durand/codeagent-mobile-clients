@@ -38,6 +38,10 @@ import { createInteractiveAgentStrategy } from '../registry';
 import { AcpClient } from './client';
 import type { AdapterSpec } from './adapters';
 import { AcpPublisher } from './publisher';
+import {
+  registerTerminalHandlers,
+  closeAllTerminals,
+} from '../../services/terminal-ops.service';
 import { mapSessionUpdate, mapPermissionRequest } from './mappers';
 import { extractSelectPrompt } from './selectPromptExtractor';
 import {
@@ -502,6 +506,29 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
   });
   const streaming = new StreamingState(publisher);
 
+  // IDE-integrated terminal: PTY data + exit events ride the same
+  // /api/commands/output channel as chat. Without these handlers the
+  // shell starts (terminal_open succeeds) but stdin/stdout never reach
+  // the mobile, so the panel sits on "running" forever.
+  registerTerminalHandlers({
+    onData: ({ sessionId, data }) => {
+      void publisher.publishOutput({
+        type: 'terminal_data',
+        terminalSessionId: sessionId,
+        data,
+        done: false,
+      });
+    },
+    onExit: ({ sessionId, exitCode }) => {
+      void publisher.publishOutput({
+        type: 'terminal_exit',
+        terminalSessionId: sessionId,
+        exitCode,
+        done: true,
+      });
+    },
+  });
+
   // Counter so the log isn't drowned by every text-delta variant —
   // we surface the variant kind + a count to confirm the SDK is
   // delivering notifications without spamming a line per chunk.
@@ -652,12 +679,6 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
   // Both modules are agent-agnostic — they watch the filesystem and
   // ask git for diffs, no PTY hooks — so they wire up identically
   // for ACP as for PTY mode.
-  const fileWatcher = new FileWatcherService({
-    workingDir: opts.cwd,
-    sessionId: opts.sessionId,
-    pluginId: opts.pluginId,
-    pluginAuthToken: opts.pluginAuthToken,
-  });
   const turnFiles = new TurnFileAggregator({
     workingDir: opts.cwd,
     sessionId: opts.sessionId,
@@ -665,9 +686,49 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
     pluginAuthToken: opts.pluginAuthToken,
     agentId: opts.agent,
   });
-  fileWatcher.start().catch((err) => {
-    log.warn('acpRunner', `fileWatcher.start failed: ${describeError(err)}`);
+  // Debounced repo-dirty → flushTurn hook. In legacy PTY mode every
+  // user-visible turn ended with `flushTurn()` and that was the
+  // only way hunks landed. ACP sessions edit files via tool calls
+  // INSIDE a turn (covered already) AND also when external clients
+  // (the user's other Claude Code, a separate IDE, `gh pr checkout`)
+  // touch the working tree while the codeam pair is idle. The
+  // legacy reasoning ("we'll catch it on the next turn flush") falls
+  // apart on ACP where the user may not send a prompt for hours.
+  //
+  // Debounce window matches the cross-file coalesce inside
+  // FileWatcherService — long enough to let a multi-file save burst
+  // settle, short enough that mobile sees hunks within ~3 s of the
+  // edit. fileWatcher's onRepoDirty fires per file change so a 2 s
+  // quiet-period gates the spawn-heavy git diff to one run per burst.
+  const REPO_DIRTY_FLUSH_DEBOUNCE_MS = 2_000;
+  let repoDirtyTimer: NodeJS.Timeout | null = null;
+  const fileWatcher = new FileWatcherService({
+    workingDir: opts.cwd,
+    sessionId: opts.sessionId,
+    pluginId: opts.pluginId,
+    pluginAuthToken: opts.pluginAuthToken,
+    onRepoDirty: () => {
+      if (repoDirtyTimer) clearTimeout(repoDirtyTimer);
+      repoDirtyTimer = setTimeout(() => {
+        repoDirtyTimer = null;
+        log.info('acpRunner', 'onRepoDirty debounce fired — running flushTurn');
+        turnFiles.flushTurn().catch((err) => {
+          log.warn('acpRunner', `flushTurn from onRepoDirty failed: ${describeError(err)}`);
+        });
+      }, REPO_DIRTY_FLUSH_DEBOUNCE_MS);
+    },
   });
+  fileWatcher
+    .start()
+    .then(() => {
+      log.info(
+        'acpRunner',
+        `fileWatcher started — watching cwd=${opts.cwd} for file changes (debounce ${REPO_DIRTY_FLUSH_DEBOUNCE_MS}ms before flushTurn)`,
+      );
+    })
+    .catch((err) => {
+      log.warn('acpRunner', `fileWatcher.start failed: ${describeError(err)}`);
+    });
 
   // Command relay — listens for prompts from mobile / web and
   // forwards them as ACP `session/prompt`. Every command branch MUST
@@ -700,6 +761,7 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
     relay.stop();
     void fileWatcher.stop();
     turnFiles.stop();
+    closeAllTerminals();
     await client.stop();
     process.exit(0);
   };
@@ -1019,6 +1081,7 @@ async function handleCommand(
         }
       }
       relay.stop();
+      closeAllTerminals();
       await client.stop();
       process.exit(0);
       return;
@@ -1033,13 +1096,33 @@ async function handleCommand(
       // ACP runner. The handlers emit their own `preview_*` events
       // via the per-user SSE bus; we just trigger + ack.
       const runtime = createInteractiveAgentStrategy(opts.agent, createOsStrategy());
-      const ctx = buildLegacyContextForACP(opts, relay, runtime);
+      let previewHandlerAcked = false;
+      const ackingRelay = new Proxy(relay, {
+        get(target, prop, receiver) {
+          if (prop === 'sendResult') {
+            return (
+              commandId: string,
+              status: string,
+              result: Record<string, unknown>,
+            ) => {
+              if (commandId === cmd.id) previewHandlerAcked = true;
+              return target.sendResult(commandId, status, result);
+            };
+          }
+          return Reflect.get(target, prop, receiver);
+        },
+      });
+      const ctx = buildLegacyContextForACP(opts, ackingRelay, runtime);
       try {
         await legacyDispatchCommand(ctx, cmd);
-        await relay.sendResult(cmd.id, 'completed', {});
+        if (!previewHandlerAcked) {
+          await relay.sendResult(cmd.id, 'completed', {});
+        }
       } catch (err) {
         log.warn('acpRunner', `${cmd.type} failed: ${describeError(err)}`);
-        await relay.sendResult(cmd.id, 'failed', { error: describeError(err) });
+        if (!previewHandlerAcked) {
+          await relay.sendResult(cmd.id, 'failed', { error: describeError(err) });
+        }
       }
       return;
     }
@@ -1059,18 +1142,42 @@ async function handleCommand(
       // `failed` ack on the relay instead of a silent crash.
       if (legacyHandlers[cmd.type]) {
         const runtime = createInteractiveAgentStrategy(opts.agent, createOsStrategy());
-        const legacyCtx = buildLegacyContextForACP(opts, relay, runtime);
+        // Wrap the relay so we can tell whether the handler ack'd
+        // this command. Duplicate acks on the same id are a real bug
+        // here — the backend's last-write-wins overwrites the
+        // handler's body (e.g. write_file's `{ok:true}`) with `{}`,
+        // and the mobile reads `{}` as "save failed".
+        let handlerAcked = false;
+        const ackingRelay = new Proxy(relay, {
+          get(target, prop, receiver) {
+            if (prop === 'sendResult') {
+              return (
+                commandId: string,
+                status: string,
+                result: Record<string, unknown>,
+              ) => {
+                if (commandId === cmd.id) handlerAcked = true;
+                return target.sendResult(commandId, status, result);
+              };
+            }
+            return Reflect.get(target, prop, receiver);
+          },
+        });
+        const legacyCtx = buildLegacyContextForACP(opts, ackingRelay, runtime);
         try {
           await legacyDispatchCommand(legacyCtx, cmd);
-          // Most legacy handlers (file/git/terminal/preview) call
-          // sendResult themselves. Some are fire-and-forget. We ack
-          // success here as a fallback so mobile sees ANY completion
-          // signal even when the handler forgot — duplicate acks
-          // are no-ops at the backend.
-          await relay.sendResult(cmd.id, 'completed', {});
+          // Fallback ack ONLY when the handler didn't already send
+          // one. Covers fire-and-forget legacy handlers that never
+          // touch the relay (rare) without clobbering the common
+          // path where the handler's structured result matters.
+          if (!handlerAcked) {
+            await relay.sendResult(cmd.id, 'completed', {});
+          }
         } catch (err) {
           log.warn('acpRunner', `legacy handler "${cmd.type}" threw: ${describeError(err)}`);
-          await relay.sendResult(cmd.id, 'failed', { error: describeError(err) });
+          if (!handlerAcked) {
+            await relay.sendResult(cmd.id, 'failed', { error: describeError(err) });
+          }
         }
         return;
       }
