@@ -11,6 +11,7 @@ import { ControllerPanelProvider } from './panels/controller-panel';
 import { initTelemetry, capture, identifyUser, shutdownTelemetry } from './services/telemetry.service';
 import { Messages } from './ui/messages';
 import { StatusBar } from './ui/status-bar';
+import { checkForUpdatesNow } from './services/update-notifier.service';
 
 let log: vscode.OutputChannel;
 let panelProvider: ControllerPanelProvider | null = null;
@@ -128,6 +129,18 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       },
     });
   }
+
+  // Update-notifier — fire-and-forget marketplace check on activation.
+  // Mirrors the CLI's auto-update advisory (apps/cli/src/lib/
+  // updateNotifier.ts); shows a banner when a newer build is on
+  // Marketplace / Open VSX so QA-reported regressions land on the
+  // user the next time they open VS Code. 24 h cache in globalState,
+  // suppression sticks per-version on explicit "Later".
+  const currentVersion = context.extension.packageJSON.version as string;
+  void checkForUpdatesNow({
+    currentVersion,
+    globalState: context.globalState,
+  }).catch((err) => log.appendLine(`update-notifier failed: ${String(err)}`));
 
   log.appendLine('CodeAgent Mobile extension activated');
 }
