@@ -47,6 +47,8 @@ import {
 } from '../../commands/start/handlers';
 import type { RuntimeStrategy } from '../strategy';
 import { removeSession } from '../../config';
+import { FileWatcherService } from '../../services/file-watcher.service';
+import { TurnFileAggregator } from '../../services/turn-files/turn-file-aggregator';
 
 /**
  * Per-turn accumulator that bridges ACP's delta-shaped notifications
@@ -639,6 +641,34 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
   // JSONL the legacy HistoryService can scan.
   const history = new AcpHistory(publisher, { agent: opts.agent, acpSessionId });
 
+  // File-change tracking — same FileWatcherService + TurnFileAggregator
+  // the legacy PTY path uses. The watcher tails chokidar over `cwd`
+  // and posts file_change records as the agent's tool calls land on
+  // disk; the aggregator runs `git status` + `git diff --numstat`
+  // once at the end of every turn and batch-posts the resulting hunk
+  // changeset to the backend so mobile's PENDING REVIEW counter +
+  // the Files rail / drawer light up.
+  //
+  // Both modules are agent-agnostic — they watch the filesystem and
+  // ask git for diffs, no PTY hooks — so they wire up identically
+  // for ACP as for PTY mode.
+  const fileWatcher = new FileWatcherService({
+    workingDir: opts.cwd,
+    sessionId: opts.sessionId,
+    pluginId: opts.pluginId,
+    pluginAuthToken: opts.pluginAuthToken,
+  });
+  const turnFiles = new TurnFileAggregator({
+    workingDir: opts.cwd,
+    sessionId: opts.sessionId,
+    pluginId: opts.pluginId,
+    pluginAuthToken: opts.pluginAuthToken,
+    agentId: opts.agent,
+  });
+  fileWatcher.start().catch((err) => {
+    log.warn('acpRunner', `fileWatcher.start failed: ${describeError(err)}`);
+  });
+
   // Command relay — listens for prompts from mobile / web and
   // forwards them as ACP `session/prompt`. Every command branch MUST
   // call `relay.sendResult(...)` even on no-op / not-supported
@@ -658,6 +688,7 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
         opts,
         history,
         initialize.agentCapabilities,
+        turnFiles,
       );
     },
     { id: opts.agent, name: opts.agent, displayName: opts.agent } as never,
@@ -667,6 +698,8 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
   const shutdown = async (signal: NodeJS.Signals) => {
     showInfo(`Shutting down ACP session (${signal})…`);
     relay.stop();
+    void fileWatcher.stop();
+    turnFiles.stop();
     await client.stop();
     process.exit(0);
   };
@@ -700,6 +733,7 @@ async function handleCommand(
   opts: AcpRunnerOptions,
   history: AcpHistory,
   agentCaps: { loadSession?: boolean } | undefined,
+  turnFiles: TurnFileAggregator,
 ): Promise<void> {
   switch (cmd.type) {
     case 'start_task': {
@@ -728,6 +762,14 @@ async function handleCommand(
         await streaming.closeTurnWithInteractiveDetection();
         history.appendAgentReply(finalText);
         void history.flush();
+        // End-of-turn file changeset — agent likely edited files
+        // during the turn (tool_call write_file / bash). The
+        // aggregator runs git diff once and batch-posts the hunks
+        // so mobile's PENDING REVIEW counter + Files rail update.
+        // Fire-and-forget; the aggregator owns its own outbox.
+        turnFiles.flushTurn().catch((err) => {
+          log.warn('acpRunner', `turnFiles.flushTurn failed: ${describeError(err)}`);
+        });
         log.info('acpRunner', `start_task ← done stopReason=${reply.stopReason ?? '?'} id=${cmd.id.slice(0, 8)}`);
         await relay.sendResult(cmd.id, 'completed', { stopReason: reply.stopReason });
       } catch (err) {
@@ -851,6 +893,14 @@ async function handleCommand(
         await streaming.closeTurnWithInteractiveDetection();
         history.appendAgentReply(finalText);
         void history.flush();
+        // End-of-turn file changeset — agent likely edited files
+        // during the turn (tool_call write_file / bash). The
+        // aggregator runs git diff once and batch-posts the hunks
+        // so mobile's PENDING REVIEW counter + Files rail update.
+        // Fire-and-forget; the aggregator owns its own outbox.
+        turnFiles.flushTurn().catch((err) => {
+          log.warn('acpRunner', `turnFiles.flushTurn failed: ${describeError(err)}`);
+        });
         await relay.sendResult(cmd.id, 'completed', { stopReason: reply.stopReason });
       } catch (err) {
         await streaming.closeAll();
@@ -927,6 +977,14 @@ async function handleCommand(
         await streaming.closeTurnWithInteractiveDetection();
         history.appendAgentReply(finalText);
         void history.flush();
+        // End-of-turn file changeset — agent likely edited files
+        // during the turn (tool_call write_file / bash). The
+        // aggregator runs git diff once and batch-posts the hunks
+        // so mobile's PENDING REVIEW counter + Files rail update.
+        // Fire-and-forget; the aggregator owns its own outbox.
+        turnFiles.flushTurn().catch((err) => {
+          log.warn('acpRunner', `turnFiles.flushTurn failed: ${describeError(err)}`);
+        });
         await relay.sendResult(cmd.id, 'completed', { stopReason: reply.stopReason });
       } catch (err) {
         await streaming.closeAll();
