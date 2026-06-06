@@ -75,6 +75,7 @@
     "@agentclientprotocol/sdk": "^0.25.0",
     "@clack/prompts": "^1.2.0",
     "chokidar": "^3.6.0",
+    "ignore": "^5.3.2",
     "picocolors": "^1.1.0",
     "qrcode-terminal": "^0.12.0",
     "which": "^5.0.0",

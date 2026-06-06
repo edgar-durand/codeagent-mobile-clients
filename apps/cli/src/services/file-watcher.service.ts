@@ -2,6 +2,7 @@ import { spawn } from 'child_process';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+import ignore, { type Ignore } from 'ignore';
 import { resolveApiBaseUrl } from '@codeagent/shared';
 import type {
   BlameLineWire,
@@ -281,6 +282,18 @@ export class FileWatcherService {
    * doesn't hammer `fs.statSync` for every event.
    */
   private readonly gitRootByDir = new Map<string, string | null>();
+
+  /**
+   * Per-repo `.gitignore` matcher. On first encounter of a git root we
+   * collect every `.gitignore` file under it, parse them through the
+   * `ignore` package, and store the resulting matcher here keyed by
+   * absolute repo path. Subsequent file events in the same repo reuse
+   * the matcher in O(1). The hard-coded IGNORED_PATH_PATTERN above
+   * catches conventional dirs (node_modules, dist, Pods, …); this
+   * matcher layers the repo's own ignore rules on top so per-project
+   * artifacts (ios/, .env*, build outputs) stop polluting the queue.
+   */
+  private readonly gitIgnoreMatcherByRoot = new Map<string, Ignore | null>();
   private stopped = false;
 
   /**
@@ -572,18 +585,35 @@ export class FileWatcherService {
       return;
     }
 
+    // `filePath` is relative to the git root so the backend can
+    // de-dup on (sessionId, repoPath, filePath) consistently across
+    // sibling repos that share file names (e.g. README.md).
+    const relPathInRepo = path.relative(gitRoot, absPath);
+    if (!relPathInRepo || relPathInRepo.startsWith('..')) return;
+
+    // Honor the repo's .gitignore. Without this the IDE Files queue
+    // surfaces auto-generated artifacts (ios/ pbxproj, .env*, build
+    // outputs not covered by the hard-coded IGNORED_PATH_PATTERN),
+    // and Reject runs `git restore` against an untracked path —
+    // visually marked REJECTED but doing nothing on the worktree,
+    // which is more confusing than the original noise. The matcher
+    // is built once per repo on first encounter (lazy, see
+    // `getGitIgnoreMatcher`) and reused for every subsequent event.
+    const matcher = this.getGitIgnoreMatcher(gitRoot);
+    if (matcher && matcher.ignores(relPathInRepo)) {
+      log.trace(
+        'fileWatcher',
+        `${relPathInRepo} ignored by ${path.basename(gitRoot)}/.gitignore — suppressing emit`,
+      );
+      return;
+    }
+
     // Notify the aggregator's dirty tracker (if wired) BEFORE the
     // legacy per-file POST. The aggregator's `flushTurn()` only
     // spawns git for repos in this set, so marking happens on the
     // hot filesystem path even if the legacy POST below short-
     // circuits later (no diff, rate-limit, etc.).
     this.opts.onRepoDirty?.(gitRoot);
-
-    // `filePath` is relative to the git root so the backend can
-    // de-dup on (sessionId, repoPath, filePath) consistently across
-    // sibling repos that share file names (e.g. README.md).
-    const relPathInRepo = path.relative(gitRoot, absPath);
-    if (!relPathInRepo || relPathInRepo.startsWith('..')) return;
 
     // `repoPath` is the git root's path relative to the CLI's
     // workingDir, so the UI can render a stable repo chip per row.
@@ -791,6 +821,96 @@ export class FileWatcherService {
 
   private async postReviewBlame(body: FileBlameEvent): Promise<void> {
     await this.postWithRetries(`${this.apiBase}/api/review/blame`, body);
+  }
+
+  /**
+   * Lazily build and cache a per-repo `.gitignore` matcher. We walk the
+   * repo collecting every `.gitignore` file (skipping the same dirs
+   * IGNORED_PATH_PATTERN already filters at chokidar level, so we
+   * don't read inside node_modules / Pods / etc.) and feed each file
+   * into a single `ignore` matcher anchored at the git root. Subsequent
+   * calls return the cached matcher; failures fall back to `null`,
+   * which the caller treats as "no extra filtering" — so a malformed
+   * .gitignore degrades to the prior pre-fix behaviour rather than
+   * silently dropping every event.
+   */
+  private getGitIgnoreMatcher(gitRoot: string): Ignore | null {
+    if (this.gitIgnoreMatcherByRoot.has(gitRoot)) {
+      return this.gitIgnoreMatcherByRoot.get(gitRoot) ?? null;
+    }
+    const matcher = ignore();
+    let added = 0;
+    try {
+      this.collectGitignoreFiles(gitRoot, gitRoot, matcher);
+      added = 1; // sentinel — matcher always usable even with 0 rules
+    } catch (err) {
+      log.warn(
+        'fileWatcher',
+        `failed to build gitignore matcher for ${gitRoot}: ${(err as Error).message}`,
+      );
+    }
+    const result = added > 0 ? matcher : null;
+    this.gitIgnoreMatcherByRoot.set(gitRoot, result);
+    return result;
+  }
+
+  /**
+   * Walk the repo recursively collecting every `.gitignore` file and
+   * add its rules to `matcher`, with the path prefix that anchors them
+   * to the right subdirectory (so a `.gitignore` inside `apps/api`
+   * scopes to `apps/api/*`, not the whole repo). Skips heavy dirs the
+   * static IGNORED_PATH_PATTERN already filters — we don't want to
+   * stat into `node_modules/` looking for buried .gitignore files.
+   */
+  private collectGitignoreFiles(
+    repoRoot: string,
+    dir: string,
+    matcher: Ignore,
+  ): void {
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    // Pull the .gitignore in this dir FIRST so its rules apply when we
+    // decide whether to recurse into sibling subdirectories.
+    const gitignoreEntry = entries.find(
+      (e) => e.isFile() && e.name === '.gitignore',
+    );
+    if (gitignoreEntry) {
+      try {
+        const body = fs.readFileSync(path.join(dir, '.gitignore'), 'utf8');
+        const rel = path.relative(repoRoot, dir).replace(/\\/g, '/');
+        // Prefix every rule with the sub-path so a nested .gitignore
+        // doesn't escape its directory. `ignore` expects POSIX paths.
+        const prefixed = body
+          .split(/\r?\n/)
+          .map((line) => {
+            const trimmed = line.trim();
+            if (!trimmed || trimmed.startsWith('#')) return line;
+            if (!rel) return line;
+            // Negation rules need the `!` to stay at the front.
+            if (trimmed.startsWith('!')) {
+              return '!' + path.posix.join(rel, trimmed.slice(1));
+            }
+            return path.posix.join(rel, trimmed);
+          })
+          .join('\n');
+        matcher.add(prefixed);
+      } catch {
+        /* unreadable .gitignore — skip */
+      }
+    }
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      if (entry.name === '.git') continue;
+      const childAbs = path.join(dir, entry.name);
+      // Re-use the same fast-path predicate the watcher uses, so we
+      // don't descend into node_modules / Pods / .gradle / etc.
+      if (isIgnoredFilePath(childAbs)) continue;
+      this.collectGitignoreFiles(repoRoot, childAbs, matcher);
+    }
   }
 
   private async postWithRetries(
