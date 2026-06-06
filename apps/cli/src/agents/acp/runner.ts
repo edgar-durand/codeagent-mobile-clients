@@ -38,6 +38,7 @@ import { createInteractiveAgentStrategy } from '../registry';
 import { AcpClient } from './client';
 import type { AdapterSpec } from './adapters';
 import { AcpPublisher } from './publisher';
+import { buildAcpPromptBlocks } from './buildAcpPromptBlocks';
 import {
   registerTerminalHandlers,
   closeAllTerminals,
@@ -799,22 +800,35 @@ async function handleCommand(
 ): Promise<void> {
   switch (cmd.type) {
     case 'start_task': {
-      const payload = cmd.payload as { prompt?: string } | undefined;
-      const prompt = payload?.prompt?.trim();
-      if (!prompt) {
-        log.warn('acpRunner', 'start_task with empty prompt; ignoring');
+      const payload = cmd.payload as
+        | {
+            prompt?: string;
+            files?: Array<{ filename: string; base64?: string; mimeType?: string }>;
+          }
+        | undefined;
+      const blocks = buildAcpPromptBlocks(payload ?? {});
+      if (blocks.length === 0) {
+        log.warn('acpRunner', 'start_task with empty prompt + no attachments; ignoring');
         await relay.sendResult(cmd.id, 'failed', { error: 'empty prompt' });
         return;
       }
-      log.info('acpRunner', `start_task → forwarding prompt chars=${prompt.length} id=${cmd.id.slice(0, 8)}`);
+      const promptText = blocks
+        .filter((b): b is { type: 'text'; text: string } => b.type === 'text')
+        .map((b) => b.text)
+        .join('\n');
+      const imageCount = blocks.filter((b) => b.type === 'image').length;
+      log.info(
+        'acpRunner',
+        `start_task → forwarding textChars=${promptText.length} imageBlocks=${imageCount} id=${cmd.id.slice(0, 8)}`,
+      );
       // Mirror the legacy `outputSvc.newTurn()` boundary: clear the
       // previous reply on mobile + show "Agent is typing…". Without
       // this, mobile keeps showing the previous turn's bubble until
       // the first streaming text overwrites it, which races visibly.
       await streaming.beginTurn();
-      history.appendUserPrompt(prompt);
+      history.appendUserPrompt(promptText);
       try {
-        const reply = await client.prompt(prompt);
+        const reply = await client.prompt(blocks);
         // Close with interactive-detection so a trailing
         // "question + numbered options" pattern in the reply gets
         // surfaced as a tappable select_prompt chunk on mobile

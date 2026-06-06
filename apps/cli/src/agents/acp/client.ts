@@ -40,6 +40,7 @@ import {
   type WriteTextFileResponse,
 } from '@agentclientprotocol/sdk';
 import type { AdapterSpec } from './adapters';
+import type { PromptBlock } from './buildAcpPromptBlocks';
 import { log } from '../../services/logger';
 
 /**
@@ -232,18 +233,34 @@ export class AcpClient {
    * a ceiling the relay command sits "pending" forever and mobile
    * shows a permanent "Thinking…" spinner with no way to recover.
    */
-  async prompt(text: string): Promise<PromptResponse> {
+  async prompt(input: string | ReadonlyArray<PromptBlock>): Promise<PromptResponse> {
     if (!this.connection || !this.sessionId) {
       throw new Error('AcpClient.prompt called before start()');
     }
+    // Normalise: plain string callers (slash commands, free-form
+    // replies) shouldn't have to build a single-block array; the
+    // start_task path with image attachments passes the array directly
+    // so it can interleave `image` + `text` blocks.
+    const blocks: PromptBlock[] =
+      typeof input === 'string'
+        ? [{ type: 'text', text: input }]
+        : (input as PromptBlock[]);
+    const textLen = blocks.reduce(
+      (n, b) => (b.type === 'text' ? n + b.text.length : n),
+      0,
+    );
+    const imageCount = blocks.reduce(
+      (n, b) => (b.type === 'image' ? n + 1 : n),
+      0,
+    );
     log.info(
       'acpClient',
-      `prompt → session=${this.sessionId.slice(0, 8)} chars=${text.length}`,
+      `prompt → session=${this.sessionId.slice(0, 8)} textChars=${textLen} imageBlocks=${imageCount}`,
     );
     const t0 = Date.now();
     const send = this.connection.prompt({
       sessionId: this.sessionId,
-      prompt: [{ type: 'text', text }],
+      prompt: blocks,
     });
 
     // Bare setTimeout + manual cleanup instead of the
