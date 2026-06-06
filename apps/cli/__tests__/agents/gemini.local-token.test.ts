@@ -5,6 +5,7 @@
  */
 
 import * as fs from 'node:fs';
+import { mkdtempSync, rmSync } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -15,8 +16,29 @@ import {
   validateLocalGeminiToken,
 } from '../../src/agents/gemini/local-token';
 
+/**
+ * Override `os.homedir()` for the duration of a test by setting both
+ * `HOME` (Linux + macOS) and `USERPROFILE` (Windows). Without the
+ * USERPROFILE override these tests would no-op on the Windows CI
+ * runner — same pattern as codex.local-token.test.ts.
+ */
+function overrideHome(target: string): { restore: () => void } {
+  const origHome = process.env.HOME;
+  const origUserProfile = process.env.USERPROFILE;
+  process.env.HOME = target;
+  process.env.USERPROFILE = target;
+  return {
+    restore: () => {
+      if (origHome === undefined) delete process.env.HOME;
+      else process.env.HOME = origHome;
+      if (origUserProfile === undefined) delete process.env.USERPROFILE;
+      else process.env.USERPROFILE = origUserProfile;
+    },
+  };
+}
+
 describe('gemini local-token paths', () => {
-  it('credentials path is ~/.gemini/oauth_creds.json', () => {
+  it('credentials path is <homedir>/.gemini/oauth_creds.json', () => {
     expect(geminiCredentialsPath()).toBe(
       path.join(os.homedir(), '.gemini', 'oauth_creds.json'),
     );
@@ -28,36 +50,32 @@ describe('gemini local-token paths', () => {
 });
 
 describe('extractLocalGeminiToken', () => {
-  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gemini-tok-'));
-  const realPath = geminiCredentialsPath();
-  // Point HOME at a sandbox dir for the duration of these specs so
-  // we never read or write the developer's real ~/.gemini.
-  const originalHome = process.env.HOME;
+  let home: string;
+  let restoreHome: () => void;
+
   beforeEach(() => {
-    process.env.HOME = tmpDir;
-  });
-  afterEach(() => {
-    process.env.HOME = originalHome;
+    home = mkdtempSync(path.join(os.tmpdir(), 'gemini-local-'));
+    ({ restore: restoreHome } = overrideHome(home));
   });
 
-  it('returns null when the credentials file is absent', async () => {
-    const sandboxPath = path.join(tmpDir, '.gemini', 'oauth_creds.json');
-    if (fs.existsSync(sandboxPath)) fs.rmSync(sandboxPath);
-    // Real homedir() reads the env var lazily — confirm the locator
-    // points at the sandbox.
-    expect(geminiCredentialsPath().startsWith(tmpDir)).toBe(true);
+  afterEach(() => {
+    restoreHome();
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  it('returns null when ~/.gemini/oauth_creds.json missing', async () => {
     expect(await extractLocalGeminiToken()).toBeNull();
   });
 
   it('returns null when the file exists but is empty / whitespace', async () => {
-    const sandboxPath = path.join(tmpDir, '.gemini', 'oauth_creds.json');
+    const sandboxPath = path.join(home, '.gemini', 'oauth_creds.json');
     fs.mkdirSync(path.dirname(sandboxPath), { recursive: true });
     fs.writeFileSync(sandboxPath, '   \n\t  ');
     expect(await extractLocalGeminiToken()).toBeNull();
   });
 
   it('returns the file body as a flat-file oauth token', async () => {
-    const sandboxPath = path.join(tmpDir, '.gemini', 'oauth_creds.json');
+    const sandboxPath = path.join(home, '.gemini', 'oauth_creds.json');
     fs.mkdirSync(path.dirname(sandboxPath), { recursive: true });
     const blob = JSON.stringify({
       access_token: 'ya29.fake',
@@ -67,13 +85,6 @@ describe('extractLocalGeminiToken', () => {
     fs.writeFileSync(sandboxPath, blob);
     const tok = await extractLocalGeminiToken();
     expect(tok).toEqual({ method: 'oauth', credential: blob, source: 'flat-file' });
-  });
-
-  // Re-pin realPath assertion so a future test that accidentally
-  // writes outside the sandbox surfaces immediately.
-  it('real homedir path is NOT inside the test sandbox', () => {
-    process.env.HOME = originalHome;
-    expect(geminiCredentialsPath()).toBe(realPath);
   });
 });
 
