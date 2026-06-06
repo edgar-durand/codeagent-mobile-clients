@@ -1,4 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import * as fs from 'fs';
+import * as os from 'os';
 import * as path from 'path';
 
 import {
@@ -13,9 +15,9 @@ import { parseUnifiedDiff } from '../src/services/file-watcher/diff-parser';
 
 const WORKING_DIR = path.resolve('/tmp/fake-cwd');
 
-function makeService(): FileWatcherService {
+function makeService(workingDir = WORKING_DIR): FileWatcherService {
   return new FileWatcherService({
-    workingDir: WORKING_DIR,
+    workingDir,
     sessionId: 'sess-abc',
     pluginId: 'plugin-1',
     pluginAuthToken: 'token-xyz',
@@ -186,9 +188,15 @@ describe('FileWatcherService', () => {
   // the previous test's /review/hunks retry would keep firing into
   // the next test's `_transport.post` spy.
   const tracked: { stop: () => Promise<void> | void }[] = [];
+  const tempRoots: string[] = [];
   function track<T extends { stop: () => Promise<void> | void }>(svc: T): T {
     tracked.push(svc);
     return svc;
+  }
+  function makeTempRepo(): string {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'codeam-fw-'));
+    tempRoots.push(root);
+    return root;
   }
 
   beforeEach(() => {
@@ -206,6 +214,9 @@ describe('FileWatcherService', () => {
     // (postWithRetries checks `this.stopped` between attempts).
     for (const svc of tracked.splice(0, tracked.length)) {
       try { await svc.stop(); } catch { /* ignore */ }
+    }
+    for (const root of tempRoots.splice(0, tempRoots.length)) {
+      try { fs.rmSync(root, { recursive: true, force: true }); } catch { /* ignore */ }
     }
     // Drain every pending fake timer (HTTP retry backoffs from the
     // /review/hunks aggressive-policy loop) BEFORE switching the
@@ -384,6 +395,55 @@ describe('FileWatcherService', () => {
 
     expect(postSpy).not.toHaveBeenCalled();
     expect(gitSpy).not.toHaveBeenCalled();
+  });
+
+  it('suppresses paths ignored by the repo root .gitignore', async () => {
+    const repoRoot = makeTempRepo();
+    fs.writeFileSync(path.join(repoRoot, '.gitignore'), '.env*\n');
+    vi.spyOn(_findGitRootSeam, 'resolve').mockImplementation((dir: string) =>
+      dir.startsWith(repoRoot) ? repoRoot : null,
+    );
+
+    const svc = track(makeService(repoRoot));
+    const gitSpy = vi.spyOn(_gitSeam, 'run').mockResolvedValue(SAMPLE_DIFF);
+    const postSpy = vi.spyOn(_transport, 'post').mockResolvedValue({
+      statusCode: 200,
+      body: '{}',
+    });
+
+    svc._scheduleForTest(path.join(repoRoot, '.env.local'), 'add');
+    await vi.advanceTimersByTimeAsync(600);
+    await vi.runAllTicks();
+
+    expect(postSpy).not.toHaveBeenCalled();
+    expect(gitSpy).not.toHaveBeenCalled();
+  });
+
+  it('anchors nested .gitignore rules to their subdirectory', async () => {
+    const repoRoot = makeTempRepo();
+    fs.mkdirSync(path.join(repoRoot, 'apps', 'api', 'sub'), { recursive: true });
+    fs.writeFileSync(path.join(repoRoot, 'apps', 'api', '.gitignore'), 'generated.txt\n');
+    vi.spyOn(_findGitRootSeam, 'resolve').mockImplementation((dir: string) =>
+      dir.startsWith(repoRoot) ? repoRoot : null,
+    );
+
+    const svc = track(makeService(repoRoot));
+    const gitSpy = vi.spyOn(_gitSeam, 'run').mockResolvedValue(SAMPLE_DIFF);
+    const postSpy = vi.spyOn(_transport, 'post').mockResolvedValue({
+      statusCode: 200,
+      body: '{}',
+    });
+
+    svc._scheduleForTest(path.join(repoRoot, 'apps', 'api', 'generated.txt'), 'add');
+    svc._scheduleForTest(path.join(repoRoot, 'apps', 'api', 'sub', 'generated.txt'), 'add');
+    svc._scheduleForTest(path.join(repoRoot, 'generated.txt'), 'add');
+    await vi.advanceTimersByTimeAsync(600);
+    await vi.runAllTicks();
+
+    const filesCalls = postSpy.mock.calls.filter((c) => c[0].endsWith('/api/files/changed'));
+    expect(filesCalls.length).toBe(1);
+    expect(JSON.parse(filesCalls[0][2]).filePath).toBe('generated.txt');
+    expect(gitSpy).toHaveBeenCalled();
   });
 
   it('attaches an error handler to chokidar so EPERM does not crash the process (#43)', async () => {

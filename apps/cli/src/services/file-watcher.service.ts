@@ -590,6 +590,7 @@ export class FileWatcherService {
     // sibling repos that share file names (e.g. README.md).
     const relPathInRepo = path.relative(gitRoot, absPath);
     if (!relPathInRepo || relPathInRepo.startsWith('..')) return;
+    const relPathForIgnore = relPathInRepo.replace(/\\/g, '/');
 
     // Honor the repo's .gitignore. Without this the IDE Files queue
     // surfaces auto-generated artifacts (ios/ pbxproj, .env*, build
@@ -600,10 +601,10 @@ export class FileWatcherService {
     // is built once per repo on first encounter (lazy, see
     // `getGitIgnoreMatcher`) and reused for every subsequent event.
     const matcher = this.getGitIgnoreMatcher(gitRoot);
-    if (matcher && matcher.ignores(relPathInRepo)) {
+    if (matcher && matcher.ignores(relPathForIgnore)) {
       log.trace(
         'fileWatcher',
-        `${relPathInRepo} ignored by ${path.basename(gitRoot)}/.gitignore — suppressing emit`,
+        `${relPathForIgnore} ignored by ${path.basename(gitRoot)}/.gitignore — suppressing emit`,
       );
       return;
     }
@@ -886,16 +887,7 @@ export class FileWatcherService {
         // doesn't escape its directory. `ignore` expects POSIX paths.
         const prefixed = body
           .split(/\r?\n/)
-          .map((line) => {
-            const trimmed = line.trim();
-            if (!trimmed || trimmed.startsWith('#')) return line;
-            if (!rel) return line;
-            // Negation rules need the `!` to stay at the front.
-            if (trimmed.startsWith('!')) {
-              return '!' + path.posix.join(rel, trimmed.slice(1));
-            }
-            return path.posix.join(rel, trimmed);
-          })
+          .flatMap((line) => prefixGitignoreRule(rel, line))
           .join('\n');
         matcher.add(prefixed);
       } catch {
@@ -979,6 +971,32 @@ export class FileWatcherService {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
+}
+
+function prefixGitignoreRule(relDir: string, line: string): string[] {
+  if (!relDir) return [line];
+  const trimmed = line.trim();
+  if (!trimmed || trimmed.startsWith('#')) return [line];
+
+  const negated = trimmed.startsWith('!');
+  const pattern = negated ? trimmed.slice(1) : trimmed;
+  const prefixed = prefixGitignorePattern(relDir, pattern);
+  return negated ? prefixed.map((p) => `!${p}`) : prefixed;
+}
+
+function prefixGitignorePattern(relDir: string, pattern: string): string[] {
+  const anchored = pattern.startsWith('/');
+  const patternWithoutAnchor = pattern.replace(/^\/+/, '');
+  const slashful = patternWithoutAnchor.replace(/\/+$/, '').includes('/');
+
+  if (anchored || slashful) {
+    return [path.posix.join(relDir, patternWithoutAnchor)];
+  }
+
+  return [
+    path.posix.join(relDir, patternWithoutAnchor),
+    path.posix.join(relDir, '**', patternWithoutAnchor),
+  ];
 }
 
 /**
