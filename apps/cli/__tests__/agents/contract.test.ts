@@ -4,6 +4,7 @@ import {
   createAgentStrategyForTests,
   listRegisteredAgentIdsForTests,
 } from '../../src/agents/registry';
+import { getAcpAdapter } from '../../src/agents/acp/adapters';
 import { LinuxOsStrategy } from '../../src/os';
 import type {
   AgentStrategy,
@@ -41,12 +42,22 @@ describe('Agent strategy registry surface', () => {
     }
   });
 
-  it('every enabled AGENT_REGISTRY entry has a registered builder', () => {
+  it('every enabled AGENT_REGISTRY entry has a PTY builder OR an ACP adapter', () => {
+    // An agent counts as "runnable" if EITHER the legacy PTY pipeline
+    // can build a strategy for it OR the ACP runtime knows how to
+    // spawn an adapter. ACP-only agents (e.g. Gemini) intentionally
+    // skip the PTY builder — their TUI isn't worth parsing because
+    // they already speak ACP natively.
     const enabledIds = Object.values(AGENT_REGISTRY)
       .filter((m) => m.enabled)
       .map((m) => m.id);
     for (const id of enabledIds) {
-      expect(agentIds, `${id} enabled in registry but no builder wired`).toContain(id);
+      const hasPtyBuilder = agentIds.includes(id);
+      const hasAcpAdapter = getAcpAdapter(id) !== null;
+      expect(
+        hasPtyBuilder || hasAcpAdapter,
+        `${id} enabled in registry but has neither PTY builder nor ACP adapter`,
+      ).toBe(true);
     }
   });
 });

@@ -1,0 +1,284 @@
+/**
+ * Thin wrapper over `@agentclientprotocol/sdk`'s
+ * {@link ClientSideConnection}.
+ *
+ * Owns the lifecycle of a single adapter process:
+ *   spawn → initialize → newSession → forward events → stop.
+ *
+ * The wrapper has zero protocol logic. It exists to:
+ *   - shield the rest of the CLI from the SDK's exact import path
+ *     (so we can swap to a hand-rolled JSON-RPC later if needed
+ *     without touching every call site),
+ *   - bridge Node child-process stdio to the SDK's web-stream
+ *     `Stream` interface,
+ *   - implement the `Client`-side of the protocol by forwarding
+ *     each notification / request to a callback supplied by the
+ *     caller.
+ */
+
+import { spawn, type ChildProcess } from 'node:child_process';
+import * as fs from 'node:fs/promises';
+import { Readable, Writable } from 'node:stream';
+import {
+  ClientSideConnection,
+  ndJsonStream,
+  type Agent,
+  type Client,
+  type CreateTerminalResponse,
+  type InitializeResponse,
+  type KillTerminalResponse,
+  type NewSessionResponse,
+  type PromptResponse,
+  type ReadTextFileResponse,
+  type ReleaseTerminalResponse,
+  type RequestPermissionRequest,
+  type RequestPermissionResponse,
+  type SessionNotification,
+  type TerminalOutputResponse,
+  type WaitForTerminalExitResponse,
+  type WriteTextFileResponse,
+} from '@agentclientprotocol/sdk';
+import type { AdapterSpec } from './adapters';
+import { log } from '../../services/logger';
+
+/**
+ * Protocol version we advertise during `initialize`. ACP v1 is the
+ * stable line; the SDK accepts a numeric major version per its
+ * type. Bumping this in the future is a one-liner change.
+ */
+const PROTOCOL_VERSION = 1;
+
+/**
+ * Capabilities we advertise to the agent. Phase 1 supports:
+ *   - fs.readTextFile / writeTextFile — implemented below against
+ *     local node:fs, so the agent can read / write files in the
+ *     user's working tree.
+ *   - terminal.* — declared as `false` so the agent doesn't try to
+ *     spawn terminals through us (Phase 2). The adapters that we
+ *     ship for Claude / Codex / Cursor all gracefully fall back
+ *     when this capability is missing.
+ */
+const CLIENT_CAPABILITIES = {
+  fs: { readTextFile: true, writeTextFile: true },
+  terminal: false,
+};
+
+export interface AcpClientOptions {
+  /** Spec resolved from {@link getAcpAdapter}. */
+  adapter: AdapterSpec;
+  /** Working directory for the agent's session (becomes the
+   *  primary `cwd` ACP root). */
+  cwd: string;
+  /** Forwarded for every `session/update` notification the agent
+   *  sends. Mapping to chunks happens in the caller via the
+   *  pure mappers — this wrapper is just a relay. */
+  onSessionUpdate: (notification: SessionNotification) => void;
+  /** Called when the agent asks the user to allow / reject a tool
+   *  call. The caller publishes an awaiting-answer to mobile and
+   *  resolves once the user replies. Throwing or returning
+   *  `outcome.kind === 'cancelled'` aborts the tool. */
+  onRequestPermission: (
+    request: RequestPermissionRequest,
+  ) => Promise<RequestPermissionResponse>;
+  /** Called on adapter stderr lines for debugging — log surface
+   *  the caller owns so we don't have to pick stdout vs stderr
+   *  semantics here. */
+  onStderr?: (line: string) => void;
+  /** Called when the adapter process exits unexpectedly so the
+   *  caller can tear down the session. Not called on a normal
+   *  `stop()` shutdown. */
+  onUnexpectedExit?: (code: number | null, signal: NodeJS.Signals | null) => void;
+}
+
+export class AcpClient {
+  private child: ChildProcess | null = null;
+  private connection: ClientSideConnection | null = null;
+  private stopping = false;
+  private sessionId: string | null = null;
+
+  constructor(private readonly opts: AcpClientOptions) {}
+
+  /**
+   * Spawn the adapter + perform the initial handshake (initialize
+   * → newSession). Returns the ACP-assigned sessionId so the
+   * caller can route subsequent prompts.
+   */
+  async start(): Promise<{ sessionId: string; initialize: InitializeResponse }> {
+    if (this.child) throw new Error('AcpClient already started');
+
+    const { adapter, cwd } = this.opts;
+    const child = spawn(adapter.command, adapter.args, {
+      cwd,
+      env: process.env,
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    this.child = child;
+
+    child.stderr?.setEncoding('utf8');
+    child.stderr?.on('data', (chunk: string) => {
+      for (const line of chunk.split(/\r?\n/)) {
+        const trimmed = line.trim();
+        if (trimmed) this.opts.onStderr?.(trimmed);
+      }
+    });
+
+    child.on('exit', (code, signal) => {
+      if (this.stopping) return;
+      log.warn('acpClient', `adapter exited unexpectedly code=${code} signal=${signal}`);
+      this.opts.onUnexpectedExit?.(code, signal);
+    });
+
+    if (!child.stdin || !child.stdout) {
+      throw new Error('Spawned ACP adapter is missing stdio handles');
+    }
+
+    // Bridge Node streams ↔ the SDK's web-stream Stream surface.
+    // The SDK ships `ndJsonStream(output, input)` which adapts
+    // newline-delimited JSON over byte streams; we hand it the
+    // child's stdout (input) + stdin (output) wrapped as web
+    // streams via Node's `Readable.toWeb`/`Writable.toWeb`.
+    const input = Readable.toWeb(child.stdout) as ReadableStream<Uint8Array>;
+    const output = Writable.toWeb(child.stdin) as WritableStream<Uint8Array>;
+    const stream = ndJsonStream(output, input);
+
+    this.connection = new ClientSideConnection(
+      (_agent: Agent) => this.buildClient(),
+      stream,
+    );
+
+    const initialize = await this.connection.initialize({
+      protocolVersion: PROTOCOL_VERSION,
+      clientCapabilities: CLIENT_CAPABILITIES,
+    });
+
+    const newSession = await this.connection.newSession({
+      cwd,
+      mcpServers: [],
+    });
+    this.sessionId = newSession.sessionId;
+
+    return { sessionId: newSession.sessionId, initialize };
+  }
+
+  /**
+   * Send a user prompt to the active session. Returns the
+   * {@link PromptResponse} which carries the agent's stop reason
+   * once the turn finishes. Session/update notifications keep
+   * arriving on `onSessionUpdate` while the turn streams.
+   */
+  async prompt(text: string): Promise<PromptResponse> {
+    if (!this.connection || !this.sessionId) {
+      throw new Error('AcpClient.prompt called before start()');
+    }
+    return this.connection.prompt({
+      sessionId: this.sessionId,
+      prompt: [{ type: 'text', text }],
+    });
+  }
+
+  /**
+   * Cancel the in-flight prompt turn. Notification — no response.
+   * Safe to call when nothing is in flight (the adapter no-ops).
+   */
+  async cancel(): Promise<void> {
+    if (!this.connection || !this.sessionId) return;
+    await this.connection.cancel({ sessionId: this.sessionId });
+  }
+
+  /**
+   * Kill the adapter process and tear down the connection. Safe
+   * to call multiple times. Suppresses the unexpected-exit
+   * callback for this teardown.
+   */
+  async stop(): Promise<void> {
+    this.stopping = true;
+    const child = this.child;
+    if (!child) return;
+    this.child = null;
+    this.connection = null;
+    this.sessionId = null;
+    try {
+      // SIGTERM first — adapters handle it cleanly and flush any
+      // pending notifications. Hard kill after 2 s if they hang.
+      child.kill('SIGTERM');
+      const grace = new Promise<void>((resolve) => {
+        const t = setTimeout(() => {
+          try { child.kill('SIGKILL'); } catch { /* already gone */ }
+          resolve();
+        }, 2000);
+        child.once('exit', () => {
+          clearTimeout(t);
+          resolve();
+        });
+      });
+      await grace;
+    } catch (err) {
+      log.trace('acpClient', 'stop teardown error', err);
+    }
+  }
+
+  // ─── Client surface (what the agent calls into) ───────────────────
+
+  private buildClient(): Client {
+    return {
+      sessionUpdate: async (params: SessionNotification): Promise<void> => {
+        this.opts.onSessionUpdate(params);
+      },
+      requestPermission: (params: RequestPermissionRequest): Promise<RequestPermissionResponse> => {
+        return this.opts.onRequestPermission(params);
+      },
+      readTextFile: async (params): Promise<ReadTextFileResponse> => {
+        // ACP guarantees `path` is absolute. Out-of-tree reads are
+        // the agent's responsibility — we trust the adapter's
+        // sandboxing (claude-agent-acp / codex-acp scope to the
+        // session cwd by default).
+        const content = await fs.readFile(params.path, 'utf8');
+        return applyLineRange(content, params.line ?? null, params.limit ?? null);
+      },
+      writeTextFile: async (params): Promise<WriteTextFileResponse> => {
+        await fs.writeFile(params.path, params.content, 'utf8');
+        return {};
+      },
+      // Terminal capability is declared `false` above so adapters
+      // shouldn't call these; provide explicit "not implemented"
+      // stubs so a misbehaving adapter gets a clean error instead
+      // of a hung promise.
+      createTerminal: async (): Promise<CreateTerminalResponse> => {
+        throw new Error('terminal capability not implemented in this client (Phase 1)');
+      },
+      terminalOutput: async (): Promise<TerminalOutputResponse> => {
+        throw new Error('terminal capability not implemented in this client (Phase 1)');
+      },
+      releaseTerminal: async (): Promise<ReleaseTerminalResponse> => {
+        throw new Error('terminal capability not implemented in this client (Phase 1)');
+      },
+      waitForTerminalExit: async (): Promise<WaitForTerminalExitResponse> => {
+        throw new Error('terminal capability not implemented in this client (Phase 1)');
+      },
+      killTerminal: async (): Promise<KillTerminalResponse> => {
+        throw new Error('terminal capability not implemented in this client (Phase 1)');
+      },
+    };
+  }
+}
+
+/**
+ * Slice file content to the `line` + `limit` window the agent
+ * requested. ACP uses 1-based line numbers and inclusive `limit`
+ * semantics (i.e. `limit: 50` returns 50 lines). When neither is
+ * set we return the full file.
+ *
+ * Exported for the unit tests — keeps the slicing logic out of
+ * the spawned-process path.
+ */
+export function applyLineRange(
+  content: string,
+  line: number | null,
+  limit: number | null,
+): ReadTextFileResponse {
+  if (line === null && limit === null) return { content };
+  const lines = content.split('\n');
+  const start = Math.max(0, (line ?? 1) - 1);
+  const end = limit !== null ? start + limit : lines.length;
+  return { content: lines.slice(start, end).join('\n') };
+}
