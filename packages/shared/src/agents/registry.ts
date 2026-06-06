@@ -57,12 +57,12 @@ export const AGENT_REGISTRY: Record<AgentId, AgentMetadata> = {
     displayName: 'Gemini CLI',
     binaryName: 'gemini',
     enabled: true,
-    // Gemini speaks ACP natively via `gemini --acp` — pairing flows
-    // through the ACP runtime, not a PTY parser. Auth is the user's
-    // existing `gemini auth login` (OAuth) or GEMINI_API_KEY env var,
-    // both managed by the gemini binary itself.
-    supportedAuthKinds: ['api_key'],
-    preferredAuthKind: 'api_key',
+    // OAuth via `gemini auth login` (captured by `codeam link gemini`
+    // from ~/.gemini/oauth_creds.json) AND GEMINI_API_KEY are both
+    // accepted by the backend's GeminiProvisioningStrategy and propagated
+    // into codespace deploys.
+    supportedAuthKinds: ['oauth_token', 'api_key'],
+    preferredAuthKind: 'oauth_token',
   },
 };
 
