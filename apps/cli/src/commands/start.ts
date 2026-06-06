@@ -87,15 +87,30 @@ export async function start(requestedAgent?: AgentId): Promise<void> {
 
   const cwd = process.cwd();
 
-  // ACP fork — when `CODEAM_ACP_ENABLED=1` AND we ship an ACP
-  // adapter for this agent (claude / codex / cursor today; more
-  // as vendors publish adapters), short-circuit the PTY pipeline
-  // and run the session over the typed protocol instead. The
-  // runner owns its own lifecycle (signal handlers, relay,
-  // process.exit on shutdown), so this branch never returns —
-  // the existing PTY orchestration code below is dead in this
-  // mode.
-  if (process.env.CODEAM_ACP_ENABLED === '1' && session.pluginAuthToken) {
+  // ACP fork — default ON since v2.27.13. Runs the session over the
+  // typed protocol whenever:
+  //   1. We ship an ACP adapter for this agent (claude / codex / gemini
+  //      today; more as vendors publish adapters), AND
+  //   2. The pairing has a `pluginAuthToken` (every modern pair flow
+  //      mints one — older pre-rolling-token pairs fall through to PTY).
+  //
+  // Escape hatches:
+  //   - `CODEAM_ACP_DISABLED=1` — force the legacy PTY pipeline even
+  //     for agents that ship an adapter (debugging / regression
+  //     verification).
+  //   - `CODEAM_ACP_ENABLED=1` — kept as a no-op alias for backwards
+  //     compatibility with the v2.27.2 → v2.27.12 opt-in flag. Setting
+  //     it is harmless; ACP runs either way unless DISABLED takes
+  //     precedence.
+  //
+  // Agents without an adapter (aider, coderabbit, cursor — until
+  // their adapters land in the official `@agentclientprotocol/*`
+  // namespace) silently fall through to the legacy PTY runtime below.
+  // The runner owns its own lifecycle (signal handlers, relay,
+  // process.exit on shutdown), so this branch never returns when ACP
+  // takes over.
+  const acpDisabled = process.env.CODEAM_ACP_DISABLED === '1';
+  if (!acpDisabled && session.pluginAuthToken) {
     const adapter = getAcpAdapter(session.agent);
     if (adapter) {
       await runAcpSession({
@@ -108,9 +123,9 @@ export async function start(requestedAgent?: AgentId): Promise<void> {
       });
       return;
     }
-    showInfo(
-      `CODEAM_ACP_ENABLED is set but no ACP adapter is registered for "${session.agent}" — falling back to PTY runtime.`,
-    );
+  }
+  if (acpDisabled) {
+    showInfo('CODEAM_ACP_DISABLED is set — running the legacy PTY pipeline.');
   }
 
   const runtime = createRuntimeStrategy(session.agent);
