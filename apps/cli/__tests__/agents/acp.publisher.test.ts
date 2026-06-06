@@ -39,7 +39,7 @@ describe('AcpPublisher', () => {
     vi.restoreAllMocks();
   });
 
-  it('publishChunk POSTs the JSON body to the right URL with auth headers', async () => {
+  it('publishChunk POSTs the JSON body to the right URL with auth headers + body envelope', async () => {
     await publisher.publishChunk({
       chunkId: 'c-1',
       kind: 'text',
@@ -50,7 +50,12 @@ describe('AcpPublisher', () => {
     const [url, headers, payload] = postSpy.mock.calls[0];
     expect(url).toBe(`${apiBaseUrl}/api/sessions/sess-1/streaming-chunk`);
     expect(headers['X-Plugin-Auth-Token']).toBe('tok-1');
+    // sessionId + pluginId must appear in the BODY too — the backend's
+    // PluginAuthGuard rejects with PLUGIN_TOKEN_REQUIRED otherwise,
+    // even when X-Plugin-Auth-Token is set.
     expect(JSON.parse(payload)).toEqual({
+      sessionId: 'sess-1',
+      pluginId: 'plug-1',
       chunkId: 'c-1',
       kind: 'text',
       content: 'hello',
