@@ -590,7 +590,12 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
   });
 
   showInfo(`Starting ${opts.agent} via ACP adapter (${opts.adapter.requiresAgentBinary})…`);
-  const { sessionId: acpSessionId, initialize } = await client.start();
+  const {
+    sessionId: acpSessionId,
+    initialize,
+    model: handshakeModel,
+    tier: handshakeTier,
+  } = await client.start();
   log.trace(
     'acpRunner',
     `adapter handshake ok protocolVersion=${initialize.protocolVersion} sessionId=${acpSessionId.slice(0, 8)}`,
@@ -615,7 +620,7 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
     // (codex-acp returns `currentModelId` on newSession; claude /
     // gemini adapters omit it). Falls back to `<display name>`
     // alone so the card never renders with a dangling separator.
-    subtitle: buildBannerSubtitle(opts.agent, acpSessionId, initialize),
+    subtitle: buildBannerSubtitle(opts.agent, acpSessionId, handshakeModel, handshakeTier),
     // The cwd — same field the legacy banner pulled from Claude's
     // footer line under the ASCII art.
     path: opts.cwd,
@@ -1026,24 +1031,30 @@ function describeError(err: unknown): string {
 
 /**
  * Build the "welcome card" subtitle line. Pulls the agent's display
- * name from {@link AGENT_REGISTRY} (always available) and appends a
- * compact ACP session-id suffix so users can correlate the bubble
- * with the adapter's session log when debugging.
+ * name from {@link AGENT_REGISTRY} (always available) and folds in
+ * the adapter-advertised model + service tier when the adapter
+ * surfaced them on `newSession` (codex-acp today; claude-agent-acp
+ * and gemini --acp omit those fields).
  *
- * The `_initialize` arg is kept on the signature for future use — if
- * an adapter starts surfacing the configured model via
- * `agentCapabilities._meta`, we can extend the subtitle to
- * "<display name> · <model>" without changing the call site.
+ * Shape variants:
+ *   - Model + tier:   "Codex CLI · gpt-5 · plus"
+ *   - Model only:     "Codex CLI · gpt-5"
+ *   - Neither:        "Claude Code · ACP · <shortSessionId>"
+ *                     (session-id suffix only kicks in here so the
+ *                     bubble still gives users a debug handle when
+ *                     the adapter omits model metadata).
  */
 function buildBannerSubtitle(
   agentId: AgentId,
   acpSessionId: string,
-  _initialize: unknown,
+  model: string | undefined,
+  tier: string | undefined,
 ): string {
   const meta = AGENT_REGISTRY[agentId];
   const displayName = meta?.displayName ?? agentId;
-  const shortId = acpSessionId.slice(0, 8);
-  return `${displayName} · ACP · ${shortId}`;
+  if (model && tier) return `${displayName} · ${model} · ${tier}`;
+  if (model) return `${displayName} · ${model}`;
+  return `${displayName} · ACP · ${acpSessionId.slice(0, 8)}`;
 }
 
 /**

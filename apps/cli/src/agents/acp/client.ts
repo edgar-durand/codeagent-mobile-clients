@@ -111,10 +111,23 @@ export class AcpClient {
 
   /**
    * Spawn the adapter + perform the initial handshake (initialize
-   * → newSession). Returns the ACP-assigned sessionId so the
-   * caller can route subsequent prompts.
+   * → newSession). Returns the ACP-assigned sessionId so the caller
+   * can route subsequent prompts, plus optional model + tier that
+   * some adapters (codex-acp today) surface on the newSession
+   * response — used by the runner to enrich the welcome card
+   * subtitle without an extra round-trip.
    */
-  async start(): Promise<{ sessionId: string; initialize: InitializeResponse }> {
+  async start(): Promise<{
+    sessionId: string;
+    initialize: InitializeResponse;
+    /** Adapter-picked model id, e.g. `gpt-5`. `undefined` when the
+     *  adapter doesn't expose `currentModelId` on newSession
+     *  (claude-agent-acp + gemini --acp today). */
+    model?: string;
+    /** Plan / service tier label the adapter advertises (`plus`,
+     *  `pro`, `team`, …). Same nullability as `model`. */
+    tier?: string;
+  }> {
     if (this.child) throw new Error('AcpClient already started');
 
     const { adapter, cwd } = this.opts;
@@ -200,7 +213,12 @@ export class AcpClient {
         ` tier=${newSessionMeta.currentServiceTier ?? '?'}`,
     );
 
-    return { sessionId: newSession.sessionId, initialize };
+    return {
+      sessionId: newSession.sessionId,
+      initialize,
+      model: newSessionMeta.currentModelId,
+      tier: newSessionMeta.currentServiceTier,
+    };
   }
 
   /**
