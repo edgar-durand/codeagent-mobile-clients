@@ -38,4 +38,13 @@ describe('ACP adapter registry', () => {
     // an aider adapter doesn't silently break this assumption.
     expect(getAcpAdapter('aider')).toBeNull();
   });
+
+  it('returns null for cursor until upstream adapter migrates off the deprecated SDK', () => {
+    // cursor-agent-acp@0.1.1 still depends on the deprecated
+    // @zed-industries/agent-client-protocol; we dropped the bundle
+    // entry in v2.27.5 to keep `npm i -g codeam-cli` clean. Re-add
+    // the entry + delete this test when @agentclientprotocol/cursor-acp
+    // ships (or upstream publishes a non-deprecated version).
+    expect(getAcpAdapter('cursor')).toBeNull();
+  });
 });
