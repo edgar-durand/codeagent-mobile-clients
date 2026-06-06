@@ -31,7 +31,7 @@ import { randomUUID } from 'node:crypto';
 import { CommandRelayService, type RemoteCommand } from '../../services/command-relay.service';
 import { log } from '../../services/logger';
 import { showInfo, showSuccess } from '../../ui/banner';
-import type { AgentId, AgentModel, StreamingChunkKind } from '@codeagent/shared';
+import { AGENT_REGISTRY, type AgentId, type AgentModel, type StreamingChunkKind } from '@codeagent/shared';
 import type { RequestPermissionResponse } from '@agentclientprotocol/sdk';
 import { createOsStrategy } from '../../os';
 import { createInteractiveAgentStrategy } from '../registry';
@@ -597,6 +597,31 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
   );
   showSuccess(`${opts.agent} online (ACP) — awaiting prompts from mobile.`);
 
+  // Synthesize a welcome banner so mobile renders the branded card
+  // (agent logo + title + subtitle + path) the legacy PTY path
+  // shipped from `parseStartupBanner` on Claude's ASCII art. ACP
+  // runs the agent headlessly so there's no TUI banner to parse —
+  // we build the same wire shape from handshake data. Without this,
+  // mobile's chat surface stays empty until the first prompt and
+  // users wonder if the pairing actually worked.
+  void publisher.publishOutput({
+    type: 'agent_banner',
+    agentId: opts.agent,
+    // Match the legacy "Welcome back!" copy the Claude PTY banner
+    // detector used as title fallback — keeps the chat surface
+    // visually identical to the PTY path on first connect.
+    title: 'Welcome back!',
+    // Subtitle = "<display name> · <model>" when we know the model
+    // (codex-acp returns `currentModelId` on newSession; claude /
+    // gemini adapters omit it). Falls back to `<display name>`
+    // alone so the card never renders with a dangling separator.
+    subtitle: buildBannerSubtitle(opts.agent, acpSessionId, initialize),
+    // The cwd — same field the legacy banner pulled from Claude's
+    // footer line under the ASCII art.
+    path: opts.cwd,
+    done: true,
+  });
+
   // Model catalog comes from the registered RuntimeStrategy — same
   // list mobile gets in the legacy PTY path so the model-picker UI
   // stays consistent even when ACP is on.
@@ -997,6 +1022,28 @@ async function handleCommand(
 function describeError(err: unknown): string {
   if (err instanceof Error) return err.message;
   return String(err);
+}
+
+/**
+ * Build the "welcome card" subtitle line. Pulls the agent's display
+ * name from {@link AGENT_REGISTRY} (always available) and appends a
+ * compact ACP session-id suffix so users can correlate the bubble
+ * with the adapter's session log when debugging.
+ *
+ * The `_initialize` arg is kept on the signature for future use — if
+ * an adapter starts surfacing the configured model via
+ * `agentCapabilities._meta`, we can extend the subtitle to
+ * "<display name> · <model>" without changing the call site.
+ */
+function buildBannerSubtitle(
+  agentId: AgentId,
+  acpSessionId: string,
+  _initialize: unknown,
+): string {
+  const meta = AGENT_REGISTRY[agentId];
+  const displayName = meta?.displayName ?? agentId;
+  const shortId = acpSessionId.slice(0, 8);
+  return `${displayName} · ACP · ${shortId}`;
 }
 
 /**
