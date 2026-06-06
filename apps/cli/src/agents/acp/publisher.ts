@@ -1,18 +1,28 @@
 /**
- * Tiny HTTP publisher for the ACP runner.
+ * HTTP publisher for the ACP runner.
  *
- * Same wire shape + endpoints as the legacy {@link
- * StreamingEmitterService} (`/api/sessions/:id/streaming-chunk` +
- * `/api/sessions/:id/awaiting-answer` + the pending-answer poll),
- * just extracted so the ACP path doesn't have to drag the whole
- * PTY-parsing class. Behaviour-equivalent — every change here is a
- * fix-once-fix-both candidate to mirror on the legacy emitter.
+ * Posts to TWO backend endpoints:
  *
- * Why duplicate the small surface instead of refactoring the
- * StreamingEmitterService: the PTY emitter owns a lot of state
- * (renderToLines accumulator, selector dedup, tick loop) that the
- * ACP path has no need for. Splitting the publisher into its own
- * file keeps each runner's I/O concerns minimal and testable.
+ *   1. **`/api/commands/output`** — the legacy chat-render pipeline
+ *      mobile actually consumes for "Thinking…" → reply → done. Same
+ *      pipe `ChunkEmitter` (legacy PTY path) uses; the only
+ *      destination that drives the chat surface. Wire shape:
+ *      `{ sessionId, pluginId, type, content?, done? }` where `type`
+ *      is `'clear' | 'new_turn' | 'text' | …`. NO `chunkId`,
+ *      `kind`, or `isFinal` fields — those are part of the
+ *      *streaming-chunk* feed (#2 below) which targets a different
+ *      mobile surface.
+ *
+ *   2. **`/api/sessions/:id/awaiting-answer`** — the pending-answer
+ *      sheet (permission requests, list selectors). Still uses the
+ *      sessions feed because that's where the mobile awaiting-answer
+ *      poll listens.
+ *
+ * We INTENTIONALLY skipped `/api/sessions/:id/streaming-chunk` in
+ * the v2.27.8 round of fixes: smoke testing proved chunks landed
+ * with 2xx but never reached the chat. Reading the legacy code
+ * showed the chat pipe is `/api/commands/output`; the streaming-chunk
+ * feed is Epic C internal-task-state, not the chat surface.
  */
 
 import { _transport } from '../../services/streaming/transport';
@@ -20,7 +30,6 @@ import { resolveApiBaseUrl } from '@codeagent/shared';
 import type {
   AnswerResolvedEvent,
   AwaitingAnswerEvent,
-  StreamingChunkEvent,
 } from '@codeagent/shared';
 import { log } from '../../services/logger';
 
@@ -46,40 +55,52 @@ export class AcpPublisher {
   }
 
   /**
-   * Wrap the event with `sessionId` + `pluginId` at the top level.
+   * Wrap the body with `sessionId` + `pluginId` at the top level.
    * The backend's `PluginAuthGuard` reads both fields from the JSON
-   * body even when `X-Plugin-Auth-Token` is set on the header and
-   * `:sessionId` is on the URL path. Without the body fields it
-   * rejects every POST with `PLUGIN_TOKEN_REQUIRED` — same shape the
-   * legacy `streaming-emitter.service.ts` `postWithRetries` uses.
+   * body even when `X-Plugin-Auth-Token` is set on the header.
    */
-  private envelope(event: StreamingChunkEvent | AwaitingAnswerEvent): string {
+  private envelope(body: Record<string, unknown>): string {
     return JSON.stringify({
       sessionId: this.opts.sessionId,
       pluginId: this.opts.pluginId,
-      ...event,
+      ...body,
     });
   }
 
   /**
-   * Fire-and-forget chunk POST. The backend's per-user SSE bus
-   * forwards each chunk to mobile/landing within ~20 ms (PRO) /
-   * ~80 ms (FREE). Errors are logged but never thrown — a missed
-   * chunk shouldn't bring down the whole session.
+   * POST one event to the legacy chat-render pipeline at
+   * `/api/commands/output`. Mobile reads this feed for the chat
+   * surface — every "Thinking…" → reply → done bubble flows through
+   * here. Accepts arbitrary body shapes (the legacy emitter is a
+   * thin pipe; mobile branches on `type`):
+   *
+   *   { type: 'clear' }                              wipe screen
+   *   { type: 'new_turn', done: false }              "Agent is typing…"
+   *   { type: 'text', content: '…', done: false }    streaming delta
+   *   { type: 'text', content: '…', done: true }     turn complete
+   *
+   * Errors are logged but never thrown — a missed chunk shouldn't
+   * bring down the whole session.
    */
-  async publishChunk(event: StreamingChunkEvent): Promise<void> {
-    const url = `${this.apiBase}/api/sessions/${encodeURIComponent(this.opts.sessionId)}/streaming-chunk`;
+  async publishOutput(body: Record<string, unknown>): Promise<void> {
+    const url = `${this.apiBase}/api/commands/output`;
     try {
-      const { statusCode, body } = await _transport.post(
+      const { statusCode, body: resBody } = await _transport.post(
         url,
         this.headers,
-        this.envelope(event),
+        this.envelope(body),
       );
       if (statusCode < 200 || statusCode >= 300) {
-        log.warn('acpPublisher', `chunk status=${statusCode} body=${body.slice(0, 200)}`);
+        log.warn(
+          'acpPublisher',
+          `output type=${String(body.type)} done=${body.done === true} status=${statusCode} body=${resBody.slice(0, 200)}`,
+        );
       }
     } catch (err) {
-      log.trace('acpPublisher', 'chunk post failed', err);
+      log.warn(
+        'acpPublisher',
+        `output type=${String(body.type)} post failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
     }
   }
 
@@ -95,7 +116,7 @@ export class AcpPublisher {
       const { statusCode, body } = await _transport.post(
         url,
         this.headers,
-        this.envelope(event),
+        this.envelope(event as unknown as Record<string, unknown>),
       );
       if (statusCode < 200 || statusCode >= 300) {
         log.warn('acpPublisher', `awaiting-answer status=${statusCode} body=${body.slice(0, 200)}`);

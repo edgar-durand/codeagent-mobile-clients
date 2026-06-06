@@ -39,27 +39,41 @@ describe('AcpPublisher', () => {
     vi.restoreAllMocks();
   });
 
-  it('publishChunk POSTs the JSON body to the right URL with auth headers + body envelope', async () => {
-    await publisher.publishChunk({
-      chunkId: 'c-1',
-      kind: 'text',
-      content: 'hello',
-      isFinal: true,
-    });
+  it('publishOutput POSTs to the legacy chat pipe with the body envelope', async () => {
+    await publisher.publishOutput({ type: 'text', content: 'hello', done: false });
     expect(postSpy).toHaveBeenCalledTimes(1);
     const [url, headers, payload] = postSpy.mock.calls[0];
-    expect(url).toBe(`${apiBaseUrl}/api/sessions/sess-1/streaming-chunk`);
+    expect(url).toBe(`${apiBaseUrl}/api/commands/output`);
     expect(headers['X-Plugin-Auth-Token']).toBe('tok-1');
-    // sessionId + pluginId must appear in the BODY too — the backend's
-    // PluginAuthGuard rejects with PLUGIN_TOKEN_REQUIRED otherwise,
-    // even when X-Plugin-Auth-Token is set.
+    // sessionId + pluginId in the BODY — the backend's PluginAuthGuard
+    // rejects with PLUGIN_TOKEN_REQUIRED otherwise even when
+    // X-Plugin-Auth-Token is set on the header.
     expect(JSON.parse(payload)).toEqual({
       sessionId: 'sess-1',
       pluginId: 'plug-1',
-      chunkId: 'c-1',
-      kind: 'text',
+      type: 'text',
       content: 'hello',
-      isFinal: true,
+      done: false,
+    });
+  });
+
+  it('publishOutput boundary events (clear / new_turn) hit the same endpoint', async () => {
+    await publisher.publishOutput({ type: 'clear' });
+    await publisher.publishOutput({ type: 'new_turn', done: false });
+    expect(postSpy).toHaveBeenCalledTimes(2);
+    for (const call of postSpy.mock.calls) {
+      expect(call[0]).toBe(`${apiBaseUrl}/api/commands/output`);
+    }
+    expect(JSON.parse(postSpy.mock.calls[0][2])).toEqual({
+      sessionId: 'sess-1',
+      pluginId: 'plug-1',
+      type: 'clear',
+    });
+    expect(JSON.parse(postSpy.mock.calls[1][2])).toEqual({
+      sessionId: 'sess-1',
+      pluginId: 'plug-1',
+      type: 'new_turn',
+      done: false,
     });
   });
 
@@ -107,15 +121,10 @@ describe('AcpPublisher', () => {
     expect(result).toBeNull();
   });
 
-  it('chunk POST that throws never surfaces — fire-and-forget guarantee', async () => {
+  it('output POST that throws never surfaces — fire-and-forget guarantee', async () => {
     postSpy.mockRejectedValueOnce(new Error('ECONNRESET'));
     await expect(
-      publisher.publishChunk({
-        chunkId: 'c-1',
-        kind: 'text',
-        content: 'hi',
-        isFinal: true,
-      }),
+      publisher.publishOutput({ type: 'text', content: 'hi', done: true }),
     ).resolves.toBeUndefined();
   });
 });

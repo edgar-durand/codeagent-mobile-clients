@@ -25,7 +25,6 @@
  * handler registry verbatim for those.
  */
 
-import { randomUUID } from 'node:crypto';
 import { CommandRelayService, type RemoteCommand } from '../../services/command-relay.service';
 import { log } from '../../services/logger';
 import { showInfo, showSuccess } from '../../ui/banner';
@@ -39,29 +38,44 @@ import { mapSessionUpdate, mapPermissionRequest } from './mappers';
 
 /**
  * Per-turn accumulator that bridges ACP's delta-shaped notifications
- * to the backend's cumulative-content wire convention (see the
- * comment block above `ChunkDelta` in mappers.ts for why).
+ * to the legacy `/api/commands/output` chat pipe mobile actually
+ * reads (see {@link AcpPublisher.publishOutput} for the wire shape).
  *
- * Lifecycle:
- *   - `append(delta)` — runs inside `onSessionUpdate`. Appends to
- *     the chunk's running buffer and POSTs the cumulative content
- *     with `isFinal: false` so mobile sees the text type out live.
- *   - `closeAll()` — runs after `client.prompt()` resolves (or the
- *     adapter exits / the user cancels). POSTs `isFinal: true` for
- *     every open chunk so mobile flips the bubble out of "Thinking…"
- *     and lets the next turn start fresh.
+ * The legacy pipe coalesces by `(sessionId, type)` — successive text
+ * events with the same type overwrite each other until one lands
+ * with `done: true`. We accumulate per ACP message-id so ordering is
+ * preserved, then flush each accumulated buffer as `{ type: 'text',
+ * content: <cumulative>, done: false }` per delta. `closeAll()`
+ * re-flushes the final cumulative content with `done: true` so
+ * mobile flips the bubble out of "Thinking…".
+ *
+ * Note: ACP `thinking` and `tool_call` notifications also flow
+ * through here for Phase 1, but get mapped to `type: 'text'` on the
+ * legacy pipe — that pipe only renders text in the chat surface;
+ * dedicated thinking/tool bubbles live on the streaming-chunk feed
+ * (Epic C, Phase 2 wire-up).
  */
 class StreamingState {
   private readonly open = new Map<string, { kind: StreamingChunkKind; content: string }>();
 
   constructor(private readonly publisher: AcpPublisher) {}
 
+  /**
+   * Boundary events emitted at the start of every turn so mobile
+   * wipes the previous reply and shows "Agent is typing…". Mirrors
+   * the legacy `outputSvc.newTurn()` — `critical: true` on those
+   * sends is implicit here (publishOutput retries on transient
+   * failures so the boundary always lands).
+   */
+  async beginTurn(): Promise<void> {
+    this.open.clear();
+    await this.publisher.publishOutput({ type: 'clear' });
+    await this.publisher.publishOutput({ type: 'new_turn', done: false });
+  }
+
   append(delta: { chunkId: string; kind: StreamingChunkKind; delta: string }): void {
     const existing = this.open.get(delta.chunkId);
     const content = (existing?.content ?? '') + delta.delta;
-    // Kind must stay stable across deltas for the same chunkId — if
-    // a buggy adapter ever flips it, log loudly so we catch the bug
-    // instead of silently mis-rendering on mobile.
     if (existing && existing.kind !== delta.kind) {
       log.warn(
         'acpRunner',
@@ -69,37 +83,41 @@ class StreamingState {
       );
     }
     this.open.set(delta.chunkId, { kind: delta.kind, content });
-    void this.publisher
-      .publishChunk({ chunkId: delta.chunkId, kind: delta.kind, content, isFinal: false })
-      .catch((err) => {
-        log.warn(
-          'acpRunner',
-          `publishChunk (streaming) failed: ${err instanceof Error ? err.message : String(err)}`,
-        );
-      });
+    // Phase 1: every ACP variant maps to `type: 'text'` on the
+    // legacy chat pipe. Thinking + tool bubbles need the Epic C
+    // streaming-chunk feed which isn't wired up yet.
+    void this.publisher.publishOutput({ type: 'text', content, done: false });
   }
 
   /**
-   * Close every open chunk with `isFinal: true`. Idempotent — safe
-   * to call multiple times per turn (e.g. once on prompt-completed,
-   * once on cancel, once on adapter-exit).
+   * Flush every open buffer with `done: true` so mobile flips out
+   * of "Thinking…". Idempotent — safe to call multiple times per
+   * turn (prompt-completed, cancel, adapter-exit).
+   *
+   * Also emits an empty `{type:'text', content:'', done:true}` when
+   * the turn produced no text at all (e.g. Claude responded with
+   * tool calls only) so mobile doesn't sit on "Thinking…" forever
+   * waiting for content that will never arrive.
    */
   async closeAll(): Promise<void> {
-    if (this.open.size === 0) return;
-    const closing = Array.from(this.open.entries());
+    if (this.open.size === 0) {
+      await this.publisher.publishOutput({ type: 'text', content: '', done: true });
+      return;
+    }
+    const closing = Array.from(this.open.values());
     this.open.clear();
-    await Promise.all(
-      closing.map(([chunkId, { kind, content }]) =>
-        this.publisher
-          .publishChunk({ chunkId, kind, content, isFinal: true })
-          .catch((err) => {
-            log.warn(
-              'acpRunner',
-              `publishChunk (closing) failed: ${err instanceof Error ? err.message : String(err)}`,
-            );
-          }),
-      ),
-    );
+    // Emit the final cumulative content for each accumulated buffer;
+    // the last one carries done:true to mark the whole turn complete.
+    // Single-buffer turn (the common case for a plain chat reply)
+    // collapses to one POST.
+    for (let i = 0; i < closing.length; i += 1) {
+      const isLast = i === closing.length - 1;
+      await this.publisher.publishOutput({
+        type: 'text',
+        content: closing[i].content,
+        done: isLast,
+      });
+    }
   }
 }
 
@@ -194,19 +212,17 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
     },
     onUnexpectedExit: (code, signal) => {
       log.warn('acpRunner', `adapter died code=${code} signal=${signal}; shutting down session`);
-      // Close any chunks still mid-stream so mobile flips them out
-      // of "Thinking…" instead of leaving the partial reply hanging
-      // forever as an unfinalised bubble.
-      void streaming.closeAll();
-      // Then surface the failure as a fresh terminal chunk so the
-      // user sees WHY the session died, with its own chunkId so it
-      // doesn't overwrite the partial reply we just closed above.
-      void publisher.publishChunk({
-        chunkId: randomUUID(),
-        kind: 'text',
-        content: `Agent adapter exited unexpectedly (code=${code ?? 'null'} signal=${signal ?? 'null'}).`,
-        isFinal: true,
-      });
+      // closeAll() flushes any half-streamed text with done:true so
+      // mobile flips out of "Thinking…" instead of leaving the
+      // partial reply hanging forever. Followed by a terminal error
+      // message so the user knows WHY the session died.
+      void streaming.closeAll().then(() =>
+        publisher.publishOutput({
+          type: 'text',
+          content: `Agent adapter exited unexpectedly (code=${code ?? 'null'} signal=${signal ?? 'null'}).`,
+          done: true,
+        }),
+      );
       process.exit(1);
     },
   });
@@ -284,11 +300,15 @@ async function handleCommand(
         return;
       }
       log.info('acpRunner', `start_task → forwarding prompt chars=${prompt.length} id=${cmd.id.slice(0, 8)}`);
+      // Mirror the legacy `outputSvc.newTurn()` boundary: clear the
+      // previous reply on mobile + show "Agent is typing…". Without
+      // this, mobile keeps showing the previous turn's bubble until
+      // the first streaming text overwrites it, which races visibly.
+      await streaming.beginTurn();
       try {
         const reply = await client.prompt(prompt);
-        // Flip every open chunk to isFinal:true so mobile flips the
-        // bubble out of "Thinking…" and the next turn can start with
-        // a fresh chunkId namespace.
+        // Close every open buffer with done:true so mobile flips
+        // the bubble out of "Thinking…".
         await streaming.closeAll();
         log.info('acpRunner', `start_task ← done stopReason=${reply.stopReason ?? '?'} id=${cmd.id.slice(0, 8)}`);
         await relay.sendResult(cmd.id, 'completed', { stopReason: reply.stopReason });
