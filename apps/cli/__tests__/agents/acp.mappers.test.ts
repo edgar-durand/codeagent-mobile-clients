@@ -27,7 +27,7 @@ describe('mapSessionUpdate', () => {
       }),
     );
     expect(chunks).toEqual([
-      { chunkId: 'msg-42', kind: 'text', content: 'Hello!', isFinal: true },
+      { chunkId: 'msg-42', kind: 'text', delta: 'Hello!'  },
     ]);
   });
 
@@ -40,7 +40,7 @@ describe('mapSessionUpdate', () => {
       }),
     );
     expect(chunks).toEqual([
-      { chunkId: 'msg-7', kind: 'thinking', content: 'Considering options…', isFinal: true },
+      { chunkId: 'msg-7', kind: 'thinking', delta: 'Considering options…'  },
     ]);
   });
 
@@ -80,8 +80,8 @@ describe('mapSessionUpdate', () => {
       {
         chunkId: 'call-1',
         kind: 'tool_use',
-        content: 'Reading apps/cli/src/agents/acp/runner.ts',
-        isFinal: true,
+        delta: 'Reading apps/cli/src/agents/acp/runner.ts',
+
       },
     ]);
   });
@@ -95,7 +95,7 @@ describe('mapSessionUpdate', () => {
         kind: 'execute',
       }),
     );
-    expect(fromKind[0]?.content).toBe('execute');
+    expect(fromKind[0]?.delta).toBe('execute');
 
     const fromRaw = mapSessionUpdate(
       notification({
@@ -105,7 +105,7 @@ describe('mapSessionUpdate', () => {
         rawInput: { command: 'ls' },
       }),
     );
-    expect(fromRaw[0]?.content).toBe('{"command":"ls"}');
+    expect(fromRaw[0]?.delta).toBe('{"command":"ls"}');
   });
 
   it('tool_call_update drops while pending/in_progress, emits on completed', () => {
@@ -127,7 +127,7 @@ describe('mapSessionUpdate', () => {
       }),
     );
     expect(completed).toEqual([
-      { chunkId: 'c1', kind: 'tool_result', content: '42 results', isFinal: true },
+      { chunkId: 'c1', kind: 'tool_result', delta: '42 results'  },
     ]);
   });
 
@@ -140,7 +140,7 @@ describe('mapSessionUpdate', () => {
         content: [{ type: 'content', content: { type: 'text', text: 'permission denied' } }],
       }),
     );
-    expect(failed[0]?.content).toBe('[failed] permission denied');
+    expect(failed[0]?.delta).toBe('[failed] permission denied');
   });
 
   it('tool_call_update with diff / terminal content summarises instead of dumping', () => {
@@ -153,7 +153,7 @@ describe('mapSessionUpdate', () => {
         content: [{ type: 'diff', path: 'src/foo.ts' }],
       }),
     );
-    expect(diff[0]?.content).toBe('diff: src/foo.ts');
+    expect(diff[0]?.delta).toBe('diff: src/foo.ts');
   });
 
   it('ignores informational variants (plan / usage_update / config_option_update)', () => {

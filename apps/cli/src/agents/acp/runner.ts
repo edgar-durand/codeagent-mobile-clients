@@ -29,13 +29,79 @@ import { randomUUID } from 'node:crypto';
 import { CommandRelayService, type RemoteCommand } from '../../services/command-relay.service';
 import { log } from '../../services/logger';
 import { showInfo, showSuccess } from '../../ui/banner';
-import type { AgentId, AgentModel } from '@codeagent/shared';
+import type { AgentId, AgentModel, StreamingChunkKind } from '@codeagent/shared';
 import { createOsStrategy } from '../../os';
 import { createInteractiveAgentStrategy } from '../registry';
 import { AcpClient } from './client';
 import type { AdapterSpec } from './adapters';
 import { AcpPublisher } from './publisher';
 import { mapSessionUpdate, mapPermissionRequest } from './mappers';
+
+/**
+ * Per-turn accumulator that bridges ACP's delta-shaped notifications
+ * to the backend's cumulative-content wire convention (see the
+ * comment block above `ChunkDelta` in mappers.ts for why).
+ *
+ * Lifecycle:
+ *   - `append(delta)` — runs inside `onSessionUpdate`. Appends to
+ *     the chunk's running buffer and POSTs the cumulative content
+ *     with `isFinal: false` so mobile sees the text type out live.
+ *   - `closeAll()` — runs after `client.prompt()` resolves (or the
+ *     adapter exits / the user cancels). POSTs `isFinal: true` for
+ *     every open chunk so mobile flips the bubble out of "Thinking…"
+ *     and lets the next turn start fresh.
+ */
+class StreamingState {
+  private readonly open = new Map<string, { kind: StreamingChunkKind; content: string }>();
+
+  constructor(private readonly publisher: AcpPublisher) {}
+
+  append(delta: { chunkId: string; kind: StreamingChunkKind; delta: string }): void {
+    const existing = this.open.get(delta.chunkId);
+    const content = (existing?.content ?? '') + delta.delta;
+    // Kind must stay stable across deltas for the same chunkId — if
+    // a buggy adapter ever flips it, log loudly so we catch the bug
+    // instead of silently mis-rendering on mobile.
+    if (existing && existing.kind !== delta.kind) {
+      log.warn(
+        'acpRunner',
+        `chunk kind flip detected chunkId=${delta.chunkId.slice(0, 8)} from=${existing.kind} to=${delta.kind} — using new kind`,
+      );
+    }
+    this.open.set(delta.chunkId, { kind: delta.kind, content });
+    void this.publisher
+      .publishChunk({ chunkId: delta.chunkId, kind: delta.kind, content, isFinal: false })
+      .catch((err) => {
+        log.warn(
+          'acpRunner',
+          `publishChunk (streaming) failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      });
+  }
+
+  /**
+   * Close every open chunk with `isFinal: true`. Idempotent — safe
+   * to call multiple times per turn (e.g. once on prompt-completed,
+   * once on cancel, once on adapter-exit).
+   */
+  async closeAll(): Promise<void> {
+    if (this.open.size === 0) return;
+    const closing = Array.from(this.open.entries());
+    this.open.clear();
+    await Promise.all(
+      closing.map(([chunkId, { kind, content }]) =>
+        this.publisher
+          .publishChunk({ chunkId, kind, content, isFinal: true })
+          .catch((err) => {
+            log.warn(
+              'acpRunner',
+              `publishChunk (closing) failed: ${err instanceof Error ? err.message : String(err)}`,
+            );
+          }),
+      ),
+    );
+  }
+}
 
 export interface AcpRunnerOptions {
   agent: AgentId;
@@ -68,6 +134,7 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
     pluginId: opts.pluginId,
     pluginAuthToken: opts.pluginAuthToken,
   });
+  const streaming = new StreamingState(publisher);
 
   // Counter so the log isn't drowned by every text-delta variant —
   // we surface the variant kind + a count to confirm the SDK is
@@ -79,20 +146,21 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
     onSessionUpdate: (notification) => {
       updateCount += 1;
       const variant = (notification.update as { sessionUpdate?: string })?.sessionUpdate ?? 'unknown';
-      const chunks = mapSessionUpdate(notification);
+      const deltas = mapSessionUpdate(notification);
       // Info-level so it appears with CODEAM_DEBUG=1 (the canonical
       // smoke-test invocation) without needing trace. Includes a
-      // post-map chunk count so we can tell "SDK delivered the
+      // post-map delta count so we can tell "SDK delivered the
       // notification but my mapper ignored it" apart from "SDK
       // never delivered anything" — those are different bugs.
       log.info(
         'acpRunner',
-        `update #${updateCount} variant=${variant} mappedChunks=${chunks.length}`,
+        `update #${updateCount} variant=${variant} mappedDeltas=${deltas.length}`,
       );
-      for (const chunk of chunks) {
-        void publisher.publishChunk(chunk).catch((err) => {
-          log.warn('acpRunner', `publishChunk failed: ${err instanceof Error ? err.message : String(err)}`);
-        });
+      for (const delta of deltas) {
+        // append() POSTs cumulative content with isFinal:false; the
+        // matching isFinal:true POST happens in closeAll() after
+        // client.prompt() resolves (in start_task's try block).
+        streaming.append(delta);
       }
     },
     onRequestPermission: async (request) => {
@@ -126,10 +194,13 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
     },
     onUnexpectedExit: (code, signal) => {
       log.warn('acpRunner', `adapter died code=${code} signal=${signal}; shutting down session`);
-      // Surface the failure as a final text chunk so the mobile
-      // doesn't sit on a stale "thinking…" forever. The chunkId
-      // is fresh so this lands as its own bubble rather than
-      // overwriting in-flight content.
+      // Close any chunks still mid-stream so mobile flips them out
+      // of "Thinking…" instead of leaving the partial reply hanging
+      // forever as an unfinalised bubble.
+      void streaming.closeAll();
+      // Then surface the failure as a fresh terminal chunk so the
+      // user sees WHY the session died, with its own chunkId so it
+      // doesn't overwrite the partial reply we just closed above.
       void publisher.publishChunk({
         chunkId: randomUUID(),
         kind: 'text',
@@ -163,7 +234,7 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
   const relay = new CommandRelayService(
     opts.pluginId,
     async (cmd) => {
-      await handleCommand(cmd, client, relay, acpSessionId, models);
+      await handleCommand(cmd, client, relay, acpSessionId, models, streaming);
     },
     { id: opts.agent, name: opts.agent, displayName: opts.agent } as never,
   );
@@ -201,6 +272,7 @@ async function handleCommand(
   relay: CommandRelayService,
   acpSessionId: string,
   models: AgentModel[],
+  streaming: StreamingState,
 ): Promise<void> {
   switch (cmd.type) {
     case 'start_task': {
@@ -214,9 +286,16 @@ async function handleCommand(
       log.info('acpRunner', `start_task → forwarding prompt chars=${prompt.length} id=${cmd.id.slice(0, 8)}`);
       try {
         const reply = await client.prompt(prompt);
+        // Flip every open chunk to isFinal:true so mobile flips the
+        // bubble out of "Thinking…" and the next turn can start with
+        // a fresh chunkId namespace.
+        await streaming.closeAll();
         log.info('acpRunner', `start_task ← done stopReason=${reply.stopReason ?? '?'} id=${cmd.id.slice(0, 8)}`);
         await relay.sendResult(cmd.id, 'completed', { stopReason: reply.stopReason });
       } catch (err) {
+        // Close on failure too so a half-streamed reply doesn't stay
+        // mid-air on mobile forever.
+        await streaming.closeAll();
         log.warn('acpRunner', `prompt failed: ${describeError(err)}`);
         await relay.sendResult(cmd.id, 'failed', { error: describeError(err) });
       }
@@ -226,6 +305,7 @@ async function handleCommand(
     case 'escape_key': {
       try {
         await client.cancel();
+        await streaming.closeAll();
         await relay.sendResult(cmd.id, 'completed', {});
       } catch (err) {
         log.warn('acpRunner', `cancel failed: ${describeError(err)}`);
