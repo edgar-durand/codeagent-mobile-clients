@@ -4,6 +4,23 @@ All notable changes to the CodeAgent-Mobile JetBrains plugin are documented here
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.28.0] — 2026-06-06
+
+### Added
+
+- **cli:** Auto-update on stale version + re-exec into new binary
+
+### Fixed
+
+- **cli:** IDE terminal output + Save round-trip on ACP sessions
+- **cli:** File-watcher honors .gitignore per-repo
+- **cli:** Refresh pluginAuthToken on boot to survive JWT_SECRET rotation
+- **cli:** Use /pairing/reconnect on boot to refresh token + activate session
+
+### Diag
+
+- **cli:** Log boot triple + on-401 triple to isolate INVALID_PLUGIN_TOKEN
+
 ## [2.27.16] — 2026-06-06
 
 ### Added
