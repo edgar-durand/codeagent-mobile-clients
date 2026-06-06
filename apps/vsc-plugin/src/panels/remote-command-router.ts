@@ -9,7 +9,7 @@ import { FileOpsService } from '../services/file-ops.service';
 import { ProjectOpsService } from '../services/project-ops.service';
 import { ChatHistoryService } from '../services/chat-history.service';
 import { AgentStrategyRegistry } from '../services/strategies/AgentStrategyRegistry';
-import type { AgentInvocation, StrategyResult } from '../services/strategies/AgentStrategy';
+import type { AgentInvocation } from '../services/strategies/AgentStrategy';
 import { CopilotChatService } from '../services/copilot-chat.service';
 import { AgentOutputMonitor } from '../services/agent-output-monitor';
 import {
@@ -28,9 +28,6 @@ function buildInstallAndRun(subcommand: string): string {
     process.platform === 'win32',
   );
 }
-
-const TERMINAL_AGENT_MESSAGE =
-  'Terminal agents are run by codeam-cli. Install it (npm i -g codeam-cli) and run `codeam pair`.';
 
 /**
  * Routes a single RemoteCommand to the right service. Extracted from
@@ -128,41 +125,15 @@ export class RemoteCommandRouter {
           }
         }
 
-        // Terminal-agent commands (Claude / Codex / Cursor / CodeRabbit
-        // / Aider) are owned by codeam-cli — the mobile should dispatch
-        // them to the CLI's pluginId, not the IDE plugin's. If one slips
-        // through anyway, fail explicitly so the user sees a clear hint
-        // instead of a silent observer-bridge no-op.
-        if (agentId?.startsWith('__terminal__:')) {
-          relay.sendResult(command.id, 'failed', {
-            message: TERMINAL_AGENT_MESSAGE,
-          });
-          break;
-        }
-        if (agentId && normalizeCliAgentId(agentId)) {
-          relay.sendResult(command.id, 'failed', {
-            message: TERMINAL_AGENT_MESSAGE,
-          });
-          break;
-        }
-
         // Resolve the target agent so strategies receive the full
-        // DetectedAgent (Copilot Chat, JCEF observers, etc.). The plugin
-        // no longer manages terminal agents, so default targeting picks
-        // the first installed non-terminal entry.
+        // DetectedAgent (terminal agents, Copilot Chat, JCEF observers,
+        // etc.). Default targeting still prefers non-terminal entries so
+        // an untargeted prompt does not accidentally write into a shell.
         ide.detectInstalledAgents()
           .then((agents) => {
             const target = agentId
               ? agents.find((a) => a.id === agentId)
               : agents.find((a) => !a.isTerminalAgent) ?? agents[0];
-
-            if (target?.isTerminalAgent) {
-              const terminalResult: StrategyResult = {
-                delivered: false,
-                message: TERMINAL_AGENT_MESSAGE,
-              };
-              return terminalResult;
-            }
 
             const invocation: AgentInvocation = {
               agent: target,

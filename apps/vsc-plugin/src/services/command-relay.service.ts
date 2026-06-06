@@ -252,8 +252,8 @@ export class CommandRelayService {
           status: obj.status as string,
           createdAt: obj.createdAt as number,
         };
-        if (!this.markDispatched(cmd.id)) continue;
-        this.listeners.forEach((l) => l.onCommandReceived(cmd));
+        if (this.wasRecentlyDispatched(cmd.id)) continue;
+        if (this.dispatchToListeners(cmd)) this.markDispatched(cmd.id);
       }
     } catch {
       /* malformed frame — wait for the next one */
@@ -321,12 +321,12 @@ export class CommandRelayService {
           status: obj.status as string,
           createdAt: obj.createdAt as number,
         };
-        if (!this.markDispatched(cmd.id)) {
+        if (this.wasRecentlyDispatched(cmd.id)) {
           this.log.appendLine(`Skipping duplicate command: ${cmd.type} (${cmd.id})`);
           continue;
         }
         this.log.appendLine(`Received command: ${cmd.type} (${cmd.id})`);
-        this.listeners.forEach((l) => l.onCommandReceived(cmd));
+        if (this.dispatchToListeners(cmd)) this.markDispatched(cmd.id);
       }
     } catch {
       this.pollFailures += 1;
@@ -747,6 +747,25 @@ export class CommandRelayService {
     }
   }
 
+  private dispatchToListeners(cmd: RemoteCommand): boolean {
+    if (this.listeners.length === 0) {
+      this.log.appendLine(
+        `No command listeners registered; leaving command pending: ${cmd.type} (${cmd.id})`,
+      );
+      return false;
+    }
+    let delivered = false;
+    for (const listener of this.listeners) {
+      try {
+        listener.onCommandReceived(cmd);
+        delivered = true;
+      } catch (e) {
+        this.log.appendLine(`Command listener threw for ${cmd.type} (${cmd.id}): ${e}`);
+      }
+    }
+    return delivered;
+  }
+
   /**
    * Returns true the first time we see a command id, false on every
    * subsequent re-delivery within DEDUP_TTL_MS. Prunes entries older
@@ -767,7 +786,13 @@ export class CommandRelayService {
     return true;
   }
 
-  // ─── Test seam (used by __tests__/command-relay.test.ts only) ───
+  private wasRecentlyDispatched(id: string): boolean {
+    if (!id) return false;
+    const seenAt = this.recentCommandIds.get(id);
+    return seenAt !== undefined && seenAt > Date.now() - CommandRelayService.DEDUP_TTL_MS;
+  }
+
+  // ─── Test seam (used by vsc-plugin Vitest specs only) ───
   // None of these methods are part of the public contract — they
   // expose private internals to vitest without polluting the
   // production surface. The CLI's telemetry service uses the same
@@ -775,6 +800,7 @@ export class CommandRelayService {
   readonly _testHelpers = {
     feedSseFrame: (frame: string): void => this.handleSseFrame(frame),
     markDispatched: (id: string): boolean => this.markDispatched(id),
+    wasRecentlyDispatched: (id: string): boolean => this.wasRecentlyDispatched(id),
     getConnectionState: (): ConnectionState => this.connectionState,
     forceConnectionState: (s: ConnectionState): void => this.setConnectionState(s),
     markTransportSuccess: (s: 'online' | 'reconnecting'): void => this.markTransportSuccess(s),

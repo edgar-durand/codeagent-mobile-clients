@@ -2,6 +2,7 @@ import type { OutputChannel } from 'vscode';
 import type { AgentInvocation, AgentStrategy, StrategyResult } from './AgentStrategy';
 import { CopilotLmStrategy } from './CopilotLmStrategy';
 import { ObserverBridgeStrategy } from './ObserverBridgeStrategy';
+import { TerminalAgentStrategy } from './TerminalAgentStrategy';
 
 /**
  * Registry + dispatch for `AgentStrategy` implementations. Mirrors
@@ -34,6 +35,7 @@ export class AgentStrategyRegistry {
 
   private constructor(private readonly log: OutputChannel) {
     this.strategies = [
+      new TerminalAgentStrategy(log),
       new CopilotLmStrategy(log),
       // Catch-all — keep last.
       new ObserverBridgeStrategy(log),
