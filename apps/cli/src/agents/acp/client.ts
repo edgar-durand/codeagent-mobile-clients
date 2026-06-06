@@ -21,6 +21,7 @@ import * as fs from 'node:fs/promises';
 import { Readable, Writable } from 'node:stream';
 import {
   ClientSideConnection,
+  RequestError,
   ndJsonStream,
   type Agent,
   type Client,
@@ -268,6 +269,57 @@ export class AcpClient {
   }
 
   /**
+   * Load a previously persisted session by id. Mobile's
+   * `resume_session` command flows through here. Requires the
+   * adapter to advertise `loadSession: true` in its initialize
+   * response — without that capability the SDK rejects the call.
+   *
+   * Side-effect: replaces the active sessionId with the loaded one
+   * so subsequent prompts target the loaded conversation, not the
+   * fresh-on-spawn `newSession` one.
+   */
+  async loadSession(sessionId: string): Promise<void> {
+    if (!this.connection) {
+      throw new Error('AcpClient.loadSession called before start()');
+    }
+    log.info('acpClient', `loadSession → sessionId=${sessionId.slice(0, 8)}`);
+    await this.connection.loadSession({
+      sessionId,
+      cwd: this.opts.cwd,
+      mcpServers: [],
+    });
+    this.sessionId = sessionId;
+    log.info('acpClient', `loadSession ← ok sessionId=${sessionId.slice(0, 8)}`);
+  }
+
+  /**
+   * Switch the active session's model via the non-standard
+   * `session/set_model` RPC. The standard ACP SDK doesn't expose
+   * this — claude-agent-acp and codex-acp implement it as an
+   * extension. Adapters without it reject and `change_model`
+   * surfaces a clean "not supported" affordance on mobile.
+   */
+  async setModel(modelId: string): Promise<void> {
+    if (!this.connection || !this.sessionId) {
+      throw new Error('AcpClient.setModel called before start()');
+    }
+    log.info('acpClient', `setModel → ${modelId}`);
+    // Use the SDK's raw request escape hatch — sendRequest sits
+    // below the typed RPC layer, so non-standard methods like
+    // `session/set_model` route through without typed-shape friction.
+    const rawConn = this.connection as unknown as {
+      connection: {
+        sendRequest: (method: string, params: unknown) => Promise<unknown>;
+      };
+    };
+    await rawConn.connection.sendRequest('session/set_model', {
+      sessionId: this.sessionId,
+      modelId,
+    });
+    log.info('acpClient', `setModel ← ok modelId=${modelId}`);
+  }
+
+  /**
    * Cancel the in-flight prompt turn. Notification — no response.
    * Safe to call when nothing is in flight (the adapter no-ops).
    */
@@ -323,12 +375,59 @@ export class AcpClient {
         // the agent's responsibility — we trust the adapter's
         // sandboxing (claude-agent-acp / codex-acp scope to the
         // session cwd by default).
-        const content = await fs.readFile(params.path, 'utf8');
-        return applyLineRange(content, params.line ?? null, params.limit ?? null);
+        //
+        // Map filesystem errors to the SDK's typed RequestError so
+        // the adapter can branch on the JSON-RPC error code. Without
+        // this, a bare `fs.readFile` ENOENT bubbles up as a generic
+        // `-32603 Internal error` which Gemini interprets as
+        // "transient failure, retry" — it then re-tries the same
+        // read in a tight loop and the prompt times out at 90 s
+        // (caught in the v2.27.11 smoke test). `resourceNotFound`
+        // (-32002) is the spec-correct shape for "this path doesn't
+        // exist"; the adapter's read-before-write check sees it and
+        // falls through to the write branch immediately.
+        try {
+          const content = await fs.readFile(params.path, 'utf8');
+          return applyLineRange(content, params.line ?? null, params.limit ?? null);
+        } catch (err) {
+          const code = (err as NodeJS.ErrnoException).code;
+          if (code === 'ENOENT') throw RequestError.resourceNotFound(params.path);
+          if (code === 'EACCES' || code === 'EPERM') {
+            throw new RequestError(
+              -32002,
+              `Permission denied: ${params.path}`,
+              { uri: params.path },
+            );
+          }
+          if (code === 'EISDIR') {
+            throw RequestError.invalidParams(`path is a directory: ${params.path}`);
+          }
+          throw RequestError.internalError({ uri: params.path }, code ?? String(err));
+        }
       },
       writeTextFile: async (params): Promise<WriteTextFileResponse> => {
-        await fs.writeFile(params.path, params.content, 'utf8');
-        return {};
+        try {
+          await fs.writeFile(params.path, params.content, 'utf8');
+          return {};
+        } catch (err) {
+          const code = (err as NodeJS.ErrnoException).code;
+          if (code === 'EACCES' || code === 'EPERM') {
+            throw new RequestError(
+              -32002,
+              `Permission denied: ${params.path}`,
+              { uri: params.path },
+            );
+          }
+          if (code === 'ENOENT') {
+            // Parent directory missing — distinct from "file not
+            // found" semantically; the adapter sees this and knows
+            // to mkdir before retrying instead of giving up.
+            throw RequestError.invalidParams(
+              `Parent directory does not exist for: ${params.path}`,
+            );
+          }
+          throw RequestError.internalError({ uri: params.path }, code ?? String(err));
+        }
       },
       // Terminal capability is declared `false` above so adapters
       // shouldn't call these; provide explicit "not implemented"
