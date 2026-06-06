@@ -31,6 +31,17 @@ export interface PairedUserInfo {
   pluginAuthToken?: string;
 }
 
+/**
+ * Hard ceiling on how long the CLI is willing to wait for the backend
+ * to ack `/api/pairing/code`. QA report #5: a transparent proxy was
+ * accepting the TCP connection but never forwarding the body, leaving
+ * the spinner on "Requesting pairing code..." for 10+ minutes. Anything
+ * past ~10 s here is hostile UX — the user can `Ctrl-C + retry` in less
+ * time than that. Resolves the outer call to `null` so `pair.ts` takes
+ * the existing "Could not reach the server" path.
+ */
+const REQUEST_CODE_TIMEOUT_MS = 10_000;
+
 export async function requestCode(
   pluginId: string,
 ): Promise<{ code: string; expiresAt: number } | null> {
@@ -47,7 +58,7 @@ export async function requestCode(
     // up the new branch. Returns `null` on detached HEAD / non-git dirs.
     const branch = detectCurrentBranch();
     // Call through _transport so vi.spyOn can intercept in tests
-    const result = await _transport.postJson(`${API_BASE}/api/pairing/code`, {
+    const post = _transport.postJson(`${API_BASE}/api/pairing/code`, {
       pluginId,
       ideName: 'Terminal (codeam-cli)',
       ideVersion: pkg.version,
@@ -56,6 +67,19 @@ export async function requestCode(
       branch,
       ...(codespaceName ? { codespaceName } : {}),
     });
+    // Race the request against a hard timeout. The underlying socket
+    // is leaked when the timeout wins (no AbortController plumbed
+    // through `_postJson`), but the OS / GC reaps it once the process
+    // exits — acceptable since the user is already on the "give up
+    // and retry" path.
+    let timer: NodeJS.Timeout | undefined;
+    const timeoutSentinel = Symbol('request-code-timeout');
+    const timeoutPromise = new Promise<typeof timeoutSentinel>((resolve) => {
+      timer = setTimeout(() => resolve(timeoutSentinel), REQUEST_CODE_TIMEOUT_MS);
+    });
+    const result = await Promise.race([post, timeoutPromise]);
+    clearTimeout(timer);
+    if (result === timeoutSentinel) return null;
     const data = result?.data as Record<string, unknown> | undefined;
     if (!data?.code) return null;
     return { code: data.code as string, expiresAt: data.expiresAt as number };
