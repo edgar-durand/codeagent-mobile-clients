@@ -32,6 +32,7 @@ import {
   type SelectPrompt,
 } from '@codeagent/shared';
 import { geminiCredentialLocator, geminiLoginLauncher } from './link';
+import { spawnAndCapture } from '../../services/spawn-and-capture';
 import type { OsStrategy } from '../../os';
 import type { ChangeModelInstruction, RuntimeStrategy } from '../strategy';
 
@@ -148,6 +149,35 @@ export class GeminiRuntimeStrategy implements RuntimeStrategy {
    */
   detectInteractivePrompt(_lines: string[]): SelectPrompt | null {
     return null;
+  }
+
+  /**
+   * Headless single-prompt invocation — the same path Claude / Codex
+   * use for `request_ai_summary` + `request_ai_insight` (Files
+   * review summaries + per-file insights). Gemini exposes the same
+   * pattern via `gemini -p "<prompt>"` which runs in non-interactive
+   * print mode, writes the response to stdout, and exits.
+   *
+   * `--skip-trust` bypasses the workspace trust prompt — required
+   * for headless invocations because the prompt would block stdin.
+   * Safe because the user already trusted this cwd when they paired
+   * the codeam session.
+   *
+   * Returns `null` on spawn failure / timeout / empty output so the
+   * AI handler can silently skip without bubbling a partial reply
+   * to the user — same semantics as Claude / Codex above.
+   */
+  async generateOneShot(
+    prompt: string,
+    opts?: { cwd?: string; timeoutMs?: number },
+  ): Promise<string | null> {
+    const binary = this.os.findInPath('gemini');
+    if (!binary) return null;
+    const launch = this.os.buildLaunch(binary, ['--skip-trust', '-p', prompt]);
+    return spawnAndCapture(launch.cmd, launch.args, {
+      cwd: opts?.cwd,
+      timeoutMs: opts?.timeoutMs,
+    });
   }
 
   credentialLocator() {

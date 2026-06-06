@@ -12,9 +12,11 @@
  *   - start_task → `client.prompt`
  *   - stop_task / escape_key → `client.cancel`
  *   - session/update → text / thinking / tool_use / tool_result chunks
- *   - session/request_permission → awaiting-answer + 1.5 s polling
- *     for the user's reply, then resolve the ACP request with the
- *     matching `optionId`.
+ *   - session/request_permission → publishAwaitingAnswer; the user's
+ *     reply lands as a `select_option` command via the CLI's existing
+ *     SSE relay (`/api/commands/pending/stream`) and `handleCommand`
+ *     resolves the pending Promise back through the SDK. No polling —
+ *     the project's CLAUDE.md forbids it product-wide.
  *
  * Out of scope for Phase 1 — we route these to a "not supported in
  * ACP mode" notice rather than silently dropping:
@@ -25,16 +27,26 @@
  * handler registry verbatim for those.
  */
 
+import { randomUUID } from 'node:crypto';
 import { CommandRelayService, type RemoteCommand } from '../../services/command-relay.service';
 import { log } from '../../services/logger';
 import { showInfo, showSuccess } from '../../ui/banner';
 import type { AgentId, AgentModel, StreamingChunkKind } from '@codeagent/shared';
+import type { RequestPermissionResponse } from '@agentclientprotocol/sdk';
 import { createOsStrategy } from '../../os';
 import { createInteractiveAgentStrategy } from '../registry';
 import { AcpClient } from './client';
 import type { AdapterSpec } from './adapters';
 import { AcpPublisher } from './publisher';
 import { mapSessionUpdate, mapPermissionRequest } from './mappers';
+import { extractSelectPrompt } from './selectPromptExtractor';
+import {
+  handlers as legacyHandlers,
+  dispatchCommand as legacyDispatchCommand,
+  type HandlerContext,
+} from '../../commands/start/handlers';
+import type { RuntimeStrategy } from '../strategy';
+import { removeSession } from '../../config';
 
 /**
  * Per-turn accumulator that bridges ACP's delta-shaped notifications
@@ -62,40 +74,313 @@ import { mapSessionUpdate, mapPermissionRequest } from './mappers';
  *     responded with tool calls only) — so mobile reliably flips out
  *     of "Thinking…".
  */
+/**
+ * Pending interactive question state. Two shapes — one per source —
+ * tracked by {@link StreamingState} so the SSE-driven `select_option`
+ * relay command can resolve whichever is active without ambiguity.
+ *
+ * `kind: 'permission'` — the SDK called `onRequestPermission` and is
+ * waiting on the returned Promise. `select_option` resolves it with
+ * the matching `optionId`; the SDK then ships the response back to
+ * the adapter over JSON-RPC.
+ *
+ * `kind: 'free-form'` — the agent emitted text with numbered options
+ * (no `session/request_permission`); the server-side parser turned
+ * those into a select_prompt block. `select_option` translates the
+ * picked index to the option text and re-prompts the adapter with it
+ * as a new turn.
+ */
+type PendingInteractive =
+  | {
+      kind: 'permission';
+      questionId: string;
+      /** Ordered labels — `select_option {index}` looks the label up here. */
+      labels: string[];
+      optionIdByLabel: Record<string, string>;
+      resolve: (response: RequestPermissionResponse) => void;
+      /** Auto-reject after this ms; matches the upstream Redis TTL. */
+      timeoutTimer: NodeJS.Timeout;
+    }
+  | {
+      kind: 'free-form';
+      /** Ordered option texts — `select_option {index}` indexes here
+       *  and sends the picked text as the next prompt. */
+      options: string[];
+    };
+
 class StreamingState {
   private text = '';
+  private pending: PendingInteractive | null = null;
+  /**
+   * Per-chunkId cumulative buffers for the Epic C streaming-chunk
+   * feed. The chat-output pipe (`publishOutput`) coalesces by
+   * `(sessionId, type)` and is text-only; this feed coalesces by
+   * `(sessionId, chunkId)` and carries thinking + tool_use +
+   * tool_result kinds for SessionDetailScreen's richer rendering.
+   *
+   * Closed out with `isFinal: true` in {@link closeAll} /
+   * {@link closeTurnWithInteractiveDetection} so mobile knows the
+   * chunk is done streaming.
+   */
+  private readonly streamingChunks = new Map<
+    string,
+    { kind: StreamingChunkKind; content: string }
+  >();
 
   constructor(private readonly publisher: AcpPublisher) {}
+
+  /**
+   * Register a permission Promise. The Promise stays pending until
+   * `resolveSelection(index)` is called from the relay handler, OR
+   * the safety timer fires after PERMISSION_TIMEOUT_MS and we
+   * default-reject. Caller is the SDK's `onRequestPermission`.
+   */
+  registerPermission(args: {
+    questionId: string;
+    labels: string[];
+    optionIdByLabel: Record<string, string>;
+  }): Promise<RequestPermissionResponse> {
+    return new Promise<RequestPermissionResponse>((resolve) => {
+      const timeoutTimer = setTimeout(() => {
+        if (this.pending?.kind === 'permission' && this.pending.questionId === args.questionId) {
+          log.warn(
+            'acpRunner',
+            `permission ${args.questionId.slice(0, 8)} TTL expired — auto-cancel`,
+          );
+          this.pending = null;
+          resolve({ outcome: { outcome: 'cancelled' } });
+        }
+      }, PERMISSION_TIMEOUT_MS);
+      this.pending = {
+        kind: 'permission',
+        questionId: args.questionId,
+        labels: args.labels,
+        optionIdByLabel: args.optionIdByLabel,
+        resolve,
+        timeoutTimer,
+      };
+    });
+  }
+
+  /**
+   * Stash the option texts the server-side select_prompt parser
+   * surfaced for this turn. Cleared on `beginTurn()` (next turn) or
+   * `resolveSelection()` (user picked).
+   */
+  registerFreeformOptions(options: string[]): void {
+    this.pending = { kind: 'free-form', options };
+  }
+
+  /**
+   * Apply a `select_option` command (delivered via the CLI's SSE
+   * relay) to whatever pending question is active. Returns the
+   * routing instruction the runner uses to drive the next ACP RPC:
+   *
+   *   - 'resolved' — permission Promise resolved; SDK is unblocked
+   *     and the runner just acks the relay command.
+   *   - 'reprompt' — free-form selection; the runner must call
+   *     `client.prompt(text)` with the returned text to send the
+   *     user's pick to the adapter as a new turn.
+   *   - 'none' — nothing pending; the runner acks the command as
+   *     failed so mobile shows a stale-question affordance.
+   */
+  resolveSelection(index: number): { kind: 'resolved' } | { kind: 'reprompt'; text: string } | { kind: 'none' } {
+    if (!this.pending) return { kind: 'none' };
+    if (this.pending.kind === 'permission') {
+      const label = this.pending.labels[index];
+      const optionId = label ? this.pending.optionIdByLabel[label] : undefined;
+      clearTimeout(this.pending.timeoutTimer);
+      const resolve = this.pending.resolve;
+      this.pending = null;
+      if (!optionId) {
+        // Index out of range — the labels list on mobile drifted out
+        // of sync with what we registered (very unlikely but cheaper
+        // to handle than to assume).
+        log.warn('acpRunner', `select_option index=${index} out of bounds — cancel`);
+        resolve({ outcome: { outcome: 'cancelled' } });
+        return { kind: 'resolved' };
+      }
+      resolve({ outcome: { outcome: 'selected', optionId } });
+      return { kind: 'resolved' };
+    }
+    // Free-form path
+    const text = this.pending.options[index];
+    this.pending = null;
+    if (!text) {
+      log.warn('acpRunner', `select_option index=${index} out of bounds (free-form) — drop`);
+      return { kind: 'none' };
+    }
+    return { kind: 'reprompt', text };
+  }
 
   /**
    * Boundary events emitted at the start of every turn so mobile
    * wipes the previous reply and shows "Agent is typing…". Mirrors
    * the legacy `outputSvc.newTurn()`.
    */
+  /**
+   * Returns the cumulative agent reply text for the in-progress
+   * turn. Lets the runner snapshot the text BEFORE `closeAll` /
+   * `closeTurnWithInteractiveDetection` reset the buffer — needed
+   * by {@link AcpHistory.appendAgentReply} so the persisted
+   * conversation history carries the same reply mobile rendered.
+   */
+  getCurrentText(): string {
+    return this.text;
+  }
+
   async beginTurn(): Promise<void> {
     this.text = '';
+    this.streamingChunks.clear();
+    // Any leftover pending interactive question from a previous turn
+    // is now stale — a fresh prompt supersedes it. Clear timers so we
+    // don't auto-cancel a question that no longer exists.
+    if (this.pending?.kind === 'permission') {
+      clearTimeout(this.pending.timeoutTimer);
+    }
+    this.pending = null;
     await this.publisher.publishOutput({ type: 'clear' });
     await this.publisher.publishOutput({ type: 'new_turn', done: false });
   }
 
   append(delta: { chunkId: string; kind: StreamingChunkKind; delta: string }): void {
-    // Phase 1: only text chunks reach the chat pipe. thinking +
-    // tool_use + tool_result need the Epic C streaming-chunk feed
-    // which isn't wired up yet — silently drop them here.
-    if (delta.kind !== 'text') return;
-    this.text += delta.delta;
-    void this.publisher.publishOutput({ type: 'text', content: this.text, done: false });
+    // 1) Chat pipe (legacy `/api/commands/output`) — text only, single
+    //    cumulative buffer per turn. Drives the main chat bubble.
+    if (delta.kind === 'text') {
+      this.text += delta.delta;
+      void this.publisher.publishOutput({ type: 'text', content: this.text, done: false });
+    }
+    // 2) Epic C streaming-chunk feed (`/api/sessions/:id/streaming-chunk`)
+    //    — all four kinds (text, thinking, tool_use, tool_result),
+    //    cumulative per chunkId. Drives SessionDetailScreen's rich
+    //    THINKING / tool-pill / tool-result bubbles. Both feeds run
+    //    in parallel so the redesigned mobile surface stays in sync
+    //    with the legacy chat surface.
+    const existing = this.streamingChunks.get(delta.chunkId);
+    const cumulativeContent = (existing?.content ?? '') + delta.delta;
+    if (existing && existing.kind !== delta.kind) {
+      log.warn(
+        'acpRunner',
+        `streaming-chunk kind flip chunkId=${delta.chunkId.slice(0, 8)} from=${existing.kind} to=${delta.kind}`,
+      );
+    }
+    this.streamingChunks.set(delta.chunkId, { kind: delta.kind, content: cumulativeContent });
+    void this.publisher.publishStreamingChunk({
+      chunkId: delta.chunkId,
+      kind: delta.kind,
+      content: cumulativeContent,
+      isFinal: false,
+    });
   }
 
   /**
    * Flip the chat out of "Thinking…" with one final cumulative
    * `done: true`. Idempotent — safe to call from happy + error +
    * adapter-exit paths.
+   *
+   * Does NOT attempt select_prompt extraction — use {@link
+   * closeTurnWithInteractiveDetection} for happy-path turn closure.
+   * Error paths (cancel, adapter exit, half-streamed reply) call
+   * THIS one because a torn-off text might match the heuristics
+   * spuriously and strand the runner with a free-form pending state
+   * the user can't see / answer.
    */
   async closeAll(): Promise<void> {
     const finalText = this.text;
     this.text = '';
-    await this.publisher.publishOutput({ type: 'text', content: finalText, done: true });
+    await Promise.all([
+      this.publisher.publishOutput({ type: 'text', content: finalText, done: true }),
+      this.flushStreamingChunks(),
+    ]);
+  }
+
+  /**
+   * Re-emit every open streaming-chunk buffer with `isFinal: true`
+   * so SessionDetailScreen's bubbles flip out of "still streaming"
+   * state. Idempotent — clears the map after, so a second call is a
+   * no-op (matters because `closeAll` runs from several lifecycle
+   * paths: happy turn-end, error catch, adapter exit).
+   */
+  private async flushStreamingChunks(): Promise<void> {
+    if (this.streamingChunks.size === 0) return;
+    const open = Array.from(this.streamingChunks.entries());
+    this.streamingChunks.clear();
+    await Promise.all(
+      open.map(([chunkId, { kind, content }]) =>
+        this.publisher.publishStreamingChunk({
+          chunkId,
+          kind,
+          content,
+          isFinal: true,
+        }),
+      ),
+    );
+  }
+
+  /**
+   * Close a successfully completed turn. Same as {@link closeAll}
+   * but additionally checks whether the final cumulative text ended
+   * with a "question + numbered options" pattern an ACP agent
+   * commonly emits when it wants user input (Gemini's typical
+   * "¿continuar?\n1. sí\n2. no" shape). When detected:
+   *
+   *   1. The text BEFORE the options ships as a normal text
+   *      `done:true` chunk so the user sees the agent's
+   *      explanation / reasoning above the buttons.
+   *   2. A `type:'select_prompt'` chunk follows with the question +
+   *      options — mobile renders this as tappable buttons (same
+   *      legacy chunk shape Claude PTY agents already emit).
+   *   3. The runner's pending state is set to `free-form` with the
+   *      option texts so the matching `select_option` relay command
+   *      can map index → text and re-prompt the adapter.
+   *
+   * When NOT detected, behaves identically to {@link closeAll} (one
+   * text done:true chunk with the full cumulative).
+   */
+  async closeTurnWithInteractiveDetection(): Promise<void> {
+    const finalText = this.text;
+    this.text = '';
+    // Streaming-chunk feed always flushes regardless of interactive
+    // detection — those bubbles live in SessionDetailScreen on their
+    // own coalescence key (chunkId) independent of the chat pipe.
+    const flushSc = this.flushStreamingChunks();
+    const extracted = extractSelectPrompt(finalText);
+    if (!extracted) {
+      await Promise.all([
+        this.publisher.publishOutput({ type: 'text', content: finalText, done: true }),
+        flushSc,
+      ]);
+      return;
+    }
+    log.info(
+      'acpRunner',
+      `select_prompt extracted question="${(extracted.question ?? '').slice(0, 60)}" options=${extracted.options.length}`,
+    );
+    if (extracted.textBefore.length > 0) {
+      await this.publisher.publishOutput({
+        type: 'text',
+        content: extracted.textBefore,
+        done: true,
+      });
+    }
+    // Register pending so the matching select_option relay command
+    // can resolve via reprompt to the picked text.
+    this.pending = { kind: 'free-form', options: extracted.options };
+    await this.publisher.publishOutput({
+      type: 'select_prompt',
+      content: extracted.question ?? 'Pick an option',
+      options: extracted.options,
+      // Mobile's renderer accepts descriptions in parallel with the
+      // options array. ACP doesn't surface per-option descriptions,
+      // so we ship empty strings — the renderer falls back to the
+      // option text as the button label.
+      optionDescriptions: extracted.options.map(() => ''),
+      currentIndex: 0,
+      done: true,
+    });
+    // Wait for the streaming-chunk feed flush we started above so
+    // the turn ends with all bubbles finalised across both pipes.
+    await flushSc;
   }
 }
 
@@ -114,15 +399,98 @@ export interface AcpRunnerOptions {
   cwd: string;
 }
 
-/** Resolution interval for the pending-answer poll. Matches the
- *  legacy emitter — short enough to feel instant on mobile, long
- *  enough to stay well under any sane rate limit. */
-const ANSWER_POLL_MS = 1500;
-
-/** Max time we'll wait for a permission reply before defaulting to
- *  reject. Same 5 min ceiling the awaiting-answer Redis TTL uses
- *  upstream, so polling beyond that is wasted work. */
+/** Auto-cancel a permission Promise after this ms. Matches the
+ *  upstream Redis TTL on the awaiting-answer record so the SDK
+ *  never blocks past the point where mobile could still answer. */
 const PERMISSION_TIMEOUT_MS = 5 * 60 * 1000;
+
+/**
+ * Accumulator for the conversation history mobile expects when the
+ * user opens a past conversation from the RECENT sheet.
+ *
+ * Legacy PTY agents parse `~/.claude/projects/<cwd>/<sessionId>.jsonl`
+ * and push that to `/api/sessions/conversation` via `HistoryService`.
+ * ACP agents have no on-disk transcript — every turn arrives over
+ * JSON-RPC stdio — so we materialise an equivalent here: append every
+ * prompt the user sends + every agent reply we close out, then push
+ * the cumulative list at turn boundaries.
+ *
+ * `summary` is the first user prompt (truncated to 120 chars) — same
+ * shape the legacy JSONL parser uses to derive the row label on
+ * mobile's RECENT list. `acpSessionId` is the id the ACP adapter
+ * minted on `newSession`; we mirror it as the `ClaudeSession.id`
+ * so mobile's resume button has a stable key per conversation.
+ */
+class AcpHistory {
+  private readonly messages: Array<{
+    id: string;
+    role: 'user' | 'agent';
+    text: string;
+    timestamp: number;
+  }> = [];
+  private summary: string | null = null;
+
+  constructor(
+    private readonly publisher: AcpPublisher,
+    private readonly opts: { agent: AgentId; acpSessionId: string },
+  ) {}
+
+  appendUserPrompt(text: string): void {
+    if (this.summary === null) {
+      // Trim newlines/whitespace and cap at 120 chars so the RECENT
+      // row's one-line summary doesn't overflow on mobile.
+      const trimmed = text.trim().replace(/\s+/g, ' ');
+      this.summary = trimmed.length > 120 ? trimmed.slice(0, 117) + '…' : trimmed;
+    }
+    this.messages.push({
+      id: randomUUID(),
+      role: 'user',
+      text,
+      timestamp: Date.now(),
+    });
+  }
+
+  appendAgentReply(text: string): void {
+    if (text.length === 0) return;
+    this.messages.push({
+      id: randomUUID(),
+      role: 'agent',
+      text,
+      timestamp: Date.now(),
+    });
+  }
+
+  /**
+   * Push both the session list (RECENT entry) and the cumulative
+   * conversation to the backend. Fire-and-forget — failures land in
+   * the publisher's trace log; the chat stream keeps working.
+   *
+   * Skipped when no prompt has fired yet (no summary derived) so a
+   * just-paired-but-not-used session doesn't spam an empty RECENT
+   * row on mobile.
+   */
+  async flush(): Promise<void> {
+    if (this.summary === null || this.messages.length === 0) return;
+    const timestamp = Date.now();
+    await Promise.all([
+      this.publisher.pushSessionList({
+        agentId: this.opts.agent,
+        sessions: [
+          {
+            id: this.opts.acpSessionId,
+            summary: this.summary,
+            timestamp,
+          },
+        ],
+      }),
+      this.publisher.pushConversation({
+        agentId: this.opts.agent,
+        sessionId: this.opts.acpSessionId,
+        messages: this.messages,
+      }),
+    ]);
+  }
+}
 
 export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
   const publisher = new AcpPublisher({
@@ -148,9 +516,33 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
       // post-map delta count so we can tell "SDK delivered the
       // notification but my mapper ignored it" apart from "SDK
       // never delivered anything" — those are different bugs.
+      // Preview first 120 chars of each delta (text + dropped
+       // kinds) so we can spot "agent emitted something but we
+       // dropped it silently" bugs in smoke tests without raw stdio
+       // tracing. Tool-use info is especially load-bearing — if
+       // Gemini ever asks the user something via a custom tool call
+       // instead of session/request_permission, we'd miss the
+       // interactive prompt without this breadcrumb.
+      const previews = deltas
+        .map((d) => `${d.kind}:"${d.delta.slice(0, 120).replace(/\n/g, '\\n')}"`)
+        .join(' | ');
+      // Also peek at the raw tool_call payload — kind alone isn't
+      // enough when the bug is "we drop the tool that would have
+      // shown a prompt"; we want the title / kind enum so we know
+      // WHICH tool the agent invoked.
+      let toolMeta = '';
+      if (variant === 'tool_call' || variant === 'tool_call_update') {
+        const u = notification.update as {
+          toolCallId?: string;
+          title?: string;
+          kind?: string;
+          status?: string;
+        };
+        toolMeta = ` tool={id=${u.toolCallId?.slice(0, 8) ?? '?'} title="${(u.title ?? '').slice(0, 60)}" kind=${u.kind ?? '?'} status=${u.status ?? '?'}}`;
+      }
       log.info(
         'acpRunner',
-        `update #${updateCount} variant=${variant} mappedDeltas=${deltas.length}`,
+        `update #${updateCount} variant=${variant} mappedDeltas=${deltas.length}${previews ? ` ${previews}` : ''}${toolMeta}`,
       );
       for (const delta of deltas) {
         // append() POSTs cumulative content with isFinal:false; the
@@ -162,25 +554,17 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
     onRequestPermission: async (request) => {
       const { event, optionIdByLabel } = mapPermissionRequest(request);
       await publisher.publishAwaitingAnswer(event);
-      const answer = await waitForAnswer(publisher, event.questionId);
-      if (!answer) {
-        // Either the user dismissed without picking OR the upstream
-        // TTL expired. The safer default is to reject the call —
-        // never auto-approve a tool the user didn't explicitly OK.
-        return { outcome: { outcome: 'cancelled' } };
-      }
-      const optionId = optionIdByLabel[answer.answer];
-      if (!optionId) {
-        // The mobile sent back a string we didn't map (the user
-        // typed free-form into a list selector, or the labels
-        // changed between request + reply). Treat as cancel.
-        log.warn(
-          'acpRunner',
-          `pending-answer label not in option map; reply="${answer.answer.slice(0, 80)}"`,
-        );
-        return { outcome: { outcome: 'cancelled' } };
-      }
-      return { outcome: { outcome: 'selected', optionId } };
+      // Event-driven: register a Promise resolver in streaming
+      // state. When mobile responds, the backend pushes a
+      // `select_option` command via the CLI's existing SSE relay
+      // (`/api/commands/pending/stream`); the `handleCommand` switch
+      // routes it back here through `streaming.resolveSelection()`.
+      // No polling.
+      return streaming.registerPermission({
+        questionId: event.questionId,
+        labels: event.options ?? [],
+        optionIdByLabel,
+      });
     },
     onStderr: (_line) => {
       // No-op here — AcpClient.start() already mirrors every stderr
@@ -219,6 +603,12 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
   const runtime = createInteractiveAgentStrategy(opts.agent, createOsStrategy());
   const models = await runtime.listModels();
 
+  // Conversation history accumulator — pushes session list +
+  // messages to the backend after each turn so mobile's RECENT
+  // sheet renders past conversations even though ACP has no on-disk
+  // JSONL the legacy HistoryService can scan.
+  const history = new AcpHistory(publisher, { agent: opts.agent, acpSessionId });
+
   // Command relay — listens for prompts from mobile / web and
   // forwards them as ACP `session/prompt`. Every command branch MUST
   // call `relay.sendResult(...)` even on no-op / not-supported
@@ -228,7 +618,17 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
   const relay = new CommandRelayService(
     opts.pluginId,
     async (cmd) => {
-      await handleCommand(cmd, client, relay, acpSessionId, models, streaming);
+      await handleCommand(
+        cmd,
+        client,
+        relay,
+        acpSessionId,
+        models,
+        streaming,
+        opts,
+        history,
+        initialize.agentCapabilities,
+      );
     },
     { id: opts.agent, name: opts.agent, displayName: opts.agent } as never,
   );
@@ -267,6 +667,9 @@ async function handleCommand(
   acpSessionId: string,
   models: AgentModel[],
   streaming: StreamingState,
+  opts: AcpRunnerOptions,
+  history: AcpHistory,
+  agentCaps: { loadSession?: boolean } | undefined,
 ): Promise<void> {
   switch (cmd.type) {
     case 'start_task': {
@@ -283,16 +686,24 @@ async function handleCommand(
       // this, mobile keeps showing the previous turn's bubble until
       // the first streaming text overwrites it, which races visibly.
       await streaming.beginTurn();
+      history.appendUserPrompt(prompt);
       try {
         const reply = await client.prompt(prompt);
-        // Close every open buffer with done:true so mobile flips
-        // the bubble out of "Thinking…".
-        await streaming.closeAll();
+        // Close with interactive-detection so a trailing
+        // "question + numbered options" pattern in the reply gets
+        // surfaced as a tappable select_prompt chunk on mobile
+        // instead of staying as plain text (Gemini's typical shape
+        // for "¿continuar? 1. sí 2. no").
+        const finalText = streaming.getCurrentText();
+        await streaming.closeTurnWithInteractiveDetection();
+        history.appendAgentReply(finalText);
+        void history.flush();
         log.info('acpRunner', `start_task ← done stopReason=${reply.stopReason ?? '?'} id=${cmd.id.slice(0, 8)}`);
         await relay.sendResult(cmd.id, 'completed', { stopReason: reply.stopReason });
       } catch (err) {
-        // Close on failure too so a half-streamed reply doesn't stay
-        // mid-air on mobile forever.
+        // Error path uses the safe closeAll (no extraction) — a
+        // torn-off text could match the heuristics spuriously and
+        // strand the runner with an unanswerable pending question.
         await streaming.closeAll();
         log.warn('acpRunner', `prompt failed: ${describeError(err)}`);
         await relay.sendResult(cmd.id, 'failed', { error: describeError(err) });
@@ -336,40 +747,293 @@ async function handleCommand(
       await relay.sendResult(cmd.id, 'completed', {});
       return;
     }
+    case 'select_option': {
+      // Event-driven answer arrival — the user tapped an option on
+      // mobile's awaiting-answer sheet or select_prompt block, and
+      // the backend pushed the command via the CLI's SSE relay.
+      // Routes through `streaming.resolveSelection`: permission
+      // questions unblock the SDK Promise; free-form selections
+      // re-prompt the adapter with the picked text.
+      const payload = cmd.payload as { index?: number; from?: number };
+      const index = typeof payload?.index === 'number' ? payload.index : 0;
+      const offset = typeof payload?.from === 'number' ? payload.from : 0;
+      const absoluteIndex = index + offset;
+      const result = streaming.resolveSelection(absoluteIndex);
+      switch (result.kind) {
+        case 'resolved':
+          log.info('acpRunner', `select_option index=${absoluteIndex} → permission resolved`);
+          await relay.sendResult(cmd.id, 'completed', {});
+          return;
+        case 'reprompt': {
+          log.info(
+            'acpRunner',
+            `select_option index=${absoluteIndex} → reprompt chars=${result.text.length}`,
+          );
+          await streaming.beginTurn();
+          history.appendUserPrompt(result.text);
+          try {
+            const reply = await client.prompt(result.text);
+            // Detect chained interactive prompts (agent asks again
+            // after the first answer) so multi-step flows render as
+            // buttons all the way down.
+            const finalText = streaming.getCurrentText();
+            await streaming.closeTurnWithInteractiveDetection();
+            history.appendAgentReply(finalText);
+            void history.flush();
+            await relay.sendResult(cmd.id, 'completed', { stopReason: reply.stopReason });
+          } catch (err) {
+            await streaming.closeAll();
+            log.warn('acpRunner', `reprompt failed: ${describeError(err)}`);
+            await relay.sendResult(cmd.id, 'failed', { error: describeError(err) });
+          }
+          return;
+        }
+        case 'none':
+          log.warn(
+            'acpRunner',
+            `select_option index=${absoluteIndex} arrived with no pending question — likely stale`,
+          );
+          await relay.sendResult(cmd.id, 'failed', {
+            error: 'No pending interactive question — the prompt may have expired.',
+          });
+          return;
+      }
+      return;
+    }
+    case 'provide_input': {
+      // Free-form text answer to an open question. Same route as
+      // select_option but the user typed instead of tapping a chip.
+      const payload = cmd.payload as { input?: string };
+      const input = payload?.input?.trim();
+      if (!input) {
+        await relay.sendResult(cmd.id, 'failed', { error: 'empty input' });
+        return;
+      }
+      // No pending-state machinery here — provide_input always means
+      // "send this as the next prompt to the adapter" (any pending
+      // permission Promise is left to its own TTL since the user
+      // chose to type rather than pick an option).
+      await streaming.beginTurn();
+      history.appendUserPrompt(input);
+      try {
+        const reply = await client.prompt(input);
+        const finalText = streaming.getCurrentText();
+        await streaming.closeTurnWithInteractiveDetection();
+        history.appendAgentReply(finalText);
+        void history.flush();
+        await relay.sendResult(cmd.id, 'completed', { stopReason: reply.stopReason });
+      } catch (err) {
+        await streaming.closeAll();
+        log.warn('acpRunner', `provide_input failed: ${describeError(err)}`);
+        await relay.sendResult(cmd.id, 'failed', { error: describeError(err) });
+      }
+      return;
+    }
+    case 'resume_session': {
+      // ACP-native equivalent of the legacy JSONL reload. Gated on
+      // `agentCapabilities.loadSession` per the ACP spec; without
+      // that flag the SDK rejects the RPC. Adapters that DO support
+      // it (Claude, Codex) accept the prior sessionId and rehydrate
+      // the conversation context so the next prompt continues where
+      // the user left off.
+      const payload = cmd.payload as { id?: string };
+      const id = payload?.id?.trim();
+      if (!id) {
+        await relay.sendResult(cmd.id, 'failed', { error: 'missing session id' });
+        return;
+      }
+      if (!agentCaps?.loadSession) {
+        await relay.sendResult(cmd.id, 'failed', {
+          error: `Agent "${opts.agent}" does not advertise loadSession capability.`,
+        });
+        return;
+      }
+      try {
+        await client.loadSession(id);
+        await relay.sendResult(cmd.id, 'completed', { sessionId: id });
+      } catch (err) {
+        log.warn('acpRunner', `resume_session failed: ${describeError(err)}`);
+        await relay.sendResult(cmd.id, 'failed', { error: describeError(err) });
+      }
+      return;
+    }
+    case 'change_model': {
+      // Non-standard ACP extension — claude-agent-acp + codex-acp
+      // expose `session/set_model`; others reject. We try the raw
+      // RPC; on rejection we ack `failed` with the adapter's reason
+      // so mobile can surface "model picker not supported on this
+      // agent".
+      const payload = cmd.payload as { modelId?: string };
+      const modelId = payload?.modelId?.trim();
+      if (!modelId) {
+        await relay.sendResult(cmd.id, 'failed', { error: 'modelId required' });
+        return;
+      }
+      try {
+        await client.setModel(modelId);
+        await relay.sendResult(cmd.id, 'completed', { modelId });
+      } catch (err) {
+        log.warn('acpRunner', `change_model failed: ${describeError(err)}`);
+        await relay.sendResult(cmd.id, 'failed', {
+          error: `Model switching not supported on ${opts.agent} via ACP: ${describeError(err)}`,
+        });
+      }
+      return;
+    }
+    case 'summarize': {
+      // ACP has no first-class "summarize" RPC, so we forward the
+      // agent's own slash command as a regular prompt. Claude
+      // recognises `/compact`, Codex `/compact`, others may not —
+      // adapters without the slash command emit a normal-text
+      // "unknown command" reply, which is at least user-visible.
+      const payload = cmd.payload as { mode?: 'normal' | 'auto' };
+      const slash = payload?.mode === 'auto' ? '/compact auto' : '/compact';
+      log.info('acpRunner', `summarize → forwarding "${slash}"`);
+      await streaming.beginTurn();
+      history.appendUserPrompt(slash);
+      try {
+        const reply = await client.prompt(slash);
+        const finalText = streaming.getCurrentText();
+        await streaming.closeTurnWithInteractiveDetection();
+        history.appendAgentReply(finalText);
+        void history.flush();
+        await relay.sendResult(cmd.id, 'completed', { stopReason: reply.stopReason });
+      } catch (err) {
+        await streaming.closeAll();
+        log.warn('acpRunner', `summarize failed: ${describeError(err)}`);
+        await relay.sendResult(cmd.id, 'failed', { error: describeError(err) });
+      }
+      return;
+    }
+    case 'session_terminated':
+    case 'shutdown_session': {
+      // Mobile/web "Delete session" (session_terminated) or
+      // "Stop session" (shutdown_session). ACP equivalent of the
+      // legacy lifecycle: ack, drop the adapter cleanly, exit.
+      // session_terminated also removes the pairing record from the
+      // local CLI config so the next `codeam pair` starts fresh
+      // (legacy did the same via removeSession on the same event).
+      try {
+        await relay.sendResult(cmd.id, 'completed', { ok: true });
+      } catch {
+        /* best-effort — process is about to exit anyway */
+      }
+      showInfo(
+        cmd.type === 'session_terminated'
+          ? 'Session was deleted from the app — exiting.'
+          : 'Session stopped from the app — exiting.',
+      );
+      if (cmd.type === 'session_terminated') {
+        try {
+          removeSession(opts.sessionId);
+        } catch {
+          /* best-effort */
+        }
+      }
+      relay.stop();
+      await client.stop();
+      process.exit(0);
+      return;
+    }
+    case 'request_preview_detect':
+    case 'preview_start':
+    case 'preview_stop':
+    case 'save_preview_config': {
+      // Preview pipeline is agent-agnostic at the architecture level
+      // (detect → start dev server → tunnel → stop). Delegate to the
+      // legacy handler registry rather than re-implementing in the
+      // ACP runner. The handlers emit their own `preview_*` events
+      // via the per-user SSE bus; we just trigger + ack.
+      const runtime = createInteractiveAgentStrategy(opts.agent, createOsStrategy());
+      const ctx = buildLegacyContextForACP(opts, relay, runtime);
+      try {
+        await legacyDispatchCommand(ctx, cmd);
+        await relay.sendResult(cmd.id, 'completed', {});
+      } catch (err) {
+        log.warn('acpRunner', `${cmd.type} failed: ${describeError(err)}`);
+        await relay.sendResult(cmd.id, 'failed', { error: describeError(err) });
+      }
+      return;
+    }
     default:
-      // Everything else (change_model, summarize, file ops, git ops,
-      // terminal ops, …) is Phase 2 work for ACP. Acking `failed`
-      // with a structured reason lets mobile show a one-line "not
-      // supported in ACP mode" affordance instead of timing out.
-      log.trace('acpRunner', `command type "${cmd.type}" not supported in Phase 1 ACP mode`);
+      // Generic-delegate fallback: agent-agnostic legacy handlers
+      // (file ops, git ops, terminal ops, link credentials, file
+      // reviews, etc.) work fine in ACP mode because they don't
+      // touch the PTY agent / outputSvc / historySvc — only the
+      // filesystem + relay. Audit-confirmed via grep against
+      // `start/handlers.ts:349-720` (file/git/terminal handlers).
+      //
+      // PTY-dependent legacy handlers (change_model, summarize,
+      // request_ai_*, resume_session) are intercepted by explicit
+      // cases above OR get a clean "ACP-mode" rejection here when
+      // we haven't ported them yet. The handler's own try/catch on
+      // the partial ctx surfaces any unexpected PTY dependency as a
+      // `failed` ack on the relay instead of a silent crash.
+      if (legacyHandlers[cmd.type]) {
+        const runtime = createInteractiveAgentStrategy(opts.agent, createOsStrategy());
+        const legacyCtx = buildLegacyContextForACP(opts, relay, runtime);
+        try {
+          await legacyDispatchCommand(legacyCtx, cmd);
+          // Most legacy handlers (file/git/terminal/preview) call
+          // sendResult themselves. Some are fire-and-forget. We ack
+          // success here as a fallback so mobile sees ANY completion
+          // signal even when the handler forgot — duplicate acks
+          // are no-ops at the backend.
+          await relay.sendResult(cmd.id, 'completed', {});
+        } catch (err) {
+          log.warn('acpRunner', `legacy handler "${cmd.type}" threw: ${describeError(err)}`);
+          await relay.sendResult(cmd.id, 'failed', { error: describeError(err) });
+        }
+        return;
+      }
+      log.trace('acpRunner', `command type "${cmd.type}" not supported in ACP mode`);
       await relay.sendResult(cmd.id, 'failed', {
-        error: `Command "${cmd.type}" is not supported in Phase 1 ACP mode.`,
+        error: `Command "${cmd.type}" is not supported in ACP mode.`,
       });
       return;
   }
 }
 
-/**
- * Poll the pending-answer endpoint until the user replies or the
- * timeout expires. Exposed as a free function (not a method on
- * the publisher) so the runner can drive cancellation from
- * elsewhere later without leaking poll-loop state into the
- * publisher.
- */
-async function waitForAnswer(
-  publisher: AcpPublisher,
-  questionId: string,
-): Promise<{ answer: string } | null> {
-  const deadline = Date.now() + PERMISSION_TIMEOUT_MS;
-  while (Date.now() < deadline) {
-    const reply = await publisher.pollPendingAnswer(questionId);
-    if (reply) return { answer: reply.answer };
-    await new Promise((r) => setTimeout(r, ANSWER_POLL_MS));
-  }
-  return null;
-}
-
 function describeError(err: unknown): string {
   if (err instanceof Error) return err.message;
   return String(err);
+}
+
+/**
+ * The legacy command handlers (`apps/cli/src/commands/start/handlers.ts`)
+ * accept a `HandlerContext` rich enough to drive the PTY pipeline —
+ * outputSvc, agent (PTY wrapper), historySvc. Most of those handlers
+ * NEED that machinery; some don't.
+ *
+ * For ACP we want to reuse the agent-agnostic ones (preview flow, file
+ * ops, git ops, terminal ops, etc.) without re-implementing them. This
+ * builds a partial context that carries ONLY the fields those handlers
+ * actually read; PTY-dependent fields are `null` (cast through unknown
+ * to satisfy the strict typedef) and any handler that tries to dereference
+ * them throws — caught by the runner's per-command try/catch and acked
+ * as `failed` to the relay.
+ *
+ * Used today only for the preview pipeline (request_preview_detect /
+ * preview_start / preview_stop / save_preview_config). Wider delegation
+ * (file/git/terminal handlers) is deliberate Phase-2 work; opening that
+ * flood gate now would mask handler-specific PTY assumptions that need
+ * audit first.
+ */
+function buildLegacyContextForACP(
+  opts: AcpRunnerOptions,
+  relay: CommandRelayService,
+  runtime: RuntimeStrategy,
+): HandlerContext {
+  return {
+    outputSvc: null,
+    agent: null,
+    historySvc: null,
+    runtime,
+    relay,
+    setKeepAlive: null,
+    keepAliveCtx: null,
+    pluginId: opts.pluginId,
+    sessionId: opts.sessionId,
+    pluginAuthToken: opts.pluginAuthToken,
+  } as unknown as HandlerContext;
 }

@@ -27,10 +27,7 @@
 
 import { _transport } from '../../services/streaming/transport';
 import { resolveApiBaseUrl } from '@codeagent/shared';
-import type {
-  AnswerResolvedEvent,
-  AwaitingAnswerEvent,
-} from '@codeagent/shared';
+import type { AwaitingAnswerEvent, StreamingChunkEvent } from '@codeagent/shared';
 import { log } from '../../services/logger';
 
 export interface AcpPublisherOptions {
@@ -127,66 +124,117 @@ export class AcpPublisher {
   }
 
   /**
-   * Drain the pending-answer endpoint. Returns the resolved answer
-   * when the user has replied, `null` otherwise. The caller polls
-   * this on a 1.5 s cadence (same as the legacy emitter) until a
-   * non-null result lands.
+   * Push one chunk to the Epic C streaming-chunk feed
+   * (`/api/sessions/:id/streaming-chunk`). Mobile's
+   * SessionDetailScreen reads these via the per-user SSE bus
+   * (`agent_streaming_chunk` variant) and renders dedicated bubbles
+   * by `kind`:
+   *
+   *   - `text`        → normal assistant bubble
+   *   - `thinking`    → dimmed "THINKING…" card
+   *   - `tool_use`    → purple pill chip with build icon
+   *   - `tool_result` → collapsible GlassCard
+   *
+   * Coalescence is `(sessionId, chunkId)` on the consumer side —
+   * successive chunks with the same chunkId concatenate `content`
+   * until `isFinal: true` lands. The chat-output pipe
+   * ({@link publishOutput}) is independent and carries `type:'text'`
+   * for the main chat bubble; this feed is purely additive for the
+   * richer SessionDetail surface.
    */
-  async pollPendingAnswer(questionId: string): Promise<AnswerResolvedEvent | null> {
-    const url =
-      `${this.apiBase}/api/sessions/${encodeURIComponent(this.opts.sessionId)}/pending-answer` +
-      `?questionId=${encodeURIComponent(questionId)}` +
-      `&pluginId=${encodeURIComponent(this.opts.pluginId)}`;
+  async publishStreamingChunk(event: StreamingChunkEvent): Promise<void> {
+    const url = `${this.apiBase}/api/sessions/${encodeURIComponent(this.opts.sessionId)}/streaming-chunk`;
     try {
-      const { statusCode, body } = await _transport.get(url, this.headers);
-      if (statusCode === 204 || statusCode === 404) return null;
+      const { statusCode, body } = await _transport.post(
+        url,
+        this.headers,
+        this.envelope(event as unknown as Record<string, unknown>),
+      );
       if (statusCode < 200 || statusCode >= 300) {
-        log.warn('acpPublisher', `pending-answer status=${statusCode} body=${body.slice(0, 200)}`);
-        return null;
+        log.warn(
+          'acpPublisher',
+          `streaming-chunk status=${statusCode} body=${body.slice(0, 200)}`,
+        );
       }
-      return parsePendingAnswerResponse(body, questionId);
     } catch (err) {
-      log.trace('acpPublisher', 'pending-answer poll failed', err);
-      return null;
+      log.trace('acpPublisher', 'streaming-chunk post failed', err);
     }
   }
-}
 
-/**
- * Parse the `GET /api/sessions/:id/pending-answer` envelope and
- * confirm the returned questionId matches the caller's. The
- * backend wraps the resource in `{ data: { … } }` (NestJS
- * standard envelope) but legacy paths sometimes return the bare
- * shape — accept both.
- *
- * Exported so the unit tests can assert envelope handling without
- * standing up an HTTP layer.
- */
-export function parsePendingAnswerResponse(
-  body: string,
-  questionId: string,
-): AnswerResolvedEvent | null {
-  if (!body) return null;
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(body);
-  } catch {
-    return null;
+  /**
+   * Push the list of resumable sessions for `(pluginId, agentId)` so
+   * mobile's Conversations sheet's RECENT section can render
+   * something. Legacy PTY agents call this from
+   * `HistoryService.load()` after scanning `~/.claude/projects/<cwd>/*.jsonl`;
+   * ACP agents have no on-disk transcript, so the {@link runner}
+   * builds a minimal in-memory `ClaudeSession` (id, summary, ts) and
+   * pushes one entry per active ACP conversation.
+   *
+   * `agentId` is the runtime id (`'claude' | 'codex' | 'gemini'`) —
+   * the backend's `pushClaudeSessions` accepts whatever string the
+   * CLI sends and persists it under that key; mobile passes the same
+   * agentId when fetching, so the storage cell matches.
+   */
+  async pushSessionList(args: {
+    agentId: string;
+    sessions: Array<{ id: string; summary: string; timestamp: number }>;
+  }): Promise<void> {
+    const url = `${this.apiBase}/api/sessions/list`;
+    const body = JSON.stringify({
+      pluginId: this.opts.pluginId,
+      agentId: args.agentId,
+      sessions: args.sessions,
+    });
+    try {
+      const { statusCode, body: resBody } = await _transport.post(url, this.headers, body);
+      if (statusCode < 200 || statusCode >= 300) {
+        log.warn(
+          'acpPublisher',
+          `sessions/list status=${statusCode} body=${resBody.slice(0, 200)}`,
+        );
+      }
+    } catch (err) {
+      log.trace('acpPublisher', 'sessions/list post failed', err);
+    }
   }
-  if (typeof parsed !== 'object' || parsed === null) return null;
-  const root = parsed as Record<string, unknown>;
-  const candidate =
-    root.data && typeof root.data === 'object'
-      ? (root.data as Record<string, unknown>)
-      : root;
-  const qid = candidate.questionId;
-  const answer = candidate.answer;
-  const optionIndex = candidate.optionIndex;
-  if (typeof qid !== 'string' || qid !== questionId) return null;
-  if (typeof answer !== 'string') return null;
-  const result: AnswerResolvedEvent = { questionId: qid, answer };
-  if (typeof optionIndex === 'number' && Number.isInteger(optionIndex)) {
-    result.optionIndex = optionIndex;
+
+  /**
+   * Push a conversation's full ordered message history so mobile can
+   * render historical bubbles when the user opens the conversation
+   * from the RECENT sheet. ACP messages are alternating user/agent
+   * turns we accumulate in the runner ({@link AcpHistory}); legacy
+   * PTY agents push their parsed JSONL contents through the same
+   * endpoint. Backend deduplicates on `id` so re-sending the full
+   * list each turn (cheaper than batched deltas for typical chats) is
+   * safe + idempotent.
+   *
+   * `mode: 'replace'` so a re-send overrides any stale persisted
+   * version — important for the ACP path because each turn we ship
+   * the cumulative messages, not a delta.
+   */
+  async pushConversation(args: {
+    agentId: string;
+    sessionId: string;
+    messages: Array<{ id: string; role: 'user' | 'agent'; text: string; timestamp: number }>;
+  }): Promise<void> {
+    const url = `${this.apiBase}/api/sessions/conversation`;
+    const body = JSON.stringify({
+      pluginId: this.opts.pluginId,
+      agentId: args.agentId,
+      sessionId: args.sessionId,
+      messages: args.messages,
+      mode: 'replace',
+    });
+    try {
+      const { statusCode, body: resBody } = await _transport.post(url, this.headers, body);
+      if (statusCode < 200 || statusCode >= 300) {
+        log.warn(
+          'acpPublisher',
+          `sessions/conversation status=${statusCode} body=${resBody.slice(0, 200)}`,
+        );
+      }
+    } catch (err) {
+      log.trace('acpPublisher', 'sessions/conversation post failed', err);
+    }
   }
-  return result;
 }
