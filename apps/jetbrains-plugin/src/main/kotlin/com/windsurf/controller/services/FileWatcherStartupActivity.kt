@@ -3,7 +3,9 @@ package com.windsurf.controller.services
 // NOTE on doc comments: Kotlin block comments NEST. Single-line '//'
 // comments only, per project memory.
 
+import com.intellij.ide.plugins.PluginManagerCore
 import com.intellij.openapi.diagnostic.Logger
+import com.intellij.openapi.extensions.PluginId
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.startup.ProjectActivity
 
@@ -41,6 +43,17 @@ class FileWatcherStartupActivity : ProjectActivity {
             // server already knows about.
             telemetry.init(SettingsService.getInstance().ensurePluginId())
             telemetry.capture("plugin_activated", mapOf("surface" to "jetbrains"))
+
+            // Marketplace update advisory - one-shot per IDE session
+            // (the service self-guards), background-threaded, balloon
+            // notification on stale install. Mirrors the CLI + VS
+            // Code plugin update banners.
+            runCatching {
+                val pluginId = PluginId.getId("com.codeagent.mobile")
+                val installedVersion =
+                    PluginManagerCore.getPlugin(pluginId)?.version.orEmpty()
+                UpdateNotifierService.getInstance().checkForUpdatesNow(installedVersion)
+            }.onFailure { logger.debug("update-notifier wiring failed: ${it.message}") }
 
             // Drive #1 - existing pairing already on disk. We have a
             // token but no in-memory session id yet on plugin reload,

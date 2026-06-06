@@ -78,6 +78,8 @@
                 serviceImplementation="com.windsurf.controller.services.FileWatcherService"/>
         <applicationService
                 serviceImplementation="com.windsurf.controller.services.TelemetryService"/>
+        <applicationService
+                serviceImplementation="com.windsurf.controller.services.UpdateNotifierService"/>
         <postStartupActivity
                 implementation="com.windsurf.controller.services.FileWatcherStartupActivity"/>
         <applicationConfigurable
