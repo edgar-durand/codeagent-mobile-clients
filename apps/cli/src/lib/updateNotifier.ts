@@ -2,6 +2,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import * as https from 'node:https';
+import { execSync, spawnSync } from 'node:child_process';
 import pc from 'picocolors';
 
 /**
@@ -133,6 +134,88 @@ function notifyIfStale(currentVersion: string, latest: string): void {
 }
 
 /**
+ * Detect whether the current `codeam-cli` install is a `npm link` (the
+ * common dev setup — the global binary is a symlink into the user's
+ * working copy of the repo). Auto-update would clobber the symlink
+ * with a real install and silently overwrite the developer's
+ * source-of-truth, so we treat it as opt-out by detection.
+ */
+function isLinkedInstall(): boolean {
+  try {
+    const root = execSync('npm root -g', {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+      timeout: 2000,
+    }).trim();
+    if (!root) return false;
+    const pkgPath = path.join(root, PKG_NAME);
+    return fs.lstatSync(pkgPath).isSymbolicLink();
+  } catch {
+    // `npm root -g` failed, path doesn't exist, etc. — assume it's a
+    // regular install so the auto-update path is allowed to try.
+    return false;
+  }
+}
+
+/**
+ * Synchronous self-upgrade. On a cache hit reporting a newer version,
+ * run `npm install -g codeam-cli@latest` and re-exec the same argv so
+ * the user's session continues on the new build without an extra
+ * boot. Falls back to the stale-banner notice on:
+ *   - npm-linked dev install (would clobber the repo).
+ *   - `CODEAM_NO_AUTO_UPDATE=1` opt-out (CI / pinned codespaces).
+ *   - npm install failure (permissions, network) — we keep going on
+ *     the old version so the user is never stranded.
+ *
+ * The re-exec uses `codeam` from PATH, not `process.argv[1]`, so the
+ * freshly-installed binary takes over instead of the now-stale entry
+ * script the running process was launched from.
+ */
+function maybeAutoUpdate(currentVersion: string, latest: string): void {
+  if (compareSemver(latest, currentVersion) <= 0) return;
+  if (process.env.CODEAM_NO_AUTO_UPDATE === '1') {
+    notifyIfStale(currentVersion, latest);
+    return;
+  }
+  if (isLinkedInstall()) {
+    // Dev path — show the nag but never touch the link.
+    notifyIfStale(currentVersion, latest);
+    return;
+  }
+
+  process.stderr.write(
+    `\n  ${pc.yellow('●')} ${pc.bold('Updating codeam-cli')} ${pc.dim(currentVersion)} ${pc.dim('→')} ${pc.green(latest)}...\n\n`,
+  );
+
+  const install = spawnSync('npm', ['install', '-g', `${PKG_NAME}@latest`], {
+    stdio: 'inherit',
+    env: process.env,
+  });
+  if (install.status !== 0) {
+    process.stderr.write(
+      `\n  ${pc.red('!')} Update failed (exit ${install.status ?? '?'}). Continuing on ${currentVersion}.\n` +
+        `    Run ${pc.cyan('npm install -g codeam-cli')} manually to retry.\n\n`,
+    );
+    return;
+  }
+
+  // Drop the cache so the next boot's TTL check re-fetches; otherwise
+  // we'd keep the now-outdated "latest" string around for 24 h.
+  try {
+    fs.unlinkSync(cachePath());
+  } catch {
+    /* missing file is fine */
+  }
+
+  process.stderr.write(`  ${pc.green('✓')} Updated. Resuming session...\n\n`);
+  const child = spawnSync('codeam', process.argv.slice(2), {
+    stdio: 'inherit',
+    env: process.env,
+  });
+  process.exit(child.status ?? 0);
+}
+
+/**
  * Fire-and-forget. Reads the cache, prints if stale, and (in the
  * background) refreshes the cache so the *next* invocation sees the
  * latest. Never returns a promise the caller needs to await.
@@ -152,13 +235,17 @@ export function checkForUpdates(): void {
   const fresh = cache && Date.now() - cache.fetchedAt < TTL_MS;
 
   if (fresh && cache) {
-    notifyIfStale(current, cache.latest);
+    // Self-upgrade synchronously when a newer version is cached, then
+    // re-exec the user's argv so the same boot continues on the new
+    // build. Returns silently if up-to-date / opt-out / npm link.
+    maybeAutoUpdate(current, cache.latest);
     return;
   }
 
   // Refresh in the background. Detach so the CLI can exit cleanly
-  // without waiting on the registry call. The banner is shown on
-  // the *next* run (this is how update-notifier behaves too).
+  // without waiting on the registry call. The auto-update fires on
+  // the *next* run (this matches update-notifier's classic cadence:
+  // first boot warms the cache, second boot acts on it).
   void fetchLatest().then((latest) => {
     if (!latest) return;
     writeCache({ fetchedAt: Date.now(), latest });
