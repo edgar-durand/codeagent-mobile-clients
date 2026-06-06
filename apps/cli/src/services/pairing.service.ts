@@ -5,7 +5,6 @@ import { resolveApiBaseUrl } from '@codeagent/shared';
 import pkg from '../../package.json';
 import { vercelBypassHeader } from '../lib/backend-headers';
 import { detectCurrentBranch } from '../lib/git-branch';
-import { computePollDelay } from '../lib/poll-delay';
 
 const API_BASE = resolveApiBaseUrl();
 
@@ -41,6 +40,10 @@ export interface PairedUserInfo {
  * the existing "Could not reach the server" path.
  */
 const REQUEST_CODE_TIMEOUT_MS = 10_000;
+const PAIRING_STATUS_TIMEOUT_MS = 300_000;
+const PAIRING_STATUS_POLL_INTERVAL_MS = 2_000;
+const PAIRING_STATUS_REQUEST_TIMEOUT_MS = 4_000;
+const PAIRING_STATUS_REQUEST_TIMED_OUT = Symbol('pairing-status-request-timeout');
 
 /**
  * Originator triple — `codeam link <agent>` from an already-paired
@@ -159,46 +162,71 @@ export function pollStatus(
 ): () => void {
   let stopped = false;
   let pollTimer: NodeJS.Timeout | null = null;
-  let consecutiveFailures = 0;
+
+  const readStatus = async (): Promise<Record<string, unknown> | null> => {
+    let timer: NodeJS.Timeout | undefined;
+    try {
+      const timeoutPromise = new Promise<typeof PAIRING_STATUS_REQUEST_TIMED_OUT>((resolve) => {
+        timer = setTimeout(
+          () => resolve(PAIRING_STATUS_REQUEST_TIMED_OUT),
+          PAIRING_STATUS_REQUEST_TIMEOUT_MS,
+        );
+      });
+      const result = await Promise.race([
+        _transport.getJson(`${API_BASE}/api/pairing/status?pluginId=${pluginId}`),
+        timeoutPromise,
+      ]);
+      if (result === PAIRING_STATUS_REQUEST_TIMED_OUT) return null;
+      return (result?.data as Record<string, unknown> | undefined) ?? null;
+    } catch {
+      return null;
+    } finally {
+      clearTimeout(timer);
+    }
+  };
+
+  const finishIfPaired = (data: Record<string, unknown> | null): boolean => {
+    if (!data?.paired) return false;
+    stop();
+    const user = (data.user as Record<string, unknown>) ?? {};
+    const rawToken = data.pluginAuthToken;
+    onPaired({
+      sessionId: data.sessionId as string,
+      userId: typeof user.id === 'string' && user.id.length > 0 ? user.id : undefined,
+      userName: (user.name as string) || '',
+      userEmail: (user.email as string) || '',
+      plan: (user.plan as string) || 'FREE',
+      pluginAuthToken: typeof rawToken === 'string' && rawToken.length > 0 ? rawToken : undefined,
+    });
+    return true;
+  };
+
+  const scheduleNext = (): void => {
+    pollTimer = setTimeout(() => { void tick(); }, PAIRING_STATUS_POLL_INTERVAL_MS);
+  };
 
   const tick = async (): Promise<void> => {
     if (stopped) return;
-    try {
-      // Call through _transport so vi.spyOn can intercept in tests
-      const result = await _transport.getJson(
-        `${API_BASE}/api/pairing/status?pluginId=${pluginId}`,
-      );
-      consecutiveFailures = 0;
-      const data = result?.data as Record<string, unknown> | undefined;
-      if (data?.paired) {
-        stop();
-        const user = (data.user as Record<string, unknown>) ?? {};
-        const rawToken = data.pluginAuthToken;
-        onPaired({
-          sessionId: data.sessionId as string,
-          userId: typeof user.id === 'string' && user.id.length > 0 ? user.id : undefined,
-          userName: (user.name as string) || '',
-          userEmail: (user.email as string) || '',
-          plan: (user.plan as string) || 'FREE',
-          pluginAuthToken: typeof rawToken === 'string' && rawToken.length > 0 ? rawToken : undefined,
-        });
-        return;
-      }
-    } catch {
-      consecutiveFailures += 1;
-    }
+    const data = await readStatus();
     if (stopped) return;
-    const delay = computePollDelay({ baseMs: 3000, failures: consecutiveFailures });
-    pollTimer = setTimeout(() => { void tick(); }, delay);
+    if (finishIfPaired(data)) return;
+    scheduleNext();
   };
 
-  const initialDelay = computePollDelay({ baseMs: 3000, failures: 0 });
-  pollTimer = setTimeout(() => { void tick(); }, initialDelay);
-
+  // Pairing is an active, short-lived user wait. Keep retries steady
+  // instead of backing off into 30s gaps that can miss a mobile claim
+  // before the 5 minute QR window closes.
   const timeout = setTimeout(() => {
-    stop();
-    onTimeout();
-  }, 300_000);
+    void (async () => {
+      const data = await readStatus();
+      if (stopped) return;
+      if (finishIfPaired(data)) return;
+      stop();
+      onTimeout();
+    })();
+  }, PAIRING_STATUS_TIMEOUT_MS);
+
+  void tick();
 
   function stop() {
     stopped = true;
