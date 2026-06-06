@@ -39,6 +39,7 @@ import { AcpClient } from './client';
 import type { AdapterSpec } from './adapters';
 import { AcpPublisher } from './publisher';
 import { buildAcpPromptBlocks } from './buildAcpPromptBlocks';
+import { formatPromptEchoLine } from './promptEcho';
 import {
   registerTerminalHandlers,
   closeAllTerminals,
@@ -821,6 +822,17 @@ async function handleCommand(
         'acpRunner',
         `start_task → forwarding textChars=${promptText.length} imageBlocks=${imageCount} id=${cmd.id.slice(0, 8)}`,
       );
+      // Echo to the terminal so whoever is watching the local CLI
+      // window sees the mobile prompt landed — under ACP the prompt
+      // rides the adapter's JSON-RPC and never touches the PTY, so
+      // the legacy "prompt appears in the terminal" signal is
+      // otherwise lost (QA Android #287). `showInfo` writes through
+      // the same banner-formatter the rest of the CLI uses; level-
+      // gated logger emits stay structured for the debug file.
+      const echoLine = formatPromptEchoLine(payload ?? {});
+      if (echoLine.length > 0) {
+        showInfo(echoLine);
+      }
       // Mirror the legacy `outputSvc.newTurn()` boundary: clear the
       // previous reply on mobile + show "Agent is typing…". Without
       // this, mobile keeps showing the previous turn's bubble until

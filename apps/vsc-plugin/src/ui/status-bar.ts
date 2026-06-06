@@ -80,7 +80,11 @@ export class StatusBar {
         this.item.backgroundColor = undefined;
         break;
       case 'reconnecting':
-        this.item.text = '$(sync~spin) CodeAgent Mobile · pairing';
+        // Copy used to say "pairing" which confused users who were
+        // already paired (QA Android #291). The state name is
+        // "reconnecting" — surface that verbatim so the meaning is
+        // unambiguous.
+        this.item.text = '$(sync~spin) CodeAgent Mobile · reconnecting';
         this.item.backgroundColor = new vscode.ThemeColor('statusBarItem.warningBackground');
         break;
       default:

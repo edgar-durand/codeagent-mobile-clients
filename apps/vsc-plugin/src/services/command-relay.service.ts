@@ -301,11 +301,16 @@ export class CommandRelayService {
       const data = await this.getJson(`${settings.apiBaseUrl}/api/commands/pending?pluginId=${pluginId}`);
       const commands = data?.data as Array<Record<string, unknown>> | undefined;
       this.pollFailures = 0;
-      // Reaching this point means at least the HTTP call landed; the
-      // panel can stop nagging the user about reconnecting. State
-      // shows "reconnecting" rather than "online" because we're on
-      // the polling fallback, not SSE.
-      this.markTransportSuccess('reconnecting');
+      // Reaching this point means at least the HTTP call landed —
+      // the plugin IS connected to the backend, just over the slower
+      // fallback path. Reporting 'reconnecting' here was misleading
+      // UX: on flaky networks where SSE stays dropped (QA Android
+      // #291: Nabeel saw "Reconnecting · pairing" forever), the
+      // status bar got stuck on amber even though commands were
+      // round-tripping fine. Transport choice is an implementation
+      // detail; from the user's POV "polling fallback succeeding" is
+      // identical to "online".
+      this.markTransportSuccess('online');
       if (!Array.isArray(commands) || commands.length === 0) {
         this.pollEmptyStreak += 1;
         return;
