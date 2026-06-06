@@ -11,7 +11,14 @@ export default defineConfig([
     format: ['cjs'],
     target: 'node18',
     clean: true,
-    noExternal: ['@clack/prompts', '@clack/core'],
+    // `@agentclientprotocol/sdk` is ESM-only (`"type": "module"`). Node
+    // 22+ supports require()-ing ESM by default, but Node 20 LTS — which
+    // the codespace-docker-e2e integration suite runs on AND a chunk
+    // of CLI installs out there are still on — throws ERR_REQUIRE_ESM.
+    // Inlining the SDK via noExternal sidesteps the runtime require:
+    // tsup transpiles the SDK to CJS during the bundle step and the
+    // produced `dist/index.js` runs cleanly on every supported Node.
+    noExternal: ['@clack/prompts', '@clack/core', '@agentclientprotocol/sdk'],
     // `node-pty` MUST stay external. Bundling it inlines
     // `unixTerminal.js`, whose top-level `loadNativeModule('pty.node')`
     // fires the instant `dist/index.js` is required — crashing
