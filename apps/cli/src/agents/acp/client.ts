@@ -25,6 +25,7 @@ import {
   ndJsonStream,
   type Agent,
   type Client,
+  type ContentBlock,
   type CreateTerminalResponse,
   type InitializeResponse,
   type KillTerminalResponse,
@@ -73,6 +74,11 @@ const CLIENT_CAPABILITIES = {
   fs: { readTextFile: true, writeTextFile: true },
   terminal: false,
 };
+
+export interface AcpPromptInput {
+  content: ContentBlock[];
+  textForLog?: string;
+}
 
 export interface AcpClientOptions {
   /** Spec resolved from {@link getAcpAdapter}. */
@@ -232,18 +238,31 @@ export class AcpClient {
    * a ceiling the relay command sits "pending" forever and mobile
    * shows a permanent "Thinking…" spinner with no way to recover.
    */
-  async prompt(text: string): Promise<PromptResponse> {
+  async prompt(input: string | AcpPromptInput): Promise<PromptResponse> {
     if (!this.connection || !this.sessionId) {
       throw new Error('AcpClient.prompt called before start()');
     }
+    const content = typeof input === 'string'
+      ? [{ type: 'text', text: input } satisfies ContentBlock]
+      : input.content;
+    const textForLog = typeof input === 'string'
+      ? input
+      : (input.textForLog ?? content
+        .map((block) => {
+          const maybeText = block as { type?: string; text?: unknown };
+          return maybeText.type === 'text' && typeof maybeText.text === 'string'
+            ? maybeText.text
+            : '';
+        })
+        .join(''));
     log.info(
       'acpClient',
-      `prompt → session=${this.sessionId.slice(0, 8)} chars=${text.length}`,
+      `prompt → session=${this.sessionId.slice(0, 8)} chars=${textForLog.length} blocks=${content.length}`,
     );
     const t0 = Date.now();
     const send = this.connection.prompt({
       sessionId: this.sessionId,
-      prompt: [{ type: 'text', text }],
+      prompt: content,
     });
 
     // Bare setTimeout + manual cleanup instead of the

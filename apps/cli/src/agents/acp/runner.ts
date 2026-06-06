@@ -32,7 +32,7 @@ import { CommandRelayService, type RemoteCommand } from '../../services/command-
 import { log } from '../../services/logger';
 import { showInfo, showSuccess } from '../../ui/banner';
 import { AGENT_REGISTRY, type AgentId, type AgentModel, type StreamingChunkKind } from '@codeagent/shared';
-import type { RequestPermissionResponse } from '@agentclientprotocol/sdk';
+import type { ContentBlock, RequestPermissionResponse } from '@agentclientprotocol/sdk';
 import { createOsStrategy } from '../../os';
 import { createInteractiveAgentStrategy } from '../registry';
 import { AcpClient } from './client';
@@ -53,6 +53,12 @@ import type { RuntimeStrategy } from '../strategy';
 import { removeSession } from '../../config';
 import { FileWatcherService } from '../../services/file-watcher.service';
 import { TurnFileAggregator } from '../../services/turn-files/turn-file-aggregator';
+import {
+  parsePayload,
+  startCommandSchema,
+  type FileEntry,
+  type StartCommandPayload,
+} from '../../lib/payload';
 
 /**
  * Per-turn accumulator that bridges ACP's delta-shaped notifications
@@ -409,6 +415,47 @@ export interface AcpRunnerOptions {
  *  upstream Redis TTL on the awaiting-answer record so the SDK
  *  never blocks past the point where mobile could still answer. */
 const PERMISSION_TIMEOUT_MS = 5 * 60 * 1000;
+
+interface AcpAgentCapabilities {
+  loadSession?: boolean;
+  promptCapabilities?: {
+    image?: boolean;
+  };
+}
+
+const IMAGE_UNSUPPORTED_NOTE = "Attachment ignored — adapter doesn't support images";
+
+function supportsImagePrompts(agentCaps: AcpAgentCapabilities | undefined): boolean {
+  return agentCaps?.promptCapabilities?.image === true;
+}
+
+function filesToImageBlocks(files: FileEntry[]): ContentBlock[] {
+  return files
+    .filter((file) => file.base64.length > 0)
+    .map((file) => ({
+      type: 'image',
+      mimeType: file.mimeType,
+      data: file.base64,
+    }) as ContentBlock);
+}
+
+export function buildStartTaskPromptContent(
+  payload: StartCommandPayload,
+  agentCaps: AcpAgentCapabilities | undefined,
+): { content: ContentBlock[]; textForLog: string } {
+  const prompt = payload.prompt?.trim() ?? '';
+  const files = payload.files?.filter((file) => file.base64.length > 0) ?? [];
+  const text = files.length > 0 && !supportsImagePrompts(agentCaps)
+    ? `${prompt}${prompt ? '\n\n' : ''}${IMAGE_UNSUPPORTED_NOTE}.`
+    : prompt;
+  const content: ContentBlock[] = text ? [{ type: 'text', text }] : [];
+
+  if (files.length > 0 && supportsImagePrompts(agentCaps)) {
+    content.push(...filesToImageBlocks(files));
+  }
+
+  return { content, textForLog: text };
+}
 
 /**
  * Accumulator for the conversation history mobile expects when the
@@ -785,7 +832,7 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
  * `get_conversation` every ~20 s) retry forever — manifests as the
  * mobile chat sitting empty while the CLI looks like it's hung.
  */
-async function handleCommand(
+export async function handleCommand(
   cmd: RemoteCommand,
   client: AcpClient,
   relay: CommandRelayService,
@@ -794,27 +841,37 @@ async function handleCommand(
   streaming: StreamingState,
   opts: AcpRunnerOptions,
   history: AcpHistory,
-  agentCaps: { loadSession?: boolean } | undefined,
+  agentCaps: AcpAgentCapabilities | undefined,
   turnFiles: TurnFileAggregator,
 ): Promise<void> {
   switch (cmd.type) {
     case 'start_task': {
-      const payload = cmd.payload as { prompt?: string } | undefined;
-      const prompt = payload?.prompt?.trim();
-      if (!prompt) {
-        log.warn('acpRunner', 'start_task with empty prompt; ignoring');
+      const payload = parsePayload(startCommandSchema, cmd.payload);
+      if (!payload) {
+        log.warn('acpRunner', 'start_task with malformed payload; ignoring');
+        await relay.sendResult(cmd.id, 'failed', { error: 'malformed payload' });
+        return;
+      }
+      const prompt = payload.prompt?.trim() ?? '';
+      const hasFiles = (payload.files?.some((file) => file.base64.length > 0) ?? false);
+      if (!prompt && !hasFiles) {
+        log.warn('acpRunner', 'start_task with empty prompt and no attachments; ignoring');
         await relay.sendResult(cmd.id, 'failed', { error: 'empty prompt' });
         return;
       }
-      log.info('acpRunner', `start_task → forwarding prompt chars=${prompt.length} id=${cmd.id.slice(0, 8)}`);
+      const promptInput = buildStartTaskPromptContent(payload, agentCaps);
+      log.info(
+        'acpRunner',
+        `start_task → forwarding prompt chars=${promptInput.textForLog.length} blocks=${promptInput.content.length} id=${cmd.id.slice(0, 8)}`,
+      );
       // Mirror the legacy `outputSvc.newTurn()` boundary: clear the
       // previous reply on mobile + show "Agent is typing…". Without
       // this, mobile keeps showing the previous turn's bubble until
       // the first streaming text overwrites it, which races visibly.
       await streaming.beginTurn();
-      history.appendUserPrompt(prompt);
+      history.appendUserPrompt(promptInput.textForLog);
       try {
-        const reply = await client.prompt(prompt);
+        const reply = await client.prompt(promptInput);
         // Close with interactive-detection so a trailing
         // "question + numbered options" pattern in the reply gets
         // surfaced as a tappable select_prompt chunk on mobile
