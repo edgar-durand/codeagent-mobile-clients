@@ -4,6 +4,12 @@ All notable changes to the CodeAgent Mobile VS Code extension are documented her
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.28.1] — 2026-06-06
+
+### Fixed
+
+- **cli:** RequestCode times out at 10s instead of hanging forever
+
 ## [2.28.0] — 2026-06-06
 
 ### Added
