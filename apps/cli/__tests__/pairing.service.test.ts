@@ -48,53 +48,6 @@ describe('requestCode', () => {
   });
 });
 
-describe('pollStatus', () => {
-  const realRandom = Math.random;
-  beforeEach(() => {
-    vi.useFakeTimers();
-    // Deterministic jitter (mid-range): exp * (0.9 + 0.5 * 0.2) = exp * 1.0
-    Math.random = () => 0.5;
-  });
-  afterEach(() => { vi.useRealTimers(); vi.clearAllMocks(); Math.random = realRandom; });
-
-  it('calls onPaired when server returns paired:true', async () => {
-    vi.spyOn(pairing._transport, 'getJson').mockResolvedValue({
-      data: {
-        paired: true,
-        sessionId: 'sess_1',
-        user: { name: 'Edgar', email: 'e@e.com', plan: 'PRO' },
-      },
-    } as never);
-
-    const onPaired = vi.fn();
-    const onTimeout = vi.fn();
-    pairing.pollStatus('plugin-1', onPaired, onTimeout);
-
-    await vi.advanceTimersByTimeAsync(3100);
-    expect(onPaired).toHaveBeenCalledWith({
-      sessionId: 'sess_1',
-      userName: 'Edgar',
-      userEmail: 'e@e.com',
-      plan: 'PRO',
-    });
-    expect(onTimeout).not.toHaveBeenCalled();
-  });
-
-  it('calls onTimeout after 5 minutes without pairing', async () => {
-    vi.spyOn(pairing._transport, 'getJson').mockResolvedValue({
-      data: { paired: false },
-    } as never);
-
-    const onPaired = vi.fn();
-    const onTimeout = vi.fn();
-    pairing.pollStatus('plugin-1', onPaired, onTimeout);
-
-    await vi.advanceTimersByTimeAsync(301_000);
-    expect(onTimeout).toHaveBeenCalled();
-    expect(onPaired).not.toHaveBeenCalled();
-  });
-});
-
 describe('postLinkCredential', () => {
   afterEach(() => { vi.restoreAllMocks(); });
 

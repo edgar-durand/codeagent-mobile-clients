@@ -8,7 +8,8 @@ import {
   showPairingCode,
   formatRemaining,
 } from '../ui/banner';
-import { requestCode, pollStatus, postLinkCredential } from '../services/pairing.service';
+import { requestCode, postLinkCredential } from '../services/pairing.service';
+import { subscribeToPairCompletion } from '../services/pair-completion-subscriber';
 import { addSession, loadCliConfig, saveCliConfig } from '../config';
 import { start } from './start';
 import { parseAgentFlag, promptForAgent } from '../utils/agent-prompt';
@@ -99,7 +100,7 @@ export async function pair(args: string[] = []): Promise<void> {
       process.exit(0);
     }
 
-    stopPolling = pollStatus(
+    stopPolling = subscribeToPairCompletion(
       pluginId,
       (info) => {
         process.removeListener('SIGINT', sigintHandler);

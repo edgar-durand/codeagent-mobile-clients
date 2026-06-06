@@ -65,11 +65,11 @@ import {
 } from '../ui/banner';
 import {
   requestCode,
-  pollStatus,
   postLinkCredential,
   postLinkErrorSignal,
   type PairedUserInfo,
 } from '../services/pairing.service';
+import { subscribeToPairCompletion } from '../services/pair-completion-subscriber';
 import { addSession, getActiveSession, loadCliConfig, saveCliConfig } from '../config';
 import { createRuntimeStrategy } from '../agents/registry';
 import type {
@@ -228,7 +228,7 @@ export async function link(args: string[] = []): Promise<void> {
       stopPoll?.();
       reject(new Error('cancelled'));
     };
-    stopPoll = pollStatus(
+    stopPoll = subscribeToPairCompletion(
       pluginId,
       (info) => {
         process.removeListener('SIGINT', sigint);

@@ -152,63 +152,6 @@ export async function fetchCurrentPluginAuthToken(
   }
 }
 
-export function pollStatus(
-  pluginId: string,
-  onPaired: (info: PairedUserInfo) => void,
-  onTimeout: () => void,
-): () => void {
-  let stopped = false;
-  let pollTimer: NodeJS.Timeout | null = null;
-  let consecutiveFailures = 0;
-
-  const tick = async (): Promise<void> => {
-    if (stopped) return;
-    try {
-      // Call through _transport so vi.spyOn can intercept in tests
-      const result = await _transport.getJson(
-        `${API_BASE}/api/pairing/status?pluginId=${pluginId}`,
-      );
-      consecutiveFailures = 0;
-      const data = result?.data as Record<string, unknown> | undefined;
-      if (data?.paired) {
-        stop();
-        const user = (data.user as Record<string, unknown>) ?? {};
-        const rawToken = data.pluginAuthToken;
-        onPaired({
-          sessionId: data.sessionId as string,
-          userId: typeof user.id === 'string' && user.id.length > 0 ? user.id : undefined,
-          userName: (user.name as string) || '',
-          userEmail: (user.email as string) || '',
-          plan: (user.plan as string) || 'FREE',
-          pluginAuthToken: typeof rawToken === 'string' && rawToken.length > 0 ? rawToken : undefined,
-        });
-        return;
-      }
-    } catch {
-      consecutiveFailures += 1;
-    }
-    if (stopped) return;
-    const delay = computePollDelay({ baseMs: 3000, failures: consecutiveFailures });
-    pollTimer = setTimeout(() => { void tick(); }, delay);
-  };
-
-  const initialDelay = computePollDelay({ baseMs: 3000, failures: 0 });
-  pollTimer = setTimeout(() => { void tick(); }, initialDelay);
-
-  const timeout = setTimeout(() => {
-    stop();
-    onTimeout();
-  }, 300_000);
-
-  function stop() {
-    stopped = true;
-    if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; }
-    clearTimeout(timeout);
-  }
-
-  return stop;
-}
-
 // Exported transport object — allows tests to spy on individual methods without
 // relying on CommonJS `exports` (which breaks in bundled output)
 export const _transport = {
