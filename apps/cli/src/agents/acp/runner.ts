@@ -405,6 +405,55 @@ export interface AcpRunnerOptions {
   cwd: string;
 }
 
+export function createAcpTerminalHandlers(
+  publisher: Pick<AcpPublisher, 'publishOutput'>,
+): Parameters<typeof registerTerminalHandlers>[0] {
+  return {
+    onData: ({ sessionId, data }) => {
+      void publisher.publishOutput({
+        type: 'terminal_data',
+        terminalSessionId: sessionId,
+        data,
+        done: false,
+      });
+    },
+    onExit: ({ sessionId, exitCode }) => {
+      void publisher.publishOutput({
+        type: 'terminal_exit',
+        terminalSessionId: sessionId,
+        exitCode,
+        done: true,
+      });
+    },
+  };
+}
+
+export function createAckTrackingRelay(
+  relay: CommandRelayService,
+  commandId: string,
+): { relay: CommandRelayService; wasAcked: () => boolean } {
+  let acked = false;
+  const trackingRelay = new Proxy(relay, {
+    get(target, prop, receiver) {
+      if (prop === 'sendResult') {
+        return (
+          ackCommandId: string,
+          status: string,
+          result: Record<string, unknown>,
+        ) => {
+          if (ackCommandId === commandId) acked = true;
+          return target.sendResult(ackCommandId, status, result);
+        };
+      }
+      return Reflect.get(target, prop, receiver);
+    },
+  });
+  return {
+    relay: trackingRelay,
+    wasAcked: () => acked,
+  };
+}
+
 /** Auto-cancel a permission Promise after this ms. Matches the
  *  upstream Redis TTL on the awaiting-answer record so the SDK
  *  never blocks past the point where mobile could still answer. */
@@ -510,24 +559,7 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
   // /api/commands/output channel as chat. Without these handlers the
   // shell starts (terminal_open succeeds) but stdin/stdout never reach
   // the mobile, so the panel sits on "running" forever.
-  registerTerminalHandlers({
-    onData: ({ sessionId, data }) => {
-      void publisher.publishOutput({
-        type: 'terminal_data',
-        terminalSessionId: sessionId,
-        data,
-        done: false,
-      });
-    },
-    onExit: ({ sessionId, exitCode }) => {
-      void publisher.publishOutput({
-        type: 'terminal_exit',
-        terminalSessionId: sessionId,
-        exitCode,
-        done: true,
-      });
-    },
-  });
+  registerTerminalHandlers(createAcpTerminalHandlers(publisher));
 
   // Counter so the log isn't drowned by every text-delta variant —
   // we surface the variant kind + a count to confirm the SDK is
@@ -1096,31 +1128,16 @@ async function handleCommand(
       // ACP runner. The handlers emit their own `preview_*` events
       // via the per-user SSE bus; we just trigger + ack.
       const runtime = createInteractiveAgentStrategy(opts.agent, createOsStrategy());
-      let previewHandlerAcked = false;
-      const ackingRelay = new Proxy(relay, {
-        get(target, prop, receiver) {
-          if (prop === 'sendResult') {
-            return (
-              commandId: string,
-              status: string,
-              result: Record<string, unknown>,
-            ) => {
-              if (commandId === cmd.id) previewHandlerAcked = true;
-              return target.sendResult(commandId, status, result);
-            };
-          }
-          return Reflect.get(target, prop, receiver);
-        },
-      });
-      const ctx = buildLegacyContextForACP(opts, ackingRelay, runtime);
+      const ackTracker = createAckTrackingRelay(relay, cmd.id);
+      const ctx = buildLegacyContextForACP(opts, ackTracker.relay, runtime);
       try {
         await legacyDispatchCommand(ctx, cmd);
-        if (!previewHandlerAcked) {
+        if (!ackTracker.wasAcked()) {
           await relay.sendResult(cmd.id, 'completed', {});
         }
       } catch (err) {
         log.warn('acpRunner', `${cmd.type} failed: ${describeError(err)}`);
-        if (!previewHandlerAcked) {
+        if (!ackTracker.wasAcked()) {
           await relay.sendResult(cmd.id, 'failed', { error: describeError(err) });
         }
       }
@@ -1147,35 +1164,20 @@ async function handleCommand(
         // here — the backend's last-write-wins overwrites the
         // handler's body (e.g. write_file's `{ok:true}`) with `{}`,
         // and the mobile reads `{}` as "save failed".
-        let handlerAcked = false;
-        const ackingRelay = new Proxy(relay, {
-          get(target, prop, receiver) {
-            if (prop === 'sendResult') {
-              return (
-                commandId: string,
-                status: string,
-                result: Record<string, unknown>,
-              ) => {
-                if (commandId === cmd.id) handlerAcked = true;
-                return target.sendResult(commandId, status, result);
-              };
-            }
-            return Reflect.get(target, prop, receiver);
-          },
-        });
-        const legacyCtx = buildLegacyContextForACP(opts, ackingRelay, runtime);
+        const ackTracker = createAckTrackingRelay(relay, cmd.id);
+        const legacyCtx = buildLegacyContextForACP(opts, ackTracker.relay, runtime);
         try {
           await legacyDispatchCommand(legacyCtx, cmd);
           // Fallback ack ONLY when the handler didn't already send
           // one. Covers fire-and-forget legacy handlers that never
           // touch the relay (rare) without clobbering the common
           // path where the handler's structured result matters.
-          if (!handlerAcked) {
+          if (!ackTracker.wasAcked()) {
             await relay.sendResult(cmd.id, 'completed', {});
           }
         } catch (err) {
           log.warn('acpRunner', `legacy handler "${cmd.type}" threw: ${describeError(err)}`);
-          if (!handlerAcked) {
+          if (!ackTracker.wasAcked()) {
             await relay.sendResult(cmd.id, 'failed', { error: describeError(err) });
           }
         }
