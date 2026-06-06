@@ -1,0 +1,160 @@
+/**
+ * GeminiRuntimeStrategy — InteractiveAgentStrategy for Google's
+ * Gemini CLI.
+ *
+ * Gemini is meant to be driven via the ACP runtime (`gemini --acp`)
+ * — see `apps/cli/src/agents/acp/`. This strategy exists so the
+ * non-ACP code paths that touch every registered agent still
+ * resolve cleanly:
+ *
+ *   - `codeam link gemini` reaches in for `credentialLocator()` +
+ *     `loginLauncher()`.
+ *   - The agent-contract suite iterates every runtime builder and
+ *     asserts the interface shape.
+ *   - `start.ts` falls through to `prepareLaunch()` when
+ *     `CODEAM_ACP_ENABLED` isn't set. In that case we spawn the raw
+ *     `gemini` REPL — the mobile UI sees unparsed PTY bytes, which
+ *     is the same degraded-but-correct fallback any agent without a
+ *     hand-rolled parser would get.
+ *
+ * History / usage / TUI parsing are deliberately no-ops: Gemini
+ * doesn't ship a stable on-disk transcript format we'd want to
+ * reverse-engineer, and ACP is the path that fills those gaps in
+ * Phase 1.
+ */
+
+import {
+  getAgent,
+  type AgentId,
+  type AgentMetadata,
+  type AgentModel,
+  type NormalizedMessage,
+  type SelectPrompt,
+} from '@codeagent/shared';
+import { geminiCredentialLocator, geminiLoginLauncher } from './link';
+import type { OsStrategy } from '../../os';
+import type { ChangeModelInstruction, RuntimeStrategy } from '../strategy';
+
+const GEMINI_PRO_CONTEXT_WINDOW = 1_000_000;
+const GEMINI_FLASH_CONTEXT_WINDOW = 1_000_000;
+
+// Subset of model ids the Gemini CLI accepts via `gemini --model
+// <id>` (and `/model` once inside the REPL). Kept short on purpose —
+// the mobile picker doesn't need to enumerate every variant.
+const GEMINI_MODELS: AgentModel[] = [
+  {
+    id: 'gemini-2.5-pro',
+    label: 'Gemini 2.5 Pro',
+    contextWindow: GEMINI_PRO_CONTEXT_WINDOW,
+  },
+  {
+    id: 'gemini-2.5-flash',
+    label: 'Gemini 2.5 Flash',
+    contextWindow: GEMINI_FLASH_CONTEXT_WINDOW,
+  },
+  {
+    id: 'gemini-2.5-flash-lite',
+    label: 'Gemini 2.5 Flash-Lite',
+    contextWindow: GEMINI_FLASH_CONTEXT_WINDOW,
+  },
+];
+
+export class GeminiRuntimeStrategy implements RuntimeStrategy {
+  readonly id: AgentId = 'gemini';
+  readonly meta: AgentMetadata = getAgent('gemini');
+  readonly mode = 'interactive' as const;
+  readonly os: OsStrategy;
+
+  constructor(os: OsStrategy) {
+    this.os = os;
+  }
+
+  async prepareLaunch(): Promise<{ cmd: string; args: string[]; env?: Record<string, string> }> {
+    const binary = this.os.findInPath('gemini');
+    if (!binary) {
+      throw new Error(
+        'Gemini CLI is not on PATH. Install it with:\n' +
+          '    npm install -g @google/gemini-cli\n' +
+          '    Then run `codeam pair` again.\n\n' +
+          '  Tip: set CODEAM_ACP_ENABLED=1 before pairing to use the\n' +
+          '  ACP runtime — it gives mobile typed messages instead of\n' +
+          '  raw PTY output for Gemini.',
+      );
+    }
+    return this.os.buildLaunch(binary);
+  }
+
+  // Gemini's REPL has no documented "resume previous session" flag,
+  // so a relaunch starts fresh. Returning an empty array is the
+  // documented "no-op resume" path (Cursor / Aider do the same).
+  resumeLaunchArgs(_sessionId: string, _opts?: { auto?: boolean }): string[] {
+    return [];
+  }
+
+  resolveHistoryDir(_cwd: string): string | null {
+    return null;
+  }
+
+  parseHistoryFile(_filePath: string): NormalizedMessage[] {
+    return [];
+  }
+
+  getCurrentUsage(
+    _historyDir: string,
+  ): { used: number; total: number; percent: number; model?: string } | null {
+    return null;
+  }
+
+  async fetchWeeklyUsage(): Promise<{ percent: number; resetAt?: string } | null> {
+    return null;
+  }
+
+  async listModels(): Promise<AgentModel[]> {
+    return GEMINI_MODELS;
+  }
+
+  /**
+   * Gemini's `/model <id>` swaps the active model inside the REPL —
+   * same shape as Claude / Codex / Cursor.
+   */
+  changeModelInstruction(modelId: string): ChangeModelInstruction {
+    return { type: 'pty', ptyInput: `/model ${modelId}\r` };
+  }
+
+  /**
+   * `/compress` is Gemini's context-compression slash command (the
+   * closest analogue to Claude's `/compact`). No auto-mode equivalent.
+   */
+  summarizeInstruction(_mode: 'normal' | 'auto'): { ptyInput: string } {
+    return { ptyInput: '/compress\r' };
+  }
+
+  /**
+   * Pass-through filter. Gemini's TUI chrome isn't worth
+   * hand-detecting — users who want clean output should use ACP
+   * (`CODEAM_ACP_ENABLED=1`) instead. Returning the input verbatim
+   * satisfies the contract's idempotency assertion and keeps mobile
+   * showing whatever the REPL prints.
+   */
+  filterTuiOutput(lines: string[]): string[] {
+    return lines;
+  }
+
+  /**
+   * No interactive-selector detection — Gemini's REPL uses input
+   * lines, not arrow-key menus we'd need to detect. ACP surfaces
+   * permission requests as typed messages, which is the path we want
+   * users on anyway.
+   */
+  detectInteractivePrompt(_lines: string[]): SelectPrompt | null {
+    return null;
+  }
+
+  credentialLocator() {
+    return geminiCredentialLocator();
+  }
+
+  loginLauncher() {
+    return geminiLoginLauncher();
+  }
+}

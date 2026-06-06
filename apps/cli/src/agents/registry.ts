@@ -7,6 +7,7 @@ import { CodexDeployStrategy } from './codex/deploy';
 import { CoderabbitRuntimeStrategy } from './coderabbit/runtime';
 import { CursorRuntimeStrategy } from './cursor/runtime';
 import { AiderRuntimeStrategy } from './aider/runtime';
+import { GeminiRuntimeStrategy } from './gemini/runtime';
 import type { AgentStrategy, RuntimeStrategy, DeployStrategy } from './strategy';
 
 const runtimeBuilders: Partial<Record<AgentId, (os: OsStrategy) => AgentStrategy>> = {
@@ -15,6 +16,7 @@ const runtimeBuilders: Partial<Record<AgentId, (os: OsStrategy) => AgentStrategy
   coderabbit: (os) => new CoderabbitRuntimeStrategy(os),
   cursor: (os) => new CursorRuntimeStrategy(os),
   aider: (os) => new AiderRuntimeStrategy(os),
+  gemini: (os) => new GeminiRuntimeStrategy(os),
 };
 
 const deployBuilders: Partial<Record<AgentId, () => DeployStrategy>> = {
