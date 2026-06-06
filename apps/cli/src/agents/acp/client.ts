@@ -183,7 +183,21 @@ export class AcpClient {
       mcpServers: [],
     });
     this.sessionId = newSession.sessionId;
-    log.info('acpClient', `newSession ← ok sessionId=${newSession.sessionId.slice(0, 8)}`);
+    // Log the adapter-picked model so account-mismatch bugs (e.g.
+    // codex-acp defaulting to a model the user's account doesn't
+    // include) are immediately visible in the smoke-test log
+    // instead of surfacing as a cryptic "Authentication required"
+    // or "model not supported" error from the prompt response.
+    const newSessionMeta = newSession as unknown as {
+      currentModelId?: string;
+      currentServiceTier?: string;
+    };
+    log.info(
+      'acpClient',
+      `newSession ← ok sessionId=${newSession.sessionId.slice(0, 8)}` +
+        ` model=${newSessionMeta.currentModelId ?? '?'}` +
+        ` tier=${newSessionMeta.currentServiceTier ?? '?'}`,
+    );
 
     return { sessionId: newSession.sessionId, initialize };
   }
@@ -212,8 +226,18 @@ export class AcpClient {
       sessionId: this.sessionId,
       prompt: [{ type: 'text', text }],
     });
+
+    // Bare setTimeout + manual cleanup instead of the
+    // `void send.finally(() => clearTimeout(id))` pattern, which
+    // leaked an unhandled rejection when `send` rejected (the
+    // discarded .finally() promise carries the same rejection,
+    // and Node 15+ kills the process on strict-unhandled). Caught
+    // by the v2.27.9 codex smoke test — the auth-error rejection
+    // crashed the runner before its own try/catch could ack the
+    // command.
+    let timeoutId: NodeJS.Timeout | undefined;
     const timeout = new Promise<PromptResponse>((_resolve, reject) => {
-      const id = setTimeout(() => {
+      timeoutId = setTimeout(() => {
         reject(
           new Error(
             `ACP prompt timed out after ${PROMPT_TIMEOUT_MS / 1000}s — adapter never responded. ` +
@@ -222,7 +246,6 @@ export class AcpClient {
           ),
         );
       }, PROMPT_TIMEOUT_MS);
-      void send.finally(() => clearTimeout(id));
     });
     try {
       const result = await Promise.race([send, timeout]);
@@ -237,6 +260,10 @@ export class AcpClient {
         `prompt ← failed elapsedMs=${Date.now() - t0} err=${err instanceof Error ? err.message : String(err)}`,
       );
       throw err;
+    } finally {
+      // Always clear the timer so the timeout promise can't fire
+      // later and try to reject after we've already moved on.
+      if (timeoutId !== undefined) clearTimeout(timeoutId);
     }
   }
 
