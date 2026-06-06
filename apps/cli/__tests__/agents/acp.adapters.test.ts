@@ -1,8 +1,9 @@
 /**
  * Smoke tests for the ACP adapter registry — every entry must
- * resolve to an absolute file path AND advertise the underlying
- * agent binary so we surface helpful errors when the user hasn't
- * installed it.
+ * advertise the underlying agent binary, and (for npm-adapter
+ * specs) resolve `args[0]` to an actual bin file under
+ * `node_modules`. Native-ACP specs (e.g. `gemini --acp`) are
+ * resolved from PATH at spawn time and skip the on-disk check.
  */
 
 import * as fs from 'node:fs';
@@ -17,9 +18,16 @@ describe('ACP adapter registry', () => {
       expect(spec, `missing adapter spec for ${agentId}`).not.toBeNull();
       expect(spec!.command).toBeTruthy();
       expect(spec!.args.length).toBeGreaterThan(0);
-      // First arg is the resolved bin script — must exist on disk
-      // (the npm install in CI guarantees node_modules is present).
-      expect(fs.existsSync(spec!.args[0]), `bin not found at ${spec!.args[0]}`).toBe(true);
+      // npm-adapter shape: `command === process.execPath` and
+      // `args[0]` is an absolute path to a bin script inside
+      // node_modules. Native-ACP shape: `command` is the agent
+      // binary name (PATH-resolved at runtime) and `args` are flags.
+      const isNpmAdapter = spec!.command === process.execPath;
+      if (isNpmAdapter) {
+        expect(fs.existsSync(spec!.args[0]), `bin not found at ${spec!.args[0]}`).toBe(true);
+      } else {
+        expect(spec!.command).toMatch(/^[a-z][a-z0-9-]+$/);
+      }
       expect(spec!.requiresAgentBinary).toMatch(/^[a-z][a-z0-9-]+$/);
     },
   );

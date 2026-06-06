@@ -4,7 +4,8 @@ export type AgentId =
   | 'copilot'
   | 'coderabbit'
   | 'cursor'
-  | 'aider';
+  | 'aider'
+  | 'gemini';
 
 export type AgentAuthKind = 'oauth_token' | 'api_key';
 

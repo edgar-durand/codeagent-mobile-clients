@@ -91,6 +91,7 @@ describe('mapSessionUpdate', () => {
       notification({
         sessionUpdate: 'tool_call',
         toolCallId: 'c1',
+        title: '',
         kind: 'execute',
       }),
     );
@@ -100,6 +101,7 @@ describe('mapSessionUpdate', () => {
       notification({
         sessionUpdate: 'tool_call',
         toolCallId: 'c2',
+        title: '',
         rawInput: { command: 'ls' },
       }),
     );
@@ -184,11 +186,13 @@ describe('mapSessionUpdate', () => {
 });
 
 describe('mapPermissionRequest', () => {
+  // `as const` preserves the kind literal so it satisfies the SDK's
+  // ToolKind union (otherwise TS widens to `string`).
   const baseToolCall = {
     toolCallId: 'tc-1',
     title: 'Run `rm -rf /`',
     kind: 'execute',
-  };
+  } as const;
 
   it('builds an awaiting-answer event with the tool title as prompt + option labels', () => {
     const req: RequestPermissionRequest = {

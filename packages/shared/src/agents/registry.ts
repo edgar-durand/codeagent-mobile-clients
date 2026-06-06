@@ -52,6 +52,18 @@ export const AGENT_REGISTRY: Record<AgentId, AgentMetadata> = {
     supportedAuthKinds: ['api_key'],
     preferredAuthKind: 'api_key',
   },
+  gemini: {
+    id: 'gemini',
+    displayName: 'Gemini CLI',
+    binaryName: 'gemini',
+    enabled: true,
+    // Gemini speaks ACP natively via `gemini --acp` — pairing flows
+    // through the ACP runtime, not a PTY parser. Auth is the user's
+    // existing `gemini auth login` (OAuth) or GEMINI_API_KEY env var,
+    // both managed by the gemini binary itself.
+    supportedAuthKinds: ['api_key'],
+    preferredAuthKind: 'api_key',
+  },
 };
 
 export function getEnabledAgents(): AgentMetadata[] {
@@ -71,6 +83,7 @@ export function isKnownAgentId(id: string): id is AgentId {
     id === 'copilot' ||
     id === 'coderabbit' ||
     id === 'cursor' ||
-    id === 'aider'
+    id === 'aider' ||
+    id === 'gemini'
   );
 }

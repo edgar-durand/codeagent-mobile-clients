@@ -10,11 +10,12 @@ ACP gives us typed messages straight from the agent — `session/update`, `sessi
 
 ## Status
 
-| Agent  | Adapter package                            | Phase 1 |
+| Agent  | Adapter source                             | Phase 1 |
 | ------ | ------------------------------------------ | :-----: |
 | Claude | `@agentclientprotocol/claude-agent-acp`    |    ✅    |
 | Codex  | `@agentclientprotocol/codex-acp`           |    ✅    |
 | Cursor | `cursor-agent-acp`                         |    ✅    |
+| Gemini | native (`gemini --acp`)                    |    ✅    |
 
 Phase 1 supports:
 
@@ -58,19 +59,38 @@ If the adapter package isn't installed or the underlying CLI is missing, the run
 
 ## Adding a new ACP-compatible agent
 
+Two shapes, depending on whether the agent ships an npm adapter or speaks ACP natively.
+
+### Shape A — npm-bundled adapter
+
+Adapters like `@agentclientprotocol/claude-agent-acp` are pulled in as regular CLI deps so the user gets them for free with `npm i -g codeam-cli`.
+
 1. `npm install <adapter-package>` in `apps/cli/`.
 2. Add an entry to `REGISTRY` in [`adapters.ts`](./adapters.ts) keyed by the agent's `AgentId`:
    ```ts
-   gemini: () => {
-     const bin = resolveBin('@google/gemini-acp', 'gemini-acp');
+   foo: () => {
+     const bin = resolveBin('@acme/foo-acp', 'foo-acp');
      if (!bin) return null;
      return {
        command: process.execPath,
        args: [bin],
-       requiresAgentBinary: 'gemini',
+       requiresAgentBinary: 'foo',
      };
    },
    ```
-3. Ship. The dispatch in [`start.ts`](../../commands/start.ts) picks it up the next time `CODEAM_ACP_ENABLED=1` is set for that agent.
+
+### Shape B — native ACP (no adapter package)
+
+Many agents now speak ACP directly via a CLI flag (Gemini's `--acp`, etc.). No npm package needed — just spawn the user's installed binary.
+
+1. Add an entry pointing at the binary on PATH:
+   ```ts
+   gemini: () => ({
+     command: 'gemini',
+     args: ['--acp'],
+     requiresAgentBinary: 'gemini',
+   }),
+   ```
+2. Ship. The dispatch in [`start.ts`](../../commands/start.ts) picks it up the next time `CODEAM_ACP_ENABLED=1` is set for that agent.
 
 No new runtime files, no parser per agent, no UI changes on mobile.

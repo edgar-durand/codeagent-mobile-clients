@@ -103,6 +103,15 @@ const REGISTRY: Partial<Record<AgentId, () => AdapterSpec | null>> = {
       requiresAgentBinary: 'cursor-agent',
     };
   },
+  // Gemini speaks ACP natively via `gemini --acp` — no npm adapter
+  // package, just the user-installed `gemini` binary on PATH. Same
+  // {@link AdapterSpec} shape; the only difference is `command` is
+  // resolved from PATH at spawn time instead of being absolute.
+  gemini: () => ({
+    command: 'gemini',
+    args: ['--acp'],
+    requiresAgentBinary: 'gemini',
+  }),
 };
 
 /**
