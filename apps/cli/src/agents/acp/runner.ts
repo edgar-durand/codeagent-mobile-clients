@@ -28,8 +28,10 @@
 import { randomUUID } from 'node:crypto';
 import { CommandRelayService, type RemoteCommand } from '../../services/command-relay.service';
 import { log } from '../../services/logger';
-import { showInfo } from '../../ui/banner';
-import type { AgentId } from '@codeagent/shared';
+import { showInfo, showSuccess } from '../../ui/banner';
+import type { AgentId, AgentModel } from '@codeagent/shared';
+import { createOsStrategy } from '../../os';
+import { createInteractiveAgentStrategy } from '../registry';
 import { AcpClient } from './client';
 import type { AdapterSpec } from './adapters';
 import { AcpPublisher } from './publisher';
@@ -124,16 +126,24 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
     'acpRunner',
     `adapter handshake ok protocolVersion=${initialize.protocolVersion} sessionId=${acpSessionId.slice(0, 8)}`,
   );
+  showSuccess(`${opts.agent} online (ACP) — awaiting prompts from mobile.`);
+
+  // Model catalog comes from the registered RuntimeStrategy — same
+  // list mobile gets in the legacy PTY path so the model-picker UI
+  // stays consistent even when ACP is on.
+  const runtime = createInteractiveAgentStrategy(opts.agent, createOsStrategy());
+  const models = await runtime.listModels();
 
   // Command relay — listens for prompts from mobile / web and
-  // forwards them as ACP `session/prompt`. Phase 1 covers only
-  // start_task + stop_task / escape; other commands surface an
-  // info nudge so the user knows the feature is on the Phase 2
-  // path.
+  // forwards them as ACP `session/prompt`. Every command branch MUST
+  // call `relay.sendResult(...)` even on no-op / not-supported
+  // paths; otherwise mobile retries the same command every ~20 s
+  // (the dashboard polls `get_conversation` on a loop to refresh
+  // the chat surface) and the relay log drowns in duplicates.
   const relay = new CommandRelayService(
     opts.pluginId,
     async (cmd) => {
-      await handleCommand(cmd, client);
+      await handleCommand(cmd, client, relay, acpSessionId, models);
     },
     { id: opts.agent, name: opts.agent, displayName: opts.agent } as never,
   );
@@ -157,23 +167,36 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
 }
 
 /**
- * Map a relay command to the ACP equivalent. Anything we don't
- * support yet logs an info line so the user sees why their action
- * didn't land — silent drops are worse than "not supported here".
+ * Map a relay command to the ACP equivalent.
+ *
+ * Every branch MUST call `relay.sendResult(cmd.id, status, result)`
+ * exactly once. Without an ack the backend keeps the command in
+ * "pending" and mobile's auto-refresh loops (notably
+ * `get_conversation` every ~20 s) retry forever — manifests as the
+ * mobile chat sitting empty while the CLI looks like it's hung.
  */
-async function handleCommand(cmd: RemoteCommand, client: AcpClient): Promise<void> {
+async function handleCommand(
+  cmd: RemoteCommand,
+  client: AcpClient,
+  relay: CommandRelayService,
+  acpSessionId: string,
+  models: AgentModel[],
+): Promise<void> {
   switch (cmd.type) {
     case 'start_task': {
       const payload = cmd.payload as { prompt?: string } | undefined;
       const prompt = payload?.prompt?.trim();
       if (!prompt) {
         log.warn('acpRunner', 'start_task with empty prompt; ignoring');
+        await relay.sendResult(cmd.id, 'failed', { error: 'empty prompt' });
         return;
       }
       try {
-        await client.prompt(prompt);
+        const reply = await client.prompt(prompt);
+        await relay.sendResult(cmd.id, 'completed', { stopReason: reply.stopReason });
       } catch (err) {
         log.warn('acpRunner', `prompt failed: ${describeError(err)}`);
+        await relay.sendResult(cmd.id, 'failed', { error: describeError(err) });
       }
       return;
     }
@@ -181,13 +204,47 @@ async function handleCommand(cmd: RemoteCommand, client: AcpClient): Promise<voi
     case 'escape_key': {
       try {
         await client.cancel();
+        await relay.sendResult(cmd.id, 'completed', {});
       } catch (err) {
         log.warn('acpRunner', `cancel failed: ${describeError(err)}`);
+        await relay.sendResult(cmd.id, 'failed', { error: describeError(err) });
       }
       return;
     }
+    case 'get_conversation': {
+      // ACP doesn't expose the agent's prior on-disk transcript the
+      // way Claude's JSONL files do — every session/update from this
+      // run is published over the streaming-chunk channel as it
+      // arrives, and the backend already buffers + replays them via
+      // its per-user SSE bus. Returning the ACP session id (not null)
+      // gives mobile a non-empty `conversationId` so the chat header
+      // can render a stable name and the refresh loop quiets down.
+      // No conversation-history file to upload; mobile relies on the
+      // streaming-chunk bus for catch-up.
+      await relay.sendResult(cmd.id, 'completed', { conversationId: acpSessionId });
+      return;
+    }
+    case 'list_models': {
+      await relay.sendResult(cmd.id, 'completed', { models });
+      return;
+    }
+    case 'set_keep_alive':
+    case 'get_context': {
+      // Codespace-only / not-applicable in ACP mode. Ack as completed
+      // with an empty result so mobile's optional features degrade
+      // silently instead of showing a permanent "loading" spinner.
+      await relay.sendResult(cmd.id, 'completed', {});
+      return;
+    }
     default:
+      // Everything else (change_model, summarize, file ops, git ops,
+      // terminal ops, …) is Phase 2 work for ACP. Acking `failed`
+      // with a structured reason lets mobile show a one-line "not
+      // supported in ACP mode" affordance instead of timing out.
       log.trace('acpRunner', `command type "${cmd.type}" not supported in Phase 1 ACP mode`);
+      await relay.sendResult(cmd.id, 'failed', {
+        error: `Command "${cmd.type}" is not supported in Phase 1 ACP mode.`,
+      });
       return;
   }
 }

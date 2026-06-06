@@ -46,6 +46,22 @@ export class AcpPublisher {
   }
 
   /**
+   * Wrap the event with `sessionId` + `pluginId` at the top level.
+   * The backend's `PluginAuthGuard` reads both fields from the JSON
+   * body even when `X-Plugin-Auth-Token` is set on the header and
+   * `:sessionId` is on the URL path. Without the body fields it
+   * rejects every POST with `PLUGIN_TOKEN_REQUIRED` — same shape the
+   * legacy `streaming-emitter.service.ts` `postWithRetries` uses.
+   */
+  private envelope(event: StreamingChunkEvent | AwaitingAnswerEvent): string {
+    return JSON.stringify({
+      sessionId: this.opts.sessionId,
+      pluginId: this.opts.pluginId,
+      ...event,
+    });
+  }
+
+  /**
    * Fire-and-forget chunk POST. The backend's per-user SSE bus
    * forwards each chunk to mobile/landing within ~20 ms (PRO) /
    * ~80 ms (FREE). Errors are logged but never thrown — a missed
@@ -57,7 +73,7 @@ export class AcpPublisher {
       const { statusCode, body } = await _transport.post(
         url,
         this.headers,
-        JSON.stringify(event),
+        this.envelope(event),
       );
       if (statusCode < 200 || statusCode >= 300) {
         log.warn('acpPublisher', `chunk status=${statusCode} body=${body.slice(0, 200)}`);
@@ -79,7 +95,7 @@ export class AcpPublisher {
       const { statusCode, body } = await _transport.post(
         url,
         this.headers,
-        JSON.stringify(event),
+        this.envelope(event),
       );
       if (statusCode < 200 || statusCode >= 300) {
         log.warn('acpPublisher', `awaiting-answer status=${statusCode} body=${body.slice(0, 200)}`);
