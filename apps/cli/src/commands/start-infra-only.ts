@@ -6,9 +6,10 @@ import { registerTerminalHandlers, closeAllTerminals } from '../services/termina
 import { handlers as commandHandlers, cleanupAttachmentTempFiles } from './start/handlers';
 import { buildKeepAlive } from './start/keep-alive';
 import type { HandlerContext } from './start/handlers';
-import { getActiveSession } from '../config';
+import { addSession, getActiveSession } from '../config';
 import { parsePayload, startCommandSchema } from '../lib/payload';
 import { log } from '../services/logger';
+import { fetchCurrentPluginAuthToken } from '../services/pairing.service';
 
 /**
  * Infra-only run loop: the in-codespace counterpart to `start()`
@@ -103,6 +104,15 @@ export async function startInfraOnly(agentId: AgentId): Promise<void> {
   }
   const pluginId = session.pluginId;
   const cwd = process.cwd();
+
+  // Same boot-time reconnect contract as start(): refresh stale
+  // HMAC tokens and flip paused deployed sessions back online before
+  // any file/terminal publishers start using the persisted token.
+  const refreshed = await fetchCurrentPluginAuthToken(session.id, pluginId);
+  if (refreshed && refreshed !== session.pluginAuthToken) {
+    addSession({ ...session, pluginAuthToken: refreshed });
+    session.pluginAuthToken = refreshed;
+  }
 
   const agentMeta = AGENT_REGISTRY[agentId];
   if (!agentMeta) {

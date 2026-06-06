@@ -48,6 +48,51 @@ describe('requestCode', () => {
   });
 });
 
+describe('fetchCurrentPluginAuthToken', () => {
+  afterEach(() => { vi.restoreAllMocks(); });
+
+  it('POSTs sessionId+pluginId to /api/pairing/reconnect and returns the refreshed token', async () => {
+    const postSpy = vi
+      .spyOn(pairing._transport, 'postJson')
+      .mockResolvedValue({
+        data: {
+          paired: true,
+          pluginAuthToken: 'v1.current-secret-token',
+        },
+      } as never);
+
+    const result = await pairing.fetchCurrentPluginAuthToken('sess-1', 'plug-1');
+
+    expect(result).toBe('v1.current-secret-token');
+    expect(postSpy).toHaveBeenCalledTimes(1);
+    const [url, body] = postSpy.mock.calls[0];
+    expect(url).toMatch(/\/api\/pairing\/reconnect$/);
+    expect(body).toEqual({ sessionId: 'sess-1', pluginId: 'plug-1' });
+  });
+
+  it('returns null when reconnect does not confirm the pairing', async () => {
+    vi.spyOn(pairing._transport, 'postJson').mockResolvedValue({
+      data: { paired: false, pluginAuthToken: 'v1.ignored' },
+    } as never);
+
+    await expect(pairing.fetchCurrentPluginAuthToken('sess-1', 'plug-1')).resolves.toBeNull();
+  });
+
+  it('returns null when reconnect omits pluginAuthToken', async () => {
+    vi.spyOn(pairing._transport, 'postJson').mockResolvedValue({
+      data: { paired: true },
+    } as never);
+
+    await expect(pairing.fetchCurrentPluginAuthToken('sess-1', 'plug-1')).resolves.toBeNull();
+  });
+
+  it('returns null on network failure so boot can fall back to the persisted token', async () => {
+    vi.spyOn(pairing._transport, 'postJson').mockRejectedValue(new Error('offline'));
+
+    await expect(pairing.fetchCurrentPluginAuthToken('sess-1', 'plug-1')).resolves.toBeNull();
+  });
+});
+
 describe('pollStatus', () => {
   const realRandom = Math.random;
   beforeEach(() => {
