@@ -41,83 +41,61 @@ import { mapSessionUpdate, mapPermissionRequest } from './mappers';
  * to the legacy `/api/commands/output` chat pipe mobile actually
  * reads (see {@link AcpPublisher.publishOutput} for the wire shape).
  *
- * The legacy pipe coalesces by `(sessionId, type)` — successive text
- * events with the same type overwrite each other until one lands
- * with `done: true`. We accumulate per ACP message-id so ordering is
- * preserved, then flush each accumulated buffer as `{ type: 'text',
- * content: <cumulative>, done: false }` per delta. `closeAll()`
- * re-flushes the final cumulative content with `done: true` so
- * mobile flips the bubble out of "Thinking…".
+ * Design: ONE cumulative `text` buffer per turn. The chat pipe
+ * coalesces by `(sessionId, type)`, so multiple `type:'text'` events
+ * with the same sessionId overwrite each other until one lands with
+ * `done: true`. Per-messageId sub-buffers (the previous design) only
+ * works when the adapter reuses the same messageId across deltas
+ * (Claude does, Gemini doesn't) — when they differ, each "buffer"
+ * emits its own text event and mobile shows only the last one
+ * because of the coalescence.
  *
- * Note: ACP `thinking` and `tool_call` notifications also flow
- * through here for Phase 1, but get mapped to `type: 'text'` on the
- * legacy pipe — that pipe only renders text in the chat surface;
- * dedicated thinking/tool bubbles live on the streaming-chunk feed
- * (Epic C, Phase 2 wire-up).
+ * Phase 1 contract:
+ *   - `agent_message_chunk` deltas → appended to the cumulative
+ *     buffer, emitted as `{type:'text', content:<cumulative>, done:false}`
+ *   - `agent_thought_chunk`, `tool_call`, `tool_call_update` →
+ *     intentionally dropped. The chat pipe only renders `type:'text'`;
+ *     dedicated thinking + tool-call bubbles live on the Epic C
+ *     streaming-chunk feed which Phase 2 wires up separately.
+ *   - `closeAll()` always emits one final `{type:'text', content:<final>,
+ *     done:true}` — even when the turn produced no text (Claude
+ *     responded with tool calls only) — so mobile reliably flips out
+ *     of "Thinking…".
  */
 class StreamingState {
-  private readonly open = new Map<string, { kind: StreamingChunkKind; content: string }>();
+  private text = '';
 
   constructor(private readonly publisher: AcpPublisher) {}
 
   /**
    * Boundary events emitted at the start of every turn so mobile
    * wipes the previous reply and shows "Agent is typing…". Mirrors
-   * the legacy `outputSvc.newTurn()` — `critical: true` on those
-   * sends is implicit here (publishOutput retries on transient
-   * failures so the boundary always lands).
+   * the legacy `outputSvc.newTurn()`.
    */
   async beginTurn(): Promise<void> {
-    this.open.clear();
+    this.text = '';
     await this.publisher.publishOutput({ type: 'clear' });
     await this.publisher.publishOutput({ type: 'new_turn', done: false });
   }
 
   append(delta: { chunkId: string; kind: StreamingChunkKind; delta: string }): void {
-    const existing = this.open.get(delta.chunkId);
-    const content = (existing?.content ?? '') + delta.delta;
-    if (existing && existing.kind !== delta.kind) {
-      log.warn(
-        'acpRunner',
-        `chunk kind flip detected chunkId=${delta.chunkId.slice(0, 8)} from=${existing.kind} to=${delta.kind} — using new kind`,
-      );
-    }
-    this.open.set(delta.chunkId, { kind: delta.kind, content });
-    // Phase 1: every ACP variant maps to `type: 'text'` on the
-    // legacy chat pipe. Thinking + tool bubbles need the Epic C
-    // streaming-chunk feed which isn't wired up yet.
-    void this.publisher.publishOutput({ type: 'text', content, done: false });
+    // Phase 1: only text chunks reach the chat pipe. thinking +
+    // tool_use + tool_result need the Epic C streaming-chunk feed
+    // which isn't wired up yet — silently drop them here.
+    if (delta.kind !== 'text') return;
+    this.text += delta.delta;
+    void this.publisher.publishOutput({ type: 'text', content: this.text, done: false });
   }
 
   /**
-   * Flush every open buffer with `done: true` so mobile flips out
-   * of "Thinking…". Idempotent — safe to call multiple times per
-   * turn (prompt-completed, cancel, adapter-exit).
-   *
-   * Also emits an empty `{type:'text', content:'', done:true}` when
-   * the turn produced no text at all (e.g. Claude responded with
-   * tool calls only) so mobile doesn't sit on "Thinking…" forever
-   * waiting for content that will never arrive.
+   * Flip the chat out of "Thinking…" with one final cumulative
+   * `done: true`. Idempotent — safe to call from happy + error +
+   * adapter-exit paths.
    */
   async closeAll(): Promise<void> {
-    if (this.open.size === 0) {
-      await this.publisher.publishOutput({ type: 'text', content: '', done: true });
-      return;
-    }
-    const closing = Array.from(this.open.values());
-    this.open.clear();
-    // Emit the final cumulative content for each accumulated buffer;
-    // the last one carries done:true to mark the whole turn complete.
-    // Single-buffer turn (the common case for a plain chat reply)
-    // collapses to one POST.
-    for (let i = 0; i < closing.length; i += 1) {
-      const isLast = i === closing.length - 1;
-      await this.publisher.publishOutput({
-        type: 'text',
-        content: closing[i].content,
-        done: isLast,
-      });
-    }
+    const finalText = this.text;
+    this.text = '';
+    await this.publisher.publishOutput({ type: 'text', content: finalText, done: true });
   }
 }
 
