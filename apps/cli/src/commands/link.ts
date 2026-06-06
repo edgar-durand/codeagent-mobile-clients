@@ -70,7 +70,7 @@ import {
   postLinkErrorSignal,
   type PairedUserInfo,
 } from '../services/pairing.service';
-import { addSession, loadCliConfig, saveCliConfig } from '../config';
+import { addSession, getActiveSession, loadCliConfig, saveCliConfig } from '../config';
 import { createRuntimeStrategy } from '../agents/registry';
 import type {
   AgentCredentialLocator,
@@ -191,7 +191,19 @@ export async function link(args: string[] = []): Promise<void> {
   const pluginId = randomUUID();
   const spin = p.spinner();
   spin.start('Requesting pairing code...');
-  const pairing = await requestCode(pluginId);
+  // If this `codeam link` was invoked from an already-paired session,
+  // pass that session's HMAC triple so the backend can publish
+  // `pairing_qr_ready` to the originating user's SSE bus the moment
+  // the code lands. Mobile uses the event to flip the Scan-QR button
+  // from disabled → enabled in the LinkAgent sheet (QA Android #8).
+  // Bare `codeam link` with no prior pair on this machine sends none
+  // of these fields and the backend silently no-ops the publish.
+  const originator = getActiveSession();
+  const pairing = await requestCode(pluginId, {
+    originatorSessionId: originator?.id,
+    originatorPluginId: originator?.pluginId,
+    originatorAuthToken: originator?.pluginAuthToken,
+  });
   if (!pairing) {
     spin.stop('Failed');
     showError('Could not reach the server. Check your connection and try again.');
