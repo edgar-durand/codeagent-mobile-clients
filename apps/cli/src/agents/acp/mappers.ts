@@ -42,41 +42,64 @@ import type {
 } from '@agentclientprotocol/sdk';
 import type {
   AwaitingAnswerEvent,
-  StreamingChunkEvent,
   StreamingChunkKind,
 } from '@codeagent/shared';
 
 /**
- * Map one ACP `session/update` notification to the chunk(s) it
- * implies. Returns an empty array when the variant is informational
- * (plan updates, usage updates) or a local echo we already render
- * client-side (user_message_chunk).
+ * Map one ACP `session/update` notification to the chunk *delta(s)*
+ * it implies. Returns an empty array when the variant is
+ * informational (plan / usage updates) or a local echo we already
+ * render client-side (user_message_chunk).
  *
- * Each emitted chunk is `isFinal: true` because ACP messages are
- * already discrete deltas — the SDK does its own coalescing
- * upstream. The backend's per-user SSE bus stitches multiple text
- * chunks that share a `messageId` back together for the mobile
- * renderer.
+ * Why deltas (and not full chunks): the wire convention the backend
+ * + mobile renderer expect — implemented end-to-end by
+ * `streaming-emitter.service.ts` (see its `maybeFlushActive`) — is
+ * that every POST under the same `chunkId` carries the **cumulative
+ * content** for that chunk, with `isFinal: false` during streaming
+ * and `isFinal: true` to mark it complete. Mobile concatenates by
+ * (sessionId, chunkId) and stops accumulating once an `isFinal:
+ * true` lands.
+ *
+ * ACP doesn't carry that wire model — each `agent_message_chunk`
+ * notification is a discrete text delta and there's no per-chunk
+ * "done" signal until the whole prompt turn ends. So the mapper
+ * returns deltas and the {@link runner} is responsible for
+ * accumulating per chunkId, posting cumulative content with
+ * `isFinal: false`, and closing every open chunk with
+ * `isFinal: true` when `client.prompt()` resolves.
  */
+export interface ChunkDelta {
+  chunkId: string;
+  kind: StreamingChunkKind;
+  /** New bytes to append to whatever the runner has accumulated for
+   *  this (chunkId, kind) pair. The runner posts the cumulative
+   *  string, not this delta verbatim. */
+  delta: string;
+}
+
 export function mapSessionUpdate(
   notification: SessionNotification,
-): StreamingChunkEvent[] {
+): ChunkDelta[] {
   const update = notification.update;
   switch (update.sessionUpdate) {
     case 'agent_message_chunk': {
       const text = extractText(update.content);
       if (!text) return [];
-      return [chunk(messageChunkId(update.messageId), 'text', text)];
+      return [{ chunkId: messageChunkId(update.messageId), kind: 'text', delta: text }];
     }
     case 'agent_thought_chunk': {
       const text = extractText(update.content);
       if (!text) return [];
-      return [chunk(messageChunkId(update.messageId), 'thinking', text)];
+      return [{ chunkId: messageChunkId(update.messageId), kind: 'thinking', delta: text }];
     }
     case 'tool_call': {
       const summary = describeToolCall(update);
       if (!summary) return [];
-      return [chunk(update.toolCallId, 'tool_use', summary)];
+      // tool_call carries the full summary up front (no streaming),
+      // so emitting a single delta == full content is fine. The
+      // runner still posts it as isFinal=false and the prompt-end
+      // closer marks it true.
+      return [{ chunkId: update.toolCallId, kind: 'tool_use', delta: summary }];
     }
     case 'tool_call_update': {
       // We only emit a `tool_result` once the tool reaches a
@@ -88,7 +111,7 @@ export function mapSessionUpdate(
       const body = describeToolCallUpdate(update);
       if (!body) return [];
       const prefix = update.status === 'failed' ? '[failed] ' : '';
-      return [chunk(update.toolCallId, 'tool_result', prefix + body)];
+      return [{ chunkId: update.toolCallId, kind: 'tool_result', delta: prefix + body }];
     }
     case 'user_message_chunk':
       // Echo of the user's own prompt — mobile already renders this
@@ -161,14 +184,6 @@ export function mapPermissionRequest(
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────
-
-function chunk(
-  chunkId: string,
-  kind: StreamingChunkKind,
-  content: string,
-): StreamingChunkEvent {
-  return { chunkId, kind, content, isFinal: true };
-}
 
 /**
  * ACP messages carry an optional `messageId` so chunks belonging to
