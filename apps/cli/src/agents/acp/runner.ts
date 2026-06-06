@@ -69,13 +69,30 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
     pluginAuthToken: opts.pluginAuthToken,
   });
 
+  // Counter so the log isn't drowned by every text-delta variant —
+  // we surface the variant kind + a count to confirm the SDK is
+  // delivering notifications without spamming a line per chunk.
+  let updateCount = 0;
   const client = new AcpClient({
     adapter: opts.adapter,
     cwd: opts.cwd,
     onSessionUpdate: (notification) => {
+      updateCount += 1;
+      const variant = (notification.update as { sessionUpdate?: string })?.sessionUpdate ?? 'unknown';
       const chunks = mapSessionUpdate(notification);
+      // Info-level so it appears with CODEAM_DEBUG=1 (the canonical
+      // smoke-test invocation) without needing trace. Includes a
+      // post-map chunk count so we can tell "SDK delivered the
+      // notification but my mapper ignored it" apart from "SDK
+      // never delivered anything" — those are different bugs.
+      log.info(
+        'acpRunner',
+        `update #${updateCount} variant=${variant} mappedChunks=${chunks.length}`,
+      );
       for (const chunk of chunks) {
-        void publisher.publishChunk(chunk);
+        void publisher.publishChunk(chunk).catch((err) => {
+          log.warn('acpRunner', `publishChunk failed: ${err instanceof Error ? err.message : String(err)}`);
+        });
       }
     },
     onRequestPermission: async (request) => {
@@ -101,8 +118,11 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
       }
       return { outcome: { outcome: 'selected', optionId } };
     },
-    onStderr: (line) => {
-      log.trace('acpAdapter', line);
+    onStderr: (_line) => {
+      // No-op here — AcpClient.start() already mirrors every stderr
+      // line to `log.info('acpAdapter', …)` so it's visible during
+      // CODEAM_DEBUG=1 smoke tests. Keeping the option for future
+      // per-line filtering / capture.
     },
     onUnexpectedExit: (code, signal) => {
       log.warn('acpRunner', `adapter died code=${code} signal=${signal}; shutting down session`);
@@ -191,8 +211,10 @@ async function handleCommand(
         await relay.sendResult(cmd.id, 'failed', { error: 'empty prompt' });
         return;
       }
+      log.info('acpRunner', `start_task → forwarding prompt chars=${prompt.length} id=${cmd.id.slice(0, 8)}`);
       try {
         const reply = await client.prompt(prompt);
+        log.info('acpRunner', `start_task ← done stopReason=${reply.stopReason ?? '?'} id=${cmd.id.slice(0, 8)}`);
         await relay.sendResult(cmd.id, 'completed', { stopReason: reply.stopReason });
       } catch (err) {
         log.warn('acpRunner', `prompt failed: ${describeError(err)}`);
