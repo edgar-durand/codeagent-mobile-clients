@@ -4,6 +4,19 @@ All notable changes to the CodeAgent-Mobile JetBrains plugin are documented here
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.30.0] — 2026-06-06
+
+### Added
+
+- **vsc-plugin:** Banner recommends update when marketplace ships a fix
+- **jetbrains-plugin:** Banner recommends update when marketplace ships a fix
+
+### Fixed
+
+- **cli:** Forward mobile image attachments to ACP as image blocks (QA #290)
+- **cli, vsc-plugin:** Echo mobile prompts + clear Reconnecting UX (QA #287/#291)
+- **cli:** Replace pair pollStatus with SSE pair_completed event (QA #285)
+
 ## [2.29.0] — 2026-06-06
 
 ### Added
