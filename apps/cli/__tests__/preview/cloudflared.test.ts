@@ -7,11 +7,16 @@ import {
 } from '../../src/services/preview/cloudflared';
 
 const resolve4Mock = vi.fn();
+const resolve6Mock = vi.fn();
 const setServersMock = vi.fn();
 
 vi.mock('dns/promises', () => ({
   Resolver: function MockResolver() {
-    return { resolve4: resolve4Mock, setServers: setServersMock };
+    return {
+      resolve4: resolve4Mock,
+      resolve6: resolve6Mock,
+      setServers: setServersMock,
+    };
   },
 }));
 
@@ -59,25 +64,40 @@ describe('resolveCloudflared', () => {
 describe('waitForCloudflaredReady', () => {
   beforeEach(() => {
     resolve4Mock.mockReset();
+    resolve6Mock.mockReset();
     setServersMock.mockReset();
   });
 
-  it('resolves as soon as c-ares returns an address', async () => {
+  const enodata = Object.assign(new Error('queryAaaa ENODATA'), {
+    code: 'ENODATA',
+  });
+
+  it('resolves as soon as the A record lands', async () => {
     resolve4Mock.mockResolvedValueOnce(['104.16.230.132']);
+    resolve6Mock.mockRejectedValueOnce(enodata);
     await expect(
       waitForCloudflaredReady('https://example.trycloudflare.com', 1_000),
     ).resolves.toBeUndefined();
-    expect(resolve4Mock).toHaveBeenCalledTimes(1);
     expect(resolve4Mock).toHaveBeenCalledWith('example.trycloudflare.com');
+  });
+
+  it('resolves when only the AAAA record lands (Quick Tunnels are often v6-only)', async () => {
+    resolve4Mock.mockRejectedValueOnce(enodata);
+    resolve6Mock.mockResolvedValueOnce(['2606:4700::6810:e784']);
+    await expect(
+      waitForCloudflaredReady('https://example.trycloudflare.com', 1_000),
+    ).resolves.toBeUndefined();
+    expect(resolve6Mock).toHaveBeenCalledWith('example.trycloudflare.com');
   });
 
   it('uses 1.1.1.1 (Cloudflare authoritative) as the DNS server', async () => {
     resolve4Mock.mockResolvedValueOnce(['104.16.230.132']);
+    resolve6Mock.mockRejectedValueOnce(enodata);
     await waitForCloudflaredReady('https://example.trycloudflare.com', 1_000);
     expect(setServersMock).toHaveBeenCalledWith(['1.1.1.1', '1.0.0.1']);
   });
 
-  it('retries past ENOTFOUND while DNS propagates', async () => {
+  it('retries past ENOTFOUND on both classes while DNS propagates', async () => {
     const enotfound = Object.assign(new Error('queryA ENOTFOUND'), {
       code: 'ENOTFOUND',
     });
@@ -85,17 +105,19 @@ describe('waitForCloudflaredReady', () => {
       .mockRejectedValueOnce(enotfound)
       .mockRejectedValueOnce(enotfound)
       .mockResolvedValueOnce(['104.16.231.132']);
+    resolve6Mock.mockRejectedValue(enotfound);
     await expect(
       waitForCloudflaredReady('https://example.trycloudflare.com', 5_000),
     ).resolves.toBeUndefined();
     expect(resolve4Mock).toHaveBeenCalledTimes(3);
   });
 
-  it('throws when the deadline expires before DNS resolves', async () => {
+  it('throws when the deadline expires before either class resolves', async () => {
     const enotfound = Object.assign(new Error('queryA ENOTFOUND'), {
       code: 'ENOTFOUND',
     });
     resolve4Mock.mockRejectedValue(enotfound);
+    resolve6Mock.mockRejectedValue(enotfound);
     await expect(
       waitForCloudflaredReady('https://example.trycloudflare.com', 200),
     ).rejects.toThrow(/did not resolve within 200ms/);
