@@ -817,7 +817,7 @@ const requestPreviewDetectH: CommandHandler = (ctx) => {
  * scenarios (binary not local), preserving the existing behavior for
  * tools like `cloudflared` that legitimately need npx.
  */
-function normalizeDetectionForSpawn(
+export function normalizeDetectionForSpawn(
   detection: PreviewDetection,
   cwd: string,
 ): PreviewDetection {

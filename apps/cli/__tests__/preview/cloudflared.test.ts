@@ -6,11 +6,21 @@ import {
   waitForCloudflaredReady,
 } from '../../src/services/preview/cloudflared';
 
-const resolve4Mock = vi.fn();
-const resolve6Mock = vi.fn();
-const setServersMock = vi.fn();
+const {
+  resolve4Mock,
+  resolve6Mock,
+  setServersMock,
+  lookupMock,
+} = vi.hoisted(() => ({
+  resolve4Mock: vi.fn(),
+  resolve6Mock: vi.fn(),
+  setServersMock: vi.fn(),
+  lookupMock: vi.fn(),
+}));
 
 vi.mock('dns/promises', () => ({
+  default: { lookup: lookupMock },
+  lookup: lookupMock,
   Resolver: function MockResolver() {
     return {
       resolve4: resolve4Mock,
@@ -66,56 +76,59 @@ describe('waitForCloudflaredReady', () => {
     resolve4Mock.mockReset();
     resolve6Mock.mockReset();
     setServersMock.mockReset();
+    lookupMock.mockReset();
   });
 
+  const enotfound = Object.assign(new Error('queryA ENOTFOUND'), {
+    code: 'ENOTFOUND',
+  });
   const enodata = Object.assign(new Error('queryAaaa ENODATA'), {
     code: 'ENODATA',
   });
 
-  it('resolves as soon as the A record lands', async () => {
+  it('resolves as soon as dns.lookup (OS resolver) succeeds — the fast path', async () => {
+    lookupMock.mockResolvedValueOnce([{ address: '104.16.230.132', family: 4 }]);
+    resolve4Mock.mockRejectedValueOnce(enotfound);
+    resolve6Mock.mockRejectedValueOnce(enotfound);
+    await expect(
+      waitForCloudflaredReady('https://example.trycloudflare.com', 1_000),
+    ).resolves.toBeUndefined();
+    expect(lookupMock).toHaveBeenCalledWith('example.trycloudflare.com', { all: true });
+  });
+
+  it('resolves via c-ares A fallback when dns.lookup is broken', async () => {
+    lookupMock.mockRejectedValueOnce(enotfound);
     resolve4Mock.mockResolvedValueOnce(['104.16.230.132']);
     resolve6Mock.mockRejectedValueOnce(enodata);
     await expect(
       waitForCloudflaredReady('https://example.trycloudflare.com', 1_000),
     ).resolves.toBeUndefined();
-    expect(resolve4Mock).toHaveBeenCalledWith('example.trycloudflare.com');
   });
 
-  it('resolves when only the AAAA record lands (Quick Tunnels are often v6-only)', async () => {
+  it('resolves via c-ares AAAA fallback (Quick Tunnels are often v6-only)', async () => {
+    lookupMock.mockRejectedValueOnce(enotfound);
     resolve4Mock.mockRejectedValueOnce(enodata);
     resolve6Mock.mockResolvedValueOnce(['2606:4700::6810:e784']);
     await expect(
       waitForCloudflaredReady('https://example.trycloudflare.com', 1_000),
     ).resolves.toBeUndefined();
-    expect(resolve6Mock).toHaveBeenCalledWith('example.trycloudflare.com');
   });
 
-  it('uses 1.1.1.1 (Cloudflare authoritative) as the DNS server', async () => {
-    resolve4Mock.mockResolvedValueOnce(['104.16.230.132']);
-    resolve6Mock.mockRejectedValueOnce(enodata);
-    await waitForCloudflaredReady('https://example.trycloudflare.com', 1_000);
-    expect(setServersMock).toHaveBeenCalledWith(['1.1.1.1', '1.0.0.1']);
-  });
-
-  it('retries past ENOTFOUND on both classes while DNS propagates', async () => {
-    const enotfound = Object.assign(new Error('queryA ENOTFOUND'), {
-      code: 'ENOTFOUND',
-    });
-    resolve4Mock
+  it('retries past ENOTFOUND across all three probes while DNS propagates', async () => {
+    lookupMock
       .mockRejectedValueOnce(enotfound)
       .mockRejectedValueOnce(enotfound)
-      .mockResolvedValueOnce(['104.16.231.132']);
+      .mockResolvedValueOnce([{ address: '104.16.231.132', family: 4 }]);
+    resolve4Mock.mockRejectedValue(enotfound);
     resolve6Mock.mockRejectedValue(enotfound);
     await expect(
-      waitForCloudflaredReady('https://example.trycloudflare.com', 5_000),
+      waitForCloudflaredReady('https://example.trycloudflare.com', 10_000),
     ).resolves.toBeUndefined();
-    expect(resolve4Mock).toHaveBeenCalledTimes(3);
+    expect(lookupMock).toHaveBeenCalledTimes(3);
   });
 
-  it('throws when the deadline expires before either class resolves', async () => {
-    const enotfound = Object.assign(new Error('queryA ENOTFOUND'), {
-      code: 'ENOTFOUND',
-    });
+  it('throws when the deadline expires before any probe resolves', async () => {
+    lookupMock.mockRejectedValue(enotfound);
     resolve4Mock.mockRejectedValue(enotfound);
     resolve6Mock.mockRejectedValue(enotfound);
     await expect(

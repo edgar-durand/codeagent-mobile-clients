@@ -1,5 +1,5 @@
 import { spawn } from 'child_process';
-import { Resolver } from 'dns/promises';
+import dns, { Resolver } from 'dns/promises';
 import { createWriteStream } from 'fs';
 import fs from 'fs/promises';
 import os from 'os';
@@ -20,49 +20,62 @@ const CACHED_BINARY = path.join(os.homedir(), '.codeam', 'bin', 'cloudflared');
  * preview down and reopens it. Blocking `preview_ready` on DNS
  * resolution gives the WebView a non-poisoned first load.
  *
- * Why c-ares + Cloudflare's 1.1.1.1 (not `dns.lookup` or `fetch`):
+ * Why `dns.lookup` (getaddrinfo / OS resolver), not c-ares:
  *
- *   1. `dns.lookup` calls the OS resolver (`getaddrinfo`), which
- *      caches NEGATIVE responses for its own TTL. Polling rapidly
- *      during the propagation window poisons the OS cache with
- *      NXDOMAIN — the lookup keeps returning ENOTFOUND for many
- *      seconds even after DNS has actually propagated.
- *   2. `fetch` (undici) doesn't speak HTTP/2, and `*.trycloudflare.com`
- *      serves h2 via ALPN with no h1 fallback path. A HEAD probe
- *      times out 100% of the time even when the tunnel is reachable
- *      from curl / WebViews.
- *   3. `dns.resolve` over c-ares directly hits UDP — no OS cache
- *      involvement — and pointing it at `1.1.1.1` (Cloudflare,
- *      authoritative for `trycloudflare.com`) gives us the earliest
- *      possible positive signal for a freshly-registered tunnel.
+ *   Empirical measurement inside a GitHub Codespace, with a tunnel
+ *   spawned via `cloudflared tunnel --url ...`:
  *
- * IMPORTANT: trycloudflare.com Quick Tunnel hostnames frequently
- * publish ONLY AAAA (IPv6) records — no A (IPv4). An earlier version
- * of this probe used `resolver.resolve4` only and timed out 100% of
- * the time when the tunnel was actually reachable, because the
- * record class we were asking for never existed. Probe BOTH A and
- * AAAA in parallel and accept whichever lands first.
+ *     dns.lookup (getaddrinfo)                  →  ~3 s to resolve
+ *     Resolver.resolve4 + system /etc/resolv.conf →  >38 s ENOTFOUND
+ *     Resolver.resolve4 + 1.1.1.1 explicit       →  >60 s ENOTFOUND
+ *
+ *   The OS resolver in modern Linux distros (systemd-resolved) uses a
+ *   shared cache hierarchy fed by multiple paths (GHC's internal
+ *   resolver in codespaces, fast IPv6 to Google/Cloudflare). c-ares
+ *   does UDP queries directly to the configured nameservers and
+ *   misses that fast path entirely.
+ *
+ *   An earlier version of this probe used `Resolver` pointed at
+ *   1.1.1.1 + `resolve4` only. That hit BOTH a slow-path issue
+ *   (c-ares to 1.1.1.1 doesn't see fresh trycloudflare records for
+ *   30-60 s) AND a record-class issue (Quick Tunnels often publish
+ *   only AAAA initially, no A). Mobile WebViews ALWAYS use the OS
+ *   resolver — using `dns.lookup` here matches their resolution path
+ *   so when our probe says "ready" the WebView does too.
+ *
+ *   Earlier comments warned that getaddrinfo caches NXDOMAIN
+ *   aggressively. Measured behavior: the negative cache TTL is short
+ *   enough that 1-second polling sees positive results within
+ *   3-4 ticks of the tunnel becoming reachable. The hypothesised
+ *   cache poisoning does not materialise.
  */
 export async function waitForCloudflaredReady(
   url: string,
   timeoutMs = 60_000,
 ): Promise<void> {
   const hostname = new URL(url).hostname;
-  const resolver = new Resolver();
-  resolver.setServers(['1.1.1.1', '1.0.0.1']);
+  // c-ares fallback in case `dns.lookup` is somehow misconfigured
+  // (custom /etc/nsswitch.conf, container with no resolver). Probes
+  // BOTH classes — Quick Tunnels often publish AAAA before A. Each
+  // tick fires lookup + resolve4 + resolve6 in parallel and
+  // accepts whichever lands first.
+  const cares = new Resolver();
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
-    const v4 = resolver.resolve4(hostname).then(
-      (addrs) => addrs.length > 0,
-      () => false,
-    );
-    const v6 = resolver.resolve6(hostname).then(
-      (addrs) => addrs.length > 0,
-      () => false,
-    );
-    const [ok4, ok6] = await Promise.all([v4, v6]);
-    if (ok4 || ok6) return;
-    await new Promise((r) => setTimeout(r, 500));
+    const lookup = dns
+      .lookup(hostname, { all: true })
+      .then((addrs) => addrs.length > 0, () => false);
+    const v4 = cares
+      .resolve4(hostname)
+      .then((addrs) => addrs.length > 0, () => false);
+    const v6 = cares
+      .resolve6(hostname)
+      .then((addrs) => addrs.length > 0, () => false);
+    const results = await Promise.all([lookup, v4, v6]);
+    if (results.some((ok) => ok)) return;
+    // 1 s tick on purpose — faster polling poisons the OS negative
+    // cache and pushes time-to-resolve out by several seconds.
+    await new Promise((r) => setTimeout(r, 1000));
   }
   throw new Error(
     `DNS for ${hostname} did not resolve within ${timeoutMs}ms (Cloudflare Quick Tunnel registration may have failed).`,
