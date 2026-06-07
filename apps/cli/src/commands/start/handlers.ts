@@ -845,7 +845,12 @@ const previewStartH: CommandHandler = (ctx, _cmd, parsed) => {
     log.info('preview', 'start: no detection in payload');
     return;
   }
-  const detection = normalizeDetectionForSpawn(rawDetection, process.cwd());
+  // NOTE: the `npx <bin>` → `./node_modules/.bin/<bin>` rewrite runs
+  // AFTER the pre-flight `pnpm/npm install` step so the local binary
+  // actually exists when we test for it. Running it here at the top
+  // — when node_modules may not exist yet on a fresh codespace —
+  // silently no-ops and we'd spawn through the unreliable npx wrapper.
+  const detection = rawDetection;
   const pluginAuthToken = ctx.pluginAuthToken;
 
   /**
@@ -953,13 +958,22 @@ const previewStartH: CommandHandler = (ctx, _cmd, parsed) => {
     }
 
     // 2. Spawn the dev server.
+    //    Rewrite `npx <bin>` to the direct binary path NOW (after
+    //    the optional pre-flight install) — `node_modules/.bin/<bin>`
+    //    is guaranteed to exist by this point if it's going to exist
+    //    at all. See `normalizeDetectionForSpawn` for why bypassing
+    //    npx matters: npm 11's `npm exec` fork-exec's the underlying
+    //    binary and the parent dies with exitCode=0 while the child
+    //    runs orphaned, fooling the spawn watcher into bailing
+    //    immediately with ERR_SPAWN_FAILED.
+    const spawnable = normalizeDetectionForSpawn(detection, process.cwd());
     emitProgress(
       'BOOT_SEQUENCE',
-      `${detection.command} ${detection.args.join(' ')}`,
+      `${spawnable.command} ${spawnable.args.join(' ')}`,
     );
-    const devServer = spawn(detection.command, detection.args, {
+    const devServer = spawn(spawnable.command, spawnable.args, {
       cwd: process.cwd(),
-      env: { ...process.env, ...(detection.env ?? {}) },
+      env: { ...process.env, ...(spawnable.env ?? {}) },
       stdio: ['ignore', 'pipe', 'pipe'],
     });
     emitProgress('BIND_PORT', String(detection.port));
