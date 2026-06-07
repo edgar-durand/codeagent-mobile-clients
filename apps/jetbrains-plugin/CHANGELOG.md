@@ -4,6 +4,20 @@ All notable changes to the CodeAgent-Mobile JetBrains plugin are documented here
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.32.8] — 2026-06-07
+
+### Chore
+
+- Add FUNDING.yml — surface Sponsor button on the public repo
+
+### Documentation
+
+- Drop Vercel reference from SSE cap comment
+
+### Fixed
+
+- **cli:** Compile preview ready_pattern case-insensitive
+
 ## [2.32.7] — 2026-06-07
 
 ### Fixed
