@@ -110,7 +110,7 @@ npm run use-commit-template      # one-time: configure git to use .gitmessage
 
 All three clients (CLI, VS Code, JetBrains) implement the same two-mode command relay:
 
-1. **SSE pull primary** — subscribe to `/api/commands/pending/stream?pluginId=…`. The backend `pushCommand` publishes a `commands` event; the client wakes within ~50 ms and dispatches the command. Vercel's 25 s fn cap closes the stream periodically — the client reconnects immediately (long-poll style).
+1. **SSE pull primary** — subscribe to `/api/commands/pending/stream?pluginId=…`. The backend `pushCommand` publishes a `commands` event; the client wakes within ~50 ms and dispatches the command. The backend caps SSE streams at a configured idle window and the client reconnects immediately (long-poll style).
 2. **Polling fallback** — on two consecutive SSE failures (network blip, older backend without the stream endpoint, proxy stripping SSE), the client falls back to `GET /api/commands/pending` polling with **idle-streak backoff**: 2 s base, exponentially widening to ~32 s when consecutive polls return empty, reset to 2 s the moment a real command arrives.
 
 Implementation shape is uniform across the three clients:
