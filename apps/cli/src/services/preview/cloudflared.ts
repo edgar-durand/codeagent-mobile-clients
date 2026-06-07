@@ -31,10 +31,17 @@ const CACHED_BINARY = path.join(os.homedir(), '.codeam', 'bin', 'cloudflared');
  *      serves h2 via ALPN with no h1 fallback path. A HEAD probe
  *      times out 100% of the time even when the tunnel is reachable
  *      from curl / WebViews.
- *   3. `dns.resolve4` uses c-ares directly over UDP — no OS cache
+ *   3. `dns.resolve` over c-ares directly hits UDP — no OS cache
  *      involvement — and pointing it at `1.1.1.1` (Cloudflare,
  *      authoritative for `trycloudflare.com`) gives us the earliest
  *      possible positive signal for a freshly-registered tunnel.
+ *
+ * IMPORTANT: trycloudflare.com Quick Tunnel hostnames frequently
+ * publish ONLY AAAA (IPv6) records — no A (IPv4). An earlier version
+ * of this probe used `resolver.resolve4` only and timed out 100% of
+ * the time when the tunnel was actually reachable, because the
+ * record class we were asking for never existed. Probe BOTH A and
+ * AAAA in parallel and accept whichever lands first.
  */
 export async function waitForCloudflaredReady(
   url: string,
@@ -45,12 +52,16 @@ export async function waitForCloudflaredReady(
   resolver.setServers(['1.1.1.1', '1.0.0.1']);
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
-    try {
-      const addrs = await resolver.resolve4(hostname);
-      if (addrs.length > 0) return;
-    } catch {
-      // DNS not propagated yet — retry inside the deadline.
-    }
+    const v4 = resolver.resolve4(hostname).then(
+      (addrs) => addrs.length > 0,
+      () => false,
+    );
+    const v6 = resolver.resolve6(hostname).then(
+      (addrs) => addrs.length > 0,
+      () => false,
+    );
+    const [ok4, ok6] = await Promise.all([v4, v6]);
+    if (ok4 || ok6) return;
     await new Promise((r) => setTimeout(r, 500));
   }
   throw new Error(
