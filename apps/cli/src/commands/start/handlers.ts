@@ -832,6 +832,69 @@ export function compileReadyPattern(pattern: string): RegExp {
   return new RegExp(pattern, 'i');
 }
 
+/**
+ * Watch a freshly-spawned dev server's stdout+stderr for the
+ * compiled `ready_pattern` regex. Resolves with the outcome instead
+ * of throwing so the caller can map each terminal state to the
+ * right `preview_error` payload without a try/catch.
+ *
+ * Slides a 32 KB window over recent output so a ready signal split
+ * across multiple `data` chunks ("Read" + "y in 1.5s") still
+ * matches. Cap keeps memory bounded; the real ready line always
+ * lands within the first few seconds of output, well under it.
+ *
+ * Polls `exitCode` every 250 ms because the `'exit'` event fires
+ * once and we need to bail mid-loop without racing — same cadence
+ * the inline implementation used.
+ */
+export type ReadyOutcome =
+  | { kind: 'ready' }
+  | { kind: 'exited'; code: number | null }
+  | { kind: 'timeout' };
+
+export async function waitForDevServerReady(
+  devServer: ChildProcessWithIO,
+  readyRe: RegExp,
+  opts: { timeoutMs: number; onChunk?: (chunk: string) => void } = {
+    timeoutMs: 120_000,
+  },
+): Promise<ReadyOutcome> {
+  let readyMatched = false;
+  const READY_BUFFER_MAX = 32_768;
+  let readyBuffer = '';
+  const consume = (chunk: Buffer): void => {
+    const s = chunk.toString();
+    opts.onChunk?.(s);
+    if (readyMatched) return;
+    readyBuffer += s;
+    if (readyBuffer.length > READY_BUFFER_MAX) {
+      readyBuffer = readyBuffer.slice(-READY_BUFFER_MAX);
+    }
+    if (readyRe.test(readyBuffer)) readyMatched = true;
+  };
+  devServer.stdout?.on('data', consume);
+  devServer.stderr?.on('data', consume);
+
+  const deadline = Date.now() + opts.timeoutMs;
+  while (!readyMatched && Date.now() < deadline) {
+    if (devServer.exitCode !== null) {
+      return { kind: 'exited', code: devServer.exitCode };
+    }
+    await new Promise((r) => setTimeout(r, 250));
+  }
+  if (readyMatched) return { kind: 'ready' };
+  return { kind: 'timeout' };
+}
+
+/** Minimal child-process surface `waitForDevServerReady` reads. Keeps
+ *  the helper testable with a real `child_process.spawn` result OR a
+ *  hand-rolled stub. */
+export interface ChildProcessWithIO {
+  readonly exitCode: number | null;
+  readonly stdout: NodeJS.ReadableStream | null;
+  readonly stderr: NodeJS.ReadableStream | null;
+}
+
 export function normalizeDetectionForSpawn(
   detection: PreviewDetection,
   cwd: string,
@@ -993,49 +1056,30 @@ const previewStartH: CommandHandler = (ctx, _cmd, parsed) => {
     });
     emitProgress('BIND_PORT', String(detection.port));
     emitProgress('WAITING_FOR_READY', detection.ready_pattern);
-    let readyMatched = false;
     let expoUrl: string | null = null;
     const readyRe = compileReadyPattern(detection.ready_pattern);
-    // Slide a window over recent stdout so a ready signal split across
-    // multiple `data` chunks ("Read" + "y in 1.5s") still matches.
-    // Capped at 32 KB to keep the buffer cheap; the ready line always
-    // lands inside the first few seconds of output, well under the cap.
-    const READY_BUFFER_MAX = 32_768;
-    let readyBuffer = '';
-    const onChunk = (chunk: Buffer): void => {
-      const s = chunk.toString();
-      if (!readyMatched) {
-        readyBuffer += s;
-        if (readyBuffer.length > READY_BUFFER_MAX) {
-          readyBuffer = readyBuffer.slice(-READY_BUFFER_MAX);
+    const outcome = await waitForDevServerReady(devServer, readyRe, {
+      timeoutMs: 120_000,
+      onChunk: (s) => {
+        if (!expoUrl && detection.framework === 'Expo') {
+          expoUrl = parseExpoUrl(s);
         }
-        if (readyRe.test(readyBuffer)) readyMatched = true;
-      }
-      if (!expoUrl && detection.framework === 'Expo') expoUrl = parseExpoUrl(s);
-    };
-    devServer.stdout!.on('data', onChunk);
-    devServer.stderr!.on('data', onChunk);
-
-    // 3. Wait for the ready_pattern. Bail if the server exits early
-    //    or the 120 s deadline passes.
-    const readyDeadline = Date.now() + 120_000;
-    while (!readyMatched && Date.now() < readyDeadline) {
-      if (devServer.exitCode !== null) {
-        void postPreviewEvent({
-          sessionId: ctx.sessionId,
-          pluginId: ctx.pluginId,
-          pluginAuthToken,
-          type: 'preview_error',
-          payload: {
-            stage: 'spawn',
-            message: `Dev server exited (code ${devServer.exitCode}).`,
-          },
-        });
-        return;
-      }
-      await new Promise((r) => setTimeout(r, 250));
+      },
+    });
+    if (outcome.kind === 'exited') {
+      void postPreviewEvent({
+        sessionId: ctx.sessionId,
+        pluginId: ctx.pluginId,
+        pluginAuthToken,
+        type: 'preview_error',
+        payload: {
+          stage: 'spawn',
+          message: `Dev server exited (code ${outcome.code}).`,
+        },
+      });
+      return;
     }
-    if (!readyMatched) {
+    if (outcome.kind === 'timeout') {
       try { devServer.kill('SIGTERM'); } catch { /* already dead */ }
       void postPreviewEvent({
         sessionId: ctx.sessionId,
