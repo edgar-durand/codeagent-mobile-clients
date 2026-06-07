@@ -4,6 +4,13 @@ All notable changes to the CodeAgent Mobile VS Code extension are documented her
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.32.5] — 2026-06-07
+
+### Fixed
+
+- **cli:** Run npx normalization AFTER preflight install, not before
+- **cli:** Probe both A and AAAA records when waiting on cloudflared tunnel
+
 ## [2.32.4] — 2026-06-07
 
 ### Fixed
