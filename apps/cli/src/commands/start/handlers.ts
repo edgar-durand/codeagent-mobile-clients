@@ -967,9 +967,21 @@ const previewStartH: CommandHandler = (ctx, _cmd, parsed) => {
     let readyMatched = false;
     let expoUrl: string | null = null;
     const readyRe = new RegExp(detection.ready_pattern);
+    // Slide a window over recent stdout so a ready signal split across
+    // multiple `data` chunks ("Read" + "y in 1.5s") still matches.
+    // Capped at 32 KB to keep the buffer cheap; the ready line always
+    // lands inside the first few seconds of output, well under the cap.
+    const READY_BUFFER_MAX = 32_768;
+    let readyBuffer = '';
     const onChunk = (chunk: Buffer): void => {
       const s = chunk.toString();
-      if (!readyMatched && readyRe.test(s)) readyMatched = true;
+      if (!readyMatched) {
+        readyBuffer += s;
+        if (readyBuffer.length > READY_BUFFER_MAX) {
+          readyBuffer = readyBuffer.slice(-READY_BUFFER_MAX);
+        }
+        if (readyRe.test(readyBuffer)) readyMatched = true;
+      }
       if (!expoUrl && detection.framework === 'Expo') expoUrl = parseExpoUrl(s);
     };
     devServer.stdout!.on('data', onChunk);
