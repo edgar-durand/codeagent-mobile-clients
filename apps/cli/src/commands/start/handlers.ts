@@ -798,16 +798,54 @@ const requestPreviewDetectH: CommandHandler = (ctx) => {
   })();
 };
 
+/**
+ * `npx <binary>` is unreliable as a long-running spawn target. npm 11's
+ * `npm exec` (the npx wrapper) fork-spawns the resolved binary and the
+ * parent process can exit before the child is fully wired up — leaving
+ * the dev server alive but orphaned (PPID 1) while the CLI's
+ * `spawn(...)` handle reports `exitCode = 0` and bails out as if the
+ * server crashed.
+ *
+ * Symptom: Mobile/landing's Preview card shows
+ * `ERR_SPAWN_FAILED · Dev server exited (code 0)` even though
+ * `ss -ltnp` confirms the port is bound and `curl` succeeds.
+ *
+ * Fix: when the agent returns `command: 'npx', args: [<bin>, …]` and
+ * `./node_modules/.bin/<bin>` exists, rewrite the spawn target to the
+ * direct binary path. Deterministic, no shell intermediate, no
+ * lifecycle race. Falls through unchanged for npx-installed-on-demand
+ * scenarios (binary not local), preserving the existing behavior for
+ * tools like `cloudflared` that legitimately need npx.
+ */
+function normalizeDetectionForSpawn(
+  detection: PreviewDetection,
+  cwd: string,
+): PreviewDetection {
+  if (detection.command !== 'npx') return detection;
+  const args = detection.args ?? [];
+  if (args.length === 0) return detection;
+  const binName = args[0];
+  if (binName.startsWith('-')) return detection;
+  const binPath = path.join(cwd, 'node_modules', '.bin', binName);
+  if (!fs.existsSync(binPath)) return detection;
+  return {
+    ...detection,
+    command: binPath,
+    args: args.slice(1),
+  };
+}
+
 const previewStartH: CommandHandler = (ctx, _cmd, parsed) => {
   if (!ctx.pluginAuthToken) {
     log.info('preview', 'no pluginAuthToken — skipping start');
     return;
   }
-  const detection = parsed.detection as PreviewDetection | undefined;
-  if (!detection) {
+  const rawDetection = parsed.detection as PreviewDetection | undefined;
+  if (!rawDetection) {
     log.info('preview', 'start: no detection in payload');
     return;
   }
+  const detection = normalizeDetectionForSpawn(rawDetection, process.cwd());
   const pluginAuthToken = ctx.pluginAuthToken;
 
   /**
