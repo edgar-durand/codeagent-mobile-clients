@@ -122,7 +122,15 @@ const REGISTRY: Partial<Record<AgentId, () => AdapterSpec | null>> = {
   // resolved from PATH at spawn time instead of being absolute.
   gemini: () => ({
     command: 'gemini',
-    args: ['--acp'],
+    // `--skip-trust` bypasses Gemini's headless-mode workspace-trust
+    // gate. Without it the CLI refuses to start in `--acp` mode with
+    // "Gemini CLI is not running in a trusted directory" and the
+    // ACP newSession call never returns, leaving mobile chat stuck
+    // on "thinking…" forever. The equivalent env var is
+    // `GEMINI_CLI_TRUST_WORKSPACE=true`; passing the flag is
+    // cleaner because it survives whatever shell env the parent
+    // codeam was launched from.
+    args: ['--skip-trust', '--acp'],
     requiresAgentBinary: 'gemini',
   }),
 };
