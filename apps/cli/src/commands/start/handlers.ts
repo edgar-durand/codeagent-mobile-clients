@@ -817,6 +817,21 @@ const requestPreviewDetectH: CommandHandler = (ctx) => {
  * scenarios (binary not local), preserving the existing behavior for
  * tools like `cloudflared` that legitimately need npx.
  */
+/**
+ * Compile the agent's `ready_pattern` into a RegExp the spawn
+ * watcher uses to detect "the dev server is up". Case-insensitive
+ * on purpose: the detection prompt often produces lowercase patterns
+ * like `"ready in"` while Next.js prints `Ready in` (capital R) and
+ * Vite prints `ready in` (lowercase). A case mismatch is invisible
+ * to the user, stalls the entire pipeline at WAITING_FOR_READY, and
+ * surfaces as `ERR_READY_TIMEOUT` 120 s later. Most ready strings
+ * are unambiguous enough that the looser match never
+ * false-positives in practice.
+ */
+export function compileReadyPattern(pattern: string): RegExp {
+  return new RegExp(pattern, 'i');
+}
+
 export function normalizeDetectionForSpawn(
   detection: PreviewDetection,
   cwd: string,
@@ -980,7 +995,7 @@ const previewStartH: CommandHandler = (ctx, _cmd, parsed) => {
     emitProgress('WAITING_FOR_READY', detection.ready_pattern);
     let readyMatched = false;
     let expoUrl: string | null = null;
-    const readyRe = new RegExp(detection.ready_pattern);
+    const readyRe = compileReadyPattern(detection.ready_pattern);
     // Slide a window over recent stdout so a ready signal split across
     // multiple `data` chunks ("Read" + "y in 1.5s") still matches.
     // Capped at 32 KB to keep the buffer cheap; the ready line always
