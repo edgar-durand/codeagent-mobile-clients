@@ -7,19 +7,43 @@ import * as gitBranch from '../src/lib/git-branch';
 describe('requestCode', () => {
   afterEach(() => { vi.restoreAllMocks(); });
 
-  it('returns code and expiresAt on success', async () => {
+  it('returns ok: true with code and expiresAt on success', async () => {
     vi.spyOn(pairing._transport, 'postJson').mockResolvedValue({
       data: { code: 'ABC123', expiresAt: 9999999999000 },
     } as never);
 
     const result = await pairing.requestCode('plugin-1');
-    expect(result).toEqual({ code: 'ABC123', expiresAt: 9999999999000 });
+    expect(result).toEqual({ ok: true, code: 'ABC123', expiresAt: 9999999999000 });
   });
 
-  it('returns null when server fails', async () => {
+  it('returns ok: false reason=network when server returns null body', async () => {
     vi.spyOn(pairing._transport, 'postJson').mockResolvedValue(null);
     const result = await pairing.requestCode('plugin-1');
-    expect(result).toBeNull();
+    expect(result).toEqual({ ok: false, reason: 'network' });
+  });
+
+  it('returns ok: false reason=rate-limited with retry-after on a 429', async () => {
+    const err = new Error('HTTP 429') as Error & {
+      statusCode: number;
+      retryAfterSeconds: number;
+    };
+    err.statusCode = 429;
+    err.retryAfterSeconds = 47;
+    vi.spyOn(pairing._transport, 'postJson').mockRejectedValue(err);
+    const result = await pairing.requestCode('plugin-1');
+    expect(result).toEqual({
+      ok: false,
+      reason: 'rate-limited',
+      retryAfterSeconds: 47,
+    });
+  });
+
+  it('returns ok: false reason=http with status when transport rejects with a non-429 status', async () => {
+    const err = new Error('HTTP 503') as Error & { statusCode: number };
+    err.statusCode = 503;
+    vi.spyOn(pairing._transport, 'postJson').mockRejectedValue(err);
+    const result = await pairing.requestCode('plugin-1');
+    expect(result).toEqual({ ok: false, reason: 'http', status: 503 });
   });
 
   it('includes the detected git branch in the pair POST body', async () => {

@@ -18,6 +18,9 @@
 
 import { spawn, type ChildProcess } from 'node:child_process';
 import * as fs from 'node:fs/promises';
+import * as fsSync from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import { Readable, Writable } from 'node:stream';
 import {
   ClientSideConnection,
@@ -132,13 +135,25 @@ export class AcpClient {
     if (this.child) throw new Error('AcpClient already started');
 
     const { adapter, cwd } = this.opts;
+    // Expand PATH to cover every well-known npm-global / nvm bin dir
+    // on a developer's machine so a global install in ANY node tree
+    // is findable. Real failure mode that triggered this code:
+    // GitHub Codespaces installs gemini under
+    // `/usr/local/share/nvm/versions/node/v24.14.0/bin/` (the
+    // codespace image's default node) but codeam runs under our own
+    // `/tmp/codeam-node20/bin/node`. Without this augmentation,
+    // `spawn('gemini', ['--acp'])` fails ENOENT and the user sees
+    // "thinking…" forever after a dormant-wake. PATH expansion is
+    // additive — we only PREPEND known dirs, never replace, so a
+    // user with a custom shell PATH keeps their resolution order.
+    const augmentedPath = expandPathForAgentBinaries(process.env.PATH ?? '');
     log.info(
       'acpClient',
       `spawn cmd=${adapter.command} args=[${adapter.args.join(',')}] cwd=${cwd}`,
     );
     const child = spawn(adapter.command, adapter.args, {
       cwd,
-      env: process.env,
+      env: { ...process.env, PATH: augmentedPath },
       stdio: ['pipe', 'pipe', 'pipe'],
     });
     this.child = child;
@@ -506,4 +521,85 @@ export function applyLineRange(
   const start = Math.max(0, (line ?? 1) - 1);
   const end = limit !== null ? start + limit : lines.length;
   return { content: lines.slice(start, end).join('\n') };
+}
+
+/**
+ * Common locations where a global agent binary (gemini, claude,
+ * codex, etc.) might be installed on a developer's machine.
+ * Returned in priority order — the FIRST match for any given
+ * binary name wins on PATH lookup.
+ *
+ * The list covers:
+ *   - codeam's bundled node tree (`/tmp/codeam-node20/bin`) — set
+ *     by the codespace bootstrap.
+ *   - Codespace / Devcontainer images: `/usr/local/share/nvm/versions/node/<ver>/bin`.
+ *   - User-installed nvm: `$HOME/.nvm/versions/node/<ver>/bin`.
+ *   - System npm prefixes: `/usr/local/bin`, `/usr/bin`.
+ *   - User XDG bin: `$HOME/.local/bin`, `$HOME/bin`.
+ *   - Volta shims: `$HOME/.volta/bin`.
+ *
+ * Listing a directory that doesn't exist is harmless — `existsSync`
+ * filters cleanly. We do NOT depend on globbing or async glob libs
+ * here; `readdirSync` on the nvm parent is enough.
+ */
+function knownAgentBinaryDirs(): string[] {
+  const home = os.homedir();
+  const out: string[] = [];
+
+  // codeam's own bundled tree (always wins so the symlink + override
+  // pattern keeps working).
+  out.push('/tmp/codeam-node20/bin');
+
+  // System nvm trees (Codespaces / Devcontainers).
+  for (const root of [
+    '/usr/local/share/nvm/versions/node',
+    path.join(home, '.nvm/versions/node'),
+  ]) {
+    try {
+      for (const child of fsSync.readdirSync(root)) {
+        out.push(path.join(root, child, 'bin'));
+      }
+    } catch {
+      // dir doesn't exist — skip silently.
+    }
+  }
+
+  // Voltage + Volta shims (uncommon but covers vendor managers).
+  out.push(path.join(home, '.volta/bin'));
+
+  // Static well-known dirs.
+  out.push('/usr/local/bin');
+  out.push('/usr/bin');
+  out.push(path.join(home, '.local/bin'));
+  out.push(path.join(home, 'bin'));
+
+  return out.filter((p) => {
+    try {
+      return fsSync.statSync(p).isDirectory();
+    } catch {
+      return false;
+    }
+  });
+}
+
+/**
+ * Prepend known agent-binary directories to an existing PATH.
+ * Idempotent — directories already in `existingPath` are not
+ * duplicated, so calling this on an already-expanded PATH is a
+ * no-op. Exported for test coverage; production callers use it
+ * through {@link AcpClient.start}.
+ */
+export function expandPathForAgentBinaries(existingPath: string): string {
+  const existing = new Set(
+    existingPath.split(path.delimiter).filter((p) => p.length > 0),
+  );
+  const additions: string[] = [];
+  for (const dir of knownAgentBinaryDirs()) {
+    if (!existing.has(dir)) {
+      additions.push(dir);
+      existing.add(dir);
+    }
+  }
+  if (additions.length === 0) return existingPath;
+  return [...additions, existingPath].filter((p) => p.length > 0).join(path.delimiter);
 }

@@ -42,9 +42,21 @@ export interface PairedUserInfo {
  */
 const REQUEST_CODE_TIMEOUT_MS = 10_000;
 
-export async function requestCode(
-  pluginId: string,
-): Promise<{ code: string; expiresAt: number } | null> {
+/**
+ * Discriminated result so callers can render the right message per
+ * failure mode. The old `null` return treated every error path —
+ * network down, 429, malformed body — as the same opaque "Could
+ * not reach the server" string. A user being rate-limited needs a
+ * countdown ("retry in 47s"), not a network troubleshooting hint.
+ */
+export type RequestCodeResult =
+  | { ok: true; code: string; expiresAt: number }
+  | { ok: false; reason: 'rate-limited'; retryAfterSeconds: number }
+  | { ok: false; reason: 'timeout' }
+  | { ok: false; reason: 'http'; status: number }
+  | { ok: false; reason: 'network' };
+
+export async function requestCode(pluginId: string): Promise<RequestCodeResult> {
   try {
     // Detect "running on a remote managed workspace" so the backend
     // (and apps) can show a "☁ codespace" tag next to the session,
@@ -79,12 +91,30 @@ export async function requestCode(
     });
     const result = await Promise.race([post, timeoutPromise]);
     clearTimeout(timer);
-    if (result === timeoutSentinel) return null;
+    if (result === timeoutSentinel) return { ok: false, reason: 'timeout' };
     const data = result?.data as Record<string, unknown> | undefined;
-    if (!data?.code) return null;
-    return { code: data.code as string, expiresAt: data.expiresAt as number };
-  } catch {
-    return null;
+    if (!data?.code) return { ok: false, reason: 'network' };
+    return {
+      ok: true,
+      code: data.code as string,
+      expiresAt: data.expiresAt as number,
+    };
+  } catch (err) {
+    const e = err as Error & { statusCode?: number; retryAfterSeconds?: number };
+    if (e.statusCode === 429) {
+      return {
+        ok: false,
+        reason: 'rate-limited',
+        retryAfterSeconds:
+          typeof e.retryAfterSeconds === 'number' && e.retryAfterSeconds > 0
+            ? e.retryAfterSeconds
+            : 60,
+      };
+    }
+    if (typeof e.statusCode === 'number') {
+      return { ok: false, reason: 'http', status: e.statusCode };
+    }
+    return { ok: false, reason: 'network' };
   }
 }
 
@@ -375,11 +405,9 @@ async function _postJsonAuthed(
         res.on('data', (chunk: Buffer) => { responseBody += chunk.toString(); });
         res.on('end', () => {
           if (res.statusCode && res.statusCode >= 400) {
-            const err = new Error(`HTTP ${res.statusCode}: ${responseBody.slice(0, 200)}`) as Error & {
-              statusCode: number;
-            };
-            err.statusCode = res.statusCode;
-            reject(err);
+            reject(
+              makeHttpError(res.statusCode, res.headers['retry-after'], responseBody),
+            );
             return;
           }
           try { resolve(JSON.parse(responseBody)); } catch { resolve(null); }
@@ -391,6 +419,29 @@ async function _postJsonAuthed(
     req.write(data);
     req.end();
   });
+}
+
+/**
+ * Build an HTTP error that carries the status code + parsed
+ * `Retry-After` header (in seconds). Used by every transport
+ * function in this module so callers can distinguish a real
+ * network failure from a rate-limit / auth / 4xx response without
+ * regex'ing the message string.
+ */
+function makeHttpError(
+  statusCode: number,
+  retryAfterHeader: string | string[] | undefined,
+  responseBody: string,
+): Error & { statusCode: number; retryAfterSeconds?: number } {
+  const raw = Array.isArray(retryAfterHeader) ? retryAfterHeader[0] : retryAfterHeader;
+  const retryAfterSeconds =
+    raw && /^\d+$/.test(raw.trim()) ? Number.parseInt(raw, 10) : undefined;
+  const err = new Error(
+    `HTTP ${statusCode}${responseBody ? ': ' + responseBody.slice(0, 200) : ''}`,
+  ) as Error & { statusCode: number; retryAfterSeconds?: number };
+  err.statusCode = statusCode;
+  if (typeof retryAfterSeconds === 'number') err.retryAfterSeconds = retryAfterSeconds;
+  return err;
 }
 
 // Exported with underscore prefix so tests can spy on them
@@ -421,7 +472,7 @@ export async function _postJson(
         res.on('data', (chunk: Buffer) => { body += chunk.toString(); });
         res.on('end', () => {
           if (res.statusCode && res.statusCode >= 400) {
-            reject(new Error(`HTTP ${res.statusCode}`));
+            reject(makeHttpError(res.statusCode, res.headers['retry-after'], body));
             return;
           }
           try { resolve(JSON.parse(body)); } catch { resolve(null); }
@@ -456,7 +507,7 @@ export async function _getJson(
         res.on('data', (chunk: Buffer) => { body += chunk.toString(); });
         res.on('end', () => {
           if (res.statusCode && res.statusCode >= 400) {
-            reject(new Error(`HTTP ${res.statusCode}`));
+            reject(makeHttpError(res.statusCode, res.headers['retry-after'], body));
             return;
           }
           try { resolve(JSON.parse(body)); } catch { resolve(null); }

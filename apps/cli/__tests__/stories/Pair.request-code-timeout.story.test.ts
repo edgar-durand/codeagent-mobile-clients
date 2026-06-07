@@ -68,13 +68,13 @@ describe('story: pair / requestCode times out on a hung backend', () => {
     await vi.advanceTimersByTimeAsync(30_000);
 
     // ── Observable outcome ─────────────────────────────────────────
-    // The contract is: `requestCode` returns `null` on any failure
-    // (network / parse / server error). A hung connection MUST behave
-    // the same way — the user shouldn't have to invent a third error
-    // case in pair.ts.
-    await expect(Promise.race([promise, Promise.resolve('still-waiting')])).resolves.toBe(
-      null,
-    );
+    // The contract is: `requestCode` returns a discriminated union;
+    // a hung connection lands on `{ ok: false, reason: 'timeout' }`
+    // so the caller can render a specific message instead of a
+    // generic "could not reach the server".
+    await expect(
+      Promise.race([promise, Promise.resolve('still-waiting' as const)]),
+    ).resolves.toEqual({ ok: false, reason: 'timeout' });
 
     // We did try the request — proves the timeout isn't a no-op shortcut.
     expect(postSpy).toHaveBeenCalledTimes(1);

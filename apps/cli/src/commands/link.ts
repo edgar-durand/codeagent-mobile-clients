@@ -192,9 +192,19 @@ export async function link(args: string[] = []): Promise<void> {
   const spin = p.spinner();
   spin.start('Requesting pairing code...');
   const pairing = await requestCode(pluginId);
-  if (!pairing) {
+  if (!pairing.ok) {
     spin.stop('Failed');
-    showError('Could not reach the server. Check your connection and try again.');
+    if (pairing.reason === 'rate-limited') {
+      showError(
+        `Server is rate-limiting this request (HTTP 429). Retry in ${pairing.retryAfterSeconds}s.`,
+      );
+    } else if (pairing.reason === 'timeout') {
+      showError('Server took too long to respond. Check your connection and try again.');
+    } else if (pairing.reason === 'http') {
+      showError(`Server returned HTTP ${pairing.status}. Try again later.`);
+    } else {
+      showError('Could not reach the server. Check your connection and try again.');
+    }
     process.exit(1);
   }
   spin.stop('Got pairing code');
