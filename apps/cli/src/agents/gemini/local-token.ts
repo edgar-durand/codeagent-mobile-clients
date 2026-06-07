@@ -76,18 +76,31 @@ export function validateLocalGeminiToken(credential: string): {
   reason?: string;
   expiresAt?: number;
 } {
-  let parsed: { expiry_date?: number };
+  let parsed: { expiry_date?: number; refresh_token?: string };
   try {
     parsed = JSON.parse(credential) as typeof parsed;
   } catch {
     return { status: 'unknown' };
+  }
+  // Match the server's policy: the `access_token` (and its
+  // `expiry_date`) lives ~1 hour, but `refresh_token` is long-lived
+  // and is what Gemini CLI's `oauth2Client` uses to mint fresh
+  // access tokens on every call. As long as we have a refresh_token
+  // the snapshot is usable indefinitely. Gating "expired" on
+  // `expiry_date` only would refuse to upload a still-good token
+  // every hour and force the user to re-auth Gemini constantly.
+  if (typeof parsed.refresh_token === 'string' && parsed.refresh_token.length > 0) {
+    return {
+      status: 'valid',
+      expiresAt: typeof parsed.expiry_date === 'number' ? parsed.expiry_date : undefined,
+    };
   }
   if (typeof parsed.expiry_date !== 'number') return { status: 'unknown' };
   const expiresAt = parsed.expiry_date;
   if (Date.now() >= expiresAt) {
     return {
       status: 'expired',
-      reason: 'Gemini OAuth access token expired',
+      reason: 'Gemini OAuth access token expired (no refresh_token in snapshot)',
       expiresAt,
     };
   }

@@ -93,23 +93,43 @@ describe('validateLocalGeminiToken', () => {
     expect(validateLocalGeminiToken('AIza-fake-api-key').status).toBe('unknown');
   });
 
-  it('returns unknown when expiry_date is absent', () => {
+  it('returns valid when refresh_token is present, even without expiry_date', () => {
     const blob = JSON.stringify({ access_token: 'a', refresh_token: 'r' });
+    expect(validateLocalGeminiToken(blob).status).toBe('valid');
+  });
+
+  it('returns valid when refresh_token is present even with past access_token expiry', () => {
+    // CRITICAL: matches Google OAuth semantics — access_token expires
+    // in ~1 hour, refresh_token is long-lived. Treating an hour-old
+    // snapshot as expired would force users to re-link Gemini every
+    // hour for no reason (the Gemini CLI auto-refreshes on first use
+    // via the refresh_token).
+    const blob = JSON.stringify({
+      access_token: 'a',
+      refresh_token: 'r.long-lived',
+      expiry_date: Date.now() - 3600_000,
+    });
+    const r = validateLocalGeminiToken(blob);
+    expect(r.status).toBe('valid');
+  });
+
+  it('returns unknown when both refresh_token and expiry_date are absent', () => {
+    const blob = JSON.stringify({ access_token: 'a' });
     expect(validateLocalGeminiToken(blob).status).toBe('unknown');
   });
 
-  it('returns expired for past expiry_date', () => {
+  it('returns expired for past expiry_date WITHOUT a refresh_token (truly dead snapshot)', () => {
     const blob = JSON.stringify({
       access_token: 'a',
       expiry_date: Date.now() - 60_000,
     });
     const r = validateLocalGeminiToken(blob);
     expect(r.status).toBe('expired');
-    expect(r.reason).toMatch(/expired/i);
+    expect(r.reason).toMatch(/no refresh_token/i);
     expect(r.expiresAt).toBeDefined();
   });
 
-  it('returns valid for future expiry_date', () => {
+  it('returns valid for future expiry_date without refresh_token (still mintable)', () => {
     const expiry = Date.now() + 3600_000;
     const blob = JSON.stringify({ access_token: 'a', expiry_date: expiry });
     const r = validateLocalGeminiToken(blob);
