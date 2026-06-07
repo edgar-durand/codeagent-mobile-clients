@@ -42,22 +42,8 @@ export interface PairedUserInfo {
  */
 const REQUEST_CODE_TIMEOUT_MS = 10_000;
 
-/**
- * Originator triple — `codeam link <agent>` from an already-paired
- * session passes its own HMAC identity so the backend can publish
- * `pairing_qr_ready` to the originating user's SSE bus. Mobile gates
- * the Scan-QR button on receipt. Optional: bare `codeam pair` runs
- * without these fields and the publish path silently no-ops.
- */
-export interface RequestCodeOptions {
-  originatorSessionId?: string;
-  originatorPluginId?: string;
-  originatorAuthToken?: string;
-}
-
 export async function requestCode(
   pluginId: string,
-  options: RequestCodeOptions = {},
 ): Promise<{ code: string; expiresAt: number } | null> {
   try {
     // Detect "running on a remote managed workspace" so the backend
@@ -80,15 +66,6 @@ export async function requestCode(
       runtime,
       branch,
       ...(codespaceName ? { codespaceName } : {}),
-      ...(options.originatorSessionId &&
-      options.originatorPluginId &&
-      options.originatorAuthToken
-        ? {
-            originatorSessionId: options.originatorSessionId,
-            originatorPluginId: options.originatorPluginId,
-            originatorAuthToken: options.originatorAuthToken,
-          }
-        : {}),
     });
     // Race the request against a hard timeout. The underlying socket
     // is leaked when the timeout wins (no AbortController plumbed
