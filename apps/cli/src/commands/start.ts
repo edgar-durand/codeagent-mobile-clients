@@ -28,6 +28,8 @@ import {
   postPreviewEvent,
 } from '../services/pairing.service';
 import { capture, identifyUser, shutdownTelemetry } from '../services/telemetry.service';
+import { startBeadsForSession } from '../beads/wiring';
+import type { StartedBeads } from '../beads';
 import { log } from '../services/logger';
 
 /**
@@ -288,6 +290,12 @@ export async function start(requestedAgent?: AgentId): Promise<void> {
   // Late-bound so the closure can reach `claude` for the answer path.
   let streamingEmitter: StreamingEmitterService | null = null;
 
+  // Late-bound live Beads session — assigned once the (non-awaited)
+  // bootstrap below resolves. Referenced by the teardown closures
+  // (onExit / sigintHandler) which only run after spawn, so the
+  // forward reference is safe. null until bootstrap succeeds.
+  let beads: StartedBeads | null = null;
+
   const agent = new AgentService(
     runtime,
     {
@@ -304,6 +312,7 @@ export async function start(requestedAgent?: AgentId): Promise<void> {
         relay.stop();
         void fileWatcher?.stop();
         turnFiles?.stop();
+        void beads?.watcher.stop();
         void streamingEmitter?.stop();
         // Close every IDE terminal spawned during the session so the
         // child shells don't get orphaned past the parent exit
@@ -352,6 +361,24 @@ export async function start(requestedAgent?: AgentId): Promise<void> {
   }, runtime.meta);
   ctx.relay = relay;
 
+  // Beads — permanently ON (kill-switch: CODEAM_BEADS_DISABLED).
+  // Bootstrap bd + start the issues.jsonl → ingest watcher for this
+  // session, then expose the live StartedBeads on `ctx` so relayed
+  // `beads_action` commands route into the orchestrator. Fired
+  // (not awaited) so a slow bd bootstrap never delays the agent
+  // spawn; `startBeadsForSession` swallows every error and resolves
+  // to null, so beads is strictly non-fatal to the agent run.
+  void startBeadsForSession({
+    sessionId: session.id,
+    pluginId,
+    pluginAuthToken: session.pluginAuthToken ?? undefined,
+    agents: [session.agent],
+    cwd,
+  }).then((started) => {
+    beads = started;
+    ctx.beads = started;
+  });
+
   // Wire the IDE terminal handlers so PTY data + exit events stream
   // back to the IDE client via the same SSE chunk channel chat uses.
   // The handler module keeps its own session map; we just forward
@@ -375,6 +402,7 @@ export async function start(requestedAgent?: AgentId): Promise<void> {
     outputSvc.dispose();
     relay.stop();
     void fileWatcher?.stop();
+    void beads?.watcher.stop();
     void streamingEmitter?.stop();
     // IDE terminals (`openTerminal()` sessions) outlive the agent's
     // PTY by design — but on hard exit we need to reap their child

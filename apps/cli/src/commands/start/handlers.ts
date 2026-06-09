@@ -59,6 +59,8 @@ import {
 import { log } from '../../services/logger';
 import type { KeepAliveContext } from './keep-alive';
 import { removeSession } from '../../config';
+import { handleBeadsActionCommand, type StartedBeads } from '../../beads';
+import { beadsActionFromPayload } from '../../beads/wiring';
 
 /**
  * Shared dependency container for command handlers.
@@ -82,6 +84,11 @@ export interface HandlerContext {
   pluginId: string;
   sessionId: string;
   pluginAuthToken?: string;
+  /** Live Beads session (watcher + adapter) when beads bootstrapped for
+   *  this run; null when beads is off (kill-switch, no bd, bootstrap
+   *  failure). Set by `start.ts` once `startBeadsForSession` resolves.
+   *  `beads_action` commands are no-ops while this is null. */
+  beads?: StartedBeads | null;
 }
 
 /**
@@ -1399,6 +1406,30 @@ export async function dispatchCommand(
   ctx: HandlerContext,
   cmd: RemoteCommand,
 ): Promise<void> {
+  // Beads actions carry a `{action, args}` shape that intentionally
+  // doesn't fit `startCommandSchema` (its `action` is the file-review
+  // enum). Intercept before the generic parse and replay the action as
+  // a native `bd` command via the orchestrator. Strictly non-fatal:
+  // any beads failure is swallowed so a misbehaving action can't break
+  // the relay's sequential dispatch loop.
+  if (cmd.type === 'beads_action') {
+    if (!ctx.beads) {
+      log.trace('beads', 'beads_action received but beads not running this session — dropping');
+      return;
+    }
+    const action = beadsActionFromPayload(cmd.payload);
+    if (!action) {
+      log.warn('beads', 'malformed beads_action payload — dropping');
+      return;
+    }
+    try {
+      await handleBeadsActionCommand(action, ctx.beads);
+    } catch (err) {
+      log.warn('beads', 'handleBeadsActionCommand failed (non-fatal)', err);
+    }
+    return;
+  }
+
   const parsed = parsePayload(startCommandSchema, cmd.payload);
   if (!parsed) {
     showInfo(`Ignoring malformed ${cmd.type} payload.`);
