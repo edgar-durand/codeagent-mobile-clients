@@ -4,6 +4,17 @@ All notable changes to the CodeAgent-Mobile JetBrains plugin are documented here
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.33.0] — 2026-06-09
+
+### Added
+
+- **shared:** Beads wire types (ingest payload + action)
+- **cli:** Bundle @beads/bd + cross-OS adapter, installer & projectKey
+- **cli:** Beads bootstrap + issues.jsonl watcher -> backend
+- **cli:** Apply queued beads actions as native bd commands
+- **cli:** Gated beads orchestrator + barrel exports
+- **cli:** Wire always-on beads into the live start + command-relay path
+
 ## [2.32.10] — 2026-06-09
 
 ### Fixed
