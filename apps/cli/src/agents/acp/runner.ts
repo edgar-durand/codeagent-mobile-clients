@@ -55,6 +55,8 @@ import type { RuntimeStrategy } from '../strategy';
 import { removeSession } from '../../config';
 import { FileWatcherService } from '../../services/file-watcher.service';
 import { TurnFileAggregator } from '../../services/turn-files/turn-file-aggregator';
+import { startBeadsForSession, beadsActionFromPayload } from '../../beads/wiring';
+import { handleBeadsActionCommand, type StartedBeads } from '../../beads';
 
 /**
  * Per-turn accumulator that bridges ACP's delta-shaped notifications
@@ -733,6 +735,22 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
       log.warn('acpRunner', `fileWatcher.start failed: ${describeError(err)}`);
     });
 
+  // Beads — permanently ON (kill-switch: CODEAM_BEADS_DISABLED). Bootstrap
+  // bd + start the issues.jsonl watcher for this paired session. Strictly
+  // non-fatal: `startBeadsForSession` swallows every error and returns null,
+  // so a beads failure can never break the ACP agent run. `beads_action`
+  // relay commands route into `handleBeadsActionCommand` while this is live.
+  let beads: StartedBeads | null = null;
+  void startBeadsForSession({
+    sessionId: opts.sessionId,
+    pluginId: opts.pluginId,
+    pluginAuthToken: opts.pluginAuthToken,
+    agents: [opts.agent],
+    cwd: opts.cwd,
+  }).then((started) => {
+    beads = started;
+  });
+
   // Command relay — listens for prompts from mobile / web and
   // forwards them as ACP `session/prompt`. Every command branch MUST
   // call `relay.sendResult(...)` even on no-op / not-supported
@@ -753,6 +771,7 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
         history,
         initialize.agentCapabilities,
         turnFiles,
+        () => beads,
       );
     },
     { id: opts.agent, name: opts.agent, displayName: opts.agent } as never,
@@ -764,6 +783,7 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
     relay.stop();
     void fileWatcher.stop();
     turnFiles.stop();
+    void beads?.watcher.stop();
     closeAllTerminals();
     await client.stop();
     process.exit(0);
@@ -799,8 +819,29 @@ async function handleCommand(
   history: AcpHistory,
   agentCaps: { loadSession?: boolean } | undefined,
   turnFiles: TurnFileAggregator,
+  getBeads: () => StartedBeads | null,
 ): Promise<void> {
   switch (cmd.type) {
+    case 'beads_action': {
+      // Mobile-originated Beads action relayed as a command. Replay it
+      // as a native `bd` command via the orchestrator, then push the
+      // resulting snapshot. Strictly non-fatal + always acks so mobile
+      // doesn't retry on a loop. No-op when beads isn't running.
+      const beads = getBeads();
+      const action = beadsActionFromPayload(cmd.payload);
+      if (!beads || !action) {
+        await relay.sendResult(cmd.id, 'completed', { applied: false });
+        return;
+      }
+      try {
+        await handleBeadsActionCommand(action, beads);
+        await relay.sendResult(cmd.id, 'completed', { applied: true });
+      } catch (err) {
+        log.warn('acpRunner', `beads_action failed (non-fatal): ${describeError(err)}`);
+        await relay.sendResult(cmd.id, 'failed', { error: describeError(err) });
+      }
+      return;
+    }
     case 'start_task': {
       const payload = cmd.payload as
         | {

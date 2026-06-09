@@ -71,6 +71,7 @@
   },
   "dependencies": {
     "@agentclientprotocol/claude-agent-acp": "^0.42.0",
+    "@beads/bd": "1.0.5",
     "@agentclientprotocol/codex-acp": "^0.0.45",
     "@agentclientprotocol/sdk": "^0.25.0",
     "@clack/prompts": "^1.2.0",
