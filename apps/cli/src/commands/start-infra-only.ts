@@ -8,6 +8,8 @@ import { buildKeepAlive } from './start/keep-alive';
 import type { HandlerContext } from './start/handlers';
 import { getActiveSession } from '../config';
 import { parsePayload, startCommandSchema } from '../lib/payload';
+import { provisionBeadsForStart, beadsActionFromPayload } from '../beads/wiring';
+import { handleBeadsActionCommand, type StartedBeads } from '../beads';
 import { log } from '../services/logger';
 
 /**
@@ -133,6 +135,22 @@ export async function startInfraOnly(agentId: AgentId): Promise<void> {
       })
     : null;
 
+  // Beads — composition-root concern (SRP decision D10). `startInfraOnly` is
+  // the codespace counterpart of `start()` (the api's infra bootstrap runs
+  // `pair-auto`→here when the agent launch is skipped), so beads must be
+  // provisioned on this path too — otherwise codespaces that never install an
+  // agent would miss it. Fired (not awaited) + strictly non-fatal; the live
+  // handle routes relayed `beads_action` commands into the orchestrator.
+  let beads: StartedBeads | null = null;
+  void provisionBeadsForStart({
+    sessionId: session.id,
+    pluginId,
+    pluginAuthToken: session.pluginAuthToken ?? undefined,
+    cwd,
+  }).then((started) => {
+    beads = started;
+  });
+
   // The relay is built first so the handler dispatcher (below)
   // can close over it. `agentsOverride: []` is what tells the
   // dashboard we're in no-agent mode.
@@ -159,6 +177,26 @@ export async function startInfraOnly(agentId: AgentId): Promise<void> {
   const relay = new CommandRelayService(
     pluginId,
     async (cmd: RemoteCommand) => {
+      // Beads actions carry a `{action, args}` shape that doesn't fit
+      // `startCommandSchema`; replay them as native bd commands via the
+      // composition-root-owned handle. Strictly non-fatal.
+      if (cmd.type === 'beads_action') {
+        if (!beads) {
+          log.trace('infra-only', 'beads_action received but beads not running — dropping');
+          return;
+        }
+        const action = beadsActionFromPayload(cmd.payload);
+        if (!action) {
+          log.warn('infra-only', 'malformed beads_action payload — dropping');
+          return;
+        }
+        try {
+          await handleBeadsActionCommand(action, beads);
+        } catch (err) {
+          log.warn('infra-only', 'handleBeadsActionCommand failed (non-fatal)', err as Error);
+        }
+        return;
+      }
       if (!INFRA_ONLY_COMMAND_TYPES.has(cmd.type)) {
         log.trace('infra-only', `dropping agent-only command type=${cmd.type}`);
         return;
@@ -232,6 +270,7 @@ export async function startInfraOnly(agentId: AgentId): Promise<void> {
       /* best-effort */
     }
     void fileWatcher?.stop();
+    void beads?.watcher.stop();
     closeAllTerminals();
     cleanupAttachmentTempFiles();
     process.exit(0);

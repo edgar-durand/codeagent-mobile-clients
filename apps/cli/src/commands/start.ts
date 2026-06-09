@@ -28,7 +28,7 @@ import {
   postPreviewEvent,
 } from '../services/pairing.service';
 import { capture, identifyUser, shutdownTelemetry } from '../services/telemetry.service';
-import { startBeadsForSession } from '../beads/wiring';
+import { provisionBeadsForStart } from '../beads/wiring';
 import type { StartedBeads } from '../beads';
 import { log } from '../services/logger';
 
@@ -121,6 +121,27 @@ export async function start(requestedAgent?: AgentId): Promise<void> {
     `boot triple sessionId=${session.id} pluginId=${pluginId} tokenLen=${tokenForLog.length} tokenHead=${tokenForLog.slice(0, 12)} tokenTail=${tokenForLog.slice(-8)} mintedEqualsCached=${refreshed === session.pluginAuthToken}`,
   );
 
+  // Beads — composition-root concern (SRP decision D10), provisioned ONCE
+  // here for BOTH the ACP and the PTY path. `start()` is the single funnel
+  // for local `codeam start` AND codespace `pair-auto`→`start()`, so this
+  // covers both. Fired (not awaited) so a slow bd provision never delays the
+  // agent spawn; `provisionBeadsForStart` swallows every error and resolves
+  // to null, so beads is strictly non-fatal and the agent runs regardless.
+  // The live handle is exposed via `getBeads` (threaded into the ACP runner)
+  // and `ctx.beads` (read by the PTY-path command handlers) so relayed
+  // `beads_action` commands route into the orchestrator.
+  let beads: StartedBeads | null = null;
+  const getBeads = (): StartedBeads | null => beads;
+  const beadsReady = provisionBeadsForStart({
+    sessionId: session.id,
+    pluginId,
+    pluginAuthToken: session.pluginAuthToken ?? undefined,
+    cwd,
+  }).then((started) => {
+    beads = started;
+    return started;
+  });
+
   // ACP fork — default ON since v2.27.13. Runs the session over the
   // typed protocol whenever:
   //   1. We ship an ACP adapter for this agent (claude / codex / gemini
@@ -154,6 +175,7 @@ export async function start(requestedAgent?: AgentId): Promise<void> {
         pluginAuthToken: session.pluginAuthToken,
         adapter,
         cwd,
+        getBeads,
       });
       return;
     }
@@ -290,11 +312,9 @@ export async function start(requestedAgent?: AgentId): Promise<void> {
   // Late-bound so the closure can reach `claude` for the answer path.
   let streamingEmitter: StreamingEmitterService | null = null;
 
-  // Late-bound live Beads session — assigned once the (non-awaited)
-  // bootstrap below resolves. Referenced by the teardown closures
-  // (onExit / sigintHandler) which only run after spawn, so the
-  // forward reference is safe. null until bootstrap succeeds.
-  let beads: StartedBeads | null = null;
+  // `beads` (the live handle) + `getBeads` are owned by the composition-root
+  // provisioning above; the teardown closures (onExit / sigintHandler) and
+  // `ctx.beads` below read that shared handle.
 
   const agent = new AgentService(
     runtime,
@@ -361,21 +381,11 @@ export async function start(requestedAgent?: AgentId): Promise<void> {
   }, runtime.meta);
   ctx.relay = relay;
 
-  // Beads — permanently ON (kill-switch: CODEAM_BEADS_DISABLED).
-  // Bootstrap bd + start the issues.jsonl → ingest watcher for this
-  // session, then expose the live StartedBeads on `ctx` so relayed
-  // `beads_action` commands route into the orchestrator. Fired
-  // (not awaited) so a slow bd bootstrap never delays the agent
-  // spawn; `startBeadsForSession` swallows every error and resolves
-  // to null, so beads is strictly non-fatal to the agent run.
-  void startBeadsForSession({
-    sessionId: session.id,
-    pluginId,
-    pluginAuthToken: session.pluginAuthToken ?? undefined,
-    agents: [session.agent],
-    cwd,
-  }).then((started) => {
-    beads = started;
+  // Expose the composition-root-provisioned Beads handle on `ctx` once it
+  // resolves, so the PTY-path command handlers route relayed `beads_action`
+  // commands into the orchestrator. Provisioning was kicked off above (before
+  // the ACP fork); this only forwards its result onto the handler context.
+  void beadsReady.then((started) => {
     ctx.beads = started;
   });
 
