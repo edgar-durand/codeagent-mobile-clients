@@ -38,6 +38,20 @@ export function showInfo(msg: string): void {
 }
 
 /**
+ * Prominent notice printed once the agent is online over ACP. The ACP
+ * adapter runs the agent headlessly — there is no interactive TUI in this
+ * terminal, so typing here does nothing. QA repeatedly tried to type prompts
+ * into the terminal and thought the integration was broken (#637). Make it
+ * unmistakable that prompts come from the mobile app.
+ */
+export function showRelayNotice(): void {
+  out('');
+  out(`  ${pc.bold(pc.yellow('⚠  This terminal is a relay — do not type here.'))}`);
+  out(`  ${pc.dim('Send your prompts from the CodeAgent Mobile app; replies stream in below.')}`);
+  out('');
+}
+
+/**
  * Width of the box INTERIOR (between the two `│` columns). Must match
  * the number of `─` characters in the top and bottom borders below.
  * Changing one without the other misaligns every row — the previous

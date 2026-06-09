@@ -30,7 +30,7 @@
 import { randomUUID } from 'node:crypto';
 import { CommandRelayService, type RemoteCommand } from '../../services/command-relay.service';
 import { log } from '../../services/logger';
-import { showInfo, showSuccess } from '../../ui/banner';
+import { showInfo, showSuccess, showRelayNotice } from '../../ui/banner';
 import { AGENT_REGISTRY, type AgentId, type AgentModel, type StreamingChunkKind } from '@codeagent/shared';
 import type { RequestPermissionResponse } from '@agentclientprotocol/sdk';
 import { createOsStrategy } from '../../os';
@@ -632,6 +632,7 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
     `adapter handshake ok protocolVersion=${initialize.protocolVersion} sessionId=${acpSessionId.slice(0, 8)}`,
   );
   showSuccess(`${opts.agent} online (ACP) — awaiting prompts from mobile.`);
+  showRelayNotice();
 
   // Synthesize a welcome banner so mobile renders the branded card
   // (agent logo + title + subtitle + path) the legacy PTY path
