@@ -1,56 +1,24 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { maybeStartBeads, handleBeadsActionCommand } from '../../src/beads';
+import { startBeads, handleBeadsActionCommand } from '../../src/beads';
 import * as adapterMod from '../../src/beads/bd-adapter';
-import * as bootstrapMod from '../../src/beads/bootstrap';
-import * as installMod from '../../src/beads/install-bd';
+import * as provisionerMod from '../../src/beads/provisioner';
 import * as watcherMod from '../../src/beads/watcher';
 import * as applyMod from '../../src/beads/apply-actions';
-import type { AgentId } from '@codeagent/shared';
 
 const baseOpts = {
   sessionId: 's1',
   pluginId: 'p1',
   pluginAuthToken: 't1',
-  agents: ['claude'] as AgentId[],
   cwd: '/repo',
 };
 
-describe('maybeStartBeads gating', () => {
+describe('startBeads — composition-root orchestrator', () => {
   afterEach(() => vi.restoreAllMocks());
 
-  it('is a complete no-op when the flag is off (no bd resolution at all)', async () => {
-    const ctor = vi.spyOn(adapterMod, 'BdAdapter');
-    const res = await maybeStartBeads({ ...baseOpts, enabled: false });
-    expect(res).toBeNull();
-    expect(ctor).not.toHaveBeenCalled();
-  });
-
-  it('returns null without bootstrapping when bd is unavailable and install not allowed', async () => {
-    vi.spyOn(adapterMod.BdAdapter.prototype, 'isAvailable').mockReturnValue(false);
-    const boot = vi.spyOn(bootstrapMod, 'bootstrapBeads');
-    const install = vi.spyOn(installMod, 'installBd');
-    const res = await maybeStartBeads({ ...baseOpts, enabled: true });
-    expect(res).toBeNull();
-    expect(install).not.toHaveBeenCalled();
-    expect(boot).not.toHaveBeenCalled();
-  });
-
-  it('runs the installer (consented) when bd is missing, then bails if still unavailable', async () => {
-    vi.spyOn(adapterMod.BdAdapter.prototype, 'isAvailable').mockReturnValue(false);
-    const install = vi
-      .spyOn(installMod, 'installBd')
-      .mockResolvedValue({ ok: false, code: 1, stderr: 'x' });
-    const res = await maybeStartBeads({ ...baseOpts, enabled: true, allowInstall: true });
-    expect(install).toHaveBeenCalledTimes(1);
-    expect(res).toBeNull();
-  });
-
-  it('bootstraps + starts the watcher when bd is available and the server comes up', async () => {
-    vi.spyOn(adapterMod.BdAdapter.prototype, 'isAvailable').mockReturnValue(true);
-    vi.spyOn(bootstrapMod, 'bootstrapBeads').mockResolvedValue({
+  it('starts the watcher + pushes an immediate snapshot when provisioning succeeds', async () => {
+    vi.spyOn(provisionerMod, 'provisionBeads').mockResolvedValue({
       bdAvailable: true,
-      serverUp: true,
-      agentsConfigured: ['claude'],
+      initialized: true,
       exportEnabled: true,
     });
     const start = vi.spyOn(watcherMod.BeadsWatcher.prototype, 'start').mockImplementation(() => {});
@@ -58,24 +26,51 @@ describe('maybeStartBeads gating', () => {
       .spyOn(watcherMod.BeadsWatcher.prototype, 'syncNow')
       .mockResolvedValue(undefined);
 
-    const res = await maybeStartBeads({ ...baseOpts, enabled: true });
+    const res = await startBeads(baseOpts);
+
     expect(res).not.toBeNull();
     expect(start).toHaveBeenCalledTimes(1);
     expect(sync).toHaveBeenCalledTimes(1); // immediate snapshot push
   });
 
-  it('does not start the watcher when bootstrap reports the server down', async () => {
-    vi.spyOn(adapterMod.BdAdapter.prototype, 'isAvailable').mockReturnValue(true);
-    vi.spyOn(bootstrapMod, 'bootstrapBeads').mockResolvedValue({
-      bdAvailable: true,
-      serverUp: false,
-      agentsConfigured: [],
+  it('does NOT start the watcher when bd could not be provisioned', async () => {
+    vi.spyOn(provisionerMod, 'provisionBeads').mockResolvedValue({
+      bdAvailable: false,
+      initialized: false,
       exportEnabled: false,
     });
     const start = vi.spyOn(watcherMod.BeadsWatcher.prototype, 'start');
-    const res = await maybeStartBeads({ ...baseOpts, enabled: true });
+
+    const res = await startBeads(baseOpts);
+
     expect(res).toBeNull();
     expect(start).not.toHaveBeenCalled();
+  });
+
+  it('does NOT start the watcher when the home brain failed to initialize', async () => {
+    vi.spyOn(provisionerMod, 'provisionBeads').mockResolvedValue({
+      bdAvailable: true,
+      initialized: false,
+      exportEnabled: false,
+    });
+    const start = vi.spyOn(watcherMod.BeadsWatcher.prototype, 'start');
+
+    const res = await startBeads(baseOpts);
+
+    expect(res).toBeNull();
+    expect(start).not.toHaveBeenCalled();
+  });
+
+  it('passes the adapter it built into the provisioner (shared resolved binary)', async () => {
+    const provision = vi.spyOn(provisionerMod, 'provisionBeads').mockResolvedValue({
+      bdAvailable: false,
+      initialized: false,
+      exportEnabled: false,
+    });
+    await startBeads(baseOpts);
+    expect(provision).toHaveBeenCalledTimes(1);
+    const passed = provision.mock.calls[0][0];
+    expect(passed?.adapter).toBeInstanceOf(adapterMod.BdAdapter);
   });
 });
 
