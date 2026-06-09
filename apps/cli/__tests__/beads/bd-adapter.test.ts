@@ -62,33 +62,33 @@ describe('BdAdapter binary resolution', () => {
   });
 });
 
-describe('BdAdapter --global home-brain wiring', () => {
+describe('BdAdapter home-brain wiring (BEADS_DIR, no --global)', () => {
   afterEach(() => vi.restoreAllMocks());
 
-  it('appends --global to every command (the home-level shared brain)', async () => {
-    const spy = vi.spyOn(_spawnSeam, 'run').mockResolvedValue(ok('[]'));
-    const a = new BdAdapter({ binaryPath: '/bd' });
-    await a.run(['ready', '--json']);
-    expect(spy).toHaveBeenCalledTimes(1);
-    const [, args] = spy.mock.calls[0];
-    expect(args).toEqual(['ready', '--json', '--global']);
-  });
-
-  it('uses BEADS_DIR instead of --global when an override is set (test isolation)', async () => {
+  it('never injects --global (the spike proved --global needs external dolt)', async () => {
     const spy = vi.spyOn(_spawnSeam, 'run').mockResolvedValue(ok('[]'));
     const a = new BdAdapter({ binaryPath: '/bd', beadsDir: '/tmp/test-beads' });
     await a.run(['ready', '--json']);
-    const [, args, opts] = spy.mock.calls[0];
-    expect(args).toEqual(['ready', '--json']); // no --global
+    expect(spy).toHaveBeenCalledTimes(1);
+    const [, args] = spy.mock.calls[0];
+    expect(args).toEqual(['ready', '--json']);
+    expect(args).not.toContain('--global');
+  });
+
+  it('sets BEADS_DIR to the configured home brain dir on every command', async () => {
+    const spy = vi.spyOn(_spawnSeam, 'run').mockResolvedValue(ok('[]'));
+    const a = new BdAdapter({ binaryPath: '/bd', beadsDir: '/tmp/test-beads' });
+    await a.run(['ready', '--json']);
+    const [, , opts] = spy.mock.calls[0];
     expect(opts.env.BEADS_DIR).toBe('/tmp/test-beads');
   });
 
-  it('does not double-add --global if the caller already passed it', async () => {
+  it('defaults BEADS_DIR to ~/.beads when no override is given', async () => {
     const spy = vi.spyOn(_spawnSeam, 'run').mockResolvedValue(ok('[]'));
     const a = new BdAdapter({ binaryPath: '/bd' });
-    await a.run(['status', '--json', '--global']);
-    const [, args] = spy.mock.calls[0];
-    expect(args.filter((x) => x === '--global')).toHaveLength(1);
+    await a.run(['status', '--json']);
+    const [, , opts] = spy.mock.calls[0];
+    expect(opts.env.BEADS_DIR).toBe(adapter.defaultBeadsHomeDir());
   });
 
   it('returns an error result when no binary resolves', async () => {

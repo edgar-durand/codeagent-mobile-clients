@@ -22,11 +22,16 @@ import { log } from '../services/logger';
  *      the caller, not here; `resolveBinary()` simply returns null so the
  *      caller can offer the installer.
  *
- * All bd state lives in the home-level shared "brain": every command is run
- * with `--global`, which `@beads/bd@1.0.5` documents as "use the global
- * shared-server database (beads_global)" and which the spike confirmed
- * preserves per-repo prefix namespacing (decision D2/§4.5). `BEADS_DIR` /
- * `--db` remain available as overrides for tests and power users.
+ * All bd state lives in the home-level "brain" at `~/.beads`, addressed via the
+ * `BEADS_DIR` env var bd reads. The spike (2026-06-09, `@beads/bd@1.0.5`)
+ * disproved the `--global` plan: `--global` REQUIRES shared-server mode, which
+ * in turn needs a standalone `dolt` binary on PATH (the bundled bd ships only
+ * an embedded engine, not the dolt server). `bd init --global ... && bd create
+ * --global` fails with "--global requires shared-server mode". The embedded
+ * home brain (init at `~/.beads`, every command run with `BEADS_DIR=~/.beads`)
+ * needs no external dolt, supports create/list/status/ready/export, and is the
+ * verified P0 path (decision D2/§4.5). Tests pass an explicit `beadsDir` to
+ * redirect off the real home brain.
  */
 
 const BD_PACKAGE = '@beads/bd';
@@ -50,8 +55,9 @@ export interface BdAdapterOptions {
    */
   binaryPath?: string;
   /**
-   * Override `--global` with an explicit `BEADS_DIR`. Used by tests so they
-   * never touch the real home brain. Maps to the `BEADS_DIR` env var bd reads.
+   * The home brain directory bd addresses via `BEADS_DIR`. Defaults to
+   * `~/.beads` (the verified embedded home brain). Tests pass an explicit dir
+   * so they never touch the real home brain.
    */
   beadsDir?: string;
 }
@@ -194,10 +200,12 @@ export class BdAdapter {
   }
 
   /**
-   * Run an arbitrary bd subcommand. Always injects `--global` (the home brain)
-   * unless a `beadsDir` override is set, in which case `BEADS_DIR` redirects bd
-   * to that dir instead (tests). Returns the raw result; callers decide how to
-   * interpret exit codes (e.g. `bd setup --check` uses 0/nonzero).
+   * Run an arbitrary bd subcommand against the home brain. `BEADS_DIR` is set
+   * to the configured `beadsDir` (tests) or `~/.beads` (the verified embedded
+   * home brain) so every command resolves to the same single graph regardless
+   * of the process cwd. Returns the raw result; callers decide how to interpret
+   * exit codes — note bd exits 0 even for some error states (e.g. "no beads
+   * database found"), so JSON-parsing callers must also inspect the payload.
    */
   async run(args: string[]): Promise<BdRunResult> {
     const binary = this.resolveBinary();
@@ -205,14 +213,9 @@ export class BdAdapter {
       return { code: -1, stdout: '', stderr: 'bd binary not resolved' };
     }
     const env: NodeJS.ProcessEnv = { ...process.env };
-    const finalArgs = [...args];
-    if (this.opts.beadsDir) {
-      env.BEADS_DIR = this.opts.beadsDir;
-    } else if (!finalArgs.includes('--global')) {
-      finalArgs.push('--global');
-    }
-    log.trace('beads', `bd ${finalArgs.join(' ')}`);
-    return _spawnSeam.run(binary, finalArgs, { cwd: this.opts.cwd, env });
+    env.BEADS_DIR = this.opts.beadsDir ?? defaultBeadsHomeDir();
+    log.trace('beads', `bd ${args.join(' ')} (BEADS_DIR=${env.BEADS_DIR})`);
+    return _spawnSeam.run(binary, args, { cwd: this.opts.cwd, env });
   }
 
   /**
