@@ -1,3 +1,4 @@
+import path from 'node:path';
 import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
 import { provisionBeads, _provisionSeam, _linkSeam } from '../../src/beads/provisioner';
 import type { BdRunResult } from '../../src/beads/bd-adapter';
@@ -233,6 +234,12 @@ describe('provisionBeads', () => {
 });
 
 describe('linkBdOntoPath — GAP 1 PATH symlink (idempotent)', () => {
+  // linkBdOntoPath no-ops on win32 (codespaces are Linux); force a POSIX
+  // platform so the symlink logic runs on Windows CI runners too. The
+  // expected link path is built with path.join so the separator matches
+  // the host (backslashes on Windows).
+  const LINK = path.join('/usr/local/bin', 'bd');
+  beforeEach(() => vi.spyOn(_linkSeam, 'platform').mockReturnValue('linux'));
   afterEach(() => vi.restoreAllMocks());
 
   it('creates a `bd` symlink to the resolved binary in the codeam bin dir', () => {
@@ -245,7 +252,7 @@ describe('linkBdOntoPath — GAP 1 PATH symlink (idempotent)', () => {
     _provisionSeam.linkBdOntoPath('/pkg/@beads/bd/bin/bd');
 
     expect(symlink).toHaveBeenCalledTimes(1);
-    expect(symlink).toHaveBeenCalledWith('/pkg/@beads/bd/bin/bd', '/usr/local/bin/bd');
+    expect(symlink).toHaveBeenCalledWith('/pkg/@beads/bd/bin/bd', LINK);
   });
 
   it('is idempotent: skips when the symlink already points at the binary', () => {
@@ -269,8 +276,8 @@ describe('linkBdOntoPath — GAP 1 PATH symlink (idempotent)', () => {
 
     _provisionSeam.linkBdOntoPath('/pkg/@beads/bd/bin/bd');
 
-    expect(unlink).toHaveBeenCalledWith('/usr/local/bin/bd');
-    expect(symlink).toHaveBeenCalledWith('/pkg/@beads/bd/bin/bd', '/usr/local/bin/bd');
+    expect(unlink).toHaveBeenCalledWith(LINK);
+    expect(symlink).toHaveBeenCalledWith('/pkg/@beads/bd/bin/bd', LINK);
   });
 
   it('no-ops on win32 (codespaces are Linux; nothing to symlink)', () => {
@@ -306,14 +313,14 @@ describe('_linkSeam.cliBinDir — picks a dir that is actually on PATH', () => {
     // while node + the codeam launcher live in the prefix bin (on PATH).
     process.execPath = '/tmp/codeam-node20/bin/node';
     process.argv[1] = '/tmp/codeam-node20/lib/node_modules/codeam-cli/dist/cli.js';
-    process.env.PATH = '/usr/bin:/tmp/codeam-node20/bin:/bin';
-    expect(_linkSeam.cliBinDir()).toBe('/tmp/codeam-node20/bin');
+    process.env.PATH = ['/usr/bin', '/tmp/codeam-node20/bin', '/bin'].join(path.delimiter);
+    expect(_linkSeam.cliBinDir()).toBe(path.dirname('/tmp/codeam-node20/bin/node'));
   });
 
   it("falls back to node's bin dir when no candidate is on PATH", () => {
     process.execPath = '/opt/node/bin/node';
     process.argv[1] = '/pkg/codeam-cli/dist/cli.js';
-    process.env.PATH = '/usr/bin:/bin';
-    expect(_linkSeam.cliBinDir()).toBe('/opt/node/bin');
+    process.env.PATH = ['/usr/bin', '/bin'].join(path.delimiter);
+    expect(_linkSeam.cliBinDir()).toBe(path.dirname('/opt/node/bin/node'));
   });
 });
