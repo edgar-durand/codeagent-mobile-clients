@@ -35,6 +35,31 @@ describe('ClaudeRuntimeStrategy', () => {
     ]);
   });
 
+  it('prepareResumeLaunch builds --resume WITHOUT the spawn-time --session-id', () => {
+    // BUG: `restart()` used to append `--resume <id>` onto the
+    // initial launch args, which still carried the spawn-time
+    // `--session-id <uuid>`. Claude Code rejects `--session-id`
+    // together with `--resume` (mutually exclusive) and exits
+    // immediately → the resumed agent is fully dead. The resume
+    // launch must therefore NOT include `--session-id`.
+    const strategy: import('../../src/agents/strategy').RuntimeStrategy = runtime;
+    expect(typeof strategy.prepareResumeLaunch).toBe('function');
+    const launch = strategy.prepareResumeLaunch!('sess-abc', { auto: false });
+    expect(launch.args).not.toContain('--session-id');
+    expect(launch.args).toContain('--resume');
+    expect(launch.args).toContain('sess-abc');
+    expect(launch.args).not.toContain('--dangerously-skip-permissions');
+  });
+
+  it('prepareResumeLaunch with auto=true adds the permissions bypass', () => {
+    const strategy: import('../../src/agents/strategy').RuntimeStrategy = runtime;
+    const launch = strategy.prepareResumeLaunch!('sess-abc', { auto: true });
+    expect(launch.args).not.toContain('--session-id');
+    expect(launch.args).toEqual(
+      expect.arrayContaining(['--resume', 'sess-abc', '--dangerously-skip-permissions']),
+    );
+  });
+
   it('does NOT define postSpawnInstruction (Claude uses CLI flag, not in-TUI)', () => {
     // Access via interface type to avoid TS2339 — the optional method
     // is not declared on the concrete class, which is the correct shape.

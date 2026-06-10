@@ -50,10 +50,12 @@ import {
   readPreviewConfig,
   registerPreview,
   resolveCloudflared,
+  runSetupCommand,
   safeParseDetection,
   setPortPublic,
   waitForCloudflaredReady,
   waitForCodespacePortReady,
+  waitForPortListening,
   writePreviewConfig,
 } from '../../services/preview';
 import { log } from '../../services/logger';
@@ -863,7 +865,22 @@ export type ReadyOutcome =
 export async function waitForDevServerReady(
   devServer: ChildProcessWithIO,
   readyRe: RegExp,
-  opts: { timeoutMs: number; onChunk?: (chunk: string) => void } = {
+  opts: {
+    timeoutMs: number;
+    onChunk?: (chunk: string) => void;
+    /**
+     * Additive readiness fallback (BUG 1). The `readyRe` regex is the
+     * PRIMARY signal; this probe only catches the cases it misses — a
+     * server that's actually listening on its port but whose stdout
+     * never trips the agent-supplied pattern (e.g. Next.js's
+     * `▲ Next.js 14.x` / `- Local: http://...` lines). Resolve `true`
+     * once the port is accepting connections. Polled in the same loop
+     * as the regex; whichever fires first wins. Omit it (non-Next.js
+     * frameworks where the regex is reliable) to keep the legacy
+     * stdout-only behavior.
+     */
+    portProbe?: () => Promise<boolean>;
+  } = {
     timeoutMs: 120_000,
   },
 ): Promise<ReadyOutcome> {
@@ -883,10 +900,27 @@ export async function waitForDevServerReady(
   devServer.stdout?.on('data', consume);
   devServer.stderr?.on('data', consume);
 
+  // Guard against overlapping probe calls when one connect attempt
+  // outlasts the 250 ms poll tick.
+  let probeInFlight = false;
   const deadline = Date.now() + opts.timeoutMs;
   while (!readyMatched && Date.now() < deadline) {
     if (devServer.exitCode !== null) {
       return { kind: 'exited', code: devServer.exitCode };
+    }
+    if (opts.portProbe && !probeInFlight) {
+      probeInFlight = true;
+      void opts
+        .portProbe()
+        .then((up) => {
+          if (up) readyMatched = true;
+        })
+        .catch(() => {
+          /* probe failures are non-fatal — the regex / deadline still apply */
+        })
+        .finally(() => {
+          probeInFlight = false;
+        });
     }
     await new Promise((r) => setTimeout(r, 250));
   }
@@ -920,6 +954,18 @@ export function normalizeDetectionForSpawn(
     args: args.slice(1),
   };
 }
+
+/**
+ * Time budgets for the preview bring-up's blocking command steps
+ * (BUG 1). Without these a stalled step — most commonly a fresh
+ * codespace's `pnpm install` with no node_modules — wedges the whole
+ * pipeline and the user waits on the spinner indefinitely.
+ *
+ * Installs get the generous budget (a cold monorepo install legitimately
+ * runs into minutes); codegen / prebuild steps get the tighter one.
+ */
+const INSTALL_TIMEOUT_MS = 5 * 60_000;
+const SETUP_TIMEOUT_MS = 2 * 60_000;
 
 const previewStartH: CommandHandler = (ctx, _cmd, parsed) => {
   if (!ctx.pluginAuthToken) {
@@ -986,13 +1032,31 @@ const previewStartH: CommandHandler = (ctx, _cmd, parsed) => {
         'SETUP_RUN',
         `${missingDeps.cmd} ${missingDeps.args.join(' ')} (pre-flight — node_modules missing)`,
       );
-      const exitCode = await runOnce(
+      const result = await runSetupCommand(
         missingDeps.cmd,
         missingDeps.args,
         process.cwd(),
         detection.env,
+        { timeoutMs: INSTALL_TIMEOUT_MS },
       );
-      if (exitCode !== 0) {
+      if (result.status === 'timeout') {
+        // The hang BUG 1 guards against: a fresh codespace with no
+        // node_modules stalls the install → the dev server never
+        // spawns → the user waits on the spinner forever. Bound it and
+        // emit an error so mobile leaves the spinner.
+        void postPreviewEvent({
+          sessionId: ctx.sessionId,
+          pluginId: ctx.pluginId,
+          pluginAuthToken,
+          type: 'preview_error',
+          payload: {
+            stage: 'ready_timeout',
+            message: `Dependency install (${missingDeps.cmd} ${missingDeps.args.join(' ')}) didn't finish within ${Math.round(INSTALL_TIMEOUT_MS / 1000)}s and was stopped. Run it manually in this project, then try the preview again.`,
+          },
+        });
+        return;
+      }
+      if (result.status === 'failed') {
         void postPreviewEvent({
           sessionId: ctx.sessionId,
           pluginId: ctx.pluginId,
@@ -1000,7 +1064,7 @@ const previewStartH: CommandHandler = (ctx, _cmd, parsed) => {
           type: 'preview_error',
           payload: {
             stage: 'spawn',
-            message: `Dependency install failed (${missingDeps.cmd} ${missingDeps.args.join(' ')}, exit ${exitCode}). Run it manually in this project and try again.`,
+            message: `Dependency install failed (${missingDeps.cmd} ${missingDeps.args.join(' ')}, exit ${result.code}). Run it manually in this project and try again.`,
           },
         });
         return;
@@ -1027,8 +1091,33 @@ const previewStartH: CommandHandler = (ctx, _cmd, parsed) => {
       : (detection.setup_commands ?? []);
     for (const setup of agentSetupCommands) {
       emitProgress('SETUP_RUN', `${setup.cmd} ${setup.args.join(' ')}`);
-      const exitCode = await runOnce(setup.cmd, setup.args, process.cwd(), detection.env);
-      if (exitCode !== 0) {
+      // An install command (the agent may emit one for a project the
+      // pre-flight didn't cover) gets the generous install budget; a
+      // codegen/prebuild step gets the tighter one.
+      const timeoutMs = isJsInstallCommand(setup.cmd, setup.args)
+        ? INSTALL_TIMEOUT_MS
+        : SETUP_TIMEOUT_MS;
+      const result = await runSetupCommand(
+        setup.cmd,
+        setup.args,
+        process.cwd(),
+        detection.env,
+        { timeoutMs },
+      );
+      if (result.status === 'timeout') {
+        void postPreviewEvent({
+          sessionId: ctx.sessionId,
+          pluginId: ctx.pluginId,
+          pluginAuthToken,
+          type: 'preview_error',
+          payload: {
+            stage: 'ready_timeout',
+            message: `Setup step (${setup.cmd} ${setup.args.join(' ')}) didn't finish within ${Math.round(timeoutMs / 1000)}s and was stopped.`,
+          },
+        });
+        return;
+      }
+      if (result.status === 'failed') {
         void postPreviewEvent({
           sessionId: ctx.sessionId,
           pluginId: ctx.pluginId,
@@ -1036,7 +1125,7 @@ const previewStartH: CommandHandler = (ctx, _cmd, parsed) => {
           type: 'preview_error',
           payload: {
             stage: 'spawn',
-            message: `Setup failed (${setup.cmd} ${setup.args.join(' ')}, exit ${exitCode}).`,
+            message: `Setup failed (${setup.cmd} ${setup.args.join(' ')}, exit ${result.code}).`,
           },
         });
         return;
@@ -1066,6 +1155,16 @@ const previewStartH: CommandHandler = (ctx, _cmd, parsed) => {
     emitProgress('WAITING_FOR_READY', detection.ready_pattern);
     let expoUrl: string | null = null;
     const readyRe = compileReadyPattern(detection.ready_pattern);
+    // Additive port-listening fallback (BUG 1) for the framework that
+    // hit the hang in prod: Next.js prints `▲ Next.js 14.x` /
+    // `- Local: http://localhost:3000` rather than a literal "ready"
+    // line, so a slightly-off `ready_pattern` stalled WAITING_FOR_READY
+    // for the full 120 s while the server was already listening. The
+    // regex stays primary; the probe only catches its misses. Scoped to
+    // Next.js (not Expo, whose true ready signal is its tunnel URL, nor
+    // generic frameworks where the regex is reliable) to avoid flipping
+    // ready before the real signal lands.
+    const isNextJs = /next/i.test(detection.framework);
     const outcome = await waitForDevServerReady(devServer, readyRe, {
       timeoutMs: 120_000,
       onChunk: (s) => {
@@ -1073,6 +1172,9 @@ const previewStartH: CommandHandler = (ctx, _cmd, parsed) => {
           expoUrl = parseExpoUrl(s);
         }
       },
+      portProbe: isNextJs
+        ? () => waitForPortListening(detection.port, { timeoutMs: 1_000, intervalMs: 250 })
+        : undefined,
     });
     if (outcome.kind === 'exited') {
       void postPreviewEvent({
@@ -1296,42 +1398,6 @@ const previewStopH: CommandHandler = (ctx) => {
     });
   })();
 };
-
-/**
- * Run a single setup command (e.g. `npm install`, `prisma generate`)
- * detached from the CLI's stdout. Output is captured to the
- * `[preview]` log so it's still debuggable, but the host terminal
- * stays clean — the user's `codeam pair` session shouldn't fill up
- * with `npm WARN` lines every time they tap Start Preview. Earlier
- * versions used `stdio: 'inherit'` and that pollution is exactly
- * what the mobile UI's "contaminated terminal" report flagged.
- */
-function runOnce(
-  cmd: string,
-  args: string[],
-  cwd: string,
-  env?: Record<string, string>,
-): Promise<number | null> {
-  return new Promise((resolve) => {
-    const child = spawn(cmd, args, {
-      cwd,
-      env: { ...process.env, ...(env ?? {}) },
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
-    const tag = `setup:${cmd}`;
-    const onChunk = (chunk: Buffer): void => {
-      // Trim trailing newlines so each captured chunk lands as one
-      // log line. Empty payloads (just `\n`) get dropped.
-      const text = chunk.toString().replace(/\n+$/g, '');
-      if (text.length === 0) return;
-      log.info('preview', `${tag}: ${text}`);
-    };
-    child.stdout?.on('data', onChunk);
-    child.stderr?.on('data', onChunk);
-    child.once('exit', (code) => resolve(code));
-    child.once('error', () => resolve(-1));
-  });
-}
 
 /**
  * Save the confirmed detection to `.codeam/preview.json` so the next

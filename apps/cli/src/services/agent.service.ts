@@ -385,11 +385,35 @@ export class AgentService {
     // (`postSpawnInstruction`), `resumeLaunchArgs` returns [] and the
     // setTimeout below types the resume command into the PTY.
     const resumeArgs = this.runtime.resumeLaunchArgs(sessionId, { auto });
+
+    // Prefer a runtime-built COMPLETE resume launch when available.
+    // Claude needs this: its spawn-time args carry `--session-id
+    // <uuid>`, and appending `--resume <id>` produces a flag conflict
+    // Claude Code rejects (it exits immediately → the resumed agent is
+    // fully dead, even for new prompts). `prepareResumeLaunch` returns
+    // a fresh launch with `--resume` *instead of* `--session-id`.
+    //
+    // Agents without it (Codex: `resume <id>` subcommand, Aider) keep
+    // the legacy concat path — their initial launch carries no flag
+    // that conflicts with their resume args.
+    const launch =
+      this.runtime.prepareResumeLaunch?.(sessionId, { auto }) ?? {
+        cmd: this.initialLaunch.cmd,
+        args: [...this.initialLaunch.args, ...resumeArgs],
+      };
+
+    // Reset per-process state so the respawned agent starts clean. A
+    // stale `agentBusy` (a turn was mid-flight when the user switched
+    // conversations) would otherwise wedge the queue and the first
+    // post-resume prompt would never drain to the fresh PTY.
+    this.agentBusy = false;
+    if (this.quietTimer) {
+      clearTimeout(this.quietTimer);
+      this.quietTimer = null;
+    }
+
     this.strategy.kill();
-    this.strategy.spawn(this.initialLaunch.cmd, this.opts.cwd, [
-      ...this.initialLaunch.args,
-      ...resumeArgs,
-    ]);
+    this.strategy.spawn(launch.cmd, this.opts.cwd, launch.args);
     if (resumeArgs.length === 0 && this.runtime.postSpawnInstruction) {
       const { ptyInput } = this.runtime.postSpawnInstruction(sessionId);
       setTimeout(() => { this.strategy?.write(ptyInput); }, 500);

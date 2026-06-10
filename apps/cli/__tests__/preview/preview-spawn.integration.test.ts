@@ -144,4 +144,42 @@ describe('preview spawn → ready-pattern (integration)', () => {
     const outcome = await waitForDevServerReady(child, re, { timeoutMs: 1_500 });
     expect(outcome.kind).toBe('timeout');
   });
+
+  it('FALLBACK: resolves `ready` via the port probe when the regex never matches', async () => {
+    // The exact BUG 1 shape: a healthy server whose stdout never trips
+    // the agent's `ready_pattern` (Next.js prints `▲ Next.js 14.x` /
+    // `- Local: http://localhost:3000`, not a "ready in" line). The
+    // port probe catches it so the spinner resolves instead of hanging
+    // for the full 120 s.
+    const child = spawnFakeDevServer('▲ Next.js 14.2.0\n  - Local: http://localhost:3000');
+    const re = compileReadyPattern('ready in'); // deliberately won't match
+    let probeCalls = 0;
+    const outcome = await waitForDevServerReady(child, re, {
+      timeoutMs: 3_000,
+      // Simulate the port coming up after a couple of polls.
+      portProbe: async () => ++probeCalls >= 2,
+    });
+    expect(outcome.kind).toBe('ready');
+  });
+
+  it('FALLBACK does not fire when neither the regex nor the port ever becomes ready', async () => {
+    const child = spawnFakeDevServer('compiling…');
+    const re = compileReadyPattern('ready in');
+    const outcome = await waitForDevServerReady(child, re, {
+      timeoutMs: 1_200,
+      portProbe: async () => false,
+    });
+    expect(outcome.kind).toBe('timeout');
+  });
+
+  it('regex still wins as the primary signal even when a port probe is supplied', async () => {
+    const child = spawnFakeDevServer('  ✓ Ready in 1.5s');
+    const re = compileReadyPattern('ready in');
+    const outcome = await waitForDevServerReady(child, re, {
+      timeoutMs: 3_000,
+      // Probe never returns true — proving the regex path resolved.
+      portProbe: async () => false,
+    });
+    expect(outcome.kind).toBe('ready');
+  });
 });
