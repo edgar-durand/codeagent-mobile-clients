@@ -4,6 +4,12 @@ All notable changes to the CodeAgent Mobile VS Code extension are documented her
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.35.8] — 2026-06-10
+
+### Added
+
+- **cli:** Handle group_mention_task (@codeagent runs + replies to group) (#316)
+
 ## [2.35.7] — 2026-06-10
 
 ### Fixed
