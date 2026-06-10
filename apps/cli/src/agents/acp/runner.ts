@@ -902,7 +902,7 @@ async function handleCommand(
         // Error path uses the safe closeAll (no extraction) — a
         // torn-off text could match the heuristics spuriously and
         // strand the runner with an unanswerable pending question.
-        await streaming.closeAll();
+        await recoverFromFailedTurn(client, streaming);
         log.warn('acpRunner', `prompt failed: ${describeError(err)}`);
         await relay.sendResult(cmd.id, 'failed', { error: describeError(err) });
       }
@@ -980,7 +980,7 @@ async function handleCommand(
             void history.flush();
             await relay.sendResult(cmd.id, 'completed', { stopReason: reply.stopReason });
           } catch (err) {
-            await streaming.closeAll();
+            await recoverFromFailedTurn(client, streaming);
             log.warn('acpRunner', `reprompt failed: ${describeError(err)}`);
             await relay.sendResult(cmd.id, 'failed', { error: describeError(err) });
           }
@@ -1029,7 +1029,7 @@ async function handleCommand(
         });
         await relay.sendResult(cmd.id, 'completed', { stopReason: reply.stopReason });
       } catch (err) {
-        await streaming.closeAll();
+        await recoverFromFailedTurn(client, streaming);
         log.warn('acpRunner', `provide_input failed: ${describeError(err)}`);
         await relay.sendResult(cmd.id, 'failed', { error: describeError(err) });
       }
@@ -1113,7 +1113,7 @@ async function handleCommand(
         });
         await relay.sendResult(cmd.id, 'completed', { stopReason: reply.stopReason });
       } catch (err) {
-        await streaming.closeAll();
+        await recoverFromFailedTurn(client, streaming);
         log.warn('acpRunner', `summarize failed: ${describeError(err)}`);
         await relay.sendResult(cmd.id, 'failed', { error: describeError(err) });
       }
@@ -1256,6 +1256,35 @@ async function handleCommand(
 function describeError(err: unknown): string {
   if (err instanceof Error) return err.message;
   return String(err);
+}
+
+/**
+ * Recover the ACP session after a turn fails, then flush the chat out
+ * of "Thinking…".
+ *
+ * The idle-timeout watchdog (and some adapter errors) reject the SDK
+ * `prompt()` while the adapter's turn is STILL running — our side gave
+ * up, but the agent never received a stop. The adapter advertises
+ * `promptQueueing`, so the NEXT prompt then queues behind that dead
+ * turn and never runs: the session is poisoned (observed as "the agent
+ * stops responding — every later message just sits on Thinking…", with
+ * the agent process alive but idle). Cancelling the turn on the adapter
+ * frees the session so the next prompt starts clean.
+ *
+ * Both steps are best-effort and independent: a cancel against an
+ * already-dead adapter may itself throw, and we still want to flush the
+ * UI regardless.
+ */
+export async function recoverFromFailedTurn(
+  client: AcpClient,
+  streaming: StreamingState,
+): Promise<void> {
+  try {
+    await client.cancel();
+  } catch (err) {
+    log.warn('acpRunner', `post-failure cancel failed: ${describeError(err)}`);
+  }
+  await streaming.closeAll();
 }
 
 /**
