@@ -1,5 +1,6 @@
 import { execFileSync } from 'child_process';
 import * as fs from 'fs';
+import * as os from 'os';
 import * as path from 'path';
 import type { AgentId } from '@codeagent/shared';
 import { BdAdapter, defaultBeadsHomeDir } from './bd-adapter';
@@ -121,30 +122,48 @@ export const _provisionSeam = {
  */
 export const _linkSeam = {
   platform: (): NodeJS.Platform => process.platform,
+  homedir: (): string => os.homedir(),
+  isWritableDir: (dir: string): boolean => {
+    try {
+      fs.accessSync(dir, fs.constants.W_OK);
+      return true;
+    } catch {
+      return false;
+    }
+  },
+  ensureDir: (dir: string): void => {
+    fs.mkdirSync(dir, { recursive: true });
+  },
   /**
-   * A directory ON PATH to symlink `bd` into, so the AGENT's shell + the
-   * SessionStart `bd prime` hook resolve `bd` by name.
+   * A directory to symlink `bd` into so the AGENT's shell + Claude Code's
+   * SessionStart `bd prime` hook resolve `bd` by name. The dir MUST be on the
+   * persistent shell PATH those processes use AND be writable.
    *
-   * Earlier this used `dirname(realpath(process.argv[1]))` — but for a GLOBAL
-   * npm install that resolves to the package's own `dist/` dir (e.g.
-   * `…/node_modules/codeam-cli/dist`), which is NOT on PATH. The symlink landed
-   * somewhere nothing sees, so `which bd` and the hook still failed (observed
-   * live in a codespace). `dirname(process.execPath)` is the dir the `node`
-   * binary lives in — for a global install that's the npm prefix `bin/` where
-   * the `codeam` launcher also lives, and IS on PATH. We prefer the first
-   * candidate that actually appears in `$PATH`, falling back to node's bin dir.
+   * History: v2.35.1 used `dirname(realpath(argv[1]))` (the package `dist/`,
+   * not on PATH); v2.35.2 used `dirname(process.execPath)` — correct for a
+   * normal global npm install, but in a GitHub Codespace `node` lives in a
+   * TRANSIENT bootstrap prefix (`/tmp/codeam-node20/bin`) that is NOT on the
+   * persistent shell PATH, so the hook still failed (validated live). The
+   * dir that IS on PATH and writable in a codespace is `~/.local/bin`.
+   *
+   * Strategy: among [node's bin, ~/.local/bin, /usr/local/bin, entry dir],
+   * pick the first that is BOTH on `$PATH` AND writable. If none qualifies
+   * (codespace: node prefix off-PATH, /usr/local/bin read-only), fall back to
+   * `~/.local/bin` — the standard user bin, on PATH for login shells —
+   * which `linkBdOntoPath` creates if missing.
    */
   cliBinDir: (): string | null => {
     const pathDirs = (process.env.PATH ?? '').split(path.delimiter).filter(Boolean);
+    const home = _linkSeam.homedir();
+    const localBin = home ? path.join(home, '.local', 'bin') : null;
     const candidates: string[] = [];
-    // node's bin dir — the npm prefix bin for a global install (on PATH).
     try {
       candidates.push(path.dirname(process.execPath));
     } catch {
-      /* execPath unavailable — fall through to the entry-script dir */
+      /* execPath unavailable */
     }
-    // the CLI entry script's dir — fallback (the dist/ dir for a global
-    // install, usually NOT on PATH; only used if node's bin dir isn't found).
+    if (localBin) candidates.push(localBin);
+    candidates.push('/usr/local/bin');
     const entry = process.argv[1];
     if (entry) {
       try {
@@ -153,8 +172,13 @@ export const _linkSeam = {
         candidates.push(path.dirname(entry));
       }
     }
-    if (candidates.length === 0) return null;
-    return candidates.find((d) => pathDirs.includes(d)) ?? candidates[0];
+    const onPathWritable = candidates.find(
+      (d) => pathDirs.includes(d) && _linkSeam.isWritableDir(d),
+    );
+    if (onPathWritable) return onPathWritable;
+    // Nothing on $PATH is writable — fall back to ~/.local/bin (created by
+    // the caller). It's on PATH for login shells via the standard profile.
+    return localBin ?? candidates[0] ?? null;
   },
   /** Current symlink target at `linkPath`, or null when absent / not a link. */
   readlink: (linkPath: string): string | null => {
@@ -183,6 +207,8 @@ function linkBdOntoPath(binaryPath: string): void {
   if (_linkSeam.platform() === 'win32') return; // codespaces are Linux
   const binDir = _linkSeam.cliBinDir();
   if (!binDir) return;
+  // The chosen dir (e.g. the ~/.local/bin fallback) may not exist yet.
+  _linkSeam.ensureDir(binDir);
   const linkPath = path.join(binDir, 'bd');
   if (linkPath === binaryPath) return; // bd already lives on PATH itself
   const current = _linkSeam.readlink(linkPath);

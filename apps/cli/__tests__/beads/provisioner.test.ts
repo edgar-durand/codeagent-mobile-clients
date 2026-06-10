@@ -239,7 +239,10 @@ describe('linkBdOntoPath — GAP 1 PATH symlink (idempotent)', () => {
   // expected link path is built with path.join so the separator matches
   // the host (backslashes on Windows).
   const LINK = path.join('/usr/local/bin', 'bd');
-  beforeEach(() => vi.spyOn(_linkSeam, 'platform').mockReturnValue('linux'));
+  beforeEach(() => {
+    vi.spyOn(_linkSeam, 'platform').mockReturnValue('linux');
+    vi.spyOn(_linkSeam, 'ensureDir').mockImplementation(() => undefined);
+  });
   afterEach(() => vi.restoreAllMocks());
 
   it('creates a `bd` symlink to the resolved binary in the codeam bin dir', () => {
@@ -297,7 +300,7 @@ describe('linkBdOntoPath — GAP 1 PATH symlink (idempotent)', () => {
   });
 });
 
-describe('_linkSeam.cliBinDir — picks a dir that is actually on PATH', () => {
+describe('_linkSeam.cliBinDir — picks an on-PATH, WRITABLE dir', () => {
   const origExecPath = process.execPath;
   const origArgv1 = process.argv[1];
   const origPath = process.env.PATH;
@@ -306,21 +309,39 @@ describe('_linkSeam.cliBinDir — picks a dir that is actually on PATH', () => {
     process.execPath = origExecPath;
     process.argv[1] = origArgv1;
     process.env.PATH = origPath;
+    vi.restoreAllMocks();
   });
 
-  it("returns node's bin dir (on PATH), NOT the package dist/ dir, for a global install", () => {
-    // The codespace bug: argv[1] resolves to …/codeam-cli/dist (NOT on PATH),
-    // while node + the codeam launcher live in the prefix bin (on PATH).
+  it('codespace: node lives in a /tmp prefix NOT on PATH → picks writable on-PATH ~/.local/bin', () => {
+    vi.spyOn(_linkSeam, 'homedir').mockReturnValue('/home/codespace');
+    // Only ~/.local/bin is writable (node's /tmp prefix doesn't exist;
+    // /usr/local/bin is read-only in codespaces).
+    vi.spyOn(_linkSeam, 'isWritableDir').mockImplementation(
+      (d: string) => d === '/home/codespace/.local/bin',
+    );
     process.execPath = '/tmp/codeam-node20/bin/node';
     process.argv[1] = '/tmp/codeam-node20/lib/node_modules/codeam-cli/dist/cli.js';
-    process.env.PATH = ['/usr/bin', '/tmp/codeam-node20/bin', '/bin'].join(path.delimiter);
-    expect(_linkSeam.cliBinDir()).toBe(path.dirname('/tmp/codeam-node20/bin/node'));
+    process.env.PATH = ['/home/codespace/.local/bin', '/usr/local/bin', '/usr/bin'].join(
+      path.delimiter,
+    );
+    expect(_linkSeam.cliBinDir()).toBe('/home/codespace/.local/bin');
   });
 
-  it("falls back to node's bin dir when no candidate is on PATH", () => {
+  it("global install: node's bin dir when it's on PATH AND writable", () => {
+    vi.spyOn(_linkSeam, 'homedir').mockReturnValue('/home/u');
+    vi.spyOn(_linkSeam, 'isWritableDir').mockReturnValue(true);
+    process.execPath = '/home/u/.nvm/versions/node/v20/bin/node';
+    process.argv[1] = '/home/u/.nvm/.../codeam-cli/dist/cli.js';
+    process.env.PATH = ['/home/u/.nvm/versions/node/v20/bin', '/usr/bin'].join(path.delimiter);
+    expect(_linkSeam.cliBinDir()).toBe('/home/u/.nvm/versions/node/v20/bin');
+  });
+
+  it('falls back to ~/.local/bin when nothing on PATH is writable', () => {
+    vi.spyOn(_linkSeam, 'homedir').mockReturnValue('/home/u');
+    vi.spyOn(_linkSeam, 'isWritableDir').mockReturnValue(false);
     process.execPath = '/opt/node/bin/node';
     process.argv[1] = '/pkg/codeam-cli/dist/cli.js';
     process.env.PATH = ['/usr/bin', '/bin'].join(path.delimiter);
-    expect(_linkSeam.cliBinDir()).toBe(path.dirname('/opt/node/bin/node'));
+    expect(_linkSeam.cliBinDir()).toBe('/home/u/.local/bin');
   });
 });
