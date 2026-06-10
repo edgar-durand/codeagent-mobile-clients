@@ -4,6 +4,12 @@ All notable changes to `codeam-cli` are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.35.6] — 2026-06-10
+
+### Fixed
+
+- **cli:** Cancel the ACP turn on failure so the session isn't poisoned (#312)
+
 ## [2.35.5] — 2026-06-10
 
 ### Fixed
