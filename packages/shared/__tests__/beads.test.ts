@@ -74,7 +74,7 @@ describe('beads wire types', () => {
     expect(summary.total_issues).toBe(13);
   });
 
-  it('assembles a full-snapshot BeadsIngestPayload with deps + memories', () => {
+  it('assembles a full-snapshot BeadsIngestPayload with dependencies + memories', () => {
     const dep: BeadsDependencyDto = {
       id: 'bd-a1b2:blocks:bd-c3d4',
       fromId: 'bd-a1b2',
@@ -94,11 +94,11 @@ describe('beads wire types', () => {
       projectLabel: 'codeagent-mobile-clients',
       fullSnapshot: true,
       issues: [],
-      deps: [dep],
+      dependencies: [dep],
       memories: [memory],
     };
     expect(payload.fullSnapshot).toBe(true);
-    expect(payload.deps?.[0].kind).toBe('blocks');
+    expect(payload.dependencies[0].kind).toBe('blocks');
     expect(payload.memories[0].projectKey).toBeNull();
   });
 
