@@ -4,6 +4,19 @@ All notable changes to `codeam-cli` are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.34.0] — 2026-06-10
+
+### Added
+
+- **cli:** Beads home-brain provisioner (idempotent init, no bd setup)
+- **cli:** Composition-root beads orchestrator + provisioning SSE signal
+- **cli:** Run bd setup <recipe> --global so the agent uses bd natively (revert D12)
+
+### Changed
+
+- **cli:** Address beads home brain via BEADS_DIR, drop broken --global
+- **cli:** Move beads provisioning to the composition root (SRP / D10)
+
 ## [2.33.0] — 2026-06-09
 
 ### Added
