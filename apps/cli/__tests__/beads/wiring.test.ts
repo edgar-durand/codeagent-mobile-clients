@@ -6,6 +6,7 @@ import {
   type BeadsSessionContext,
 } from '../../src/beads/wiring';
 import type { StartedBeads } from '../../src/beads';
+import { defaultBeadsHomeDir } from '../../src/beads';
 import * as pairing from '../../src/services/pairing.service';
 
 const baseCtx: BeadsSessionContext = {
@@ -23,6 +24,24 @@ describe('provisionBeadsForStart — composition-root entry', () => {
   afterEach(() => {
     vi.restoreAllMocks();
     delete process.env.CODEAM_BEADS_DISABLED;
+    delete process.env.BEADS_DIR;
+  });
+
+  it('sets process.env.BEADS_DIR for the agent spawn SYNCHRONOUSLY (GAP 2)', () => {
+    vi.spyOn(orchestrator, 'startBeads').mockResolvedValue(fakeStarted());
+    vi.spyOn(pairing, 'postBeadsProvisioning').mockResolvedValue({ ok: true });
+    delete process.env.BEADS_DIR;
+    // NOT awaited — BEADS_DIR must be set before the promise resolves so the
+    // agent (spawned later in the same synchronous tick) inherits it.
+    void provisionBeadsForStart(baseCtx);
+    expect(process.env.BEADS_DIR).toBe(defaultBeadsHomeDir());
+  });
+
+  it('does NOT set BEADS_DIR when beads is killed (full no-op)', () => {
+    process.env.CODEAM_BEADS_DISABLED = '1';
+    delete process.env.BEADS_DIR;
+    void provisionBeadsForStart(baseCtx);
+    expect(process.env.BEADS_DIR).toBeUndefined();
   });
 
   it('invokes the orchestrator with the session creds (permanently ON)', async () => {
