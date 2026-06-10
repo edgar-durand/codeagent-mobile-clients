@@ -31,7 +31,7 @@ describe('mapSessionUpdate', () => {
     ]);
   });
 
-  it('maps agent_thought_chunk → thinking chunk', () => {
+  it('maps agent_thought_chunk → thinking chunk, namespaced off the messageId', () => {
     const chunks = mapSessionUpdate(
       notification({
         sessionUpdate: 'agent_thought_chunk',
@@ -40,8 +40,31 @@ describe('mapSessionUpdate', () => {
       }),
     );
     expect(chunks).toEqual([
-      { chunkId: 'msg-7', kind: 'thinking', delta: 'Considering options…'  },
+      { chunkId: 'msg-7::thought', kind: 'thinking', delta: 'Considering options…' },
     ]);
+  });
+
+  it('keeps thought + reply on DISTINCT chunkIds when they share a messageId (no kind flip)', () => {
+    // Claude streams a thought and the reply under ONE messageId. They
+    // MUST land on different chunkIds, or the mobile store latches one
+    // kind and the reply text leaks into the live-activity line.
+    const thought = mapSessionUpdate(
+      notification({
+        sessionUpdate: 'agent_thought_chunk',
+        messageId: 'msg-9',
+        content: { type: 'text', text: 'thinking…' },
+      }),
+    );
+    const message = mapSessionUpdate(
+      notification({
+        sessionUpdate: 'agent_message_chunk',
+        messageId: 'msg-9',
+        content: { type: 'text', text: 'the answer' },
+      }),
+    );
+    expect(thought[0].kind).toBe('thinking');
+    expect(message[0].kind).toBe('text');
+    expect(thought[0].chunkId).not.toBe(message[0].chunkId);
   });
 
   it('drops user_message_chunk (local echo)', () => {

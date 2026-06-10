@@ -90,7 +90,21 @@ export function mapSessionUpdate(
     case 'agent_thought_chunk': {
       const text = extractText(update.content);
       if (!text) return [];
-      return [{ chunkId: messageChunkId(update.messageId), kind: 'thinking', delta: text }];
+      // Distinct chunkId from the SAME message's agent_message_chunk.
+      // Claude streams a thought and the reply under one messageId, so
+      // sharing the derived chunkId made the chunk "flip" thinking↔text
+      // mid-stream. The mobile store latches a chunk's first kind, so
+      // the reply text ended up stored as a `thinking` chunk and
+      // polluted the live-activity line (it showed the agent's ANSWER
+      // where the current thought belongs — "se marea"). Namespacing the
+      // thought id keeps the thinking and text streams fully separate.
+      return [
+        {
+          chunkId: `${messageChunkId(update.messageId)}::thought`,
+          kind: 'thinking',
+          delta: text,
+        },
+      ];
     }
     case 'tool_call': {
       const summary = describeToolCall(update);
