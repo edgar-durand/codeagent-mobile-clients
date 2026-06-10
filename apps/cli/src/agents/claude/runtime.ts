@@ -106,6 +106,35 @@ export class ClaudeRuntimeStrategy implements RuntimeStrategy {
     return args;
   }
 
+  /**
+   * Resume relaunch as a COMPLETE command. We deliberately rebuild the
+   * launch from scratch with `--resume <id>` rather than appending it
+   * onto the spawn-time args, because those carried `--session-id
+   * <uuid>` (the conversation binding from the initial spawn). Claude
+   * Code rejects `--session-id` together with `--resume` and exits
+   * immediately — that was the "resume → agent fully dead, even new
+   * prompts get no response" bug. Building a fresh launch drops the
+   * conflicting flag by construction.
+   *
+   * Synchronous on purpose: by the time a resume happens the binary
+   * was already resolved (the initial spawn succeeded), so
+   * `buildClaudeLaunch` re-probes PATH without needing the async
+   * installer fallback.
+   */
+  prepareResumeLaunch(
+    sessionId: string,
+    opts?: { auto?: boolean },
+  ): { cmd: string; args: string[] } {
+    const launch = buildClaudeLaunch(this.resumeLaunchArgs(sessionId, opts), this.os);
+    if (!launch) {
+      // Should never happen post-initial-spawn, but stay defensive:
+      // fall back to the binary name + resume args so the caller can
+      // still attempt a relaunch instead of throwing into a sync path.
+      return { cmd: this.meta.binaryName, args: this.resumeLaunchArgs(sessionId, opts) };
+    }
+    return launch;
+  }
+
   resolveHistoryDir(cwd: string): string | null {
     return history.resolveHistoryDir(cwd);
   }

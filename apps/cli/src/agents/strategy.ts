@@ -216,6 +216,26 @@ export interface InteractiveAgentStrategy extends BaseAgentStrategy {
    * (Codex) ignore the option.
    */
   resumeLaunchArgs(sessionId: string, opts?: { auto?: boolean }): string[];
+  /**
+   * Build the COMPLETE relaunch command for a resume, when appending
+   * `resumeLaunchArgs` onto the original spawn args would be wrong.
+   *
+   * Claude's initial spawn binds the conversation with
+   * `--session-id <uuid>`, which Claude Code rejects alongside
+   * `--resume <id>` (mutually exclusive — it exits immediately and the
+   * agent goes dead). So Claude's resume must spawn a fresh launch that
+   * carries `--resume` *instead of* `--session-id`, not in addition to
+   * it. This method returns that launch directly.
+   *
+   * `restart()` prefers this when present and otherwise falls back to
+   * `[...initialLaunch.args, ...resumeLaunchArgs(...)]` — correct for
+   * agents (Codex, Aider) whose initial launch carries no spawn-time
+   * flag that conflicts with their resume args.
+   */
+  prepareResumeLaunch?(
+    sessionId: string,
+    opts?: { auto?: boolean },
+  ): { cmd: string; args: string[]; env?: Record<string, string> };
   postSpawnInstruction?(sessionId: string): { ptyInput: string };
 
   resolveHistoryDir(cwd: string): string | null;
