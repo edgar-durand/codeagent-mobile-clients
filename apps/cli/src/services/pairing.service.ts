@@ -372,6 +372,42 @@ export async function postPreviewEvent(input: {
 }
 
 /**
+ * Signal Beads provisioning status so the backend can emit a
+ * `beads_provisioning` UserEvent (D13). The backend side is built in parallel;
+ * this matches its contract: `POST /api/beads/provisioning` with plugin auth,
+ * body `{ sessionId, pluginId, status, projectKey? }`. Strictly non-fatal — a
+ * failure here never blocks provisioning; we swallow + report it.
+ */
+export async function postBeadsProvisioning(input: {
+  sessionId: string;
+  pluginId: string;
+  pluginAuthToken: string;
+  status: 'ready' | 'failed';
+  projectKey?: string;
+}): Promise<{ ok: true } | { ok: false; status: number; message: string }> {
+  try {
+    await _transport.postJsonAuthed(
+      `${API_BASE}/api/beads/provisioning`,
+      {
+        sessionId: input.sessionId,
+        pluginId: input.pluginId,
+        status: input.status,
+        ...(input.projectKey ? { projectKey: input.projectKey } : {}),
+      },
+      input.pluginAuthToken,
+    );
+    return { ok: true };
+  } catch (err) {
+    const e = err as Error & { statusCode?: number };
+    return {
+      ok: false,
+      status: typeof e.statusCode === 'number' ? e.statusCode : 0,
+      message: e.message || 'unknown',
+    };
+  }
+}
+
+/**
  * Variant of `_postJson` that includes the X-Plugin-Auth-Token
  * header and surfaces the HTTP status code on the rejected error
  * so the caller can map 401/403/404 to specific user messages.

@@ -55,7 +55,7 @@ import type { RuntimeStrategy } from '../strategy';
 import { removeSession } from '../../config';
 import { FileWatcherService } from '../../services/file-watcher.service';
 import { TurnFileAggregator } from '../../services/turn-files/turn-file-aggregator';
-import { startBeadsForSession, beadsActionFromPayload } from '../../beads/wiring';
+import { beadsActionFromPayload } from '../../beads/wiring';
 import { handleBeadsActionCommand, type StartedBeads } from '../../beads';
 
 /**
@@ -407,6 +407,13 @@ export interface AcpRunnerOptions {
   /** Working directory for the ACP session — becomes the primary
    *  ACP root the agent operates over. */
   cwd: string;
+  /** Accessor for the live Beads handle (watcher + adapter), provisioned
+   *  by the CLI composition root (`start()`) as a separate, non-fatal
+   *  concern — NOT by this runner (SRP decision D10). Returns null until
+   *  provisioning resolves, or forever when beads is off (kill-switch /
+   *  no bd / failed). Used only to route relayed `beads_action` commands;
+   *  the runner never provisions or tears down beads. */
+  getBeads?: () => StartedBeads | null;
 }
 
 /** Auto-cancel a permission Promise after this ms. Matches the
@@ -735,21 +742,11 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
       log.warn('acpRunner', `fileWatcher.start failed: ${describeError(err)}`);
     });
 
-  // Beads — permanently ON (kill-switch: CODEAM_BEADS_DISABLED). Bootstrap
-  // bd + start the issues.jsonl watcher for this paired session. Strictly
-  // non-fatal: `startBeadsForSession` swallows every error and returns null,
-  // so a beads failure can never break the ACP agent run. `beads_action`
-  // relay commands route into `handleBeadsActionCommand` while this is live.
-  let beads: StartedBeads | null = null;
-  void startBeadsForSession({
-    sessionId: opts.sessionId,
-    pluginId: opts.pluginId,
-    pluginAuthToken: opts.pluginAuthToken,
-    agents: [opts.agent],
-    cwd: opts.cwd,
-  }).then((started) => {
-    beads = started;
-  });
+  // Beads is provisioned by the composition root (`start()`), NOT here
+  // (SRP decision D10) — this runner is pure agent. `opts.getBeads`
+  // returns the live handle the composition root owns so relayed
+  // `beads_action` commands can route into `handleBeadsActionCommand`.
+  const getBeads = opts.getBeads ?? (() => null);
 
   // Command relay — listens for prompts from mobile / web and
   // forwards them as ACP `session/prompt`. Every command branch MUST
@@ -771,7 +768,7 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
         history,
         initialize.agentCapabilities,
         turnFiles,
-        () => beads,
+        getBeads,
       );
     },
     { id: opts.agent, name: opts.agent, displayName: opts.agent } as never,
@@ -783,7 +780,6 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
     relay.stop();
     void fileWatcher.stop();
     turnFiles.stop();
-    void beads?.watcher.stop();
     closeAllTerminals();
     await client.stop();
     process.exit(0);

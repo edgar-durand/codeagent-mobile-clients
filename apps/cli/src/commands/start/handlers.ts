@@ -84,10 +84,11 @@ export interface HandlerContext {
   pluginId: string;
   sessionId: string;
   pluginAuthToken?: string;
-  /** Live Beads session (watcher + adapter) when beads bootstrapped for
-   *  this run; null when beads is off (kill-switch, no bd, bootstrap
-   *  failure). Set by `start.ts` once `startBeadsForSession` resolves.
-   *  `beads_action` commands are no-ops while this is null. */
+  /** Live Beads session (watcher + adapter) when beads provisioned for
+   *  this run; null when beads is off (kill-switch, no bd, provisioning
+   *  failure). Set by the composition root (`start.ts`) once
+   *  `provisionBeadsForStart` resolves. `beads_action` commands are no-ops
+   *  while this is null. */
   beads?: StartedBeads | null;
 }
 

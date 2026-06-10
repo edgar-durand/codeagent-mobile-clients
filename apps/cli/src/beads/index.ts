@@ -1,15 +1,14 @@
 import type { AgentId, BeadsActionPayload } from '@codeagent/shared';
 import { BdAdapter } from './bd-adapter';
-import { bootstrapBeads } from './bootstrap';
+import { provisionBeads } from './provisioner';
 import { BeadsWatcher } from './watcher';
 import { applyBeadsAction } from './apply-actions';
-import { installBd } from './install-bd';
 import { log } from '../services/logger';
 
 export { BdAdapter, createBdAdapter, defaultBeadsHomeDir } from './bd-adapter';
 export type { BdRunResult, BdAdapterOptions } from './bd-adapter';
-export { bootstrapBeads } from './bootstrap';
-export type { BootstrapResult, BootstrapOptions } from './bootstrap';
+export { provisionBeads, _provisionSeam } from './provisioner';
+export type { ProvisionResult, ProvisionOptions } from './provisioner';
 export { BeadsWatcher } from './watcher';
 export type { BeadsWatcherOptions } from './watcher';
 export { applyBeadsAction, buildBdArgs } from './apply-actions';
@@ -19,31 +18,25 @@ export { deriveProjectIdentity, normalizeOrigin } from './project-key';
 export type { ProjectIdentity } from './project-key';
 
 /**
- * Gated orchestrator — the single entry point the pair / codespace bootstrap
- * path calls. It is intentionally the ONLY place that ties bootstrap + watcher
- * together so the call-site wiring is a one-liner and the `beads` feature flag
- * (server-pushed, default OFF) is checked exactly once, up front.
+ * Composition-root Beads orchestrator (SRP decision D10). Ties the home-brain
+ * provisioner + the issues.jsonl watcher together so the call-site wiring is a
+ * one-liner. Invoked from the CLI's shared start path (`start()` AND
+ * `startInfraOnly()`) — NOT from the agent runner. The agent runners carry
+ * zero beads code.
  *
- * The flag value is INJECTED (`enabled`) rather than fetched here so this stays
- * decoupled from the backend gates endpoint shape — the caller passes whatever
- * the heartbeat / gates response reports. When the flag is off, this is a
- * complete no-op: no bd resolution, no daemon, no watcher.
- *
- * Returns the live `BeadsWatcher` (or null) so the caller can `stop()` it on
- * session teardown and route incoming `beads_action` commands into
- * `handleBeadsActionCommand`.
+ * Returns the live `BeadsWatcher` + adapter (or null) so the composition root
+ * can `stop()` the watcher on teardown and route incoming `beads_action`
+ * commands into `handleBeadsActionCommand`. The non-fatal + kill-switch
+ * semantics live in `wiring.ts`, which is what `start()` / `startInfraOnly()`
+ * call; this function assumes it should run.
  */
 export interface StartBeadsOptions {
-  /** Server-pushed `beads` feature flag for this user. */
-  enabled: boolean;
   sessionId: string;
   pluginId: string;
   pluginAuthToken: string;
-  /** Agents detected for this session — each gets `bd setup <recipe>`. */
-  agents: AgentId[];
   cwd?: string;
-  /** Consent to run the OS installer when the bundled binary is missing. */
-  allowInstall?: boolean;
+  /** Session agents to wire natively via `bd setup <recipe> --global` (D12). */
+  agents?: AgentId[];
 }
 
 export interface StartedBeads {
@@ -51,29 +44,15 @@ export interface StartedBeads {
   adapter: BdAdapter;
 }
 
-export async function maybeStartBeads(
-  opts: StartBeadsOptions,
-): Promise<StartedBeads | null> {
-  if (!opts.enabled) {
-    log.trace('beads', 'beads flag off — skipping');
-    return null;
-  }
-
+export async function startBeads(opts: StartBeadsOptions): Promise<StartedBeads | null> {
   const adapter = new BdAdapter({ cwd: opts.cwd });
 
-  // Resolve bd; offer the consented OS installer as a last resort.
-  if (!adapter.isAvailable() && opts.allowInstall) {
-    log.info('beads', 'bd not found — running OS installer');
-    await installBd();
-  }
-  if (!adapter.isAvailable()) {
-    log.warn('beads', 'bd unavailable — beads disabled for this session');
-    return null;
-  }
-
-  const boot = await bootstrapBeads({ cwd: opts.cwd, agents: opts.agents, adapter });
-  if (!boot.serverUp) {
-    log.warn('beads', 'beads server not up — watcher not started this run');
+  // Provision the home brain (ensure-bd + install fallback + idempotent init +
+  // export.auto). When bd can't be made available, provisioning reports
+  // bdAvailable:false and we run without a watcher this session.
+  const provision = await provisionBeads({ cwd: opts.cwd, adapter, agents: opts.agents });
+  if (!provision.bdAvailable || !provision.initialized) {
+    log.warn('beads', 'home brain not provisioned — watcher not started this run');
     return null;
   }
 
@@ -85,8 +64,8 @@ export async function maybeStartBeads(
     adapter,
   });
   watcher.start();
-  // Push the current state immediately so the phone has a snapshot without
-  // waiting for the next bd mutation.
+  // Push the current state immediately so the phone has a snapshot (even an
+  // empty one) without waiting for the next bd mutation.
   void watcher.syncNow();
 
   return { watcher, adapter };
@@ -94,8 +73,8 @@ export async function maybeStartBeads(
 
 /**
  * Route a relayed `beads_action` command into the native bd apply path, then
- * trigger a push via the live watcher. Returns the apply result so the relay
- * can ack the command.
+ * trigger a push via the live watcher. The live `StartedBeads` handle comes
+ * from the composition-root-owned provisioner, threaded through the relay.
  */
 export async function handleBeadsActionCommand(
   action: BeadsActionPayload,
