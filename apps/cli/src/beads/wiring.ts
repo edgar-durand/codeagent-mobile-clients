@@ -1,5 +1,6 @@
 import type { AgentId, BeadsActionKind, BeadsActionPayload } from '@codeagent/shared';
 import { startBeads, type StartedBeads } from './index';
+import { defaultBeadsHomeDir } from './bd-adapter';
 import { deriveProjectIdentity } from './project-key';
 import { postBeadsProvisioning } from '../services/pairing.service';
 import { log } from '../services/logger';
@@ -58,6 +59,18 @@ export async function provisionBeadsForStart(
     log.trace('beads', 'CODEAM_BEADS_DISABLED set — beads off this run');
     return null;
   }
+
+  // GAP 2 — export BEADS_DIR into THIS process's env SYNCHRONOUSLY, before the
+  // agent is spawned. The agent (and its Bash tool + the `bd prime`
+  // SessionStart hook) inherit our env, so without this they'd look for a beads
+  // database in the workspace and report "no beads database found". It's just a
+  // path — no need to await provisioning. Kept consistent with the dir the
+  // adapter / watcher already address (`~/.beads`). Done after the kill-switch
+  // so a disabled run stays a complete no-op. Non-interactive agent shells may
+  // not source ~/.bashrc, so the spawned env — not a profile file — is the
+  // reliable carrier.
+  process.env.BEADS_DIR = defaultBeadsHomeDir();
+
   // No plugin auth token → ingest + provisioning POSTs can't authenticate (the
   // CLI has no user JWT). Skip rather than start a watcher that 401s.
   if (!ctx.pluginAuthToken) {

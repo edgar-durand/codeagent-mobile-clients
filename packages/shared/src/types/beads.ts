@@ -86,7 +86,10 @@ export interface BeadsIngestPayload {
   /** When true, the backend prunes mirror rows not present in `issues`. */
   fullSnapshot?: boolean;
   issues: BeadsIssueDto[];
-  deps?: BeadsDependencyDto[];
+  /** Dependency edges between issues. Always sent (possibly empty) so the
+   *  backend DTO can require it. Field name matches the backend (`dependencies`,
+   *  not `deps`). */
+  dependencies: BeadsDependencyDto[];
   memories: BeadsMemoryDto[];
   summary?: BeadsStatusSummary;
 }

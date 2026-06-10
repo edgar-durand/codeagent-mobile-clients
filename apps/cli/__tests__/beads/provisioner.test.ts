@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
-import { provisionBeads, _provisionSeam } from '../../src/beads/provisioner';
+import { provisionBeads, _provisionSeam, _linkSeam } from '../../src/beads/provisioner';
 import type { BdRunResult } from '../../src/beads/bd-adapter';
 
 /**
@@ -10,10 +10,14 @@ import type { BdRunResult } from '../../src/beads/bd-adapter';
 class FakeBd {
   calls: string[][] = [];
   available = true;
+  binary: string | null = '/pkg/@beads/bd/bin/bd';
   private codes: Record<string, number> = {};
 
   isAvailable(): boolean {
     return this.available;
+  }
+  resolveBinary(): string | null {
+    return this.available ? this.binary : null;
   }
   setCode(prefix: string, code: number): void {
     this.codes[prefix] = code;
@@ -41,8 +45,35 @@ describe('provisionBeads', () => {
     // Default: the home brain is NOT yet initialized (no embeddeddolt dir).
     vi.spyOn(_provisionSeam, 'homeBrainInitialized').mockReturnValue(false);
     vi.spyOn(_provisionSeam, 'install').mockResolvedValue({ ok: true, code: 0, stderr: '' });
+    // Symlink the resolved bd onto PATH — mocked out so unit runs never touch
+    // the real filesystem. Idempotency is covered in its own describe block.
+    vi.spyOn(_provisionSeam, 'linkBdOntoPath').mockImplementation(() => undefined);
   });
   afterEach(() => vi.restoreAllMocks());
+
+  it('symlinks the resolved bd binary onto PATH (GAP 1) using the adapter binary', async () => {
+    await provisionBeads({ adapter: fake as never, beadsDir: '/tmp/hb' });
+    expect(_provisionSeam.linkBdOntoPath).toHaveBeenCalledTimes(1);
+    expect(_provisionSeam.linkBdOntoPath).toHaveBeenCalledWith('/pkg/@beads/bd/bin/bd');
+  });
+
+  it('silences the bd role warning: `git config --global beads.role contributor`', async () => {
+    const gitConfig = vi
+      .spyOn(_provisionSeam, 'setGitBeadsRole')
+      .mockImplementation(() => undefined);
+    await provisionBeads({ adapter: fake as never, beadsDir: '/tmp/hb' });
+    expect(gitConfig).toHaveBeenCalledTimes(1);
+  });
+
+  it('a thrown PATH symlink is strictly NON-FATAL (provisioning still completes)', async () => {
+    (_provisionSeam.linkBdOntoPath as ReturnType<typeof vi.fn>).mockImplementation(() => {
+      throw new Error('EACCES');
+    });
+    const res = await provisionBeads({ adapter: fake as never, beadsDir: '/tmp/hb' });
+    expect(res.bdAvailable).toBe(true);
+    expect(res.initialized).toBe(true);
+    expect(res.exportEnabled).toBe(true);
+  });
 
   it('cold start: inits the home brain (skip-agents/hooks, no --global) + enables export.auto', async () => {
     const res = await provisionBeads({ adapter: fake as never, beadsDir: '/tmp/hb' });
@@ -196,5 +227,65 @@ describe('provisionBeads', () => {
     expect(res.initialized).toBe(false);
     // No bd commands attempted once we know the binary can't be resolved.
     expect(fake.calls).toHaveLength(0);
+    // bd never resolved → no PATH symlink attempt.
+    expect(_provisionSeam.linkBdOntoPath).not.toHaveBeenCalled();
+  });
+});
+
+describe('linkBdOntoPath — GAP 1 PATH symlink (idempotent)', () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it('creates a `bd` symlink to the resolved binary in the codeam bin dir', () => {
+    const symlink = vi.fn();
+    vi.spyOn(_linkSeam, 'cliBinDir').mockReturnValue('/usr/local/bin');
+    vi.spyOn(_linkSeam, 'readlink').mockReturnValue(null); // nothing there yet
+    vi.spyOn(_linkSeam, 'symlink').mockImplementation(symlink);
+    vi.spyOn(_linkSeam, 'unlink').mockImplementation(() => undefined);
+
+    _provisionSeam.linkBdOntoPath('/pkg/@beads/bd/bin/bd');
+
+    expect(symlink).toHaveBeenCalledTimes(1);
+    expect(symlink).toHaveBeenCalledWith('/pkg/@beads/bd/bin/bd', '/usr/local/bin/bd');
+  });
+
+  it('is idempotent: skips when the symlink already points at the binary', () => {
+    const symlink = vi.fn();
+    vi.spyOn(_linkSeam, 'cliBinDir').mockReturnValue('/usr/local/bin');
+    vi.spyOn(_linkSeam, 'readlink').mockReturnValue('/pkg/@beads/bd/bin/bd');
+    vi.spyOn(_linkSeam, 'symlink').mockImplementation(symlink);
+
+    _provisionSeam.linkBdOntoPath('/pkg/@beads/bd/bin/bd');
+
+    expect(symlink).not.toHaveBeenCalled();
+  });
+
+  it('replaces a stale symlink that points elsewhere', () => {
+    const symlink = vi.fn();
+    const unlink = vi.fn();
+    vi.spyOn(_linkSeam, 'cliBinDir').mockReturnValue('/usr/local/bin');
+    vi.spyOn(_linkSeam, 'readlink').mockReturnValue('/old/bd');
+    vi.spyOn(_linkSeam, 'symlink').mockImplementation(symlink);
+    vi.spyOn(_linkSeam, 'unlink').mockImplementation(unlink);
+
+    _provisionSeam.linkBdOntoPath('/pkg/@beads/bd/bin/bd');
+
+    expect(unlink).toHaveBeenCalledWith('/usr/local/bin/bd');
+    expect(symlink).toHaveBeenCalledWith('/pkg/@beads/bd/bin/bd', '/usr/local/bin/bd');
+  });
+
+  it('no-ops on win32 (codespaces are Linux; nothing to symlink)', () => {
+    const symlink = vi.fn();
+    vi.spyOn(_linkSeam, 'platform').mockReturnValue('win32');
+    vi.spyOn(_linkSeam, 'symlink').mockImplementation(symlink);
+    _provisionSeam.linkBdOntoPath('C:/pkg/bd.exe');
+    expect(symlink).not.toHaveBeenCalled();
+  });
+
+  it('no-ops when the CLI bin dir cannot be resolved', () => {
+    const symlink = vi.fn();
+    vi.spyOn(_linkSeam, 'cliBinDir').mockReturnValue(null);
+    vi.spyOn(_linkSeam, 'symlink').mockImplementation(symlink);
+    _provisionSeam.linkBdOntoPath('/pkg/@beads/bd/bin/bd');
+    expect(symlink).not.toHaveBeenCalled();
   });
 });

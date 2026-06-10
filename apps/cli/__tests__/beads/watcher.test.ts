@@ -29,10 +29,13 @@ const SUMMARY: BeadsStatusSummary = {
 };
 
 /** Minimal fake adapter that returns a programmable issue list. */
-function fakeAdapter(issues: BeadsIssueDto[]): BdAdapter {
+function fakeAdapter(
+  issues: BeadsIssueDto[],
+  summary: BeadsStatusSummary | null = SUMMARY,
+): BdAdapter {
   return {
     listIssues: vi.fn().mockResolvedValue(issues),
-    statusSummary: vi.fn().mockResolvedValue(SUMMARY),
+    statusSummary: vi.fn().mockResolvedValue(summary),
   } as unknown as BdAdapter;
 }
 
@@ -99,6 +102,45 @@ describe('BeadsWatcher', () => {
     expect(payload.issues).toHaveLength(1);
     expect(payload.issues[0].status).toBe('in_progress');
     expect(payload.summary.total_issues).toBe(1);
+    // The backend DTO requires `dependencies` (not `deps`) — always present.
+    expect(payload.dependencies).toEqual([]);
+  });
+
+  it('always includes a `dependencies` array even when there are no edges', async () => {
+    const post = vi
+      .spyOn(_transport, 'post')
+      .mockResolvedValue({ statusCode: 200, body: '{}' });
+    const w = newWatcher(fakeAdapter([makeIssue('bd-1', 'open')]));
+
+    w._emitForTest();
+    await vi.advanceTimersByTimeAsync(400);
+
+    const body = post.mock.calls[0][2];
+    const payload = JSON.parse(body);
+    expect(Array.isArray(payload.dependencies)).toBe(true);
+    expect(payload.dependencies).toEqual([]);
+  });
+
+  it('always sends a `summary` — zeroed when statusSummary() returns null', async () => {
+    const post = vi
+      .spyOn(_transport, 'post')
+      .mockResolvedValue({ statusCode: 200, body: '{}' });
+    // statusSummary() yields null (bd status failed / unparseable).
+    const w = newWatcher(fakeAdapter([makeIssue('bd-1', 'open')], null));
+
+    w._emitForTest();
+    await vi.advanceTimersByTimeAsync(400);
+
+    const body = post.mock.calls[0][2];
+    const payload = JSON.parse(body);
+    expect(payload.summary).toEqual({
+      open_issues: 0,
+      ready_issues: 0,
+      blocked_issues: 0,
+      in_progress_issues: 0,
+      closed_issues: 0,
+      total_issues: 0,
+    });
   });
 
   it('skips the POST when the snapshot is unchanged (diff short-circuit)', async () => {
