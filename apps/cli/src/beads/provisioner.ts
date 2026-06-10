@@ -122,20 +122,39 @@ export const _provisionSeam = {
 export const _linkSeam = {
   platform: (): NodeJS.Platform => process.platform,
   /**
-   * The directory the `codeam` executable lives in — guaranteed on PATH (npm
-   * puts global bins there, and that's how the user launched us). We symlink
-   * `bd` alongside it so the AGENT's shell resolves `bd` natively. Derived from
-   * `process.argv[1]` (the CLI entry script). Returns null when it can't be
-   * determined.
+   * A directory ON PATH to symlink `bd` into, so the AGENT's shell + the
+   * SessionStart `bd prime` hook resolve `bd` by name.
+   *
+   * Earlier this used `dirname(realpath(process.argv[1]))` — but for a GLOBAL
+   * npm install that resolves to the package's own `dist/` dir (e.g.
+   * `…/node_modules/codeam-cli/dist`), which is NOT on PATH. The symlink landed
+   * somewhere nothing sees, so `which bd` and the hook still failed (observed
+   * live in a codespace). `dirname(process.execPath)` is the dir the `node`
+   * binary lives in — for a global install that's the npm prefix `bin/` where
+   * the `codeam` launcher also lives, and IS on PATH. We prefer the first
+   * candidate that actually appears in `$PATH`, falling back to node's bin dir.
    */
   cliBinDir: (): string | null => {
-    const entry = process.argv[1];
-    if (!entry) return null;
+    const pathDirs = (process.env.PATH ?? '').split(path.delimiter).filter(Boolean);
+    const candidates: string[] = [];
+    // node's bin dir — the npm prefix bin for a global install (on PATH).
     try {
-      return path.dirname(fs.realpathSync(entry));
+      candidates.push(path.dirname(process.execPath));
     } catch {
-      return path.dirname(entry);
+      /* execPath unavailable — fall through to the entry-script dir */
     }
+    // the CLI entry script's dir — fallback (the dist/ dir for a global
+    // install, usually NOT on PATH; only used if node's bin dir isn't found).
+    const entry = process.argv[1];
+    if (entry) {
+      try {
+        candidates.push(path.dirname(fs.realpathSync(entry)));
+      } catch {
+        candidates.push(path.dirname(entry));
+      }
+    }
+    if (candidates.length === 0) return null;
+    return candidates.find((d) => pathDirs.includes(d)) ?? candidates[0];
   },
   /** Current symlink target at `linkPath`, or null when absent / not a link. */
   readlink: (linkPath: string): string | null => {
