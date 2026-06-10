@@ -300,6 +300,14 @@ describe('linkBdOntoPath — GAP 1 PATH symlink (idempotent)', () => {
   });
 });
 
+// cliBinDir is platform-agnostic and MUST return a correct NATIVE path on
+// every OS the CLI ships to (mac / Linux / Windows) — only the symlink step
+// (`linkBdOntoPath`) is a codespace-specific PATH workaround gated to
+// non-Windows. So these expectations are built with `path.join`, which
+// yields the right separators per platform: the contract under test is WHICH
+// directory cliBinDir selects, and that must hold on the Windows shard too.
+// (Asserting literal POSIX strings was a Windows false-failure that slipped
+// in with the bd-on-PATH work.)
 describe('_linkSeam.cliBinDir — picks an on-PATH, WRITABLE dir', () => {
   const origExecPath = process.execPath;
   const origArgv1 = process.argv[1];
@@ -313,18 +321,22 @@ describe('_linkSeam.cliBinDir — picks an on-PATH, WRITABLE dir', () => {
   });
 
   it('codespace: node lives in a /tmp prefix NOT on PATH → picks writable on-PATH ~/.local/bin', () => {
+    // Native ~/.local/bin — backslashes on Windows, forward slashes
+    // elsewhere — so the on-PATH match (and assertion) are exercised
+    // with the same separators cliBinDir itself produces.
+    const localBin = path.join('/home/codespace', '.local', 'bin');
     vi.spyOn(_linkSeam, 'homedir').mockReturnValue('/home/codespace');
     // Only ~/.local/bin is writable (node's /tmp prefix doesn't exist;
     // /usr/local/bin is read-only in codespaces).
     vi.spyOn(_linkSeam, 'isWritableDir').mockImplementation(
-      (d: string) => d === '/home/codespace/.local/bin',
+      (d: string) => d === localBin,
     );
     process.execPath = '/tmp/codeam-node20/bin/node';
     process.argv[1] = '/tmp/codeam-node20/lib/node_modules/codeam-cli/dist/cli.js';
-    process.env.PATH = ['/home/codespace/.local/bin', '/usr/local/bin', '/usr/bin'].join(
+    process.env.PATH = [localBin, '/usr/local/bin', '/usr/bin'].join(
       path.delimiter,
     );
-    expect(_linkSeam.cliBinDir()).toBe('/home/codespace/.local/bin');
+    expect(_linkSeam.cliBinDir()).toBe(localBin);
   });
 
   it("global install: node's bin dir when it's on PATH AND writable", () => {
@@ -342,6 +354,7 @@ describe('_linkSeam.cliBinDir — picks an on-PATH, WRITABLE dir', () => {
     process.execPath = '/opt/node/bin/node';
     process.argv[1] = '/pkg/codeam-cli/dist/cli.js';
     process.env.PATH = ['/usr/bin', '/bin'].join(path.delimiter);
-    expect(_linkSeam.cliBinDir()).toBe('/home/u/.local/bin');
+    // The fallback is built with path.join → native separators per OS.
+    expect(_linkSeam.cliBinDir()).toBe(path.join('/home/u', '.local', 'bin'));
   });
 });
