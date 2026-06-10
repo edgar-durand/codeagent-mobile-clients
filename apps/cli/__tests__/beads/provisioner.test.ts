@@ -51,7 +51,8 @@ describe('provisionBeads', () => {
     expect(res.initialized).toBe(true);
     expect(res.exportEnabled).toBe(true);
 
-    // The verified init invocation — never with --global, never bd setup.
+    // The verified init invocation — the home brain init itself never uses
+    // --global (that's the setup step, step 4).
     const init = fake.calls.find((c) => c[0] === 'init');
     expect(init).toBeDefined();
     expect(init).toContain('--skip-agents');
@@ -62,9 +63,101 @@ describe('provisionBeads', () => {
     expect(ran(fake, 'config set export.auto true')).toBe(1);
   });
 
-  it('NEVER runs `bd setup <recipe>` (P0 must not mutate workspace CLAUDE.md/AGENTS.md)', async () => {
-    await provisionBeads({ adapter: fake as never, beadsDir: '/tmp/hb' });
+  it('runs `bd setup <recipe> --global` for each session agent — gated by --check (D12 — REVISED)', async () => {
+    // --check returns non-zero → not yet installed → real setup must run.
+    fake.setCode('setup claude --global --check', 1);
+    fake.setCode('setup codex --global --check', 1);
+
+    const res = await provisionBeads({
+      adapter: fake as never,
+      beadsDir: '/tmp/hb',
+      agents: ['claude', 'codex'],
+    });
+
+    // Each agent: a --check probe, then the real --global setup.
+    expect(ran(fake, 'setup claude --global --check')).toBe(1);
+    expect(ran(fake, 'setup codex --global --check')).toBe(1);
+    const claudeSetup = fake.calls.find((c) => c.join(' ') === 'setup claude --global');
+    const codexSetup = fake.calls.find((c) => c.join(' ') === 'setup codex --global');
+    expect(claudeSetup).toBeDefined();
+    expect(codexSetup).toBeDefined();
+    expect(res.agentsWired).toEqual(expect.arrayContaining(['claude', 'codex']));
+
+    // Setup runs AFTER the home-brain init + export.auto (step ordering).
+    const initIdx = fake.calls.findIndex((c) => c[0] === 'init');
+    const setupIdx = fake.calls.findIndex((c) => c[0] === 'setup');
+    expect(initIdx).toBeGreaterThanOrEqual(0);
+    expect(setupIdx).toBeGreaterThan(initIdx);
+  });
+
+  it('idempotent: when `--check` reports installed (exit 0), it does NOT re-run setup', async () => {
+    // --check exit 0 → already wired → skip the real setup.
+    fake.setCode('setup claude --global --check', 0);
+
+    const res = await provisionBeads({
+      adapter: fake as never,
+      beadsDir: '/tmp/hb',
+      agents: ['claude'],
+    });
+
+    expect(ran(fake, 'setup claude --global --check')).toBe(1);
+    // No bare `setup claude --global` (without --check) was issued.
+    expect(fake.calls.some((c) => c.join(' ') === 'setup claude --global')).toBe(false);
+    // Still reported as wired (it's already installed).
+    expect(res.agentsWired).toContain('claude');
+  });
+
+  it('skips agents bd ships no recipe for (coderabbit) — never calls setup for them', async () => {
+    const res = await provisionBeads({
+      adapter: fake as never,
+      beadsDir: '/tmp/hb',
+      agents: ['coderabbit'],
+    });
     expect(fake.calls.some((c) => c[0] === 'setup')).toBe(false);
+    expect(res.agentsWired).toEqual([]);
+  });
+
+  it('no agents (codespace infra path): the setup step is a no-op', async () => {
+    const res = await provisionBeads({ adapter: fake as never, beadsDir: '/tmp/hb' });
+    expect(fake.calls.some((c) => c[0] === 'setup')).toBe(false);
+    expect(res.agentsWired).toEqual([]);
+  });
+
+  it('setup is strictly NON-FATAL: a failed/thrown setup never aborts provisioning', async () => {
+    fake.setCode('setup claude --global --check', 1); // not installed
+    fake.setCode('setup claude --global', 7); // setup itself fails
+
+    const res = await provisionBeads({
+      adapter: fake as never,
+      beadsDir: '/tmp/hb',
+      agents: ['claude'],
+    });
+
+    // Provisioning still completed — init + export are unaffected.
+    expect(res.bdAvailable).toBe(true);
+    expect(res.initialized).toBe(true);
+    expect(res.exportEnabled).toBe(true);
+    // The failed agent is simply absent from agentsWired (no throw bubbled up).
+    expect(res.agentsWired).toEqual([]);
+  });
+
+  it('a thrown adapter.run during setup does not abort provisioning', async () => {
+    fake.setCode('setup claude --global --check', 1);
+    const realRun = fake.run.bind(fake);
+    vi.spyOn(fake, 'run').mockImplementation(async (args: string[]) => {
+      if (args.join(' ') === 'setup claude --global') throw new Error('boom');
+      return realRun(args);
+    });
+
+    const res = await provisionBeads({
+      adapter: fake as never,
+      beadsDir: '/tmp/hb',
+      agents: ['claude'],
+    });
+
+    expect(res.initialized).toBe(true);
+    expect(res.exportEnabled).toBe(true);
+    expect(res.agentsWired).toEqual([]);
   });
 
   it('idempotent: when the home brain already exists, it does NOT re-init', async () => {

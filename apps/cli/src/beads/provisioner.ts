@@ -1,5 +1,6 @@
 import * as fs from 'fs';
 import * as path from 'path';
+import type { AgentId } from '@codeagent/shared';
 import { BdAdapter, defaultBeadsHomeDir } from './bd-adapter';
 import { installBd } from './install-bd';
 import { log } from '../services/logger';
@@ -31,13 +32,43 @@ import { log } from '../services/logger';
  *      the earlier `export.jsonl` was wrong and silently no-op'd) so bd writes
  *      `~/.beads/issues.jsonl` after each mutation — the change feed the watcher
  *      tails.
- *
- * We do NOT run `bd setup <recipe>` here. That installs the per-agent
- * instruction-file wiring + SessionStart hook (P1 — Composer eats `bd prime`)
- * and is exactly what risks disrupting the agent. P0 is the read-only mirror.
+ *   4. wire each session agent natively (D12 — REVISED 2026-06-10): for every
+ *      agent in the session, `bd setup <recipe> --global`. This is the step
+ *      that makes the agent actually USE bd — it registers the SessionStart
+ *      hook globally in the agent's user-level settings (e.g.
+ *      `~/.claude/settings.json`, runs `bd prime` each session) and appends a
+ *      marked beads block to the cwd's CLAUDE.md NON-destructively (spike-
+ *      verified against `@beads/bd@1.0.5`: pre-existing content is preserved).
+ *      Without it the agent never runs `bd create`/`bd ready`, the graph stays
+ *      empty, and the P0 mirror shows nothing. The earlier decision to skip it
+ *      (the original D12) was wrong and is reverted here.
+ *        • `--global`: registers at the user level so it covers every project,
+ *          not just this cwd.
+ *        • `--check`-gated: `bd setup <recipe> --global --check` reports install
+ *          status; we skip the real setup when it's already installed
+ *          (idempotent — re-running provisioning never re-wires).
+ *        • strictly NON-FATAL: a setup failure (or a missing recipe for an
+ *          agent bd doesn't ship) logs a warning and never aborts provisioning
+ *          or the agent run.
  *
  * One-shot sequence the caller awaits — no timers, no polling.
  */
+
+/**
+ * Map a CodeAgent `AgentId` to the matching built-in `bd setup` recipe id.
+ * `@beads/bd@1.0.5` ships recipes for `claude codex cursor windsurf junie
+ * copilot gemini aider …`; for the agents we support the recipe id IS the
+ * agent id — except `coderabbit`, which bd has no recipe for (→ null, skipped).
+ */
+const AGENT_SETUP_RECIPE: Record<AgentId, string | null> = {
+  claude: 'claude',
+  codex: 'codex',
+  copilot: 'copilot',
+  cursor: 'cursor',
+  aider: 'aider',
+  gemini: 'gemini',
+  coderabbit: null,
+};
 
 export interface ProvisionOptions {
   /** Inject a pre-built adapter (tests / a shared instance). */
@@ -46,6 +77,12 @@ export interface ProvisionOptions {
   cwd?: string;
   /** Redirect the home brain off `~/.beads` (test isolation). */
   beadsDir?: string;
+  /**
+   * The agents in this session to wire natively via `bd setup <recipe>
+   * --global` (D12). Empty / omitted (e.g. the no-agent codespace infra path)
+   * → the setup step is a no-op.
+   */
+  agents?: AgentId[];
 }
 
 export interface ProvisionResult {
@@ -55,6 +92,13 @@ export interface ProvisionResult {
   initialized: boolean;
   /** `issues.jsonl` auto-export is enabled. */
   exportEnabled: boolean;
+  /**
+   * Recipe ids for which `bd setup <recipe> --global` is in place after this
+   * run (freshly installed OR already present). Diagnostic only — a failed /
+   * recipe-less agent is simply absent. Non-fatal: a setup failure never
+   * affects the other result fields.
+   */
+  agentsWired: string[];
 }
 
 /**
@@ -87,6 +131,7 @@ export async function provisionBeads(opts: ProvisionOptions = {}): Promise<Provi
     bdAvailable: false,
     initialized: false,
     exportEnabled: false,
+    agentsWired: [],
   };
 
   // Step 1 — ensure bd. On a missing binary, run the consented installer and
@@ -124,9 +169,64 @@ export async function provisionBeads(opts: ProvisionOptions = {}): Promise<Provi
   const exp = await bd.run(['config', 'set', 'export.auto', 'true']);
   result.exportEnabled = exp.code === 0;
 
+  // Step 4 — wire each session agent natively (D12 — REVISED). `--check`-gated
+  // + idempotent + strictly non-fatal (a throw / non-zero never aborts).
+  result.agentsWired = await setupAgents(bd, opts.agents ?? []);
+
   log.info(
     'beads',
-    `provision done initialized=${result.initialized} export=${result.exportEnabled}`,
+    `provision done initialized=${result.initialized} export=${result.exportEnabled} agentsWired=[${result.agentsWired.join(',')}]`,
   );
   return result;
+}
+
+/**
+ * Run `bd setup <recipe> --global` for each session agent (D12 — REVISED).
+ * `--check`-gated so an already-wired recipe is skipped (idempotent), and
+ * strictly non-fatal: any failure — a non-zero setup, a thrown adapter, or an
+ * agent bd ships no recipe for — logs a warning and moves on without aborting
+ * provisioning. Returns the recipe ids that are wired after this pass.
+ */
+async function setupAgents(bd: BdAdapter, agents: AgentId[]): Promise<string[]> {
+  const wired: string[] = [];
+  // De-dupe so a repeated agent doesn't run setup twice in one pass.
+  for (const recipe of dedupeRecipes(agents)) {
+    try {
+      // `--check` reports install status: exit 0 → already wired, skip.
+      const check = await bd.run(['setup', recipe, '--global', '--check']);
+      if (check.code === 0) {
+        log.trace('beads', `bd setup ${recipe} --global already installed — skipping`);
+        wired.push(recipe);
+        continue;
+      }
+      log.info('beads', `wiring agent natively: bd setup ${recipe} --global`);
+      const setup = await bd.run(['setup', recipe, '--global']);
+      if (setup.code === 0) {
+        wired.push(recipe);
+      } else {
+        log.warn(
+          'beads',
+          `bd setup ${recipe} --global failed (code=${setup.code}): ${setup.stderr.slice(0, 200)} — non-fatal, agent runs without native bd wiring`,
+        );
+      }
+    } catch (err) {
+      // Strictly non-fatal — a setup throw must never abort provisioning or
+      // the agent run.
+      log.warn('beads', `bd setup ${recipe} --global threw (non-fatal)`, err);
+    }
+  }
+  return wired;
+}
+
+/**
+ * Map the session's agent ids to their de-duplicated `bd setup` recipe ids,
+ * dropping agents bd ships no recipe for (e.g. coderabbit → null).
+ */
+function dedupeRecipes(agents: AgentId[]): string[] {
+  const seen = new Set<string>();
+  for (const agent of agents) {
+    const recipe = AGENT_SETUP_RECIPE[agent];
+    if (recipe) seen.add(recipe);
+  }
+  return [...seen];
 }

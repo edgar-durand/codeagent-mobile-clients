@@ -1,4 +1,4 @@
-import type { BeadsActionKind, BeadsActionPayload } from '@codeagent/shared';
+import type { AgentId, BeadsActionKind, BeadsActionPayload } from '@codeagent/shared';
 import { startBeads, type StartedBeads } from './index';
 import { deriveProjectIdentity } from './project-key';
 import { postBeadsProvisioning } from '../services/pairing.service';
@@ -37,6 +37,12 @@ export interface BeadsSessionContext {
    *  without a token beads can't authenticate, so it stays off. */
   pluginAuthToken?: string;
   cwd?: string;
+  /**
+   * The agents in this session, wired natively via `bd setup <recipe>
+   * --global` (D12). `start()` passes its single `session.agent`; the no-agent
+   * `startInfraOnly()` path passes none, so the setup step is a no-op there.
+   */
+  agents?: AgentId[];
 }
 
 /**
@@ -67,6 +73,7 @@ export async function provisionBeadsForStart(
       pluginId: ctx.pluginId,
       pluginAuthToken,
       cwd: ctx.cwd,
+      agents: ctx.agents,
     });
   } catch (err) {
     // Strictly non-fatal — a provisioning failure must never break the agent

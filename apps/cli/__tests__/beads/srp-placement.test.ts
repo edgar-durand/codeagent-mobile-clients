@@ -41,23 +41,25 @@ describe('Beads provisioning placement (SRP / D10)', () => {
     expect(infra).toContain('provisionBeadsForStart');
   });
 
-  it('no code path runs `bd setup <recipe>` (P0 must not mutate workspace files / D12)', () => {
-    // Walk the whole beads module — none of it may invoke `bd setup`.
-    const beadsDir = path.join(SRC, 'beads');
-    const offenders: string[] = [];
-    for (const f of fs.readdirSync(beadsDir)) {
-      if (!f.endsWith('.ts')) continue;
-      // Strip comments first so the provisioner's explanatory "we do NOT run
-      // `bd setup`" note isn't a false positive — we only want real code.
-      const code = fs
-        .readFileSync(path.join(beadsDir, f), 'utf8')
-        .replace(/\/\*[\s\S]*?\*\//g, '')
-        .replace(/\/\/.*$/gm, '');
-      // Flag a literal `setup` argv element handed to bd (e.g. ['setup', …]).
-      if (/['"]setup['"]/.test(code)) {
-        offenders.push(f);
-      }
-    }
-    expect(offenders).toEqual([]);
+  it('the provisioner DOES run `bd setup <recipe> --global` (D12 — REVISED: native agent wiring)', () => {
+    // Strip comments first so the explanatory prose doesn't create false
+    // positives — we only want a real `['setup', …, '--global']` argv.
+    const code = read('beads/provisioner.ts')
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      .replace(/\/\/.*$/gm, '');
+    expect(code).toContain("'setup'");
+    expect(code).toContain("'--global'");
+    // …and it is gated by `--check` (idempotent).
+    expect(code).toContain("'--check'");
+  });
+
+  it('runAcpSession does NOT run `bd setup` (SRP holds — setup is a composition-root concern)', () => {
+    // The agent runner must carry zero beads-setup code; the wiring (setup
+    // included) runs in the provisioner / composition root, not the runner.
+    const runner = read('agents/acp/runner.ts')
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      .replace(/\/\/.*$/gm, '');
+    expect(runner).not.toContain("'setup'");
+    expect(runner).not.toContain('bd setup');
   });
 });

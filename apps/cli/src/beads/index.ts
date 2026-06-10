@@ -1,4 +1,4 @@
-import type { BeadsActionPayload } from '@codeagent/shared';
+import type { AgentId, BeadsActionPayload } from '@codeagent/shared';
 import { BdAdapter } from './bd-adapter';
 import { provisionBeads } from './provisioner';
 import { BeadsWatcher } from './watcher';
@@ -35,6 +35,8 @@ export interface StartBeadsOptions {
   pluginId: string;
   pluginAuthToken: string;
   cwd?: string;
+  /** Session agents to wire natively via `bd setup <recipe> --global` (D12). */
+  agents?: AgentId[];
 }
 
 export interface StartedBeads {
@@ -48,7 +50,7 @@ export async function startBeads(opts: StartBeadsOptions): Promise<StartedBeads 
   // Provision the home brain (ensure-bd + install fallback + idempotent init +
   // export.auto). When bd can't be made available, provisioning reports
   // bdAvailable:false and we run without a watcher this session.
-  const provision = await provisionBeads({ cwd: opts.cwd, adapter });
+  const provision = await provisionBeads({ cwd: opts.cwd, adapter, agents: opts.agents });
   if (!provision.bdAvailable || !provision.initialized) {
     log.warn('beads', 'home brain not provisioned — watcher not started this run');
     return null;

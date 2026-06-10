@@ -137,6 +137,9 @@ export async function start(requestedAgent?: AgentId): Promise<void> {
     pluginId,
     pluginAuthToken: session.pluginAuthToken ?? undefined,
     cwd,
+    // Wire this session's agent natively via `bd setup <recipe> --global` so
+    // the agent actually uses bd (D12 — REVISED). Covers BOTH ACP and PTY.
+    agents: [session.agent],
   }).then((started) => {
     beads = started;
     return started;
