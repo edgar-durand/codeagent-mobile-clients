@@ -124,6 +124,14 @@ export class AcpClient {
    *  the turn alive while the adapter is demonstrably working. Null
    *  between prompts. */
   private promptIdle: IdleTimeout | null = null;
+  /** Tool calls the adapter has started but not yet reported terminal
+   *  (`completed`/`failed`). A long-running tool — typecheck, build,
+   *  install, a big test run — emits NO `session/update` for its whole
+   *  duration, which can exceed the idle window and falsely trip the
+   *  watchdog. While ANY tool is outstanding we SUSPEND the watchdog
+   *  (the agent is demonstrably working, just blocked on the tool), and
+   *  re-arm only once the last one finishes. Reset per prompt. */
+  private pendingToolCalls = new Set<string>();
 
   constructor(private readonly opts: AcpClientOptions) {}
 
@@ -307,6 +315,9 @@ export class AcpClient {
         ),
     );
     this.promptIdle = idle;
+    // Fresh tool-call ledger per turn so a stale entry from a prior
+    // turn can't keep this turn's watchdog suspended forever.
+    this.pendingToolCalls.clear();
     try {
       const result = await Promise.race([send, idle.promise]);
       log.info(
@@ -425,13 +436,49 @@ export class AcpClient {
     }
   }
 
+  /**
+   * Drive the idle watchdog off the tool-call lifecycle so a long but
+   * alive tool (typecheck / build / install) can't trip it.
+   *
+   *   - `tool_call` (a tool starts)             → track + suspend
+   *   - `tool_call_update` completed/failed     → untrack; re-arm iff
+   *                                               no tool still running
+   *   - anything else (thought / message / …)   → re-arm, unless a tool
+   *                                               is still outstanding
+   */
+  private trackToolCallIdle(params: SessionNotification): void {
+    const u = params.update as {
+      sessionUpdate?: string;
+      toolCallId?: string;
+      status?: string;
+    };
+    if (u.sessionUpdate === 'tool_call' && typeof u.toolCallId === 'string') {
+      this.pendingToolCalls.add(u.toolCallId);
+      this.promptIdle?.suspend();
+      return;
+    }
+    if (
+      u.sessionUpdate === 'tool_call_update' &&
+      (u.status === 'completed' || u.status === 'failed')
+    ) {
+      if (typeof u.toolCallId === 'string') this.pendingToolCalls.delete(u.toolCallId);
+      if (this.pendingToolCalls.size === 0) this.promptIdle?.bump();
+      return;
+    }
+    if (this.pendingToolCalls.size === 0) this.promptIdle?.bump();
+  }
+
   // ─── Client surface (what the agent calls into) ───────────────────
 
   private buildClient(): Client {
     return {
       sessionUpdate: async (params: SessionNotification): Promise<void> => {
-        // Proof of life — restart the in-flight prompt's idle window.
-        this.promptIdle?.bump();
+        // Tool-call lifecycle drives the idle watchdog: a started tool
+        // may run silently for minutes, so suspend while any is pending
+        // and only re-arm when the last one settles. All other updates
+        // (thoughts, message text, usage) are proof of life → re-arm,
+        // unless a tool is still outstanding.
+        this.trackToolCallIdle(params);
         this.opts.onSessionUpdate(params);
       },
       requestPermission: async (
