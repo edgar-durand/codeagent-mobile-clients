@@ -44,6 +44,7 @@ import {
 } from '@agentclientprotocol/sdk';
 import type { AdapterSpec } from './adapters';
 import type { PromptBlock } from './buildAcpPromptBlocks';
+import { createIdleTimeout, type IdleTimeout } from './idleTimeout';
 import { log } from '../../services/logger';
 
 /**
@@ -54,14 +55,22 @@ import { log } from '../../services/logger';
 const PROTOCOL_VERSION = 1;
 
 /**
- * Ceiling for a single `session/prompt` round-trip. Sized to a value
- * Claude can plausibly need for a long reasoning turn (90 s ≫ typical
- * Sonnet response) so we don't false-trip on slow legitimate work,
- * but small enough that a silently-stuck adapter doesn't strand the
- * relay command forever. Mobile sees the timeout as a normal
- * "failed" command result, not a permanent "Thinking…" spinner.
+ * IDLE window for a single `session/prompt` round-trip — the max time
+ * the adapter may go silent (no `session/update`, no in-flight
+ * permission request) before we treat it as wedged and fail the turn.
+ *
+ * This is deliberately an inactivity timeout, NOT a total-elapsed cap.
+ * A real agentic turn runs for minutes — reasoning, many tool calls,
+ * and human-in-the-loop approvals — while emitting an update every few
+ * seconds. A total-elapsed ceiling killed those healthy turns the
+ * instant their wall-clock crossed it (the mobile client then never
+ * saw the final answer; reported as "the agent stopped responding
+ * after I approved a few prompts"). 90 s of pure silence is well past
+ * any legitimate gap between updates, so a genuinely stuck adapter
+ * still surfaces as a normal "failed" command result, not a permanent
+ * "Thinking…" spinner — while long-but-active work runs to completion.
  */
-const PROMPT_TIMEOUT_MS = 90_000;
+const PROMPT_IDLE_TIMEOUT_MS = 90_000;
 
 /**
  * Capabilities we advertise to the agent. Phase 1 supports:
@@ -110,6 +119,11 @@ export class AcpClient {
   private connection: ClientSideConnection | null = null;
   private stopping = false;
   private sessionId: string | null = null;
+  /** Idle watchdog for the in-flight prompt. The `Client` handlers
+   *  (`sessionUpdate` / `requestPermission`) reach for this to keep
+   *  the turn alive while the adapter is demonstrably working. Null
+   *  between prompts. */
+  private promptIdle: IdleTimeout | null = null;
 
   constructor(private readonly opts: AcpClientOptions) {}
 
@@ -278,43 +292,44 @@ export class AcpClient {
       prompt: blocks,
     });
 
-    // Bare setTimeout + manual cleanup instead of the
-    // `void send.finally(() => clearTimeout(id))` pattern, which
-    // leaked an unhandled rejection when `send` rejected (the
-    // discarded .finally() promise carries the same rejection,
-    // and Node 15+ kills the process on strict-unhandled). Caught
-    // by the v2.27.9 codex smoke test — the auth-error rejection
-    // crashed the runner before its own try/catch could ack the
-    // command.
-    let timeoutId: NodeJS.Timeout | undefined;
-    const timeout = new Promise<PromptResponse>((_resolve, reject) => {
-      timeoutId = setTimeout(() => {
-        reject(
-          new Error(
-            `ACP prompt timed out after ${PROMPT_TIMEOUT_MS / 1000}s — adapter never responded. ` +
-              `Likely the underlying agent's auth or network is misconfigured; check the adapter stderr ` +
-              `lines above (acpAdapter tag) for the actual error.`,
-          ),
-        );
-      }, PROMPT_TIMEOUT_MS);
-    });
+    // Idle watchdog, NOT a total-elapsed cap. The `Client` handlers
+    // bump it on every `session/update` and suspend it across a
+    // human permission wait (see `buildClient`), so a long-but-active
+    // turn never trips it — only a genuinely silent adapter does. See
+    // PROMPT_IDLE_TIMEOUT_MS for the full rationale.
+    const idle = createIdleTimeout(
+      PROMPT_IDLE_TIMEOUT_MS,
+      () =>
+        new Error(
+          `ACP prompt idle for ${PROMPT_IDLE_TIMEOUT_MS / 1000}s — adapter sent no updates. ` +
+            `Likely the underlying agent's auth or network is misconfigured; check the adapter stderr ` +
+            `lines above (acpAdapter tag) for the actual error.`,
+        ),
+    );
+    this.promptIdle = idle;
     try {
-      const result = await Promise.race([send, timeout]);
+      const result = await Promise.race([send, idle.promise]);
       log.info(
         'acpClient',
         `prompt ← ok stopReason=${result.stopReason ?? '?'} elapsedMs=${Date.now() - t0}`,
       );
       return result;
     } catch (err) {
+      // If the watchdog won the race, `send` is still in flight;
+      // swallow its eventual settlement so a late adapter rejection
+      // can't surface as an unhandled rejection and crash the runner
+      // (the v2.27.9 codex smoke test caught exactly this class).
+      void send.catch(() => {});
       log.warn(
         'acpClient',
         `prompt ← failed elapsedMs=${Date.now() - t0} err=${err instanceof Error ? err.message : String(err)}`,
       );
       throw err;
     } finally {
-      // Always clear the timer so the timeout promise can't fire
-      // later and try to reject after we've already moved on.
-      if (timeoutId !== undefined) clearTimeout(timeoutId);
+      // Permanently disarm so a late bump/timer can't reject after
+      // we've moved on, and drop the handle for the next prompt.
+      idle.clear();
+      this.promptIdle = null;
     }
   }
 
@@ -415,10 +430,23 @@ export class AcpClient {
   private buildClient(): Client {
     return {
       sessionUpdate: async (params: SessionNotification): Promise<void> => {
+        // Proof of life — restart the in-flight prompt's idle window.
+        this.promptIdle?.bump();
         this.opts.onSessionUpdate(params);
       },
-      requestPermission: (params: RequestPermissionRequest): Promise<RequestPermissionResponse> => {
-        return this.opts.onRequestPermission(params);
+      requestPermission: async (
+        params: RequestPermissionRequest,
+      ): Promise<RequestPermissionResponse> => {
+        // The decision is the user's and may take minutes; no
+        // `session/update` flows during the wait. Suspend the idle
+        // window so the human-in-the-loop pause can't be mistaken for
+        // a wedged adapter, then re-arm once they answer.
+        this.promptIdle?.suspend();
+        try {
+          return await this.opts.onRequestPermission(params);
+        } finally {
+          this.promptIdle?.bump();
+        }
       },
       readTextFile: async (params): Promise<ReadTextFileResponse> => {
         // ACP guarantees `path` is absolute. Out-of-tree reads are
