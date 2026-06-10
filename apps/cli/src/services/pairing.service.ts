@@ -412,7 +412,7 @@ export async function postBeadsProvisioning(input: {
  * header and surfaces the HTTP status code on the rejected error
  * so the caller can map 401/403/404 to specific user messages.
  */
-async function _postJsonAuthed(
+export async function _postJsonAuthed(
   url: string,
   body: Record<string, unknown>,
   pluginAuthToken: string,
