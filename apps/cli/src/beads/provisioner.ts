@@ -1,3 +1,4 @@
+import { execFileSync } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
 import type { AgentId } from '@codeagent/shared';
@@ -108,7 +109,80 @@ export interface ProvisionResult {
 export const _provisionSeam = {
   install: installBd,
   homeBrainInitialized,
+  /** GAP 1 — symlink the resolved bd onto PATH for the agent's own shell. */
+  linkBdOntoPath,
+  /** Silence bd's `beads.role not configured` warning. */
+  setGitBeadsRole,
 };
+
+/**
+ * Filesystem / environment primitives for the PATH symlink, isolated behind a
+ * seam so tests drive idempotency without touching the real filesystem.
+ */
+export const _linkSeam = {
+  platform: (): NodeJS.Platform => process.platform,
+  /**
+   * The directory the `codeam` executable lives in — guaranteed on PATH (npm
+   * puts global bins there, and that's how the user launched us). We symlink
+   * `bd` alongside it so the AGENT's shell resolves `bd` natively. Derived from
+   * `process.argv[1]` (the CLI entry script). Returns null when it can't be
+   * determined.
+   */
+  cliBinDir: (): string | null => {
+    const entry = process.argv[1];
+    if (!entry) return null;
+    try {
+      return path.dirname(fs.realpathSync(entry));
+    } catch {
+      return path.dirname(entry);
+    }
+  },
+  /** Current symlink target at `linkPath`, or null when absent / not a link. */
+  readlink: (linkPath: string): string | null => {
+    try {
+      return fs.readlinkSync(linkPath);
+    } catch {
+      return null;
+    }
+  },
+  unlink: (linkPath: string): void => fs.unlinkSync(linkPath),
+  symlink: (target: string, linkPath: string): void => fs.symlinkSync(target, linkPath),
+};
+
+/**
+ * GAP 1 — make `bd` resolvable in the AGENT's own shell. OUR adapter resolves
+ * the bundled binary internally, but Claude Code runs `bd` in its Bash tool,
+ * where the bundled binary isn't on PATH (`bd: command not found`) and the
+ * SessionStart `bd prime` hook fails. Fix (validated live): symlink the
+ * resolved binary as `bd` into the dir the `codeam` executable lives in — that
+ * dir is already on PATH. Idempotent (skips when the link already points at the
+ * binary, replaces a stale one). Linux/macOS only; Windows codespaces don't
+ * exist so we no-op there. The caller wraps this in try/catch — strictly
+ * non-fatal.
+ */
+function linkBdOntoPath(binaryPath: string): void {
+  if (_linkSeam.platform() === 'win32') return; // codespaces are Linux
+  const binDir = _linkSeam.cliBinDir();
+  if (!binDir) return;
+  const linkPath = path.join(binDir, 'bd');
+  if (linkPath === binaryPath) return; // bd already lives on PATH itself
+  const current = _linkSeam.readlink(linkPath);
+  if (current === binaryPath) return; // already correct — idempotent
+  if (current !== null) _linkSeam.unlink(linkPath); // stale link → replace
+  _linkSeam.symlink(binaryPath, linkPath);
+  log.info('beads', `linked bd onto PATH: ${linkPath} -> ${binaryPath}`);
+}
+
+/**
+ * Run `git config --global beads.role contributor` so bd stops warning
+ * `beads.role not configured` in the agent's session output. Best-effort:
+ * a missing git / non-zero exit is swallowed (the caller is non-fatal too).
+ */
+function setGitBeadsRole(): void {
+  execFileSync('git', ['config', '--global', 'beads.role', 'contributor'], {
+    stdio: 'ignore',
+  });
+}
 
 /**
  * The home brain is initialized iff `<beadsDir>/embeddeddolt` exists — the
@@ -150,6 +224,26 @@ export async function provisionBeads(opts: ProvisionOptions = {}): Promise<Provi
     return result;
   }
   result.bdAvailable = true;
+
+  // GAP 1 — symlink the resolved bd onto PATH so the AGENT's own shell finds
+  // it (our adapter resolves it internally, but Claude Code's Bash tool / the
+  // `bd prime` SessionStart hook run `bd` directly). Strictly non-fatal.
+  const binaryPath = bd.resolveBinary();
+  if (binaryPath) {
+    try {
+      _provisionSeam.linkBdOntoPath(binaryPath);
+    } catch (err) {
+      log.warn('beads', 'linking bd onto PATH failed (non-fatal)', err);
+    }
+  }
+
+  // Silence bd's `beads.role not configured` warning in the agent's output.
+  // Best-effort — never aborts provisioning.
+  try {
+    _provisionSeam.setGitBeadsRole();
+  } catch (err) {
+    log.trace('beads', `git config beads.role failed (non-fatal): ${(err as Error).message}`);
+  }
 
   // Step 2 — init the home brain (idempotent: skip when already present).
   if (_provisionSeam.homeBrainInitialized(beadsDir)) {
