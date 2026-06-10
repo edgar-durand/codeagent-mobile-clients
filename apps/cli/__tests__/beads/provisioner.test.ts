@@ -289,3 +289,31 @@ describe('linkBdOntoPath — GAP 1 PATH symlink (idempotent)', () => {
     expect(symlink).not.toHaveBeenCalled();
   });
 });
+
+describe('_linkSeam.cliBinDir — picks a dir that is actually on PATH', () => {
+  const origExecPath = process.execPath;
+  const origArgv1 = process.argv[1];
+  const origPath = process.env.PATH;
+
+  afterEach(() => {
+    process.execPath = origExecPath;
+    process.argv[1] = origArgv1;
+    process.env.PATH = origPath;
+  });
+
+  it("returns node's bin dir (on PATH), NOT the package dist/ dir, for a global install", () => {
+    // The codespace bug: argv[1] resolves to …/codeam-cli/dist (NOT on PATH),
+    // while node + the codeam launcher live in the prefix bin (on PATH).
+    process.execPath = '/tmp/codeam-node20/bin/node';
+    process.argv[1] = '/tmp/codeam-node20/lib/node_modules/codeam-cli/dist/cli.js';
+    process.env.PATH = '/usr/bin:/tmp/codeam-node20/bin:/bin';
+    expect(_linkSeam.cliBinDir()).toBe('/tmp/codeam-node20/bin');
+  });
+
+  it("falls back to node's bin dir when no candidate is on PATH", () => {
+    process.execPath = '/opt/node/bin/node';
+    process.argv[1] = '/pkg/codeam-cli/dist/cli.js';
+    process.env.PATH = '/usr/bin:/bin';
+    expect(_linkSeam.cliBinDir()).toBe('/opt/node/bin');
+  });
+});
