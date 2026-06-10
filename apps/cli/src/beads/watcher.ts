@@ -1,7 +1,7 @@
 import * as crypto from 'crypto';
 import * as path from 'path';
 import { resolveApiBaseUrl } from '@codeagent/shared';
-import type { BeadsIngestPayload } from '@codeagent/shared';
+import type { BeadsIngestPayload, BeadsStatusSummary } from '@codeagent/shared';
 import { BdAdapter, defaultBeadsHomeDir } from './bd-adapter';
 import { deriveProjectIdentity } from './project-key';
 import { _transport } from '../services/file-watcher/transport';
@@ -26,6 +26,16 @@ import { log } from '../services/logger';
 
 const API_BASE = resolveApiBaseUrl();
 const DEBOUNCE_MS = 400;
+
+/** Sent in place of a null `bd status --json` so `summary` is never omitted. */
+const ZERO_SUMMARY: BeadsStatusSummary = {
+  open_issues: 0,
+  ready_issues: 0,
+  blocked_issues: 0,
+  in_progress_issues: 0,
+  closed_issues: 0,
+  total_issues: 0,
+};
 
 export interface BeadsWatcherOptions {
   sessionId: string;
@@ -157,8 +167,14 @@ export class BeadsWatcher {
       projectLabel,
       fullSnapshot: true,
       issues,
+      // The backend DTO requires `dependencies` (not `deps`). We don't track
+      // edges in the P0 snapshot yet, so always send an empty array rather than
+      // omitting the field (an omitted/conditional field 400s the ingest).
+      dependencies: [],
       memories: [],
-      ...(summary ? { summary } : {}),
+      // Always send a summary — a null `bd status` yields a zeroed block rather
+      // than an omitted field, so the backend never has to special-case it.
+      summary: summary ?? ZERO_SUMMARY,
     };
 
     const body = JSON.stringify(payload);
