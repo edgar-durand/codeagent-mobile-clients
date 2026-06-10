@@ -29,6 +29,8 @@
 
 import { randomUUID } from 'node:crypto';
 import { CommandRelayService, type RemoteCommand } from '../../services/command-relay.service';
+import { _postJsonAuthed } from '../../services/pairing.service';
+import { resolveApiBaseUrl } from '@codeagent/shared';
 import { log } from '../../services/logger';
 import { showInfo, showSuccess, showRelayNotice } from '../../ui/banner';
 import { AGENT_REGISTRY, type AgentId, type AgentModel, type StreamingChunkKind } from '@codeagent/shared';
@@ -906,6 +908,63 @@ async function handleCommand(
         log.warn('acpRunner', `prompt failed: ${describeError(err)}`);
         await relay.sendResult(cmd.id, 'failed', { error: describeError(err) });
       }
+      return;
+    }
+    case 'group_mention_task': {
+      // `@codeagent` mention forwarded from a Team Space. The backend
+      // (AgentTasksService.enqueueForGroupMention) resolved the sender's
+      // default agent + active session and pushed this command. We run
+      // the prompt as a NORMAL turn on the active session — so the user
+      // sees the agent working in their own chat (Option 1) — then POST
+      // the final reply to /agent-tasks/:id/complete, which round-trips
+      // it into the originating group as an `agent_reply`.
+      const payload = cmd.payload as { taskId?: string; prompt?: string };
+      const taskId = typeof payload?.taskId === 'string' ? payload.taskId : '';
+      const promptText =
+        typeof payload?.prompt === 'string' ? payload.prompt : '';
+      if (!taskId || !promptText.trim()) {
+        await relay.sendResult(cmd.id, 'failed', {
+          error: 'invalid group_mention_task payload',
+        });
+        return;
+      }
+      await streaming.beginTurn();
+      history.appendUserPrompt(promptText);
+      let response = '';
+      let status: 'completed' | 'failed' = 'completed';
+      try {
+        await client.prompt(promptText);
+        response = streaming.getCurrentText();
+        await streaming.closeTurnWithInteractiveDetection();
+        history.appendAgentReply(response);
+        void history.flush();
+      } catch (err) {
+        status = 'failed';
+        response = describeError(err);
+        await recoverFromFailedTurn(client, streaming);
+      }
+      // Round-trip the reply into the group. Best-effort: a failed POST
+      // (network blip, expired token, already-completed row) must not
+      // crash the runner — the command result still acks below so mobile
+      // doesn't retry-loop.
+      try {
+        await _postJsonAuthed(
+          `${resolveApiBaseUrl()}/api/agent-tasks/${encodeURIComponent(taskId)}/complete`,
+          {
+            sessionId: opts.sessionId,
+            pluginId: opts.pluginId,
+            response: response.slice(0, 32 * 1024),
+            status,
+          },
+          opts.pluginAuthToken,
+        );
+      } catch (err) {
+        log.warn(
+          'acpRunner',
+          `group_mention_task ${taskId.slice(0, 8)} complete POST failed: ${describeError(err)}`,
+        );
+      }
+      await relay.sendResult(cmd.id, status, { taskId });
       return;
     }
     case 'stop_task':
