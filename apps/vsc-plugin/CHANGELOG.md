@@ -4,6 +4,15 @@ All notable changes to the CodeAgent Mobile VS Code extension are documented her
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.35.0] — 2026-06-10
+
+### Fixed
+
+- **shared:** Rename BeadsIngestPayload.deps to required dependencies
+- **cli:** Symlink bd onto PATH + set git beads.role during provisioning
+- **cli:** Set BEADS_DIR pre-spawn so the agent inherits the home brain
+- **cli:** Always send dependencies + summary in beads ingest payload
+
 ## [2.34.0] — 2026-06-10
 
 ### Added
