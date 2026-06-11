@@ -179,6 +179,10 @@ export async function start(requestedAgent?: AgentId): Promise<void> {
         adapter,
         cwd,
         getBeads,
+        // AUTO mode in a headless GitHub Codespace: no human at the phone to
+        // answer permission prompts, so auto-approve them rather than stall the
+        // turn (the agent-agnostic equivalent of --dangerously-skip-permissions).
+        autoApprovePermissions: process.env.CODESPACES === 'true',
       });
       return;
     }
