@@ -88,16 +88,19 @@ export function buildOnboardingPrompt(cwd: string): string {
     '  • a full integrated IDE powered by Monaco — edit code, live preview, rich visual output (NOT just a file viewer);',
     '  • Smart Composer — helps them craft and structure prompts;',
     '  • Team Spaces — share this session with their team to collaborate, or hand a session to someone else.',
-    '- Invite them to share feedback or report any issue via GitHub',
-    '  (https://github.com/edgar-durand/codeagent-mobile-clients/issues) or the Discord',
-    '  bugs channel (https://discord.gg/ADMKwGAB).',
+    '- Invite them to share feedback or report any issue via GitHub or the Discord',
+    '  bugs channel. Include BOTH of these URLs in full, EXACTLY as written here',
+    '  (keep the https:// scheme on each so the app renders them as tappable links):',
+    '    https://github.com/edgar-durand/codeagent-mobile-clients/issues',
+    '    https://discord.gg/ADMKwGAB',
     `- End with a SHORT, concrete invitation tied to THIS project (working dir: ${cwd},`,
     `  repo: "${repo}") — suggest 1–2 specific things you could help with here.`,
     '',
     'Rules: do NOT run any tools or shell commands — base the project hint only on the',
     'repo name/path above so your reply is instant. No preamble like "Sure" or "Of',
     'course" — start directly with the greeting. Use light markdown (one intro line +',
-    'a few bullets). Keep it tight despite the feature list.',
+    'a few bullets). NEVER shorten a URL or drop its https:// scheme — paste each link',
+    'verbatim so both render as navigable links. Keep it tight despite the feature list.',
   ].join('\n');
 }
 
