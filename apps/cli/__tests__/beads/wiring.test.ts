@@ -25,23 +25,29 @@ describe('provisionBeadsForStart — composition-root entry', () => {
     vi.restoreAllMocks();
     delete process.env.CODEAM_BEADS_DISABLED;
     delete process.env.BEADS_DIR;
+    delete process.env.BEADS_DOLT_SHARED_SERVER;
   });
 
-  it('sets process.env.BEADS_DIR for the agent spawn SYNCHRONOUSLY (GAP 2)', () => {
+  it('sets BEADS_DIR + BEADS_DOLT_SHARED_SERVER for the agent spawn SYNCHRONOUSLY (GAP 2)', () => {
     vi.spyOn(orchestrator, 'startBeads').mockResolvedValue(fakeStarted());
     vi.spyOn(pairing, 'postBeadsProvisioning').mockResolvedValue({ ok: true });
     delete process.env.BEADS_DIR;
-    // NOT awaited — BEADS_DIR must be set before the promise resolves so the
-    // agent (spawned later in the same synchronous tick) inherits it.
+    delete process.env.BEADS_DOLT_SHARED_SERVER;
+    // NOT awaited — these must be set before the promise resolves so the agent
+    // (spawned later in the same synchronous tick) inherits them; its Bash tool
+    // + the `bd prime` SessionStart hook need shared-server mode to read memory.
     void provisionBeadsForStart(baseCtx);
     expect(process.env.BEADS_DIR).toBe(defaultBeadsHomeDir());
+    expect(process.env.BEADS_DOLT_SHARED_SERVER).toBe('1');
   });
 
-  it('does NOT set BEADS_DIR when beads is killed (full no-op)', () => {
+  it('does NOT set BEADS_DIR / shared-server env when beads is killed (full no-op)', () => {
     process.env.CODEAM_BEADS_DISABLED = '1';
     delete process.env.BEADS_DIR;
+    delete process.env.BEADS_DOLT_SHARED_SERVER;
     void provisionBeadsForStart(baseCtx);
     expect(process.env.BEADS_DIR).toBeUndefined();
+    expect(process.env.BEADS_DOLT_SHARED_SERVER).toBeUndefined();
   });
 
   it('invokes the orchestrator with the session creds (permanently ON)', async () => {

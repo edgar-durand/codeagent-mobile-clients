@@ -70,6 +70,11 @@ export async function provisionBeadsForStart(
   // not source ~/.bashrc, so the spawned env — not a profile file — is the
   // reliable carrier.
   process.env.BEADS_DIR = defaultBeadsHomeDir();
+  // GAP 2 (extended, D15) — also export shared-server mode so the agent's Bash
+  // tool + the `bd prime` SessionStart hook hit the shared dolt sql-server.
+  // Without it they'd default to an embedded engine and fail "dolt is not
+  // installed", so the agent's `bd prime` / `bd remember` would see no memory.
+  process.env.BEADS_DOLT_SHARED_SERVER = '1';
 
   // No plugin auth token → ingest + provisioning POSTs can't authenticate (the
   // CLI has no user JWT). Skip rather than start a watcher that 401s.
