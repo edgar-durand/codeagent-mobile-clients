@@ -5,28 +5,11 @@ import * as path from 'path';
 import type { AgentId } from '@codeagent/shared';
 import { BdAdapter, defaultBeadsHomeDir } from './bd-adapter';
 import { installBd } from './install-bd';
-import { installDolt } from './install-dolt';
+import { installDolt, ensureDoltResolvable } from './install-dolt';
 import { ensureSharedServer } from './dolt-daemon';
 import { deriveProjectIdentity } from './project-key';
 import { prefixForProjectKey } from './project-prefix';
 import { log } from '../services/logger';
-
-/** True when a `dolt` binary is resolvable on PATH (memory ops need it, D15). */
-function doltOnPath(): boolean {
-  const dirs = (process.env.PATH ?? '').split(path.delimiter).filter(Boolean);
-  const names = process.platform === 'win32' ? ['dolt.exe', 'dolt.cmd', 'dolt'] : ['dolt'];
-  for (const dir of dirs) {
-    for (const n of names) {
-      try {
-        fs.accessSync(path.join(dir, n), fs.constants.F_OK);
-        return true;
-      } catch {
-        /* next */
-      }
-    }
-  }
-  return false;
-}
 
 /**
  * Provision the home-level Beads "brain" — a composition-root concern (SRP
@@ -137,7 +120,10 @@ export interface ProvisionResult {
 export const _provisionSeam = {
   install: installBd,
   installDolt,
-  doltOnPath,
+  // Probe dolt on PATH AND auto-prepend a known install dir if found off-PATH
+  // (codespace: official install.sh drops dolt in /usr/local/bin, which the
+  // bundled-node CLI's PATH can omit — mirrors the bd-on-PATH symlink fix).
+  doltOnPath: ensureDoltResolvable,
   ensureSharedServer,
   deriveProjectIdentity,
   /** GAP 1 — symlink the resolved bd onto PATH for the agent's own shell. */

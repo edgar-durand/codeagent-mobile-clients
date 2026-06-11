@@ -2,7 +2,9 @@ import { describe, it, expect, vi, afterEach } from 'vitest';
 import {
   resolveDoltInstallStrategy,
   installDolt,
+  ensureDoltResolvable,
   _doltInstallSpawnSeam,
+  _doltPathSeam,
 } from '../../src/beads/install-dolt';
 
 describe('resolveDoltInstallStrategy — per OS (cross-OS parity, official Dolt installers)', () => {
@@ -51,5 +53,33 @@ describe('installDolt', () => {
     const r = await installDolt('linux');
     expect(r.ok).toBe(false);
     expect(r.code).toBe(1);
+  });
+});
+
+describe('ensureDoltResolvable — codespace PATH hardening', () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it('true when dolt is already on PATH (no PATH mutation)', () => {
+    vi.spyOn(_doltPathSeam, 'getPath').mockReturnValue('/usr/bin:/bin');
+    const setPath = vi.spyOn(_doltPathSeam, 'setPath');
+    vi.spyOn(_doltPathSeam, 'exists').mockImplementation((p) => p === '/usr/bin/dolt');
+    expect(ensureDoltResolvable('linux')).toBe(true);
+    expect(setPath).not.toHaveBeenCalled();
+  });
+
+  it('codespace: dolt in /usr/local/bin but NOT on PATH → prepends it and resolves', () => {
+    vi.spyOn(_doltPathSeam, 'homedir').mockReturnValue('/home/codespace');
+    vi.spyOn(_doltPathSeam, 'getPath').mockReturnValue('/usr/bin:/bin'); // no /usr/local/bin
+    const setPath = vi.spyOn(_doltPathSeam, 'setPath');
+    vi.spyOn(_doltPathSeam, 'exists').mockImplementation((p) => p === '/usr/local/bin/dolt');
+    expect(ensureDoltResolvable('linux')).toBe(true);
+    expect(setPath).toHaveBeenCalledWith('/usr/local/bin:/usr/bin:/bin');
+  });
+
+  it('false when dolt is nowhere (PATH nor known dirs)', () => {
+    vi.spyOn(_doltPathSeam, 'homedir').mockReturnValue('/home/u');
+    vi.spyOn(_doltPathSeam, 'getPath').mockReturnValue('/usr/bin:/bin');
+    vi.spyOn(_doltPathSeam, 'exists').mockReturnValue(false);
+    expect(ensureDoltResolvable('linux')).toBe(false);
   });
 });

@@ -1,4 +1,7 @@
 import { spawn } from 'child_process';
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
 import { log } from '../services/logger';
 
 /**
@@ -92,6 +95,85 @@ export interface InstallResult {
   ok: boolean;
   code: number;
   stderr: string;
+}
+
+/**
+ * Filesystem/env seam for the PATH-resolution helper, isolated so tests drive
+ * it without touching the real filesystem or `process.env`.
+ */
+export const _doltPathSeam = {
+  homedir: (): string => os.homedir(),
+  getPath: (): string => process.env.PATH ?? '',
+  setPath: (p: string): void => {
+    process.env.PATH = p;
+  },
+  exists: (p: string): boolean => {
+    try {
+      fs.accessSync(p, fs.constants.F_OK);
+      return true;
+    } catch {
+      return false;
+    }
+  },
+};
+
+/** The dolt binary name(s) to probe per platform. */
+function doltBinaryNames(platform: NodeJS.Platform): string[] {
+  return platform === 'win32' ? ['dolt.exe', 'dolt.cmd', 'dolt'] : ['dolt'];
+}
+
+/**
+ * Well-known directories the official installers drop `dolt` into, which may
+ * NOT be on a non-login process PATH (the codespace gotcha: the official
+ * install.sh hard-installs to `/usr/local/bin`, and the bundled-node CLI runs
+ * with a transient PATH that can omit it — same root cause as the bd-on-PATH
+ * symlink fix). `/opt/homebrew/bin` covers Apple-Silicon brew.
+ */
+function knownDoltDirs(platform: NodeJS.Platform): string[] {
+  const home = _doltPathSeam.homedir();
+  if (platform === 'win32') {
+    return [
+      'C:\\Program Files\\Dolt\\bin',
+      home ? path.join(home, 'AppData', 'Local', 'Programs', 'dolt', 'bin') : '',
+    ].filter(Boolean);
+  }
+  return [
+    '/usr/local/bin',
+    '/opt/homebrew/bin',
+    home ? path.join(home, '.local', 'bin') : '',
+    home ? path.join(home, 'bin') : '',
+  ].filter(Boolean);
+}
+
+/**
+ * True when `dolt` is resolvable for the CURRENT process — checking `$PATH`
+ * first, then well-known install dirs. If found in a known dir that isn't on
+ * `$PATH` (the codespace case after `sudo install.sh` → `/usr/local/bin`), it
+ * **prepends that dir to `process.env.PATH`** so the immediately-following
+ * `bd dolt start` (and the agent, which inherits our env) resolves it. The
+ * AGENT'S `bd prime` does NOT need `dolt` on PATH — once the shared server is
+ * up it connects over TCP — but the provisioner does, to start that server.
+ */
+export function ensureDoltResolvable(platform: NodeJS.Platform = process.platform): boolean {
+  const names = doltBinaryNames(platform);
+  const delim = platform === 'win32' ? ';' : ':';
+  const pathDirs = _doltPathSeam.getPath().split(delim).filter(Boolean);
+  for (const dir of pathDirs) {
+    for (const n of names) {
+      if (_doltPathSeam.exists(path.join(dir, n))) return true;
+    }
+  }
+  // Not on PATH — scan known install dirs and prepend the first that has dolt.
+  for (const dir of knownDoltDirs(platform)) {
+    for (const n of names) {
+      if (_doltPathSeam.exists(path.join(dir, n))) {
+        _doltPathSeam.setPath(`${dir}${delim}${_doltPathSeam.getPath()}`);
+        log.info('beads', `dolt found in ${dir} (not on PATH) — prepended to process PATH`);
+        return true;
+      }
+    }
+  }
+  return false;
 }
 
 export const _doltInstallSpawnSeam = {
