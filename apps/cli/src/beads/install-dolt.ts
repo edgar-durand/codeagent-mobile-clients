@@ -1,0 +1,140 @@
+import { spawn } from 'child_process';
+import { log } from '../services/logger';
+
+/**
+ * OS-detected installer for the standalone `dolt` CLI. Required because the
+ * npm-bundled `@beads/bd` is the SERVER-mode build: every DB operation — and
+ * `bd remember` / `bd memories` / `bd prime`(+memories) in particular — needs
+ * the `dolt` binary + a running `dolt sql-server`. Without it, beads memory
+ * silently can't work (spec §3c, D15). The provisioner calls this when `dolt`
+ * isn't already on PATH; consent is the caller's job.
+ *
+ * Cross-OS parity is mandatory (Mac + Linux + Windows), using the OFFICIAL
+ * Dolt installers (https://www.dolthub.com/docs/introduction/installation):
+ *   - darwin  → `brew install dolt`            (no sudo, no hang; primary)
+ *   - linux   → official sudo `curl … install.sh | sudo bash` (→ /usr/local/bin;
+ *               codespaces are Linux and typically root/passwordless-sudo)
+ *   - win32   → PowerShell: download the official MSI + silent `msiexec`.
+ *               NOT `winget` — it may not be installed (Edgar, 2026-06-10).
+ *               winget/choco/scoop remain opportunistic fallbacks only.
+ *
+ * Mirrors `install-bd.ts` exactly (same InstallStrategy/InstallResult shapes,
+ * same `_doltInstallSpawnSeam` test seam, same non-fatal logging contract).
+ */
+
+/** Official Dolt release artifacts (latest, resolved by GitHub redirect). */
+const DOLT_INSTALL_SH_URL =
+  'https://github.com/dolthub/dolt/releases/latest/download/install.sh';
+const DOLT_MSI_URL =
+  'https://github.com/dolthub/dolt/releases/latest/download/dolt-windows-amd64.msi';
+
+export interface InstallStrategy {
+  /** Executable to spawn. */
+  command: string;
+  /** argv handed to the executable (no shell string interpolation). */
+  args: string[];
+  /** Human description for logs / consent prompts. */
+  description: string;
+}
+
+/**
+ * Pure resolver: maps an `os.platform()` value to the dolt installer strategy.
+ * Separated from the spawn so it's trivially testable across all three OSes
+ * without mocking child_process.
+ */
+export function resolveDoltInstallStrategy(platform: NodeJS.Platform): InstallStrategy {
+  if (platform === 'win32') {
+    // PowerShell-only: fetch the official MSI and install it silently. No
+    // package-manager dependency (winget may be absent). If msiexec needs
+    // elevation, it returns a non-zero code → surfaced by the caller, which
+    // can then offer the elevation-free ZIP fallback.
+    const script = [
+      `$ErrorActionPreference='Stop';`,
+      `$u='${DOLT_MSI_URL}';`,
+      `$o="$env:TEMP\\dolt-install.msi";`,
+      `Invoke-WebRequest -Uri $u -OutFile $o;`,
+      `Start-Process msiexec.exe -ArgumentList '/i',('"'+$o+'"'),'/quiet','/norestart' -Wait`,
+    ].join(' ');
+    return {
+      command: 'powershell.exe',
+      args: [
+        '-NoProfile',
+        '-NonInteractive',
+        '-ExecutionPolicy',
+        'Bypass',
+        '-Command',
+        script,
+      ],
+      description: 'PowerShell: download official dolt MSI + silent msiexec',
+    };
+  }
+  if (platform === 'darwin') {
+    // brew avoids sudo (no password prompt / hang). curl install.sh is the
+    // documented fallback when brew is absent (the caller decides).
+    return {
+      command: 'brew',
+      args: ['install', 'dolt'],
+      description: 'brew install dolt',
+    };
+  }
+  // linux (+ any other POSIX): the official install.sh, which detects arch and
+  // installs to /usr/local/bin. Needs sudo for that path; codespaces run as
+  // root / passwordless-sudo. A sudo password prompt would surface as a
+  // non-zero exit rather than hang under a non-interactive spawn.
+  return {
+    command: 'bash',
+    args: ['-c', `curl -L ${DOLT_INSTALL_SH_URL} | sudo bash`],
+    description: `curl -L ${DOLT_INSTALL_SH_URL} | sudo bash (→ /usr/local/bin)`,
+  };
+}
+
+export interface InstallResult {
+  ok: boolean;
+  code: number;
+  stderr: string;
+}
+
+export const _doltInstallSpawnSeam = {
+  run: _defaultDoltInstallSpawn,
+};
+
+function _defaultDoltInstallSpawn(strategy: InstallStrategy): Promise<InstallResult> {
+  return new Promise((resolve) => {
+    let proc: ReturnType<typeof spawn>;
+    try {
+      proc = spawn(strategy.command, strategy.args, { env: process.env });
+    } catch (err) {
+      resolve({ ok: false, code: -1, stderr: (err as Error).message });
+      return;
+    }
+    let stderr = '';
+    proc.stderr?.on('data', (c: Buffer) => {
+      stderr += c.toString();
+    });
+    proc.on('error', (err) => resolve({ ok: false, code: -1, stderr: err.message }));
+    proc.on('close', (code) => resolve({ ok: code === 0, code: code ?? -1, stderr }));
+  });
+}
+
+/**
+ * Run the OS-appropriate dolt installer. The caller is responsible for
+ * obtaining user consent before calling this (it executes a remote install /
+ * downloads an MSI). `platform` defaults to the host's `process.platform` but
+ * is injectable for tests. Strictly non-fatal: a failure logs a warning and
+ * returns `ok:false` — the provisioner degrades to "beads memory unavailable
+ * this run", never aborting the agent.
+ */
+export async function installDolt(
+  platform: NodeJS.Platform = process.platform,
+): Promise<InstallResult> {
+  const strategy = resolveDoltInstallStrategy(platform);
+  log.info('beads', `installing dolt via ${strategy.description}`);
+  const result = await _doltInstallSpawnSeam.run(strategy);
+  if (!result.ok) {
+    log.warn(
+      'beads',
+      `dolt install failed (code=${result.code}): ${result.stderr.slice(0, 200)}`,
+    );
+  }
+  return result;
+}
