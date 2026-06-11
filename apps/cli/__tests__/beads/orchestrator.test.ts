@@ -18,6 +18,9 @@ describe('startBeads — composition-root orchestrator', () => {
   it('starts the watcher + pushes an immediate snapshot when provisioning succeeds', async () => {
     vi.spyOn(provisionerMod, 'provisionBeads').mockResolvedValue({
       bdAvailable: true,
+      doltAvailable: true,
+      serverUp: true,
+      prefix: 'codeagent_mobile_3f9a1c02',
       initialized: true,
       exportEnabled: true,
       agentsWired: [],
@@ -37,6 +40,9 @@ describe('startBeads — composition-root orchestrator', () => {
   it('does NOT start the watcher when bd could not be provisioned', async () => {
     vi.spyOn(provisionerMod, 'provisionBeads').mockResolvedValue({
       bdAvailable: false,
+      doltAvailable: false,
+      serverUp: false,
+      prefix: null,
       initialized: false,
       exportEnabled: false,
       agentsWired: [],
@@ -52,6 +58,9 @@ describe('startBeads — composition-root orchestrator', () => {
   it('does NOT start the watcher when the home brain failed to initialize', async () => {
     vi.spyOn(provisionerMod, 'provisionBeads').mockResolvedValue({
       bdAvailable: true,
+      doltAvailable: true,
+      serverUp: false,
+      prefix: null,
       initialized: false,
       exportEnabled: false,
       agentsWired: [],
@@ -67,6 +76,9 @@ describe('startBeads — composition-root orchestrator', () => {
   it('passes the adapter it built into the provisioner (shared resolved binary)', async () => {
     const provision = vi.spyOn(provisionerMod, 'provisionBeads').mockResolvedValue({
       bdAvailable: false,
+      doltAvailable: false,
+      serverUp: false,
+      prefix: null,
       initialized: false,
       exportEnabled: false,
       agentsWired: [],
