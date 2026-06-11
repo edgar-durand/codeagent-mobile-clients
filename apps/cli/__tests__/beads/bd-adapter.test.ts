@@ -89,6 +89,32 @@ describe('BdAdapter shared-server wiring (cwd-resolved, no BEADS_DIR, no --globa
     delete process.env.BEADS_DIR;
   });
 
+  it('retries on a transient spawn ENOENT (bundled bd postinstall rename window) then succeeds', async () => {
+    vi.spyOn(adapter._adapterSeam, 'sleep').mockResolvedValue(undefined); // instant backoff
+    let calls = 0;
+    vi.spyOn(_spawnSeam, 'run').mockImplementation(async () => {
+      calls += 1;
+      return calls === 1
+        ? { code: -1, stdout: '', stderr: 'spawn /pkg/@beads/bd/bin/bd ENOENT' }
+        : ok('done');
+    });
+    const a = new BdAdapter({ binaryPath: '/bd' });
+    const res = await a.run(['dolt', 'start']);
+    expect(calls).toBe(2); // failed once (ENOENT), retried once → ok
+    expect(res.code).toBe(0);
+  });
+
+  it('does NOT retry on a normal non-zero exit (only on spawn ENOENT)', async () => {
+    const sleep = vi.spyOn(adapter._adapterSeam, 'sleep').mockResolvedValue(undefined);
+    const spy = vi
+      .spyOn(_spawnSeam, 'run')
+      .mockResolvedValue({ code: 1, stdout: '', stderr: 'real error' });
+    const a = new BdAdapter({ binaryPath: '/bd' });
+    await a.run(['status']);
+    expect(spy).toHaveBeenCalledTimes(1); // no retry on a genuine exit code
+    expect(sleep).not.toHaveBeenCalled();
+  });
+
   it('enables shared-server mode (BEADS_DOLT_SHARED_SERVER=1) on every command', async () => {
     // The npm-bundled bd is the server-mode build; memory ops need the shared
     // dolt sql-server, so every command must run in shared-server mode (D15).

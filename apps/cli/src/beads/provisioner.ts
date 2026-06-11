@@ -122,8 +122,6 @@ export const _provisionSeam = {
   installDolt,
   /** No-sudo fallback: extract the dolt tarball/zip into a user-writable dir. */
   installDoltToDir,
-  /** Async sleep — behind the seam so the spawn-retry backoff is instant in tests. */
-  sleep: (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms)),
   // Probe dolt on PATH AND auto-prepend a known install dir if found off-PATH
   // (codespace: official install.sh drops dolt in /usr/local/bin, which the
   // bundled-node CLI's PATH can omit — mirrors the bd-on-PATH symlink fix).
@@ -405,21 +403,10 @@ async function setupAgents(bd: BdAdapter, agents: AgentId[]): Promise<string[]> 
         continue;
       }
       log.info('beads', `wiring agent natively: bd setup ${recipe} --global`);
-      // Retry on a SPAWN failure (code -1 / ENOENT): the bundled @beads/bd
-      // native binary is fetched by its postinstall via an atomic rename, so
-      // there's a brief window where the path 404s mid-provision (observed live
-      // — `bd init` worked, then `bd setup` ENOENT'd 15s later, then a later
-      // pass succeeded). A short backoff lets the rename settle. A real
-      // non-zero exit (not -1) is NOT retried — that's a genuine setup error.
-      let setup = await bd.run(['setup', recipe, '--global']);
-      for (let attempt = 1; setup.code === -1 && attempt <= 2; attempt++) {
-        log.info(
-          'beads',
-          `bd setup ${recipe} --global spawn failed (transient: ${setup.stderr.slice(0, 80)}) — retry ${attempt}/2`,
-        );
-        await _provisionSeam.sleep(1500);
-        setup = await bd.run(['setup', recipe, '--global']);
-      }
+      // Transient spawn ENOENT (the bundled bd native binary's postinstall
+      // rename window) is retried at the adapter level (BdAdapter.run), so it
+      // covers every bd call — init, dolt start, setup — not just this one.
+      const setup = await bd.run(['setup', recipe, '--global']);
       if (setup.code === 0) {
         wired.push(recipe);
       } else {

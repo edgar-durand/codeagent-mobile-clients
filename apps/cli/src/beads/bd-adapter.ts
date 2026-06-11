@@ -171,6 +171,15 @@ function _defaultSpawn(
   });
 }
 
+/**
+ * Backoff sleep behind a seam so the transient-ENOENT retry is instant in
+ * tests. The bundled @beads/bd native binary is fetched by its postinstall via
+ * an atomic rename, so the resolved path can momentarily 404 mid-provision.
+ */
+export const _adapterSeam = {
+  sleep: (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms)),
+};
+
 export class BdAdapter {
   private resolved: string | null;
 
@@ -234,7 +243,19 @@ export class BdAdapter {
       'beads',
       `bd ${args.join(' ')} (cwd=${this.opts.cwd ?? process.cwd()}, shared-server)`,
     );
-    return _spawnSeam.run(binary, args, { cwd: this.opts.cwd, env });
+    let res = await _spawnSeam.run(binary, args, { cwd: this.opts.cwd, env });
+    // Retry on a transient spawn ENOENT: the bundled @beads/bd native binary is
+    // fetched by its postinstall via an atomic rename, so the resolved path can
+    // momentarily 404 mid-provision (observed live on `bd dolt start` and
+    // `bd setup` ~20-30s into a codespace bootstrap, then recovered). The path
+    // is stable — just transiently missing — so re-spawn with backoff. ONLY on
+    // a spawn-level ENOENT (code -1 + ENOENT), never on a real non-zero exit.
+    for (let attempt = 1; attempt <= 3 && res.code === -1 && res.stderr.includes('ENOENT'); attempt++) {
+      log.info('beads', `bd ${args[0]} spawn ENOENT (transient binary) — retry ${attempt}/3`);
+      await _adapterSeam.sleep(750 * attempt);
+      res = await _spawnSeam.run(binary, args, { cwd: this.opts.cwd, env });
+    }
+    return res;
   }
 
   /**
