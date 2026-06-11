@@ -2,7 +2,7 @@ import * as crypto from 'crypto';
 import * as path from 'path';
 import { resolveApiBaseUrl } from '@codeagent/shared';
 import type { BeadsIngestPayload, BeadsStatusSummary } from '@codeagent/shared';
-import { BdAdapter, defaultBeadsHomeDir } from './bd-adapter';
+import { BdAdapter } from './bd-adapter';
 import { deriveProjectIdentity } from './project-key';
 import { _transport } from '../services/file-watcher/transport';
 import { log } from '../services/logger';
@@ -85,7 +85,12 @@ export class BeadsWatcher {
 
   constructor(private readonly opts: BeadsWatcherOptions) {
     this.bd = opts.adapter ?? new BdAdapter({ cwd: opts.cwd, beadsDir: opts.beadsDir });
-    this.feedPath = opts.feedPath ?? path.join(defaultBeadsHomeDir(), 'issues.jsonl');
+    // Under shared-server the project's `bd init` writes its workspace +
+    // auto-exported `issues.jsonl` into `<cwd>/.beads/` (cwd-resolved), NOT
+    // `~/.beads`. Watch the project's feed so issue mirroring tracks the right
+    // file (D16). Tests/non-default homes can still override via feedPath.
+    this.feedPath =
+      opts.feedPath ?? path.join(opts.cwd ?? process.cwd(), '.beads', 'issues.jsonl');
     this.apiBase = opts.apiBaseUrl ?? API_BASE;
   }
 

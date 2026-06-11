@@ -62,7 +62,7 @@ describe('BdAdapter binary resolution', () => {
   });
 });
 
-describe('BdAdapter home-brain wiring (BEADS_DIR, no --global)', () => {
+describe('BdAdapter shared-server wiring (cwd-resolved, no BEADS_DIR, no --global)', () => {
   afterEach(() => vi.restoreAllMocks());
 
   it('never injects --global (the spike proved --global needs external dolt)', async () => {
@@ -75,20 +75,18 @@ describe('BdAdapter home-brain wiring (BEADS_DIR, no --global)', () => {
     expect(args).not.toContain('--global');
   });
 
-  it('sets BEADS_DIR to the configured home brain dir on every command', async () => {
+  it('does NOT set BEADS_DIR (shared-server resolves the workspace from cwd) + strips inherited', async () => {
+    // A stale inherited BEADS_DIR (older provisioning run / agent shell) would
+    // override cwd resolution → "no active beads workspace found". Must be
+    // stripped, and the project cwd passed through.
+    process.env.BEADS_DIR = '/stale/beads';
     const spy = vi.spyOn(_spawnSeam, 'run').mockResolvedValue(ok('[]'));
-    const a = new BdAdapter({ binaryPath: '/bd', beadsDir: '/tmp/test-beads' });
+    const a = new BdAdapter({ binaryPath: '/bd', cwd: '/workspaces/repo' });
     await a.run(['ready', '--json']);
     const [, , opts] = spy.mock.calls[0];
-    expect(opts.env.BEADS_DIR).toBe('/tmp/test-beads');
-  });
-
-  it('defaults BEADS_DIR to ~/.beads when no override is given', async () => {
-    const spy = vi.spyOn(_spawnSeam, 'run').mockResolvedValue(ok('[]'));
-    const a = new BdAdapter({ binaryPath: '/bd' });
-    await a.run(['status', '--json']);
-    const [, , opts] = spy.mock.calls[0];
-    expect(opts.env.BEADS_DIR).toBe(adapter.defaultBeadsHomeDir());
+    expect(opts.env.BEADS_DIR).toBeUndefined();
+    expect(opts.cwd).toBe('/workspaces/repo');
+    delete process.env.BEADS_DIR;
   });
 
   it('enables shared-server mode (BEADS_DOLT_SHARED_SERVER=1) on every command', async () => {

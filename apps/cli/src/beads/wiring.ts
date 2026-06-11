@@ -1,6 +1,5 @@
 import type { AgentId, BeadsActionKind, BeadsActionPayload } from '@codeagent/shared';
 import { startBeads, type StartedBeads } from './index';
-import { defaultBeadsHomeDir } from './bd-adapter';
 import { deriveProjectIdentity } from './project-key';
 import { postBeadsProvisioning } from '../services/pairing.service';
 import { log } from '../services/logger';
@@ -60,20 +59,19 @@ export async function provisionBeadsForStart(
     return null;
   }
 
-  // GAP 2 — export BEADS_DIR into THIS process's env SYNCHRONOUSLY, before the
-  // agent is spawned. The agent (and its Bash tool + the `bd prime`
-  // SessionStart hook) inherit our env, so without this they'd look for a beads
-  // database in the workspace and report "no beads database found". It's just a
-  // path — no need to await provisioning. Kept consistent with the dir the
-  // adapter / watcher already address (`~/.beads`). Done after the kill-switch
-  // so a disabled run stays a complete no-op. Non-interactive agent shells may
-  // not source ~/.bashrc, so the spawned env — not a profile file — is the
-  // reliable carrier.
-  process.env.BEADS_DIR = defaultBeadsHomeDir();
-  // GAP 2 (extended, D15) — also export shared-server mode so the agent's Bash
-  // tool + the `bd prime` SessionStart hook hit the shared dolt sql-server.
-  // Without it they'd default to an embedded engine and fail "dolt is not
-  // installed", so the agent's `bd prime` / `bd remember` would see no memory.
+  // GAP 2 (D15/D16) — export shared-server mode into THIS process's env
+  // SYNCHRONOUSLY, before the agent spawns, so the agent (its Bash tool + the
+  // `bd prime` SessionStart hook) inherits it and reaches the shared dolt
+  // sql-server. Done after the kill-switch so a disabled run stays a no-op.
+  // Non-interactive agent shells may not source ~/.bashrc, so the spawned env
+  // — not a profile file — is the reliable carrier.
+  //
+  // Do NOT export BEADS_DIR: under shared-server the workspace is resolved from
+  // the agent's CWD (the project's `.beads/`, pointing at this project's prefix
+  // DB). Forcing BEADS_DIR=~/.beads makes `bd prime`/`bd dolt start` fail "no
+  // active beads workspace found" (verified live). Strip any inherited stale
+  // BEADS_DIR so it can't override cwd resolution for the agent either.
+  delete process.env.BEADS_DIR;
   process.env.BEADS_DOLT_SHARED_SERVER = '1';
 
   // No plugin auth token → ingest + provisioning POSTs can't authenticate (the

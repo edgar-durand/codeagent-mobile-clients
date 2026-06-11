@@ -217,13 +217,23 @@ export class BdAdapter {
       return { code: -1, stdout: '', stderr: 'bd binary not resolved' };
     }
     const env: NodeJS.ProcessEnv = { ...process.env };
-    env.BEADS_DIR = this.opts.beadsDir ?? defaultBeadsHomeDir();
     // Shared-server mode: the npm-bundled @beads/bd is the server-mode build,
-    // so every DB op (memory included) must target the shared dolt sql-server
-    // at ~/.beads/shared-server (port 3308). Without this, bd tries an embedded
+    // so every DB op (memory included) targets the shared dolt sql-server at
+    // ~/.beads/shared-server (port 3308). Without this, bd tries an embedded
     // engine and fails "dolt is not installed". (Spec §3c, D15.)
     env.BEADS_DOLT_SHARED_SERVER = '1';
-    log.trace('beads', `bd ${args.join(' ')} (BEADS_DIR=${env.BEADS_DIR}, shared-server)`);
+    // Do NOT set BEADS_DIR. Under shared-server the workspace is resolved from
+    // CWD (the project dir, which holds its own `.beads/` pointing at this
+    // project's prefix DB on the shared engine). Forcing BEADS_DIR=~/.beads
+    // makes `bd dolt start` / memory ops fail "no active beads workspace found"
+    // (verified live in a codespace, v2.36.0/1 bug). Strip any inherited
+    // BEADS_DIR (an older provisioning run / the agent shell) so it can't
+    // override cwd resolution.
+    delete env.BEADS_DIR;
+    log.trace(
+      'beads',
+      `bd ${args.join(' ')} (cwd=${this.opts.cwd ?? process.cwd()}, shared-server)`,
+    );
     return _spawnSeam.run(binary, args, { cwd: this.opts.cwd, env });
   }
 
