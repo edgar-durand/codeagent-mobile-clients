@@ -1,6 +1,8 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import {
   resolveDoltInstallStrategy,
+  resolveDoltTarballStrategy,
+  doltPlatformTuple,
   installDolt,
   ensureDoltResolvable,
   _doltInstallSpawnSeam,
@@ -81,5 +83,44 @@ describe('ensureDoltResolvable — codespace PATH hardening', () => {
     vi.spyOn(_doltPathSeam, 'getPath').mockReturnValue('/usr/bin:/bin');
     vi.spyOn(_doltPathSeam, 'exists').mockReturnValue(false);
     expect(ensureDoltResolvable('linux')).toBe(false);
+  });
+});
+
+describe('doltPlatformTuple', () => {
+  it('maps node platform/arch to Dolt release tuples', () => {
+    expect(doltPlatformTuple('linux', 'x64')).toBe('linux-amd64');
+    expect(doltPlatformTuple('linux', 'arm64')).toBe('linux-arm64');
+    expect(doltPlatformTuple('darwin', 'arm64')).toBe('darwin-arm64');
+    expect(doltPlatformTuple('win32', 'x64')).toBe('windows-amd64');
+  });
+  it('returns null for unsupported arches (Dolt ships no prebuilt)', () => {
+    expect(doltPlatformTuple('linux', 'ia32')).toBeNull();
+    expect(doltPlatformTuple('win32', 'arm64')).toBeNull(); // windows-amd64 only
+  });
+});
+
+describe('resolveDoltTarballStrategy — no-sudo fallback', () => {
+  it('linux/codespace: curl | tar into the target dir (no sudo)', () => {
+    const s = resolveDoltTarballStrategy('/home/codespace/.local/bin', 'linux', 'x64');
+    expect(s).not.toBeNull();
+    expect(s!.command).toBe('bash');
+    const cmd = s!.args.join(' ');
+    expect(cmd).toContain('dolt-linux-amd64.tar.gz');
+    expect(cmd).toContain('tar -xz -C "/home/codespace/.local/bin"');
+    expect(cmd).toContain('--strip-components=2');
+    expect(cmd).not.toContain('sudo');
+  });
+
+  it('win32: PowerShell download zip + Expand-Archive into the target dir', () => {
+    const s = resolveDoltTarballStrategy('C:\\Users\\u\\bin', 'win32', 'x64');
+    expect(s).not.toBeNull();
+    expect(s!.command).toBe('powershell.exe');
+    const cmd = s!.args.join(' ');
+    expect(cmd).toContain('dolt-windows-amd64.zip');
+    expect(cmd).toContain('Expand-Archive');
+  });
+
+  it('returns null when Dolt ships no prebuilt (win arm64)', () => {
+    expect(resolveDoltTarballStrategy('C:/bin', 'win32', 'arm64')).toBeNull();
   });
 });

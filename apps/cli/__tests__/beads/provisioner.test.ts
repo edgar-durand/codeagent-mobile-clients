@@ -48,6 +48,9 @@ describe('provisionBeads', () => {
     // the project resolves to a fixed key (→ a deterministic prefix).
     vi.spyOn(_provisionSeam, 'doltOnPath').mockReturnValue(true);
     vi.spyOn(_provisionSeam, 'installDolt').mockResolvedValue({ ok: true, code: 0, stderr: '' });
+    vi.spyOn(_provisionSeam, 'installDoltToDir').mockResolvedValue({ ok: true, code: 0, stderr: '' });
+    vi.spyOn(_linkSeam, 'cliBinDir').mockReturnValue('/home/u/.local/bin');
+    vi.spyOn(_linkSeam, 'ensureDir').mockImplementation(() => undefined);
     vi.spyOn(_provisionSeam, 'ensureSharedServer').mockResolvedValue({ up: true, started: false });
     vi.spyOn(_provisionSeam, 'deriveProjectIdentity').mockReturnValue({
       projectKey: 'github.com/edgar-durand/codeagent-mobile',
@@ -122,10 +125,29 @@ describe('provisionBeads', () => {
     expect(res.initialized).toBe(true);
   });
 
-  it('dolt missing AND install fails → doltAvailable:false, no init, non-fatal', async () => {
-    (_provisionSeam.doltOnPath as ReturnType<typeof vi.fn>).mockReturnValue(false);
-    vi.spyOn(_provisionSeam, 'installDolt').mockResolvedValue({ ok: false, code: 1, stderr: 'no net' });
+  it('no sudo: official install does not resolve → tarball fallback into ~/.local/bin succeeds', async () => {
+    // dolt never on PATH until the tarball fallback "installs" it.
+    let resolved = false;
+    (_provisionSeam.doltOnPath as ReturnType<typeof vi.fn>).mockImplementation(() => resolved);
+    vi.spyOn(_provisionSeam, 'installDolt').mockResolvedValue({ ok: false, code: 1, stderr: 'E_UID_NONZERO' });
+    const toDir = vi.spyOn(_provisionSeam, 'installDoltToDir').mockImplementation(async () => {
+      resolved = true; // extracted dolt into the user dir → now resolvable
+      return { ok: true, code: 0, stderr: '' };
+    });
     const res = await provisionBeads({ adapter: fake as never, beadsDir: '/tmp/hb' });
+    expect(toDir).toHaveBeenCalledWith('/home/u/.local/bin');
+    expect(res.doltAvailable).toBe(true);
+    expect(res.initialized).toBe(true);
+  });
+
+  it('dolt missing AND both official + tarball fallback fail → doltAvailable:false, no init', async () => {
+    (_provisionSeam.doltOnPath as ReturnType<typeof vi.fn>).mockReturnValue(false);
+    vi.spyOn(_provisionSeam, 'installDolt').mockResolvedValue({ ok: false, code: 1, stderr: 'no sudo' });
+    const toDir = vi
+      .spyOn(_provisionSeam, 'installDoltToDir')
+      .mockResolvedValue({ ok: false, code: 1, stderr: 'no net' });
+    const res = await provisionBeads({ adapter: fake as never, beadsDir: '/tmp/hb' });
+    expect(toDir).toHaveBeenCalled(); // fallback was attempted before giving up
     expect(res.bdAvailable).toBe(true);
     expect(res.doltAvailable).toBe(false);
     expect(res.initialized).toBe(false);

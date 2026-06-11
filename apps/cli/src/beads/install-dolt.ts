@@ -97,6 +97,98 @@ export interface InstallResult {
   stderr: string;
 }
 
+/** Official Dolt release tarball/zip base (latest, resolved by GitHub redirect). */
+const DOLT_RELEASE_BASE = 'https://github.com/dolthub/dolt/releases/latest/download';
+
+/**
+ * Map Node's `process.platform`/`process.arch` to Dolt's release platform tuple
+ * (e.g. `linux-amd64`, `darwin-arm64`, `windows-amd64`). Returns null for an
+ * arch Dolt ships no prebuilt for (Windows arm64), so the caller can give up
+ * gracefully. Mirrors the official install.sh's `PLATFORM_TUPLE` logic.
+ */
+export function doltPlatformTuple(
+  platform: NodeJS.Platform,
+  arch: string,
+): string | null {
+  const os = platform === 'win32' ? 'windows' : platform === 'darwin' ? 'darwin' : 'linux';
+  const a = arch === 'x64' ? 'amd64' : arch === 'arm64' ? 'arm64' : null;
+  if (!a) return null;
+  if (os === 'windows' && a !== 'amd64') return null; // Dolt ships windows-amd64 only
+  return `${os}-${a}`;
+}
+
+/**
+ * No-sudo fallback strategy: download the official Dolt release archive and
+ * extract just the `dolt` binary into a USER-writable, on-PATH dir (e.g.
+ * `~/.local/bin` in a locked-down container without sudo / writable
+ * `/usr/local/bin`). Returns null when Dolt ships no artifact for this
+ * platform tuple. Pure (no spawn) so it's unit-testable per OS.
+ */
+export function resolveDoltTarballStrategy(
+  targetDir: string,
+  platform: NodeJS.Platform,
+  arch: string,
+): InstallStrategy | null {
+  const tuple = doltPlatformTuple(platform, arch);
+  if (!tuple) return null;
+
+  if (platform === 'win32') {
+    const url = `${DOLT_RELEASE_BASE}/dolt-${tuple}.zip`;
+    const script = [
+      `$ErrorActionPreference='Stop';`,
+      `New-Item -ItemType Directory -Force -Path '${targetDir}' | Out-Null;`,
+      `$u='${url}';`,
+      `$o="$env:TEMP\\dolt-cs.zip";`,
+      `Invoke-WebRequest -Uri $u -OutFile $o;`,
+      `$x="$env:TEMP\\dolt-cs";`,
+      `Expand-Archive -Path $o -DestinationPath $x -Force;`,
+      `Copy-Item "$x\\dolt-${tuple}\\bin\\dolt.exe" '${targetDir}\\dolt.exe' -Force`,
+    ].join(' ');
+    return {
+      command: 'powershell.exe',
+      args: ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', script],
+      description: `download dolt ${tuple} zip → ${targetDir} (no sudo)`,
+    };
+  }
+
+  // posix (linux/codespace + macOS): stream the tarball through tar, keeping
+  // only `dolt-<tuple>/bin/dolt` (strip the leading two path components).
+  const url = `${DOLT_RELEASE_BASE}/dolt-${tuple}.tar.gz`;
+  const cmd =
+    `mkdir -p "${targetDir}" && ` +
+    `curl -fsSL "${url}" | tar -xz -C "${targetDir}" --strip-components=2 "dolt-${tuple}/bin/dolt" && ` +
+    `chmod +x "${targetDir}/dolt"`;
+  return {
+    command: 'bash',
+    args: ['-c', cmd],
+    description: `download dolt ${tuple} tarball → ${targetDir} (no sudo)`,
+  };
+}
+
+/**
+ * Run the no-sudo tarball/zip fallback into `targetDir`. Strictly non-fatal;
+ * returns `ok:false` when Dolt ships no artifact for this platform or the
+ * download/extract fails. The caller then re-probes `ensureDoltResolvable`
+ * (which scans `~/.local/bin`) and degrades to "beads memory off this run".
+ */
+export async function installDoltToDir(
+  targetDir: string,
+  platform: NodeJS.Platform = process.platform,
+  arch: string = process.arch,
+): Promise<InstallResult> {
+  const strategy = resolveDoltTarballStrategy(targetDir, platform, arch);
+  if (!strategy) {
+    log.warn('beads', `no dolt prebuilt for ${platform}/${arch} — cannot fall back`);
+    return { ok: false, code: -1, stderr: `unsupported platform ${platform}/${arch}` };
+  }
+  log.info('beads', `dolt fallback: ${strategy.description}`);
+  const result = await _doltInstallSpawnSeam.run(strategy);
+  if (!result.ok) {
+    log.warn('beads', `dolt tarball fallback failed (code=${result.code}): ${result.stderr.slice(0, 200)}`);
+  }
+  return result;
+}
+
 /**
  * Filesystem/env seam for the PATH-resolution helper, isolated so tests drive
  * it without touching the real filesystem or `process.env`.

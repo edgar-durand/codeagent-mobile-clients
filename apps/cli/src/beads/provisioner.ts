@@ -5,7 +5,7 @@ import * as path from 'path';
 import type { AgentId } from '@codeagent/shared';
 import { BdAdapter, defaultBeadsHomeDir } from './bd-adapter';
 import { installBd } from './install-bd';
-import { installDolt, ensureDoltResolvable } from './install-dolt';
+import { installDolt, installDoltToDir, ensureDoltResolvable } from './install-dolt';
 import { ensureSharedServer } from './dolt-daemon';
 import { deriveProjectIdentity } from './project-key';
 import { prefixForProjectKey } from './project-prefix';
@@ -120,6 +120,8 @@ export interface ProvisionResult {
 export const _provisionSeam = {
   install: installBd,
   installDolt,
+  /** No-sudo fallback: extract the dolt tarball/zip into a user-writable dir. */
+  installDoltToDir,
   // Probe dolt on PATH AND auto-prepend a known install dir if found off-PATH
   // (codespace: official install.sh drops dolt in /usr/local/bin, which the
   // bundled-node CLI's PATH can omit — mirrors the bd-on-PATH symlink fix).
@@ -302,14 +304,27 @@ export async function provisionBeads(opts: ProvisionOptions = {}): Promise<Provi
   // the agent still runs (issues+memory just won't be available this session).
   if (!_provisionSeam.doltOnPath()) {
     log.info('beads', 'dolt binary missing — running per-OS dolt installer');
-    const di = await _provisionSeam.installDolt();
-    if (!di.ok) {
-      log.warn('beads', `dolt install failed (code=${di.code}) — beads memory disabled this run`);
-      return result;
+    await _provisionSeam.installDolt(); // official (brew / sudo curl / MSI), non-fatal
+  }
+  if (!_provisionSeam.doltOnPath()) {
+    // No-sudo fallback: the official install.sh needs root + /usr/local/bin,
+    // which a locked-down container may not allow. Extract the official
+    // tarball/zip into a user-writable, on-PATH dir (~/.local/bin in a
+    // codespace) — no sudo. ensureDoltResolvable then finds it there and
+    // prepends the dir to PATH.
+    const dir = _linkSeam.cliBinDir();
+    if (dir) {
+      try {
+        _linkSeam.ensureDir(dir);
+      } catch {
+        /* non-fatal — installDoltToDir's mkdir also creates it */
+      }
+      log.info('beads', `dolt still missing — no-sudo tarball fallback into ${dir}`);
+      await _provisionSeam.installDoltToDir(dir);
     }
   }
   if (!_provisionSeam.doltOnPath()) {
-    log.warn('beads', 'dolt still unavailable after install — beads memory disabled this run');
+    log.warn('beads', 'dolt unavailable after install + tarball fallback — beads memory disabled this run');
     return result;
   }
   result.doltAvailable = true;
