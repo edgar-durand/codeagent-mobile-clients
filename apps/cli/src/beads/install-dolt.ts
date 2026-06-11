@@ -222,18 +222,22 @@ function doltBinaryNames(platform: NodeJS.Platform): string[] {
  * symlink fix). `/opt/homebrew/bin` covers Apple-Silicon brew.
  */
 function knownDoltDirs(platform: NodeJS.Platform): string[] {
+  // Use the path flavour for the TARGET platform (not the host) so the helper
+  // behaves identically whether it runs on the platform or is unit-tested
+  // cross-OS (e.g. a Windows CI runner exercising the linux path).
+  const P = platform === 'win32' ? path.win32 : path.posix;
   const home = _doltPathSeam.homedir();
   if (platform === 'win32') {
     return [
       'C:\\Program Files\\Dolt\\bin',
-      home ? path.join(home, 'AppData', 'Local', 'Programs', 'dolt', 'bin') : '',
+      home ? P.join(home, 'AppData', 'Local', 'Programs', 'dolt', 'bin') : '',
     ].filter(Boolean);
   }
   return [
     '/usr/local/bin',
     '/opt/homebrew/bin',
-    home ? path.join(home, '.local', 'bin') : '',
-    home ? path.join(home, 'bin') : '',
+    home ? P.join(home, '.local', 'bin') : '',
+    home ? P.join(home, 'bin') : '',
   ].filter(Boolean);
 }
 
@@ -247,18 +251,21 @@ function knownDoltDirs(platform: NodeJS.Platform): string[] {
  * up it connects over TCP — but the provisioner does, to start that server.
  */
 export function ensureDoltResolvable(platform: NodeJS.Platform = process.platform): boolean {
-  const names = doltBinaryNames(platform);
+  // Path flavour + PATH separator for the TARGET platform (the arg), so probing
+  // is correct whether called on-platform or unit-tested cross-OS.
+  const P = platform === 'win32' ? path.win32 : path.posix;
   const delim = platform === 'win32' ? ';' : ':';
+  const names = doltBinaryNames(platform);
   const pathDirs = _doltPathSeam.getPath().split(delim).filter(Boolean);
   for (const dir of pathDirs) {
     for (const n of names) {
-      if (_doltPathSeam.exists(path.join(dir, n))) return true;
+      if (_doltPathSeam.exists(P.join(dir, n))) return true;
     }
   }
   // Not on PATH — scan known install dirs and prepend the first that has dolt.
   for (const dir of knownDoltDirs(platform)) {
     for (const n of names) {
-      if (_doltPathSeam.exists(path.join(dir, n))) {
+      if (_doltPathSeam.exists(P.join(dir, n))) {
         _doltPathSeam.setPath(`${dir}${delim}${_doltPathSeam.getPath()}`);
         log.info('beads', `dolt found in ${dir} (not on PATH) — prepended to process PATH`);
         return true;
