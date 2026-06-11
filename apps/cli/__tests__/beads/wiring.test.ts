@@ -6,7 +6,6 @@ import {
   type BeadsSessionContext,
 } from '../../src/beads/wiring';
 import type { StartedBeads } from '../../src/beads';
-import { defaultBeadsHomeDir } from '../../src/beads';
 import * as pairing from '../../src/services/pairing.service';
 
 const baseCtx: BeadsSessionContext = {
@@ -28,17 +27,19 @@ describe('provisionBeadsForStart — composition-root entry', () => {
     delete process.env.BEADS_DOLT_SHARED_SERVER;
   });
 
-  it('sets BEADS_DIR + BEADS_DOLT_SHARED_SERVER for the agent spawn SYNCHRONOUSLY (GAP 2)', () => {
+  it('exports shared-server mode + strips BEADS_DIR for the agent spawn SYNCHRONOUSLY (GAP 2)', () => {
     vi.spyOn(orchestrator, 'startBeads').mockResolvedValue(fakeStarted());
     vi.spyOn(pairing, 'postBeadsProvisioning').mockResolvedValue({ ok: true });
-    delete process.env.BEADS_DIR;
+    process.env.BEADS_DIR = '/stale/beads'; // a stale inherited value must be cleared
     delete process.env.BEADS_DOLT_SHARED_SERVER;
-    // NOT awaited — these must be set before the promise resolves so the agent
-    // (spawned later in the same synchronous tick) inherits them; its Bash tool
+    // NOT awaited — must be set before the promise resolves so the agent
+    // (spawned later in the same synchronous tick) inherits it; its Bash tool
     // + the `bd prime` SessionStart hook need shared-server mode to read memory.
+    // BEADS_DIR must be ABSENT — under shared-server the workspace resolves from
+    // the agent's cwd; a forced BEADS_DIR breaks it.
     void provisionBeadsForStart(baseCtx);
-    expect(process.env.BEADS_DIR).toBe(defaultBeadsHomeDir());
     expect(process.env.BEADS_DOLT_SHARED_SERVER).toBe('1');
+    expect(process.env.BEADS_DIR).toBeUndefined();
   });
 
   it('does NOT set BEADS_DIR / shared-server env when beads is killed (full no-op)', () => {
