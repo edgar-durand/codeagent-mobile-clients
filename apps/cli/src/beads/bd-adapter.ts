@@ -23,15 +23,19 @@ import { log } from '../services/logger';
  *      caller can offer the installer.
  *
  * All bd state lives in the home-level "brain" at `~/.beads`, addressed via the
- * `BEADS_DIR` env var bd reads. The spike (2026-06-09, `@beads/bd@1.0.5`)
- * disproved the `--global` plan: `--global` REQUIRES shared-server mode, which
- * in turn needs a standalone `dolt` binary on PATH (the bundled bd ships only
- * an embedded engine, not the dolt server). `bd init --global ... && bd create
- * --global` fails with "--global requires shared-server mode". The embedded
- * home brain (init at `~/.beads`, every command run with `BEADS_DIR=~/.beads`)
- * needs no external dolt, supports create/list/status/ready/export, and is the
- * verified P0 path (decision D2/§4.5). Tests pass an explicit `beadsDir` to
- * redirect off the real home brain.
+ * `BEADS_DIR` env var bd reads, and served by ONE shared `dolt sql-server`.
+ *
+ * CORRECTION (spec §3c, D15 — supersedes the 2026-06-09 spike): the npm-bundled
+ * `@beads/bd` is the SERVER-mode build, NOT an embedded engine. Every DB
+ * operation — `bd remember`/`memories`/`prime`(+memories) especially — needs
+ * the standalone `dolt` binary + a running `dolt sql-server`; the old "embedded
+ * home brain needs no external dolt" assumption was false and left memory
+ * silently dead. So `run()` sets `BEADS_DOLT_SHARED_SERVER=1` on every command
+ * (one shared server at `~/.beads/shared-server`, port 3308) and per-repo
+ * isolation is by per-project database name (the `prefix`), NOT `--global`
+ * (which we still never pass). The provisioner installs dolt + owns the server
+ * + inits the per-prefix DB. Tests pass an explicit `beadsDir` to redirect off
+ * the real home brain.
  */
 
 const BD_PACKAGE = '@beads/bd';
@@ -214,7 +218,12 @@ export class BdAdapter {
     }
     const env: NodeJS.ProcessEnv = { ...process.env };
     env.BEADS_DIR = this.opts.beadsDir ?? defaultBeadsHomeDir();
-    log.trace('beads', `bd ${args.join(' ')} (BEADS_DIR=${env.BEADS_DIR})`);
+    // Shared-server mode: the npm-bundled @beads/bd is the server-mode build,
+    // so every DB op (memory included) must target the shared dolt sql-server
+    // at ~/.beads/shared-server (port 3308). Without this, bd tries an embedded
+    // engine and fails "dolt is not installed". (Spec §3c, D15.)
+    env.BEADS_DOLT_SHARED_SERVER = '1';
+    log.trace('beads', `bd ${args.join(' ')} (BEADS_DIR=${env.BEADS_DIR}, shared-server)`);
     return _spawnSeam.run(binary, args, { cwd: this.opts.cwd, env });
   }
 
