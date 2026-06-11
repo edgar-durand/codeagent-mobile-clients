@@ -510,6 +510,24 @@ class AcpHistory {
   }
 
   /**
+   * Record an agent-initiated reply that has NO preceding user prompt
+   * — the first-pair onboarding welcome the agent sends on its own.
+   * Seeds the RECENT summary from the reply itself (so {@link flush}
+   * isn't skipped for lack of a user prompt) and appends ONLY the
+   * agent message: the background instruction that produced this reply
+   * must never surface as a user bubble on mobile.
+   */
+  appendAgentInitiatedReply(text: string): void {
+    const trimmed = text.trim();
+    if (trimmed.length === 0) return;
+    if (this.summary === null) {
+      const oneLine = trimmed.replace(/\s+/g, ' ');
+      this.summary = oneLine.length > 120 ? oneLine.slice(0, 117) + '…' : oneLine;
+    }
+    this.appendAgentReply(text);
+  }
+
+  /**
    * Push both the session list (RECENT entry) and the cumulative
    * conversation to the backend. Fire-and-forget — failures land in
    * the publisher's trace log; the chat stream keeps working.
@@ -715,13 +733,6 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
     done: true,
   });
 
-  // First-pair onboarding: right AFTER the welcome card, have the agent send
-  // the user's first message — a short CodeAgent Mobile intro — so the agent
-  // takes the initiative. Sent as a background prompt (the instructions are
-  // never shown as a user message; only the agent's streamed reply reaches the
-  // app). Once per paired session; skipped on reconnects/resumes. Non-fatal.
-  maybeSendOnboardingWelcome({ client, sessionId: opts.sessionId, cwd: opts.cwd });
-
   // Model catalog comes from the registered RuntimeStrategy — same
   // list mobile gets in the legacy PTY path so the model-picker UI
   // stays consistent even when ACP is on.
@@ -733,6 +744,22 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
   // sheet renders past conversations even though ACP has no on-disk
   // JSONL the legacy HistoryService can scan.
   const history = new AcpHistory(publisher, { agent: opts.agent, acpSessionId });
+
+  // First-pair onboarding: right after the welcome card, the agent sends the
+  // user's first message — a short CodeAgent Mobile intro — taking the
+  // initiative. Runs as a normal turn (clear + new_turn → streamed reply →
+  // done) AND records the reply into the conversation anchor via `history`, so
+  // it survives a SessionDetail opened AFTER the turn finished (the chat reads
+  // the anchor; SSE catchup deliberately drops historical text). The background
+  // instruction is never shown as a user message — only the agent's reply.
+  // Once per paired session; skipped on reconnects/resumes. Non-fatal.
+  maybeSendOnboardingWelcome({
+    client,
+    streaming,
+    history,
+    sessionId: opts.sessionId,
+    cwd: opts.cwd,
+  });
 
   // File-change tracking — same FileWatcherService + TurnFileAggregator
   // the legacy PTY path uses. The watcher tails chokidar over `cwd`

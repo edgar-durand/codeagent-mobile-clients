@@ -20,9 +20,32 @@ import * as os from 'os';
 import * as path from 'path';
 import { log } from '../../services/logger';
 
-/** Just the slice of AcpClient we need — keeps this unit easy to test. */
+/** Just the slices of the ACP runner we need — keeps this unit easy to test. */
 interface PromptCapable {
   prompt(input: string): Promise<unknown>;
+}
+
+/**
+ * The turn-streaming surface from `StreamingState`. We drive a real turn so
+ * mobile gets the `clear` + `new_turn` boundary (typing indicator) and a final
+ * `done:true`, and so we can snapshot the cumulative reply text to persist it.
+ */
+interface TurnStreaming {
+  beginTurn(): Promise<void>;
+  getCurrentText(): string;
+  closeAll(): Promise<void>;
+}
+
+/**
+ * The conversation-anchor surface from `AcpHistory`. Recording the reply here
+ * is what makes it survive a SessionDetail opened AFTER the turn completed —
+ * the chat hydrates from this anchor, not from SSE catchup (which drops
+ * historical text). `appendAgentInitiatedReply` records the reply with NO user
+ * bubble, so our background instruction is never shown.
+ */
+interface WelcomeHistory {
+  appendAgentInitiatedReply(text: string): void;
+  flush(): Promise<void>;
 }
 
 /**
@@ -74,12 +97,16 @@ export function buildOnboardingPrompt(cwd: string): string {
 
 /**
  * Send the onboarding welcome once for a freshly paired session. Strictly
- * non-fatal + fire-and-forget: the agent's reply streams back through the
- * normal session/update → publishOutput path. A failure (or the kill-switch /
- * an already-welcomed marker) just means no welcome this run.
+ * non-fatal + fire-and-forget: the turn streams back through the normal
+ * session/update → publishOutput path AND is recorded into the conversation
+ * anchor so it shows in chat even when SessionDetail is opened after the turn
+ * finishes. A failure (or the kill-switch / an already-welcomed marker) just
+ * means no welcome this run.
  */
 export function maybeSendOnboardingWelcome(opts: {
   client: PromptCapable;
+  streaming: TurnStreaming;
+  history: WelcomeHistory;
   sessionId: string;
   cwd: string;
 }): void {
@@ -95,12 +122,44 @@ export function maybeSendOnboardingWelcome(opts: {
     return;
   }
   log.info('acpRunner', `sending first-pair onboarding welcome for session=${opts.sessionId.slice(0, 8)}`);
-  // Fire-and-forget — the reply streams as the first agent message after the
-  // welcome card; the instruction text is never published as a user message.
-  void opts.client.prompt(buildOnboardingPrompt(opts.cwd)).catch((err: unknown) => {
+  // Fire-and-forget — must not block session startup. The turn runs + records
+  // the reply asynchronously; the instruction text is never a user message.
+  void runOnboardingTurn(opts).catch((err: unknown) => {
     log.warn(
       'acpRunner',
-      `onboarding welcome prompt failed (non-fatal): ${err instanceof Error ? err.message : String(err)}`,
+      `onboarding welcome turn failed (non-fatal): ${err instanceof Error ? err.message : String(err)}`,
     );
   });
+}
+
+/**
+ * Run the onboarding prompt as a real turn and persist the reply.
+ *
+ * Mirrors the runner's normal turn shape — `beginTurn()` (clear + new_turn →
+ * "Agent is typing…"), `client.prompt()`, snapshot `getCurrentText()`,
+ * `closeAll()` (one `done:true`; no select_prompt extraction — the welcome is
+ * conversational, not a menu) — then records the reply into the conversation
+ * anchor WITHOUT a user prompt. The anchor is what mobile's chat hydrates from
+ * on open, so this is what makes the welcome appear when the user navigates in
+ * after the turn already completed.
+ */
+async function runOnboardingTurn(opts: {
+  client: PromptCapable;
+  streaming: TurnStreaming;
+  history: WelcomeHistory;
+  cwd: string;
+}): Promise<void> {
+  const { client, streaming, history, cwd } = opts;
+  await streaming.beginTurn();
+  try {
+    await client.prompt(buildOnboardingPrompt(cwd));
+    const reply = streaming.getCurrentText();
+    await streaming.closeAll();
+    history.appendAgentInitiatedReply(reply);
+    await history.flush();
+  } catch (err) {
+    // Best-effort finalize so the chat doesn't sit on "Agent is typing…".
+    await streaming.closeAll().catch(() => undefined);
+    throw err;
+  }
 }
