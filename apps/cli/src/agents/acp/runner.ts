@@ -41,6 +41,7 @@ import { AcpClient } from './client';
 import type { AdapterSpec } from './adapters';
 import { AcpPublisher } from './publisher';
 import { buildAcpPromptBlocks } from './buildAcpPromptBlocks';
+import { maybeSendOnboardingWelcome } from './onboarding';
 import { formatPromptEchoLine } from './promptEcho';
 import {
   registerTerminalHandlers,
@@ -713,6 +714,13 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
     path: opts.cwd,
     done: true,
   });
+
+  // First-pair onboarding: right AFTER the welcome card, have the agent send
+  // the user's first message — a short CodeAgent Mobile intro — so the agent
+  // takes the initiative. Sent as a background prompt (the instructions are
+  // never shown as a user message; only the agent's streamed reply reaches the
+  // app). Once per paired session; skipped on reconnects/resumes. Non-fatal.
+  maybeSendOnboardingWelcome({ client, sessionId: opts.sessionId, cwd: opts.cwd });
 
   // Model catalog comes from the registered RuntimeStrategy — same
   // list mobile gets in the legacy PTY path so the model-picker UI
