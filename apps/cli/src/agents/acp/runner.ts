@@ -416,12 +416,41 @@ export interface AcpRunnerOptions {
    *  no bd / failed). Used only to route relayed `beads_action` commands;
    *  the runner never provisions or tears down beads. */
   getBeads?: () => StartedBeads | null;
+  /**
+   * AUTO mode: auto-approve every `session/request_permission` instead of
+   * round-tripping to a human. Set in headless contexts (a GitHub Codespace
+   * has no one at the phone to answer), so the agent never stalls a turn
+   * waiting on a permission decision that will never come — the robust,
+   * agent-agnostic equivalent of `claude --dangerously-skip-permissions`.
+   */
+  autoApprovePermissions?: boolean;
 }
 
 /** Auto-cancel a permission Promise after this ms. Matches the
  *  upstream Redis TTL on the awaiting-answer record so the SDK
  *  never blocks past the point where mobile could still answer. */
 const PERMISSION_TIMEOUT_MS = 5 * 60 * 1000;
+
+/** One ACP permission option (subset of the SDK's PermissionOption). */
+interface AcpPermissionOption {
+  optionId: string;
+  kind: string;
+}
+
+/**
+ * AUTO-mode option picker: choose the broadest "allow" grant (allow_always,
+ * else allow_once) from an ACP permission request's options, or null when the
+ * agent offers no allow option (then the caller falls back to interactive).
+ * Pure + exported so the auto-approve decision is unit-tested without spinning
+ * up a full ACP session.
+ */
+export function pickAllowOption<T extends AcpPermissionOption>(options: readonly T[]): T | null {
+  return (
+    options.find((o) => o.kind === 'allow_always') ??
+    options.find((o) => o.kind === 'allow_once') ??
+    null
+  );
+}
 
 /**
  * Accumulator for the conversation history mobile expects when the
@@ -594,6 +623,21 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
       }
     },
     onRequestPermission: async (request) => {
+      // AUTO mode (headless / codespace): no human at the phone to answer, so
+      // auto-pick an "allow" option instead of stalling the turn forever. Pick
+      // the broadest grant available (allow_always > allow_once). If the agent
+      // somehow offers no allow option, fall through to the interactive flow.
+      if (opts.autoApprovePermissions) {
+        const allow = pickAllowOption(request.options);
+        if (allow) {
+          log.info(
+            'acpRunner',
+            `AUTO mode — auto-approving permission (${allow.kind}) optionId=${allow.optionId}`,
+          );
+          return { outcome: { outcome: 'selected', optionId: allow.optionId } };
+        }
+        log.warn('acpRunner', 'AUTO mode — no allow option offered; falling back to interactive');
+      }
       const { event, optionIdByLabel } = mapPermissionRequest(request);
       await publisher.publishAwaitingAnswer(event);
       // Event-driven: register a Promise resolver in streaming
