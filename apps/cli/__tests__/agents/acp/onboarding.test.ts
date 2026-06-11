@@ -14,7 +14,14 @@ describe('buildOnboardingPrompt', () => {
     expect(p).toMatch(/Beads on Dolt/i); // native memory / issue tracker pitch
     expect(p).toMatch(/CodeAgent Mobile/);
     expect(p).toMatch(/do NOT run any tools|no tools/i); // keep it instant
-    expect(p).toMatch(/~110 words|under ~110/); // keep it short
+    expect(p).toMatch(/~160 words|aim ~160/); // keep it tight
+    // Core features get visibility (not just a file viewer).
+    expect(p).toMatch(/Monaco/);
+    expect(p).toMatch(/Smart Composer/);
+    expect(p).toMatch(/Team Spaces/);
+    // Collaboration / feedback channels.
+    expect(p).toContain('https://github.com/edgar-durand/codeagent-mobile-clients/issues');
+    expect(p).toContain('https://discord.gg/ADMKwGAB');
   });
 
   it('falls back to a generic project label when cwd has no basename', () => {
