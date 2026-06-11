@@ -51,8 +51,11 @@ export async function startBeads(opts: StartBeadsOptions): Promise<StartedBeads 
   // export.auto). When bd can't be made available, provisioning reports
   // bdAvailable:false and we run without a watcher this session.
   const provision = await provisionBeads({ cwd: opts.cwd, adapter, agents: opts.agents });
-  if (!provision.bdAvailable || !provision.initialized) {
-    log.warn('beads', 'home brain not provisioned — watcher not started this run');
+  // Need bd + an initialized workspace + a LIVE shared dolt sql-server: the
+  // watcher's `bd ready`/`bd list` hit the server, so without it they'd just
+  // error. Any missing piece → run without a watcher this session (non-fatal).
+  if (!provision.bdAvailable || !provision.initialized || !provision.serverUp) {
+    log.warn('beads', 'beads not fully provisioned — watcher not started this run');
     return null;
   }
 
