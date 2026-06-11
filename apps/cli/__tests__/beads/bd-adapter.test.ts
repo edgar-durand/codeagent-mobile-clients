@@ -91,6 +91,16 @@ describe('BdAdapter home-brain wiring (BEADS_DIR, no --global)', () => {
     expect(opts.env.BEADS_DIR).toBe(adapter.defaultBeadsHomeDir());
   });
 
+  it('enables shared-server mode (BEADS_DOLT_SHARED_SERVER=1) on every command', async () => {
+    // The npm-bundled bd is the server-mode build; memory ops need the shared
+    // dolt sql-server, so every command must run in shared-server mode (D15).
+    const spy = vi.spyOn(_spawnSeam, 'run').mockResolvedValue(ok('[]'));
+    const a = new BdAdapter({ binaryPath: '/bd', beadsDir: '/tmp/test-beads' });
+    await a.run(['status', '--json']);
+    const [, , opts] = spy.mock.calls[0];
+    expect(opts.env.BEADS_DOLT_SHARED_SERVER).toBe('1');
+  });
+
   it('returns an error result when no binary resolves', async () => {
     vi.spyOn(_resolveSeam, 'resolveBundled').mockReturnValue(null);
     vi.spyOn(_resolveSeam, 'resolveOnPath').mockReturnValue(null);

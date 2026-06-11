@@ -5,6 +5,10 @@ import * as path from 'path';
 import type { AgentId } from '@codeagent/shared';
 import { BdAdapter, defaultBeadsHomeDir } from './bd-adapter';
 import { installBd } from './install-bd';
+import { installDolt, installDoltToDir, ensureDoltResolvable } from './install-dolt';
+import { ensureSharedServer } from './dolt-daemon';
+import { deriveProjectIdentity } from './project-key';
+import { prefixForProjectKey } from './project-prefix';
 import { log } from '../services/logger';
 
 /**
@@ -90,6 +94,12 @@ export interface ProvisionOptions {
 export interface ProvisionResult {
   /** bd was resolvable (bundled / PATH / freshly installed). */
   bdAvailable: boolean;
+  /** `dolt` is resolvable on PATH (required for memory; D15). */
+  doltAvailable: boolean;
+  /** The shared `dolt sql-server` is up after provisioning (D8/D15). */
+  serverUp: boolean;
+  /** The per-project shared-server database name we init'd / verified (D16). */
+  prefix: string | null;
   /** The home brain exists (was already there, or freshly initialized). */
   initialized: boolean;
   /** `issues.jsonl` auto-export is enabled. */
@@ -104,12 +114,20 @@ export interface ProvisionResult {
 }
 
 /**
- * Seams so tests can drive the install fallback + the on-disk init probe
- * without touching the real `~/.beads` or spawning a process.
+ * Seams so tests can drive the install fallbacks + the daemon + the project
+ * identity without touching the real `~/.beads`, installing dolt, or spawning.
  */
 export const _provisionSeam = {
   install: installBd,
-  homeBrainInitialized,
+  installDolt,
+  /** No-sudo fallback: extract the dolt tarball/zip into a user-writable dir. */
+  installDoltToDir,
+  // Probe dolt on PATH AND auto-prepend a known install dir if found off-PATH
+  // (codespace: official install.sh drops dolt in /usr/local/bin, which the
+  // bundled-node CLI's PATH can omit — mirrors the bd-on-PATH symlink fix).
+  doltOnPath: ensureDoltResolvable,
+  ensureSharedServer,
+  deriveProjectIdentity,
   /** GAP 1 — symlink the resolved bd onto PATH for the agent's own shell. */
   linkBdOntoPath,
   /** Silence bd's `beads.role not configured` warning. */
@@ -229,25 +247,14 @@ function setGitBeadsRole(): void {
   });
 }
 
-/**
- * The home brain is initialized iff `<beadsDir>/embeddeddolt` exists — the
- * embedded Dolt engine dir `bd init` creates. Cheap fs probe (no spawn), and
- * reliable because `bd where` / `bd status` exit 0 even when uninitialized.
- */
-function homeBrainInitialized(beadsDir: string): boolean {
-  try {
-    return fs.statSync(path.join(beadsDir, 'embeddeddolt')).isDirectory();
-  } catch {
-    return false;
-  }
-}
-
 export async function provisionBeads(opts: ProvisionOptions = {}): Promise<ProvisionResult> {
   const bd = opts.adapter ?? new BdAdapter({ cwd: opts.cwd, beadsDir: opts.beadsDir });
-  const beadsDir = opts.beadsDir ?? defaultBeadsHomeDir();
 
   const result: ProvisionResult = {
     bdAvailable: false,
+    doltAvailable: false,
+    serverUp: false,
+    prefix: null,
     initialized: false,
     exportEnabled: false,
     agentsWired: [],
@@ -290,31 +297,83 @@ export async function provisionBeads(opts: ProvisionOptions = {}): Promise<Provi
     log.trace('beads', `git config beads.role failed (non-fatal): ${(err as Error).message}`);
   }
 
-  // Step 2 — init the home brain (idempotent: skip when already present).
-  if (_provisionSeam.homeBrainInitialized(beadsDir)) {
-    log.trace('beads', `home brain already initialized at ${beadsDir}`);
-    result.initialized = true;
-  } else {
-    log.info('beads', `initializing home brain at ${beadsDir}`);
-    const init = await bd.run(['init', '--skip-agents', '--skip-hooks', '--non-interactive']);
-    if (init.code !== 0) {
-      log.warn('beads', `bd init failed (code=${init.code}): ${init.stderr.slice(0, 200)}`);
-      return result;
+  // Step 2 — ensure `dolt`. The npm-bundled bd is the server-mode build, so
+  // memory ops (remember/memories/prime) need the standalone dolt binary +
+  // server (D15). On a missing binary, run the consented per-OS installer and
+  // re-probe. Without dolt, beads can't deliver memory — bail non-fatally so
+  // the agent still runs (issues+memory just won't be available this session).
+  if (!_provisionSeam.doltOnPath()) {
+    log.info('beads', 'dolt binary missing — running per-OS dolt installer');
+    await _provisionSeam.installDolt(); // official (brew / sudo curl / MSI), non-fatal
+  }
+  if (!_provisionSeam.doltOnPath()) {
+    // No-sudo fallback: the official install.sh needs root + /usr/local/bin,
+    // which a locked-down container may not allow. Extract the official
+    // tarball/zip into a user-writable, on-PATH dir (~/.local/bin in a
+    // codespace) — no sudo. ensureDoltResolvable then finds it there and
+    // prepends the dir to PATH.
+    const dir = _linkSeam.cliBinDir();
+    if (dir) {
+      try {
+        _linkSeam.ensureDir(dir);
+      } catch {
+        /* non-fatal — installDoltToDir's mkdir also creates it */
+      }
+      log.info('beads', `dolt still missing — no-sudo tarball fallback into ${dir}`);
+      await _provisionSeam.installDoltToDir(dir);
     }
-    result.initialized = true;
+  }
+  if (!_provisionSeam.doltOnPath()) {
+    log.warn('beads', 'dolt unavailable after install + tarball fallback — beads memory disabled this run');
+    return result;
+  }
+  result.doltAvailable = true;
+
+  // Step 3 — ensure the shared dolt sql-server is up (D8). Reuse-if-running,
+  // else start detached. Without it, every DB/memory op fails connection-refused.
+  const server = await _provisionSeam.ensureSharedServer(bd);
+  result.serverUp = server.up;
+  if (!server.up) {
+    log.warn('beads', 'shared dolt sql-server not up — beads disabled this run');
+    return result;
   }
 
-  // Step 3 — enable the issues.jsonl auto-export change feed (idempotent).
+  // Step 4 — init/verify the per-project prefix DB on the shared server (D16).
+  // Per-repo isolation = unique prefix (database name). Always pass our own
+  // `-p <prefix>` so we never inherit a foreign `dolt_database` from a stray
+  // global config (D17). bd init is idempotent: an already-initialized prefix
+  // aborts with an "already initialized" notice, which we treat as success.
+  const { projectKey } = _provisionSeam.deriveProjectIdentity(opts.cwd);
+  const prefix = prefixForProjectKey(projectKey);
+  result.prefix = prefix;
+  log.info('beads', `initializing shared-server prefix DB '${prefix}' (projectKey=${projectKey})`);
+  const init = await bd.run([
+    'init',
+    '-p',
+    prefix,
+    '--shared-server',
+    '--skip-agents',
+    '--skip-hooks',
+    '--non-interactive',
+  ]);
+  const alreadyInit = /already initialized|already exists/i.test(init.stderr + init.stdout);
+  if (init.code !== 0 && !alreadyInit) {
+    log.warn('beads', `bd init -p ${prefix} failed (code=${init.code}): ${init.stderr.slice(0, 200)}`);
+    return result;
+  }
+  result.initialized = true;
+
+  // Step 5 — enable the issues.jsonl auto-export change feed (idempotent).
   const exp = await bd.run(['config', 'set', 'export.auto', 'true']);
   result.exportEnabled = exp.code === 0;
 
-  // Step 4 — wire each session agent natively (D12 — REVISED). `--check`-gated
+  // Step 6 — wire each session agent natively (D12 — REVISED). `--check`-gated
   // + idempotent + strictly non-fatal (a throw / non-zero never aborts).
   result.agentsWired = await setupAgents(bd, opts.agents ?? []);
 
   log.info(
     'beads',
-    `provision done initialized=${result.initialized} export=${result.exportEnabled} agentsWired=[${result.agentsWired.join(',')}]`,
+    `provision done dolt=${result.doltAvailable} server=${result.serverUp} prefix=${result.prefix} initialized=${result.initialized} export=${result.exportEnabled} agentsWired=[${result.agentsWired.join(',')}]`,
   );
   return result;
 }

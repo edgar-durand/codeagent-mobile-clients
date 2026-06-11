@@ -43,9 +43,19 @@ describe('provisionBeads', () => {
   let fake: FakeBd;
   beforeEach(() => {
     fake = new FakeBd();
-    // Default: the home brain is NOT yet initialized (no embeddeddolt dir).
-    vi.spyOn(_provisionSeam, 'homeBrainInitialized').mockReturnValue(false);
     vi.spyOn(_provisionSeam, 'install').mockResolvedValue({ ok: true, code: 0, stderr: '' });
+    // Default happy path: dolt is on PATH, the shared server is already up, and
+    // the project resolves to a fixed key (→ a deterministic prefix).
+    vi.spyOn(_provisionSeam, 'doltOnPath').mockReturnValue(true);
+    vi.spyOn(_provisionSeam, 'installDolt').mockResolvedValue({ ok: true, code: 0, stderr: '' });
+    vi.spyOn(_provisionSeam, 'installDoltToDir').mockResolvedValue({ ok: true, code: 0, stderr: '' });
+    vi.spyOn(_linkSeam, 'cliBinDir').mockReturnValue('/home/u/.local/bin');
+    vi.spyOn(_linkSeam, 'ensureDir').mockImplementation(() => undefined);
+    vi.spyOn(_provisionSeam, 'ensureSharedServer').mockResolvedValue({ up: true, started: false });
+    vi.spyOn(_provisionSeam, 'deriveProjectIdentity').mockReturnValue({
+      projectKey: 'github.com/edgar-durand/codeagent-mobile',
+      projectLabel: 'codeagent-mobile',
+    });
     // Symlink the resolved bd onto PATH — mocked out so unit runs never touch
     // the real filesystem. Idempotency is covered in its own describe block.
     vi.spyOn(_provisionSeam, 'linkBdOntoPath').mockImplementation(() => undefined);
@@ -76,23 +86,81 @@ describe('provisionBeads', () => {
     expect(res.exportEnabled).toBe(true);
   });
 
-  it('cold start: inits the home brain (skip-agents/hooks, no --global) + enables export.auto', async () => {
+  it('cold start: inits the per-project prefix DB (-p, --shared-server, no --global) + export.auto', async () => {
     const res = await provisionBeads({ adapter: fake as never, beadsDir: '/tmp/hb' });
 
     expect(res.bdAvailable).toBe(true);
+    expect(res.doltAvailable).toBe(true);
+    expect(res.serverUp).toBe(true);
     expect(res.initialized).toBe(true);
     expect(res.exportEnabled).toBe(true);
+    // Prefix derived from the (mocked) projectKey — stable + bd-safe.
+    expect(res.prefix).toMatch(/^codeagent_mobile_[0-9a-f]{8}$/);
 
-    // The verified init invocation — the home brain init itself never uses
-    // --global (that's the setup step, step 4).
+    // The init invocation: D17 — ALWAYS our explicit `-p <prefix>` so we never
+    // inherit a foreign dolt_database; shared-server; never --global.
     const init = fake.calls.find((c) => c[0] === 'init');
     expect(init).toBeDefined();
+    expect(init).toContain('-p');
+    expect(init).toContain(res.prefix);
+    expect(init).toContain('--shared-server');
     expect(init).toContain('--skip-agents');
     expect(init).toContain('--skip-hooks');
     expect(init).toContain('--non-interactive');
     expect(init).not.toContain('--global');
 
     expect(ran(fake, 'config set export.auto true')).toBe(1);
+  });
+
+  it('dolt missing → runs the per-OS dolt installer, then proceeds', async () => {
+    let installed = false;
+    (_provisionSeam.doltOnPath as ReturnType<typeof vi.fn>).mockImplementation(() => installed);
+    const di = vi.spyOn(_provisionSeam, 'installDolt').mockImplementation(async () => {
+      installed = true; // installer made dolt resolvable
+      return { ok: true, code: 0, stderr: '' };
+    });
+    const res = await provisionBeads({ adapter: fake as never, beadsDir: '/tmp/hb' });
+    expect(di).toHaveBeenCalledTimes(1);
+    expect(res.doltAvailable).toBe(true);
+    expect(res.initialized).toBe(true);
+  });
+
+  it('no sudo: official install does not resolve → tarball fallback into ~/.local/bin succeeds', async () => {
+    // dolt never on PATH until the tarball fallback "installs" it.
+    let resolved = false;
+    (_provisionSeam.doltOnPath as ReturnType<typeof vi.fn>).mockImplementation(() => resolved);
+    vi.spyOn(_provisionSeam, 'installDolt').mockResolvedValue({ ok: false, code: 1, stderr: 'E_UID_NONZERO' });
+    const toDir = vi.spyOn(_provisionSeam, 'installDoltToDir').mockImplementation(async () => {
+      resolved = true; // extracted dolt into the user dir → now resolvable
+      return { ok: true, code: 0, stderr: '' };
+    });
+    const res = await provisionBeads({ adapter: fake as never, beadsDir: '/tmp/hb' });
+    expect(toDir).toHaveBeenCalledWith('/home/u/.local/bin');
+    expect(res.doltAvailable).toBe(true);
+    expect(res.initialized).toBe(true);
+  });
+
+  it('dolt missing AND both official + tarball fallback fail → doltAvailable:false, no init', async () => {
+    (_provisionSeam.doltOnPath as ReturnType<typeof vi.fn>).mockReturnValue(false);
+    vi.spyOn(_provisionSeam, 'installDolt').mockResolvedValue({ ok: false, code: 1, stderr: 'no sudo' });
+    const toDir = vi
+      .spyOn(_provisionSeam, 'installDoltToDir')
+      .mockResolvedValue({ ok: false, code: 1, stderr: 'no net' });
+    const res = await provisionBeads({ adapter: fake as never, beadsDir: '/tmp/hb' });
+    expect(toDir).toHaveBeenCalled(); // fallback was attempted before giving up
+    expect(res.bdAvailable).toBe(true);
+    expect(res.doltAvailable).toBe(false);
+    expect(res.initialized).toBe(false);
+    expect(fake.calls.some((c) => c[0] === 'init')).toBe(false);
+  });
+
+  it('shared server cannot start → serverUp:false, no init, non-fatal', async () => {
+    vi.spyOn(_provisionSeam, 'ensureSharedServer').mockResolvedValue({ up: false, started: false });
+    const res = await provisionBeads({ adapter: fake as never, beadsDir: '/tmp/hb' });
+    expect(res.doltAvailable).toBe(true);
+    expect(res.serverUp).toBe(false);
+    expect(res.initialized).toBe(false);
+    expect(fake.calls.some((c) => c[0] === 'init')).toBe(false);
   });
 
   it('runs `bd setup <recipe> --global` for each session agent — gated by --check (D12 — REVISED)', async () => {
@@ -192,13 +260,20 @@ describe('provisionBeads', () => {
     expect(res.agentsWired).toEqual([]);
   });
 
-  it('idempotent: when the home brain already exists, it does NOT re-init', async () => {
-    vi.spyOn(_provisionSeam, 'homeBrainInitialized').mockReturnValue(true);
+  it('idempotent: an already-initialized prefix DB ("already initialized") is treated as success', async () => {
+    // bd init aborts with a non-zero code + "already initialized" notice when
+    // the prefix DB already exists on the shared server — that's success, not
+    // failure, so provisioning continues to export.auto + setup.
+    fake.run = async (args: string[]): Promise<BdRunResult> => {
+      fake.calls.push(args);
+      if (args[0] === 'init') {
+        return { code: 1, stdout: '', stderr: 'This workspace is already initialized.' };
+      }
+      return { code: 0, stdout: '', stderr: '' };
+    };
     const res = await provisionBeads({ adapter: fake as never, beadsDir: '/tmp/hb' });
 
-    expect(res.initialized).toBe(true); // already there
-    expect(fake.calls.some((c) => c[0] === 'init')).toBe(false); // never re-init
-    // export.auto is still (idempotently) asserted.
+    expect(res.initialized).toBe(true); // already-init notice → treated as success
     expect(ran(fake, 'config set export.auto true')).toBe(1);
   });
 
