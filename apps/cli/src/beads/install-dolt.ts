@@ -279,21 +279,54 @@ export const _doltInstallSpawnSeam = {
   run: _defaultDoltInstallSpawn,
 };
 
+/**
+ * Hard ceiling on a dolt install. The dolt binary is ~127 MB, so allow a
+ * generous window for a slow codespace network, but NEVER unbounded — a hung
+ * install must not stall the (already fire-and-forget) provisioner forever.
+ */
+const DOLT_INSTALL_TIMEOUT_MS = 120_000;
+
 function _defaultDoltInstallSpawn(strategy: InstallStrategy): Promise<InstallResult> {
   return new Promise((resolve) => {
+    let settled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const finish = (r: InstallResult) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      resolve(r);
+    };
     let proc: ReturnType<typeof spawn>;
     try {
-      proc = spawn(strategy.command, strategy.args, { env: process.env });
+      // stdin = 'ignore' so a sudo/winget password or confirmation prompt
+      // fails fast instead of blocking forever on a tty that isn't there
+      // (graceful degradation — a locked-down env returns non-fatal, not hang).
+      proc = spawn(strategy.command, strategy.args, {
+        env: process.env,
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
     } catch (err) {
-      resolve({ ok: false, code: -1, stderr: (err as Error).message });
+      finish({ ok: false, code: -1, stderr: (err as Error).message });
       return;
     }
+    timer = setTimeout(() => {
+      try {
+        proc.kill('SIGKILL');
+      } catch {
+        /* already gone */
+      }
+      finish({
+        ok: false,
+        code: -1,
+        stderr: `dolt install timed out after ${DOLT_INSTALL_TIMEOUT_MS}ms`,
+      });
+    }, DOLT_INSTALL_TIMEOUT_MS);
     let stderr = '';
     proc.stderr?.on('data', (c: Buffer) => {
       stderr += c.toString();
     });
-    proc.on('error', (err) => resolve({ ok: false, code: -1, stderr: err.message }));
-    proc.on('close', (code) => resolve({ ok: code === 0, code: code ?? -1, stderr }));
+    proc.on('error', (err) => finish({ ok: false, code: -1, stderr: err.message }));
+    proc.on('close', (code) => finish({ ok: code === 0, code: code ?? -1, stderr }));
   });
 }
 

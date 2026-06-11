@@ -154,13 +154,31 @@ describe('provisionBeads', () => {
     expect(fake.calls.some((c) => c[0] === 'init')).toBe(false);
   });
 
-  it('shared server cannot start → serverUp:false, no init, non-fatal', async () => {
+  it('inits the workspace BEFORE starting the server (codespace ordering fix)', async () => {
+    // bd dolt start fails "no active beads workspace found" if no workspace
+    // exists yet — so init MUST precede ensureSharedServer (the v2.36.0 bug).
+    let initBeforeServer = false;
+    vi.spyOn(_provisionSeam, 'ensureSharedServer').mockImplementation(async () => {
+      initBeforeServer = fake.calls.some((c) => c[0] === 'init');
+      return { up: true, started: true };
+    });
+    await provisionBeads({ adapter: fake as never, beadsDir: '/tmp/hb' });
+    expect(initBeforeServer).toBe(true);
+  });
+
+  it('shared server cannot start → init ran first, serverUp:false, bail before export/agents', async () => {
     vi.spyOn(_provisionSeam, 'ensureSharedServer').mockResolvedValue({ up: false, started: false });
-    const res = await provisionBeads({ adapter: fake as never, beadsDir: '/tmp/hb' });
+    const res = await provisionBeads({
+      adapter: fake as never,
+      beadsDir: '/tmp/hb',
+      agents: ['claude'],
+    });
     expect(res.doltAvailable).toBe(true);
+    expect(res.initialized).toBe(true); // init runs BEFORE server start (the fix)
     expect(res.serverUp).toBe(false);
-    expect(res.initialized).toBe(false);
-    expect(fake.calls.some((c) => c[0] === 'init')).toBe(false);
+    expect(res.exportEnabled).toBe(false); // bailed before export
+    expect(res.agentsWired).toEqual([]); // bailed before agent wiring
+    expect(fake.calls.some((c) => c[0] === 'init')).toBe(true);
   });
 
   it('runs `bd setup <recipe> --global` for each session agent — gated by --check (D12 — REVISED)', async () => {

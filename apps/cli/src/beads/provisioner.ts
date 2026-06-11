@@ -329,20 +329,15 @@ export async function provisionBeads(opts: ProvisionOptions = {}): Promise<Provi
   }
   result.doltAvailable = true;
 
-  // Step 3 — ensure the shared dolt sql-server is up (D8). Reuse-if-running,
-  // else start detached. Without it, every DB/memory op fails connection-refused.
-  const server = await _provisionSeam.ensureSharedServer(bd);
-  result.serverUp = server.up;
-  if (!server.up) {
-    log.warn('beads', 'shared dolt sql-server not up — beads disabled this run');
-    return result;
-  }
-
-  // Step 4 — init/verify the per-project prefix DB on the shared server (D16).
-  // Per-repo isolation = unique prefix (database name). Always pass our own
-  // `-p <prefix>` so we never inherit a foreign `dolt_database` from a stray
-  // global config (D17). bd init is idempotent: an already-initialized prefix
-  // aborts with an "already initialized" notice, which we treat as success.
+  // Step 3 — init/verify the per-project prefix DB / workspace (D16). This MUST
+  // run BEFORE starting the server: `bd dolt start` fails "no active beads
+  // workspace found" with no initialized workspace (verified live in a
+  // codespace — the v2.36.0 ordering bug). Per-repo isolation = unique prefix
+  // (database name). Always pass our own `-p <prefix>` so we never inherit a
+  // foreign `dolt_database` from a stray global config (D17). bd init is
+  // idempotent: an already-initialized prefix returns an "already initialized"
+  // notice (non-zero), which we treat as success. The actual Dolt database is
+  // created lazily once the server is up + first written (verified).
   const { projectKey } = _provisionSeam.deriveProjectIdentity(opts.cwd);
   const prefix = prefixForProjectKey(projectKey);
   result.prefix = prefix;
@@ -362,6 +357,16 @@ export async function provisionBeads(opts: ProvisionOptions = {}): Promise<Provi
     return result;
   }
   result.initialized = true;
+
+  // Step 4 — ensure the shared dolt sql-server is up (D8), now that a workspace
+  // exists for it. Reuse-if-running, else start detached. Without it, every
+  // DB/memory op fails connection-refused.
+  const server = await _provisionSeam.ensureSharedServer(bd);
+  result.serverUp = server.up;
+  if (!server.up) {
+    log.warn('beads', 'shared dolt sql-server not up — beads disabled this run');
+    return result;
+  }
 
   // Step 5 — enable the issues.jsonl auto-export change feed (idempotent).
   const exp = await bd.run(['config', 'set', 'export.auto', 'true']);
