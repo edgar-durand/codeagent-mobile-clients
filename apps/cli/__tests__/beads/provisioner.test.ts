@@ -52,6 +52,7 @@ describe('provisionBeads', () => {
     vi.spyOn(_linkSeam, 'cliBinDir').mockReturnValue('/home/u/.local/bin');
     vi.spyOn(_linkSeam, 'ensureDir').mockImplementation(() => undefined);
     vi.spyOn(_provisionSeam, 'ensureSharedServer').mockResolvedValue({ up: true, started: false });
+    vi.spyOn(_provisionSeam, 'sleep').mockResolvedValue(undefined); // instant backoff in tests
     vi.spyOn(_provisionSeam, 'deriveProjectIdentity').mockReturnValue({
       projectKey: 'github.com/edgar-durand/codeagent-mobile',
       projectLabel: 'codeagent-mobile',
@@ -206,6 +207,45 @@ describe('provisionBeads', () => {
     const setupIdx = fake.calls.findIndex((c) => c[0] === 'setup');
     expect(initIdx).toBeGreaterThanOrEqual(0);
     expect(setupIdx).toBeGreaterThan(initIdx);
+  });
+
+  it('retries bd setup on a transient spawn failure (code -1 / ENOENT) then succeeds', async () => {
+    // First `setup claude --global` (no --check) spawn-fails (-1, the postinstall
+    // rename window); the retry succeeds → claude ends up wired.
+    fake.setCode('setup claude --global --check', 1); // not yet installed
+    let setupCalls = 0;
+    const realRun = fake.run.bind(fake);
+    vi.spyOn(fake, 'run').mockImplementation(async (args: string[]) => {
+      if (args.join(' ') === 'setup claude --global') {
+        setupCalls += 1;
+        return setupCalls === 1
+          ? { code: -1, stdout: '', stderr: 'spawn .../@beads/bd/bin/bd ENOENT' }
+          : { code: 0, stdout: '', stderr: '' };
+      }
+      return realRun(args);
+    });
+
+    const res = await provisionBeads({
+      adapter: fake as never,
+      beadsDir: '/tmp/hb',
+      agents: ['claude'],
+    });
+
+    expect(setupCalls).toBe(2); // failed once, retried once
+    expect(res.agentsWired).toContain('claude');
+  });
+
+  it('does NOT retry bd setup on a genuine non-(-1) failure', async () => {
+    fake.setCode('setup claude --global --check', 1);
+    fake.setCode('setup claude --global', 7); // real error, not a spawn glitch
+    const res = await provisionBeads({
+      adapter: fake as never,
+      beadsDir: '/tmp/hb',
+      agents: ['claude'],
+    });
+    // Exactly ONE real setup attempt (the bare `setup claude --global`, not --check) — no retry.
+    expect(fake.calls.filter((c) => c.join(' ') === 'setup claude --global')).toHaveLength(1);
+    expect(res.agentsWired).toEqual([]);
   });
 
   it('idempotent: when `--check` reports installed (exit 0), it does NOT re-run setup', async () => {
