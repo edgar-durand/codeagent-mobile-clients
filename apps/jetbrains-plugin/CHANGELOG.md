@@ -4,6 +4,23 @@ All notable changes to the CodeAgent-Mobile JetBrains plugin are documented here
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.36.0] — 2026-06-11
+
+### Added
+
+- **cli:** Per-OS dolt installer (install-dolt.ts)
+- **cli:** Stable bd-safe prefix from projectKey (D16)
+- **cli:** Shared dolt sql-server lifecycle (ensureSharedServer, D8)
+- **cli:** Adapter runs in shared-server mode; correct stale embedded doc
+- **cli:** Provision dolt + shared-server + per-prefix DB (D15-D17)
+- **cli:** Export BEADS_DOLT_SHARED_SERVER to the agent (GAP 2, D15)
+- **cli:** Harden dolt PATH resolution for codespaces
+- **cli:** No-sudo dolt fallback (tarball -> ~/.local/bin) for locked-down containers
+
+### Fixed
+
+- **cli:** Make dolt PATH resolution host-independent (Windows CI)
+
 ## [2.35.9] — 2026-06-10
 
 ### Fixed
