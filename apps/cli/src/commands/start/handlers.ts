@@ -808,6 +808,43 @@ const requestPreviewDetectH: CommandHandler = (ctx) => {
   })();
 };
 
+let previewPrewarmStarted = false;
+
+/**
+ * Proactively run project-type detection ONCE after the session is up and
+ * cache it to `.codeam/preview.json`, so the user's FIRST "Start Preview"
+ * skips the ~50 s "Detecting project…" step and lands straight on the
+ * confirm sheet (the on-demand `request_preview_detect` handler then reads
+ * the cache instead of invoking the agent).
+ *
+ * Uses the SAME headless `claude -p` one-shot the on-demand path uses — a
+ * separate short-lived child process, safe alongside the live interactive
+ * session (the agent runtime's `generateOneShot` already runs this way for
+ * AI summaries). Idempotent (cache + once-guard) and strictly non-fatal:
+ * a failure just means the first preview pays the detect cost, as today.
+ */
+export function prewarmPreviewDetection(runtime: RuntimeStrategy): void {
+  if (previewPrewarmStarted) return;
+  previewPrewarmStarted = true;
+  if (typeof runtime.generateOneShot !== 'function') return;
+  void (async () => {
+    try {
+      const cwd = process.cwd();
+      if (await readPreviewConfig(cwd)) return; // already pinned/cached — nothing to do
+      const raw = await runtime.generateOneShot!(PREVIEW_DETECT_PROMPT).catch(() => null);
+      const detection = safeParseDetection(raw);
+      if (!detection || detection.framework === 'unsupported') return;
+      await writePreviewConfig(cwd, detection);
+      log.info(
+        'preview',
+        `prewarm: cached detection (${detection.framework} on :${detection.port})`,
+      );
+    } catch (err) {
+      log.info('preview', `prewarm: skipped (${String(err)})`);
+    }
+  })();
+}
+
 /**
  * `npx <binary>` is unreliable as a long-running spawn target. npm 11's
  * `npm exec` (the npx wrapper) fork-spawns the resolved binary and the

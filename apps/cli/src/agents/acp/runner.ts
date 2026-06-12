@@ -52,6 +52,7 @@ import { extractSelectPrompt } from './selectPromptExtractor';
 import {
   handlers as legacyHandlers,
   dispatchCommand as legacyDispatchCommand,
+  prewarmPreviewDetection,
   type HandlerContext,
 } from '../../commands/start/handlers';
 import type { RuntimeStrategy } from '../strategy';
@@ -856,8 +857,16 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
   );
   relay.start();
 
+  // Pre-warm project-type detection so the user's first "Start Preview" is
+  // instant (skips the ~50 s detect step). Fired ~20 s after the session is
+  // up so it clears the boot window, then runs a headless `claude -p`
+  // one-shot in the background and caches `.codeam/preview.json`. Idempotent
+  // + non-fatal; cleared on shutdown so a quick teardown doesn't fire it.
+  const prewarmTimer = setTimeout(() => prewarmPreviewDetection(runtime), 20_000);
+
   const shutdown = async (signal: NodeJS.Signals) => {
     showInfo(`Shutting down ACP session (${signal})…`);
+    clearTimeout(prewarmTimer);
     relay.stop();
     void fileWatcher.stop();
     turnFiles.stop();
