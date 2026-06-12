@@ -8,6 +8,7 @@ import { vercelBypassHeader } from '../lib/backend-headers';
 import { detectCurrentBranch } from '../lib/git-branch';
 import { start } from './start';
 import { startInfraOnly } from './start-infra-only';
+import { provisionProjectDependencies } from '../services/preview/provision-deps';
 
 /**
  * `codeam pair-auto` — non-interactive pair, used INSIDE a freshly-
@@ -233,6 +234,15 @@ export async function pairAuto(args: string[]): Promise<void> {
   // SSHes back in and launches `codeam` from a fresh login shell
   // that doesn't inherit `CODEAM_SKIP_AGENT_LAUNCH`, so `start()`
   // takes over there with the full agent loop.
+  // Fire-and-forget: stand up the project's runtime deps (Postgres/Redis/…)
+  // + a working `.env` so the dev server boots on the first preview without
+  // manual setup (#640). Non-blocking + self-contained (never throws); runs
+  // in the background while the agent loop / infra loop starts below.
+  void provisionProjectDependencies(process.cwd()).catch(() => {
+    /* provisionProjectDependencies is self-contained + non-throwing; this is
+       a belt-and-suspenders guard so a stray rejection never crashes pairing. */
+  });
+
   if (process.env.CODEAM_SKIP_AGENT_LAUNCH === 'true') {
     capture('pair_auto_skipped_launch', {
       sessionId: claimed.sessionId,

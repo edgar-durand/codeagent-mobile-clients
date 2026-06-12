@@ -1154,6 +1154,10 @@ const previewStartH: CommandHandler = (ctx, _cmd, parsed) => {
     emitProgress('BIND_PORT', String(detection.port));
     emitProgress('WAITING_FOR_READY', detection.ready_pattern);
     let expoUrl: string | null = null;
+    // Bounded tail of the dev server's stdout+stderr so a `preview_failed`
+    // event can carry the REAL reason the server never came up (e.g. an
+    // "Unable to connect to the database" loop) instead of a black screen.
+    let outputTail = '';
     const readyRe = compileReadyPattern(detection.ready_pattern);
     // Additive port-listening fallback (BUG 1) for the framework that
     // hit the hang in prod: Next.js prints `▲ Next.js 14.x` /
@@ -1168,6 +1172,7 @@ const previewStartH: CommandHandler = (ctx, _cmd, parsed) => {
     const outcome = await waitForDevServerReady(devServer, readyRe, {
       timeoutMs: 120_000,
       onChunk: (s) => {
+        outputTail = (outputTail + s).slice(-4000);
         if (!expoUrl && detection.framework === 'Expo') {
           expoUrl = parseExpoUrl(s);
         }
@@ -1181,10 +1186,11 @@ const previewStartH: CommandHandler = (ctx, _cmd, parsed) => {
         sessionId: ctx.sessionId,
         pluginId: ctx.pluginId,
         pluginAuthToken,
-        type: 'preview_error',
+        type: 'preview_failed',
         payload: {
           stage: 'spawn',
-          message: `Dev server exited (code ${outcome.code}).`,
+          message: `The dev server exited (code ${outcome.code}) before it was ready. It may need a database or other services.`,
+          stderrTail: outputTail.slice(-2000),
         },
       });
       return;
@@ -1195,8 +1201,12 @@ const previewStartH: CommandHandler = (ctx, _cmd, parsed) => {
         sessionId: ctx.sessionId,
         pluginId: ctx.pluginId,
         pluginAuthToken,
-        type: 'preview_error',
-        payload: { stage: 'ready_timeout', message: "Server didn't signal ready in 120s." },
+        type: 'preview_failed',
+        payload: {
+          stage: 'ready_timeout',
+          message: "The dev server didn't become ready in time. It may be stuck waiting on a database or other service.",
+          stderrTail: outputTail.slice(-2000),
+        },
       });
       return;
     }

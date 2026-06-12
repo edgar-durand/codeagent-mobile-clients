@@ -5,6 +5,7 @@ export * from './codespace';
 export * from './config-file';
 export * from './parser';
 export * from './port-ready';
+export * from './provision-deps';
 export * from './run-setup';
 export * from './setup-deps';
 
