@@ -8,7 +8,6 @@ import { vercelBypassHeader } from '../lib/backend-headers';
 import { detectCurrentBranch } from '../lib/git-branch';
 import { start } from './start';
 import { startInfraOnly } from './start-infra-only';
-import { provisionProjectDependencies } from '../services/preview/provision-deps';
 
 /**
  * `codeam pair-auto` — non-interactive pair, used INSIDE a freshly-
@@ -234,14 +233,15 @@ export async function pairAuto(args: string[]): Promise<void> {
   // SSHes back in and launches `codeam` from a fresh login shell
   // that doesn't inherit `CODEAM_SKIP_AGENT_LAUNCH`, so `start()`
   // takes over there with the full agent loop.
-  // Fire-and-forget: stand up the project's runtime deps (Postgres/Redis/…)
-  // + a working `.env` so the dev server boots on the first preview without
-  // manual setup (#640). Non-blocking + self-contained (never throws); runs
-  // in the background while the agent loop / infra loop starts below.
-  void provisionProjectDependencies(process.cwd()).catch(() => {
-    /* provisionProjectDependencies is self-contained + non-throwing; this is
-       a belt-and-suspenders guard so a stray rejection never crashes pairing. */
-  });
+  // NOTE: auto-provisioning project deps was previously kicked off here
+  // fire-and-forget, but running a heavy `docker compose up -d --wait`
+  // (cold image pull of Postgres etc.) CONCURRENTLY with the live agent
+  // session starved/OOM-killed the codeam CLI + ACP agent on small
+  // codespaces — the relay dropped, the agent froze, the plugin went
+  // offline (v2.39.0 regression). Provisioning must run at codespace
+  // CREATION (devcontainer postCreate), before the agent session is live,
+  // and with resource limits — NOT in-session. Disabled until re-engineered.
+  // The `provisionProjectDependencies` module is retained for that work.
 
   if (process.env.CODEAM_SKIP_AGENT_LAUNCH === 'true') {
     capture('pair_auto_skipped_launch', {
