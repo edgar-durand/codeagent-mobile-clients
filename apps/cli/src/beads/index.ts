@@ -2,6 +2,7 @@ import type { AgentId, BeadsActionPayload } from '@codeagent/shared';
 import { BdAdapter } from './bd-adapter';
 import { provisionBeads } from './provisioner';
 import { BeadsWatcher } from './watcher';
+import { inheritTeamMemories } from './inherit-team-memories';
 import { applyBeadsAction } from './apply-actions';
 import { log } from '../services/logger';
 
@@ -70,6 +71,16 @@ export async function startBeads(opts: StartBeadsOptions): Promise<StartedBeads 
   // Push the current state immediately so the phone has a snapshot (even an
   // empty one) without waiting for the next bd mutation.
   void watcher.syncNow();
+
+  // P3b — pull the user's team-inherited memories and write them into the
+  // active repo's Beads DB so the agent's `bd prime` includes the team's
+  // conventions. Fire-and-forget + non-fatal.
+  void inheritTeamMemories({
+    sessionId: opts.sessionId,
+    pluginId: opts.pluginId,
+    pluginAuthToken: opts.pluginAuthToken,
+    adapter,
+  });
 
   return { watcher, adapter };
 }
