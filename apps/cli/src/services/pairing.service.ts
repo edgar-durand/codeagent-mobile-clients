@@ -346,11 +346,7 @@ export async function postPreviewEvent(input: {
     | 'preview_ready'
     | 'preview_stopped'
     | 'preview_error'
-    | 'preview_progress'
-    // Dev server never bound its port (e.g. it crashed needing a DB). Carries
-    // the captured stderr tail so the mobile preview can show the real reason
-    // instead of a black screen.
-    | 'preview_failed';
+    | 'preview_progress';
   payload?: Record<string, unknown>;
 }): Promise<{ ok: true } | { ok: false; status: number; message: string }> {
   try {

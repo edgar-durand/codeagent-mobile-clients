@@ -1186,7 +1186,7 @@ const previewStartH: CommandHandler = (ctx, _cmd, parsed) => {
         sessionId: ctx.sessionId,
         pluginId: ctx.pluginId,
         pluginAuthToken,
-        type: 'preview_failed',
+        type: 'preview_error',
         payload: {
           stage: 'spawn',
           message: `The dev server exited (code ${outcome.code}) before it was ready. It may need a database or other services.`,
@@ -1201,7 +1201,7 @@ const previewStartH: CommandHandler = (ctx, _cmd, parsed) => {
         sessionId: ctx.sessionId,
         pluginId: ctx.pluginId,
         pluginAuthToken,
-        type: 'preview_failed',
+        type: 'preview_error',
         payload: {
           stage: 'ready_timeout',
           message: "The dev server didn't become ready in time. It may be stuck waiting on a database or other service.",
