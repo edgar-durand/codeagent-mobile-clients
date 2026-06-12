@@ -4,6 +4,16 @@ All notable changes to the CodeAgent Mobile VS Code extension are documented her
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.39.0] — 2026-06-12
+
+### Added
+
+- **cli:** Auto-provision project dependencies in codespaces + preview_failed
+
+### Fixed
+
+- **cli:** Emit preview_error (not a new type) with stderr tail on dev-server failure
+
 ## [2.38.0] — 2026-06-12
 
 ### Added
