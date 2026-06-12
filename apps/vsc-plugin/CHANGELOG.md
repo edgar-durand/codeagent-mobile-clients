@@ -4,6 +4,17 @@ All notable changes to the CodeAgent Mobile VS Code extension are documented her
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.38.0] — 2026-06-12
+
+### Added
+
+- **cli:** Inherit team memories into the active repo's Beads DB (P3b)
+
+### Chore
+
+- **deps:** Bump com.squareup.okhttp3:okhttp in /apps/jetbrains-plugin (#326)
+- **deps-dev:** Bump @vscode/test-electron from 2.5.2 to 3.0.0 in /apps/vsc-plugin (#322)
+
 ## [2.37.3] — 2026-06-11
 
 ### Fixed
