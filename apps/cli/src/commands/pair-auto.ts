@@ -1,5 +1,6 @@
 import * as fs from 'fs';
 import * as os from 'os';
+import * as path from 'path';
 import { randomUUID } from 'crypto';
 import { resolveApiBaseUrl, isKnownAgentId } from '@codeagent/shared';
 import { addSession, loadCliConfig } from '../config';
@@ -171,7 +172,83 @@ async function claim(token: string, pluginId: string): Promise<ClaimSuccess> {
   }
 }
 
+/** Resolved per-call so tests can redirect via HOME/USERPROFILE. */
+function pairAutoLockPath(): string {
+  return path.join(os.homedir(), '.codeam', 'pair-auto.lock');
+}
+
+/** True only if `pid` is a LIVE `codeam` process (guards against PID reuse). */
+export function isLivePairAuto(pid: number): boolean {
+  if (!Number.isInteger(pid) || pid <= 0 || pid === process.pid) return false;
+  try {
+    process.kill(pid, 0); // throws ESRCH if gone; EPERM means alive-but-not-ours
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== 'EPERM') return false;
+  }
+  // On Linux (codespaces) confirm it's actually a codeam process so a reused
+  // PID doesn't make us defer to an unrelated process. No /proc → trust the
+  // liveness check (macOS local pairs).
+  try {
+    return fs.readFileSync(`/proc/${pid}/cmdline`, 'utf8').includes('codeam');
+  } catch {
+    return true;
+  }
+}
+
+/**
+ * Singleton guard — at most ONE `codeam pair-auto` per machine/codespace.
+ *
+ * The backend bootstrap can fire twice (deploy + a wake, or a retry), each
+ * launching its own `pair-auto`. Two daemons paired to the same session both
+ * poll `/commands/pending` and heartbeat, so the mobile's commands + events
+ * get split between them and stall (e.g. Start Preview hangs on "Detecting
+ * project…" forever — the `request_preview_detect` lands on one process while
+ * the reply is expected from the other). This guard makes a second launch
+ * detect the live owner and defer to it instead of split-braining the session.
+ *
+ * Exclusive-create (`wx`) wins the race atomically; a stale lock (crashed
+ * prior run) is reclaimed. Fail-open: lock-infra errors never block pairing.
+ * Returns false when another live pair-auto already owns the session.
+ */
+export function acquireSingletonLock(): boolean {
+  const lockPath = pairAutoLockPath();
+  try {
+    fs.mkdirSync(path.dirname(lockPath), { recursive: true });
+    try {
+      fs.writeFileSync(lockPath, String(process.pid), { flag: 'wx' });
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e;
+      const holder = Number(fs.readFileSync(lockPath, 'utf8').trim());
+      if (isLivePairAuto(holder)) return false; // another pair-auto owns it
+      fs.writeFileSync(lockPath, String(process.pid)); // reclaim stale lock
+    }
+    process.once('exit', () => {
+      try {
+        if (
+          fs.existsSync(lockPath) &&
+          Number(fs.readFileSync(lockPath, 'utf8').trim()) === process.pid
+        ) {
+          fs.unlinkSync(lockPath);
+        }
+      } catch {
+        /* best-effort cleanup */
+      }
+    });
+    return true;
+  } catch {
+    return true; // never block pairing on a lock-infra failure
+  }
+}
+
 export async function pairAuto(args: string[]): Promise<void> {
+  // One pair-auto per codespace — a duplicate launch would split-brain the
+  // session (see acquireSingletonLock). Defer to the running owner.
+  if (!acquireSingletonLock()) {
+    capture('pair_auto_deferred_singleton', {});
+    // eslint-disable-next-line no-console
+    console.log('  A codeam session is already running here — deferring to it.');
+    return;
+  }
   const token = readTokenFromArgs(args);
   const pluginId = randomUUID();
   capture('pair_auto_started', { pluginId });
