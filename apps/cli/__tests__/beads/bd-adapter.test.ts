@@ -104,7 +104,25 @@ describe('BdAdapter shared-server wiring (cwd-resolved, no BEADS_DIR, no --globa
     expect(res.code).toBe(0);
   });
 
-  it('does NOT retry on a normal non-zero exit (only on spawn ENOENT)', async () => {
+  it('retries on a transient spawn ETXTBSY (bd/dolt binary still being written) then succeeds', async () => {
+    vi.spyOn(adapter._adapterSeam, 'sleep').mockResolvedValue(undefined); // instant backoff
+    let calls = 0;
+    vi.spyOn(_spawnSeam, 'run').mockImplementation(async () => {
+      calls += 1;
+      // ETXTBSY ("text file busy") is the same postinstall/install race as
+      // ENOENT — an un-retried ETXTBSY on `bd dolt start` disabled beads for
+      // the whole session in a live codespace. Busy twice, then frees up.
+      return calls <= 2
+        ? { code: -1, stdout: '', stderr: 'spawn /pkg/@beads/bd/bin/bd ETXTBSY' }
+        : ok('done');
+    });
+    const a = new BdAdapter({ binaryPath: '/bd' });
+    const res = await a.run(['dolt', 'start']);
+    expect(calls).toBe(3); // busy twice (ETXTBSY), retried → ok on the 3rd
+    expect(res.code).toBe(0);
+  });
+
+  it('does NOT retry on a normal non-zero exit (only on transient spawn failures)', async () => {
     const sleep = vi.spyOn(adapter._adapterSeam, 'sleep').mockResolvedValue(undefined);
     const spy = vi
       .spyOn(_spawnSeam, 'run')

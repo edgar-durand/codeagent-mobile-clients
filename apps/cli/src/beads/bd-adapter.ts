@@ -244,14 +244,24 @@ export class BdAdapter {
       `bd ${args.join(' ')} (cwd=${this.opts.cwd ?? process.cwd()}, shared-server)`,
     );
     let res = await _spawnSeam.run(binary, args, { cwd: this.opts.cwd, env });
-    // Retry on a transient spawn ENOENT: the bundled @beads/bd native binary is
-    // fetched by its postinstall via an atomic rename, so the resolved path can
-    // momentarily 404 mid-provision (observed live on `bd dolt start` and
-    // `bd setup` ~20-30s into a codespace bootstrap, then recovered). The path
-    // is stable — just transiently missing — so re-spawn with backoff. ONLY on
-    // a spawn-level ENOENT (code -1 + ENOENT), never on a real non-zero exit.
-    for (let attempt = 1; attempt <= 3 && res.code === -1 && res.stderr.includes('ENOENT'); attempt++) {
-      log.info('beads', `bd ${args[0]} spawn ENOENT (transient binary) — retry ${attempt}/3`);
+    // Retry on a transient spawn race: the bundled @beads/bd native binary
+    // (and the `dolt` binary it execs) are fetched/installed via postinstall
+    // + atomic rename, so mid-provision the resolved path can momentarily 404
+    // (ENOENT — not renamed in yet) OR be open-for-write (ETXTBSY — "text file
+    // busy", the rename target still being written, or `dolt` just dropped by
+    // its installer). BOTH were observed live on `bd dolt start` / `bd setup`
+    // ~20-40s into a codespace bootstrap, then recovered seconds later — and an
+    // un-retried ETXTBSY on `bd dolt start` disabled beads for the whole
+    // session (no memory/issues, agent shows no `bd`). The path is stable, just
+    // transiently unusable, so re-spawn with backoff. ONLY on a spawn-level
+    // failure (code -1 + ENOENT/ETXTBSY), never on a real non-zero exit.
+    const TRANSIENT_SPAWN = /ENOENT|ETXTBSY/;
+    for (
+      let attempt = 1;
+      attempt <= 5 && res.code === -1 && TRANSIENT_SPAWN.test(res.stderr);
+      attempt++
+    ) {
+      log.info('beads', `bd ${args[0]} transient spawn failure (binary busy) — retry ${attempt}/5`);
       await _adapterSeam.sleep(750 * attempt);
       res = await _spawnSeam.run(binary, args, { cwd: this.opts.cwd, env });
     }
