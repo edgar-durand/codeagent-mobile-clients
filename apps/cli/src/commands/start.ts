@@ -145,6 +145,34 @@ export async function start(requestedAgent?: AgentId): Promise<void> {
     return started;
   });
 
+  // Gate the agent spawn on beads — codespace only. bd's SessionStart hook
+  // (`bd prime`, installed by `bd setup` inside provisionBeadsForStart) fires
+  // ONCE when the agent's Claude Code session initializes. With the
+  // fire-and-forget above, the agent often spawned BEFORE the hook landed, so
+  // SessionStart never ran `bd prime` and the agent never learned to use bd —
+  // it wrote a file instead of `bd remember` (validated live 2026-06-13, the
+  // SessionStart-only hook has no per-prompt self-heal). Await beads (bounded,
+  // non-fatal) so the hook + dolt server are ready before the agent inits.
+  // Bonus: the agent now starts AFTER the heavy dolt install instead of racing
+  // it, so the OOM overlap that bit v2.39.0 is gone too. Local `codeam start`
+  // keeps the original fire-and-forget — no codespace bootstrap racing the
+  // binary, and the user can restart their own session to pick up the hook.
+  if (process.env.CODESPACES === 'true') {
+    const BEADS_GATE_TIMEOUT_MS = 60_000;
+    let gateTimer: ReturnType<typeof setTimeout> | undefined;
+    await Promise.race([
+      beadsReady.catch(() => null),
+      new Promise<void>((resolve) => {
+        gateTimer = setTimeout(resolve, BEADS_GATE_TIMEOUT_MS);
+      }),
+    ]);
+    if (gateTimer) clearTimeout(gateTimer);
+    log.info(
+      'beads',
+      `agent-spawn gate released — beads ${beads ? 'ready' : 'not ready (timed out / failed; agent runs without it)'}`,
+    );
+  }
+
   // ACP fork — default ON since v2.27.13. Runs the session over the
   // typed protocol whenever:
   //   1. We ship an ACP adapter for this agent (claude / codex / gemini
