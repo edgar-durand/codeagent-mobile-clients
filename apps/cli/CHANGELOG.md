@@ -4,6 +4,12 @@ All notable changes to `codeam-cli` are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.39.9] — 2026-06-13
+
+### Added
+
+- **cli:** Auto-provision project deps (docker compose) gated before the agent
+
 ## [2.39.8] — 2026-06-13
 
 ### Fixed
