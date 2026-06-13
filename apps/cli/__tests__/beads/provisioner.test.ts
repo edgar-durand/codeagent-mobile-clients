@@ -432,6 +432,24 @@ describe('_linkSeam.cliBinDir — picks an on-PATH, WRITABLE dir', () => {
     expect(_linkSeam.cliBinDir()).toBe(localBin);
   });
 
+  it('codespace: transient node /tmp prefix IS on PATH + writable → STILL prefers ~/.local/bin', () => {
+    // The real codespace condition the prior test missed: the bootstrap
+    // PREPENDS the transient node prefix to the CLI process PATH, so it is
+    // BOTH on-PATH and writable. The old ordering (execPath dir first) then
+    // picked it — but `/tmp/codeam-node20/bin` is NOT on the agent's shell
+    // PATH, so the symlinked `bd` was `command not found` in Claude Code's
+    // Bash tool (validated live 2026-06-13). ~/.local/bin must win.
+    const localBin = path.join('/home/codespace', '.local', 'bin');
+    const tmpBin = path.join('/tmp/codeam-node20', 'bin');
+    vi.spyOn(_linkSeam, 'homedir').mockReturnValue('/home/codespace');
+    vi.spyOn(_linkSeam, 'ensureDir').mockImplementation(() => undefined);
+    vi.spyOn(_linkSeam, 'isWritableDir').mockReturnValue(true); // both writable
+    process.execPath = path.join(tmpBin, 'node');
+    process.argv[1] = '/tmp/codeam-node20/lib/node_modules/codeam-cli/dist/cli.js';
+    process.env.PATH = [tmpBin, localBin, '/usr/local/bin'].join(path.delimiter);
+    expect(_linkSeam.cliBinDir()).toBe(localBin);
+  });
+
   it("global install: node's bin dir when it's on PATH AND writable", () => {
     vi.spyOn(_linkSeam, 'homedir').mockReturnValue('/home/u');
     vi.spyOn(_linkSeam, 'isWritableDir').mockReturnValue(true);

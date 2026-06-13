@@ -174,13 +174,28 @@ export const _linkSeam = {
     const pathDirs = (process.env.PATH ?? '').split(path.delimiter).filter(Boolean);
     const home = _linkSeam.homedir();
     const localBin = home ? path.join(home, '.local', 'bin') : null;
+    // PREFER ~/.local/bin. In a codespace it is on the AGENT's persistent
+    // login-shell PATH, whereas node's own bin (`dirname(process.execPath)`)
+    // is the TRANSIENT bootstrap prefix (`/tmp/codeam-node20/bin`): on the
+    // CLI process's PATH and writable, so the old ordering picked it FIRST —
+    // but it is NOT on the agent's PATH, so the symlinked `bd` was
+    // `command not found` in Claude Code's Bash tool (the bug this reorder
+    // fixes, validated live 2026-06-13). Create ~/.local/bin first so the
+    // writable check below accepts it even on a fresh codespace.
+    if (localBin) {
+      try {
+        _linkSeam.ensureDir(localBin);
+      } catch {
+        /* fall through to the other candidates */
+      }
+    }
     const candidates: string[] = [];
+    if (localBin) candidates.push(localBin);
     try {
       candidates.push(path.dirname(process.execPath));
     } catch {
       /* execPath unavailable */
     }
-    if (localBin) candidates.push(localBin);
     candidates.push('/usr/local/bin');
     const entry = process.argv[1];
     if (entry) {
