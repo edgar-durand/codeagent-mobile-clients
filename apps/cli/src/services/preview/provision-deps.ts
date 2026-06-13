@@ -1,7 +1,7 @@
 import { promises as fs } from 'fs';
 import path from 'path';
 import { log } from '../logger';
-import { runSetupCommand } from './run-setup';
+import { runSetupCommand, type SetupRunResult } from './run-setup';
 
 /**
  * Auto-provision a project's runtime dependencies (Postgres, Redis, …) inside
@@ -203,6 +203,23 @@ async function runMigrationsIfPresent(cwd: string, scripts: Record<string, strin
   if (res.status !== 'ok') log.warn('provision', `migration script "${script}" → ${res.status} (non-fatal)`);
 }
 
+/**
+ * Run `docker compose` at IDLE cpu+io priority (`nice`/`ionice`) so a cold
+ * image pull can't starve the CLI / ACP agent. The agent-spawn gate already
+ * sequences the agent AFTER provisioning (no steady overlap) — this is
+ * belt-and-suspenders for the tail. Provisioning only runs in a codespace
+ * (Linux), where `nice` + `ionice` are always present.
+ */
+function runDockerComposeUp(cwd: string, composeArgs: string[]): Promise<SetupRunResult> {
+  return runSetupCommand(
+    'nice',
+    ['-n', '19', 'ionice', '-c', '3', 'docker', 'compose', ...composeArgs],
+    cwd,
+    undefined,
+    { timeoutMs: 180_000 },
+  );
+}
+
 export async function provisionProjectDependencies(cwd: string): Promise<void> {
   try {
     // 1. Docker must be usable (a missing binary or dead daemon → 'failed').
@@ -219,10 +236,8 @@ export async function provisionProjectDependencies(cwd: string): Promise<void> {
     // 2. Compose-first: run what the project author already declared.
     const composeFile = await firstExisting(cwd, COMPOSE_FILES);
     if (composeFile) {
-      log.info('provision', `compose found (${composeFile}) — docker compose up -d --wait`);
-      const up = await runSetupCommand('docker', ['compose', 'up', '-d', '--wait'], cwd, undefined, {
-        timeoutMs: 180_000,
-      });
+      log.info('provision', `compose found (${composeFile}) — docker compose up -d --wait (idle prio)`);
+      const up = await runDockerComposeUp(cwd, ['up', '-d', '--wait']);
       // `--wait` returns non-zero if a service never goes healthy; treat
       // 'ok' as started, but also accept a plain up if --wait isn't honored.
       started = up.status === 'ok';
@@ -239,13 +254,7 @@ export async function provisionProjectDependencies(cwd: string): Promise<void> {
           'provision',
           `no compose in repo — generated ${generated.map((s) => s.name).join('+')}`,
         );
-        const up = await runSetupCommand(
-          'docker',
-          ['compose', '-f', file, 'up', '-d', '--wait'],
-          cwd,
-          undefined,
-          { timeoutMs: 180_000 },
-        );
+        const up = await runDockerComposeUp(cwd, ['-f', file, 'up', '-d', '--wait']);
         started = up.status === 'ok';
         if (!started) log.warn('provision', `generated compose up → ${up.status} (non-fatal)`);
       } else {

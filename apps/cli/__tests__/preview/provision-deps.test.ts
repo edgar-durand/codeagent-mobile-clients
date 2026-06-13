@@ -1,9 +1,55 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi, afterEach } from 'vitest';
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
+import * as runSetup from '../../src/services/preview/run-setup';
 import {
   detectServicesFromDeps,
   renderComposeYaml,
   pickMigrationScript,
+  provisionProjectDependencies,
 } from '../../src/services/preview/provision-deps';
+
+describe('provisionProjectDependencies — OOM resource discipline', () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it('runs `docker compose up` via nice + ionice (idle priority) when a compose file exists', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'prov-'));
+    fs.writeFileSync(path.join(dir, 'compose.yaml'), 'services: {}\n');
+    const calls: string[][] = [];
+    vi.spyOn(runSetup, 'runSetupCommand').mockImplementation(async (cmd, args) => {
+      calls.push([cmd, ...args]);
+      return { status: 'ok', code: 0 };
+    });
+
+    await provisionProjectDependencies(dir);
+
+    // The compose-up MUST be wrapped so a cold image pull can't starve the
+    // agent (belt-and-suspenders on top of the agent-spawn gate).
+    const composeUp = calls.find((c) => c.includes('compose') && c.includes('up'));
+    expect(composeUp?.[0]).toBe('nice');
+    expect(composeUp).toEqual(
+      expect.arrayContaining([
+        'nice', '-n', '19', 'ionice', '-c', '3', 'docker', 'compose', 'up', '-d',
+      ]),
+    );
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('skips provisioning entirely when docker is not usable', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'prov-'));
+    fs.writeFileSync(path.join(dir, 'compose.yaml'), 'services: {}\n');
+    const spy = vi
+      .spyOn(runSetup, 'runSetupCommand')
+      .mockResolvedValue({ status: 'failed', code: 1 }); // `docker info` fails
+
+    await provisionProjectDependencies(dir);
+
+    // Only the `docker info` probe ran — no compose up after it failed.
+    expect(spy).toHaveBeenCalledTimes(1);
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+});
 
 describe('detectServicesFromDeps', () => {
   it('maps pg + ioredis to postgres + redis', () => {

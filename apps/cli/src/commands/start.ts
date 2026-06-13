@@ -22,7 +22,11 @@ import {
 } from './start/handlers';
 import { registerTerminalHandlers, closeAllTerminals } from '../services/terminal-ops.service';
 import { killActiveSpawnAndCaptureChildren } from '../services/spawn-and-capture';
-import { activePreviewSessionIds, killAllPreviews } from '../services/preview';
+import {
+  activePreviewSessionIds,
+  killAllPreviews,
+  provisionProjectDependencies,
+} from '../services/preview';
 import {
   fetchCurrentPluginAuthToken,
   postPreviewEvent,
@@ -145,27 +149,44 @@ export async function start(requestedAgent?: AgentId): Promise<void> {
     return started;
   });
 
-  // Gate the agent spawn on beads — codespace only. bd's full setup (download
-  // bd → PATH → init → dolt server → SessionStart `bd prime` hook) must finish
-  // BEFORE the agent's Claude Code session initializes, otherwise the hook
-  // fires too late and the agent never learns to use bd. The onboarding
-  // welcome no longer depends on the agent (it's published hardcoded by the
-  // runner — see maybeSendOnboardingWelcome), so this gate delays only the
-  // agent spawn, not the welcome. Bounded + non-fatal so a slow/failed
-  // provision never wedges the session; and the agent starting AFTER the dolt
-  // install (not alongside) removes the OOM overlap that bit v2.39.0. Local
-  // `codeam start` keeps the original fire-and-forget.
+  // Auto-provision the project's runtime deps (Postgres/Redis via the repo's
+  // compose, or a heuristic one) so the dev server boots on the first preview.
+  // CODESPACE ONLY — locally the user owns their own services. Fired in
+  // PARALLEL with beads (both BEFORE the agent); strictly non-fatal. The heavy
+  // part is a cold image pull, run at idle cpu/io priority (see
+  // provisionProjectDependencies) — but the real OOM guard is the gate below:
+  // the agent (the memory hog) only spawns AFTER this resolves, so the pull and
+  // the agent never peak together (the v2.39.0 regression was the pull running
+  // DURING the live agent). If a dep still isn't up, the preview error-card is
+  // the safety net.
+  const depsReady: Promise<void> =
+    process.env.CODESPACES === 'true'
+      ? provisionProjectDependencies(cwd).catch(() => undefined)
+      : Promise.resolve();
+
+  // Gate the agent spawn on beads + dep provisioning — codespace only. bd's
+  // SessionStart `bd prime` hook must be installed before the agent inits (else
+  // it never learns to use bd), and the docker pull must finish before the
+  // agent spawns (else they OOM together). The onboarding welcome is published
+  // hardcoded by the runner, so this delays ONLY the agent, never the welcome.
+  // Generously bounded so a normal cold pull completes inside the gate (no
+  // overlap); if it overruns, the agent spawns anyway (nice/ionice keeps the
+  // tail from starving it) rather than wedging the session. Local `codeam
+  // start` keeps the original fire-and-forget.
   if (process.env.CODESPACES === 'true') {
-    const BEADS_GATE_TIMEOUT_MS = 60_000;
+    const GATE_TIMEOUT_MS = 240_000;
     let gateTimer: ReturnType<typeof setTimeout> | undefined;
     await Promise.race([
-      beadsReady.catch(() => null),
+      Promise.all([beadsReady.catch(() => null), depsReady]),
       new Promise<void>((resolve) => {
-        gateTimer = setTimeout(resolve, BEADS_GATE_TIMEOUT_MS);
+        gateTimer = setTimeout(resolve, GATE_TIMEOUT_MS);
       }),
     ]);
     if (gateTimer) clearTimeout(gateTimer);
-    log.info('beads', `agent-spawn gate released — beads ${beads ? 'ready' : 'not ready (timed out)'}`);
+    log.info(
+      'beads',
+      `agent-spawn gate released — beads ${beads ? 'ready' : 'pending'}; project deps provisioned`,
+    );
   }
 
   // ACP fork — default ON since v2.27.13. Runs the session over the
