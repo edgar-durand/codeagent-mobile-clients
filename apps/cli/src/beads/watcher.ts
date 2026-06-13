@@ -85,12 +85,16 @@ export class BeadsWatcher {
 
   constructor(private readonly opts: BeadsWatcherOptions) {
     this.bd = opts.adapter ?? new BdAdapter({ cwd: opts.cwd, beadsDir: opts.beadsDir });
-    // Under shared-server the project's `bd init` writes its workspace +
-    // auto-exported `issues.jsonl` into `<cwd>/.beads/` (cwd-resolved), NOT
-    // `~/.beads`. Watch the project's feed so issue mirroring tracks the right
-    // file (D16). Tests/non-default homes can still override via feedPath.
+    // Trigger file: `.beads/last-touched`, which bd updates on EVERY operation.
+    // We deliberately do NOT watch `issues.jsonl` — under shared-server mode
+    // bd's `export.auto` does NOT materialize that file (`bd export` defaults
+    // to stdout), so it never exists and the watcher never fires. That was the
+    // root cause of the mobile Beads panel sitting at 0/0/0 while the codespace
+    // had live issues. The snapshot is always rebuilt from `bd list`/`bd status`
+    // (the trigger file's CONTENT is irrelevant — we only need a file bd
+    // reliably touches). Tests/non-default homes override via feedPath.
     this.feedPath =
-      opts.feedPath ?? path.join(opts.cwd ?? process.cwd(), '.beads', 'issues.jsonl');
+      opts.feedPath ?? path.join(opts.cwd ?? process.cwd(), '.beads', 'last-touched');
     this.apiBase = opts.apiBaseUrl ?? API_BASE;
   }
 
@@ -114,6 +118,12 @@ export class BeadsWatcher {
     );
     this.watcher = watcher;
     log.info('beads', `watching ${this.feedPath} for session=${this.opts.sessionId.slice(0, 8)}`);
+    // Belt-and-suspenders initial sync: `ignoreInitial:false` fires `add` for an
+    // EXISTING trigger file, but if it isn't there yet (provisioning race) we'd
+    // miss the first snapshot and the panel would sit empty until the next bd
+    // op. Push the current state once explicitly; the hash-diff in syncNow makes
+    // a duplicate (vs the chokidar `add`) a no-op.
+    void this.syncNow();
   }
 
   async stop(): Promise<void> {

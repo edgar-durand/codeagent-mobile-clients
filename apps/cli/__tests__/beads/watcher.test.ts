@@ -204,10 +204,51 @@ describe('BeadsWatcher', () => {
       close: vi.fn().mockResolvedValue(undefined),
     });
     vi.spyOn(_chokidarSeam, 'load').mockReturnValue({ watch });
+    vi.spyOn(_transport, 'post').mockResolvedValue({ statusCode: 200, body: '' });
     const w = newWatcher(fakeAdapter([]));
     w.start();
     w.start(); // idempotent
     expect(watch).toHaveBeenCalledTimes(1);
     await w.stop();
+  });
+
+  it('pushes an initial snapshot on start() (no fs event) so the panel is never stuck empty', async () => {
+    const watch = vi.fn().mockReturnValue({
+      on() {
+        return this;
+      },
+      close: vi.fn().mockResolvedValue(undefined),
+    });
+    vi.spyOn(_chokidarSeam, 'load').mockReturnValue({ watch });
+    const post = vi.spyOn(_transport, 'post').mockResolvedValue({ statusCode: 200, body: '' });
+    const w = newWatcher(fakeAdapter([makeIssue('bd-1', 'open')]));
+
+    w.start();
+    await vi.advanceTimersByTimeAsync(10); // flush the fire-and-forget initial syncNow
+    expect(post).toHaveBeenCalledTimes(1); // current state pushed immediately, no fs event
+
+    await w.stop();
+  });
+
+  it('watches .beads/last-touched by default — NOT issues.jsonl (bd never writes it in server mode)', () => {
+    const watch = vi.fn().mockReturnValue({
+      on() {
+        return this;
+      },
+      close: vi.fn().mockResolvedValue(undefined),
+    });
+    vi.spyOn(_chokidarSeam, 'load').mockReturnValue({ watch });
+    vi.spyOn(_transport, 'post').mockResolvedValue({ statusCode: 200, body: '' });
+    // No feedPath override → exercises the default trigger file.
+    const w = new BeadsWatcher({
+      sessionId: 'sess-1',
+      pluginId: 'plug-1',
+      pluginAuthToken: 'token',
+      cwd: '/repo',
+      adapter: fakeAdapter([]),
+      apiBaseUrl: 'https://api.test',
+    });
+    w.start();
+    expect(watch).toHaveBeenCalledWith('/repo/.beads/last-touched', expect.anything());
   });
 });
