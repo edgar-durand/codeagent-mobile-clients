@@ -108,6 +108,47 @@ function superProperties(): PostHogJsonProperties {
 }
 
 /**
+ * Telemetry must NEVER take the CLI down with it. PostHog's flush throws a
+ * `PostHogFetchNetworkError` on any transport failure (DNS / offline /
+ * restricted network — `getaddrinfo ENOTFOUND us.i.posthog.com`). Left
+ * unhandled, the SDK's background flush then:
+ *   1. `console.error`s the whole stack — which in `codeam start` /
+ *      `pair-auto` bleeds into the very terminal the agent PTY renders into
+ *      and derails live sessions, and
+ *   2. keeps the failed batch on the queue and retries it every
+ *      `flushInterval`, so the queue (and memory) grow without bound while
+ *      the network is down.
+ *
+ * Analytics is best-effort, so we wrap `fetch`: a transport failure resolves
+ * to a synthetic `200` instead of throwing. The SDK treats the batch as
+ * delivered, drains the queue (no retry storm, no growth), and stays silent
+ * — events are simply dropped until connectivity returns. Real HTTP error
+ * responses (4xx/5xx) come back resolved and flow through untouched.
+ */
+// Exact shape PostHog expects for its `fetch` option — derived from the
+// constructor so we don't import (transitive) `@posthog/core` types.
+type PostHogFetch = NonNullable<NonNullable<ConstructorParameters<typeof PostHog>[1]>['fetch']>;
+
+const resilientFetch: PostHogFetch = async (url, options) => {
+  try {
+    return await fetch(url, options);
+  } catch (err) {
+    log.trace(
+      'telemetry',
+      `posthog transport failed — dropping batch (network unreachable): ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+    return {
+      status: 200,
+      text: async () => '',
+      json: async () => ({}),
+      body: null,
+    };
+  }
+};
+
+/**
  * Initialise the PostHog client. Safe to call more than once — the
  * second call is a no-op. Returns true when capture is active.
  */
@@ -132,6 +173,15 @@ export function initTelemetry(): boolean {
     // memory growth on long-lived `codeam start` sessions.
     flushAt: 20,
     flushInterval: 10_000,
+    // Network failures resolve to a synthetic 200 instead of throwing —
+    // keeps a flaky/offline network from crashing the CLI or spamming the
+    // session PTY. See resilientFetch above.
+    fetch: resilientFetch,
+  });
+  // Any other SDK-emitted error (feature-flag load, etc.) goes to the file
+  // logger, never to stdout/stderr — telemetry stays invisible to the user.
+  client.on('error', (err) => {
+    log.trace('telemetry', 'posthog error (ignored)', err);
   });
   // Register super props once — every capture inherits them.
   client.register(superProperties());
@@ -261,4 +311,5 @@ export const _testHelpers = {
     return distinctId;
   },
   isOptedOut,
+  resilientFetch,
 };
