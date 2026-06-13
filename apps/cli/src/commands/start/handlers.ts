@@ -798,6 +798,13 @@ const requestPreviewDetectH: CommandHandler = (ctx) => {
       return;
     }
     log.info('preview', `detect: ${detection.framework} on :${detection.port} (took ${tookMs}ms)`);
+    // Persist the result so the next detect (this session, a reconnect, or a
+    // teammate) is instant. Only the prewarm cached `.codeam/preview.json`
+    // before — so when the prewarm didn't run (e.g. it raced agent startup),
+    // every detect paid the full 30-90 s LLM round-trip again. Best-effort.
+    void writePreviewConfig(process.cwd(), detection).catch((err) => {
+      log.info('preview', `detect: writePreviewConfig failed (non-fatal): ${String(err)}`);
+    });
     void postPreviewEvent({
       sessionId: ctx.sessionId,
       pluginId: ctx.pluginId,

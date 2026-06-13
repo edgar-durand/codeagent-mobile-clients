@@ -34,6 +34,7 @@ import {
 import { capture, identifyUser, shutdownTelemetry } from '../services/telemetry.service';
 import { provisionBeadsForStart } from '../beads/wiring';
 import type { StartedBeads } from '../beads';
+import { ensureClaudeOnboarded } from '../agents/claude/onboarding';
 import { log } from '../services/logger';
 
 /**
@@ -124,6 +125,12 @@ export async function start(requestedAgent?: AgentId): Promise<void> {
     'pluginAuth',
     `boot triple sessionId=${session.id} pluginId=${pluginId} tokenLen=${tokenForLog.length} tokenHead=${tokenForLog.slice(0, 12)} tokenTail=${tokenForLog.slice(-8)} mintedEqualsCached=${refreshed === session.pluginAuthToken}`,
   );
+
+  // Codespace: pre-complete Claude's first-run onboarding BEFORE anything
+  // launches claude (the ACP agent + the `claude -p` preview prewarm). Without
+  // this, Claude v2.1.177's interactive theme picker stalls both. No-op for a
+  // local `codeam start` (the user's own onboarding is already done).
+  if (process.env.CODESPACES === 'true') ensureClaudeOnboarded();
 
   // Beads — composition-root concern (SRP decision D10), provisioned ONCE
   // here for BOTH the ACP and the PTY path. `start()` is the single funnel
