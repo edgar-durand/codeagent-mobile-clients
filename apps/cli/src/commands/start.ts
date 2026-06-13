@@ -145,18 +145,16 @@ export async function start(requestedAgent?: AgentId): Promise<void> {
     return started;
   });
 
-  // Gate the agent spawn on beads — codespace only. bd's SessionStart hook
-  // (`bd prime`, installed by `bd setup` inside provisionBeadsForStart) fires
-  // ONCE when the agent's Claude Code session initializes. With the
-  // fire-and-forget above, the agent often spawned BEFORE the hook landed, so
-  // SessionStart never ran `bd prime` and the agent never learned to use bd —
-  // it wrote a file instead of `bd remember` (validated live 2026-06-13, the
-  // SessionStart-only hook has no per-prompt self-heal). Await beads (bounded,
-  // non-fatal) so the hook + dolt server are ready before the agent inits.
-  // Bonus: the agent now starts AFTER the heavy dolt install instead of racing
-  // it, so the OOM overlap that bit v2.39.0 is gone too. Local `codeam start`
-  // keeps the original fire-and-forget — no codespace bootstrap racing the
-  // binary, and the user can restart their own session to pick up the hook.
+  // Gate the agent spawn on beads — codespace only. bd's full setup (download
+  // bd → PATH → init → dolt server → SessionStart `bd prime` hook) must finish
+  // BEFORE the agent's Claude Code session initializes, otherwise the hook
+  // fires too late and the agent never learns to use bd. The onboarding
+  // welcome no longer depends on the agent (it's published hardcoded by the
+  // runner — see maybeSendOnboardingWelcome), so this gate delays only the
+  // agent spawn, not the welcome. Bounded + non-fatal so a slow/failed
+  // provision never wedges the session; and the agent starting AFTER the dolt
+  // install (not alongside) removes the OOM overlap that bit v2.39.0. Local
+  // `codeam start` keeps the original fire-and-forget.
   if (process.env.CODESPACES === 'true') {
     const BEADS_GATE_TIMEOUT_MS = 60_000;
     let gateTimer: ReturnType<typeof setTimeout> | undefined;
@@ -167,10 +165,7 @@ export async function start(requestedAgent?: AgentId): Promise<void> {
       }),
     ]);
     if (gateTimer) clearTimeout(gateTimer);
-    log.info(
-      'beads',
-      `agent-spawn gate released — beads ${beads ? 'ready' : 'not ready (timed out / failed; agent runs without it)'}`,
-    );
+    log.info('beads', `agent-spawn gate released — beads ${beads ? 'ready' : 'not ready (timed out)'}`);
   }
 
   // ACP fork — default ON since v2.27.13. Runs the session over the
