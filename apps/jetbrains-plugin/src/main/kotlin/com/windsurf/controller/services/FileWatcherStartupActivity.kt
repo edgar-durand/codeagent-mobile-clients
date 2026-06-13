@@ -61,19 +61,36 @@ class FileWatcherStartupActivity : ProjectActivity {
             // sessions entry. The mobile keeps the same sessionId for
             // the duration of a pairing, so this stays correct after
             // an IDE restart.
-            val existingSession = pairing.currentSessionId
-                ?: SettingsService.getInstance().getRecentSessions().firstOrNull()?.sessionId
-
             val hasToken = SettingsService.getInstance().getPluginAuthToken() != null
-            if (existingSession != null && hasToken) {
-                watcher.start(project, existingSession)
-            } else {
-                // Still register the project so attachProject() can find
-                // it without a basePath lookup race when pairing lands.
-                // We avoid calling start() with an empty session id - the
-                // listener below will start the global subscription on
-                // first pairing.
+            val recent = SettingsService.getInstance().getRecentSessions().firstOrNull()
+            val live = pairing.currentSessionId
+            if (live != null) {
+                // Already connected in this IDE session - just bind the watcher.
+                watcher.start(project, live)
+            } else if (recent != null && hasToken) {
+                // Auto-resume on IDE restart. Previously we only started the
+                // file watcher here, which does NOT bring the session ONLINE -
+                // the relay/heartbeat never started, so the backend kept the
+                // session OFFLINE and the mobile app's Reconnect sheet spun on
+                // "Waiting..." forever, forcing the user to mint a brand-new
+                // pairing. Re-attach the SAME session server-side and start the
+                // relay so it heartbeats back to ACTIVE, unattended.
+                RecentSessionsApi.reconnect(recent) { result ->
+                    if (result is RecentSessionsApi.ReconnectResult.Success) {
+                        pairing.onReconnected(result.sessionId, result.userInfo)
+                        CommandRelayService.getInstance().startPolling()
+                        watcher.start(project, result.sessionId)
+                        logger.info(
+                            "auto-reconnect: resumed session ${result.sessionId.take(8)}",
+                        )
+                    } else {
+                        logger.info("auto-reconnect: session not resumable (expired/failed)")
+                    }
+                }
             }
+            // else: never paired on this machine (or a legacy pairing without a
+            // token) - the Drive #2 listener below starts everything on the
+            // first fresh pairing.
 
             // Drive #2 - listen for fresh pairings.
             pairing.addListener(object : PairingService.PairingListener {

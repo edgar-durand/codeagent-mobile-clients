@@ -142,7 +142,62 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     globalState: context.globalState,
   }).catch((err) => log.appendLine(`update-notifier failed: ${String(err)}`));
 
+  // Auto-resume the most-recent session on activation. Without this, the
+  // plugin's pluginId is persistent but the relay/heartbeat only start on an
+  // explicit pair or a manual "Reconnect" tap — so reopening the IDE left the
+  // session OFFLINE (no heartbeat) and the mobile app's Reconnect sheet spun
+  // on "Waiting…" forever, forcing the user to mint a brand-new pairing. Now
+  // we re-attach the SAME session automatically; the card flips to ACTIVE.
+  void autoReconnectLastSession();
+
   log.appendLine('CodeAgent Mobile extension activated');
+}
+
+/**
+ * Best-effort silent reconnect of the most-recent paired session at startup.
+ * Mirrors the panel's manual "Reconnect" (POST /api/pairing/reconnect) but
+ * runs unattended on activation and starts the relay directly so the session
+ * heartbeats even if the side panel is never opened. No-ops cleanly when the
+ * user was never paired, the pairing has no auth token (legacy), or the
+ * session has expired server-side.
+ */
+async function autoReconnectLastSession(): Promise<void> {
+  const settings = SettingsService.getInstance();
+  const pairing = PairingService.getInstance();
+  const relay = CommandRelayService.getInstance();
+
+  if (pairing.currentSessionId) return; // already connected this session
+  const recent = settings.getRecentSessions();
+  if (recent.length === 0) return; // never paired on this machine
+  if (!settings.getPluginAuthToken()) return; // legacy pairing — must re-pair
+
+  const cached = recent[0]; // getRecentSessions() returns newest-first
+  const pluginId = settings.ensurePluginId();
+  try {
+    const result = await relay.postJson(`${settings.apiBaseUrl}/api/pairing/reconnect`, {
+      pluginId,
+      sessionId: cached.sessionId,
+    });
+    if (!(result as Record<string, unknown> | null)?.success) {
+      log?.appendLine(`[auto-reconnect] session ${cached.sessionId} not resumable (expired)`);
+      return;
+    }
+    const data = (result as Record<string, unknown>).data as Record<string, unknown> | undefined;
+    const userObj = data?.user as Record<string, unknown> | undefined;
+    pairing.onReconnected(cached.sessionId, {
+      name: (userObj?.name as string) || cached.userName || '',
+      email: (userObj?.email as string) || cached.userEmail || '',
+      plan: (userObj?.plan as string) || cached.userPlan || 'FREE',
+      currentPeriodEnd: userObj?.currentPeriodEnd as string | undefined,
+    });
+    // Start the relay + heartbeat directly so the session goes ONLINE even
+    // when the panel webview hasn't been resolved (its onPaired listener is
+    // what normally does this). startPolling() is idempotent.
+    relay.startPolling();
+    log?.appendLine(`[auto-reconnect] resumed session ${cached.sessionId}`);
+  } catch (e) {
+    log?.appendLine(`[auto-reconnect] failed: ${String(e)}`);
+  }
 }
 
 export function deactivate(): void {
