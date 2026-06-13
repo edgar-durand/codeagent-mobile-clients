@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import * as path from 'path';
 import { BeadsWatcher, _chokidarSeam } from '../../src/beads/watcher';
 import { _transport } from '../../src/services/file-watcher/transport';
 import * as projectKey from '../../src/beads/project-key';
@@ -249,6 +250,11 @@ describe('BeadsWatcher', () => {
       apiBaseUrl: 'https://api.test',
     });
     w.start();
-    expect(watch).toHaveBeenCalledWith('/repo/.beads/last-touched', expect.anything());
+    // Build the expected path with path.join so the separators match what the
+    // watcher itself produces (backslashes on the Windows CI shard).
+    expect(watch).toHaveBeenCalledWith(
+      path.join('/repo', '.beads', 'last-touched'),
+      expect.anything(),
+    );
   });
 });
