@@ -64,6 +64,8 @@ internal object RecentSessionsApi {
                 .url("${settings.state.apiBaseUrl}/api/pairing/reconnect")
                 .post(gson.toJson(body).toRequestBody("application/json".toMediaType()))
                 .withAuthHeaders()
+                // SEC crit1 (#813): prove possession on the gated /reconnect.
+                .header("X-Plugin-Poll-Secret", settings.ensurePollSecret())
                 .build()
             try {
                 val response = client.newCall(request).execute()

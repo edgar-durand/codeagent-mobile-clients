@@ -536,6 +536,8 @@ class CommandRelayService {
                 .url("${settings.state.apiBaseUrl}/api/pairing/reconnect")
                 .post(payload.toString().toRequestBody("application/json".toMediaType()))
                 .header("X-Codeam-Protocol-Version", PROTOCOL_VERSION)
+                // SEC crit1 (#813): prove possession on the gated /reconnect.
+                .header("X-Plugin-Poll-Secret", settings.ensurePollSecret())
                 .build()
             httpClient.newCall(request).execute().use { response ->
                 if (response.code == 404) {

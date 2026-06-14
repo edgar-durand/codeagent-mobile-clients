@@ -62,6 +62,9 @@ class PairingService {
             addProperty("ideName", "WebStorm")
             addProperty("ideVersion", com.intellij.openapi.application.ApplicationInfo.getInstance().fullVersion)
             addProperty("hostname", getHostname())
+            // SEC crit1 (#813): enroll the PoP hash so /status + /reconnect
+            // require this install's secret. Older backends ignore it.
+            addProperty("pluginSecretHash", settings.pollSecretHash())
         }
 
         val request = Request.Builder()
@@ -120,6 +123,9 @@ class PairingService {
 
         val request = Request.Builder()
             .url("${settings.state.apiBaseUrl}/api/pairing/status?pluginId=$pluginId")
+            // SEC crit1 (#813): replay the PoP secret so the gated /status
+            // returns the token + PII (the plugin reads the token here).
+            .header("X-Plugin-Poll-Secret", settings.ensurePollSecret())
             .get()
             .build()
 

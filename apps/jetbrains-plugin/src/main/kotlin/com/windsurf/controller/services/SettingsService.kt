@@ -34,6 +34,13 @@ class SettingsService : PersistentStateComponent<SettingsService.State> {
         var showNotifications: Boolean = true,
         var heartbeatIntervalMs: Long = 30000,
         var recentSessions: MutableList<RecentSession> = mutableListOf(),
+        // SEC crit1 (#813): per-install proof-of-possession secret.
+        // Generated locally, never sent in the clear; sha256 is sent at
+        // enrollment and the raw value replayed as the X-Plugin-Poll-Secret
+        // header on /status + /reconnect, so the backend returns the auth
+        // token + owner PII only to this install, not to anyone who learns
+        // the (non-secret) pluginId.
+        var pollSecret: String = "",
         /**
          * Legacy slot for older installs. The auth token now lives in
          * PasswordSafe (OS keychain on macOS/Win, libsecret on Linux,
@@ -93,6 +100,27 @@ class SettingsService : PersistentStateComponent<SettingsService.State> {
             myState.pluginId = java.util.UUID.randomUUID().toString()
         }
         return myState.pluginId
+    }
+
+    // SEC crit1 (#813): lazily generate + persist the proof-of-possession
+    // secret (32 random bytes, base64url). Returned raw for the
+    // X-Plugin-Poll-Secret header; only its sha256 leaves at enrollment.
+    fun ensurePollSecret(): String {
+        if (myState.pollSecret.isBlank()) {
+            val bytes = ByteArray(32)
+            java.security.SecureRandom().nextBytes(bytes)
+            myState.pollSecret =
+                java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(bytes)
+        }
+        return myState.pollSecret
+    }
+
+    // sha256(pollSecret) as lowercase hex — sent at enrollment so the
+    // backend can verify the raw secret on later /status + /reconnect.
+    fun pollSecretHash(): String {
+        val digest = java.security.MessageDigest.getInstance("SHA-256")
+            .digest(ensurePollSecret().toByteArray(Charsets.UTF_8))
+        return digest.joinToString("") { "%02x".format(it) }
     }
 
     fun getPluginAuthToken(): String? {
