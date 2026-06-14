@@ -48,6 +48,9 @@ describe('CommandRelayService', () => {
     await vi.advanceTimersByTimeAsync(10_100);
     expect(pairing._getJson).toHaveBeenCalledWith(
       expect.stringContaining('pending?pluginId=plugin-1'),
+      // SEC crit1 (#8): poll now carries the X-Plugin-Poll-Secret header
+      // (empty {} here — no persisted session for this synthetic pluginId).
+      expect.any(Object),
     );
     // At least two polls in ~10 s of idle (initial + one backed-off
     // retry). The exact count drifts with jitter so we don't pin a

@@ -537,6 +537,7 @@ export async function _postJson(
 
 export async function _getJson(
   url: string,
+  extraHeaders?: Record<string, string>,
 ): Promise<Record<string, unknown> | null> {
   return new Promise((resolve, reject) => {
     const u = new URL(url);
@@ -547,7 +548,7 @@ export async function _getJson(
         port: u.port || (u.protocol === 'https:' ? 443 : 80),
         path: u.pathname + u.search,
         method: 'GET',
-        headers: { ...vercelBypassHeader() },
+        headers: { ...vercelBypassHeader(), ...(extraHeaders ?? {}) },
         timeout: 10000,
       },
       (res) => {
