@@ -3,6 +3,7 @@ import * as http from 'http';
 import { resolveApiBaseUrl } from '@codeagent/shared';
 import type { AgentMetadata } from '@codeagent/shared';
 import { _postJson, _getJson } from './pairing.service';
+import { loadCliConfig } from '../config';
 import { vercelBypassHeader } from '../lib/backend-headers';
 import { computePollDelay } from '../lib/poll-delay';
 import { detectCurrentBranch } from '../lib/git-branch';
@@ -165,7 +166,12 @@ export class CommandRelayService {
         port: url.port || (url.protocol === 'https:' ? 443 : 80),
         path: `${url.pathname}${url.search}`,
         method: 'GET',
-        headers: { Accept: 'text/event-stream', 'Cache-Control': 'no-cache', ...vercelBypassHeader() },
+        headers: {
+          Accept: 'text/event-stream',
+          'Cache-Control': 'no-cache',
+          ...vercelBypassHeader(),
+          ...this.pollSecretHeader(),
+        },
         timeout: 35_000,
       },
       (res) => {
@@ -345,9 +351,28 @@ export class CommandRelayService {
     }
   }
 
+  // SEC crit1 (#8): the command-delivery endpoints are gated on the
+  // per-pairing pollSecret when the backend enforces it. Look it up from
+  // the persisted session (keyed by this relay's pluginId) and replay it
+  // as X-Plugin-Poll-Secret. Empty {} for legacy sessions / older
+  // backends (which ignore it).
+  private pollSecretHeader(): Record<string, string> {
+    try {
+      const secret = loadCliConfig().sessions.find(
+        (s) => s.pluginId === this.pluginId,
+      )?.pollSecret;
+      return secret ? { 'X-Plugin-Poll-Secret': secret } : {};
+    } catch {
+      return {};
+    }
+  }
+
   private async pollOnce(): Promise<void> {
     try {
-      const data = await _getJson(`${API_BASE}/api/commands/pending?pluginId=${this.pluginId}`);
+      const data = await _getJson(
+        `${API_BASE}/api/commands/pending?pluginId=${this.pluginId}`,
+        this.pollSecretHeader(),
+      );
       const commands = data?.data as RemoteCommand[] | undefined;
       this.pollFailures = 0;
       if (!Array.isArray(commands) || commands.length === 0) {

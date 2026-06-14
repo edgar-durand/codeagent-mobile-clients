@@ -186,6 +186,9 @@ export async function pair(args: string[] = []): Promise<void> {
         showError('Pairing timed out after 5 minutes. Run codeam pair to try again.');
         process.exit(1);
       },
+      // SEC crit1 (#8): replay this pairing's secret on the pre-pair
+      // subscription so it passes the command-endpoint gate when enforced.
+      pollSecret,
     );
 
     process.once('SIGINT', sigintHandler);

@@ -27,8 +27,13 @@ import kotlin.math.max
 import kotlin.math.min
 
 fun Request.Builder.withAuthHeaders(): Request.Builder {
+    val settings = SettingsService.getInstance()
     addHeader("X-Codeam-Protocol-Version", PROTOCOL_VERSION)
-    SettingsService.getInstance().getPluginAuthToken()?.let { addHeader("X-Plugin-Auth-Token", it) }
+    settings.getPluginAuthToken()?.let { addHeader("X-Plugin-Auth-Token", it) }
+    // SEC crit1 (#8): the command-delivery endpoints are gated on the
+    // pollSecret when enforced. Always attach it; the backend ignores it
+    // on endpoints that don't require it.
+    addHeader("X-Plugin-Poll-Secret", settings.ensurePollSecret())
     return this
 }
 

@@ -441,10 +441,15 @@ export class CommandRelayService {
     const headers: Record<string, string> = {
       'X-Codeam-Protocol-Version': PROTOCOL_VERSION,
     };
-    const token = SettingsService.getInstance().getPluginAuthToken();
+    const settings = SettingsService.getInstance();
+    const token = settings.getPluginAuthToken();
     if (token) {
       headers['X-Plugin-Auth-Token'] = token;
     }
+    // SEC crit1 (#8): the command-delivery endpoints are gated on the
+    // pollSecret when enforced. Always attach it; the backend ignores it
+    // on endpoints that don't require it.
+    headers['X-Plugin-Poll-Secret'] = settings.ensurePollSecret();
     return headers;
   }
 

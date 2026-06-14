@@ -60,6 +60,10 @@ export function subscribeToPairCompletion(
   pluginId: string,
   onPaired: (info: PairedUserInfo) => void,
   onTimeout: () => void,
+  // SEC crit1 (#8): the pollSecret generated for this pairing. The
+  // backend stores its hash at /pairing/code, so this pre-pair
+  // subscription passes the command-endpoint gate when enforced.
+  pollSecret?: string,
 ): () => void {
   let stopped = false;
   let req: http.ClientRequest | null = null;
@@ -106,6 +110,7 @@ export function subscribeToPairCompletion(
           Accept: 'text/event-stream',
           'Cache-Control': 'no-cache',
           ...vercelBypassHeader(),
+          ...(pollSecret ? { 'X-Plugin-Poll-Secret': pollSecret } : {}),
         },
         timeout: 35_000,
       },
