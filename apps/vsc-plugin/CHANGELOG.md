@@ -4,6 +4,12 @@ All notable changes to the CodeAgent Mobile VS Code extension are documented her
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.39.18] — 2026-06-14
+
+### Added
+
+- **cli:** Send X-Plugin-Auth-Token on conversation-history writes (SEC crit1 #819) — v2.39.18
+
 ## [2.39.16] — 2026-06-14
 
 ### Added
