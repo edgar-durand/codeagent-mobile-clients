@@ -1,4 +1,4 @@
-import { randomUUID } from 'crypto';
+import { randomUUID, randomBytes, createHash } from 'crypto';
 import pc from 'picocolors';
 import { p } from '../ui/prompts';
 import {
@@ -29,11 +29,18 @@ export async function pair(args: string[] = []): Promise<void> {
   // Generate a fresh pluginId for this pairing so multiple sessions from the
   // same machine can coexist without overwriting each other.
   const pluginId = randomUUID();
+  // SEC: proof-of-possession secret for this pairing. We send only its
+  // sha256 at enrollment; the raw secret is replayed as
+  // `X-Plugin-Poll-Secret` on /status + /reconnect so the backend hands
+  // back the auth token + owner PII only to this device — not to anyone
+  // who learns the (non-secret) pluginId. Persisted with the session below.
+  const pollSecret = randomBytes(32).toString('base64url');
+  const pluginSecretHash = createHash('sha256').update(pollSecret).digest('hex');
   capture('pair_started', { agentId, pluginId, dryRun });
   const spin = p.spinner();
   spin.start('Requesting pairing code...');
 
-  const result = await requestCode(pluginId);
+  const result = await requestCode(pluginId, pluginSecretHash);
   if (!result.ok) {
     spin.stop('Failed');
     if (result.reason === 'rate-limited') {
@@ -124,6 +131,9 @@ export async function pair(args: string[] = []): Promise<void> {
           plan: info.plan,
           pairedAt: Date.now(),
           pluginAuthToken: info.pluginAuthToken,
+          // SEC: persist the PoP secret so boot-time /reconnect can prove
+          // possession and refresh the token on the gated endpoint.
+          pollSecret,
           agent: agentId,
         });
         // Persist preferredAgent for next time (reload to pick up activeSessionId written by addSession)

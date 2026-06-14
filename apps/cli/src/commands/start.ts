@@ -106,7 +106,11 @@ export async function start(requestedAgent?: AgentId): Promise<void> {
   // even though the agent answered correctly. Falling back to the
   // persisted token on lookup failure keeps offline / flaky-net
   // sessions working unchanged.
-  const refreshed = await fetchCurrentPluginAuthToken(session.id, pluginId);
+  const refreshed = await fetchCurrentPluginAuthToken(
+    session.id,
+    pluginId,
+    session.pollSecret,
+  );
   if (refreshed && refreshed !== session.pluginAuthToken) {
     addSession({ ...session, pluginAuthToken: refreshed });
     session.pluginAuthToken = refreshed;

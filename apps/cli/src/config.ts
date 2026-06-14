@@ -19,6 +19,18 @@ export interface SavedSession {
    * legacy fallback on the server (sunset 2026-05-25).
    */
   pluginAuthToken?: string;
+  /**
+   * SEC: high-entropy proof-of-possession secret generated locally at
+   * pairing time (never sent to the server in the clear). Sent as
+   * `sha256(pollSecret)` at enrollment and replayed raw as the
+   * `X-Plugin-Poll-Secret` header on `/api/pairing/status` +
+   * `/api/pairing/reconnect`, so the backend returns the auth token +
+   * owner PII only to the device that initiated pairing — not to anyone
+   * who learns the (non-secret) pluginId. Optional: sessions paired
+   * before this existed have none and use the backend's legacy
+   * pluginId-only path until they re-pair.
+   */
+  pollSecret?: string;
   agent: AgentId;
 }
 
