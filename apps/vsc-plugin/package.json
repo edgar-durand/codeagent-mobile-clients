@@ -2,7 +2,7 @@
   "name": "codeagent-mobile",
   "displayName": "CodeAgent — Remote AI Supervision",
   "description": "The workflow-continuity bridge for AI coding agents. Supervise, approve, and redirect Claude Code, Copilot, Cursor, and other agents in this editor from any device — async.",
-  "version": "2.11.0",
+  "version": "2.39.13",
   "publisher": "CodeAgentMobile",
   "icon": "resources/icon.png",
   "galleryBanner": {
