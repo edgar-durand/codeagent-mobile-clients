@@ -4,6 +4,12 @@ All notable changes to the CodeAgent-Mobile JetBrains plugin are documented here
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.39.15] — 2026-06-14
+
+### Added
+
+- **vsc-plugin:** Proof-of-possession secret for /status + /reconnect (SEC crit1)
+
 ## [2.39.14] — 2026-06-14
 
 ### Added
