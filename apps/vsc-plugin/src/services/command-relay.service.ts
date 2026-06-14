@@ -448,7 +448,11 @@ export class CommandRelayService {
     return headers;
   }
 
-  async postJson(url: string, body: Record<string, unknown>): Promise<Record<string, unknown> | null> {
+  async postJson(
+    url: string,
+    body: Record<string, unknown>,
+    extraHeaders?: Record<string, string>,
+  ): Promise<Record<string, unknown> | null> {
     return new Promise((resolve, reject) => {
       const data = JSON.stringify(body);
       const urlObj = new URL(url);
@@ -464,6 +468,7 @@ export class CommandRelayService {
             'Content-Type': 'application/json',
             'Content-Length': Buffer.byteLength(data),
             ...this.authHeaders(),
+            ...(extraHeaders ?? {}),
           },
           timeout: 10000,
         },

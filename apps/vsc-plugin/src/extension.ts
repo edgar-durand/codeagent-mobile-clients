@@ -174,10 +174,12 @@ async function autoReconnectLastSession(): Promise<void> {
   const cached = recent[0]; // getRecentSessions() returns newest-first
   const pluginId = settings.ensurePluginId();
   try {
-    const result = await relay.postJson(`${settings.apiBaseUrl}/api/pairing/reconnect`, {
-      pluginId,
-      sessionId: cached.sessionId,
-    });
+    const result = await relay.postJson(
+      `${settings.apiBaseUrl}/api/pairing/reconnect`,
+      { pluginId, sessionId: cached.sessionId },
+      // SEC crit1 (#813): prove possession on the gated /reconnect.
+      { 'X-Plugin-Poll-Secret': settings.ensurePollSecret() },
+    );
     if (!(result as Record<string, unknown> | null)?.success) {
       log?.appendLine(`[auto-reconnect] session ${cached.sessionId} not resumable (expired)`);
       return;

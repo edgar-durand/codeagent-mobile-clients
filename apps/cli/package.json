@@ -1,6 +1,6 @@
 {
   "name": "codeam-cli",
-  "version": "2.39.14",
+  "version": "2.39.15",
   "description": "Workflow-continuity bridge for AI coding agents. Wrap Claude Code or Codex in a PTY and supervise, approve, and redirect the session from any device — async. The terminal companion for CodeAgent Mobile.",
   "type": "commonjs",
   "main": "dist/index.js",

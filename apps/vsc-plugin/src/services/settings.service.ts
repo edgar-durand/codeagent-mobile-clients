@@ -157,6 +157,27 @@ export class SettingsService {
   }
 
   /**
+   * SEC crit1 (#813): per-(installation+workspace) proof-of-possession
+   * secret, generated + stored locally (never sent in the clear). Sent
+   * as sha256 at enrollment and replayed raw as the `X-Plugin-Poll-Secret`
+   * header on /status + /reconnect, so the backend returns the auth token
+   * + owner PII only to this window — not to anyone who learns the
+   * (non-secret) pluginId. Keyed by the same workspaceKey as the pluginId
+   * so the pair sticks to this window.
+   */
+  ensurePollSecret(): string {
+    const key = this.workspaceKey();
+    const map =
+      this.context.globalState.get<Record<string, string>>('pollSecretsByWorkspace') ?? {};
+    const cached = map[key];
+    if (cached) return cached;
+    const secret = crypto.randomBytes(32).toString('base64url');
+    map[key] = secret;
+    this.context.globalState.update('pollSecretsByWorkspace', map);
+    return secret;
+  }
+
+  /**
    * Stable per-workspace identifier. Hashes the first workspace
    * folder's fsPath; when no workspace is open we fall back to a
    * "no-workspace" bucket so the id is at least deterministic for
