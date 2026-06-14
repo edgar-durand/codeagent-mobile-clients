@@ -1,7 +1,7 @@
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { randomUUID } from 'crypto';
+import { randomUUID, randomBytes, createHash } from 'crypto';
 import { resolveApiBaseUrl, isKnownAgentId } from '@codeagent/shared';
 import { addSession, loadCliConfig } from '../config';
 import { capture, identifyUser } from '../services/telemetry.service';
@@ -91,7 +91,11 @@ function networkError(msg: string, cause?: unknown): NetworkError {
   return err;
 }
 
-async function claimOnce(token: string, pluginId: string): Promise<ClaimSuccess> {
+async function claimOnce(
+  token: string,
+  pluginId: string,
+  pluginSecretHash?: string,
+): Promise<ClaimSuccess> {
   const url = `${API_BASE}/api/pairing/claim-auto-token`;
   const body = {
     token,
@@ -104,6 +108,10 @@ async function claimOnce(token: string, pluginId: string): Promise<ClaimSuccess>
     // backend can populate `PairedSession.branch` for the codespace pair.
     // `null` when detached HEAD / not a git repo.
     branch: detectCurrentBranch(),
+    // SEC crit1 (#813): enroll the PoP hash so /status + /reconnect for
+    // this codespace session require the raw secret. Older backends
+    // ignore the unknown field.
+    ...(pluginSecretHash ? { pluginSecretHash } : {}),
   };
 
   const controller = new AbortController();
@@ -152,9 +160,13 @@ async function claimOnce(token: string, pluginId: string): Promise<ClaimSuccess>
   return ok.data;
 }
 
-async function claim(token: string, pluginId: string): Promise<ClaimSuccess> {
+async function claim(
+  token: string,
+  pluginId: string,
+  pluginSecretHash?: string,
+): Promise<ClaimSuccess> {
   try {
-    return await claimOnce(token, pluginId);
+    return await claimOnce(token, pluginId, pluginSecretHash);
   } catch (err) {
     if ((err as NetworkError).code !== 'NETWORK') throw err;
     // One retry after a short backoff. The codespace bootstrap is the
@@ -164,7 +176,7 @@ async function claim(token: string, pluginId: string): Promise<ClaimSuccess> {
     // bootstrap shell should re-invoke us.
     await new Promise((r) => setTimeout(r, RETRY_BACKOFF_MS));
     try {
-      return await claimOnce(token, pluginId);
+      return await claimOnce(token, pluginId, pluginSecretHash);
     } catch (retryErr) {
       const netErr = retryErr as NetworkError;
       fail(`Auto-pair failed (NETWORK): ${netErr.message}`);
@@ -251,11 +263,15 @@ export async function pairAuto(args: string[]): Promise<void> {
   }
   const token = readTokenFromArgs(args);
   const pluginId = randomUUID();
+  // SEC crit1 (#813): same PoP secret as the interactive pair flow, so
+  // the codespace session is gated on /status + /reconnect too.
+  const pollSecret = randomBytes(32).toString('base64url');
+  const pluginSecretHash = createHash('sha256').update(pollSecret).digest('hex');
   capture('pair_auto_started', { pluginId });
 
   // eslint-disable-next-line no-console
   console.log('  Claiming pairing token…');
-  const claimed = await claim(token, pluginId);
+  const claimed = await claim(token, pluginId, pluginSecretHash);
 
   // Validate the agent the API picked is one this CLI version knows about.
   // (Forward-compat guard for when the backend ships an agent we haven't released yet.)
@@ -274,6 +290,8 @@ export async function pairAuto(args: string[]): Promise<void> {
     plan: claimed.user.plan,
     pairedAt: Date.now(),
     pluginAuthToken: claimed.pluginAuthToken,
+    // SEC crit1 (#813): persist so boot-time /reconnect proves possession.
+    pollSecret,
     agent: claimed.agent,
   });
 
