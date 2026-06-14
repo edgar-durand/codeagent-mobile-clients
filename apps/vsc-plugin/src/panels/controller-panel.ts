@@ -326,10 +326,13 @@ export class ControllerPanelProvider implements vscode.WebviewViewProvider, Comm
     const pluginId = settings.ensurePluginId();
 
     try {
-      const result = await relay.postJson(`${settings.apiBaseUrl}/api/pairing/reconnect`, {
-        pluginId,
-        sessionId,
-      });
+      const result = await relay.postJson(
+        `${settings.apiBaseUrl}/api/pairing/reconnect`,
+        { pluginId, sessionId },
+        // SEC crit1 (#813): prove possession so the gated /reconnect
+        // returns the refreshed token. Legacy backends ignore it.
+        { 'X-Plugin-Poll-Secret': settings.ensurePollSecret() },
+      );
 
       const success = (result as Record<string, unknown>)?.success as boolean;
       if (success) {

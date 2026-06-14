@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import * as os from 'os';
 import * as http from 'http';
 import * as https from 'https';
+import * as crypto from 'crypto';
 import { SettingsService, RecentSession } from './settings.service';
 import { CommandRelayService } from './command-relay.service';
 import { OutputChannel } from 'vscode';
@@ -73,6 +74,12 @@ export class PairingService {
         ideVersion: vscode.version,
         hostname: os.hostname(),
         branch,
+        // SEC crit1 (#813): enroll the PoP hash so /status + /reconnect
+        // require this window's secret. Older backends ignore it.
+        pluginSecretHash: crypto
+          .createHash('sha256')
+          .update(settings.ensurePollSecret())
+          .digest('hex'),
       });
 
       if (result?.data) {
@@ -112,7 +119,13 @@ export class PairingService {
     const pluginId = settings.ensurePluginId();
 
     try {
-      const result = await this.getJson(`${settings.apiBaseUrl}/api/pairing/status?pluginId=${pluginId}`);
+      // SEC crit1 (#813): replay this window's PoP secret so the gated
+      // /status returns the token + PII (the VSC plugin reads the token
+      // from here). Legacy backends ignore the header.
+      const result = await this.getJson(
+        `${settings.apiBaseUrl}/api/pairing/status?pluginId=${pluginId}`,
+        { 'X-Plugin-Poll-Secret': settings.ensurePollSecret() },
+      );
 
       if (result?.data) {
         const data = result.data as Record<string, unknown>;
@@ -191,7 +204,10 @@ export class PairingService {
     this.listeners.forEach((l) => l.onPaired(sessionId));
   }
 
-  private async getJson(url: string): Promise<Record<string, unknown> | null> {
+  private async getJson(
+    url: string,
+    extraHeaders?: Record<string, string>,
+  ): Promise<Record<string, unknown> | null> {
     return new Promise((resolve, reject) => {
       const urlObj = new URL(url);
       const transport = urlObj.protocol === 'https:' ? https : http;
@@ -201,6 +217,7 @@ export class PairingService {
           port: urlObj.port,
           path: urlObj.pathname + urlObj.search,
           method: 'GET',
+          ...(extraHeaders ? { headers: extraHeaders } : {}),
           timeout: 10000,
         },
         (res: http.IncomingMessage) => {
