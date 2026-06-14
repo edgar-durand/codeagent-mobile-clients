@@ -247,7 +247,11 @@ export async function start(requestedAgent?: AgentId): Promise<void> {
   }
 
   const runtime = createRuntimeStrategy(session.agent);
-  const historySvc = new HistoryService(runtime, pluginId, cwd);
+  // SEC crit1 (#819): pass the per-pairing token so conversation-history
+  // writes carry X-Plugin-Auth-Token for the backend to authorize.
+  const historySvc = new HistoryService(runtime, pluginId, cwd, {
+    pluginAuthToken: session.pluginAuthToken,
+  });
 
   const keepAliveCtx = {
     inCodespace: process.env.CODESPACES === 'true',

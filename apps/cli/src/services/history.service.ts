@@ -120,7 +120,11 @@ function parseJsonl(filePath: string): ClaudeHistoryMessage[] {
 }
 
 /** POST JSON to the API. Returns true on 2xx, false on error/timeout/non-2xx. */
-function post(endpoint: string, body: Record<string, unknown>): Promise<boolean> {
+function post(
+  endpoint: string,
+  body: Record<string, unknown>,
+  pluginAuthToken?: string,
+): Promise<boolean> {
   return new Promise((resolve) => {
     const payload = JSON.stringify(body);
     const u = new URL(`${API_BASE}${endpoint}`);
@@ -135,6 +139,12 @@ function post(endpoint: string, body: Record<string, unknown>): Promise<boolean>
           'Content-Type': 'application/json',
           'Content-Length': Buffer.byteLength(payload),
           ...vercelBypassHeader(),
+          // SEC crit1 (#819): authenticate conversation-history writes so
+          // the backend can verify the (sessionId, pluginId) ownership.
+          // Older backends ignore the header.
+          ...(pluginAuthToken
+            ? { 'X-Plugin-Auth-Token': pluginAuthToken }
+            : {}),
         },
         timeout: 15000,
       },
@@ -205,6 +215,7 @@ export class HistoryService {
   private static readonly BIRTHTIME_GRACE_MS = 5_000;
 
   private readonly runtime: RuntimeStrategy;
+  private readonly pluginAuthToken?: string;
 
   constructor(
     runtime: RuntimeStrategy,
@@ -215,10 +226,15 @@ export class HistoryService {
      * for the birthtime filter. Production callers omit this; tests
      * use it to simulate a CLI that started just after a pre-existing
      * parallel-session JSONL.
+     *
+     * `pluginAuthToken` (SEC crit1 #819) is replayed as
+     * `X-Plugin-Auth-Token` on conversation-history writes so the
+     * backend can authorize them.
      */
-    options?: { bootTimeMs?: number },
+    options?: { bootTimeMs?: number; pluginAuthToken?: string },
   ) {
     this.runtime = runtime;
+    this.pluginAuthToken = options?.pluginAuthToken;
     this.bootTimeMs = options?.bootTimeMs ?? Date.now();
   }
 
@@ -514,11 +530,15 @@ export class HistoryService {
     }
     const sessions = this.runtime.listResumableSessions(this.cwd);
     if (sessions.length === 0) return;
-    await post('/api/sessions/list', {
-      pluginId: this.pluginId,
-      agentId: this.runtime.id,
-      sessions,
-    });
+    await post(
+      '/api/sessions/list',
+      {
+        pluginId: this.pluginId,
+        agentId: this.runtime.id,
+        sessions,
+      },
+      this.pluginAuthToken,
+    );
   }
 
   /**
@@ -552,10 +572,10 @@ export class HistoryService {
         totalBatches,
       };
 
-      let ok = await post('/api/sessions/conversation', body);
+      let ok = await post('/api/sessions/conversation', body, this.pluginAuthToken);
       for (let attempt = 0; !ok && attempt < RETRY_DELAYS.length; attempt++) {
         await new Promise<void>((r) => setTimeout(r, RETRY_DELAYS[attempt]));
-        ok = await post('/api/sessions/conversation', body);
+        ok = await post('/api/sessions/conversation', body, this.pluginAuthToken);
       }
 
       if (!ok) {
@@ -630,7 +650,7 @@ export class HistoryService {
       mode: 'append' as const,
     };
 
-    const ok = await post('/api/sessions/conversation', body);
+    const ok = await post('/api/sessions/conversation', body, this.pluginAuthToken);
     if (ok) {
       const last = newMessages[newMessages.length - 1];
       this.lastUploadedUuid.set(sessionId, last.id);
