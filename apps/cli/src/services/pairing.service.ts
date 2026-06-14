@@ -56,7 +56,10 @@ export type RequestCodeResult =
   | { ok: false; reason: 'http'; status: number }
   | { ok: false; reason: 'network' };
 
-export async function requestCode(pluginId: string): Promise<RequestCodeResult> {
+export async function requestCode(
+  pluginId: string,
+  pluginSecretHash?: string,
+): Promise<RequestCodeResult> {
   try {
     // Detect "running on a remote managed workspace" so the backend
     // (and apps) can show a "☁ codespace" tag next to the session,
@@ -78,6 +81,10 @@ export async function requestCode(pluginId: string): Promise<RequestCodeResult> 
       runtime,
       branch,
       ...(codespaceName ? { codespaceName } : {}),
+      // SEC: proof-of-possession enrollment. Backend carries this hash
+      // onto the session and requires the raw secret on /status +
+      // /reconnect. Older backends ignore the unknown field.
+      ...(pluginSecretHash ? { pluginSecretHash } : {}),
     });
     // Race the request against a hard timeout. The underlying socket
     // is leaked when the timeout wins (no AbortController plumbed
@@ -144,11 +151,15 @@ export async function requestCode(pluginId: string): Promise<RequestCodeResult> 
 export async function fetchCurrentPluginAuthToken(
   sessionId: string,
   pluginId: string,
+  pollSecret?: string,
 ): Promise<string | null> {
   try {
     const result = await _transport.postJson(
       `${API_BASE}/api/pairing/reconnect`,
       { sessionId, pluginId },
+      // SEC: prove possession so the gated /reconnect returns the token.
+      // Omitted for legacy sessions (no secret) → backend legacy path.
+      pollSecret ? { 'X-Plugin-Poll-Secret': pollSecret } : undefined,
     );
     const data = result?.data as Record<string, unknown> | undefined;
     if (!data?.paired) return null;
@@ -484,6 +495,7 @@ function makeHttpError(
 export async function _postJson(
   url: string,
   body: Record<string, unknown>,
+  extraHeaders?: Record<string, string>,
 ): Promise<Record<string, unknown> | null> {
   return new Promise((resolve, reject) => {
     const data = JSON.stringify(body);
@@ -499,6 +511,7 @@ export async function _postJson(
           'Content-Type': 'application/json',
           'Content-Length': Buffer.byteLength(data),
           ...vercelBypassHeader(),
+          ...(extraHeaders ?? {}),
         },
         timeout: 10000,
       },
