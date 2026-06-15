@@ -1216,7 +1216,12 @@ const previewStartH: CommandHandler = (ctx, _cmd, parsed) => {
     const outcome = await waitForDevServerReady(devServer, readyRe, {
       timeoutMs: 120_000,
       onChunk: (s) => {
-        outputTail = (outputTail + s).slice(-4000);
+        // Keep a generous window: when a task runner (Nx, Turbo, npm
+        // workspaces) fails a dependency task, the REAL error prints
+        // BEFORE the terse summary line, so a small tail captures only
+        // the unhelpful "N tasks failed · run with --verbose" footer.
+        // 16 KB reliably includes the failing task's own stderr.
+        outputTail = (outputTail + s).slice(-16_000);
         if (!expoUrl && detection.framework === 'Expo') {
           expoUrl = parseExpoUrl(s);
         }
@@ -1234,7 +1239,7 @@ const previewStartH: CommandHandler = (ctx, _cmd, parsed) => {
         payload: {
           stage: 'spawn',
           message: `The dev server exited (code ${outcome.code}) before it was ready. It may need a database or other services.`,
-          stderrTail: outputTail.slice(-2000),
+          stderrTail: outputTail.slice(-8000),
         },
       });
       return;
@@ -1249,7 +1254,7 @@ const previewStartH: CommandHandler = (ctx, _cmd, parsed) => {
         payload: {
           stage: 'ready_timeout',
           message: "The dev server didn't become ready in time. It may be stuck waiting on a database or other service.",
-          stderrTail: outputTail.slice(-2000),
+          stderrTail: outputTail.slice(-8000),
         },
       });
       return;
