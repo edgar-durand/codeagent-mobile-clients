@@ -201,6 +201,30 @@ export class AcpClient {
       this.opts.onUnexpectedExit?.(code, signal);
     });
 
+    // spawn(2) failures arrive as an ASYNC 'error' event. With no
+    // listener, Node rethrows them as an uncaught exception and the
+    // WHOLE relay process dies — that's the `spawn ENOEXEC` crash a
+    // user hit. (PATH expansion above only prevents ENOENT for a
+    // missing binary; ENOEXEC — wrong-architecture binary or a script
+    // without a shebang / +x — slips past it.) Catch it, surface a
+    // useful message to mobile, and route it through the same
+    // unexpected-exit path so the relay stays connected.
+    child.on('error', (err: NodeJS.ErrnoException) => {
+      if (this.stopping) return;
+      const code = err.code ?? err.message;
+      const hint =
+        err.code === 'ENOEXEC'
+          ? ' — the agent binary looks like the wrong architecture or a non-executable script'
+          : err.code === 'ENOENT'
+            ? ` — '${adapter.command}' was not found on PATH`
+            : err.code === 'EACCES'
+              ? ` — '${adapter.command}' is not executable`
+              : '';
+      log.error('acpClient', `adapter spawn failed: ${code}${hint}`);
+      this.opts.onStderr?.(`Failed to launch ${adapter.command}: ${code}${hint}`);
+      this.opts.onUnexpectedExit?.(null, null);
+    });
+
     if (!child.stdin || !child.stdout) {
       throw new Error('Spawned ACP adapter is missing stdio handles');
     }
