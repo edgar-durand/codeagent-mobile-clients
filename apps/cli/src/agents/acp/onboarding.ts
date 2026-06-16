@@ -31,7 +31,7 @@ import { log } from '../../services/logger';
  * startup timing.
  */
 interface TurnStreaming {
-  beginTurn(): Promise<void>;
+  beginTurn(opts?: { clear?: boolean }): Promise<void>;
   append(delta: { chunkId: string; kind: StreamingChunkKind; delta: string }): void;
   closeAll(): Promise<void>;
 }
@@ -156,7 +156,11 @@ async function runOnboardingTurn(opts: {
 }): Promise<void> {
   const { streaming, history, cwd } = opts;
   const welcome = buildOnboardingWelcome(cwd);
-  await streaming.beginTurn();
+  // clear: false — keep the agent_banner card published moments earlier
+  // (the welcome turn's clear would otherwise flush it from the backend
+  // output buffer that SSE catchup replays). This is the first turn, so
+  // there's nothing else to clear.
+  await streaming.beginTurn({ clear: false });
   try {
     // Single text chunk — `append` publishes the chat bubble + streaming-chunk
     // feed; `closeAll` flips it to done. Fixed chunkId: one chunk per welcome.

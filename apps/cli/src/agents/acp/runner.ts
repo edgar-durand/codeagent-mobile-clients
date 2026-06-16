@@ -243,7 +243,7 @@ class StreamingState {
     return this.text;
   }
 
-  async beginTurn(): Promise<void> {
+  async beginTurn(opts?: { clear?: boolean }): Promise<void> {
     this.text = '';
     this.streamingChunks.clear();
     // Any leftover pending interactive question from a previous turn
@@ -253,7 +253,16 @@ class StreamingState {
       clearTimeout(this.pending.timeoutTimer);
     }
     this.pending = null;
-    await this.publisher.publishOutput({ type: 'clear' });
+    // `clear` flushes the backend output buffer — the source SSE catchup
+    // replays when a client opens the session. The onboarding welcome turn
+    // passes { clear: false } because it runs right AFTER the agent_banner
+    // card is published: clearing here wiped that card from the buffer, so
+    // anyone opening the session after first-pair saw the welcome text with
+    // no branded banner. It's the session's first turn, so there's nothing
+    // else to clear. Real command turns keep the default (clear: true).
+    if (opts?.clear !== false) {
+      await this.publisher.publishOutput({ type: 'clear' });
+    }
     await this.publisher.publishOutput({ type: 'new_turn', done: false });
   }
 

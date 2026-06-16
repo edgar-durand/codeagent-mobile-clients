@@ -55,7 +55,10 @@ describe('maybeSendOnboardingWelcome', () => {
 
     const expected = buildOnboardingWelcome('/repo/acme');
     expect(write).toHaveBeenCalledTimes(1);
-    expect(streaming.beginTurn).toHaveBeenCalledTimes(1); // turn boundary (clear+new_turn)
+    expect(streaming.beginTurn).toHaveBeenCalledTimes(1);
+    // clear:false — must NOT flush the agent_banner card published just
+    // before onboarding from the backend catchup buffer (welcome-card bug).
+    expect(streaming.beginTurn).toHaveBeenCalledWith({ clear: false });
     // Hardcoded text appended as a single text chunk — NO agent round-trip.
     expect(streaming.append).toHaveBeenCalledWith({
       chunkId: 'onboarding-welcome',
