@@ -108,4 +108,59 @@ describe('maybeSendOnboardingWelcome', () => {
 
     expect(streaming.beginTurn).not.toHaveBeenCalled();
   });
+
+  // #339 — the first user prompt sometimes got answered by the greeting.
+  // Root cause: the welcome turn was fire-and-forget and could still be open
+  // (mid beginTurn→append→closeAll) when the relay began the first command
+  // turn on the SAME shared StreamingState, so the two interleaved on one
+  // buffer. The runner now `await`s this before `relay.start()`. For that to
+  // actually serialize, the returned promise MUST NOT resolve until the
+  // welcome turn has fully closed (closeAll). This pins that contract.
+  it('resolves only AFTER the welcome turn closes, so the relay can serialize against it (#339)', async () => {
+    vi.spyOn(_onboardingSeam, 'disabled').mockReturnValue(false);
+    vi.spyOn(_onboardingSeam, 'exists').mockReturnValue(false);
+    vi.spyOn(_onboardingSeam, 'write').mockImplementation(() => {});
+
+    // Gate closeAll so we can observe the promise's resolution timing
+    // relative to the turn actually closing.
+    let releaseCloseAll: () => void = () => {};
+    const closeAllGate = new Promise<void>((resolve) => {
+      releaseCloseAll = resolve;
+    });
+    let turnClosed = false;
+    const streaming = {
+      beginTurn: vi.fn().mockResolvedValue(undefined),
+      append: vi.fn(),
+      closeAll: vi.fn().mockImplementation(async () => {
+        await closeAllGate;
+        turnClosed = true;
+      }),
+    };
+    const history = fakeHistory();
+
+    let promiseResolved = false;
+    const done = maybeSendOnboardingWelcome({
+      streaming,
+      history,
+      sessionId: 'sess-123',
+      cwd: '/repo/acme',
+    }).then(() => {
+      promiseResolved = true;
+    });
+
+    // Let microtasks run: the turn has begun + appended but closeAll is gated.
+    await new Promise((r) => setImmediate(r));
+    expect(streaming.beginTurn).toHaveBeenCalledTimes(1);
+    expect(turnClosed).toBe(false);
+    // The relay-awaited promise MUST still be pending while the turn is open —
+    // otherwise relay.start() could begin a command turn mid-welcome.
+    expect(promiseResolved).toBe(false);
+
+    // Close the welcome turn → the promise resolves, and only now is it safe
+    // for the relay to start its own turn.
+    releaseCloseAll();
+    await done;
+    expect(turnClosed).toBe(true);
+    expect(promiseResolved).toBe(true);
+  });
 });

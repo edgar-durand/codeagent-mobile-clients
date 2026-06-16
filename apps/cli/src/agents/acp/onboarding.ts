@@ -93,18 +93,27 @@ export function buildOnboardingWelcome(cwd: string): string {
 
 /**
  * Send the onboarding welcome once for a freshly paired session. Strictly
- * non-fatal + fire-and-forget: the turn streams back through the normal
- * session/update → publishOutput path AND is recorded into the conversation
- * anchor so it shows in chat even when SessionDetail is opened after the turn
- * finishes. A failure (or the kill-switch / an already-welcomed marker) just
- * means no welcome this run.
+ * non-fatal: the turn streams back through the normal session/update →
+ * publishOutput path AND is recorded into the conversation anchor so it shows
+ * in chat even when SessionDetail is opened after the turn finishes. A failure
+ * (or the kill-switch / an already-welcomed marker) just means no welcome this
+ * run.
+ *
+ * Returns a promise that resolves when the welcome turn has FULLY closed (or
+ * immediately when skipped). The caller awaits this before starting the
+ * command relay: both the welcome turn and command turns drive the SAME shared
+ * `StreamingState` buffer, so if the first `start_task` interleaves with an
+ * in-flight welcome turn, the (instant, hardcoded) welcome wins the buffer and
+ * the user's first prompt appears answered by the greeting (#339). Awaiting
+ * here serializes the two without a turn mutex; the welcome has no model
+ * round-trip so the added startup delay is a few publishes, not a turn.
  */
-export function maybeSendOnboardingWelcome(opts: {
+export async function maybeSendOnboardingWelcome(opts: {
   streaming: TurnStreaming;
   history: WelcomeHistory;
   sessionId: string;
   cwd: string;
-}): void {
+}): Promise<void> {
   if (_onboardingSeam.disabled()) return;
   const marker = _onboardingSeam.markerPath(opts.sessionId);
   try {
@@ -117,14 +126,17 @@ export function maybeSendOnboardingWelcome(opts: {
     return;
   }
   log.info('acpRunner', `sending first-pair onboarding welcome for session=${opts.sessionId.slice(0, 8)}`);
-  // Fire-and-forget — must not block session startup. Publishes the hardcoded
-  // welcome as a turn + records it in the anchor; no agent round-trip.
-  void runOnboardingTurn(opts).catch((err: unknown) => {
+  // Run the welcome turn to completion; swallow errors (non-fatal). The caller
+  // awaits this so the turn fully closes before the relay can begin a command
+  // turn on the shared StreamingState (#339).
+  try {
+    await runOnboardingTurn(opts);
+  } catch (err: unknown) {
     log.warn(
       'acpRunner',
       `onboarding welcome turn failed (non-fatal): ${err instanceof Error ? err.message : String(err)}`,
     );
-  });
+  }
 }
 
 /**
