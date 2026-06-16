@@ -754,7 +754,13 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
   // conversation anchor via `history`, so it survives a SessionDetail opened
   // AFTER the turn finished (the chat reads the anchor; SSE catchup drops
   // historical text). Once per paired session; skipped on reconnects. Non-fatal.
-  maybeSendOnboardingWelcome({
+  // Kicked off here so it streams concurrently with the watcher/relay setup
+  // below, but we AWAIT it right before `relay.start()` so the welcome turn
+  // has fully closed before any command turn can begin on the shared
+  // StreamingState — otherwise the first `start_task` interleaves with the
+  // in-flight welcome and the user's first prompt gets answered by the
+  // greeting (#339).
+  const onboardingWelcomeDone = maybeSendOnboardingWelcome({
     streaming,
     history,
     sessionId: opts.sessionId,
@@ -854,6 +860,10 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
     },
     { id: opts.agent, name: opts.agent, displayName: opts.agent } as never,
   );
+  // Serialize against the onboarding welcome (#339): wait for its turn to
+  // fully close before the relay can start a command turn on the shared
+  // StreamingState. Non-fatal internally, so this never rejects.
+  await onboardingWelcomeDone;
   relay.start();
 
   // Pre-warm project-type detection so the user's first "Start Preview" is
