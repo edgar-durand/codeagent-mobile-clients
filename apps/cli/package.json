@@ -70,8 +70,8 @@
     "node": ">=20.0.0"
   },
   "dependencies": {
-    "@agentclientprotocol/claude-agent-acp": "^0.42.0",
-    "@agentclientprotocol/codex-acp": "^0.0.45",
+    "@agentclientprotocol/claude-agent-acp": "^0.47.0",
+    "@agentclientprotocol/codex-acp": "^0.0.46",
     "@agentclientprotocol/sdk": "^0.25.0",
     "@clack/prompts": "^1.2.0",
     "chokidar": "^3.6.0",
