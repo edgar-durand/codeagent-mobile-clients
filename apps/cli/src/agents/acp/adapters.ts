@@ -10,8 +10,8 @@
  * Adding a new ACP-compatible agent is a 3-step recipe:
  *   1. `npm install <adapter-package>` in `apps/cli/`.
  *   2. Add an entry below keyed by its {@link AgentId}.
- *   3. Ship. The dispatch in `start.ts` picks it up automatically
- *      when `CODEAM_ACP_ENABLED=1` and the agent's id matches.
+ *   3. Ship. The dispatch in `start.ts` picks it up automatically —
+ *      any agent with an adapter runs over ACP unconditionally.
  *
  * No per-agent runtime files, no parser per agent — that's the whole
  * point of replacing the hand-rolled per-agent strategies with the
@@ -49,8 +49,7 @@ export interface AdapterSpec {
 
 /**
  * Resolve the absolute path to a package's `bin` entry. Returns
- * `null` when the package is missing (lets the dispatch fall back
- * to the legacy per-agent strategy without crashing).
+ * `null` when the package is missing.
  */
 function resolveBin(pkgName: string, binName?: string): string | null {
   try {
@@ -114,8 +113,8 @@ const REGISTRY: Partial<Record<AgentId, () => AdapterSpec | null>> = {
   //   },
   //
   // Until then `getAcpAdapter('cursor')` returns null and the dispatch
-  // in start.ts falls back to the legacy PTY runtime — same behaviour
-  // cursor users had before ACP was added.
+  // in start.ts runs cursor over the legacy PTY runtime — same
+  // behaviour cursor users had before ACP was added.
   // Gemini speaks ACP natively via `gemini --acp` — no npm adapter
   // package, just the user-installed `gemini` binary on PATH. Same
   // {@link AdapterSpec} shape; the only difference is `command` is
@@ -138,12 +137,28 @@ const REGISTRY: Partial<Record<AgentId, () => AdapterSpec | null>> = {
 /**
  * Resolve the adapter spec for an agent, or `null` if we have no
  * ACP coverage. Used by the dispatch in `start.ts` — when this
- * returns null (or `CODEAM_ACP_ENABLED` isn't set), the existing
- * hand-rolled `RuntimeStrategy` is used instead.
+ * returns null the legacy PTY `RuntimeStrategy` is used instead
+ * (aider, cursor, coderabbit).
  */
 export function getAcpAdapter(agent: AgentId): AdapterSpec | null {
   const factory = REGISTRY[agent];
   return factory ? factory() : null;
+}
+
+/**
+ * Pure dispatch predicate: does this agent run over ACP?
+ *
+ * `true` ⇒ ACP is the agent's ONLY launch path (claude / codex /
+ * gemini today). There is no env flag and no PTY fallback for these
+ * agents — if the adapter resolves, the session runs over the typed
+ * protocol. `false` ⇒ the agent has no ACP adapter and runs over the
+ * legacy PTY runtime (aider, cursor, coderabbit).
+ *
+ * Extracted so `start.ts`'s dispatch decision is unit-testable
+ * without standing up the whole run-loop.
+ */
+export function requiresAcp(agent: AgentId): boolean {
+  return getAcpAdapter(agent) !== null;
 }
 
 /**

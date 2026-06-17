@@ -10,6 +10,22 @@ import { AiderRuntimeStrategy } from './aider/runtime';
 import { GeminiRuntimeStrategy } from './gemini/runtime';
 import type { AgentStrategy, RuntimeStrategy, DeployStrategy } from './strategy';
 
+/**
+ * Per-agent runtime (PTY/REPL) strategy builders.
+ *
+ * claude / codex / gemini are dispatched ACP-only at runtime (see
+ * `requiresAcp` in `acp/adapters.ts` + the dispatch in `start.ts`) —
+ * the legacy PTY-spawn path is never taken for them. Their builders
+ * survive anyway because the ACP runner (`listModels`, headless
+ * `generateOneShot`, legacy file/preview handlers), `codeam link`
+ * (`credentialLocator` / `loginLauncher`), and `HistoryService`
+ * (transcript parsing) still resolve the strategy via
+ * `createInteractiveAgentStrategy`. Their TUI-parsing methods are
+ * inert stubs now that the React-Ink / ratatui parsers are gone.
+ *
+ * aider / cursor / coderabbit have no ACP adapter and DO spawn over
+ * the PTY runtime built here.
+ */
 const runtimeBuilders: Partial<Record<AgentId, (os: OsStrategy) => AgentStrategy>> = {
   claude: (os) => new ClaudeRuntimeStrategy(os),
   codex: (os) => new CodexRuntimeStrategy(os),

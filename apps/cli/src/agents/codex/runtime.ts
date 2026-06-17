@@ -1,10 +1,8 @@
 import { spawn, spawnSync } from 'node:child_process';
 import * as path from 'node:path';
-import { getAgent, type AgentId, type AgentMetadata, type AgentModel, type ChromeStep, type SelectPrompt } from '@codeagent/shared';
+import { getAgent, type AgentId, type AgentMetadata, type AgentModel, type SelectPrompt } from '@codeagent/shared';
 import type { OsStrategy } from '../../os';
 import * as history from './history';
-import { filterCodexChrome, parseCodexChrome, detectCodexSelector } from './parsing';
-import { renderCodexBuffer } from './renderer';
 import { codexCredentialLocator, codexLoginLauncher } from './link';
 import { spawnAndCapture } from '../../services/spawn-and-capture';
 import type { ChangeModelInstruction, RuntimeStrategy } from '../strategy';
@@ -119,38 +117,19 @@ export class CodexRuntimeStrategy implements RuntimeStrategy {
   }
 
   // ─── TUI parser strategy methods ─────────────────────────────────
-
-  /**
-   * Codex needs its own virtual terminal because the Codex CLI uses
-   * DECSTBM scroll regions (`\x1B[1;31r`) and Reverse Index (`\x1BM`)
-   * to scroll chat history within a fixed top zone — bytes the shared
-   * renderer drops, leaving the mobile feed with only the most recent
-   * frame instead of the full reply. See ./renderer.ts.
-   */
-  renderToLines(buffer: string): string[] {
-    return renderCodexBuffer(buffer);
-  }
-
-  parseTuiChrome(line: string): ChromeStep | null {
-    return parseCodexChrome(line);
-  }
+  // Codex runs ACP-only (see the `requiresAcp` dispatch in start.ts);
+  // the legacy PTY-spawn pipeline never reaches these. Inert stubs to
+  // satisfy the InteractiveAgentStrategy contract — the Codex ratatui
+  // parsers + scroll-region renderer were removed with the PTY path.
+  // The optional TUI hooks (renderToLines / parseTuiChrome /
+  // detectReadyPrompt) are dropped entirely.
 
   filterTuiOutput(lines: string[]): string[] {
-    return filterCodexChrome(lines);
+    return lines;
   }
 
-  detectInteractivePrompt(lines: string[]): SelectPrompt | null {
-    return detectCodexSelector(lines);
-  }
-
-  detectReadyPrompt(lines: string[]): boolean {
-    // Codex's ratatui input box reappears at the bottom of the
-    // screen the moment the agent stops working — `│ › │` (box
-    // border + U+203A SINGLE RIGHT-POINTING ANGLE QUOTATION MARK
-    // cursor). The cursor char survives across versions; box
-    // borders may swap (╭╮╰╯ / ┌┐└┘) so we anchor only on the
-    // U+203A + adjacent box-bar.
-    return lines.some((l) => /[│┃]\s*›/u.test(l));
+  detectInteractivePrompt(_lines: string[]): SelectPrompt | null {
+    return null;
   }
 
   credentialLocator() {

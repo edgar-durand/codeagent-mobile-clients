@@ -1,11 +1,11 @@
 import pc from 'picocolors';
 import { AGENT_REGISTRY, type AgentId } from '@codeagent/shared';
 import { addSession, getActiveSession, getActiveSessionForAgent, ensurePluginId, loadCliConfig } from '../config';
-import { showIntro, showInfo } from '../ui/banner';
+import { showIntro, showInfo, showError } from '../ui/banner';
 import { CommandRelayService } from '../services/command-relay.service';
 import { AgentService } from '../services/agent.service';
 import { createRuntimeStrategy } from '../agents/registry';
-import { getAcpAdapter } from '../agents/acp/adapters';
+import { getAcpAdapter, requiresAcp } from '../agents/acp/adapters';
 import { runAcpSession } from '../agents/acp/runner';
 import { OutputService } from '../services/output.service';
 import { HistoryService } from '../services/history.service';
@@ -200,50 +200,44 @@ export async function start(requestedAgent?: AgentId): Promise<void> {
     );
   }
 
-  // ACP fork — default ON since v2.27.13. Runs the session over the
-  // typed protocol whenever:
-  //   1. We ship an ACP adapter for this agent (claude / codex / gemini
-  //      today; more as vendors publish adapters), AND
-  //   2. The pairing has a `pluginAuthToken` (every modern pair flow
-  //      mints one — older pre-rolling-token pairs fall through to PTY).
+  // ACP dispatch. Agents that ship an ACP adapter (claude / codex /
+  // gemini today; more as vendors publish adapters) run over the typed
+  // protocol UNCONDITIONALLY — it is their ONLY launch path. There is
+  // no env flag and no PTY fallback for them: the legacy per-agent TUI
+  // parsers were removed in the ACP-only cutover. The runner owns its
+  // own lifecycle (signal handlers, relay, process.exit on shutdown),
+  // so this branch never returns once ACP takes over.
   //
-  // Escape hatches:
-  //   - `CODEAM_ACP_DISABLED=1` — force the legacy PTY pipeline even
-  //     for agents that ship an adapter (debugging / regression
-  //     verification).
-  //   - `CODEAM_ACP_ENABLED=1` — kept as a no-op alias for backwards
-  //     compatibility with the v2.27.2 → v2.27.12 opt-in flag. Setting
-  //     it is harmless; ACP runs either way unless DISABLED takes
-  //     precedence.
+  // ACP requires a `pluginAuthToken` (every modern pair flow mints one).
+  // If an adapter-backed agent somehow has no token we FAIL loudly
+  // rather than silently degrade — falling back to PTY is impossible
+  // now that the TUI spawn surface for these agents is gone.
   //
-  // Agents without an adapter (aider, coderabbit, cursor — until
-  // their adapters land in the official `@agentclientprotocol/*`
-  // namespace) silently fall through to the legacy PTY runtime below.
-  // The runner owns its own lifecycle (signal handlers, relay,
-  // process.exit on shutdown), so this branch never returns when ACP
-  // takes over.
-  const acpDisabled = process.env.CODEAM_ACP_DISABLED === '1';
-  if (!acpDisabled && session.pluginAuthToken) {
+  // Agents WITHOUT an adapter (aider, cursor, coderabbit) keep using
+  // the generic PTY runtime below.
+  if (requiresAcp(session.agent)) {
     const adapter = getAcpAdapter(session.agent);
-    if (adapter) {
-      await runAcpSession({
-        agent: session.agent,
-        sessionId: session.id,
-        pluginId,
-        pluginAuthToken: session.pluginAuthToken,
-        adapter,
-        cwd,
-        getBeads,
-        // AUTO mode in a headless GitHub Codespace: no human at the phone to
-        // answer permission prompts, so auto-approve them rather than stall the
-        // turn (the agent-agnostic equivalent of --dangerously-skip-permissions).
-        autoApprovePermissions: process.env.CODESPACES === 'true',
-      });
-      return;
+    if (!adapter || !session.pluginAuthToken) {
+      showError(
+        `${AGENT_REGISTRY[session.agent].displayName} requires a paired session with an ` +
+          'auth token. Re-pair with `codeam pair` to continue.',
+      );
+      process.exit(1);
     }
-  }
-  if (acpDisabled) {
-    showInfo('CODEAM_ACP_DISABLED is set — running the legacy PTY pipeline.');
+    await runAcpSession({
+      agent: session.agent,
+      sessionId: session.id,
+      pluginId,
+      pluginAuthToken: session.pluginAuthToken,
+      adapter,
+      cwd,
+      getBeads,
+      // AUTO mode in a headless GitHub Codespace: no human at the phone to
+      // answer permission prompts, so auto-approve them rather than stall the
+      // turn (the agent-agnostic equivalent of --dangerously-skip-permissions).
+      autoApprovePermissions: process.env.CODESPACES === 'true',
+    });
+    return;
   }
 
   const runtime = createRuntimeStrategy(session.agent);

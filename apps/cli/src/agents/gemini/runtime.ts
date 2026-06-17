@@ -2,20 +2,20 @@
  * GeminiRuntimeStrategy — InteractiveAgentStrategy for Google's
  * Gemini CLI.
  *
- * Gemini is meant to be driven via the ACP runtime (`gemini --acp`)
- * — see `apps/cli/src/agents/acp/`. This strategy exists so the
- * non-ACP code paths that touch every registered agent still
- * resolve cleanly:
+ * Gemini is driven EXCLUSIVELY via the ACP runtime (`gemini --acp`)
+ * — see `apps/cli/src/agents/acp/`. The `requiresAcp` dispatch in
+ * `start.ts` always routes Gemini through ACP; the PTY-spawn path is
+ * never reached. This strategy exists only so the non-spawn code
+ * paths that touch every registered agent still resolve cleanly:
  *
  *   - `codeam link gemini` reaches in for `credentialLocator()` +
  *     `loginLauncher()`.
  *   - The agent-contract suite iterates every runtime builder and
  *     asserts the interface shape.
- *   - `start.ts` falls through to `prepareLaunch()` when
- *     `CODEAM_ACP_ENABLED` isn't set. In that case we spawn the raw
- *     `gemini` REPL — the mobile UI sees unparsed PTY bytes, which
- *     is the same degraded-but-correct fallback any agent without a
- *     hand-rolled parser would get.
+ *
+ * `prepareLaunch()` and the TUI-parsing methods below are retained
+ * solely to satisfy that contract — production never spawns Gemini
+ * over a PTY.
  *
  * History / usage / TUI parsing are deliberately no-ops: Gemini
  * doesn't ship a stable on-disk transcript format we'd want to
@@ -76,10 +76,7 @@ export class GeminiRuntimeStrategy implements RuntimeStrategy {
       throw new Error(
         'Gemini CLI is not on PATH. Install it with:\n' +
           '    npm install -g @google/gemini-cli\n' +
-          '    Then run `codeam pair` again.\n\n' +
-          '  Tip: set CODEAM_ACP_ENABLED=1 before pairing to use the\n' +
-          '  ACP runtime — it gives mobile typed messages instead of\n' +
-          '  raw PTY output for Gemini.',
+          '    Then run `codeam pair` again.',
       );
     }
     return this.os.buildLaunch(binary);
@@ -131,11 +128,10 @@ export class GeminiRuntimeStrategy implements RuntimeStrategy {
   }
 
   /**
-   * Pass-through filter. Gemini's TUI chrome isn't worth
-   * hand-detecting — users who want clean output should use ACP
-   * (`CODEAM_ACP_ENABLED=1`) instead. Returning the input verbatim
-   * satisfies the contract's idempotency assertion and keeps mobile
-   * showing whatever the REPL prints.
+   * Pass-through filter. Gemini runs over ACP, so this is never hit
+   * in production — it exists only to satisfy the contract's
+   * idempotency assertion. Returning the input verbatim keeps the
+   * stub trivially idempotent.
    */
   filterTuiOutput(lines: string[]): string[] {
     return lines;

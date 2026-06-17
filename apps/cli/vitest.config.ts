@@ -11,6 +11,11 @@ export default defineConfig({
     globals: true,
     environment: 'node',
     include: ['__tests__/**/*.ts'],
+    // Shared test fixtures (no `describe`/`it`) live under
+    // __tests__/fixtures and are imported by the real specs. Keep
+    // them out of the test glob so vitest doesn't treat them as empty
+    // suites and fail with "No test suite found".
+    exclude: ['__tests__/fixtures/**', '**/node_modules/**', '**/dist/**'],
     coverage: {
       // v8 is faster than istanbul + ships in core Node, so no
       // sourcemap-translation step on the hot path.
