@@ -322,37 +322,12 @@ export class ControllerPanelProvider implements vscode.WebviewViewProvider, Comm
   private async handleReconnect(sessionId: string): Promise<void> {
     const settings = SettingsService.getInstance();
     const pairing = PairingService.getInstance();
-    const relay = CommandRelayService.getInstance();
-    const pluginId = settings.ensurePluginId();
+    const cached = settings.getRecentSessions().find((s) => s.sessionId === sessionId);
 
-    try {
-      const result = await relay.postJson(
-        `${settings.apiBaseUrl}/api/pairing/reconnect`,
-        { pluginId, sessionId },
-        // SEC crit1 (#813): prove possession so the gated /reconnect
-        // returns the refreshed token. Legacy backends ignore it.
-        { 'X-Plugin-Poll-Secret': settings.ensurePollSecret() },
-      );
-
-      const success = (result as Record<string, unknown>)?.success as boolean;
-      if (success) {
-        const data = (result as Record<string, unknown>)?.data as Record<string, unknown>;
-        const userObj = data?.user as Record<string, unknown> | undefined;
-        const recentSessions = settings.getRecentSessions();
-        const cached = recentSessions.find((s) => s.sessionId === sessionId);
-
-        pairing.onReconnected(sessionId, {
-          name: (userObj?.name as string) || cached?.userName || '',
-          email: (userObj?.email as string) || cached?.userEmail || '',
-          plan: (userObj?.plan as string) || cached?.userPlan || 'FREE',
-          currentPeriodEnd: userObj?.currentPeriodEnd as string | undefined,
-        });
-        this.log.appendLine(`Reconnected to session: ${sessionId}`);
-      } else {
-        this.postMessage({ type: 'error', message: 'Session expired. Please generate a new code.' });
-      }
-    } catch (e) {
-      this.log.appendLine(`Reconnect error: ${e}`);
+    const reconnected = await pairing.reconnectSession(sessionId, cached);
+    if (reconnected) {
+      this.log.appendLine(`Reconnected to session: ${sessionId}`);
+    } else {
       this.postMessage({ type: 'error', message: 'Failed to reconnect. Session may have expired.' });
     }
   }
