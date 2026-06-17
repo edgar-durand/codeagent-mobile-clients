@@ -105,7 +105,11 @@ describe('host enroll — redeem flow', () => {
     // 2) Sealed to ~/.codeam/host-agent.json at mode 0600.
     const file = hostIdentityPath();
     expect(fs.existsSync(file)).toBe(true);
-    expect(fs.statSync(file).mode & 0o777).toBe(0o600);
+    // POSIX file modes don't apply on Windows (the host-agent is a Linux/systemd
+    // feature); skip the 0600 assertion there.
+    if (process.platform !== 'win32') {
+      expect(fs.statSync(file).mode & 0o777).toBe(0o600);
+    }
     expect(loadHostIdentity()).toEqual({
       hostId: 'h1',
       hostToken: 'long-lived',
@@ -208,7 +212,9 @@ describe('HostAgentSupervisor — command routing', () => {
     // Credential was written the codespace way: ~/.claude/.credentials.json (0600).
     const credFile = path.join(tmpHome, '.claude', '.credentials.json');
     expect(fs.existsSync(credFile)).toBe(true);
-    expect(fs.statSync(credFile).mode & 0o777).toBe(0o600);
+    if (process.platform !== 'win32') {
+      expect(fs.statSync(credFile).mode & 0o777).toBe(0o600);
+    }
 
     fs.rmSync(cwdTarget, { recursive: true, force: true });
   });
