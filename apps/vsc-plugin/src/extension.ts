@@ -157,9 +157,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
  * Best-effort silent reconnect of the most-recent paired session at startup.
  * Mirrors the panel's manual "Reconnect" (POST /api/pairing/reconnect) but
  * runs unattended on activation and starts the relay directly so the session
- * heartbeats even if the side panel is never opened. No-ops cleanly when the
- * user was never paired, the pairing has no auth token (legacy), or the
- * session has expired server-side.
+ * heartbeats even if the side panel is never opened. Also upgrades saved
+ * sessions that do not have a cached auth token yet by persisting the token
+ * returned from reconnect. No-ops cleanly when the user was never paired or
+ * the session has expired server-side.
  */
 async function autoReconnectLastSession(): Promise<void> {
   const settings = SettingsService.getInstance();
@@ -169,29 +170,14 @@ async function autoReconnectLastSession(): Promise<void> {
   if (pairing.currentSessionId) return; // already connected this session
   const recent = settings.getRecentSessions();
   if (recent.length === 0) return; // never paired on this machine
-  if (!settings.getPluginAuthToken()) return; // legacy pairing — must re-pair
 
   const cached = recent[0]; // getRecentSessions() returns newest-first
-  const pluginId = settings.ensurePluginId();
   try {
-    const result = await relay.postJson(
-      `${settings.apiBaseUrl}/api/pairing/reconnect`,
-      { pluginId, sessionId: cached.sessionId },
-      // SEC crit1 (#813): prove possession on the gated /reconnect.
-      { 'X-Plugin-Poll-Secret': settings.ensurePollSecret() },
-    );
-    if (!(result as Record<string, unknown> | null)?.success) {
+    const reconnected = await pairing.reconnectSession(cached.sessionId, cached);
+    if (!reconnected) {
       log?.appendLine(`[auto-reconnect] session ${cached.sessionId} not resumable (expired)`);
       return;
     }
-    const data = (result as Record<string, unknown>).data as Record<string, unknown> | undefined;
-    const userObj = data?.user as Record<string, unknown> | undefined;
-    pairing.onReconnected(cached.sessionId, {
-      name: (userObj?.name as string) || cached.userName || '',
-      email: (userObj?.email as string) || cached.userEmail || '',
-      plan: (userObj?.plan as string) || cached.userPlan || 'FREE',
-      currentPeriodEnd: userObj?.currentPeriodEnd as string | undefined,
-    });
     // Start the relay + heartbeat directly so the session goes ONLINE even
     // when the panel webview hasn't been resolved (its onPaired listener is
     // what normally does this). startPolling() is idempotent.

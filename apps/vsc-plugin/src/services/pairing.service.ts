@@ -3,7 +3,8 @@ import * as os from 'os';
 import * as http from 'http';
 import * as https from 'https';
 import * as crypto from 'crypto';
-import { SettingsService, RecentSession } from './settings.service';
+import { PROTOCOL_VERSION } from '@codeagent/shared';
+import { SettingsService, type RecentSession } from './settings.service';
 import { CommandRelayService } from './command-relay.service';
 import { OutputChannel } from 'vscode';
 
@@ -197,6 +198,58 @@ export class PairingService {
     SettingsService.getInstance().setPluginAuthToken(null);
   }
 
+  /**
+   * Re-attach a saved paired session without requiring a fresh QR code.
+   *
+   * This deliberately avoids CommandRelayService.postJson(): that helper adds
+   * the cached X-Plugin-Auth-Token to every request, and a stale token can make
+   * /api/pairing/reconnect return 401 before it has a chance to mint the fresh
+   * token we need. The reconnect endpoint trusts the sessionId+pluginId tuple
+   * plus the poll secret, matching the CLI boot path.
+   */
+  async reconnectSession(
+    sessionId: string,
+    cached?: Partial<RecentSession>,
+  ): Promise<boolean> {
+    const settings = SettingsService.getInstance();
+    const pluginId = settings.ensurePluginId();
+
+    try {
+      const result = await this.postJson(
+        `${settings.apiBaseUrl}/api/pairing/reconnect`,
+        { pluginId, sessionId },
+        { 'X-Plugin-Poll-Secret': settings.ensurePollSecret() },
+      );
+
+      const success = (result as Record<string, unknown> | null)?.success === true;
+      if (!success) return false;
+
+      const data = (result as Record<string, unknown>).data as Record<string, unknown> | undefined;
+      const rawToken = data?.pluginAuthToken;
+      if (typeof rawToken === 'string' && rawToken.length > 0) {
+        settings.setPluginAuthToken(rawToken);
+        this.log.appendLine(`[reconnect] Stored pluginAuthToken (${rawToken.length} chars)`);
+        CommandRelayService.getInstance().resetAuthFailureGate();
+      } else {
+        this.log.appendLine(
+          `[reconnect] WARN no pluginAuthToken on reconnect response — rawToken=${typeof rawToken}`,
+        );
+      }
+
+      const userObj = data?.user as Record<string, unknown> | undefined;
+      this.onReconnected(sessionId, {
+        name: (userObj?.name as string) || cached?.userName || '',
+        email: (userObj?.email as string) || cached?.userEmail || '',
+        plan: (userObj?.plan as string) || cached?.userPlan || 'FREE',
+        currentPeriodEnd: userObj?.currentPeriodEnd as string | undefined,
+      });
+      return true;
+    } catch (e) {
+      this.log.appendLine(`Reconnect error: ${e}`);
+      return false;
+    }
+  }
+
   onReconnected(sessionId: string, user: PairedUserInfo): void {
     this.currentSessionId = sessionId;
     this.pairedUser = user;
@@ -230,6 +283,44 @@ export class PairingService {
       );
       req.on('error', reject);
       req.on('timeout', () => { req.destroy(); reject(new Error('timeout')); });
+      req.end();
+    });
+  }
+
+  private async postJson(
+    url: string,
+    body: Record<string, unknown>,
+    extraHeaders?: Record<string, string>,
+  ): Promise<Record<string, unknown> | null> {
+    return new Promise((resolve, reject) => {
+      const data = JSON.stringify(body);
+      const urlObj = new URL(url);
+      const transport = urlObj.protocol === 'https:' ? https : http;
+      const req = transport.request(
+        {
+          hostname: urlObj.hostname,
+          port: urlObj.port,
+          path: urlObj.pathname + urlObj.search,
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Content-Length': Buffer.byteLength(data),
+            'X-Codeam-Protocol-Version': PROTOCOL_VERSION,
+            ...(extraHeaders ?? {}),
+          },
+          timeout: 10000,
+        },
+        (res: http.IncomingMessage) => {
+          let responseBody = '';
+          res.on('data', (chunk: Buffer) => { responseBody += chunk.toString(); });
+          res.on('end', () => {
+            try { resolve(JSON.parse(responseBody)); } catch { resolve(null); }
+          });
+        },
+      );
+      req.on('error', reject);
+      req.on('timeout', () => { req.destroy(); reject(new Error('timeout')); });
+      req.write(data);
       req.end();
     });
   }
