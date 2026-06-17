@@ -219,6 +219,47 @@ describe('HostAgentSupervisor — command routing', () => {
     fs.rmSync(cwdTarget, { recursive: true, force: true });
   });
 
+  it('house-agent deploy sets ANTHROPIC_BASE_URL/AUTH_TOKEN, makes NO unseal call, writes NO cred files', async () => {
+    const cwdTarget = fs.mkdtempSync(path.join(os.tmpdir(), 'codeam-ws-'));
+    const calls: Array<{ env: Record<string, string>; cwd: string; args?: string[] }> = [];
+    const spawnChild: ChildSpawner = (env, cwd, args) => {
+      calls.push({ env, cwd, args });
+      return fakeChild();
+    };
+    const { sup, resolveAgentAuth } = makeSupervisor(spawnChild);
+
+    await sup.handleCommand(
+      deployCmd({
+        repoOrPath: cwdTarget,
+        agentId: 'house-codeagent-cloud',
+        // House deploys carry houseProxy + NO sealedAgentAuth.
+        sealedAgentAuth: undefined,
+        houseProxy: {
+          baseUrl: 'https://api.test/api/v1/agent-proxy',
+          token: 'proxy-token-xyz',
+          agentKind: 'claude',
+        },
+      }),
+    );
+
+    // No unseal round-trip on the house path.
+    expect(resolveAgentAuth).not.toHaveBeenCalled();
+    expect(calls).toHaveLength(1);
+    // Managed-proxy env mirrors the codespace house bootstrap exactly.
+    expect(calls[0].env.ANTHROPIC_BASE_URL).toBe('https://api.test/api/v1/agent-proxy');
+    expect(calls[0].env.ANTHROPIC_AUTH_TOKEN).toBe('proxy-token-xyz');
+    expect(calls[0].env.ANTHROPIC_MODEL).toBe('MiniMax-M3');
+    expect(calls[0].env.CODEAM_AUTO_TOKEN).toBe('auto-xyz');
+    expect(calls[0].args).toEqual(['--agent=claude']);
+    expect(sup.childCount()).toBe(1);
+
+    // No cred files written for the house agent.
+    const credFile = path.join(tmpHome, '.claude', '.credentials.json');
+    expect(fs.existsSync(credFile)).toBe(false);
+
+    fs.rmSync(cwdTarget, { recursive: true, force: true });
+  });
+
   it('self_hosted_stop kills the matching child and untracks it', async () => {
     const cwdTarget = fs.mkdtempSync(path.join(os.tmpdir(), 'codeam-ws-'));
     const child = fakeChild();
