@@ -4,6 +4,16 @@ All notable changes to `codeam-cli` are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.39.27] — 2026-06-17
+
+### Added
+
+- **cli:** Run the managed house agent on self-hosted host deploys (#330) (#353)
+
+### Chore
+
+- **deps:** Bump ACP adapters + resync lockfile (supersedes #324, #325) (#352)
+
 ## [2.39.26] — 2026-06-17
 
 ### Documentation
