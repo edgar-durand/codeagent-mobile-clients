@@ -54,12 +54,27 @@ import { provisionAgentCredentials } from './host/agent-provisioning';
 /** Liveness heartbeat cadence. State liveness only — NOT command polling. */
 const HEARTBEAT_INTERVAL_MS = 20_000;
 
+/**
+ * The managed "CodeAgent Cloud" house-agent proxy block (mirrors the
+ * backend `SelfHostedHouseProxy`). When present, the child runs the
+ * underlying agent pointed at our managed proxy with NO user
+ * credentials — exactly like the codespace house bootstrap.
+ */
+interface HouseProxy {
+  baseUrl: string;
+  token: string;
+  agentKind: string;
+}
+
 /** The deploy command payload (mirrors the backend `SelfHostedDeployCommand`). */
 interface DeployPayload {
   deployId: string;
   repoOrPath: string;
   agentId: string;
-  sealedAgentAuth: string;
+  /** Sealed LinkedAgent credential. Present iff NOT a house-agent deploy. */
+  sealedAgentAuth?: string;
+  /** Managed house-agent proxy config. Present iff a house-agent deploy. */
+  houseProxy?: HouseProxy;
   autoPairToken: string;
 }
 
@@ -68,14 +83,29 @@ interface StopPayload {
   sessionId: string;
 }
 
-function isDeployPayload(p: Record<string, unknown>): p is DeployPayload & Record<string, unknown> {
+function isHouseProxy(v: unknown): v is HouseProxy {
+  if (typeof v !== 'object' || v === null) return false;
+  const o = v as Record<string, unknown>;
   return (
-    typeof p.deployId === 'string' &&
-    typeof p.repoOrPath === 'string' &&
-    typeof p.agentId === 'string' &&
-    typeof p.sealedAgentAuth === 'string' &&
-    typeof p.autoPairToken === 'string'
+    typeof o.baseUrl === 'string' &&
+    typeof o.token === 'string' &&
+    typeof o.agentKind === 'string'
   );
+}
+
+function isDeployPayload(p: Record<string, unknown>): p is DeployPayload & Record<string, unknown> {
+  if (
+    typeof p.deployId !== 'string' ||
+    typeof p.repoOrPath !== 'string' ||
+    typeof p.agentId !== 'string' ||
+    typeof p.autoPairToken !== 'string'
+  ) {
+    return false;
+  }
+  // Exactly one credential source must be present + well-formed.
+  const hasHouse = isHouseProxy(p.houseProxy);
+  const hasSealed = typeof p.sealedAgentAuth === 'string';
+  return hasHouse || hasSealed;
 }
 
 function isStopPayload(p: Record<string, unknown>): p is StopPayload & Record<string, unknown> {
@@ -105,11 +135,15 @@ interface ChildSession {
 }
 
 /** How the supervisor spawns a child — injectable so tests don't fork. */
-export type ChildSpawner = (env: Record<string, string>, cwd: string) => ChildProcess;
+export type ChildSpawner = (
+  env: Record<string, string>,
+  cwd: string,
+  args?: string[],
+) => ChildProcess;
 
 /** Default spawner: `codeam pair-auto` carrying CODEAM_AUTO_TOKEN. */
-const defaultSpawner: ChildSpawner = (env, cwd) =>
-  spawn(process.execPath, [process.argv[1], 'pair-auto'], {
+const defaultSpawner: ChildSpawner = (env, cwd, args = []) =>
+  spawn(process.execPath, [process.argv[1], 'pair-auto', ...args], {
     cwd,
     env: { ...process.env, ...env },
     stdio: 'ignore',
@@ -242,17 +276,41 @@ export class HostAgentSupervisor {
     );
     const cwd = await prepareWorkspace(payload.repoOrPath, payload.deployId);
 
-    // Resolve the sealed agent-auth → plaintext (outbound, host-token
-    // authed) and write the credential files the agent reads at startup,
-    // BEFORE spawning the child — matching the codespace ordering.
-    const auth = await this.resolveAgentAuth(this.identity, payload.sealedAgentAuth);
-    const credEnv = provisionAgentCredentials(payload.agentId, auth, undefined);
-
-    const childEnv: Record<string, string> = {
-      ...credEnv,
-      CODEAM_AUTO_TOKEN: payload.autoPairToken,
-    };
-    const proc = this.spawnChild(childEnv, cwd);
+    // Two mutually-exclusive credential shapes (see DeployPayload):
+    //   - House agent ("CodeAgent Cloud"): point the underlying agent at
+    //     our managed proxy with the supplied token — NO unseal round-trip,
+    //     NO cred files. Mirrors the codespace house bootstrap env exactly
+    //     (apps/api-v2/src/codespaces/agent.ts).
+    //   - Real LinkedAgent: unseal the sealed blob → plaintext (outbound,
+    //     host-token authed) and write the credential files the agent reads
+    //     at startup, BEFORE spawning the child (unchanged path).
+    let childEnv: Record<string, string>;
+    let extraArgs: string[] = [];
+    if (payload.houseProxy) {
+      const { baseUrl, token, agentKind } = payload.houseProxy;
+      childEnv = {
+        ANTHROPIC_BASE_URL: baseUrl,
+        ANTHROPIC_AUTH_TOKEN: token,
+        ANTHROPIC_MODEL: 'MiniMax-M3',
+        ANTHROPIC_DEFAULT_SONNET_MODEL: 'MiniMax-M3',
+        ANTHROPIC_DEFAULT_OPUS_MODEL: 'MiniMax-M3',
+        ANTHROPIC_DEFAULT_HAIKU_MODEL: 'MiniMax-M3',
+        CLAUDE_CODE_AUTO_COMPACT_WINDOW: '512000',
+        API_TIMEOUT_MS: '3000000',
+        CODEAM_AUTO_TOKEN: payload.autoPairToken,
+      };
+      extraArgs = [`--agent=${agentKind || 'claude'}`];
+    } else {
+      // Non-house path: `sealedAgentAuth` is guaranteed present by
+      // isDeployPayload (exactly one of houseProxy / sealedAgentAuth).
+      const auth = await this.resolveAgentAuth(this.identity, payload.sealedAgentAuth!);
+      const credEnv = provisionAgentCredentials(payload.agentId, auth, undefined);
+      childEnv = {
+        ...credEnv,
+        CODEAM_AUTO_TOKEN: payload.autoPairToken,
+      };
+    }
+    const proc = this.spawnChild(childEnv, cwd, extraArgs);
     // Track by deployId now; the stop command uses sessionId, which the
     // backend correlates to this deploy (the control channel pushed the
     // stop with the session the child paired into). We index both ids so
