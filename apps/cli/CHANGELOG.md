@@ -4,6 +4,16 @@ All notable changes to `codeam-cli` are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.39.23] — 2026-06-17
+
+### Chore
+
+- **cli:** Raise engines.node floor to >=20, bump which to ^6 (#345)
+
+### Agent
+
+- Waiting for your CLI... (#348)
+
 ## [2.39.22] — 2026-06-16
 
 ### Fixed
