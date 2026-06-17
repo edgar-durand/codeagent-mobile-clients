@@ -39,15 +39,11 @@ Phase 2 backlog (currently `not supported in Phase 1 ACP mode` notice in the rel
    - Claude: `claude --version`
    - Codex: `codex --version`
    - Cursor: `cursor-agent --version`
-2. Pair the CLI with mobile as usual (`codeam pair --agent=claude`), but pass the env flag:
-   ```sh
-   CODEAM_ACP_ENABLED=1 codeam pair --agent=claude
-   ```
-   On startup the CLI prints `Starting claude via ACP adapter (claude)…` instead of the usual Claude welcome banner — that's how you know the fork took.
+2. Pair the CLI with mobile as usual (`codeam pair --agent=claude`). Adapter-backed agents (claude / codex / gemini) run over ACP **unconditionally** — there is no env flag and no opt-in. On startup the CLI prints `Starting claude via ACP adapter (claude)…` instead of the usual Claude welcome banner.
 3. Send a prompt from mobile. The agent's response streams back as text chunks identical in shape to the PTY pipeline; the mobile / web UI renders them with no client-side changes.
 4. Trigger a permission-requiring action (e.g. tool that wants to run a shell command). The mobile sheet pops up the same `awaiting-answer` flow that the PTY path used — pick an option and the reply round-trips back to ACP via the pending-answer poll.
 
-If the adapter package isn't installed or the underlying CLI is missing, the runner falls back to the PTY pipeline with a one-line `CODEAM_ACP_ENABLED is set but no ACP adapter is registered…` info nudge — no crash, no degraded session.
+ACP is the ONLY launch path for adapter-backed agents — the legacy per-agent PTY parsers were removed. If the adapter package isn't installed or the underlying CLI is missing, the session fails with a clear error rather than degrading to an unparsed PTY.
 
 ## File map
 
@@ -93,6 +89,6 @@ Many agents now speak ACP directly via a CLI flag (Gemini's `--acp`, etc.). No n
      requiresAgentBinary: 'gemini',
    }),
    ```
-2. Ship. The dispatch in [`start.ts`](../../commands/start.ts) picks it up the next time `CODEAM_ACP_ENABLED=1` is set for that agent.
+2. Ship. The dispatch in [`start.ts`](../../commands/start.ts) (`requiresAcp`) picks it up automatically — the agent runs over ACP from then on, with no PTY fallback.
 
 No new runtime files, no parser per agent, no UI changes on mobile.

@@ -3,7 +3,6 @@ import {
   type AgentId,
   type AgentMetadata,
   type AgentModel,
-  type ChromeStep,
   type SelectPrompt,
 } from '@codeagent/shared';
 import { randomUUID } from 'node:crypto';
@@ -13,17 +12,8 @@ import { claudeCredentialLocator, claudeLoginLauncher } from './link';
 import { fetchClaudeQuota } from './quota';
 import { spawnAndCapture } from '../../services/spawn-and-capture';
 import * as history from './history';
-import {
-  detectInputSuggestion,
-  detectListSelector,
-  detectSelector,
-  detectStartupBanner as detectClaudeStartupBanner,
-  filterChrome,
-  isChromeLine,
-  parseChromeLine,
-} from './parsing';
 import type { OsStrategy } from '../../os';
-import type { ChangeModelInstruction, RuntimeStrategy, StartupBanner } from '../strategy';
+import type { ChangeModelInstruction, RuntimeStrategy } from '../strategy';
 
 export class ClaudeRuntimeStrategy implements RuntimeStrategy {
   readonly id: AgentId = 'claude';
@@ -178,38 +168,19 @@ export class ClaudeRuntimeStrategy implements RuntimeStrategy {
   }
 
   // ─── TUI parser strategy methods ─────────────────────────────────
-
-  parseTuiChrome(line: string): ChromeStep | null {
-    if (!isChromeLine(line)) return null;
-    return parseChromeLine(line);
-  }
+  // Claude runs ACP-only (see the `requiresAcp` dispatch in start.ts),
+  // so the legacy PTY-spawn pipeline never reaches these. They remain
+  // as inert stubs purely to satisfy the InteractiveAgentStrategy
+  // contract; the React-Ink TUI parsers were removed with the PTY path.
+  // The optional TUI hooks (parseTuiChrome / detectReadyPrompt /
+  // detectStartupBanner / detectInputSuggestion) are dropped entirely.
 
   filterTuiOutput(lines: string[]): string[] {
-    return filterChrome(lines);
+    return lines;
   }
 
-  detectInteractivePrompt(lines: string[]): SelectPrompt | null {
-    // Prefer the numbered `❯ N. label` selector; fall back to the
-    // list-style `  ❯ label` selector used by /mcp / /model. Mirrors
-    // the legacy call order in OutputService.tick().
-    return detectSelector(lines) ?? detectListSelector(lines);
-  }
-
-  detectReadyPrompt(lines: string[]): boolean {
-    // Claude Code redraws `? for shortcuts` at the bottom of the
-    // TUI the moment a turn finishes and the input field is hot
-    // again. Stable signal for "agent stopped working" even when
-    // the spinner keeps the PTY pushing bytes — drives the fast
-    // finalize path in OutputService.tick().
-    return lines.some((l) => /^\?\s.*shortcut/i.test(l.trim()));
-  }
-
-  detectStartupBanner(lines: string[]): StartupBanner | null {
-    return detectClaudeStartupBanner(lines);
-  }
-
-  detectInputSuggestion(lines: string[]): string | null {
-    return detectInputSuggestion(lines);
+  detectInteractivePrompt(_lines: string[]): SelectPrompt | null {
+    return null;
   }
 
   credentialLocator() {

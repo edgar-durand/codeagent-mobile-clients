@@ -1,18 +1,11 @@
-/**
- * Claude-specific TUI parsers.
- *
- * Moved verbatim from @codeagent/shared's protocol/{filterChrome,parseChrome,
- * selector}.ts. The logic is exactly what shipped for every prior Claude
- * release — no behavioral changes. It lives here because each agent's TUI
- * conventions are different (glyphs, selector shapes, status-line formats),
- * so the parsers belong next to the agent's RuntimeStrategy rather than in
- * the cross-agent shared package.
- *
- * Codex's parsers live at apps/cli/src/agents/codex/parsing.ts.
- */
+// Test fixture: React-Ink TUI parsers formerly in src/agents/claude/parsing.ts.
+// claude is ACP-only in production now, so these parsers were deleted from the
+// source tree; this verbatim copy is kept ONLY to exercise the GENERIC
+// StreamingEmitterService (which still serves the PTY agents aider/cursor).
+// Not production code — do not import from src/.
 
 import type { ChromeStep, SelectPrompt } from '@codeagent/shared';
-import type { StartupBanner } from '../strategy';
+import type { StartupBanner } from '../../src/agents/strategy';
 
 // ─── filterChrome ──────────────────────────────────────────────────
 
