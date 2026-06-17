@@ -60,6 +60,8 @@ That's it. Open the [CodeAgent Mobile app](https://codeagent-mobile.com), enter 
 | `codeam deploy` | Provision a cloud workspace (GitHub Codespaces) and pair it to your phone |
 | `codeam deploy ls` (alias `list`) | List the cloud workspaces you've deployed (and which still have a session running) |
 | `codeam deploy stop` (alias `remove`) | Pick a deployed workspace and stop its codeam session (and optionally the workspace itself) |
+| `codeam host enroll --token <token>` | Enroll **this machine** as a self-hosted execution target (the token is minted by the mobile/web app) |
+| `codeam host-agent` | Run the self-hosted supervisor (the enroll step installs this as a systemd service — you rarely call it by hand) |
 | `codeam completion <shell>` | print shell completions for `<shell>` (`bash`, `zsh`, or `fish`) |
 | `codeam --version`, `-v` | Print the installed CLI version |
 | `codeam --help`, `-h` | Show usage and the full command list |
@@ -98,13 +100,33 @@ codeam deploy stop
 
 Stopping a workspace via `codeam deploy stop` is non-destructive: the GitHub Codespace stays around (preserving your branch, files, and dotfiles); only the running compute is paused. Re-running `codeam deploy` will offer to resume that same codespace.
 
-Adding more cloud backends (Gitpod, Coder, your own SSH host, …) is a single new file in `apps/cli/src/services/providers/` — the `CloudProvider` interface keeps it pluggable.
+Adding more managed cloud backends (Gitpod, Coder, …) is a single new file in `apps/cli/src/services/providers/` — the `CloudProvider` interface keeps it pluggable. To run on **your own server** instead, see the next section.
+
+---
+
+## Self-hosted execution plane — run agents on your own server
+
+Prefer to run the execution plane on **your own hardware** (a VPS, homelab, or GPU box) instead of a managed Codespace? CodeAgent can provision the same agent runtime on any Linux server you own — with **zero inbound ports, no tunnel, and without ever handing us your SSH keys**. The box only needs outbound internet.
+
+**Setup is a one-time paste, driven from the app:**
+
+1. In the CodeAgent Mobile app (or web dashboard), open the deploy flow and pick **Self-hosted → Add server**. It shows a one-line install command carrying a short-lived enroll token.
+2. Paste it into an SSH session on your box:
+   ```bash
+   curl -fsSL https://api.codeagent-mobile.com/api/self-hosted/enroll.sh | sh -s -- --token=<enroll-token>
+   ```
+   That installs `codeam-cli`, registers a **systemd** service (`codeam-host-agent`), and connects it back over the same **outbound** relay everything else uses. It survives reboots.
+3. From then on it's **100% phone/web-driven**: pick the host + a repo (or an absolute path on the box) + an agent, and a session spins up on your server — supervised from your phone like any other. Stop sessions or remove the host from the app.
+
+Under the hood the installer runs `codeam host enroll` (redeems the token, seals a long-lived host-token to `~/.codeam/host-agent.json`) and starts `codeam host-agent` (the supervisor that spawns a `codeam pair-auto` child per deploy, injecting your linked agent's credentials). You normally never invoke these by hand.
+
+> **Deploying to and managing self-hosted servers happens in the mobile/web app, not the CLI.** The CLI's role here is the one-time enrollment plus the long-running host-agent. Requires Linux + systemd.
 
 ---
 
 ## Requirements
 
-- **Node.js 18+**
+- **Node.js 20+**
 - **Claude Code** — see the [official quickstart](https://code.claude.com/docs/en/quickstart)
 - **OpenAI Codex** (optional) — see the [official quickstart](https://github.com/openai/codex)
 - **[CodeAgent Mobile](https://codeagent-mobile.com)** app on your phone ([iOS](https://apps.apple.com/) / [Android](https://play.google.com/store/apps/details?id=com.codeagent.mobile))
