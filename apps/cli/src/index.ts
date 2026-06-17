@@ -6,6 +6,8 @@ import { status } from './commands/status';
 import { logout } from './commands/logout';
 import { deploy } from './commands/deploy';
 import { deployList, deployStop } from './commands/deploy-manage';
+import { host } from './commands/host';
+import { hostAgent } from './commands/host-agent';
 import { link } from './commands/link';
 import { doctor } from './commands/doctor';
 import { completion } from './commands/completion';
@@ -83,6 +85,8 @@ async function main(): Promise<void> {
   const commands: Record<string, () => Promise<void> | void> = {
     'pair': () => pair(args),
     'pair-auto': () => pairAuto(args),
+    'host-agent': () => hostAgent(args),
+    'host': () => host(args),
     'sessions': () => sessions(args),
     'status': () => status(),
     'logout': () => logout(),

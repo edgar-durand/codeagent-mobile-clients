@@ -15,7 +15,18 @@ export default defineConfig({
     // __tests__/fixtures and are imported by the real specs. Keep
     // them out of the test glob so vitest doesn't treat them as empty
     // suites and fail with "No test suite found".
-    exclude: ['__tests__/fixtures/**', '**/node_modules/**', '**/dist/**'],
+    // `__tests__/docker/**` holds the host-agent Docker-E2E support files
+    // (the Dockerfile + the stub-backend helper). The stub helper has no
+    // `describe`/`it`, so — like the fixtures dir — it must stay out of the
+    // glob or vitest fails it as an empty suite. The actual spec lives at
+    // `__tests__/host-agent.docker.e2e.test.ts` and IS collected (it
+    // self-skips when Docker / the DOCKER_E2E flag is absent).
+    exclude: [
+      '__tests__/fixtures/**',
+      '__tests__/docker/**',
+      '**/node_modules/**',
+      '**/dist/**',
+    ],
     coverage: {
       // v8 is faster than istanbul + ships in core Node, so no
       // sourcemap-translation step on the hot path.
