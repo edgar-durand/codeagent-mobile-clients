@@ -15,6 +15,7 @@ const settings = {
 };
 
 const resetAuthFailureGate = vi.fn();
+const startPolling = vi.fn();
 
 vi.mock('../src/services/settings.service', () => ({
   SettingsService: {
@@ -24,11 +25,12 @@ vi.mock('../src/services/settings.service', () => ({
 
 vi.mock('../src/services/command-relay.service', () => ({
   CommandRelayService: {
-    getInstance: () => ({ resetAuthFailureGate }),
+    getInstance: () => ({ resetAuthFailureGate, startPolling }),
   },
 }));
 
 import { PairingService } from '../src/services/pairing.service';
+import { CommandRelayService } from '../src/services/command-relay.service';
 
 function makeLog(): vscode.OutputChannel {
   return {
@@ -135,5 +137,37 @@ describe('PairingService.reconnectSession', () => {
     await expect(pairing.reconnectSession('missing-session')).resolves.toBe(false);
     expect(settings.setPluginAuthToken).not.toHaveBeenCalled();
     expect(pairing.currentSessionId).toBeNull();
+  });
+
+  it('brings the command relay ONLINE through the onPaired wiring after reconnect', async () => {
+    server = http.createServer((_req, res) => {
+      res.setHeader('Content-Type', 'application/json');
+      res.end(JSON.stringify({
+        success: true,
+        data: {
+          pluginAuthToken: 'fresh-token',
+          user: { name: 'Nabeel', email: 'nabeel@example.com', plan: 'PRO' },
+        },
+      }));
+    });
+    await new Promise<void>((resolve) => server?.listen(0, '127.0.0.1', resolve));
+    const address = server.address();
+    if (!address || typeof address === 'string') throw new Error('expected TCP server');
+    settings.apiBaseUrl = `http://127.0.0.1:${address.port}`;
+
+    const pairing = PairingService.initialize(makeLog());
+    // Mirror the panel/extension wiring: the onPaired listener is what
+    // actually flips the relay ONLINE. This closes the loop from
+    // "token refreshed" to "mobile sees the CLI online".
+    pairing.addListener({
+      onPaired: () => {
+        CommandRelayService.getInstance().startPolling();
+      },
+    });
+
+    const ok = await pairing.reconnectSession('sess-1');
+
+    expect(ok).toBe(true);
+    expect(startPolling).toHaveBeenCalledTimes(1);
   });
 });
