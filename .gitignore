@@ -29,6 +29,9 @@ apps/vsc-plugin/*.vsix
 
 # CLI build artifacts
 apps/cli/*.tgz
+# Transient pack tarball the host-agent Docker E2E copies into its build
+# context (cleaned up in afterAll; ignored so a crashed run can't commit it).
+apps/cli/__tests__/docker/*.tgz
 
 # Logs
 *.log

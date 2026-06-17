@@ -1,0 +1,221 @@
+/**
+ * Self-hosted host-agent — backend client + on-disk host-token seal.
+ *
+ * Design of record:
+ * docs/superpowers/specs/2026-06-17-self-hosted-execution-plane-design.md
+ *
+ * Pure I/O boundary for the host-agent: redeem the ephemeral enroll
+ * token for a long-lived host-token, seal it 0600 on the box, send
+ * liveness heartbeats, and unseal the agent-auth blob the deploy command
+ * forwards. Everything here is `fetch`-mockable so the supervisor logic
+ * stays unit-testable.
+ *
+ * Trust model (matches the backend contract):
+ *   - `redeem`    — NO host-token yet; the enroll token is the trust.
+ *   - `heartbeat` — authenticated by `{ hostId, hostToken }` in the body
+ *                   (the backend sha256-verifies against the stored hash).
+ *   - `unseal`    — the host has no decryption key (the vault key is
+ *                   HKDF-derived from SECRETS_ROOT_KEY, server-side only),
+ *                   so the sealed agent-auth blob is exchanged for its
+ *                   plaintext over an outbound, host-token-authenticated
+ *                   call. See the Phase-3 note in host-agent.ts.
+ */
+
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
+import { resolveApiBaseUrl } from '@codeagent/shared';
+import type { AgentAuth } from '@codeagent/shared';
+import { vercelBypassHeader } from '../../lib/backend-headers';
+
+/** Diagnostics reported at redeem (mirrors the backend `HostOsInfo`). */
+export interface HostOsInfo {
+  distro?: string;
+  arch?: string;
+  kernel?: string;
+  nodeVersion?: string;
+}
+
+/** The sealed identity the host-agent persists 0600 on the box. */
+export interface SealedHostIdentity {
+  hostId: string;
+  /** Plaintext long-lived host-token (returned once at redeem). */
+  hostToken: string;
+  /** The relay pluginId the host-agent subscribes to for commands. */
+  controlPluginId: string;
+}
+
+/** Shape of `POST /api/self-hosted/redeem`'s `data`. */
+interface RedeemResponseData {
+  hostId: string;
+  hostToken: string;
+  controlPluginId: string;
+}
+
+function apiBase(): string {
+  return process.env.CODEAM_API_URL ?? resolveApiBaseUrl();
+}
+
+/** Path of the sealed host identity file: `~/.codeam/host-agent.json`. */
+export function hostIdentityPath(): string {
+  return path.join(os.homedir(), '.codeam', 'host-agent.json');
+}
+
+/** Collect best-effort OS diagnostics for the redeem call. */
+export function collectOsInfo(): HostOsInfo {
+  return {
+    distro: os.platform(),
+    arch: os.arch(),
+    kernel: os.release(),
+    nodeVersion: process.versions.node,
+  };
+}
+
+/**
+ * Read the sealed host identity if present + well-formed. Returns null
+ * when the file is absent (first run) or unreadable/corrupt (re-redeem).
+ */
+export function loadHostIdentity(): SealedHostIdentity | null {
+  try {
+    const raw = fs.readFileSync(hostIdentityPath(), 'utf8');
+    const parsed: unknown = JSON.parse(raw);
+    if (
+      typeof parsed === 'object' &&
+      parsed !== null &&
+      typeof (parsed as Record<string, unknown>).hostId === 'string' &&
+      typeof (parsed as Record<string, unknown>).hostToken === 'string' &&
+      typeof (parsed as Record<string, unknown>).controlPluginId === 'string'
+    ) {
+      const p = parsed as Record<string, string>;
+      return { hostId: p.hostId, hostToken: p.hostToken, controlPluginId: p.controlPluginId };
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/** Seal the host identity to `~/.codeam/host-agent.json` at mode 0600. */
+export function saveHostIdentity(identity: SealedHostIdentity): void {
+  const file = hostIdentityPath();
+  fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+  fs.writeFileSync(file, JSON.stringify(identity, null, 2), {
+    encoding: 'utf8',
+    mode: 0o600,
+  });
+  fs.chmodSync(file, 0o600);
+}
+
+async function postJson<T>(pathname: string, body: Record<string, unknown>): Promise<T> {
+  const res = await fetch(`${apiBase()}${pathname}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...vercelBypassHeader() },
+    body: JSON.stringify(body),
+  });
+  const json = (await res.json()) as
+    | { success: true; data: T }
+    | { success: false; error?: { code?: string; message?: string } };
+  if (!res.ok || !json.success) {
+    const err = !json.success ? json.error : undefined;
+    throw new Error(
+      `${pathname} failed (${err?.code ?? `HTTP_${res.status}`}): ${err?.message ?? res.statusText}`,
+    );
+  }
+  return json.data;
+}
+
+/**
+ * Redeem the ephemeral enroll token for the long-lived host identity.
+ * Idempotent at the call site (the caller only redeems when no sealed
+ * identity exists); the enroll token itself is single-use server-side.
+ */
+export async function redeemEnrollToken(
+  token: string,
+  label?: string,
+): Promise<SealedHostIdentity> {
+  const data = await postJson<RedeemResponseData>('/api/self-hosted/redeem', {
+    token,
+    ...(label ? { label } : {}),
+    osInfo: collectOsInfo(),
+  });
+  return {
+    hostId: data.hostId,
+    hostToken: data.hostToken,
+    controlPluginId: data.controlPluginId,
+  };
+}
+
+/** Send a liveness heartbeat (state liveness, NOT command polling). */
+export async function sendHostHeartbeat(identity: SealedHostIdentity): Promise<void> {
+  await postJson<{ ok: boolean }>('/api/self-hosted/heartbeat', {
+    hostId: identity.hostId,
+    hostToken: identity.hostToken,
+  });
+}
+
+/** A `SealedSecret` vault envelope (the deploy command's JSON blob). */
+interface SealedEnvelope {
+  ciphertext: string;
+  iv: string;
+  authTag: string;
+  keyVersion: number;
+}
+
+function isSealedEnvelope(v: unknown): v is SealedEnvelope {
+  if (typeof v !== 'object' || v === null) return false;
+  const o = v as Record<string, unknown>;
+  return (
+    typeof o.ciphertext === 'string' &&
+    typeof o.iv === 'string' &&
+    typeof o.authTag === 'string' &&
+    typeof o.keyVersion === 'number'
+  );
+}
+
+function isAgentAuth(v: unknown): v is AgentAuth {
+  if (typeof v !== 'object' || v === null) return false;
+  const o = v as Record<string, unknown>;
+  return (
+    (o.kind === 'oauth_token' || o.kind === 'api_key') && typeof o.value === 'string'
+  );
+}
+
+/**
+ * Resolve the sealed agent-auth blob the deploy command carries into the
+ * plaintext `AgentAuth`. The host has no decryption key (server-side
+ * only), so this is an outbound, host-token-authenticated round-trip —
+ * the same posture as heartbeat/redeem (no inbound surface, no key
+ * custody on the box).
+ *
+ * NOTE: the backend endpoint this targets does not exist yet — it is the
+ * one backend change Phase 3 needs to close the loop end-to-end. The
+ * supervisor accepts an injected resolver so this seam is exercised in
+ * tests today and swapped for the real endpoint when it lands.
+ */
+export async function unsealAgentAuth(
+  identity: SealedHostIdentity,
+  sealedAgentAuth: string,
+): Promise<AgentAuth> {
+  const envelope: unknown = JSON.parse(sealedAgentAuth);
+  if (!isSealedEnvelope(envelope)) {
+    throw new Error('sealedAgentAuth is not a valid vault envelope');
+  }
+  const data = await postJson<{ kind: string; value: string }>(
+    '/api/self-hosted/unseal-agent-auth',
+    {
+      hostId: identity.hostId,
+      hostToken: identity.hostToken,
+      sealedAgentAuth,
+    },
+  );
+  if (!isAgentAuth(data)) {
+    throw new Error('unseal-agent-auth returned an unexpected shape');
+  }
+  return data;
+}
+
+/** A function that turns the sealed blob into plaintext `AgentAuth`. */
+export type AgentAuthResolver = (
+  identity: SealedHostIdentity,
+  sealedAgentAuth: string,
+) => Promise<AgentAuth>;

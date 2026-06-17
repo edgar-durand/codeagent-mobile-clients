@@ -67,6 +67,23 @@ jobs:
         working-directory: apps/cli
         run: npm run build
 
+      # Self-hosted host-agent REAL Docker integration test (Phase 3
+      # acceptance gate). Boots a Node-20 container running the built
+      # `codeam host-agent` against an in-test stub backend and asserts the
+      # real process tree: enroll → control channel → deploy → spawned
+      # pair-auto child reaches the stub. GitHub-hosted ubuntu runners ship
+      # a working Docker daemon, so we gate it to Linux + Node 20 (one cell)
+      # to avoid rebuilding the image 6×. DOCKER_E2E=1 flips it on; on every
+      # other OS / Node cell the suite self-skips (the spec probes
+      # `docker info` and skips cleanly when Docker is absent — the default
+      # `npm run test` step above never depends on Docker).
+      - name: CLI Docker E2E (self-hosted host-agent)
+        if: matrix.os == 'ubuntu-latest' && matrix.node == '20'
+        working-directory: apps/cli
+        env:
+          DOCKER_E2E: '1'
+        run: npx vitest run host-agent.docker.e2e
+
       # Smoke from the repo workspace. Confirms the freshly-built
       # binary boots on this OS, the argument parser handles every
       # `<cmd> --help` we ship, and the live backend at
