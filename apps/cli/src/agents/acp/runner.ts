@@ -154,6 +154,28 @@ export class StreamingState {
     { kind: StreamingChunkKind; content: string }
   >();
 
+  /**
+   * Stable chunkId that ALL `text` segments of the current turn collapse
+   * onto (set to the first text chunk's id, reset each {@link beginTurn}).
+   *
+   * Why: `claude-agent-acp` (≥0.47) streams the reply live as
+   * `agent_message_chunk` deltas under one message id, then — when its
+   * own streamed-vs-consolidated dedupe misfires (the live path keys
+   * `streamedTextIds` off the stream message id while consolidation
+   * checks `messageIdForGrouping`, which can differ per gateway) —
+   * RE-EMITS the complete assistant message as a fresh
+   * `agent_message_chunk` under a DIFFERENT message id. Keying our buffer
+   * off the adapter's chunkId then lands the two copies in two buckets,
+   * and `recomputeText` concatenates them → the whole reply doubles
+   * ("…del proyecto.¡Perfecto!…del proyecto."). Observed on BOTH real
+   * Claude (codespace) and the MiniMax proxy (self-hosted) — anything
+   * behind this adapter. Collapsing every text segment of a turn into one
+   * reconcile buffer makes the re-emit a `reconcileCumulative` REPLACE
+   * (identical snapshot) instead of an APPEND, so the reply can't double
+   * no matter how many message ids the adapter spreads it across.
+   */
+  private turnTextChunkId: string | null = null;
+
   constructor(private readonly publisher: AcpPublisher) {}
 
   /**
@@ -259,6 +281,7 @@ export class StreamingState {
   async beginTurn(opts?: { clear?: boolean }): Promise<void> {
     this.text = '';
     this.streamingChunks.clear();
+    this.turnTextChunkId = null;
     // Any leftover pending interactive question from a previous turn
     // is now stale — a fresh prompt supersedes it. Clear timers so we
     // don't auto-cancel a question that no longer exists.
@@ -285,15 +308,23 @@ export class StreamingState {
     // a true-delta adapter (Anthropic Claude) appends, a cumulative-
     // snapshot adapter (self-hosted MiniMax-M3 proxy behind
     // claude-agent-acp) replaces — instead of `+=` doubling the reply.
-    const existing = this.streamingChunks.get(delta.chunkId);
+    // Every `text` segment of a turn collapses onto one stable chunkId
+    // (the first text chunk's), so the adapter re-emitting the full reply
+    // under a second message id reconciles in place (REPLACE) instead of
+    // landing in a second buffer that recomputeText would concatenate —
+    // the reply-doubling bug (see turnTextChunkId). Non-text kinds keep
+    // their own id: thinking / tool_use / tool_result are distinct bubbles.
+    const chunkId =
+      delta.kind === 'text' ? (this.turnTextChunkId ??= delta.chunkId) : delta.chunkId;
+    const existing = this.streamingChunks.get(chunkId);
     if (existing && existing.kind !== delta.kind) {
       log.warn(
         'acpRunner',
-        `streaming-chunk kind flip chunkId=${delta.chunkId.slice(0, 8)} from=${existing.kind} to=${delta.kind}`,
+        `streaming-chunk kind flip chunkId=${chunkId.slice(0, 8)} from=${existing.kind} to=${delta.kind}`,
       );
     }
     const cumulativeContent = reconcileCumulative(existing?.content ?? '', delta.delta);
-    this.streamingChunks.set(delta.chunkId, { kind: delta.kind, content: cumulativeContent });
+    this.streamingChunks.set(chunkId, { kind: delta.kind, content: cumulativeContent });
 
     // 1) Chat pipe (legacy `/api/commands/output`) — text only. The
     //    bubble body is the ordered concatenation of every text chunk's
@@ -310,7 +341,7 @@ export class StreamingState {
     //    in parallel so the redesigned mobile surface stays in sync
     //    with the legacy chat surface.
     void this.publisher.publishStreamingChunk({
-      chunkId: delta.chunkId,
+      chunkId,
       kind: delta.kind,
       content: cumulativeContent,
       isFinal: false,
