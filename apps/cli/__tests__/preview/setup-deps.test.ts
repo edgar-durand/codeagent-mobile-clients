@@ -28,46 +28,56 @@ describe('detectMissingNodeDeps', () => {
     expect(detectMissingNodeDeps(dir)).toBeNull();
   });
 
-  it('defaults to npm install when no lockfile is present', () => {
+  it('defaults to npm install --legacy-peer-deps when no lockfile is present', () => {
     fs.writeFileSync(path.join(dir, 'package.json'), '{}');
-    expect(detectMissingNodeDeps(dir)).toEqual({ cmd: 'npm', args: ['install'] });
+    expect(detectMissingNodeDeps(dir)).toEqual({
+      cmd: 'npm',
+      args: ['install', '--legacy-peer-deps'],
+    });
   });
 
-  it('picks npm when package-lock.json is present', () => {
+  it('uses npm --legacy-peer-deps when package-lock.json is present', () => {
     fs.writeFileSync(path.join(dir, 'package.json'), '{}');
     fs.writeFileSync(path.join(dir, 'package-lock.json'), '{}');
-    expect(detectMissingNodeDeps(dir)).toEqual({ cmd: 'npm', args: ['install'] });
+    expect(detectMissingNodeDeps(dir)).toEqual({
+      cmd: 'npm',
+      args: ['install', '--legacy-peer-deps'],
+    });
   });
 
-  it('picks pnpm when pnpm-lock.yaml is present', () => {
+  // REGRESSION: a pnpm-lock project used to return `pnpm install`, which
+  // crashes on the codespace's Node 20 (pnpm ≥10 needs Node ≥22.13) →
+  // node_modules never created → `next dev` "next: not found" → stuck
+  // preview / ERR_SPAWN_FAILED. Must use npm instead. (FAILS pre-fix.)
+  it('uses npm --legacy-peer-deps for a pnpm-lock project (pnpm cannot run on Node 20)', () => {
     fs.writeFileSync(path.join(dir, 'package.json'), '{}');
     fs.writeFileSync(path.join(dir, 'pnpm-lock.yaml'), '');
-    expect(detectMissingNodeDeps(dir)).toEqual({ cmd: 'pnpm', args: ['install'] });
+    expect(detectMissingNodeDeps(dir)).toEqual({
+      cmd: 'npm',
+      args: ['install', '--legacy-peer-deps'],
+    });
   });
 
-  it('picks yarn when yarn.lock is present', () => {
+  it('keeps yarn when yarn.lock is present (yarn classic runs on Node 20)', () => {
     fs.writeFileSync(path.join(dir, 'package.json'), '{}');
     fs.writeFileSync(path.join(dir, 'yarn.lock'), '');
     expect(detectMissingNodeDeps(dir)).toEqual({ cmd: 'yarn', args: ['install'] });
   });
 
-  it('picks bun when bun.lockb is present', () => {
+  it('uses npm --legacy-peer-deps for a bun project (bun often absent)', () => {
     fs.writeFileSync(path.join(dir, 'package.json'), '{}');
     fs.writeFileSync(path.join(dir, 'bun.lockb'), '');
-    expect(detectMissingNodeDeps(dir)).toEqual({ cmd: 'bun', args: ['install'] });
+    expect(detectMissingNodeDeps(dir)).toEqual({
+      cmd: 'npm',
+      args: ['install', '--legacy-peer-deps'],
+    });
   });
 
-  it('picks bun when the text-format bun.lock is present', () => {
-    fs.writeFileSync(path.join(dir, 'package.json'), '{}');
-    fs.writeFileSync(path.join(dir, 'bun.lock'), '');
-    expect(detectMissingNodeDeps(dir)).toEqual({ cmd: 'bun', args: ['install'] });
-  });
-
-  it('prefers pnpm over yarn when both lockfiles exist (corrupt repo state)', () => {
+  it('prefers yarn over a pnpm lockfile when both exist (yarn is runnable)', () => {
     fs.writeFileSync(path.join(dir, 'package.json'), '{}');
     fs.writeFileSync(path.join(dir, 'pnpm-lock.yaml'), '');
     fs.writeFileSync(path.join(dir, 'yarn.lock'), '');
-    expect(detectMissingNodeDeps(dir)).toEqual({ cmd: 'pnpm', args: ['install'] });
+    expect(detectMissingNodeDeps(dir)).toEqual({ cmd: 'yarn', args: ['install'] });
   });
 });
 

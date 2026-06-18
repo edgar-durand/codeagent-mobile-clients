@@ -18,12 +18,26 @@ import path from 'path';
  * there — that case shows up as a dev-server runtime error which
  * the agent's normal output handling already surfaces.
  *
- * Package-manager detection by lockfile presence:
+ * Package-manager choice (verified live on a fresh codespace):
  *
- *   pnpm-lock.yaml  -> pnpm install
- *   yarn.lock       -> yarn install
- *   bun.lock(b)     -> bun install
- *   default         -> npm install
+ *   yarn.lock  -> yarn install   (yarn classic runs fine on the codespace
+ *                                 Node and honours yarn.lock)
+ *   everything  -> npm install --legacy-peer-deps
+ *   else
+ *
+ * Why npm for pnpm/bun/default instead of the project's own PM:
+ *   - pnpm ≥10 requires Node ≥22.13 (it imports `node:sqlite`), but
+ *     codespaces ship Node 20 — `pnpm install` then crashes with
+ *     ERR_UNKNOWN_BUILTIN_MODULE, node_modules never gets created, and
+ *     `next dev` dies with "next: not found" (the stuck-preview /
+ *     ERR_SPAWN_FAILED report). bun is often simply absent. Trying them
+ *     first just burns the install budget on a command that can't succeed.
+ *   - npm always ships with Node; a fresh `node_modules` builds cleanly
+ *     from `package.json`, so ignoring a pnpm/bun lockfile is safe for an
+ *     ephemeral preview install.
+ *   - `--legacy-peer-deps` mirrors the lenient peer resolution those
+ *     lockfiles assume; plain `npm install` ERESOLVE-fails on the React-19
+ *     peer ranges v0 / Next.js templates ship.
  *
  * Non-Node projects (no `package.json`) return null and let the
  * agent's `setup_commands` cover Python / Ruby / Go / Rust.
@@ -33,20 +47,10 @@ export function detectMissingNodeDeps(
 ): { cmd: string; args: string[] } | null {
   if (!fs.existsSync(path.join(cwd, 'package.json'))) return null;
   if (fs.existsSync(path.join(cwd, 'node_modules'))) return null;
-
-  if (fs.existsSync(path.join(cwd, 'pnpm-lock.yaml'))) {
-    return { cmd: 'pnpm', args: ['install'] };
-  }
   if (fs.existsSync(path.join(cwd, 'yarn.lock'))) {
     return { cmd: 'yarn', args: ['install'] };
   }
-  if (
-    fs.existsSync(path.join(cwd, 'bun.lockb')) ||
-    fs.existsSync(path.join(cwd, 'bun.lock'))
-  ) {
-    return { cmd: 'bun', args: ['install'] };
-  }
-  return { cmd: 'npm', args: ['install'] };
+  return { cmd: 'npm', args: ['install', '--legacy-peer-deps'] };
 }
 
 /**
