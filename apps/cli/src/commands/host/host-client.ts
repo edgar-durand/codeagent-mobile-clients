@@ -36,6 +36,93 @@ export interface HostOsInfo {
   nodeVersion?: string;
 }
 
+/**
+ * Live system metrics carried on the heartbeat so the app's "My Servers"
+ * cards can show real CPU/RAM/latency. EXACT shape the backend accepts
+ * (treated as optional there — older agents omit it).
+ */
+export interface HostMetrics {
+  /** Real CPU utilization 0–100 (integer), from os.cpus() time deltas. */
+  cpuPct: number;
+  /** Used RAM in MiB. */
+  ramUsedMb: number;
+  /** Total RAM in MiB. */
+  ramTotalMb: number;
+  /** Measured heartbeat round-trip latency in ms (integer). */
+  latencyMs: number;
+}
+
+/** A snapshot of aggregate CPU times across all cores. */
+interface CpuTimesSnapshot {
+  idle: number;
+  total: number;
+}
+
+/** Sum idle + total CPU ticks across every core (one snapshot in time). */
+function sampleCpuTimes(): CpuTimesSnapshot {
+  let idle = 0;
+  let total = 0;
+  for (const cpu of os.cpus()) {
+    const t = cpu.times;
+    idle += t.idle;
+    total += t.user + t.nice + t.sys + t.idle + t.irq;
+  }
+  return { idle, total };
+}
+
+/**
+ * Best-effort live-metrics collector for the heartbeat.
+ *
+ * - cpuPct: computed HONESTLY from the delta of idle-vs-total CPU ticks
+ *   (os.cpus()) between successive beats — i.e. the busy fraction over the
+ *   heartbeat interval, not a point-in-time guess and not a fake constant.
+ *   The very first beat has no prior sample, so it falls back to a
+ *   loadavg-based proxy (clamped 0–100) for that single beat.
+ * - ramUsedMb / ramTotalMb: straight from os.totalmem()/os.freemem().
+ * - latencyMs: the round-trip of the PREVIOUS heartbeat (measured by the
+ *   caller and fed back in via recordLatency); the first beat reports 0
+ *   until a real measurement exists.
+ *
+ * Stateful across beats by design (CPU delta + latency carry-over). All
+ * methods are pure-ish and never throw on their own.
+ */
+export class MetricsCollector {
+  private prevCpu: CpuTimesSnapshot | null = null;
+  private lastLatencyMs = 0;
+
+  /** Record the measured round-trip of the heartbeat just sent. */
+  recordLatency(latencyMs: number): void {
+    this.lastLatencyMs = Math.max(0, Math.round(latencyMs));
+  }
+
+  private cpuPct(): number {
+    const current = sampleCpuTimes();
+    const prev = this.prevCpu;
+    this.prevCpu = current;
+    if (!prev) {
+      // First beat: no interval to diff yet — use a loadavg proxy.
+      const cores = os.cpus().length || 1;
+      const proxy = (os.loadavg()[0] / cores) * 100;
+      return Math.min(100, Math.max(0, Math.round(proxy)));
+    }
+    const idleDelta = current.idle - prev.idle;
+    const totalDelta = current.total - prev.total;
+    if (totalDelta <= 0) return 0;
+    const busy = (1 - idleDelta / totalDelta) * 100;
+    return Math.min(100, Math.max(0, Math.round(busy)));
+  }
+
+  /** Collect the current metrics snapshot for this beat. */
+  collect(): HostMetrics {
+    return {
+      cpuPct: this.cpuPct(),
+      ramUsedMb: Math.round((os.totalmem() - os.freemem()) / 1048576),
+      ramTotalMb: Math.round(os.totalmem() / 1048576),
+      latencyMs: this.lastLatencyMs,
+    };
+  }
+}
+
 /** The sealed identity the host-agent persists 0600 on the box. */
 export interface SealedHostIdentity {
   hostId: string;
@@ -145,12 +232,26 @@ export async function redeemEnrollToken(
   };
 }
 
-/** Send a liveness heartbeat (state liveness, NOT command polling). */
-export async function sendHostHeartbeat(identity: SealedHostIdentity): Promise<void> {
+/**
+ * Send a liveness heartbeat (state liveness, NOT command polling).
+ *
+ * Optionally carries live system metrics (additive; the backend treats
+ * `metrics` as optional). Returns the measured round-trip latency of THIS
+ * request in ms, so the caller can feed it back as the `latencyMs` of the
+ * next beat (the only way to send a real, measured latency).
+ */
+export async function sendHostHeartbeat(
+  identity: SealedHostIdentity,
+  metrics?: HostMetrics,
+): Promise<number> {
+  const start = process.hrtime.bigint();
   await postJson<{ ok: boolean }>('/api/self-hosted/heartbeat', {
     hostId: identity.hostId,
     hostToken: identity.hostToken,
+    ...(metrics ? { metrics } : {}),
   });
+  const elapsedNs = process.hrtime.bigint() - start;
+  return Math.round(Number(elapsedNs) / 1_000_000);
 }
 
 /** A `SealedSecret` vault envelope (the deploy command's JSON blob). */
