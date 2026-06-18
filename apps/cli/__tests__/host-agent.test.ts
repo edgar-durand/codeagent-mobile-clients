@@ -15,7 +15,9 @@ import { hostEnroll } from '../src/commands/host';
 import {
   hostIdentityPath,
   loadHostIdentity,
+  MetricsCollector,
   reportProgress,
+  sendHostHeartbeat,
   type SealedHostIdentity,
 } from '../src/commands/host/host-client';
 import type { RemoteCommand } from '../src/services/command-relay.service';
@@ -385,5 +387,158 @@ describe('HostAgentSupervisor — command routing', () => {
       }),
     ).resolves.toBeUndefined();
     expect(sup.childCount()).toBe(0);
+  });
+});
+
+describe('MetricsCollector — real system metrics', () => {
+  it('collects RAM/CPU/latency in plausible ranges', () => {
+    const c = new MetricsCollector();
+    const m = c.collect();
+
+    // RAM: used in (0, total], total positive, all integers.
+    expect(Number.isInteger(m.ramTotalMb)).toBe(true);
+    expect(Number.isInteger(m.ramUsedMb)).toBe(true);
+    expect(m.ramTotalMb).toBeGreaterThan(0);
+    expect(m.ramUsedMb).toBeGreaterThan(0);
+    expect(m.ramUsedMb).toBeLessThanOrEqual(m.ramTotalMb);
+
+    // CPU: integer percent 0–100.
+    expect(Number.isInteger(m.cpuPct)).toBe(true);
+    expect(m.cpuPct).toBeGreaterThanOrEqual(0);
+    expect(m.cpuPct).toBeLessThanOrEqual(100);
+
+    // Latency: first beat has no measurement yet → 0.
+    expect(m.latencyMs).toBe(0);
+  });
+
+  it('computes CPU from the idle-vs-total delta across successive beats', () => {
+    const c = new MetricsCollector();
+    c.collect(); // seed the prior CPU sample
+    const second = c.collect(); // now a real delta-based reading
+    expect(Number.isInteger(second.cpuPct)).toBe(true);
+    expect(second.cpuPct).toBeGreaterThanOrEqual(0);
+    expect(second.cpuPct).toBeLessThanOrEqual(100);
+  });
+
+  it('carries a recorded latency into the next snapshot, rounded + clamped', () => {
+    const c = new MetricsCollector();
+    c.recordLatency(42.7);
+    expect(c.collect().latencyMs).toBe(43);
+    c.recordLatency(-5);
+    expect(c.collect().latencyMs).toBe(0);
+  });
+});
+
+describe('sendHostHeartbeat — metrics on the body + measured latency', () => {
+  it('includes the metrics object and returns a measured round-trip', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ success: true, data: { ok: true } }),
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const latency = await sendHostHeartbeat(IDENTITY, {
+      cpuPct: 12,
+      ramUsedMb: 2048,
+      ramTotalMb: 8192,
+      latencyMs: 7,
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(String(url)).toContain('/api/self-hosted/heartbeat');
+    const body = JSON.parse((init as { body: string }).body);
+    expect(body.hostId).toBe(IDENTITY.hostId);
+    expect(body.hostToken).toBe(IDENTITY.hostToken);
+    expect(body.metrics).toEqual({ cpuPct: 12, ramUsedMb: 2048, ramTotalMb: 8192, latencyMs: 7 });
+
+    // Measured round-trip is a non-negative integer (ms).
+    expect(Number.isInteger(latency)).toBe(true);
+    expect(latency).toBeGreaterThanOrEqual(0);
+  });
+
+  it('omits metrics from the body when none are supplied (back-compat)', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ success: true, data: { ok: true } }),
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    await sendHostHeartbeat(IDENTITY);
+
+    const [, init] = fetchMock.mock.calls[0];
+    const body = JSON.parse((init as { body: string }).body);
+    expect(body.metrics).toBeUndefined();
+  });
+});
+
+describe('HostAgentSupervisor — heartbeat metrics', () => {
+  it('the heartbeat body carries a metrics object with plausible numbers', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ success: true, data: { ok: true } }),
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const sup = new HostAgentSupervisor(IDENTITY, { makeRelay: () => ({ start: vi.fn(), stop: vi.fn() }) });
+    sup.start(); // fires one beat immediately (void this.beat())
+    // Let the fire-and-forget beat's microtasks settle.
+    await Promise.resolve();
+    await Promise.resolve();
+    sup.stop();
+
+    expect(fetchMock).toHaveBeenCalled();
+    const heartbeatCall = fetchMock.mock.calls.find((c) =>
+      String(c[0]).includes('/api/self-hosted/heartbeat'),
+    );
+    expect(heartbeatCall).toBeDefined();
+    const body = JSON.parse((heartbeatCall![1] as { body: string }).body);
+    expect(body.metrics).toBeDefined();
+    expect(typeof body.metrics.cpuPct).toBe('number');
+    expect(typeof body.metrics.ramUsedMb).toBe('number');
+    expect(typeof body.metrics.ramTotalMb).toBe('number');
+    expect(typeof body.metrics.latencyMs).toBe('number');
+    expect(body.metrics.cpuPct).toBeGreaterThanOrEqual(0);
+    expect(body.metrics.cpuPct).toBeLessThanOrEqual(100);
+    expect(body.metrics.ramTotalMb).toBeGreaterThan(0);
+  });
+
+  it('still sends a heartbeat (without metrics) when metric collection throws', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ success: true, data: { ok: true } }),
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    // Inject a collector whose snapshot throws — the beat must survive it.
+    const throwingCollector = {
+      collect: () => {
+        throw new Error('metrics boom');
+      },
+      recordLatency: vi.fn(),
+    };
+
+    const sup = new HostAgentSupervisor(IDENTITY, {
+      makeRelay: () => ({ start: vi.fn(), stop: vi.fn() }),
+      metricsCollector: throwingCollector,
+    });
+    sup.start();
+    await Promise.resolve();
+    await Promise.resolve();
+    sup.stop();
+
+    const heartbeatCall = fetchMock.mock.calls.find((c) =>
+      String(c[0]).includes('/api/self-hosted/heartbeat'),
+    );
+    // The beat still fired despite the collector throwing…
+    expect(heartbeatCall).toBeDefined();
+    // …and it carried NO metrics (best-effort: never fail the beat).
+    const body = JSON.parse((heartbeatCall![1] as { body: string }).body);
+    expect(body.metrics).toBeUndefined();
+    expect(body.hostId).toBe(IDENTITY.hostId);
   });
 });

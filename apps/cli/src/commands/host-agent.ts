@@ -41,12 +41,14 @@ import type { AgentMetadata } from '@codeagent/shared';
 import { log } from '../services/logger';
 import {
   loadHostIdentity,
+  MetricsCollector,
   redeemEnrollToken,
   reportProgress,
   saveHostIdentity,
   sendHostHeartbeat,
   unsealAgentAuth,
   type AgentAuthResolver,
+  type HostMetrics,
   type SealedHostIdentity,
 } from './host/host-client';
 import { prepareWorkspace } from './host/workspace';
@@ -151,10 +153,15 @@ const defaultSpawner: ChildSpawner = (env, cwd, args = []) =>
     detached: false,
   });
 
+/** The slice of MetricsCollector the supervisor depends on (injectable for tests). */
+export type HostMetricsCollector = Pick<MetricsCollector, 'collect' | 'recordLatency'>;
+
 /** Dependencies the supervisor needs — all injectable for tests. */
 export interface HostAgentDeps {
   spawnChild?: ChildSpawner;
   resolveAgentAuth?: AgentAuthResolver;
+  /** Live-metrics collector; defaults to a real one. Injectable for tests. */
+  metricsCollector?: HostMetricsCollector;
   /** Factory for the relay (lets tests assert subscription without HTTP). */
   makeRelay?: (
     pluginId: string,
@@ -176,6 +183,8 @@ export class HostAgentSupervisor {
   private heartbeatTimer: NodeJS.Timeout | null = null;
   /** Guards the one-shot 'connected' telemetry on the first heartbeat. */
   private reportedConnected = false;
+  /** Live-metrics collector — stateful across beats (CPU delta + latency). */
+  private readonly metrics: HostMetricsCollector;
 
   constructor(
     private readonly identity: SealedHostIdentity,
@@ -183,6 +192,7 @@ export class HostAgentSupervisor {
   ) {
     this.spawnChild = deps.spawnChild ?? defaultSpawner;
     this.resolveAgentAuth = deps.resolveAgentAuth ?? unsealAgentAuth;
+    this.metrics = deps.metricsCollector ?? new MetricsCollector();
   }
 
   /** Open the control channel (reusing the relay) + start heartbeats. */
@@ -226,7 +236,19 @@ export class HostAgentSupervisor {
 
   private async beat(): Promise<void> {
     try {
-      await sendHostHeartbeat(this.identity);
+      // Best-effort live metrics. If collection throws, send the heartbeat
+      // WITHOUT metrics rather than failing the beat (back-compat: the
+      // backend treats `metrics` as optional).
+      let metrics: HostMetrics | undefined;
+      try {
+        metrics = this.metrics.collect();
+      } catch (err) {
+        log.trace('host-agent', 'metrics collection failed', err);
+      }
+      // Measure this beat's round-trip and feed it back as the next beat's
+      // latencyMs (a real measured value, not a guess).
+      const latencyMs = await sendHostHeartbeat(this.identity, metrics);
+      this.metrics.recordLatency(latencyMs);
       // First successful heartbeat means the control channel is live —
       // report 'connected' once (host-token auth). Best-effort, fire it
       // off without awaiting so it can't delay the heartbeat cadence.
