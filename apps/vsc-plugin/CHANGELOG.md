@@ -4,6 +4,16 @@ All notable changes to the CodeAgent Mobile VS Code extension are documented her
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.39.35] — 2026-06-18
+
+### Fixed
+
+- **cli:** Preview pre-flight installs with npm --legacy-peer-deps (not pnpm)
+
+### Tests
+
+- **cli:** Integration regression for ACP reply-doubling (notification → mapper → runner)
+
 ## [2.39.34] — 2026-06-18
 
 ### Fixed
