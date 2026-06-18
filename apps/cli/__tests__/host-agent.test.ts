@@ -187,8 +187,28 @@ describe('reportProgress — best-effort enrollment telemetry', () => {
   });
 });
 
-describe('resolveHostIdentity', () => {
-  it('returns the sealed identity without redeeming when present', async () => {
+/** A fetch mock that succeeds for redeem and any best-effort progress POST. */
+function redeemFetchMock(redeemData: {
+  hostId: string;
+  hostToken: string;
+  controlPluginId: string;
+}) {
+  return vi.fn().mockImplementation(async (url: string) => {
+    if (String(url).includes('/api/self-hosted/redeem')) {
+      return {
+        ok: true,
+        status: 200,
+        statusText: 'OK',
+        json: async () => ({ success: true, data: redeemData }),
+      };
+    }
+    // enroll-progress + anything else: best-effort 200.
+    return { ok: true, status: 200, json: async () => ({ success: true }) };
+  });
+}
+
+describe('resolveHostIdentity — redeem-first', () => {
+  it('returns the sealed identity without redeeming when NO token is present', async () => {
     const fetchMock = vi.fn();
     vi.stubGlobal('fetch', fetchMock);
     fs.mkdirSync(path.dirname(hostIdentityPath()), { recursive: true });
@@ -197,6 +217,66 @@ describe('resolveHostIdentity', () => {
     const resolved = await resolveHostIdentity(undefined);
     expect(resolved).toEqual(IDENTITY);
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('redeems a present token even when a sealed identity already exists (re-enroll)', async () => {
+    const fresh = { hostId: 'host-NEW', hostToken: 'tok-NEW', controlPluginId: 'sh-plugin-NEW' };
+    const fetchMock = redeemFetchMock(fresh);
+    vi.stubGlobal('fetch', fetchMock);
+    // Pre-seal a STALE identity on disk (the old, deleted host).
+    fs.mkdirSync(path.dirname(hostIdentityPath()), { recursive: true });
+    fs.writeFileSync(hostIdentityPath(), JSON.stringify(IDENTITY));
+
+    const resolved = await resolveHostIdentity('FRESH-ENROLL');
+
+    // The fresh token wins — the stale identity is replaced, not reused.
+    expect(resolved).toEqual(fresh);
+    expect(loadHostIdentity()).toEqual(fresh);
+    const redeemCall = fetchMock.mock.calls.find((c) =>
+      String(c[0]).includes('/api/self-hosted/redeem'),
+    );
+    expect(redeemCall).toBeDefined();
+  });
+
+  it('falls back to the existing identity when redeem throws (e.g. a restart)', async () => {
+    const fetchMock = vi.fn().mockImplementation(async (url: string) => {
+      if (String(url).includes('/api/self-hosted/redeem')) {
+        // Token already consumed (single-use) — backend rejects the redeem.
+        return {
+          ok: false,
+          status: 409,
+          statusText: 'Conflict',
+          json: async () => ({ success: false, error: { code: 'TOKEN_USED' } }),
+        };
+      }
+      return { ok: true, status: 200, json: async () => ({ success: true }) };
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    fs.mkdirSync(path.dirname(hostIdentityPath()), { recursive: true });
+    fs.writeFileSync(hostIdentityPath(), JSON.stringify(IDENTITY));
+
+    const resolved = await resolveHostIdentity('ALREADY-USED-TOKEN');
+
+    // Redeem failed → fall back to the sealed identity (a plain restart).
+    expect(resolved).toEqual(IDENTITY);
+    expect(loadHostIdentity()).toEqual(IDENTITY);
+  });
+
+  it('rethrows when redeem fails AND there is no sealed identity to fall back to', async () => {
+    const fetchMock = vi.fn().mockImplementation(async (url: string) => {
+      if (String(url).includes('/api/self-hosted/redeem')) {
+        return {
+          ok: false,
+          status: 410,
+          statusText: 'Gone',
+          json: async () => ({ success: false, error: { code: 'TOKEN_EXPIRED' } }),
+        };
+      }
+      return { ok: true, status: 200, json: async () => ({ success: true }) };
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(resolveHostIdentity('EXPIRED-TOKEN')).rejects.toThrow(/redeem failed/);
   });
 
   it('returns null when neither identity nor token is available', async () => {
@@ -540,5 +620,149 @@ describe('HostAgentSupervisor — heartbeat metrics', () => {
     const body = JSON.parse((heartbeatCall![1] as { body: string }).body);
     expect(body.metrics).toBeUndefined();
     expect(body.hostId).toBe(IDENTITY.hostId);
+  });
+});
+
+describe('HostAgentSupervisor — self-heal on rejected host-token', () => {
+  /** Seal the identity on disk so the wipe path has something to remove. */
+  function sealIdentity(): void {
+    fs.mkdirSync(path.dirname(hostIdentityPath()), { recursive: true });
+    fs.writeFileSync(hostIdentityPath(), JSON.stringify(IDENTITY));
+  }
+
+  /** Let the fire-and-forget beat's full async error chain settle. */
+  const flushBeat = () => new Promise<void>((r) => setTimeout(r, 0));
+
+  it('wipes the identity + fires self-heal on a 404 heartbeat (host deleted)', async () => {
+    sealIdentity();
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 404,
+      statusText: 'Not Found',
+      json: async () => ({ success: false, error: { code: 'HOST_NOT_FOUND' } }),
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const onIdentityRejected = vi.fn(() => {
+      // The default would process.exit; in the test we just wipe like prod.
+      fs.rmSync(hostIdentityPath(), { force: true });
+    });
+
+    const sup = new HostAgentSupervisor(IDENTITY, {
+      makeRelay: () => ({ start: vi.fn(), stop: vi.fn() }),
+      onIdentityRejected,
+    });
+    sup.start(); // fires one beat immediately
+    await flushBeat();
+    sup.stop();
+
+    expect(onIdentityRejected).toHaveBeenCalledTimes(1);
+    expect(fs.existsSync(hostIdentityPath())).toBe(false);
+  });
+
+  it('wipes the identity + fires self-heal on a 401 heartbeat (token revoked)', async () => {
+    sealIdentity();
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 401,
+      statusText: 'Unauthorized',
+      json: async () => ({ success: false, error: { code: 'BAD_TOKEN' } }),
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const onIdentityRejected = vi.fn();
+    const sup = new HostAgentSupervisor(IDENTITY, {
+      makeRelay: () => ({ start: vi.fn(), stop: vi.fn() }),
+      onIdentityRejected,
+    });
+    sup.start();
+    await flushBeat();
+    sup.stop();
+
+    expect(onIdentityRejected).toHaveBeenCalledTimes(1);
+  });
+
+  it('does NOT self-heal on a transient network error (keeps retrying)', async () => {
+    sealIdentity();
+    // A raw network failure (fetch rejects) — NOT an auth rejection.
+    const fetchMock = vi.fn().mockRejectedValue(new Error('ECONNREFUSED'));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const onIdentityRejected = vi.fn();
+    const sup = new HostAgentSupervisor(IDENTITY, {
+      makeRelay: () => ({ start: vi.fn(), stop: vi.fn() }),
+      onIdentityRejected,
+    });
+    sup.start();
+    await flushBeat();
+    sup.stop();
+
+    // Transient → no wipe, no exit; the sealed identity survives.
+    expect(onIdentityRejected).not.toHaveBeenCalled();
+    expect(fs.existsSync(hostIdentityPath())).toBe(true);
+  });
+
+  it('does NOT self-heal on a 500 heartbeat (transient server error)', async () => {
+    sealIdentity();
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 500,
+      statusText: 'Internal Server Error',
+      json: async () => ({ success: false, error: { code: 'OOPS' } }),
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const onIdentityRejected = vi.fn();
+    const sup = new HostAgentSupervisor(IDENTITY, {
+      makeRelay: () => ({ start: vi.fn(), stop: vi.fn() }),
+      onIdentityRejected,
+    });
+    sup.start();
+    await flushBeat();
+    sup.stop();
+
+    expect(onIdentityRejected).not.toHaveBeenCalled();
+    expect(fs.existsSync(hostIdentityPath())).toBe(true);
+  });
+});
+
+describe('HostAgentSupervisor — self_hosted_wipe control command', () => {
+  it('removes the sealed identity, disables the service, and fires the exit', async () => {
+    fs.mkdirSync(path.dirname(hostIdentityPath()), { recursive: true });
+    fs.writeFileSync(hostIdentityPath(), JSON.stringify(IDENTITY));
+    // Heartbeat would hit the network during start() — stub a success.
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: async () => ({ success: true, data: { ok: true } }),
+      }),
+    );
+
+    const relayStop = vi.fn();
+    const disableService = vi.fn();
+    const onIdentityRejected = vi.fn(() => {
+      fs.rmSync(hostIdentityPath(), { force: true });
+    });
+
+    const sup = new HostAgentSupervisor(IDENTITY, {
+      makeRelay: () => ({ start: vi.fn(), stop: relayStop }),
+      disableService,
+      onIdentityRejected,
+    });
+    sup.start();
+
+    await sup.handleCommand({
+      id: 'cmd-wipe',
+      sessionId: 'sh-plugin-1',
+      type: 'self_hosted_wipe',
+      payload: {},
+    });
+
+    expect(relayStop).toHaveBeenCalled(); // children + channel torn down
+    expect(disableService).toHaveBeenCalledTimes(1);
+    expect(onIdentityRejected).toHaveBeenCalledTimes(1);
+    expect(fs.existsSync(hostIdentityPath())).toBe(false);
   });
 });
