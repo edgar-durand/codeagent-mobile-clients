@@ -42,6 +42,7 @@ import { log } from '../services/logger';
 import {
   loadHostIdentity,
   redeemEnrollToken,
+  reportProgress,
   saveHostIdentity,
   sendHostHeartbeat,
   unsealAgentAuth,
@@ -173,6 +174,8 @@ export class HostAgentSupervisor {
   private readonly resolveAgentAuth: AgentAuthResolver;
   private relay: Pick<CommandRelayService, 'start' | 'stop'> | null = null;
   private heartbeatTimer: NodeJS.Timeout | null = null;
+  /** Guards the one-shot 'connected' telemetry on the first heartbeat. */
+  private reportedConnected = false;
 
   constructor(
     private readonly identity: SealedHostIdentity,
@@ -224,6 +227,17 @@ export class HostAgentSupervisor {
   private async beat(): Promise<void> {
     try {
       await sendHostHeartbeat(this.identity);
+      // First successful heartbeat means the control channel is live —
+      // report 'connected' once (host-token auth). Best-effort, fire it
+      // off without awaiting so it can't delay the heartbeat cadence.
+      if (!this.reportedConnected) {
+        this.reportedConnected = true;
+        void reportProgress(
+          { hostId: this.identity.hostId, hostToken: this.identity.hostToken },
+          'connected',
+          'host-agent connected',
+        );
+      }
     } catch (err) {
       log.trace('host-agent', 'heartbeat failed', err);
     }
@@ -361,8 +375,17 @@ export async function resolveHostIdentity(
   const existing = loadHostIdentity();
   if (existing) return existing;
   if (!enrollToken) return null;
+  // Box-side telemetry: report the redeem milestone before it lands
+  // (enroll-token auth — no host identity exists yet). Best-effort.
+  await reportProgress({ enrollToken }, 'redeeming', 'redeeming enrollment token…');
   const identity = await redeemEnrollToken(enrollToken);
   saveHostIdentity(identity);
+  // Identity sealed — report enrolled (host-token auth now available).
+  await reportProgress(
+    { hostId: identity.hostId, hostToken: identity.hostToken },
+    'enrolled',
+    'host enrolled',
+  );
   return identity;
 }
 
