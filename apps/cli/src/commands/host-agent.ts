@@ -35,11 +35,13 @@
  * Everything else here is complete + tested via an injected resolver.
  */
 
-import { spawn, type ChildProcess } from 'node:child_process';
+import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
 import { CommandRelayService, type RemoteCommand } from '../services/command-relay.service';
 import type { AgentMetadata } from '@codeagent/shared';
 import { log } from '../services/logger';
 import {
+  deleteHostIdentity,
+  isHostAuthRejection,
   loadHostIdentity,
   MetricsCollector,
   redeemEnrollToken,
@@ -153,6 +155,31 @@ const defaultSpawner: ChildSpawner = (env, cwd, args = []) =>
     detached: false,
   });
 
+/**
+ * Default self-heal action when the backend rejects the host identity:
+ * wipe the sealed identity and exit non-zero so systemd restarts us. On
+ * restart, `resolveHostIdentity` redeems a fresh env token if one is
+ * present (re-enroll), or fails cleanly if not.
+ */
+const defaultOnIdentityRejected = (): void => {
+  deleteHostIdentity();
+  log.warn('host-agent', 'host identity rejected by backend — wiped sealed identity, exiting');
+  process.exit(1);
+};
+
+/**
+ * Default best-effort service de-provision for `self_hosted_wipe`. The
+ * agent runs as root via its systemd unit, so it can usually disable
+ * itself; wrapped so a permission failure is non-fatal.
+ */
+const defaultDisableService = (): void => {
+  try {
+    execFileSync('systemctl', ['disable', '--now', 'codeam-host-agent'], { stdio: 'ignore' });
+  } catch {
+    /* may not be permitted / not on systemd — best-effort */
+  }
+};
+
 /** The slice of MetricsCollector the supervisor depends on (injectable for tests). */
 export type HostMetricsCollector = Pick<MetricsCollector, 'collect' | 'recordLatency'>;
 
@@ -168,6 +195,16 @@ export interface HostAgentDeps {
     onCommand: (cmd: RemoteCommand) => void | Promise<void>,
     meta: AgentMetadata,
   ) => Pick<CommandRelayService, 'start' | 'stop'>;
+  /**
+   * Called when the host identity is rejected by the backend (host deleted
+   * / token revoked) or on `self_hosted_wipe`. The default wipes the sealed
+   * identity and exits non-zero so systemd restarts us; restart then
+   * redeems a fresh env token if present, else fails cleanly. Injectable so
+   * tests assert the wipe without tearing down the test runner.
+   */
+  onIdentityRejected?: () => void;
+  /** Best-effort de-provision for `self_hosted_wipe`. Injectable for tests. */
+  disableService?: () => void;
 }
 
 /**
@@ -185,6 +222,12 @@ export class HostAgentSupervisor {
   private reportedConnected = false;
   /** Live-metrics collector — stateful across beats (CPU delta + latency). */
   private readonly metrics: HostMetricsCollector;
+  /** Self-heal action when the backend rejects this identity. */
+  private readonly onIdentityRejected: () => void;
+  /** Best-effort systemd de-provision used by `self_hosted_wipe`. */
+  private readonly disableService: () => void;
+  /** Guards against firing the self-heal more than once. */
+  private healing = false;
 
   constructor(
     private readonly identity: SealedHostIdentity,
@@ -193,6 +236,8 @@ export class HostAgentSupervisor {
     this.spawnChild = deps.spawnChild ?? defaultSpawner;
     this.resolveAgentAuth = deps.resolveAgentAuth ?? unsealAgentAuth;
     this.metrics = deps.metricsCollector ?? new MetricsCollector();
+    this.onIdentityRejected = deps.onIdentityRejected ?? defaultOnIdentityRejected;
+    this.disableService = deps.disableService ?? defaultDisableService;
   }
 
   /** Open the control channel (reusing the relay) + start heartbeats. */
@@ -261,6 +306,20 @@ export class HostAgentSupervisor {
         );
       }
     } catch (err) {
+      // Self-heal: if the backend genuinely REJECTED our host identity
+      // (401/403/404 — the host was deleted server-side), don't spin
+      // forever on a dead token. Wipe the sealed identity and exit so
+      // systemd restarts us; on restart we redeem a fresh env token if one
+      // is present, else fail cleanly. Transient failures (5xx, network
+      // blips) are NOT rejections — keep retrying on the next beat.
+      if (isHostAuthRejection(err)) {
+        if (!this.healing) {
+          this.healing = true;
+          log.warn('host-agent', 'heartbeat rejected — host deleted/revoked, self-healing', err);
+          this.onIdentityRejected();
+        }
+        return;
+      }
       log.trace('host-agent', 'heartbeat failed', err);
     }
   }
@@ -290,6 +349,20 @@ export class HostAgentSupervisor {
         return;
       }
       this.stopChild(cmd.payload.sessionId);
+      return;
+    }
+    if (cmd.type === 'self_hosted_wipe') {
+      // The app deleted this host while it was ONLINE. Cleanly de-provision:
+      // kill children, remove the sealed identity, best-effort disable the
+      // systemd unit, then exit. (Disabling first means systemd won't simply
+      // restart us into a cleanly-failing redeem.)
+      log.warn('host-agent', `self_hosted_wipe received id=${cmd.id} — de-provisioning`);
+      this.stop();
+      this.disableService();
+      if (!this.healing) {
+        this.healing = true;
+        this.onIdentityRejected();
+      }
       return;
     }
     log.trace('host-agent', `ignoring unsupported command type=${cmd.type}`);
@@ -387,28 +460,64 @@ export class HostAgentSupervisor {
 }
 
 /**
- * Resolve the sealed host identity: load it from disk, or redeem the
- * enroll token on first run + seal it. Returns null when neither is
- * available (no identity + no token → can't start).
+ * Resolve the sealed host identity — REDEEM-FIRST.
+ *
+ * When the systemd unit carries a `CODEAM_ENROLL_TOKEN`, we PREFER
+ * redeeming it over reusing the sealed identity on disk. This is what makes
+ * re-enrollment work: a freshly-installed token (the user re-ran the
+ * installer, possibly after deleting the old host in the app) must replace
+ * any stale, now-dead identity instead of being ignored.
+ *
+ * The enroll token is single-use server-side, which makes the fallback
+ * correct and safe:
+ *   - Fresh enroll (a new, unredeemed token) → redeem succeeds → new
+ *     identity sealed and returned. Re-enrollment works, and a deleted host
+ *     self-replaces.
+ *   - Plain service restart / reboot (the SAME token is still in the unit
+ *     but was already consumed) → redeem fails → we fall back to the sealed
+ *     identity and carry on. No spurious failure on every reboot.
+ *
+ * Returns null only when there is neither a usable token nor a sealed
+ * identity to fall back to.
  */
 export async function resolveHostIdentity(
   enrollToken: string | undefined,
 ): Promise<SealedHostIdentity | null> {
   const existing = loadHostIdentity();
+
+  if (enrollToken) {
+    // Box-side telemetry: report the redeem milestone before it lands
+    // (enroll-token auth — host identity may be stale or absent). Best-effort.
+    await reportProgress({ enrollToken }, 'redeeming', 'redeeming enrollment token…');
+    try {
+      const identity = await redeemEnrollToken(enrollToken);
+      saveHostIdentity(identity);
+      // Identity sealed — report enrolled (host-token auth now available).
+      await reportProgress(
+        { hostId: identity.hostId, hostToken: identity.hostToken },
+        'enrolled',
+        'host enrolled',
+      );
+      return identity;
+    } catch (err) {
+      // Redeem failed — almost always because the token was already
+      // consumed (a plain restart with the same unit env). Fall back to the
+      // sealed identity if we have one; otherwise the failure is real.
+      if (existing) {
+        log.trace(
+          'host-agent',
+          'enroll-token redeem failed; reusing sealed identity (likely a restart)',
+          err,
+        );
+        return existing;
+      }
+      throw err;
+    }
+  }
+
+  // No token in the environment — only the sealed identity can start us.
   if (existing) return existing;
-  if (!enrollToken) return null;
-  // Box-side telemetry: report the redeem milestone before it lands
-  // (enroll-token auth — no host identity exists yet). Best-effort.
-  await reportProgress({ enrollToken }, 'redeeming', 'redeeming enrollment token…');
-  const identity = await redeemEnrollToken(enrollToken);
-  saveHostIdentity(identity);
-  // Identity sealed — report enrolled (host-token auth now available).
-  await reportProgress(
-    { hostId: identity.hostId, hostToken: identity.hostToken },
-    'enrolled',
-    'host enrolled',
-  );
-  return identity;
+  return null;
 }
 
 /**

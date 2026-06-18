@@ -193,6 +193,58 @@ export function saveHostIdentity(identity: SealedHostIdentity): void {
   fs.chmodSync(file, 0o600);
 }
 
+/**
+ * A backend rejection that carries the HTTP status, so callers can tell a
+ * genuine auth-rejection (the host was deleted / its token revoked) apart
+ * from a transient network error. Only 401/403/404 mean "this identity is
+ * dead, stop using it" — everything else (5xx, network blips) is transient
+ * and must keep retrying.
+ */
+export class HostHttpError extends Error {
+  constructor(
+    message: string,
+    /** The HTTP status the backend returned (0 for a non-HTTP failure). */
+    readonly status: number,
+  ) {
+    super(message);
+    this.name = 'HostHttpError';
+  }
+
+  /**
+   * True iff this is a genuine auth-rejection of the host identity:
+   * 401 (token invalid), 403 (forbidden), 404 (host not found / deleted).
+   * Transient failures (5xx, timeouts, network errors) are NOT rejections.
+   */
+  get isAuthRejection(): boolean {
+    return this.status === 401 || this.status === 403 || this.status === 404;
+  }
+}
+
+/**
+ * Classify an unknown error thrown while talking to the backend as a
+ * genuine host-identity auth-rejection (host deleted / token revoked).
+ * Transient errors (network down, 5xx, abort) return false so the agent
+ * keeps retrying rather than wiping a still-valid identity.
+ */
+export function isHostAuthRejection(err: unknown): boolean {
+  return err instanceof HostHttpError && err.isAuthRejection;
+}
+
+/**
+ * Remove the sealed host identity (`~/.codeam/host-agent.json`). Used by
+ * the self-heal path when the backend rejects the host-token (host deleted
+ * server-side) and by the `self_hosted_wipe` control command. Best-effort:
+ * a missing file is fine, any other error is swallowed (the caller is about
+ * to exit anyway and systemd will not re-seal a stale identity).
+ */
+export function deleteHostIdentity(): void {
+  try {
+    fs.rmSync(hostIdentityPath(), { force: true });
+  } catch {
+    /* best-effort — already gone or unwritable */
+  }
+}
+
 async function postJson<T>(pathname: string, body: Record<string, unknown>): Promise<T> {
   const res = await fetch(`${apiBase()}${pathname}`, {
     method: 'POST',
@@ -204,8 +256,9 @@ async function postJson<T>(pathname: string, body: Record<string, unknown>): Pro
     | { success: false; error?: { code?: string; message?: string } };
   if (!res.ok || !json.success) {
     const err = !json.success ? json.error : undefined;
-    throw new Error(
+    throw new HostHttpError(
       `${pathname} failed (${err?.code ?? `HTTP_${res.status}`}): ${err?.message ?? res.statusText}`,
+      res.status,
     );
   }
   return json.data;
