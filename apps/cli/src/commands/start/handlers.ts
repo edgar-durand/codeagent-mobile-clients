@@ -354,6 +354,24 @@ const shutdownSession: CommandHandler = async (ctx, cmd) => {
   process.exit(0);
 };
 
+// Backend pushes this when the user picks a device from the
+// self-hosted setup flow. We DISPLAY the install one-liner so the
+// user can copy it onto their own box — we NEVER execute it. The
+// command string is validated by `startCommandSchema` before it
+// reaches here.
+const showInstallCommand: CommandHandler = async (ctx, cmd, parsed) => {
+  const command = parsed.command;
+  if (!command) {
+    await ctx.relay.sendResult(cmd.id, 'failed', { error: 'Missing command' });
+    return;
+  }
+  showInfo('CodeAgent — self-hosted install. Run this on your box:');
+  showInfo('');
+  showInfo(`    ${command}`);
+  showInfo('');
+  await ctx.relay.sendResult(cmd.id, 'completed', {});
+};
+
 // ─── Mini-IDE file ops ───────────────────────────────────────────
 
 const readFile: CommandHandler = async (ctx, cmd, parsed) => {
@@ -1495,6 +1513,7 @@ export const handlers: Record<string, CommandHandler> = {
   set_keep_alive: setKeepAlive,
   session_terminated: sessionTerminated,
   shutdown_session: shutdownSession,
+  show_install_command: showInstallCommand,
   read_file: readFile,
   write_file: writeFile,
   list_files: listFiles,

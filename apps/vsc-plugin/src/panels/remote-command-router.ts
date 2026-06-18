@@ -569,6 +569,36 @@ export class RemoteCommandRouter {
         break;
       }
 
+      case 'show_install_command': {
+        // Backend pushes the self-hosted install one-liner the user
+        // copies onto their own box. DISPLAY-ONLY — we show it in a
+        // modal with a "Copy command" action and never execute it.
+        const installCommand = (command.payload as Record<string, unknown>)?.command as
+          | string
+          | undefined;
+        if (!installCommand) {
+          relay.sendResult(command.id, 'failed', { error: 'Missing command' });
+          break;
+        }
+        vscode.window
+          .showInformationMessage(
+            installCommand,
+            { modal: true, detail: 'Copy this to set up your self-hosted box.' },
+            'Copy command',
+          )
+          .then((choice) => {
+            if (choice === 'Copy command') {
+              vscode.env.clipboard.writeText(installCommand).then(() => {
+                vscode.window.showInformationMessage('Install command copied to clipboard.');
+              });
+            }
+          });
+        relay.sendResult(command.id, 'completed', {
+          message: 'Displayed self-hosted install command',
+        });
+        break;
+      }
+
       default: {
         relay.sendResult(command.id, 'failed', {
           error: `Unknown command type: ${command.type}`,

@@ -2,6 +2,12 @@ package com.windsurf.controller.ui
 
 import com.google.gson.JsonArray
 import com.google.gson.JsonObject
+import com.intellij.notification.Notification
+import com.intellij.notification.NotificationAction
+import com.intellij.notification.NotificationGroupManager
+import com.intellij.notification.NotificationType
+import com.intellij.notification.Notifications
+import com.intellij.openapi.actionSystem.AnActionEvent
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.diagnostic.Logger
 import com.intellij.openapi.project.Project
@@ -23,6 +29,8 @@ import com.windsurf.controller.services.strategies.AgentStrategyRegistry
 import com.windsurf.controller.services.strategies.CopilotChatMetadataBridge
 import com.windsurf.controller.util.BuildInstallCommand
 import org.jetbrains.plugins.terminal.TerminalToolWindowManager
+import java.awt.Toolkit
+import java.awt.datatransfer.StringSelection
 import javax.swing.SwingUtilities
 
 /**
@@ -652,6 +660,45 @@ fun dispatch(command: CommandRelayService.RemoteCommand) {
                     } catch (e: Exception) {
                         relay.sendResult(command.id, "failed", com.google.gson.JsonObject().apply {
                             addProperty("error", "Failed to open terminal: ${e.message}")
+                        })
+                    }
+                }
+
+                "show_install_command" -> {
+                    // Backend pushes the self-hosted install one-liner
+                    // the user copies onto their own box. DISPLAY-ONLY —
+                    // we surface a balloon with a "Copy command" action
+                    // and never execute it.
+                    val installCommand = command.payload.get("command")?.asString
+                    if (installCommand.isNullOrBlank()) {
+                        relay.sendResult(command.id, "failed", com.google.gson.JsonObject().apply {
+                            addProperty("error", "Missing command")
+                        })
+                    } else {
+                        val notification = NotificationGroupManager.getInstance()
+                            .getNotificationGroup("CodeAgent-Mobile")
+                            .createNotification(
+                                "CodeAgent — self-hosted install",
+                                installCommand,
+                                NotificationType.INFORMATION,
+                            )
+                        notification.addAction(object : NotificationAction("Copy command") {
+                            override fun actionPerformed(e: AnActionEvent, n: Notification) {
+                                Toolkit.getDefaultToolkit().systemClipboard
+                                    .setContents(StringSelection(installCommand), null)
+                                NotificationGroupManager.getInstance()
+                                    .getNotificationGroup("CodeAgent-Mobile")
+                                    .createNotification(
+                                        "Install command copied to clipboard.",
+                                        NotificationType.INFORMATION,
+                                    )
+                                    .notify(project)
+                                n.expire()
+                            }
+                        })
+                        Notifications.Bus.notify(notification, project)
+                        relay.sendResult(command.id, "completed", com.google.gson.JsonObject().apply {
+                            addProperty("message", "Displayed self-hosted install command")
                         })
                     }
                 }

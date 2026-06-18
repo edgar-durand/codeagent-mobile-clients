@@ -46,6 +46,11 @@ export const startCommandSchema = z.object({
   query: z.string().max(256).optional(),
   message: z.string().max(8000).optional(),
   paths: z.array(z.string().max(4096)).optional(),
+  // `show_install_command` — backend pushes the self-hosted install
+  // one-liner the user copies onto their own box. DISPLAY-ONLY: the
+  // CLI prints it to the terminal and never executes it. Bounded to
+  // 8192 chars so a malformed payload can't flood the terminal.
+  command: z.string().min(1).max(8192).optional(),
   side: z.enum(['ours', 'theirs']).optional(),
   limit: z.number().int().min(1).max(500).optional(),
   // search_files options. `query` is the haystack/needle string,
