@@ -8,13 +8,19 @@
  *   - an ABSOLUTE PATH on the box → used in place (the user points at a
  *     checkout they already have), or
  *   - a GitHub repo ref (`owner/repo` or a clone URL) → cloned under
- *     `~/.codeam/self-hosted/<deployId>` using the box's own git auth.
+ *     `~/.codeam/self-hosted/<deployId>`.
  *
- * The clone uses the box's ambient git credentials (the user enrolled
- * the box from a laptop SSH session they already trust). The backend
- * deploy command does not (yet) carry a short-lived clone token — see
- * the Phase-3 note in host-agent.ts for closing that gap on private
- * repos the box can't otherwise read.
+ * Clone auth: when the deploy command carries a short-lived `cloneToken`
+ * (a GitHub token minted by the backend) AND the target is a GitHub repo,
+ * we clone via `https://x-access-token:<token>@github.com/owner/repo.git`
+ * so private repos the box couldn't otherwise read clone cleanly. With no
+ * token we fall back to the box's ambient git auth.
+ *
+ * In ALL cases git runs with `GIT_TERMINAL_PROMPT=0` (and friends) so a
+ * missing or invalid credential FAILS FAST instead of hanging forever on
+ * an interactive credential prompt — the original "deploy hangs silently"
+ * bug. The token is NEVER logged: any thrown error has the token-bearing
+ * URL masked before it propagates.
  */
 
 import * as fs from 'node:fs';
@@ -35,12 +41,65 @@ export function selfHostedWorkspaceRoot(): string {
   return path.join(os.homedir(), '.codeam', 'self-hosted');
 }
 
-/** Normalise an `owner/repo` (or URL) ref into an https clone URL. */
-export function repoCloneUrl(repoRef: string): string {
+/**
+ * Non-interactive git environment: never prompt for credentials on the
+ * terminal, never invoke an askpass helper, never pop a Git Credential
+ * Manager dialog. A missing/invalid credential therefore fails fast with a
+ * non-zero exit instead of hanging the deploy waiting on stdin.
+ */
+function nonInteractiveGitEnv(): NodeJS.ProcessEnv {
+  return {
+    ...process.env,
+    GIT_TERMINAL_PROMPT: '0',
+    GIT_ASKPASS: '',
+    GCM_INTERACTIVE: 'never',
+  };
+}
+
+/** Parse a GitHub `owner/repo` out of a ref or URL; null if not GitHub. */
+function githubOwnerRepo(repoRef: string): { owner: string; repo: string } | null {
   const trimmed = repoRef.trim();
+  // owner/repo shorthand (no scheme, no host).
+  const shorthand = /^([^/\s]+)\/([^/\s]+?)(?:\.git)?$/.exec(trimmed);
+  if (shorthand && !/^https?:\/\//.test(trimmed) && !trimmed.startsWith('git@')) {
+    return { owner: shorthand[1], repo: shorthand[2] };
+  }
+  // https://github.com/owner/repo(.git) URL form.
+  const httpsMatch = /^https?:\/\/github\.com\/([^/\s]+)\/([^/\s]+?)(?:\.git)?\/?$/.exec(trimmed);
+  if (httpsMatch) return { owner: httpsMatch[1], repo: httpsMatch[2] };
+  return null;
+}
+
+/**
+ * Normalise an `owner/repo` (or URL) ref into an https clone URL. When a
+ * `cloneToken` is supplied and the target is a GitHub repo, the token is
+ * embedded as `x-access-token:<token>` so the clone authenticates.
+ */
+export function repoCloneUrl(repoRef: string, cloneToken?: string): string {
+  const trimmed = repoRef.trim();
+  if (cloneToken) {
+    const gh = githubOwnerRepo(trimmed);
+    if (gh) {
+      return `https://x-access-token:${cloneToken}@github.com/${gh.owner}/${gh.repo}.git`;
+    }
+  }
   if (/^https?:\/\//.test(trimmed) || trimmed.startsWith('git@')) return trimmed;
   // `owner/repo` shorthand.
   return `https://github.com/${trimmed.replace(/\.git$/, '')}.git`;
+}
+
+/** Mask a token-bearing clone URL so it never reaches a log or error message. */
+function maskCloneUrl(url: string): string {
+  return url.replace(/(https?:\/\/)[^@/]+@/, '$1***@');
+}
+
+/** Mask any embedded token in an arbitrary string (defensive, for error text). */
+function maskToken(text: string, cloneToken?: string): string {
+  const masked = maskCloneUrl(text);
+  if (cloneToken && cloneToken.length > 0) {
+    return masked.split(cloneToken).join('***');
+  }
+  return masked;
 }
 
 /**
@@ -48,10 +107,16 @@ export function repoCloneUrl(repoRef: string): string {
  * `repoOrPath` is a repo ref; returns the path verbatim when it is an
  * absolute path. Idempotent for clones: a pre-existing target dir for
  * the same `deployId` is reused rather than re-cloned.
+ *
+ * When `cloneToken` is present and the target is a GitHub repo, the clone
+ * authenticates with it (private-repo support). The clone always runs
+ * non-interactively (see `nonInteractiveGitEnv`) so it can never hang, and
+ * the token is masked out of any error it throws.
  */
 export async function prepareWorkspace(
   repoOrPath: string,
   deployId: string,
+  cloneToken?: string,
 ): Promise<string> {
   if (isAbsolutePathTarget(repoOrPath)) {
     if (!fs.existsSync(repoOrPath)) {
@@ -65,9 +130,17 @@ export async function prepareWorkspace(
     return dest; // already cloned for this deploy
   }
   fs.mkdirSync(selfHostedWorkspaceRoot(), { recursive: true, mode: 0o700 });
-  await execFileP('git', ['clone', '--depth', '1', repoCloneUrl(repoOrPath), dest], {
-    timeout: 120_000,
-    maxBuffer: 16 * 1024 * 1024,
-  });
+  const cloneUrl = repoCloneUrl(repoOrPath, cloneToken);
+  try {
+    await execFileP('git', ['clone', '--depth', '1', cloneUrl, dest], {
+      timeout: 120_000,
+      maxBuffer: 16 * 1024 * 1024,
+      env: nonInteractiveGitEnv(),
+    });
+  } catch (err) {
+    // Re-throw with the token-bearing URL masked so nothing logs the token.
+    const reason = err instanceof Error ? err.message : String(err);
+    throw new Error(`git clone failed for ${maskCloneUrl(cloneUrl)}: ${maskToken(reason, cloneToken)}`);
+  }
   return dest;
 }

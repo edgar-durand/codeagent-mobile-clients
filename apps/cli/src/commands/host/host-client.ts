@@ -421,3 +421,51 @@ export async function reportProgress(
     /* best-effort telemetry — swallow all failures */
   }
 }
+
+/** How a deploy-progress report authenticates: the sealed host identity. */
+export type DeployProgressAuth = { hostId: string; hostToken: string };
+
+/**
+ * Report a deploy-progress milestone to the backend so the app can show
+ * real, box-side telemetry during a `self_hosted_deploy` — mirroring the
+ * codespace deploy log. Steps flow as the deploy proceeds (`preparing`,
+ * `cloning`, `spawning`, `agent_starting`) and `failed` on any error.
+ *
+ * The backend owns the terminal `paired` step (it correlates the auto-pair
+ * token to a session), so the host-agent never reports it.
+ *
+ * STRICTLY best-effort, exactly like {@link reportProgress}: fire-and-forget
+ * with a short timeout; every error (network, abort, non-200, bad JSON) is
+ * swallowed. A failure here must NEVER fail or stall the deploy.
+ */
+export async function reportDeployProgress(
+  auth: DeployProgressAuth,
+  deployId: string,
+  step: string,
+  message: string,
+  sessionId?: string,
+): Promise<void> {
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), PROGRESS_TIMEOUT_MS);
+    timer.unref?.();
+    try {
+      await fetch(`${apiBase()}/api/self-hosted/deploy-progress`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...vercelBypassHeader() },
+        body: JSON.stringify({
+          ...auth,
+          deployId,
+          step,
+          message,
+          ...(sessionId ? { sessionId } : {}),
+        }),
+        signal: controller.signal,
+      });
+    } finally {
+      clearTimeout(timer);
+    }
+  } catch {
+    /* best-effort telemetry — swallow all failures */
+  }
+}

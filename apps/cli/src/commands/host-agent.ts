@@ -45,6 +45,7 @@ import {
   loadHostIdentity,
   MetricsCollector,
   redeemEnrollToken,
+  reportDeployProgress,
   reportProgress,
   saveHostIdentity,
   sendHostHeartbeat,
@@ -53,7 +54,7 @@ import {
   type HostMetrics,
   type SealedHostIdentity,
 } from './host/host-client';
-import { prepareWorkspace } from './host/workspace';
+import { isAbsolutePathTarget, prepareWorkspace } from './host/workspace';
 import { provisionAgentCredentials } from './host/agent-provisioning';
 
 /** Liveness heartbeat cadence. State liveness only — NOT command polling. */
@@ -81,6 +82,13 @@ interface DeployPayload {
   /** Managed house-agent proxy config. Present iff a house-agent deploy. */
   houseProxy?: HouseProxy;
   autoPairToken: string;
+  /**
+   * Short-lived GitHub token for cloning the target repo. Present when the
+   * box must clone a (possibly private) GitHub repo it can't read with its
+   * own ambient git auth. Absent for absolute-path deploys or when the box
+   * is trusted to clone on its own. NEVER logged.
+   */
+  cloneToken?: string;
 }
 
 /** The stop command payload (mirrors the backend `SelfHostedStopCommand`). */
@@ -107,6 +115,10 @@ function isDeployPayload(p: Record<string, unknown>): p is DeployPayload & Recor
   ) {
     return false;
   }
+  // cloneToken is optional, but must be a string when present.
+  if (p.cloneToken !== undefined && typeof p.cloneToken !== 'string') {
+    return false;
+  }
   // Exactly one credential source must be present + well-formed.
   const hasHouse = isHouseProxy(p.houseProxy);
   const hasSealed = typeof p.sealedAgentAuth === 'string';
@@ -131,11 +143,15 @@ const CONTROL_AGENT_META: AgentMetadata = {
   preferredAuthKind: 'oauth_token',
 };
 
-/** A spawned `codeam pair-auto` child the supervisor manages. */
+/**
+ * A spawned `codeam pair-auto` child the supervisor manages. Tracked by
+ * `deployId` only — the backend correlates the auto-pair token to a real
+ * sessionId server-side, so the supervisor never invents/holds one. A
+ * `self_hosted_stop { sessionId }` is matched against the deployId (the
+ * backend correlates the two), see `stopChild`.
+ */
 interface ChildSession {
   deployId: string;
-  /** Resolved once the child reports its sessionId (see note in spawn). */
-  sessionId: string;
   proc: ChildProcess;
 }
 
@@ -146,12 +162,16 @@ export type ChildSpawner = (
   args?: string[],
 ) => ChildProcess;
 
-/** Default spawner: `codeam pair-auto` carrying CODEAM_AUTO_TOKEN. */
+/**
+ * Default spawner: `codeam pair-auto` carrying CODEAM_AUTO_TOKEN. stdout/
+ * stderr are PIPED (not ignored) so the supervisor can capture the tail and
+ * surface it as a `failed` deploy-progress if the child dies early.
+ */
 const defaultSpawner: ChildSpawner = (env, cwd, args = []) =>
   spawn(process.execPath, [process.argv[1], 'pair-auto', ...args], {
     cwd,
     env: { ...process.env, ...env },
-    stdio: 'ignore',
+    stdio: ['ignore', 'pipe', 'pipe'],
     detached: false,
   });
 
@@ -383,61 +403,126 @@ export class HostAgentSupervisor {
       'host-agent',
       `deploy id=${payload.deployId.slice(0, 8)} agent=${payload.agentId} target=${payload.repoOrPath}`,
     );
-    const cwd = await prepareWorkspace(payload.repoOrPath, payload.deployId);
+    // Best-effort deploy-progress, bound to this deploy + the sealed
+    // identity (host-token auth). Fire-and-forget — never await on the hot
+    // path; the helper swallows its own errors.
+    const report = (step: string, message: string): void => {
+      void reportDeployProgress(
+        { hostId: this.identity.hostId, hostToken: this.identity.hostToken },
+        payload.deployId,
+        step,
+        message,
+      );
+    };
 
-    // Two mutually-exclusive credential shapes (see DeployPayload):
-    //   - House agent ("CodeAgent Cloud"): point the underlying agent at
-    //     our managed proxy with the supplied token — NO unseal round-trip,
-    //     NO cred files. Mirrors the codespace house bootstrap env exactly
-    //     (apps/api-v2/src/codespaces/agent.ts).
-    //   - Real LinkedAgent: unseal the sealed blob → plaintext (outbound,
-    //     host-token authed) and write the credential files the agent reads
-    //     at startup, BEFORE spawning the child (unchanged path).
-    let childEnv: Record<string, string>;
-    let extraArgs: string[] = [];
-    if (payload.houseProxy) {
-      const { baseUrl, token, agentKind } = payload.houseProxy;
-      childEnv = {
-        ANTHROPIC_BASE_URL: baseUrl,
-        ANTHROPIC_AUTH_TOKEN: token,
-        ANTHROPIC_MODEL: 'MiniMax-M3',
-        ANTHROPIC_DEFAULT_SONNET_MODEL: 'MiniMax-M3',
-        ANTHROPIC_DEFAULT_OPUS_MODEL: 'MiniMax-M3',
-        ANTHROPIC_DEFAULT_HAIKU_MODEL: 'MiniMax-M3',
-        CLAUDE_CODE_AUTO_COMPACT_WINDOW: '512000',
-        API_TIMEOUT_MS: '3000000',
-        CODEAM_AUTO_TOKEN: payload.autoPairToken,
-      };
-      extraArgs = [`--agent=${agentKind || 'claude'}`];
-    } else {
-      // Non-house path: `sealedAgentAuth` is guaranteed present by
-      // isDeployPayload (exactly one of houseProxy / sealedAgentAuth).
-      const auth = await this.resolveAgentAuth(this.identity, payload.sealedAgentAuth!);
-      const credEnv = provisionAgentCredentials(payload.agentId, auth, undefined);
-      childEnv = {
-        ...credEnv,
-        CODEAM_AUTO_TOKEN: payload.autoPairToken,
-      };
-    }
-    const proc = this.spawnChild(childEnv, cwd, extraArgs);
-    // Track by deployId now; the stop command uses sessionId, which the
-    // backend correlates to this deploy (the control channel pushed the
-    // stop with the session the child paired into). We index both ids so
-    // stop matches whichever the backend sends.
-    const child: ChildSession = { deployId: payload.deployId, sessionId: payload.deployId, proc };
-    this.children.set(payload.deployId, child);
+    try {
+      // 1) Prepare the workspace (clone, or use an absolute path verbatim).
+      //    Clones run non-interactively + with the supplied cloneToken so a
+      //    private repo authenticates and a bad/missing credential fails
+      //    fast instead of hanging the deploy.
+      report('preparing', 'preparing workspace');
+      if (!isAbsolutePathTarget(payload.repoOrPath)) {
+        report('cloning', 'cloning repository');
+      }
+      const cwd = await prepareWorkspace(payload.repoOrPath, payload.deployId, payload.cloneToken);
 
-    proc.once('exit', () => {
-      // Self-heal the map when a child dies on its own.
-      if (this.children.get(payload.deployId)?.proc === proc) {
+      // Two mutually-exclusive credential shapes (see DeployPayload):
+      //   - House agent ("CodeAgent Cloud"): point the underlying agent at
+      //     our managed proxy with the supplied token — NO unseal round-trip,
+      //     NO cred files. Mirrors the codespace house bootstrap env exactly
+      //     (apps/api-v2/src/codespaces/agent.ts).
+      //   - Real LinkedAgent: unseal the sealed blob → plaintext (outbound,
+      //     host-token authed) and write the credential files the agent reads
+      //     at startup, BEFORE spawning the child (unchanged path).
+      let childEnv: Record<string, string>;
+      let extraArgs: string[] = [];
+      if (payload.houseProxy) {
+        const { baseUrl, token, agentKind } = payload.houseProxy;
+        childEnv = {
+          ANTHROPIC_BASE_URL: baseUrl,
+          ANTHROPIC_AUTH_TOKEN: token,
+          ANTHROPIC_MODEL: 'MiniMax-M3',
+          ANTHROPIC_DEFAULT_SONNET_MODEL: 'MiniMax-M3',
+          ANTHROPIC_DEFAULT_OPUS_MODEL: 'MiniMax-M3',
+          ANTHROPIC_DEFAULT_HAIKU_MODEL: 'MiniMax-M3',
+          CLAUDE_CODE_AUTO_COMPACT_WINDOW: '512000',
+          API_TIMEOUT_MS: '3000000',
+          CODEAM_AUTO_TOKEN: payload.autoPairToken,
+        };
+        extraArgs = [`--agent=${agentKind || 'claude'}`];
+      } else {
+        // Non-house path: `sealedAgentAuth` is guaranteed present by
+        // isDeployPayload (exactly one of houseProxy / sealedAgentAuth).
+        const auth = await this.resolveAgentAuth(this.identity, payload.sealedAgentAuth!);
+        const credEnv = provisionAgentCredentials(payload.agentId, auth, undefined);
+        childEnv = {
+          ...credEnv,
+          CODEAM_AUTO_TOKEN: payload.autoPairToken,
+        };
+      }
+
+      // 2) Spawn the supervised `pair-auto` child.
+      report('spawning', 'starting agent');
+      const proc = this.spawnChild(childEnv, cwd, extraArgs);
+      // Track by deployId now; the stop command uses sessionId, which the
+      // backend correlates to this deploy (the control channel pushed the
+      // stop with the session the child paired into).
+      const child: ChildSession = { deployId: payload.deployId, proc };
+      this.children.set(payload.deployId, child);
+
+      // Capture a rolling tail of the child's stdout/stderr so an EARLY
+      // non-zero exit (the agent failed to start) can be reported with
+      // context. Bounded so a long-lived child can't grow this unbounded.
+      let tail = '';
+      const appendTail = (buf: Buffer): void => {
+        tail = (tail + buf.toString('utf8')).slice(-2_000);
+      };
+      proc.stdout?.on('data', appendTail);
+      proc.stderr?.on('data', appendTail);
+
+      report('agent_starting', 'agent process started');
+
+      proc.once('exit', (code) => {
+        const tracked = this.children.get(payload.deployId)?.proc === proc;
+        // Self-heal the map when a child dies on its own.
+        if (tracked) {
+          this.children.delete(payload.deployId);
+        }
+        // A non-zero exit means the agent failed to come up. Report it as a
+        // deploy failure with the captured tail (best-effort). A clean exit
+        // (code 0 / null from a SIGTERM stop) is normal teardown — no report.
+        if (tracked && typeof code === 'number' && code !== 0) {
+          const detail = tail.trim().slice(-500);
+          report('failed', detail ? `agent exited (${code}): ${detail}` : `agent exited (${code})`);
+        }
+      });
+    } catch (err) {
+      // Any failure before/while spawning (clone hang→fast-fail, unseal
+      // error, provisioning error) lands here. Report a concise `failed`
+      // (NOT a stack), clean up any partial child, and DO NOT rethrow — a
+      // throw out of the relay dispatch would be invisible to the app.
+      const message = err instanceof Error ? err.message : String(err);
+      log.warn('host-agent', `deploy ${payload.deployId.slice(0, 8)} failed: ${message}`);
+      const existing = this.children.get(payload.deployId);
+      if (existing) {
+        try {
+          existing.proc.kill('SIGTERM');
+        } catch {
+          /* already gone */
+        }
         this.children.delete(payload.deployId);
       }
-    });
+      report('failed', message);
+    }
   }
 
-  /** Kill the child matching `sessionId` (or its deployId). No-op if absent. */
+  /**
+   * Kill the child for the given id. The backend correlates the session it
+   * sends to this deploy, so the id matches the deployId we keyed on. No-op
+   * if absent.
+   */
   private stopChild(sessionId: string): void {
-    const child = this.children.get(sessionId) ?? this.findBySessionId(sessionId);
+    const child = this.children.get(sessionId);
     if (!child) {
       log.trace('host-agent', `stop: no child for sessionId=${sessionId}`);
       return;
@@ -449,13 +534,6 @@ export class HostAgentSupervisor {
       /* already gone */
     }
     this.children.delete(child.deployId);
-  }
-
-  private findBySessionId(sessionId: string): ChildSession | undefined {
-    for (const child of this.children.values()) {
-      if (child.sessionId === sessionId) return child;
-    }
-    return undefined;
   }
 }
 

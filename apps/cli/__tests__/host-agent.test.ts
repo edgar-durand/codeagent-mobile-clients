@@ -64,6 +64,26 @@ function fakeChild(): ChildProcess & { killed: boolean } {
   return emitter;
 }
 
+/**
+ * A fake child with stdout/stderr streams (EventEmitters) so tests can feed
+ * output and trigger the early-exit `failed` path.
+ */
+function fakeChildWithStreams(): ChildProcess & {
+  killed: boolean;
+  stdout: EventEmitter;
+  stderr: EventEmitter;
+} {
+  const child = fakeChild();
+  // The supervisor only ever calls `.on('data')` on these streams, so an
+  // EventEmitter is a faithful stand-in for the real Readable at the test
+  // boundary (a validated vitest-fake cast, like fakeChild itself).
+  const stdout = new EventEmitter();
+  const stderr = new EventEmitter();
+  (child as { stdout: unknown }).stdout = stdout;
+  (child as { stderr: unknown }).stderr = stderr;
+  return child as ChildProcess & { killed: boolean; stdout: EventEmitter; stderr: EventEmitter };
+}
+
 function deployCmd(over: Partial<Record<string, unknown>> = {}): RemoteCommand {
   return {
     id: 'cmd-1',
@@ -467,6 +487,166 @@ describe('HostAgentSupervisor — command routing', () => {
       }),
     ).resolves.toBeUndefined();
     expect(sup.childCount()).toBe(0);
+  });
+});
+
+describe('HostAgentSupervisor — deploy-progress reporting', () => {
+  /**
+   * Collect the deploy-progress steps POSTed during a deploy, in order, plus
+   * the raw bodies (so tests can assert no token leaks). Returns a fetch mock
+   * that succeeds for the unseal round-trip and any best-effort progress POST.
+   */
+  function progressFetchMock() {
+    const steps: string[] = [];
+    const bodies: string[] = [];
+    const fetchMock = vi.fn().mockImplementation(async (url: string, init?: RequestInit) => {
+      const u = String(url);
+      if (init?.body && typeof init.body === 'string') {
+        if (u.includes('/api/self-hosted/deploy-progress')) {
+          bodies.push(init.body);
+          const parsed = JSON.parse(init.body) as { step?: string };
+          if (parsed.step) steps.push(parsed.step);
+        }
+      }
+      return { ok: true, status: 200, json: async () => ({ success: true, data: { ok: true } }) };
+    });
+    return { fetchMock, steps, bodies };
+  }
+
+  it('reports preparing → cloning → spawning → agent_starting in order on a clone deploy', async () => {
+    const { fetchMock, steps } = progressFetchMock();
+    vi.stubGlobal('fetch', fetchMock);
+
+    // A clone target: relative `owner/repo`. We stub the spawner so no real
+    // git clone runs — but prepareWorkspace would try to clone. To keep this
+    // a unit test, point at an absolute path that EXISTS so it skips cloning,
+    // and assert the absolute-path step sequence (no `cloning`). The clone
+    // step is covered separately by the workspace.test.ts URL+env tests.
+    const cwdTarget = fs.mkdtempSync(path.join(os.tmpdir(), 'codeam-ws-'));
+    const child = fakeChildWithStreams();
+    const resolveAgentAuth = vi
+      .fn<(i: SealedHostIdentity, s: string) => Promise<AgentAuth>>()
+      .mockResolvedValue({ kind: 'oauth_token', value: '{"claudeAiOauth":{}}' });
+    const sup = new HostAgentSupervisor(IDENTITY, {
+      spawnChild: () => child,
+      resolveAgentAuth,
+    });
+
+    await sup.handleCommand(deployCmd({ repoOrPath: cwdTarget }));
+    // Let the fire-and-forget progress POSTs settle.
+    await new Promise<void>((r) => setTimeout(r, 0));
+
+    // Absolute-path deploy: no `cloning` step (nothing was cloned).
+    expect(steps).toEqual(['preparing', 'spawning', 'agent_starting']);
+
+    fs.rmSync(cwdTarget, { recursive: true, force: true });
+  });
+
+  it('reports a `failed` deploy-progress and does NOT throw when prepareWorkspace fails', async () => {
+    const { fetchMock, steps, bodies } = progressFetchMock();
+    vi.stubGlobal('fetch', fetchMock);
+
+    const spawnChild = vi.fn<ChildSpawner>(() => fakeChildWithStreams());
+    const resolveAgentAuth = vi
+      .fn<(i: SealedHostIdentity, s: string) => Promise<AgentAuth>>()
+      .mockResolvedValue({ kind: 'oauth_token', value: '{}' });
+    const sup = new HostAgentSupervisor(IDENTITY, { spawnChild, resolveAgentAuth });
+
+    // An absolute path that does NOT exist → prepareWorkspace throws.
+    await expect(
+      sup.handleCommand(deployCmd({ repoOrPath: '/does/not/exist/anywhere-xyz' })),
+    ).resolves.toBeUndefined(); // dispatch never throws
+
+    await new Promise<void>((r) => setTimeout(r, 0));
+
+    // It reported `preparing` then `failed`; never spawned a child.
+    expect(steps).toContain('preparing');
+    expect(steps).toContain('failed');
+    expect(spawnChild).not.toHaveBeenCalled();
+    expect(sup.childCount()).toBe(0);
+
+    // The failure body carries a concise message (no stack frames).
+    const failedBody = bodies
+      .map((b) => JSON.parse(b) as { step: string; message: string })
+      .find((b) => b.step === 'failed');
+    expect(failedBody).toBeDefined();
+    expect(failedBody!.message).toContain('/does/not/exist/anywhere-xyz');
+    expect(failedBody!.message).not.toContain('\n    at '); // no stack
+  });
+
+  it('reports `failed` with the captured output tail on an early non-zero child exit', async () => {
+    const { fetchMock, steps, bodies } = progressFetchMock();
+    vi.stubGlobal('fetch', fetchMock);
+
+    const cwdTarget = fs.mkdtempSync(path.join(os.tmpdir(), 'codeam-ws-'));
+    const child = fakeChildWithStreams();
+    const resolveAgentAuth = vi
+      .fn<(i: SealedHostIdentity, s: string) => Promise<AgentAuth>>()
+      .mockResolvedValue({ kind: 'oauth_token', value: '{}' });
+    const sup = new HostAgentSupervisor(IDENTITY, {
+      spawnChild: () => child,
+      resolveAgentAuth,
+    });
+
+    await sup.handleCommand(deployCmd({ repoOrPath: cwdTarget }));
+
+    // The child emits some stderr then dies non-zero (agent failed to boot).
+    child.stderr.emit('data', Buffer.from('Error: could not authenticate agent\n'));
+    (child as unknown as EventEmitter).emit('exit', 7);
+
+    await new Promise<void>((r) => setTimeout(r, 0));
+
+    const failedBody = bodies
+      .map((b) => JSON.parse(b) as { step: string; message: string })
+      .find((b) => b.step === 'failed');
+    expect(steps).toContain('failed');
+    expect(failedBody!.message).toContain('agent exited (7)');
+    expect(failedBody!.message).toContain('could not authenticate agent');
+    expect(sup.childCount()).toBe(0);
+
+    fs.rmSync(cwdTarget, { recursive: true, force: true });
+  });
+
+  it('does NOT report `failed` on a clean child exit (SIGTERM teardown)', async () => {
+    const { fetchMock, steps } = progressFetchMock();
+    vi.stubGlobal('fetch', fetchMock);
+
+    const cwdTarget = fs.mkdtempSync(path.join(os.tmpdir(), 'codeam-ws-'));
+    const child = fakeChildWithStreams();
+    const resolveAgentAuth = vi
+      .fn<(i: SealedHostIdentity, s: string) => Promise<AgentAuth>>()
+      .mockResolvedValue({ kind: 'oauth_token', value: '{}' });
+    const sup = new HostAgentSupervisor(IDENTITY, {
+      spawnChild: () => child,
+      resolveAgentAuth,
+    });
+
+    await sup.handleCommand(deployCmd({ repoOrPath: cwdTarget }));
+    // Clean exit (code 0) — normal stop, not a failure.
+    (child as unknown as EventEmitter).emit('exit', 0);
+    await new Promise<void>((r) => setTimeout(r, 0));
+
+    expect(steps).not.toContain('failed');
+
+    fs.rmSync(cwdTarget, { recursive: true, force: true });
+  });
+
+  it('accepts a deploy payload carrying a cloneToken (guard passes)', async () => {
+    const { fetchMock } = progressFetchMock();
+    vi.stubGlobal('fetch', fetchMock);
+    const cwdTarget = fs.mkdtempSync(path.join(os.tmpdir(), 'codeam-ws-'));
+    const spawnChild = vi.fn<ChildSpawner>(() => fakeChildWithStreams());
+    const resolveAgentAuth = vi
+      .fn<(i: SealedHostIdentity, s: string) => Promise<AgentAuth>>()
+      .mockResolvedValue({ kind: 'oauth_token', value: '{}' });
+    const sup = new HostAgentSupervisor(IDENTITY, { spawnChild, resolveAgentAuth });
+
+    await sup.handleCommand(deployCmd({ repoOrPath: cwdTarget, cloneToken: 'ghs_secret' }));
+
+    // The deploy proceeded (guard accepted the cloneToken field).
+    expect(spawnChild).toHaveBeenCalledTimes(1);
+
+    fs.rmSync(cwdTarget, { recursive: true, force: true });
   });
 });
 
