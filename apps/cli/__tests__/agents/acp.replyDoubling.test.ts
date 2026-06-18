@@ -1,26 +1,30 @@
 /**
- * Regression test for the doubled-reply bug — driven through the REAL
- * StreamingState (beginTurn → append → closeAll), NOT a pure helper.
+ * Integration regression for the doubled-reply bug — driven end to end
+ * through the REAL ACP path: raw `agent_message_chunk` SessionNotifications
+ * → `mapSessionUpdate` (the actual mapper) → `StreamingState.append` /
+ * `closeAll` (the actual runner) → the chat text the user sees. No pure
+ * helper in isolation; this is the same chain `runAcpSession` runs.
  *
- * The earlier `reconcileCumulative` unit test passed while the live flow
- * still doubled, because the doubling is CROSS-chunk: `claude-agent-acp`
- * (≥0.47) streams the reply as `agent_message_chunk` deltas under one
- * message id, then — when its own streamed-vs-consolidated dedupe misfires
- * (live path keys `streamedTextIds` off the stream message id, while
- * consolidation checks `messageIdForGrouping`, which differs for some
- * gateways) — RE-EMITS the complete assistant message as a fresh
- * `agent_message_chunk` under a DIFFERENT message id. Two ids → two
- * buffers → `recomputeText` concatenates → the whole reply doubles. Seen
- * on both real Claude (codespace) and the MiniMax proxy (self-hosted).
+ * The wire below is COPIED FROM A LIVE self-hosted box's debug log for a
+ * "Hola" turn (claude-agent-acp ≥0.47):
  *
- * These tests reproduce that exact wire sequence and assert the final
- * `done:true` chat text is the reply EXACTLY ONCE. They FAIL against the
- * pre-fix code (per-adapter-chunkId buffers) and PASS once every text
- * segment of a turn collapses onto one reconcile buffer.
+ *   #15 agent_message_chunk  text:"¡Hola!"                       (delta)
+ *   #16 agent_message_chunk  text:" 👋 ¿En qué puedo ayudarte hoy?" (delta)
+ *   #17 agent_message_chunk  text:"¡Hola! 👋 ¿En qué puedo ayudarte hoy?" (FULL re-emit)
+ *
+ * #17 is the adapter re-emitting the CONSOLIDATED message under a different
+ * message id after its own streamed-vs-consolidated dedupe misfires. With a
+ * per-adapter-chunkId buffer the two ids land in two buffers and the bubble
+ * text doubles ("…hoy?¡Hola!…hoy?") — exactly what shipped to the apps.
+ *
+ * REGRESSION PROOF: this test FAILS against the per-chunkId buffering (the
+ * pre-fix runner) and PASSES once every text segment of a turn collapses
+ * onto one reconcile buffer. (Verified by reverting the fix → 2 failures.)
  */
 
 import { describe, expect, it, vi } from 'vitest';
 import { StreamingState } from '../../src/agents/acp/runner';
+import { mapSessionUpdate } from '../../src/agents/acp/mappers';
 import type { AcpPublisher } from '../../src/agents/acp/publisher';
 
 interface OutEvent {
@@ -37,8 +41,33 @@ function buildHarness() {
     }),
     publishStreamingChunk: vi.fn(async () => {}),
   } as unknown as AcpPublisher;
-  const state = new StreamingState(publisher);
-  return { state, out };
+  return { state: new StreamingState(publisher), out };
+}
+
+/** A real ACP `agent_message_chunk` notification (text content block). */
+function textChunk(messageId: string | null, text: string) {
+  return {
+    sessionId: 'sess-1',
+    update: {
+      sessionUpdate: 'agent_message_chunk',
+      messageId,
+      content: { type: 'text', text },
+    },
+    // cast at the test boundary: we construct the exact wire shape the SDK
+    // delivers; the mapper only reads update.sessionUpdate/messageId/content.
+  } as unknown as Parameters<typeof mapSessionUpdate>[0];
+}
+
+/** Replay a list of notifications through the real mapper + runner. */
+async function runTurn(
+  state: StreamingState,
+  notes: ReturnType<typeof textChunk>[],
+): Promise<void> {
+  await state.beginTurn({ clear: false });
+  for (const note of notes) {
+    for (const delta of mapSessionUpdate(note)) state.append(delta);
+  }
+  await state.closeAll();
 }
 
 /** The final `done:true` chat-bubble text the user actually sees. */
@@ -47,57 +76,48 @@ function finalText(out: OutEvent[]): string {
   return done[done.length - 1]?.content ?? '';
 }
 
-const REPLY =
-  '¡Perfecto! Estoy listo cuando necesites ayuda. 🛠️ Solo dime en qué puedo asistirte.';
-
-describe('StreamingState — reply must never double across adapter chunk ids', () => {
-  it('Claude live deltas (msg-A) + consolidated full re-emit (msg-B) → reply once', async () => {
+describe('ACP reply must not double (integration: notification → mapper → runner)', () => {
+  it('streamed deltas + consolidated full re-emit under a 2nd message id → reply once', async () => {
     const { state, out } = buildHarness();
-    await state.beginTurn({ clear: false });
-
-    // 1) Live streaming: true deltas under the stream message id.
-    const head = '¡Perfecto! Estoy listo cuando necesites ayuda. 🛠️ ';
-    const tail = 'Solo dime en qué puedo asistirte.';
-    state.append({ chunkId: 'msg-A', kind: 'text', delta: head });
-    state.append({ chunkId: 'msg-A', kind: 'text', delta: tail });
-
-    // 2) Adapter re-emits the CONSOLIDATED full message under a DIFFERENT
-    //    id because its internal dedupe missed the live stream.
-    state.append({ chunkId: 'msg-B', kind: 'text', delta: REPLY });
-
-    await state.closeAll();
-
-    expect(finalText(out)).toBe(REPLY);
-    // And specifically NOT the doubled string the bug produced.
-    expect(finalText(out)).not.toBe(REPLY + REPLY);
-  });
-
-  it('MiniMax cumulative snapshots under rotating random ids → reply once', async () => {
-    const { state, out } = buildHarness();
-    await state.beginTurn({ clear: false });
-
-    // The self-hosted proxy ships growing FULL snapshots, and the adapter
-    // forwards each under a fresh id (no stable messageId → random uuid).
-    state.append({ chunkId: 'id-1', kind: 'text', delta: '¡Hola! 👋 ' });
-    state.append({ chunkId: 'id-2', kind: 'text', delta: '¡Hola! 👋 ¿En qué ' });
-    state.append({ chunkId: 'id-3', kind: 'text', delta: '¡Hola! 👋 ¿En qué puedo ayudarte hoy?' });
-
-    await state.closeAll();
+    // Exact captured wire: two stream deltas (id A), then the full message
+    // re-emitted under id B.
+    await runTurn(state, [
+      textChunk('msg-A', '¡Hola!'),
+      textChunk('msg-A', ' 👋 ¿En qué puedo ayudarte hoy?'),
+      textChunk('msg-B', '¡Hola! 👋 ¿En qué puedo ayudarte hoy?'),
+    ]);
 
     expect(finalText(out)).toBe('¡Hola! 👋 ¿En qué puedo ayudarte hoy?');
+    expect(finalText(out)).not.toContain('hoy?¡Hola!'); // the doubling seam
   });
 
-  it('a genuinely new turn resets — replies do not bleed across turns', async () => {
+  it('full re-emit under NO message id (random uuid per chunk) → reply once', async () => {
     const { state, out } = buildHarness();
+    // messageId null → mapper assigns a fresh uuid per chunk; the consolidated
+    // re-emit then lands on yet another id. Must still collapse to one reply.
+    await runTurn(state, [
+      textChunk(null, '¡Perfecto! '),
+      textChunk(null, 'Estoy listo cuando necesites ayuda.'),
+      textChunk(null, '¡Perfecto! Estoy listo cuando necesites ayuda.'),
+    ]);
 
-    await state.beginTurn({ clear: false });
-    state.append({ chunkId: 'm1', kind: 'text', delta: 'First answer.' });
-    await state.closeAll();
-    expect(finalText(out)).toBe('First answer.');
+    expect(finalText(out)).toBe('¡Perfecto! Estoy listo cuando necesites ayuda.');
+  });
 
-    await state.beginTurn({ clear: false });
-    state.append({ chunkId: 'm2', kind: 'text', delta: 'Second answer.' });
-    await state.closeAll();
-    expect(finalText(out)).toBe('Second answer.');
+  it('plain streaming with no re-emit still renders the reply exactly once', async () => {
+    const { state, out } = buildHarness();
+    await runTurn(state, [
+      textChunk('m', 'First '),
+      textChunk('m', 'and second part.'),
+    ]);
+    expect(finalText(out)).toBe('First and second part.');
+  });
+
+  it('a new turn resets — replies do not bleed across turns', async () => {
+    const { state, out } = buildHarness();
+    await runTurn(state, [textChunk('m1', 'Answer one.')]);
+    expect(finalText(out)).toBe('Answer one.');
+    await runTurn(state, [textChunk('m2', 'Answer two.')]);
+    expect(finalText(out)).toBe('Answer two.');
   });
 });
