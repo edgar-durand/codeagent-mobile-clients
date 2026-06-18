@@ -23,6 +23,26 @@ import {
   shutdownTelemetry,
 } from './services/telemetry.service';
 import { EXIT_FAILURE, EXIT_USAGE } from './exit-codes';
+import * as os from 'node:os';
+
+// Guarantee $HOME is set before ANY command runs. The self-hosted
+// host-agent is launched detached (PPID 1, no login shell) by the
+// background fallback when systemd is absent, so its process env — and
+// every child it spawns (pair-auto → bd → dolt, git, the agent) — inherits
+// NO $HOME. `bd init` / `dolt` then abort with "cannot determine home
+// directory: $HOME is not defined" (verified live on a self-hosted Docker
+// box: HOME unset on the host-agent + pair-auto pids), which failed Beads
+// provisioning on every such box. `os.homedir()` resolves the real home
+// from the passwd database even when $HOME is unset, so this is a safe,
+// universal backfill that fixes bd/dolt and anything else keyed off HOME.
+if (!process.env.HOME) {
+  try {
+    const home = os.homedir();
+    if (home) process.env.HOME = home;
+  } catch {
+    /* os.homedir() can throw if the uid has no passwd entry — leave unset */
+  }
+}
 
 const [, , command, ...args] = process.argv;
 

@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
+import * as os from 'os';
 import * as adapter from '../../src/beads/bd-adapter';
 import type { BdRunResult } from '../../src/beads/bd-adapter';
 
@@ -87,6 +88,25 @@ describe('BdAdapter shared-server wiring (cwd-resolved, no BEADS_DIR, no --globa
     expect(opts.env.BEADS_DIR).toBeUndefined();
     expect(opts.cwd).toBe('/workspaces/repo');
     delete process.env.BEADS_DIR;
+  });
+
+  it('backfills HOME from os.homedir() when the process env has none (detached self-hosted agent)', async () => {
+    // The self-hosted host-agent runs detached (PPID 1, no login shell) with
+    // $HOME unset; bd then aborts init/shared-server with "cannot determine
+    // home directory: $HOME is not defined" — the Beads-provisioning failure
+    // observed live. The adapter must pin HOME on the spawn env.
+    const savedHome = process.env.HOME;
+    delete process.env.HOME;
+    try {
+      const spy = vi.spyOn(_spawnSeam, 'run').mockResolvedValue(ok('[]'));
+      const a = new BdAdapter({ binaryPath: '/bd', cwd: '/workspaces/repo' });
+      await a.run(['init', '-p', 'proj']);
+      const [, , opts] = spy.mock.calls[0];
+      expect(opts.env.HOME).toBe(os.homedir());
+      expect(opts.env.HOME).toBeTruthy();
+    } finally {
+      if (savedHome !== undefined) process.env.HOME = savedHome;
+    }
   });
 
   it('retries on a transient spawn ENOENT (bundled bd postinstall rename window) then succeeds', async () => {

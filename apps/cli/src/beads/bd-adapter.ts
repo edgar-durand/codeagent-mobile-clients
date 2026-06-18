@@ -226,6 +226,22 @@ export class BdAdapter {
       return { code: -1, stdout: '', stderr: 'bd binary not resolved' };
     }
     const env: NodeJS.ProcessEnv = { ...process.env };
+    // Guarantee HOME for the bd child. The self-hosted host-agent can run
+    // detached with no $HOME (verified live: host-agent + pair-auto pids had
+    // HOME unset), and bd then aborts `init`/shared-server with "cannot
+    // determine home directory: $HOME is not defined" — which failed Beads
+    // provisioning on every such box. `os.homedir()` resolves the real home
+    // from the passwd DB even when $HOME is absent. Defence-in-depth: the CLI
+    // entrypoint already backfills HOME, but bd's home requirement is the one
+    // that actually broke, so we pin it at the spawn boundary too.
+    if (!env.HOME) {
+      try {
+        const home = os.homedir();
+        if (home) env.HOME = home;
+      } catch {
+        /* no passwd entry for this uid — leave unset, bd will report it */
+      }
+    }
     // Shared-server mode: the npm-bundled @beads/bd is the server-mode build,
     // so every DB op (memory included) targets the shared dolt sql-server at
     // ~/.beads/shared-server (port 3308). Without this, bd tries an embedded
