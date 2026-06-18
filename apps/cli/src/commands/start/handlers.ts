@@ -1003,6 +1003,31 @@ export function normalizeDetectionForSpawn(
   detection: PreviewDetection,
   cwd: string,
 ): PreviewDetection {
+  // pnpm/bun can't run the dev server on the codespace runtime: pnpm ≥10
+  // needs Node ≥22.13 (it imports node:sqlite) while codespaces ship Node 20,
+  // and bun is often absent. The agent detection / saved `.codeam/preview.json`
+  // may still carry `pnpm dev` (verified live: BOOT_SEQUENCE "pnpm dev" hung,
+  // then ERR_SPAWN_FAILED). Rewrite the script run to npm — it always ships
+  // with Node and reads the same package.json scripts. yarn is left alone
+  // (yarn classic runs on Node 20). Only script runs are rewritten; one-off
+  // binary fetches (`exec`/`dlx`/`x`) fall through unchanged.
+  if (detection.command === 'pnpm' || detection.command === 'bun') {
+    const raw = detection.args ?? [];
+    const verb = raw[0];
+    if (verb && !['exec', 'dlx', 'x'].includes(verb)) {
+      const rest = verb === 'run' ? raw.slice(1) : raw;
+      const [script, ...extra] = rest;
+      if (script && !script.startsWith('-')) {
+        // npm needs an explicit `--` before flags forwarded to the script;
+        // pnpm/bun forward trailing args to the script implicitly.
+        return {
+          ...detection,
+          command: 'npm',
+          args: extra.length ? ['run', script, '--', ...extra] : ['run', script],
+        };
+      }
+    }
+  }
   if (detection.command !== 'npx') return detection;
   const args = detection.args ?? [];
   if (args.length === 0) return detection;
