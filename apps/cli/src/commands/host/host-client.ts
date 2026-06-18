@@ -219,3 +219,51 @@ export type AgentAuthResolver = (
   identity: SealedHostIdentity,
   sealedAgentAuth: string,
 ) => Promise<AgentAuth>;
+
+/**
+ * How a progress report authenticates to the backend:
+ *   - `{ enrollToken }`        — pre-redeem (no host identity yet).
+ *   - `{ hostId, hostToken }`  — post-redeem (sealed identity).
+ *
+ * The backend resolves the host by whichever it receives.
+ */
+export type ProgressAuth =
+  | { enrollToken: string }
+  | { hostId: string; hostToken: string };
+
+/** Best-effort progress POST budget — never block the connect/heartbeat path. */
+const PROGRESS_TIMEOUT_MS = 3_000;
+
+/**
+ * Report an enrollment-progress milestone to the backend so the app can
+ * show real, box-side telemetry during enrollment.
+ *
+ * STRICTLY best-effort: fire-and-forget with a short timeout, every error
+ * (network, abort, non-200, bad JSON) is swallowed. The backend returns
+ * 200 regardless and ALSO emits enrolled/connected from its own
+ * redeem/heartbeat, so these reports are purely additive and idempotent —
+ * a failure here must NEVER fail or stall the host-agent.
+ */
+export async function reportProgress(
+  auth: ProgressAuth,
+  step: string,
+  message: string,
+): Promise<void> {
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), PROGRESS_TIMEOUT_MS);
+    timer.unref?.();
+    try {
+      await fetch(`${apiBase()}/api/self-hosted/enroll-progress`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...vercelBypassHeader() },
+        body: JSON.stringify({ ...auth, step, message }),
+        signal: controller.signal,
+      });
+    } finally {
+      clearTimeout(timer);
+    }
+  } catch {
+    /* best-effort telemetry — swallow all failures */
+  }
+}

@@ -15,6 +15,7 @@ import { hostEnroll } from '../src/commands/host';
 import {
   hostIdentityPath,
   loadHostIdentity,
+  reportProgress,
   type SealedHostIdentity,
 } from '../src/commands/host/host-client';
 import type { RemoteCommand } from '../src/services/command-relay.service';
@@ -123,6 +124,64 @@ describe('host enroll — redeem flow', () => {
 
   it('throws when no token and no existing identity', async () => {
     await expect(hostEnroll([])).rejects.toThrow(/requires --token/);
+  });
+});
+
+describe('reportProgress — best-effort enrollment telemetry', () => {
+  it('POSTs the enroll-token body to /enroll-progress (pre-redeem auth)', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue({ ok: true, status: 200, json: async () => ({ success: true }) });
+    vi.stubGlobal('fetch', fetchMock);
+
+    await reportProgress({ enrollToken: 'ENROLL' }, 'redeeming', 'redeeming enrollment token…');
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(String(url)).toContain('/api/self-hosted/enroll-progress');
+    const body = JSON.parse((init as { body: string }).body);
+    expect(body).toEqual({
+      enrollToken: 'ENROLL',
+      step: 'redeeming',
+      message: 'redeeming enrollment token…',
+    });
+    // No hostId/hostToken leak into the pre-redeem report.
+    expect(body.hostId).toBeUndefined();
+    expect(body.hostToken).toBeUndefined();
+  });
+
+  it('POSTs the host-token body to /enroll-progress (post-redeem auth)', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue({ ok: true, status: 200, json: async () => ({ success: true }) });
+    vi.stubGlobal('fetch', fetchMock);
+
+    await reportProgress(
+      { hostId: 'host-123', hostToken: 'tok-abc' },
+      'connected',
+      'host-agent connected',
+    );
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [, init] = fetchMock.mock.calls[0];
+    const body = JSON.parse((init as { body: string }).body);
+    expect(body).toEqual({
+      hostId: 'host-123',
+      hostToken: 'tok-abc',
+      step: 'connected',
+      message: 'host-agent connected',
+    });
+    expect(body.enrollToken).toBeUndefined();
+  });
+
+  it('swallows a failed POST — never throws (strictly best-effort)', async () => {
+    const fetchMock = vi.fn().mockRejectedValue(new Error('network down'));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(
+      reportProgress({ enrollToken: 'ENROLL' }, 'redeeming', 'x'),
+    ).resolves.toBeUndefined();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 });
 
