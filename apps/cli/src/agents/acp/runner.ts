@@ -41,6 +41,7 @@ import { AcpClient } from './client';
 import type { AdapterSpec } from './adapters';
 import { AcpPublisher } from './publisher';
 import { buildAcpPromptBlocks } from './buildAcpPromptBlocks';
+import { reconcileCumulative } from './reconcileDelta';
 import { maybeSendOnboardingWelcome } from './onboarding';
 import { formatPromptEchoLine } from './promptEcho';
 import {
@@ -122,7 +123,19 @@ type PendingInteractive =
       options: string[];
     };
 
-class StreamingState {
+export class StreamingState {
+  /**
+   * Cumulative agent reply for the in-progress turn — the body of the
+   * chat bubble (`/api/commands/output` text events). DERIVED from the
+   * per-chunkId text buffers in {@link streamingChunks} via
+   * {@link recomputeText} on every `append`, NOT accumulated with a
+   * blind `+=`. That derivation is what makes the chat pipe correct for
+   * adapters that send cumulative snapshots (a self-hosted MiniMax proxy
+   * behind claude-agent-acp) as well as true-delta adapters (Anthropic
+   * Claude): `reconcileCumulative` collapses a re-sent snapshot instead
+   * of concatenating the reply with itself (the "…hoy?¡Hola!…hoy?"
+   * intra-reply duplication bug).
+   */
   private text = '';
   private pending: PendingInteractive | null = null;
   /**
@@ -267,10 +280,27 @@ class StreamingState {
   }
 
   append(delta: { chunkId: string; kind: StreamingChunkKind; delta: string }): void {
-    // 1) Chat pipe (legacy `/api/commands/output`) — text only, single
-    //    cumulative buffer per turn. Drives the main chat bubble.
+    // Reconcile the incoming segment against the chunk's accumulated
+    // content with snapshot-vs-delta awareness (see reconcileCumulative):
+    // a true-delta adapter (Anthropic Claude) appends, a cumulative-
+    // snapshot adapter (self-hosted MiniMax-M3 proxy behind
+    // claude-agent-acp) replaces — instead of `+=` doubling the reply.
+    const existing = this.streamingChunks.get(delta.chunkId);
+    if (existing && existing.kind !== delta.kind) {
+      log.warn(
+        'acpRunner',
+        `streaming-chunk kind flip chunkId=${delta.chunkId.slice(0, 8)} from=${existing.kind} to=${delta.kind}`,
+      );
+    }
+    const cumulativeContent = reconcileCumulative(existing?.content ?? '', delta.delta);
+    this.streamingChunks.set(delta.chunkId, { kind: delta.kind, content: cumulativeContent });
+
+    // 1) Chat pipe (legacy `/api/commands/output`) — text only. The
+    //    bubble body is the ordered concatenation of every text chunk's
+    //    reconciled content, recomputed from the per-chunkId buffers so
+    //    a snapshot re-send can never concatenate the reply with itself.
     if (delta.kind === 'text') {
-      this.text += delta.delta;
+      this.recomputeText();
       void this.publisher.publishOutput({ type: 'text', content: this.text, done: false });
     }
     // 2) Epic C streaming-chunk feed (`/api/sessions/:id/streaming-chunk`)
@@ -279,21 +309,27 @@ class StreamingState {
     //    THINKING / tool-pill / tool-result bubbles. Both feeds run
     //    in parallel so the redesigned mobile surface stays in sync
     //    with the legacy chat surface.
-    const existing = this.streamingChunks.get(delta.chunkId);
-    const cumulativeContent = (existing?.content ?? '') + delta.delta;
-    if (existing && existing.kind !== delta.kind) {
-      log.warn(
-        'acpRunner',
-        `streaming-chunk kind flip chunkId=${delta.chunkId.slice(0, 8)} from=${existing.kind} to=${delta.kind}`,
-      );
-    }
-    this.streamingChunks.set(delta.chunkId, { kind: delta.kind, content: cumulativeContent });
     void this.publisher.publishStreamingChunk({
       chunkId: delta.chunkId,
       kind: delta.kind,
       content: cumulativeContent,
       isFinal: false,
     });
+  }
+
+  /**
+   * Rebuild the cumulative chat-bubble text from the per-chunkId text
+   * buffers, in arrival order (Map preserves insertion order). Source
+   * of truth for the `text` field — never accumulated incrementally, so
+   * a re-sent snapshot updates its own chunk in place rather than
+   * lengthening the reply.
+   */
+  private recomputeText(): void {
+    let next = '';
+    for (const { kind, content } of this.streamingChunks.values()) {
+      if (kind === 'text') next += content;
+    }
+    this.text = next;
   }
 
   /**
