@@ -50,7 +50,6 @@ import {
   resolveCloudflared,
   runSetupCommand,
   safeParseDetection,
-  waitForCloudflaredReady,
   waitForPortListening,
   writePreviewConfig,
 } from '../../services/preview';
@@ -1379,9 +1378,19 @@ const previewStartH: CommandHandler = (ctx, _cmd, parsed) => {
           { stdio: ['ignore', 'pipe', 'pipe'] },
         );
         let candidateUrl: string | null = null;
+        let registered = false;
         const onTunnelChunk = (chunk: Buffer): void => {
           const s = chunk.toString();
           if (!candidateUrl) candidateUrl = parseCloudflaredUrl(s);
+          // cloudflared logs "Registered tunnel connection" once the edge
+          // has accepted the connector — the AUTHORITATIVE "tunnel is live"
+          // signal. We gate on this instead of resolving the hostname from
+          // THIS host: a self-hosted box's resolver (e.g. Docker's embedded
+          // 127.0.0.11) can take >40 s to see a fresh trycloudflare record
+          // even though the tunnel registered fine and is reachable from the
+          // internet — that false-negative failed every self-hosted preview
+          // (verified live: 3/3 retries registered, DNS poll timed out).
+          if (/Registered tunnel connection/i.test(s)) registered = true;
           // Log cloudflared output under [preview] so tunnel issues are
           // post-hoc debuggable without re-running.
           const trimmed = s.replace(/\n+$/g, '');
@@ -1389,30 +1398,23 @@ const previewStartH: CommandHandler = (ctx, _cmd, parsed) => {
         };
         candidate.stderr!.on('data', onTunnelChunk);
         candidate.stdout!.on('data', onTunnelChunk);
-        // 45 s for the URL to land — cold launches (binary download
-        // finishing, QUIC handshake) can miss a tighter budget.
-        const urlDeadline = Date.now() + 45_000;
-        while (!candidateUrl && Date.now() < urlDeadline) {
+        // Wait for BOTH the URL and the registered-connection line. 45 s
+        // covers a cold launch (binary download, QUIC handshake). We do NOT
+        // DNS-probe from here — once registered, the edge serves the URL and
+        // the mobile WebView rides out its own DNS-propagation window (it no
+        // longer caches NXDOMAIN and gives up — see PreviewWebView's retry).
+        const deadline = Date.now() + 45_000;
+        while ((!candidateUrl || !registered) && Date.now() < deadline) {
           await new Promise((r) => setTimeout(r, 250));
         }
-        if (!candidateUrl) {
-          lastTunnelErr = 'cloudflared did not emit a URL within 45s';
-          try { candidate.kill('SIGTERM'); } catch { /* already dead */ }
-          continue;
-        }
-        // Block on DNS reachability before announcing the URL. The public
-        // `*.trycloudflare.com` hostname lags the connector by a few
-        // seconds; the mobile WebView caches NXDOMAIN if it opens too
-        // early. DNS-only probe (not HTTP): cloudflared's edge speaks h2
-        // only and undici can't, so an HTTP probe times out even when the
-        // tunnel is reachable — DNS resolution is the real gate.
-        try {
-          await waitForCloudflaredReady(candidateUrl, 40_000);
-          log.info('preview', `cloudflared probe: ${candidateUrl} reachable from CLI host`);
+        if (candidateUrl && registered) {
+          log.info('preview', `cloudflared tunnel registered: ${candidateUrl}`);
           tunnel = candidate;
           parsedUrl = candidateUrl;
-        } catch (e) {
-          lastTunnelErr = (e as Error).message;
+        } else {
+          lastTunnelErr = candidateUrl
+            ? 'cloudflared did not register a tunnel connection within 45s'
+            : 'cloudflared did not emit a URL within 45s';
           try { candidate.kill('SIGTERM'); } catch { /* already dead */ }
         }
       }
