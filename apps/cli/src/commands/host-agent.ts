@@ -39,6 +39,7 @@ import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
 import * as os from 'node:os';
 import { CommandRelayService, type RemoteCommand } from '../services/command-relay.service';
 import type { AgentMetadata } from '@codeagent/shared';
+import { resolveApiBaseUrl } from '@codeagent/shared';
 import { log } from '../services/logger';
 import {
   deleteHostIdentity,
@@ -57,9 +58,79 @@ import {
 } from './host/host-client';
 import { isAbsolutePathTarget, prepareWorkspace } from './host/workspace';
 import { provisionAgentCredentials } from './host/agent-provisioning';
+import { HeadroomStatsReporter, type Savings } from '../services/headroom/stats-reporter';
 
 /** Liveness heartbeat cadence. State liveness only — NOT command polling. */
 const HEARTBEAT_INTERVAL_MS = 20_000;
+
+/**
+ * Context the Headroom reporter needs to authenticate its savings POST.
+ * Mirrors the codespace session's auth fields; callers supply real values
+ * from the claimed session (pair-auto) or the deploy payload (self-hosted).
+ */
+export interface HeadroomReporterCtx {
+  sessionId: string;
+  pluginId: string;
+  pluginAuthToken: string;
+  codespaceId: string;
+}
+
+/**
+ * Start a {@link HeadroomStatsReporter} scoped to the running codespace
+ * agent session, or return `null` when the feature is disabled.
+ *
+ * Enabled only when `HEADROOM_ENABLED === '1'` (injected by the backend
+ * bootstrap for PRO users whose plan has Headroom + the kill-switch is off).
+ *
+ * Never throws into the agent launch path — construction and `start()` are
+ * wrapped in a try/catch so a misconfigured or unavailable Headroom proxy
+ * can't prevent the session from starting.
+ *
+ * URL resolution order for the savings POST target:
+ *   1. `HEADROOM_SAVINGS_INGEST_URL` (full URL, exported by the backend into
+ *      the codespace env — preferred, avoids a round-trip resolution).
+ *   2. Constructed from `resolveApiBaseUrl()` as the fallback:
+ *      `${apiBase}/api/codespaces/${ctx.codespaceId}/headroom-savings`
+ */
+export function maybeStartHeadroomReporter(
+  ctx: HeadroomReporterCtx,
+): HeadroomStatsReporter | null {
+  if (process.env['HEADROOM_ENABLED'] !== '1') return null;
+
+  try {
+    const ingestUrl =
+      process.env['HEADROOM_SAVINGS_INGEST_URL'] ??
+      `${resolveApiBaseUrl()}/api/codespaces/${ctx.codespaceId}/headroom-savings`;
+
+    const reporter = new HeadroomStatsReporter({
+      fetchStats: async () => {
+        const res = await fetch('http://localhost:8787/stats');
+        // res.json() returns unknown; cast at this validated boundary.
+        return res.json() as Promise<{ persistent_savings?: { tokens_before?: number; tokens_after?: number; cached_tokens?: number; retrieve_hops?: number } }>;
+      },
+      postSavings: async (delta: Savings) => {
+        await fetch(ingestUrl, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Plugin-Auth-Token': ctx.pluginAuthToken,
+          },
+          body: JSON.stringify({
+            sessionId: ctx.sessionId,
+            pluginId: ctx.pluginId,
+            agentId: process.env['HEADROOM_AGENT'] ?? 'claude',
+            savings: delta,
+          }),
+        });
+      },
+    });
+    reporter.start();
+    return reporter;
+  } catch (err) {
+    log.warn('headroom', `failed to start Headroom reporter (best-effort): ${err instanceof Error ? err.message : String(err)}`);
+    return null;
+  }
+}
 
 /**
  * The managed "CodeAgent Cloud" house-agent proxy block (mirrors the

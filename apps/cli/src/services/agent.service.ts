@@ -1,6 +1,7 @@
 import { IPtyStrategy } from './pty/types';
 import { log } from './logger';
 import type { RuntimeStrategy } from '../agents/strategy';
+import { headroomPresent, wrapWithHeadroom, type LaunchSpec } from './headroom/wrap-launch';
 
 export interface ClaudeServiceOptions {
   cwd: string;
@@ -181,9 +182,14 @@ export class AgentService {
     // a strategy throws here, it has already exhausted its install
     // path — there is nothing generic this layer can do beyond
     // surfacing the agent-specific error to the user and exiting.
-    let launch: { cmd: string; args: string[]; env?: Record<string, string> };
+    let launch: LaunchSpec;
     try {
-      launch = await this.runtime.prepareLaunch();
+      const launch0 = await this.runtime.prepareLaunch();
+      launch = wrapWithHeadroom(launch0, {
+        enabled: process.env['HEADROOM_ENABLED'] === '1',
+        agent: process.env['HEADROOM_AGENT'] ?? launch0.cmd,
+        headroomPresent: await headroomPresent(),
+      });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       console.error(
