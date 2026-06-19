@@ -58,7 +58,7 @@ import {
 } from './host/host-client';
 import { isAbsolutePathTarget, prepareWorkspace } from './host/workspace';
 import { provisionAgentCredentials } from './host/agent-provisioning';
-import { HeadroomStatsReporter, type Savings } from '../services/headroom/stats-reporter';
+import { HeadroomStatsReporter, type Savings, type StatsShape } from '../services/headroom/stats-reporter';
 
 /** Liveness heartbeat cadence. State liveness only — NOT command polling. */
 const HEARTBEAT_INTERVAL_MS = 20_000;
@@ -106,7 +106,7 @@ export function maybeStartHeadroomReporter(
       fetchStats: async () => {
         const res = await fetch('http://localhost:8787/stats');
         // res.json() returns unknown; cast at this validated boundary.
-        return res.json() as Promise<{ persistent_savings?: { tokens_before?: number; tokens_after?: number; cached_tokens?: number; retrieve_hops?: number } }>;
+        return res.json() as Promise<StatsShape>;
       },
       postSavings: async (delta: Savings) => {
         await fetch(ingestUrl, {

@@ -3,12 +3,26 @@ export interface Savings {
   rawTokensEst: number; sentTokensEst: number; cachedTokens: number; retrieveHops: number;
 }
 
-interface StatsShape {
+export interface StatsShape {
   // VERIFY field names against `curl localhost:8787/stats` (see VERIFY-THEN-MAP in task brief).
   // The exact names inside `persistent_savings` must be confirmed against a running proxy;
   // adjust this one function after the curl check — the rest of the code is isolated from them.
+  // Alias-tolerant: read() tries plausible alternative field names before defaulting to 0
+  // so the dashboard shows real data even before a live curl verification lands.
   persistent_savings?: {
-    tokens_before?: number; tokens_after?: number; cached_tokens?: number; retrieve_hops?: number;
+    // Primary (documented) names:
+    tokens_before?: number;
+    tokens_after?: number;
+    cached_tokens?: number;
+    retrieve_hops?: number;
+    // Aliases — tried when the primary field is absent:
+    input_tokens?: number;        // tokens_before alias
+    tokensBefore?: number;        // tokens_before camelCase alias
+    output_tokens?: number;       // tokens_after alias
+    tokensAfter?: number;         // tokens_after camelCase alias
+    cache_read_input_tokens?: number;  // cached_tokens alias (Anthropic header name)
+    cachedTokens?: number;        // cached_tokens camelCase alias
+    retrieveHops?: number;        // retrieve_hops camelCase alias
   };
 }
 
@@ -17,10 +31,10 @@ const ZERO: Savings = { rawTokensEst: 0, sentTokensEst: 0, cachedTokens: 0, retr
 function read(stats: StatsShape): Savings {
   const p = stats.persistent_savings ?? {};
   return {
-    rawTokensEst: p.tokens_before ?? 0,
-    sentTokensEst: p.tokens_after ?? 0,
-    cachedTokens: p.cached_tokens ?? 0,
-    retrieveHops: p.retrieve_hops ?? 0,
+    rawTokensEst: p.tokens_before ?? p.input_tokens ?? p.tokensBefore ?? 0,
+    sentTokensEst: p.tokens_after ?? p.output_tokens ?? p.tokensAfter ?? 0,
+    cachedTokens: p.cached_tokens ?? p.cache_read_input_tokens ?? p.cachedTokens ?? 0,
+    retrieveHops: p.retrieve_hops ?? p.retrieveHops ?? 0,
   };
 }
 
