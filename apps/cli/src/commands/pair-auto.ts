@@ -9,6 +9,7 @@ import { vercelBypassHeader } from '../lib/backend-headers';
 import { detectCurrentBranch } from '../lib/git-branch';
 import { start } from './start';
 import { startInfraOnly } from './start-infra-only';
+import { maybeStartHeadroomReporter } from './host-agent';
 
 /**
  * `codeam pair-auto` — non-interactive pair, used INSIDE a freshly-
@@ -355,6 +356,17 @@ export async function pairAuto(args: string[]): Promise<void> {
 
   // eslint-disable-next-line no-console
   console.log('  Starting agent loop…');
+
+  // Best-effort Headroom savings reporter — enabled only when
+  // HEADROOM_ENABLED=1 (injected by the backend for PRO users). A missing
+  // or misbehaving Headroom proxy never blocks the agent from starting.
+  const headroomReporter = maybeStartHeadroomReporter({
+    sessionId: claimed.sessionId,
+    pluginId,
+    pluginAuthToken: claimed.pluginAuthToken ?? '',
+    codespaceId: process.env['CODESPACE_NAME'] ?? claimed.sessionId,
+  });
+  process.once('exit', () => { headroomReporter?.stop(); });
 
   // Hand off to the same long-running poller `codeam pair` ends with.
   await start();
