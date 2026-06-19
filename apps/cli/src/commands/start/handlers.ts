@@ -44,6 +44,7 @@ import {
   detectMissingNodeDeps,
   ensureYarnInstalled,
   isJsInstallCommand,
+  isPortListening,
   killPreview,
   parseCloudflaredUrl,
   parseExpoUrl,
@@ -1261,6 +1262,27 @@ const previewStartH: CommandHandler = (ctx, _cmd, parsed) => {
     //    binary and the parent dies with exitCode=0 while the child
     //    runs orphaned, fooling the spawn watcher into bailing
     //    immediately with ERR_SPAWN_FAILED.
+    // Guard: the detected port must be FREE before we spawn. If something is
+    // already listening on it (a stale process, another dev server, a leftover
+    // from a prior run), our dev server can't bind it AND — worse — the tunnel
+    // forwards to that squatter, serving someone else's content under the
+    // preview URL (observed live: a leftover `http.server` on :3000 served a
+    // /tmp directory listing through the tunnel). Fail fast with an actionable
+    // error instead of tunnelling the wrong process.
+    if (await isPortListening(detection.port)) {
+      void postPreviewEvent({
+        sessionId: ctx.sessionId,
+        pluginId: ctx.pluginId,
+        pluginAuthToken,
+        type: 'preview_error',
+        payload: {
+          stage: 'spawn',
+          message: `Port ${detection.port} is already in use by another process, so the dev server can't start there. Stop whatever is listening on port ${detection.port} and try the preview again.`,
+        },
+      });
+      return;
+    }
+
     const spawnable = normalizeDetectionForSpawn(detection, process.cwd());
     emitProgress(
       'BOOT_SEQUENCE',

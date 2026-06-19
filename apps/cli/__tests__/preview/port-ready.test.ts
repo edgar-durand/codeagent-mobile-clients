@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import * as net from 'net';
-import { waitForPortListening } from '../../src/services/preview/port-ready';
+import { isPortListening, waitForPortListening } from '../../src/services/preview/port-ready';
 
 /**
  * BUG 1 (preview hangs on "waiting for ready signal"): when the
@@ -65,5 +65,22 @@ describe('waitForPortListening', () => {
     void port;
 
     expect(await waitP).toBe(true);
+  });
+
+  // Backs the pre-spawn port-in-use guard: the preview must refuse to start
+  // (and notify the app) when the detected port is already occupied, so the
+  // tunnel never forwards to a squatter instead of the real dev server.
+  describe('isPortListening (pre-spawn guard)', () => {
+    it('returns true when a process is already listening on the port', async () => {
+      const port = await listenOnEphemeralPort();
+      expect(await isPortListening(port)).toBe(true);
+    });
+
+    it('returns false when the port is free', async () => {
+      const port = await listenOnEphemeralPort();
+      await new Promise<void>((resolve) => servers[0].close(() => resolve()));
+      servers.length = 0;
+      expect(await isPortListening(port)).toBe(false);
+    });
   });
 });
