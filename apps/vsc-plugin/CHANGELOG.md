@@ -4,6 +4,12 @@ All notable changes to the CodeAgent Mobile VS Code extension are documented her
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.39.47] — 2026-06-19
+
+### Fixed
+
+- **cli:** Skip headroom reporter when pluginAuthToken absent; alias-tolerant stats mapping
+
 ## [2.39.46] — 2026-06-19
 
 ### Added
