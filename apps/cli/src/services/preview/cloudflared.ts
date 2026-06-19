@@ -163,3 +163,59 @@ export function spawnCloudflaredTunnel(bin: string, port: number): ReturnType<ty
     stdio: ['ignore', 'pipe', 'pipe'],
   });
 }
+
+/**
+ * Decode a Cloudflare tunnel token (base64 of `{"a":accountTag,"t":tunnelID,
+ * "s":tunnelSecret}`) into the credentials-file JSON `cloudflared` expects.
+ * Throws if the token isn't the expected shape so the caller can fall back
+ * to a quick tunnel.
+ */
+export function decodeTunnelToken(token: string): {
+  AccountTag: string;
+  TunnelID: string;
+  TunnelSecret: string;
+} {
+  const decoded = JSON.parse(Buffer.from(token, 'base64').toString('utf8')) as {
+    a?: string;
+    t?: string;
+    s?: string;
+  };
+  if (!decoded.a || !decoded.t || !decoded.s) {
+    throw new Error('cloudflared token missing accountTag/tunnelID/tunnelSecret');
+  }
+  return { AccountTag: decoded.a, TunnelID: decoded.t, TunnelSecret: decoded.s };
+}
+
+/**
+ * Spawn a NAMED tunnel from a backend-provisioned token. The tunnel lives
+ * under our own zone (`*.preview.codeagent-mobile.com`), which ISP/security
+ * resolvers serve reliably — unlike `*.trycloudflare.com`. The token decodes
+ * to a credentials file; we run the tunnel locally-managed with `--url` so
+ * the box sets its own ingress (no backend round-trip). The public hostname
+ * is fixed (the caller already knows it), but we still gate readiness on the
+ * `Registered tunnel connection` stderr line, exactly like the quick tunnel.
+ */
+export async function spawnNamedTunnel(
+  bin: string,
+  token: string,
+  port: number,
+): Promise<ReturnType<typeof spawn>> {
+  const creds = decodeTunnelToken(token);
+  const credDir = path.join(os.homedir(), '.codeam');
+  await fs.mkdir(credDir, { recursive: true });
+  const credFile = path.join(credDir, `tunnel-${creds.TunnelID}.json`);
+  await fs.writeFile(credFile, JSON.stringify(creds), { mode: 0o600 });
+  return spawn(
+    bin,
+    [
+      'tunnel',
+      'run',
+      '--credentials-file',
+      credFile,
+      '--url',
+      `http://localhost:${port}`,
+      creds.TunnelID,
+    ],
+    { stdio: ['ignore', 'pipe', 'pipe'] },
+  );
+}

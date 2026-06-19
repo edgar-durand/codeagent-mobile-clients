@@ -48,6 +48,7 @@ import {
   readPreviewConfig,
   registerPreview,
   resolveCloudflared,
+  spawnNamedTunnel,
   runSetupCommand,
   safeParseDetection,
   waitForPortListening,
@@ -1361,6 +1362,53 @@ const previewStartH: CommandHandler = (ctx, _cmd, parsed) => {
       const MAX_TUNNEL_ATTEMPTS = 3;
       let parsedUrl: string | null = null;
       let lastTunnelErr = 'cloudflared did not emit a URL within 45s';
+
+      // Named tunnel FIRST when the backend provisioned one. It lives under
+      // our own zone (*.preview.codeagent-mobile.com), which ISP/security
+      // resolvers serve reliably — unlike *.trycloudflare.com, which ANTEL
+      // (and many others) resolve only intermittently, the root cause of the
+      // -1003 the user hit. Delivered via env for BOTH surfaces: the
+      // codespace bootstrap exports it; the host-agent exports it into the
+      // child. On ANY failure we fall through to the quick-tunnel loop below.
+      const namedToken = process.env.PREVIEW_TUNNEL_TOKEN;
+      const namedHostname = process.env.PREVIEW_TUNNEL_HOSTNAME;
+      if (namedToken && namedHostname) {
+        try {
+          emitProgress('TUNNEL_STARTING', `named tunnel ${namedHostname}`);
+          const candidate = await spawnNamedTunnel(bin, namedToken, detection.port);
+          let registered = false;
+          const onNamedChunk = (chunk: Buffer): void => {
+            const s = chunk.toString();
+            if (/Registered tunnel connection/i.test(s)) registered = true;
+            const trimmed = s.replace(/\n+$/g, '');
+            if (trimmed.length > 0) log.info('preview', `cloudflared: ${trimmed}`);
+          };
+          candidate.stderr!.on('data', onNamedChunk);
+          candidate.stdout!.on('data', onNamedChunk);
+          const namedDeadline = Date.now() + 45_000;
+          while (!registered && Date.now() < namedDeadline) {
+            await new Promise((r) => setTimeout(r, 250));
+          }
+          if (registered) {
+            const namedUrl = `https://${namedHostname}`;
+            log.info('preview', `named tunnel registered: ${namedUrl}`);
+            tunnel = candidate;
+            parsedUrl = namedUrl;
+          } else {
+            log.info(
+              'preview',
+              'named tunnel did not register within 45s — falling back to quick tunnel',
+            );
+            try { candidate.kill('SIGTERM'); } catch { /* already dead */ }
+          }
+        } catch (e) {
+          log.info(
+            'preview',
+            `named tunnel failed (${(e as Error).message}) — falling back to quick tunnel`,
+          );
+        }
+      }
+
       for (
         let attempt = 1;
         attempt <= MAX_TUNNEL_ATTEMPTS && !parsedUrl;

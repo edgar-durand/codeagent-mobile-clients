@@ -99,6 +99,17 @@ interface DeployPayload {
    * the chat agent runs via the bundled ACP SDK regardless.
    */
   agentInstallScript?: string;
+  /**
+   * Cloudflare named-tunnel token for the in-app Preview. When present it's
+   * exported into the child env as `PREVIEW_TUNNEL_TOKEN` so the preview
+   * runs `cloudflared tunnel run` against a stable
+   * `*.preview.codeagent-mobile.com` hostname instead of the
+   * intermittently-resolved `*.trycloudflare.com`. Absent → quick-tunnel
+   * fallback. NEVER logged.
+   */
+  previewTunnelToken?: string;
+  /** Stable preview hostname for this box's tunnel; exported as `PREVIEW_TUNNEL_HOSTNAME`. */
+  previewHostname?: string;
 }
 
 /** The stop command payload (mirrors the backend `SelfHostedStopCommand`). */
@@ -486,6 +497,15 @@ export class HostAgentSupervisor {
       // installs (codex) already land on PATH; this is the additive case.
       const home = process.env.HOME || os.homedir();
       childEnv.PATH = `${home}/.local/bin:${process.env.PATH ?? ''}`;
+
+      // 1c) Named preview tunnel — same unified env contract the codespace
+      //     bootstrap uses. The preview start handler reads these and runs
+      //     `cloudflared tunnel run` against our own zone instead of the
+      //     intermittently-resolved trycloudflare.com. Absent → quick tunnel.
+      if (payload.previewTunnelToken && payload.previewHostname) {
+        childEnv.PREVIEW_TUNNEL_TOKEN = payload.previewTunnelToken;
+        childEnv.PREVIEW_TUNNEL_HOSTNAME = payload.previewHostname;
+      }
 
       // 2) Spawn the supervised `pair-auto` child.
       report('spawning', 'starting agent');
