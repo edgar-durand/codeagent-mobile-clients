@@ -4,6 +4,16 @@ All notable changes to the CodeAgent Mobile VS Code extension are documented her
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.39.45] — 2026-06-19
+
+### Fixed
+
+- **cli:** Fetch pluginAuthToken via /api/pairing/reconnect when PoP enforcement omits it from pair_completed
+
+### Tests
+
+- **cli:** Make untracked-path assertion platform-agnostic (fix Windows CI)
+
 ## [2.39.44] — 2026-06-19
 
 ### Fixed
