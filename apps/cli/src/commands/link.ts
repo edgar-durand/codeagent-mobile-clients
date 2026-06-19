@@ -48,7 +48,7 @@
  */
 
 import { type ChildProcess } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, randomBytes, createHash } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import chokidar from 'chokidar';
@@ -67,6 +67,7 @@ import {
   requestCode,
   postLinkCredential,
   postLinkErrorSignal,
+  fetchCurrentPluginAuthToken,
   type PairedUserInfo,
 } from '../services/pairing.service';
 import { subscribeToPairCompletion } from '../services/pair-completion-subscriber';
@@ -189,9 +190,18 @@ export async function link(args: string[] = []): Promise<void> {
 
   // ─── 1. Pair ────────────────────────────────────────────────────
   const pluginId = randomUUID();
+  // SEC: proof-of-possession secret for this link pairing (same scheme
+  // as `codeam pair`). Sent as sha256 at enrollment; replayed raw as
+  // X-Plugin-Poll-Secret on /reconnect so the backend returns the
+  // pluginAuthToken only to this device — not to anyone who learns the
+  // (non-secret) pluginId. Required under PoP enforcement (ON in prod)
+  // because the pending-stream endpoint intentionally omits the token
+  // from pair_completed broadcasts (broadcasting it there is a vuln).
+  const pollSecret = randomBytes(32).toString('base64url');
+  const pluginSecretHash = createHash('sha256').update(pollSecret).digest('hex');
   const spin = p.spinner();
   spin.start('Requesting pairing code...');
-  const pairing = await requestCode(pluginId);
+  const pairing = await requestCode(pluginId, pluginSecretHash);
   if (!pairing.ok) {
     spin.stop('Failed');
     if (pairing.reason === 'rate-limited') {
@@ -239,15 +249,36 @@ export async function link(args: string[] = []): Promise<void> {
         waitSpin.stop('Timed out');
         reject(new Error('Pairing timed out after 5 minutes. Run codeam link again.'));
       },
+      // SEC: replay the PoP secret so the pending-stream gate passes
+      // under PoP enforcement.
+      pollSecret,
     );
     process.once('SIGINT', sigint);
   });
 
-  if (!paired.pluginAuthToken) {
-    showError(
-      'Backend did not return a pluginAuthToken — upgrade api-v2 (deploy includes the link endpoint).',
-    );
-    process.exit(1);
+  // Under PoP enforcement the backend intentionally omits pluginAuthToken
+  // from the pair_completed broadcast (the pending-stream is pluginId-gated,
+  // so broadcasting the token there is a vuln). Fetch it securely via the
+  // gated /api/pairing/reconnect endpoint (pollSecret-authenticated).
+  let pluginAuthToken = paired.pluginAuthToken;
+  if (!pluginAuthToken) {
+    const fetchSpin = p.spinner();
+    fetchSpin.start('Fetching plugin auth token via secure reconnect...');
+    pluginAuthToken = await fetchCurrentPluginAuthToken(
+      paired.sessionId,
+      pluginId,
+      pollSecret,
+    ) ?? undefined;
+    if (!pluginAuthToken) {
+      fetchSpin.stop('Failed');
+      showError(
+        'Could not obtain a pluginAuthToken — the pairing did not supply one and the ' +
+        '/api/pairing/reconnect fallback also failed. ' +
+        'Ensure api-v2 is deployed and try running codeam link again.',
+      );
+      process.exit(1);
+    }
+    fetchSpin.stop('Token retrieved');
   }
 
   // Persist the pair so the session shows up in `codeam sessions`
@@ -259,14 +290,17 @@ export async function link(args: string[] = []): Promise<void> {
     userEmail: paired.userEmail,
     plan: paired.plan,
     pairedAt: Date.now(),
-    pluginAuthToken: paired.pluginAuthToken,
+    pluginAuthToken,
+    // SEC: persist so command-relay and future reconnects can prove
+    // possession on the gated endpoint.
+    pollSecret,
     agent: ctx.runtime.id,
   });
   saveCliConfig({ ...loadCliConfig(), preferredAgent: ctx.runtime.id });
 
   // ─── 2. API-key escape hatch ────────────────────────────────────
   if (parsed.apiKey) {
-    await uploadAndSucceed(ctx, paired, pluginId, {
+    await uploadAndSucceed(ctx, paired, pluginId, pluginAuthToken, {
       method: 'api_key',
       credential: parsed.apiKey.trim(),
       source: 'manual',
@@ -281,7 +315,7 @@ export async function link(args: string[] = []): Promise<void> {
       showError(`--token-file ${parsed.tokenFile} is empty.`);
       process.exit(1);
     }
-    await uploadAndSucceed(ctx, paired, pluginId, {
+    await uploadAndSucceed(ctx, paired, pluginId, pluginAuthToken, {
       method: 'oauth',
       credential,
       source: 'manual',
@@ -303,9 +337,9 @@ export async function link(args: string[] = []): Promise<void> {
   // ─── 5. Probe existing credentials ──────────────────────────────
   const existing = await ctx.locator.extract();
   if (existing) {
-    if (await refuseIfStale(ctx, paired, pluginId, existing)) return;
+    if (await refuseIfStale(ctx, paired, pluginId, pluginAuthToken, existing)) return;
     showInfo(`Found existing ${ctx.displayName} credentials at ${pc.bold(existing.source)}.`);
-    await uploadAndSucceed(ctx, paired, pluginId, existing);
+    await uploadAndSucceed(ctx, paired, pluginId, pluginAuthToken, existing);
     return;
   }
 
@@ -324,8 +358,8 @@ export async function link(args: string[] = []): Promise<void> {
 
   const captured = await captureFreshCredentials(ctx);
   console.log('');
-  if (await refuseIfStale(ctx, paired, pluginId, captured)) return;
-  await uploadAndSucceed(ctx, paired, pluginId, captured);
+  if (await refuseIfStale(ctx, paired, pluginId, pluginAuthToken, captured)) return;
+  await uploadAndSucceed(ctx, paired, pluginId, pluginAuthToken, captured);
 }
 
 /**
@@ -344,21 +378,20 @@ async function refuseIfStale(
   ctx: LinkContext,
   paired: PairedUserInfo,
   pluginId: string,
+  pluginAuthToken: string,
   token: LocalAgentToken,
 ): Promise<boolean> {
   const verdict = ctx.locator.validate?.(token);
   if (!verdict || verdict.status !== 'expired') return false;
   const reason = verdict.reason ?? 'Token expired';
-  if (paired.pluginAuthToken) {
-    await postLinkErrorSignal({
-      agentId: ctx.locator.publicId,
-      sessionId: paired.sessionId,
-      pluginId,
-      pluginAuthToken: paired.pluginAuthToken,
-      code: 'credentials_expired',
-      reason,
-    });
-  }
+  await postLinkErrorSignal({
+    agentId: ctx.locator.publicId,
+    sessionId: paired.sessionId,
+    pluginId,
+    pluginAuthToken,
+    code: 'credentials_expired',
+    reason,
+  });
   showError(
     `Your local ${ctx.displayName} credentials at ${pc.bold(ctx.locator.hint)} are already expired:\n` +
       `   ${reason}\n\n` +
@@ -486,20 +519,16 @@ async function uploadAndSucceed(
   ctx: LinkContext,
   paired: PairedUserInfo,
   pluginId: string,
+  pluginAuthToken: string,
   token: LocalAgentToken,
 ): Promise<void> {
-  if (!paired.pluginAuthToken) {
-    // Belt-and-braces — should have been caught earlier.
-    showError('Missing pluginAuthToken; re-run codeam link.');
-    process.exit(1);
-  }
   const uploadSpin = p.spinner();
   uploadSpin.start('Sealing credential in your vault...');
   const result = await postLinkCredential({
     agentId: ctx.locator.publicId,
     sessionId: paired.sessionId,
     pluginId,
-    pluginAuthToken: paired.pluginAuthToken,
+    pluginAuthToken,
     method: token.method,
     credential: token.credential,
     agentState: token.agentState,
