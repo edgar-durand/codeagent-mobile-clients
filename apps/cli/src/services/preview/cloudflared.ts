@@ -109,7 +109,13 @@ export async function resolveCloudflared(opts: Options = {}): Promise<string> {
 
   try {
     await fs.access(CACHED_BINARY);
-    return CACHED_BINARY;
+    if (await isExecutableBinary(CACHED_BINARY)) {
+      return CACHED_BINARY;
+    }
+    // Self-heal: an earlier version wrote the macOS `.tgz` archive straight to
+    // this path (and chmod +x'd it), so the cache is a gzip file that fails
+    // with `spawn ENOEXEC`. Drop it and re-download + extract below.
+    await fs.rm(CACHED_BINARY, { force: true });
   } catch {
     // fallthrough
   }
@@ -133,10 +139,79 @@ async function downloadCloudflared(target: string): Promise<void> {
       `Failed to download cloudflared from ${url}: HTTP ${response.status}. Install manually from https://github.com/cloudflare/cloudflared/releases.`,
     );
   }
+
+  // macOS releases ship a gzipped tarball (`cloudflared-darwin-*.tgz`) whose
+  // single entry is the `cloudflared` executable — it MUST be extracted.
+  // Writing the .tgz bytes straight to `target` (and chmod +x) produces a
+  // non-executable gzip file that fails with `spawn ENOEXEC` — the macOS-only
+  // bug this guards. Linux/Windows URLs are the raw binary/.exe, so they stream
+  // straight to disk as before.
+  if (url.endsWith('.tgz')) {
+    const tmp = `${target}.download.tgz`;
+    await pipeline(
+      response.body as unknown as NodeJS.ReadableStream,
+      createWriteStream(tmp),
+    );
+    try {
+      await extractTgz(tmp, path.dirname(target));
+      // The tarball's top-level entry is `cloudflared` → it lands at `target`.
+      await fs.access(target);
+      await fs.chmod(target, 0o755);
+    } catch (err) {
+      throw new Error(
+        `Downloaded the cloudflared archive but could not extract the binary: ${
+          (err as Error).message
+        }. Install manually via \`brew install cloudflared\`.`,
+      );
+    } finally {
+      await fs.rm(tmp, { force: true });
+    }
+    return;
+  }
+
   await pipeline(
     response.body as unknown as NodeJS.ReadableStream,
     createWriteStream(target, { mode: 0o755 }),
   );
+}
+
+/**
+ * True unless the file is actually a gzip archive. A previous version wrote the
+ * macOS `cloudflared-darwin-*.tgz` bytes straight to the binary path and
+ * chmod +x'd it → `spawn` then failed with ENOEXEC. Detect that corrupt cache
+ * by its gzip magic (0x1f 0x8b) so the caller can re-download + extract it.
+ */
+export async function isExecutableBinary(p: string): Promise<boolean> {
+  let handle: Awaited<ReturnType<typeof fs.open>> | undefined;
+  try {
+    handle = await fs.open(p, 'r');
+    const buf = Buffer.alloc(2);
+    await handle.read(buf, 0, 2, 0);
+    return !(buf[0] === 0x1f && buf[1] === 0x8b);
+  } catch {
+    return false;
+  } finally {
+    await handle?.close();
+  }
+}
+
+/**
+ * Extract the `cloudflared` binary from a downloaded macOS `.tgz` into
+ * `destDir`. Cloudflare ships macOS builds as a gzipped tarball containing a
+ * single `cloudflared` executable; Linux/Windows ship the raw binary. We shell
+ * out to the system `tar` (always present on macOS/Linux) rather than pull in a
+ * tar dependency just for this one platform's archive format.
+ */
+export function extractTgz(tgzPath: string, destDir: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const child = spawn('tar', ['-xzf', tgzPath, '-C', destDir], { stdio: 'ignore' });
+    child.on('error', (err) => reject(err));
+    child.on('exit', (code) =>
+      code === 0
+        ? resolve()
+        : reject(new Error(`tar exited with code ${code} while extracting cloudflared`)),
+    );
+  });
 }
 
 function downloadUrlForPlatform(): string {
