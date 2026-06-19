@@ -4,6 +4,14 @@ All notable changes to the CodeAgent-Mobile JetBrains plugin are documented here
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.39.46] — 2026-06-19
+
+### Added
+
+- **cli:** Wrap codespace agent launch with headroom (never-break fallback)
+- **cli:** Headroom /stats poll reporter (local, scoped) -> backend savings
+- **cli:** Start/stop headroom savings reporter with the codespace agent
+
 ## [2.39.45] — 2026-06-19
 
 ### Fixed
