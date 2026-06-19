@@ -40,9 +40,7 @@ import { postLinkCredential, postAiResult, postPreviewEvent } from '../../servic
 import { AGENT_REGISTRY, isKnownAgentId, PREVIEW_DETECT_PROMPT, type AgentId, type PreviewDetection } from '@codeagent/shared';
 import {
   activePreviews,
-  buildCodespaceUrl,
   detectMissingNodeDeps,
-  isCodespaceSession,
   isJsInstallCommand,
   killPreview,
   parseCloudflaredUrl,
@@ -52,9 +50,7 @@ import {
   resolveCloudflared,
   runSetupCommand,
   safeParseDetection,
-  setPortPublic,
   waitForCloudflaredReady,
-  waitForCodespacePortReady,
   waitForPortListening,
   writePreviewConfig,
 } from '../../services/preview';
@@ -1309,9 +1305,7 @@ const previewStartH: CommandHandler = (ctx, _cmd, parsed) => {
       'TUNNEL_STARTING',
       detection.framework === 'Expo'
         ? 'Expo (self-tunnelled)'
-        : isCodespaceSession()
-          ? 'GitHub Codespaces public port'
-          : 'cloudflared quick tunnel',
+        : 'cloudflared quick tunnel',
     );
     let tunnel: ReturnType<typeof spawn> | null = null;
     let url: string;
@@ -1337,37 +1331,12 @@ const previewStartH: CommandHandler = (ctx, _cmd, parsed) => {
         return;
       }
       url = expoUrl;
-    } else if (isCodespaceSession()) {
-      const codespaceName = process.env.CODESPACE_NAME!;
-      try {
-        await setPortPublic(codespaceName, detection.port);
-      } catch (e) {
-        try { devServer.kill('SIGTERM'); } catch { /* already dead */ }
-        void postPreviewEvent({
-          sessionId: ctx.sessionId,
-          pluginId: ctx.pluginId,
-          pluginAuthToken,
-          type: 'preview_error',
-          payload: { stage: 'tunnel', message: `Failed to flip port public: ${(e as Error).message}` },
-        });
-        return;
-      }
-      url = buildCodespaceUrl(codespaceName, detection.port);
-      try {
-        await waitForCodespacePortReady(url, 15_000);
-      } catch (e) {
-        try { devServer.kill('SIGTERM'); } catch { /* already dead */ }
-        void postPreviewEvent({
-          sessionId: ctx.sessionId,
-          pluginId: ctx.pluginId,
-          pluginAuthToken,
-          type: 'preview_error',
-          payload: { stage: 'tunnel', message: (e as Error).message },
-        });
-        return;
-      }
     } else {
-      // Local — Cloudflare Quick Tunnel via `cloudflared`.
+      // ALWAYS a Cloudflare Quick Tunnel — the same public-URL path for
+      // codespaces, self-hosted boxes, and local CLIs, so the preview
+      // behaves identically everywhere. We deliberately do NOT use GitHub
+      // Codespaces port-forwarding (it required CODESPACE_NAME, which the
+      // detached CLI env doesn't carry, and split behaviour by environment).
       let bin: string;
       try {
         bin = await resolveCloudflared();
@@ -1382,70 +1351,72 @@ const previewStartH: CommandHandler = (ctx, _cmd, parsed) => {
         });
         return;
       }
-      tunnel = spawn(bin, ['tunnel', '--url', `http://localhost:${detection.port}`], {
-        stdio: ['ignore', 'pipe', 'pipe'],
-      });
+      // Cloudflare Quick Tunnels occasionally fail to register or are slow
+      // to propagate DNS (the user hit this as an intermittent
+      // ERR_TUNNEL_FAILED that "worked on the Nth manual retry"). A FRESH
+      // tunnel almost always succeeds, so we auto-retry the whole bring-up
+      // (spawn → URL → DNS-ready) up to 3 times with a new connector +
+      // hostname each attempt, instead of surfacing the first miss to the
+      // user. Each attempt's cloudflared child is killed before the next so
+      // we never leak orphaned connectors.
+      const MAX_TUNNEL_ATTEMPTS = 3;
       let parsedUrl: string | null = null;
-      const onTunnelChunk = (chunk: Buffer): void => {
-        const s = chunk.toString();
-        if (!parsedUrl) parsedUrl = parseCloudflaredUrl(s);
-        // Log cloudflared output under [preview] so tunnel issues are
-        // post-hoc debuggable without re-running. Trim trailing
-        // newlines so one log line == one cloudflared chunk.
-        const trimmed = s.replace(/\n+$/g, '');
-        if (trimmed.length > 0) log.info('preview', `cloudflared: ${trimmed}`);
-      };
-      tunnel.stderr!.on('data', onTunnelChunk);
-      tunnel.stdout!.on('data', onTunnelChunk);
-      // 45 s for the URL to land — cold launches on a fresh
-      // cloudflared binary (binary download finishing, QUIC handshake
-      // negotiation) used to occasionally miss the previous 15 s
-      // budget. The local connector usually prints the URL in <5 s
-      // once it's warm.
-      const tunnelDeadline = Date.now() + 45_000;
-      while (!parsedUrl && Date.now() < tunnelDeadline) {
-        await new Promise((r) => setTimeout(r, 250));
+      let lastTunnelErr = 'cloudflared did not emit a URL within 45s';
+      for (
+        let attempt = 1;
+        attempt <= MAX_TUNNEL_ATTEMPTS && !parsedUrl;
+        attempt += 1
+      ) {
+        if (attempt > 1) {
+          emitProgress(
+            'TUNNEL_STARTING',
+            `cloudflared quick tunnel (retry ${attempt}/${MAX_TUNNEL_ATTEMPTS})`,
+          );
+        }
+        const candidate = spawn(
+          bin,
+          ['tunnel', '--url', `http://localhost:${detection.port}`],
+          { stdio: ['ignore', 'pipe', 'pipe'] },
+        );
+        let candidateUrl: string | null = null;
+        const onTunnelChunk = (chunk: Buffer): void => {
+          const s = chunk.toString();
+          if (!candidateUrl) candidateUrl = parseCloudflaredUrl(s);
+          // Log cloudflared output under [preview] so tunnel issues are
+          // post-hoc debuggable without re-running.
+          const trimmed = s.replace(/\n+$/g, '');
+          if (trimmed.length > 0) log.info('preview', `cloudflared: ${trimmed}`);
+        };
+        candidate.stderr!.on('data', onTunnelChunk);
+        candidate.stdout!.on('data', onTunnelChunk);
+        // 45 s for the URL to land — cold launches (binary download
+        // finishing, QUIC handshake) can miss a tighter budget.
+        const urlDeadline = Date.now() + 45_000;
+        while (!candidateUrl && Date.now() < urlDeadline) {
+          await new Promise((r) => setTimeout(r, 250));
+        }
+        if (!candidateUrl) {
+          lastTunnelErr = 'cloudflared did not emit a URL within 45s';
+          try { candidate.kill('SIGTERM'); } catch { /* already dead */ }
+          continue;
+        }
+        // Block on DNS reachability before announcing the URL. The public
+        // `*.trycloudflare.com` hostname lags the connector by a few
+        // seconds; the mobile WebView caches NXDOMAIN if it opens too
+        // early. DNS-only probe (not HTTP): cloudflared's edge speaks h2
+        // only and undici can't, so an HTTP probe times out even when the
+        // tunnel is reachable — DNS resolution is the real gate.
+        try {
+          await waitForCloudflaredReady(candidateUrl, 40_000);
+          log.info('preview', `cloudflared probe: ${candidateUrl} reachable from CLI host`);
+          tunnel = candidate;
+          parsedUrl = candidateUrl;
+        } catch (e) {
+          lastTunnelErr = (e as Error).message;
+          try { candidate.kill('SIGTERM'); } catch { /* already dead */ }
+        }
       }
       if (!parsedUrl) {
-        try { tunnel.kill('SIGTERM'); } catch { /* already dead */ }
-        try { devServer.kill('SIGTERM'); } catch { /* already dead */ }
-        void postPreviewEvent({
-          sessionId: ctx.sessionId,
-          pluginId: ctx.pluginId,
-          pluginAuthToken,
-          type: 'preview_error',
-          payload: { stage: 'tunnel', message: 'cloudflared did not emit a URL within 45s.' },
-        });
-        return;
-      }
-      // cloudflared prints its URL the moment its LOCAL connector
-      // is up, but the public `*.trycloudflare.com` hostname needs
-      // a few seconds for DNS to propagate. Empirically the URL
-      // appears in stderr at ~3–5 s and DNS resolves from this host
-      // at ~7–12 s.
-      //
-      // We MUST block on DNS reachability before announcing
-      // `preview_ready`. Mobile WebViews (and Chrome / Safari) cache
-      // NXDOMAIN aggressively on first load — if the WebView opens
-      // the URL before DNS lands, every subsequent reload inside
-      // that WebView session keeps showing "server IP could not be
-      // found" because the negative DNS cache hasn't expired. An
-      // older version of this handler made the probe fire-and-forget
-      // on the theory that the WebView would retry; it doesn't. The
-      // user has to fully tear the preview down and reopen it to
-      // recover.
-      //
-      // Why DNS-only: cloudflared's edge serves `*.trycloudflare.com`
-      // over HTTP/2 (ALPN-negotiated, no h1 path), and Node's built-in
-      // `fetch` (undici) does not speak h2. An HTTP HEAD probe times
-      // out 100% of the time even when the tunnel is fully reachable
-      // from curl/WebViews. The NXDOMAIN cache is the actual failure
-      // mode we're guarding against, and DNS resolution is the gate.
-      try {
-        await waitForCloudflaredReady(parsedUrl, 60_000);
-        log.info('preview', `cloudflared probe: ${parsedUrl} reachable from CLI host`);
-      } catch (e) {
-        try { tunnel.kill('SIGTERM'); } catch { /* already dead */ }
         try { devServer.kill('SIGTERM'); } catch { /* already dead */ }
         void postPreviewEvent({
           sessionId: ctx.sessionId,
@@ -1454,7 +1425,7 @@ const previewStartH: CommandHandler = (ctx, _cmd, parsed) => {
           type: 'preview_error',
           payload: {
             stage: 'tunnel',
-            message: `Tunnel ${parsedUrl} did not become reachable within 60s (${(e as Error).message}). Cloudflare Quick Tunnels occasionally fail to register — retry usually succeeds.`,
+            message: `Tunnel did not become reachable after ${MAX_TUNNEL_ATTEMPTS} attempts (${lastTunnelErr}). Cloudflare Quick Tunnels occasionally fail to register — please retry.`,
           },
         });
         return;
