@@ -2,8 +2,10 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { vi } from 'vitest';
 import {
   detectMissingNodeDeps,
+  ensureYarnInstalled,
   isJsInstallCommand,
 } from '../../src/services/preview/setup-deps';
 
@@ -78,6 +80,45 @@ describe('detectMissingNodeDeps', () => {
     fs.writeFileSync(path.join(dir, 'pnpm-lock.yaml'), '');
     fs.writeFileSync(path.join(dir, 'yarn.lock'), '');
     expect(detectMissingNodeDeps(dir)).toEqual({ cmd: 'yarn', args: ['install'] });
+  });
+});
+
+describe('ensureYarnInstalled', () => {
+  it('no-ops when yarn is already on PATH (no install)', async () => {
+    const installYarn = vi.fn();
+    const res = await ensureYarnInstalled({
+      hasYarn: async () => true,
+      installYarn,
+    });
+    expect(res).toEqual({ ok: true, code: 0 });
+    expect(installYarn).not.toHaveBeenCalled();
+  });
+
+  it('installs yarn when missing, then confirms it resolves (the codespace fix)', async () => {
+    const hasYarn = vi
+      .fn<() => Promise<boolean>>()
+      .mockResolvedValueOnce(false) // initial probe: not on PATH
+      .mockResolvedValueOnce(true); // after install: now resolves
+    const installYarn = vi.fn(async () => ({ ok: true, code: 0 }));
+    const res = await ensureYarnInstalled({ hasYarn, installYarn });
+    expect(installYarn).toHaveBeenCalledTimes(1);
+    expect(res).toEqual({ ok: true, code: 0 });
+  });
+
+  it('reports failure (with exit code) when the yarn install fails', async () => {
+    const res = await ensureYarnInstalled({
+      hasYarn: async () => false,
+      installYarn: async () => ({ ok: false, code: 1 }),
+    });
+    expect(res).toEqual({ ok: false, code: 1 });
+  });
+
+  it('reports failure when install "succeeds" but yarn still is not on PATH', async () => {
+    const res = await ensureYarnInstalled({
+      hasYarn: async () => false, // never resolves, even after install
+      installYarn: async () => ({ ok: true, code: 0 }),
+    });
+    expect(res.ok).toBe(false);
   });
 });
 

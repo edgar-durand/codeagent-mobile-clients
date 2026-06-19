@@ -3,6 +3,7 @@ import * as os from 'os';
 import * as path from 'path';
 import { randomUUID } from 'crypto';
 import { spawn } from 'child_process';
+import which from 'which';
 import type { AgentService } from '../../services/agent.service';
 import type { CommandRelayService, RemoteCommand } from '../../services/command-relay.service';
 import type { HistoryService } from '../../services/history.service';
@@ -41,6 +42,7 @@ import { AGENT_REGISTRY, isKnownAgentId, PREVIEW_DETECT_PROMPT, type AgentId, ty
 import {
   activePreviews,
   detectMissingNodeDeps,
+  ensureYarnInstalled,
   isJsInstallCommand,
   killPreview,
   parseCloudflaredUrl,
@@ -1111,6 +1113,41 @@ const previewStartH: CommandHandler = (ctx, _cmd, parsed) => {
     const missingDeps = detectMissingNodeDeps(process.cwd());
     let preflightRan = false;
     if (missingDeps) {
+      // yarn isn't guaranteed on a fresh GitHub codespace (node + npm only).
+      // If the project uses yarn, install it on demand FIRST — otherwise the
+      // pre-flight spawns `yarn install` → ENOENT → exit null →
+      // ERR_SPAWN_FAILED "Dependency install failed (yarn install, exit null)"
+      // (observed live on a yarn project). We install rather than fall back to
+      // npm so the project's real package manager + yarn.lock are honoured.
+      if (missingDeps.cmd === 'yarn') {
+        const ensured = await ensureYarnInstalled({
+          hasYarn: async () => Boolean(await which('yarn', { nothrow: true })),
+          installYarn: async () => {
+            emitProgress('SETUP_RUN', 'installing yarn (not found on PATH) — npm install -g yarn');
+            const r = await runSetupCommand(
+              'npm',
+              ['install', '-g', 'yarn'],
+              process.cwd(),
+              detection.env,
+              { timeoutMs: INSTALL_TIMEOUT_MS },
+            );
+            return { ok: r.status === 'ok', code: r.code };
+          },
+        });
+        if (!ensured.ok) {
+          void postPreviewEvent({
+            sessionId: ctx.sessionId,
+            pluginId: ctx.pluginId,
+            pluginAuthToken,
+            type: 'preview_error',
+            payload: {
+              stage: 'spawn',
+              message: `This project uses yarn but yarn isn't installed, and installing it automatically failed (npm install -g yarn, exit ${ensured.code}). Install yarn in this environment and try the preview again.`,
+            },
+          });
+          return;
+        }
+      }
       emitProgress(
         'SETUP_RUN',
         `${missingDeps.cmd} ${missingDeps.args.join(' ')} (pre-flight — node_modules missing)`,

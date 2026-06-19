@@ -20,8 +20,11 @@ import path from 'path';
  *
  * Package-manager choice (verified live on a fresh codespace):
  *
- *   yarn.lock  -> yarn install   (yarn classic runs fine on the codespace
- *                                 Node and honours yarn.lock)
+ *   yarn.lock  -> yarn install   (yarn honours yarn.lock; the caller
+ *                                 ensures yarn is installed first — a
+ *                                 fresh codespace ships node+npm only, so
+ *                                 yarn install would ENOENT → "exit null".
+ *                                 See `ensureYarnInstalled` at the call site.)
  *   everything  -> npm install --legacy-peer-deps
  *   else
  *
@@ -39,6 +42,10 @@ import path from 'path';
  *     lockfiles assume; plain `npm install` ERESOLVE-fails on the React-19
  *     peer ranges v0 / Next.js templates ship.
  *
+ * yarn.lock wins even when pnpm-lock.yaml is also present: a yarn-built
+ * repo that later picked up a stray pnpm-lock should still install with
+ * yarn (the caller installs yarn on demand if it's missing).
+ *
  * Non-Node projects (no `package.json`) return null and let the
  * agent's `setup_commands` cover Python / Ruby / Go / Rust.
  */
@@ -51,6 +58,30 @@ export function detectMissingNodeDeps(
     return { cmd: 'yarn', args: ['install'] };
   }
   return { cmd: 'npm', args: ['install', '--legacy-peer-deps'] };
+}
+
+/**
+ * Ensure `yarn` is runnable before a yarn-based install. A fresh GitHub
+ * codespace ships node + npm only (`yarn: command not found`), so a yarn
+ * project's pre-flight `yarn install` spawns ENOENT → "exit null" /
+ * ERR_SPAWN_FAILED. Rather than fall back to npm (which would ignore the
+ * project's real package manager + yarn.lock), we install yarn on demand.
+ *
+ * Pure + injectable for testing: the caller supplies `hasYarn` (a PATH probe)
+ * and `installYarn` (the actual `npm install -g yarn` runner). Returns `ok`
+ * when yarn is already present or became present after install; otherwise the
+ * failure carries the installer's exit code so the caller can surface it.
+ */
+export async function ensureYarnInstalled(deps: {
+  hasYarn: () => Promise<boolean>;
+  installYarn: () => Promise<{ ok: boolean; code: number | null }>;
+}): Promise<{ ok: boolean; code: number | null }> {
+  if (await deps.hasYarn()) return { ok: true, code: 0 };
+  const res = await deps.installYarn();
+  if (!res.ok) return res;
+  // The installer reported success — confirm yarn now resolves on PATH
+  // (a global install can succeed yet land outside PATH on odd setups).
+  return (await deps.hasYarn()) ? { ok: true, code: 0 } : { ok: false, code: res.code };
 }
 
 /**
