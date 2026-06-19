@@ -1,6 +1,7 @@
 import pc from 'picocolors';
 import { AGENT_REGISTRY, type AgentId } from '@codeagent/shared';
 import { addSession, getActiveSession, getActiveSessionForAgent, ensurePluginId, loadCliConfig } from '../config';
+import { acquireDaemonLock } from './pair-auto';
 import { showIntro, showInfo, showError } from '../ui/banner';
 import { CommandRelayService } from '../services/command-relay.service';
 import { AgentService } from '../services/agent.service';
@@ -64,6 +65,17 @@ export async function start(requestedAgent?: AgentId): Promise<void> {
       console.log(`  ${pc.dim('No paired session found.')}`);
       console.log(`  ${pc.dim(`Run ${pc.white('codeam pair')} to connect your mobile app.`)}\n`);
     }
+    process.exit(0);
+  }
+
+  // Per-session daemon singleton lock. At most ONE long-lived `codeam` daemon
+  // runs per sessionId. Multiple code paths converge on start() for the same
+  // session (pair-auto→start, bare `codeam`→start, install-relaunch→start,
+  // wake-kick→start); without this guard they coexist and fight over the relay
+  // SSE (split-brain). Fail-open: any lock-infra error lets the daemon proceed.
+  // Exit code 0 so the bootstrap's `setsid nohup` launch sees success.
+  if (!acquireDaemonLock(session.id)) {
+    console.log(`  ${pc.dim('A codeam daemon for this session is already running — deferring to it.')}`);
     process.exit(0);
   }
 

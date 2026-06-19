@@ -209,6 +209,75 @@ export function isLivePairAuto(pid: number): boolean {
 }
 
 /**
+ * Same liveness check as `isLivePairAuto` but not restricted to pair-auto —
+ * any `codeam` process (bare `codeam`, `codeam start`, `codeam pair-auto`…)
+ * satisfies this. Used by the daemon singleton guard where the lock holder is
+ * typically the bare `codeam` / `start` daemon, not specifically pair-auto.
+ *
+ * Platform handling is identical to `isLivePairAuto`: Linux uses /proc cmdline
+ * to guard against PID reuse; macOS / Windows fall back to signal-0 liveness.
+ */
+export function isLiveCodeam(pid: number): boolean {
+  return isLivePairAuto(pid);
+}
+
+/** Lock-file path for the per-session daemon singleton. Resolved per-call so
+ *  tests can redirect via HOME/USERPROFILE. sessionId is sanitised so it is
+ *  safe to embed in a filename on every OS. */
+export function daemonLockPath(sessionId: string): string {
+  const safe = sessionId.replace(/[^a-zA-Z0-9_-]/g, '_');
+  return path.join(os.homedir(), '.codeam', `daemon-${safe}.lock`);
+}
+
+/**
+ * Acquire the per-session daemon singleton. Returns true if THIS process now
+ * owns the daemon slot for `sessionId`, false if another LIVE codeam process
+ * already holds it.
+ *
+ * Fail-open: any lock-infra error returns true (never block a daemon from
+ * starting). PID-based with a liveness check so a stale lock from a crashed
+ * daemon is automatically reclaimed on the next launch. Signal handlers
+ * release the lock on clean exit; the `process.once('exit')` guard covers
+ * hard-exit paths.
+ *
+ * Self-hosted / local pairs spawn distinct sessionIds → distinct lock files;
+ * no codespace-specific assumptions are made here.
+ */
+export function acquireDaemonLock(sessionId: string): boolean {
+  const lockPath = daemonLockPath(sessionId);
+  try {
+    fs.mkdirSync(path.dirname(lockPath), { recursive: true });
+    try {
+      fs.writeFileSync(lockPath, String(process.pid), { flag: 'wx' });
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e;
+      const holder = Number(fs.readFileSync(lockPath, 'utf8').trim());
+      if (holder && holder !== process.pid && isLiveCodeam(holder)) return false;
+      // Stale lock (crashed daemon) or re-acquire by the same process — reclaim.
+      fs.writeFileSync(lockPath, String(process.pid));
+    }
+    const release = () => {
+      try {
+        if (
+          fs.existsSync(lockPath) &&
+          Number(fs.readFileSync(lockPath, 'utf8').trim()) === process.pid
+        ) {
+          fs.unlinkSync(lockPath);
+        }
+      } catch {
+        /* best-effort */
+      }
+    };
+    process.once('exit', release);
+    process.once('SIGTERM', () => { release(); process.exit(0); });
+    process.once('SIGINT', () => { release(); process.exit(0); });
+    return true;
+  } catch {
+    return true; // fail-open — never block a daemon from starting
+  }
+}
+
+/**
  * Singleton guard — at most ONE `codeam pair-auto` per machine/codespace.
  *
  * The backend bootstrap can fire twice (deploy + a wake, or a retry), each
