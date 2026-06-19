@@ -185,6 +185,57 @@ export function makeConfig(baseDir?: string) {
   return { getConfig, ensurePluginId, addSession, removeSession, setActiveSession, getActiveSession, getActiveSessionForAgent, clearAll, saveCliConfig, loadCliConfig };
 }
 
+/**
+ * Keys the backend bootstrap writes into `~/.codeam/codespace-env.json`.
+ * Contract with the backend — these names are verbatim and must not drift.
+ */
+const CODESPACE_ENV_KEYS = [
+  'PREVIEW_TUNNEL_TOKEN',
+  'PREVIEW_TUNNEL_HOSTNAME',
+  'HEADROOM_ENABLED',
+  'HEADROOM_AGENT',
+  'HEADROOM_SAVINGS_INGEST_URL',
+] as const;
+
+/**
+ * Load the codespace env file (`~/.codeam/codespace-env.json`) into
+ * `process.env` at process startup.
+ *
+ * WHY: the codespace serving daemon is spawned via `setsid` with NO shell rc
+ * sourced, so env vars exported by the backend bootstrap
+ * (PREVIEW_TUNNEL_TOKEN/HOSTNAME, HEADROOM_*) never reach the daemon's
+ * `process.env`. Symptoms: preview falls back to a quick trycloudflare tunnel
+ * instead of the NAMED tunnel (which fails to resolve → -1003), and the
+ * Headroom savings reporter never starts (admin dashboard empty). The backend
+ * now also drops those same vars into a JSON file; reading it here restores
+ * them however the daemon was spawned.
+ *
+ * Contract: the file is a JSON object with any of the {@link CODESPACE_ENV_KEYS}
+ * present as string values. Only those keys are accepted; unknown keys and
+ * non-string values are ignored. A real env var ALWAYS wins over the file
+ * (we set a key only when it is currently `undefined`), so an explicit export
+ * is never clobbered.
+ *
+ * Best-effort and side-effect-free on local / self-hosted: a missing file,
+ * unreadable file, or malformed JSON is a silent no-op (those environments
+ * never write this file, so they keep their existing behaviour unchanged).
+ */
+export function loadCodespaceEnv(): void {
+  try {
+    const file = path.join(os.homedir(), '.codeam', 'codespace-env.json');
+    if (!fs.existsSync(file)) return;
+    const raw = JSON.parse(fs.readFileSync(file, 'utf-8')) as Record<string, unknown>;
+    for (const key of CODESPACE_ENV_KEYS) {
+      const value = raw[key];
+      if (typeof value === 'string' && value.length > 0 && process.env[key] === undefined) {
+        process.env[key] = value;
+      }
+    }
+  } catch {
+    /* best-effort: missing file / parse error / unreadable → no-op */
+  }
+}
+
 // Default instance — uses ~/.codeam/config.json
 const _default = makeConfig();
 export const { getConfig, ensurePluginId, addSession, removeSession, setActiveSession, getActiveSession, getActiveSessionForAgent, clearAll, saveCliConfig, loadCliConfig } =

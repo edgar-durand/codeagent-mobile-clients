@@ -2,6 +2,7 @@ import pc from 'picocolors';
 import { AGENT_REGISTRY, type AgentId } from '@codeagent/shared';
 import { addSession, getActiveSession, getActiveSessionForAgent, ensurePluginId, loadCliConfig } from '../config';
 import { acquireDaemonLock } from './pair-auto';
+import { maybeStartHeadroomReporter } from './host-agent';
 import { showIntro, showInfo, showError } from '../ui/banner';
 import { CommandRelayService } from '../services/command-relay.service';
 import { AgentService } from '../services/agent.service';
@@ -141,6 +142,27 @@ export async function start(requestedAgent?: AgentId): Promise<void> {
     'pluginAuth',
     `boot triple sessionId=${session.id} pluginId=${pluginId} tokenLen=${tokenForLog.length} tokenHead=${tokenForLog.slice(0, 12)} tokenTail=${tokenForLog.slice(-8)} mintedEqualsCached=${refreshed === session.pluginAuthToken}`,
   );
+
+  // Best-effort Headroom savings reporter — the long-lived serving daemon
+  // funnels through start() (pair-auto→start, bare `codeam`→start, etc.), so
+  // this is where the reporter must live for the SERVING daemon (pair-auto.ts
+  // only covers the transient pairing process). Gated inside
+  // maybeStartHeadroomReporter on HEADROOM_ENABLED==='1', which the backend
+  // sets for PRO users and loadCodespaceEnv() restores into process.env at
+  // boot — so the gate passes on the codespace daemon and is a no-op locally.
+  // Skip entirely when pluginAuthToken is absent/empty: an empty token
+  // guarantees a 401 on every savings POST (metering lost, 401-storm).
+  const headroomReporter = session.pluginAuthToken
+    ? maybeStartHeadroomReporter({
+        sessionId: session.id,
+        pluginId,
+        pluginAuthToken: session.pluginAuthToken,
+        codespaceId: process.env['CODESPACE_NAME'] ?? session.id,
+      })
+    : null;
+  process.once('exit', () => {
+    headroomReporter?.stop();
+  });
 
   // Codespace: pre-complete Claude's first-run onboarding BEFORE anything
   // launches claude (the ACP agent + the `claude -p` preview prewarm). Without

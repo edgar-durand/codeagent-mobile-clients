@@ -23,6 +23,7 @@ import {
   shutdownTelemetry,
 } from './services/telemetry.service';
 import { EXIT_FAILURE, EXIT_USAGE } from './exit-codes';
+import { loadCodespaceEnv } from './config';
 import * as os from 'node:os';
 
 // Guarantee $HOME is set before ANY command runs. The self-hosted
@@ -43,6 +44,16 @@ if (!process.env.HOME) {
     /* os.homedir() can throw if the uid has no passwd entry — leave unset */
   }
 }
+
+// Load `~/.codeam/codespace-env.json` into process.env BEFORE any command
+// runs. The codespace serving daemon is spawned via `setsid` (no shell rc),
+// so the backend bootstrap's exported vars (PREVIEW_TUNNEL_TOKEN/HOSTNAME,
+// HEADROOM_*) never reach the daemon's env. Reading the file here restores
+// them so the named preview tunnel + the Headroom savings reporter (gated on
+// HEADROOM_ENABLED, checked downstream) both work on the daemon. No-op on
+// local / self-hosted where the file is absent; an explicit env var always
+// wins over the file.
+loadCodespaceEnv();
 
 const [, , command, ...args] = process.argv;
 
