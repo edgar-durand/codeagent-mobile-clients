@@ -1,4 +1,5 @@
 import { spawn } from 'child_process';
+import * as fs from 'fs/promises';
 import * as path from 'path';
 import { log } from '../logger';
 import { isIgnoredFilePath } from '../file-watcher/ignored-paths';
@@ -39,8 +40,8 @@ export interface CollectOptions {
  *      added, deleted, renamed, or untracked file with their porcelain
  *      status codes. Null-separated so paths with newlines stay safe.
  *   2. `git diff --numstat -z HEAD` → numerical add/remove counts per
- *      tracked file. Untracked-file counts are synthesized from the
- *      file's own line count.
+ *      tracked file. Untracked files (`??`) are absent from numstat;
+ *      their line counts are synthesized by reading the file directly.
  *
  * This replaces the per-save / per-file `git diff <path>` storm the
  * legacy chokidar-driven watcher fires. For a turn that touches 30
@@ -75,7 +76,35 @@ export async function collectRepoChangeset(
     // Drop before the API hop; api-v2's `isIgnoredFilePath` would
     // reject these anyway, this just saves the round-trip.
     if (isIgnoredFilePath(row.filePath)) continue;
-    const stats = numstat.get(row.filePath) ?? { added: 0, removed: 0 };
+
+    const numstatEntry = numstat.get(row.filePath);
+
+    // Untracked files (`??` porcelain code) are absent from
+    // `git diff --numstat HEAD` because git has no knowledge of them
+    // yet. Synthesize their line count by reading the file directly so
+    // the mobile/web review shows real content instead of "+0 −0".
+    //
+    // Staged new files (index code `A`) DO appear in numstat — the
+    // absence test below is therefore specific to the untracked case.
+    //
+    // Guards mirroring the existing tracked-file path:
+    //   • Binary files: `readUntrackedLineCount` returns 0 on a
+    //     read error caused by non-UTF-8 content, same as the `-`
+    //     treatment in parseNumstat.
+    //   • Large files: capped at MAX_UNTRACKED_LINE_SCAN lines to
+    //     avoid buffering multi-MB files into memory — beyond the cap
+    //     we use the capped count, which is still >> 0 so the rail
+    //     lights up correctly.
+    let stats: { added: number; removed: number };
+    if (row.fileStatus === 'added' && numstatEntry === undefined) {
+      const lineCount = await readUntrackedLineCount(
+        path.join(opts.repoRoot, row.filePath),
+      );
+      stats = { added: lineCount, removed: 0 };
+    } else {
+      stats = numstatEntry ?? { added: 0, removed: 0 };
+    }
+
     entries.push({
       filePath: row.filePath,
       fileStatus: row.fileStatus,
@@ -96,6 +125,55 @@ export async function collectRepoChangeset(
 interface PorcelainRow {
   filePath: string;
   fileStatus: 'modified' | 'added' | 'deleted' | 'renamed';
+}
+
+/**
+ * Maximum number of lines we scan when synthesizing the line count
+ * for an untracked file. Prevents buffering multi-MB files into
+ * memory for files the user would never actually review. The cap
+ * is intentionally generous (100 k lines) — hitting it means the
+ * file has real content and the count is still >> 0 so the review
+ * rail lights up correctly.
+ */
+const MAX_UNTRACKED_LINE_SCAN = 100_000;
+
+/**
+ * Count the lines in an untracked file so we can synthesise its
+ * `linesAdded` stat without spawning git.
+ *
+ * Returns 0 on any read error (file vanished, binary content that
+ * can't be decoded as UTF-8, permission denied) — identical to the
+ * `-\t-\t…` binary treatment in `parseNumstat`.
+ *
+ * Exposed via `_readUntrackedLineCountImpl` for test stubbing,
+ * mirroring the `_runGitImpl` seam.
+ */
+export const _readUntrackedLineCountImpl = {
+  read: defaultReadUntrackedLineCount,
+};
+
+function readUntrackedLineCount(absPath: string): Promise<number> {
+  return _readUntrackedLineCountImpl.read(absPath);
+}
+
+async function defaultReadUntrackedLineCount(absPath: string): Promise<number> {
+  try {
+    const content = await fs.readFile(absPath, 'utf8');
+    // Count newlines, capping at MAX_UNTRACKED_LINE_SCAN. A file
+    // with no trailing newline still counts its last line.
+    let count = 0;
+    let pos = -1;
+    while ((pos = content.indexOf('\n', pos + 1)) !== -1) {
+      count += 1;
+      if (count >= MAX_UNTRACKED_LINE_SCAN) return count;
+    }
+    // If the file has content but no newlines (single line, no
+    // trailing newline), report 1 so the entry is non-zero.
+    return content.length > 0 ? Math.max(count, 1) : 0;
+  } catch {
+    // Binary file, permission error, file vanished — degrade to 0.
+    return 0;
+  }
 }
 
 /**
