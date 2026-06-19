@@ -36,6 +36,7 @@
  */
 
 import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
+import * as os from 'node:os';
 import { CommandRelayService, type RemoteCommand } from '../services/command-relay.service';
 import type { AgentMetadata } from '@codeagent/shared';
 import { log } from '../services/logger';
@@ -89,6 +90,15 @@ interface DeployPayload {
    * is trusted to clone on its own. NEVER logged.
    */
   cloneToken?: string;
+  /**
+   * Shell that installs the selected agent's CLI (from the backend's
+   * per-agent provisioning strategy — same one the codespace bootstrap
+   * runs). Executed before spawning so the agent binary is on PATH for
+   * anything that shells out to it, notably `claude -p` / `codex` preview
+   * detection. Best-effort: a failed install doesn't block the deploy —
+   * the chat agent runs via the bundled ACP SDK regardless.
+   */
+  agentInstallScript?: string;
 }
 
 /** The stop command payload (mirrors the backend `SelfHostedStopCommand`). */
@@ -461,6 +471,22 @@ export class HostAgentSupervisor {
         };
       }
 
+      // 1b) Install the selected agent's CLI (per-agent strategy from the
+      //     backend — same one the codespace bootstrap runs). Best-effort:
+      //     a failure never blocks the deploy (the chat agent runs via the
+      //     bundled ACP SDK regardless), but without it `claude -p` / `codex`
+      //     preview detection finds no binary on a self-hosted box.
+      if (payload.agentInstallScript) {
+        report('installing', 'installing agent CLI');
+        await this.runAgentInstall(payload.agentInstallScript);
+      }
+      // Put the installer's target (claude.ai/install.sh → ~/.local/bin) on
+      // the child's PATH so the freshly-installed binary resolves for both
+      // the agent and the `claude -p` / `codex` detection spawn. npm-global
+      // installs (codex) already land on PATH; this is the additive case.
+      const home = process.env.HOME || os.homedir();
+      childEnv.PATH = `${home}/.local/bin:${process.env.PATH ?? ''}`;
+
       // 2) Spawn the supervised `pair-auto` child.
       report('spawning', 'starting agent');
       const proc = this.spawnChild(childEnv, cwd, extraArgs);
@@ -514,6 +540,56 @@ export class HostAgentSupervisor {
       }
       report('failed', message);
     }
+  }
+
+  /**
+   * Run the backend-supplied per-agent CLI install script (e.g.
+   * `claude.ai/install.sh`, `npm i -g @openai/codex`). Best-effort + bounded:
+   * a non-zero exit / timeout is logged but never rejects, so a box that
+   * can't reach an installer still deploys (the chat agent runs via the
+   * bundled ACP SDK; only `claude -p` / `codex` preview detection degrades).
+   * HOME is forced so the installer's `~/.local/bin` resolves on a detached
+   * host-agent whose env may lack it.
+   */
+  private runAgentInstall(script: string): Promise<void> {
+    return new Promise((resolve) => {
+      const home = process.env.HOME || os.homedir();
+      const child = spawn('sh', ['-c', script], {
+        env: { ...process.env, HOME: home },
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      const onData = (b: Buffer): void => {
+        const line = b.toString().replace(/\n+$/g, '');
+        if (line) log.info('host-agent', `agent-install: ${line}`);
+      };
+      child.stdout?.on('data', onData);
+      child.stderr?.on('data', onData);
+      let settled = false;
+      const done = (): void => {
+        if (settled) return;
+        settled = true;
+        resolve();
+      };
+      const timer = setTimeout(() => {
+        log.warn('host-agent', 'agent install timed out (180s) — preview detection may be unavailable');
+        try { child.kill('SIGTERM'); } catch { /* already dead */ }
+        done();
+      }, 180_000);
+      child.once('exit', (code) => {
+        clearTimeout(timer);
+        if (code !== 0) {
+          log.warn('host-agent', `agent install exited code=${code} — preview detection may be unavailable; agent still runs`);
+        } else {
+          log.info('host-agent', 'agent CLI installed');
+        }
+        done();
+      });
+      child.once('error', (e) => {
+        clearTimeout(timer);
+        log.warn('host-agent', `agent install spawn error: ${e.message}`);
+        done();
+      });
+    });
   }
 
   /**
