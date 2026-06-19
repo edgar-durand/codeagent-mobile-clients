@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import * as path from 'path';
 import {
   _runGitImpl,
   _readUntrackedLineCountImpl,
@@ -150,9 +151,12 @@ describe('collectRepoChangeset', () => {
       repoPath: 'myrepo',
       repoName: 'myrepo',
     });
-    // Confirm we asked to read the right absolute path.
+    // Confirm we asked to read the right absolute path. Build the
+    // expected path with `path.join` so the assertion matches the
+    // production code's join (which uses the platform separator —
+    // backslashes on Windows CI, forward slashes elsewhere).
     expect(_readUntrackedLineCountImpl.read).toHaveBeenCalledWith(
-      '/tmp/fake-repo/src/new-feature.ts',
+      path.join('/tmp/fake-repo', 'src/new-feature.ts'),
     );
   });
 
