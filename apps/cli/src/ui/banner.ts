@@ -82,21 +82,21 @@ function boxRow(content: string, visibleLength: number): string {
  * printed once and never updated).
  */
 export function showPairingCode(code: string): void {
-  console.log(BOX_BORDER_TOP);
+  out(BOX_BORDER_TOP);
   // Visible prefix "  Code:  " = 9 chars; code is 6 chars; total 15
   // visible, padded out to BOX_INTERIOR. The ANSI bold+yellow wraps the
   // code AFTER we've computed the visible length so the pad is honest.
   const codeVisible = `  Code:  ${code}`.length;
-  console.log(
+  out(
     boxRow(`  Code:  ${pc.bold(pc.yellow(code))}`, codeVisible),
   );
-  console.log(BOX_BORDER_BOT);
-  console.log('');
+  out(BOX_BORDER_BOT);
+  out('');
 
   qrcode.generate(code, { small: true }, (qr: string) => {
-    qr.split('\n').forEach((line) => console.log('  ' + line));
+    qr.split('\n').forEach((line) => out('  ' + line));
   });
-  console.log('');
+  out('');
 }
 
 /** Format a remaining-seconds value as `M:SS`. */

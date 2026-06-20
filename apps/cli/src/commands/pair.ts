@@ -85,8 +85,9 @@ export async function pair(args: string[] = []): Promise<void> {
   }
 
   showPairingCode(result.code);
-  console.log(pc.dim('  Scan the QR code or enter the code in CodeAgent Mobile.'));
-  console.log('');
+  process.stderr.write(
+    `${pc.dim('  Scan the QR code or enter the code in CodeAgent Mobile.')}\n\n`,
+  );
 
   const waitSpin = p.spinner();
   const waitMessage = (): string =>
