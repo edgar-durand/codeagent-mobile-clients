@@ -117,7 +117,21 @@ export async function maybeSendOnboardingWelcome(opts: {
   if (_onboardingSeam.disabled()) return;
   const marker = _onboardingSeam.markerPath(opts.sessionId);
   try {
-    if (_onboardingSeam.exists(marker)) return; // already welcomed this session
+    if (_onboardingSeam.exists(marker)) {
+      // Already welcomed in a PRIOR run — this is a RESUME (supervisor
+      // restart / auto-update / dormant-wake). Don't re-publish the welcome
+      // live, but DO re-seed it into this run's (empty) history: the first
+      // flush REPLACES the durable conversation with its in-memory list, so
+      // without this a later flush — e.g. a failed/auth turn — would drop the
+      // welcome banner the user still has on screen. Silent: no live publish,
+      // no flush (the next real turn's flush carries it). Best-effort.
+      try {
+        opts.history.appendAgentInitiatedReply(buildOnboardingWelcome(opts.cwd));
+      } catch {
+        /* non-fatal — worst case the welcome is absent from a resumed flush */
+      }
+      return;
+    }
     _onboardingSeam.write(marker);
   } catch (err) {
     // Can't read/write the marker — skip rather than risk re-welcoming on a

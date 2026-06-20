@@ -72,7 +72,7 @@ describe('maybeSendOnboardingWelcome', () => {
     expect(history.flush).toHaveBeenCalledTimes(1);
   });
 
-  it('does NOT re-send when the session was already welcomed (marker exists)', () => {
+  it('on resume (marker exists) re-seeds the welcome into history WITHOUT re-publishing it live', () => {
     vi.spyOn(_onboardingSeam, 'disabled').mockReturnValue(false);
     vi.spyOn(_onboardingSeam, 'exists').mockReturnValue(true);
     const write = vi.spyOn(_onboardingSeam, 'write').mockImplementation(() => {});
@@ -81,9 +81,16 @@ describe('maybeSendOnboardingWelcome', () => {
 
     maybeSendOnboardingWelcome({ streaming, history, sessionId: 'sess-123', cwd: '/repo/acme' });
 
+    // No LIVE re-send: no turn, no flush, marker untouched.
     expect(streaming.beginTurn).not.toHaveBeenCalled();
     expect(history.flush).not.toHaveBeenCalled();
     expect(write).not.toHaveBeenCalled();
+    // But the welcome IS re-seeded into this run's (empty-on-resume) history,
+    // so a later flush (e.g. a failed/auth turn that REPLACES the durable
+    // conversation) can't drop the welcome banner the user still sees.
+    expect(history.appendAgentInitiatedReply).toHaveBeenCalledWith(
+      buildOnboardingWelcome('/repo/acme'),
+    );
   });
 
   it('is a complete no-op when the kill-switch is set (never touches the marker)', () => {
