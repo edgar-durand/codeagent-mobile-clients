@@ -382,6 +382,22 @@ export class AcpClient {
     if (!this.connection) {
       throw new Error('AcpClient.loadSession called before start()');
     }
+    // Self-load guard. Resuming the conversation that is ALREADY the active
+    // session (the common case — the user taps the current conversation in the
+    // history list) is a no-op semantically, but issuing `session/load` for it
+    // is actively harmful: Claude Code resumes by RELAUNCHING with `--resume`
+    // (it can't switch into a session it is already running — see
+    // claude/runtime.ts), so the adapter tries to relaunch Claude into the
+    // session it's already serving and the process wedges — every subsequent
+    // `prompt` then hangs 90s with "adapter sent no updates" and the agent
+    // appears dead. Skip the redundant RPC; the session is already loaded.
+    if (sessionId === this.sessionId) {
+      log.info(
+        'acpClient',
+        `loadSession skipped — already the active session (${sessionId.slice(0, 8)})`,
+      );
+      return;
+    }
     log.info('acpClient', `loadSession → sessionId=${sessionId.slice(0, 8)}`);
     await this.connection.loadSession({
       sessionId,
