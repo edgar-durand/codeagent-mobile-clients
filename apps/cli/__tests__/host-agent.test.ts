@@ -1114,6 +1114,7 @@ describe('HostAgentSupervisor — self_hosted_wipe control command', () => {
 
     const relayStop = vi.fn();
     const disableService = vi.fn();
+    const teardownHeadroom = vi.fn();
     const onIdentityRejected = vi.fn(() => {
       fs.rmSync(hostIdentityPath(), { force: true });
     });
@@ -1121,6 +1122,7 @@ describe('HostAgentSupervisor — self_hosted_wipe control command', () => {
     const sup = new HostAgentSupervisor(IDENTITY, {
       makeRelay: () => ({ start: vi.fn(), stop: relayStop }),
       disableService,
+      teardownHeadroom,
       onIdentityRejected,
     });
     sup.start();
@@ -1133,9 +1135,41 @@ describe('HostAgentSupervisor — self_hosted_wipe control command', () => {
     });
 
     expect(relayStop).toHaveBeenCalled(); // children + channel torn down
+    expect(teardownHeadroom).toHaveBeenCalledTimes(1); // per-host proxy reaped
     expect(disableService).toHaveBeenCalledTimes(1);
     expect(onIdentityRejected).toHaveBeenCalledTimes(1);
     expect(fs.existsSync(hostIdentityPath())).toBe(false);
+  });
+
+  it('does NOT tear down the Headroom proxy on a per-session self_hosted_stop (shared singleton)', async () => {
+    fs.mkdirSync(path.dirname(hostIdentityPath()), { recursive: true });
+    fs.writeFileSync(hostIdentityPath(), JSON.stringify(IDENTITY));
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: async () => ({ success: true, data: { ok: true } }),
+      }),
+    );
+
+    const teardownHeadroom = vi.fn();
+    const sup = new HostAgentSupervisor(IDENTITY, {
+      makeRelay: () => ({ start: vi.fn(), stop: vi.fn() }),
+      teardownHeadroom,
+    });
+    sup.start();
+
+    await sup.handleCommand({
+      id: 'cmd-stop',
+      sessionId: 'sh-plugin-1',
+      type: 'self_hosted_stop',
+      payload: { sessionId: 'sh-plugin-1' },
+    });
+
+    // The proxy is shared across sessions on the box — a single session stop
+    // must NOT reap it (only a full self_hosted_wipe does).
+    expect(teardownHeadroom).not.toHaveBeenCalled();
   });
 });
 

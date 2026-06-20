@@ -1069,6 +1069,45 @@ const defaultDisableService = (): void => {
   }
 };
 
+/**
+ * Best-effort Headroom teardown for `self_hosted_wipe` (full de-provision).
+ *
+ * The Headroom proxy is a per-HOST singleton on :8787, started detached +
+ * unref'd with NO handle retained (by the supervisor warm-start and/or the
+ * durable `headroom install` + SessionStart hook). The supervisor's normal
+ * child teardown therefore never reaps it, so on a full de-provision it would
+ * leak: keep holding :8787, keep a uvicorn master+worker alive, and keep
+ * polling Anthropic subscription usage every 5 min. We must stop it explicitly.
+ *
+ * IMPORTANT: this runs ONLY on `self_hosted_wipe` (the whole host is being
+ * removed), never on `self_hosted_stop` — the proxy is shared across all
+ * sessions on the box, so killing it per-session would break the others.
+ */
+const defaultTeardownHeadroom = (): void => {
+  // 1. Undo the durable integration first so a future agent start can't relaunch
+  //    the proxy from the SessionStart hook / settings.json base URL.
+  try {
+    const kind = (JSON.parse(fs.readFileSync(headroomConfigPath(), 'utf8')) as { agent?: string })
+      .agent;
+    if (kind) {
+      execFileSync('headroom', ['unwrap', kind], { stdio: 'ignore', timeout: 15_000 });
+    }
+  } catch {
+    /* no config / headroom absent / unwrap unsupported — best-effort */
+  }
+  // 2. Stop the running proxy (no handle was kept). SIGTERM lets uvicorn flush
+  //    its savings ledger and reap its own workers; pkill skips its own pid and
+  //    matches both `headroom proxy …` and `python -m headroom.cli proxy …`.
+  try {
+    execFileSync('pkill', ['-TERM', '-f', 'headroom.*proxy'], { stdio: 'ignore' });
+  } catch {
+    /* pkill absent (non-Linux) or nothing matched — best-effort */
+  }
+  // 3. Mark the persisted config disabled so any stray resume can't point a
+  //    child at the now-dead proxy.
+  persistHeadroomConfig({ enabled: false });
+};
+
 /** The slice of MetricsCollector the supervisor depends on (injectable for tests). */
 export type HostMetricsCollector = Pick<MetricsCollector, 'collect' | 'recordLatency'>;
 
@@ -1094,6 +1133,13 @@ export interface HostAgentDeps {
   onIdentityRejected?: () => void;
   /** Best-effort de-provision for `self_hosted_wipe`. Injectable for tests. */
   disableService?: () => void;
+  /**
+   * Best-effort Headroom proxy teardown for `self_hosted_wipe`. Defaults to
+   * {@link defaultTeardownHeadroom} (unwrap durable integration + kill the
+   * orphaned proxy on :8787). Injectable so tests assert the wipe path without
+   * running real pkill/headroom.
+   */
+  teardownHeadroom?: () => void;
   /**
    * Headroom setup function. Defaults to `setupHeadroomForSelfHosted`.
    * Injectable so tests mock away real pip/spawn without touching the file system.
@@ -1148,6 +1194,7 @@ export class HostAgentSupervisor {
   private readonly onIdentityRejected: () => void;
   /** Best-effort systemd de-provision used by `self_hosted_wipe`. */
   private readonly disableService: () => void;
+  private readonly teardownHeadroom: () => void;
   /** Guards against firing the self-heal more than once. */
   private healing = false;
 
@@ -1161,6 +1208,7 @@ export class HostAgentSupervisor {
     this.metrics = deps.metricsCollector ?? new MetricsCollector();
     this.onIdentityRejected = deps.onIdentityRejected ?? defaultOnIdentityRejected;
     this.disableService = deps.disableService ?? defaultDisableService;
+    this.teardownHeadroom = deps.teardownHeadroom ?? defaultTeardownHeadroom;
     this.selfUpdate = deps.selfUpdate ?? runSelfUpdate;
     this.onUpdated = deps.onUpdated ?? defaultOnUpdated;
   }
@@ -1418,6 +1466,10 @@ export class HostAgentSupervisor {
       // restart us into a cleanly-failing redeem.)
       log.warn('host-agent', `self_hosted_wipe received id=${cmd.id} — de-provisioning`);
       this.stop();
+      // Reap the per-host Headroom proxy too — stop() only kills tracked
+      // children, and the proxy is detached with no handle, so it would
+      // otherwise leak (holds :8787, keeps uvicorn + subscription polling alive).
+      this.teardownHeadroom();
       this.disableService();
       if (!this.healing) {
         this.healing = true;
