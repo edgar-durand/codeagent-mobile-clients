@@ -56,6 +56,7 @@ import {
   unsealAgentAuth,
   type AgentAuthResolver,
   type HostMetrics,
+  type HostSession,
   type SealedHostIdentity,
 } from './host/host-client';
 import { isAbsolutePathTarget, prepareWorkspace } from './host/workspace';
@@ -306,6 +307,13 @@ const CONTROL_AGENT_META: AgentMetadata = {
 interface ChildSession {
   deployId: string;
   proc: ChildProcess;
+  /**
+   * The agent kind this child runs (the deploy's `agentId`), surfaced on the
+   * heartbeat so the app's My Servers screen can label the active session.
+   */
+  agent: string;
+  /** epoch ms when the child was spawned — surfaced on the heartbeat. */
+  startedAt: number;
 }
 
 /**
@@ -1159,9 +1167,13 @@ export class HostAgentSupervisor {
       } catch (err) {
         log.trace('host-agent', 'metrics collection failed', err);
       }
+      // Active supervised sessions, derived from the live children map. Always
+      // an array (empty when no children) so the backend reflects "0 active".
+      // Additive to the heartbeat body — older backends ignore it.
+      const sessions = this.activeSessions();
       // Measure this beat's round-trip and feed it back as the next beat's
       // latencyMs (a real measured value, not a guess).
-      const latencyMs = await sendHostHeartbeat(this.identity, metrics);
+      const latencyMs = await sendHostHeartbeat(this.identity, metrics, sessions);
       this.metrics.recordLatency(latencyMs);
       // First successful heartbeat means the control channel is live —
       // report 'connected' once (host-token auth). Best-effort, fire it
@@ -1261,6 +1273,23 @@ export class HostAgentSupervisor {
   /** Number of live children — for tests + diagnostics. */
   childCount(): number {
     return this.children.size;
+  }
+
+  /**
+   * Snapshot the supervisor's live children as heartbeat session entries.
+   *
+   * Each entry's `id` is the deployId-correlated sessionId the backend
+   * recognizes (the supervisor keys its children by it — the same id a
+   * `self_hosted_stop` arrives with, see `stopChild`). `agent` is the deploy's
+   * `agentId`; `startedAt` is the epoch-ms spawn time tracked on the child.
+   * Returns `[]` when no children are active so the backend reflects "0 active".
+   */
+  private activeSessions(): HostSession[] {
+    return [...this.children.values()].map((child) => ({
+      id: child.deployId,
+      agent: child.agent,
+      startedAt: child.startedAt,
+    }));
   }
 
   /**
@@ -1443,7 +1472,12 @@ export class HostAgentSupervisor {
       // Track by deployId now; the stop command uses sessionId, which the
       // backend correlates to this deploy (the control channel pushed the
       // stop with the session the child paired into).
-      const child: ChildSession = { deployId: payload.deployId, proc };
+      const child: ChildSession = {
+        deployId: payload.deployId,
+        proc,
+        agent: payload.agentId,
+        startedAt: Date.now(),
+      };
       this.children.set(payload.deployId, child);
 
       // Capture a rolling tail of the child's stdout/stderr so an EARLY

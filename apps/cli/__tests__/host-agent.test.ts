@@ -811,6 +811,152 @@ describe('HostAgentSupervisor — heartbeat metrics', () => {
   });
 });
 
+describe('sendHostHeartbeat — sessions on the body', () => {
+  it('includes the sessions array when supplied', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ success: true, data: { ok: true } }),
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    await sendHostHeartbeat(IDENTITY, undefined, [
+      { id: 'sess-1', agent: 'claude_code', startedAt: 1_700_000_000_000 },
+    ]);
+
+    const [, init] = fetchMock.mock.calls[0];
+    const body = JSON.parse((init as { body: string }).body);
+    expect(body.sessions).toEqual([
+      { id: 'sess-1', agent: 'claude_code', startedAt: 1_700_000_000_000 },
+    ]);
+  });
+
+  it('sends an empty sessions array (0 active) when supplied []', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ success: true, data: { ok: true } }),
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    await sendHostHeartbeat(IDENTITY, undefined, []);
+
+    const [, init] = fetchMock.mock.calls[0];
+    const body = JSON.parse((init as { body: string }).body);
+    expect(body.sessions).toEqual([]);
+  });
+
+  it('omits sessions from the body when none supplied (back-compat)', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ success: true, data: { ok: true } }),
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    await sendHostHeartbeat(IDENTITY);
+
+    const [, init] = fetchMock.mock.calls[0];
+    const body = JSON.parse((init as { body: string }).body);
+    expect(body.sessions).toBeUndefined();
+  });
+});
+
+describe('HostAgentSupervisor — active sessions on heartbeat', () => {
+  /** Find the most-recent heartbeat POST body in a fetch mock. */
+  function lastHeartbeatBody(
+    fetchMock: ReturnType<typeof vi.fn>,
+  ): Record<string, unknown> {
+    const calls = fetchMock.mock.calls.filter((c) =>
+      String(c[0]).includes('/api/self-hosted/heartbeat'),
+    );
+    expect(calls.length).toBeGreaterThan(0);
+    const last = calls[calls.length - 1];
+    return JSON.parse((last[1] as { body: string }).body);
+  }
+
+  it('emits sessions: [] on a heartbeat when no children are active', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ success: true, data: { ok: true } }),
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const sup = new HostAgentSupervisor(IDENTITY, {
+      makeRelay: () => ({ start: vi.fn(), stop: vi.fn() }),
+    });
+    sup.start(); // fires one immediate beat
+    await Promise.resolve();
+    await Promise.resolve();
+    sup.stop();
+
+    const body = lastHeartbeatBody(fetchMock);
+    expect(body.sessions).toEqual([]);
+  });
+
+  it('lists the spawned child session after a deploy', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ success: true, data: { ok: true } }),
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const cwdTarget = fs.mkdtempSync(path.join(os.tmpdir(), 'codeam-ws-'));
+    // A never-exiting child so it stays in the children map across the beat.
+    const child = fakeChildWithStreams();
+    const resolveAgentAuth = vi
+      .fn<(i: SealedHostIdentity, s: string) => Promise<AgentAuth>>()
+      .mockResolvedValue({ kind: 'oauth_token', value: '{"claudeAiOauth":{}}' });
+
+    const sup = new HostAgentSupervisor(IDENTITY, {
+      makeRelay: () => ({ start: vi.fn(), stop: vi.fn() }),
+      spawnChild: () => child,
+      resolveAgentAuth,
+    });
+
+    const before = Date.now();
+    await sup.handleCommand(
+      deployCmd({ repoOrPath: cwdTarget, deployId: 'deploy-42', agentId: 'claude_code' }),
+    );
+    expect(sup.childCount()).toBe(1);
+
+    // Drive a heartbeat manually (start() also beats, but we call it after the
+    // deploy so the child is already tracked).
+    sup.start();
+    await Promise.resolve();
+    await Promise.resolve();
+    sup.stop();
+
+    const body = lastHeartbeatBody(fetchMock);
+    const sessions = body.sessions as Array<{ id: string; agent?: string; startedAt?: number }>;
+    expect(sessions).toHaveLength(1);
+    expect(sessions[0].id).toBe('deploy-42');
+    expect(sessions[0].agent).toBe('claude_code');
+    expect(typeof sessions[0].startedAt).toBe('number');
+    expect(sessions[0].startedAt).toBeGreaterThanOrEqual(before);
+
+    // After the child is stopped, the next heartbeat drops it (0 active).
+    fetchMock.mockClear();
+    await sup.handleCommand({
+      id: 'cmd-stop',
+      sessionId: 'sh-plugin-1',
+      type: 'self_hosted_stop',
+      payload: { sessionId: 'deploy-42' },
+    });
+    expect(sup.childCount()).toBe(0);
+
+    sup.start();
+    await Promise.resolve();
+    await Promise.resolve();
+    sup.stop();
+    expect(lastHeartbeatBody(fetchMock).sessions).toEqual([]);
+
+    fs.rmSync(cwdTarget, { recursive: true, force: true });
+  });
+});
+
 describe('HostAgentSupervisor — self-heal on rejected host-token', () => {
   /** Seal the identity on disk so the wipe path has something to remove. */
   function sealIdentity(): void {

@@ -286,22 +286,38 @@ export async function redeemEnrollToken(
 }
 
 /**
+ * One active supervised session on the heartbeat body, so the backend can
+ * show the box's live sessions on the My Servers screen. `id` is the real
+ * sessionId the backend recognizes; `agent`/`startedAt` are best-effort.
+ * Additive contract — older backends ignore unknown fields.
+ */
+export interface HostSession {
+  id: string;
+  agent?: string;
+  startedAt?: number;
+}
+
+/**
  * Send a liveness heartbeat (state liveness, NOT command polling).
  *
  * Optionally carries live system metrics (additive; the backend treats
- * `metrics` as optional). Returns the measured round-trip latency of THIS
- * request in ms, so the caller can feed it back as the `latencyMs` of the
- * next beat (the only way to send a real, measured latency).
+ * `metrics` as optional) and the box's currently-active supervised sessions
+ * (`sessions`, also additive — an empty array reflects "0 active"). Returns
+ * the measured round-trip latency of THIS request in ms, so the caller can
+ * feed it back as the `latencyMs` of the next beat (the only way to send a
+ * real, measured latency).
  */
 export async function sendHostHeartbeat(
   identity: SealedHostIdentity,
   metrics?: HostMetrics,
+  sessions?: HostSession[],
 ): Promise<number> {
   const start = process.hrtime.bigint();
   await postJson<{ ok: boolean }>('/api/self-hosted/heartbeat', {
     hostId: identity.hostId,
     hostToken: identity.hostToken,
     ...(metrics ? { metrics } : {}),
+    ...(sessions ? { sessions } : {}),
   });
   const elapsedNs = process.hrtime.bigint() - start;
   return Math.round(Number(elapsedNs) / 1_000_000);
