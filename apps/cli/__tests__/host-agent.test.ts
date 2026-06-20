@@ -11,6 +11,8 @@ import {
   resolveHostIdentity,
   type ChildSpawner,
   setupHeadroomForSelfHosted,
+  detectPackageManager,
+  type HeadroomRunner,
 } from '../src/commands/host-agent';
 import { hostEnroll } from '../src/commands/host';
 import {
@@ -1197,4 +1199,309 @@ describe('setupHeadroomForSelfHosted — unit (real subprocess)', () => {
     // Not asserting true/false — behaviour depends on what's installed.
     // The important invariant is that it never throws.
   }, 30_000); // generous timeout for real pip attempts
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// setupHeadroomForSelfHosted — injectable runner tests
+//
+// These tests use a mock HeadroomRunner so no real apt/pip/python3 runs.
+// They verify:
+//   • Never-throw contract holds regardless of runner results.
+//   • When pip is ABSENT (which fails for pip+pip3), the package-manager
+//     install is attempted BEFORE the pip install.
+//   • A PEP 668 "externally-managed-environment" error on the first pip
+//     attempt triggers a retry with --break-system-packages.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('setupHeadroomForSelfHosted — injectable runner (no real subprocess)', () => {
+  /**
+   * Build a complete mock HeadroomRunner from:
+   *   `presentCmds` — set of command names that `which()` should return true for
+   *   `runResponses` — map of `"<cmd>"` → result for `run()` calls; default
+   *                    is `{ code: 0, stderr: '' }` for anything unmatched.
+   *
+   * `run` dispatches by `cmd`; for `python3` the first unmatched-by-args call
+   * gets the plain 'python3' response; callers that need different per-args
+   * behaviour should build a custom runner directly.
+   */
+  function makeRunner(
+    presentCmds: string[],
+    runResponses: Record<string, { code: number | null; stderr: string }> = {},
+  ): HeadroomRunner & { calls: Array<{ cmd: string; args: string[] }> } {
+    const present = new Set(presentCmds);
+    const calls: Array<{ cmd: string; args: string[] }> = [];
+    return {
+      calls,
+      which(cmd: string): boolean {
+        return present.has(cmd);
+      },
+      run(cmd: string, args: string[]): Promise<{ code: number | null; stderr: string }> {
+        calls.push({ cmd, args });
+        return Promise.resolve(runResponses[cmd] ?? { code: 0, stderr: '' });
+      },
+    };
+  }
+
+  it('never throws — returns boolean even when runner always fails', async () => {
+    // pip present (which returns true for pip), but python3 -m pip fails.
+    const runner = makeRunner(['pip'], {
+      python3: { code: 1, stderr: 'some random error, not pep668' },
+    });
+
+    const result = await setupHeadroomForSelfHosted('claude', runner);
+    expect(typeof result).toBe('boolean');
+    expect(result).toBe(false); // install failed → false (never throws)
+  });
+
+  it('when pip is absent, calls the package-manager (apt-get) before python3 -m pip', async () => {
+    // Simulate: pip absent, pip3 absent, apt-get present, headroom absent.
+    // apt-get update+install succeed; python3 -m pip succeeds.
+    // headroom not in presentCmds → init step skips → returns false.
+    // We assert ORDER: pm install before pip install.
+    //
+    // When not running as root (the common test environment), the code prefixes
+    // the pm command with `sudo`. The runner must therefore also accept `sudo`.
+    const isRoot = process.getuid?.() === 0;
+    const runner = makeRunner(
+      ['apt-get'], // pip and pip3 are absent; headroom absent
+      {
+        // Root: command is 'apt-get'; non-root: command is 'sudo'.
+        'apt-get': { code: 0, stderr: '' },
+        sudo: { code: 0, stderr: '' },
+        python3: { code: 0, stderr: '' },
+      },
+    );
+
+    await setupHeadroomForSelfHosted('claude', runner);
+
+    // When running as root the cmd is 'apt-get'; as non-root it is 'sudo'
+    // with 'apt-get' as the first arg (e.g. ['apt-get', 'update']).
+    const isAptUpdateCall = (c: { cmd: string; args: string[] }): boolean =>
+      isRoot
+        ? c.cmd === 'apt-get' && c.args.includes('update')
+        : c.cmd === 'sudo' && c.args.includes('apt-get') && c.args.includes('update');
+
+    const isAptInstallCall = (c: { cmd: string; args: string[] }): boolean =>
+      isRoot
+        ? c.cmd === 'apt-get' && c.args.includes('install')
+        : c.cmd === 'sudo' && c.args.includes('apt-get') && c.args.includes('install');
+
+    const aptUpdateIdx = runner.calls.findIndex(isAptUpdateCall);
+    const pipIdx = runner.calls.findIndex((c) => c.cmd === 'python3');
+
+    expect(aptUpdateIdx).toBeGreaterThanOrEqual(0);
+    expect(pipIdx).toBeGreaterThanOrEqual(0);
+    expect(aptUpdateIdx).toBeLessThan(pipIdx);
+
+    // The apt-get install call must include python3 and python3-pip.
+    const installCall = runner.calls.find(isAptInstallCall);
+    expect(installCall).toBeDefined();
+    expect(installCall!.args).toContain('python3');
+    expect(installCall!.args).toContain('python3-pip');
+  });
+
+  it('retries python3 -m pip with --break-system-packages on PEP 668 error', async () => {
+    // pip IS on PATH → ensurePip short-circuits.
+    // First python3 -m pip install fails with PEP 668; retry with
+    // --break-system-packages succeeds.
+    // headroom is absent → init skips → overall false.
+    const calls: Array<{ cmd: string; args: string[] }> = [];
+    const runner: HeadroomRunner = {
+      which(cmd: string): boolean {
+        return cmd === 'pip'; // pip found; headroom absent
+      },
+      run(cmd: string, args: string[]): Promise<{ code: number | null; stderr: string }> {
+        calls.push({ cmd, args });
+        if (cmd === 'python3' && args[0] === '-m') {
+          if (args.includes('--break-system-packages')) {
+            return Promise.resolve({ code: 0, stderr: '' }); // retry succeeds
+          }
+          // First attempt fails with PEP 668.
+          return Promise.resolve({
+            code: 1,
+            stderr: 'error: externally-managed-environment\ninstall in a venv',
+          });
+        }
+        return Promise.resolve({ code: 0, stderr: '' });
+      },
+    };
+
+    const result = await setupHeadroomForSelfHosted('claude', runner);
+
+    // Exactly 2 python3 calls: first attempt + retry.
+    const pipCalls = calls.filter((c) => c.cmd === 'python3');
+    expect(pipCalls).toHaveLength(2);
+
+    // First call: no --break-system-packages.
+    expect(pipCalls[0].args).not.toContain('--break-system-packages');
+
+    // Second (retry) call: must have --break-system-packages.
+    expect(pipCalls[1].args).toContain('--break-system-packages');
+
+    // Both calls use `python3 -m pip install --quiet ... headroom-ai ...`.
+    for (const c of pipCalls) {
+      expect(c.args[0]).toBe('-m');
+      expect(c.args[1]).toBe('pip');
+      expect(c.args[2]).toBe('install');
+      expect(c.args).toContain('headroom-ai');
+    }
+
+    // Retry succeeded (install ok) but headroom not on PATH → init skips → false.
+    expect(result).toBe(false);
+  });
+
+  it('returns false (never throws) when PEP 668 retry also fails', async () => {
+    // Both pip install attempts fail (first: PEP 668; second: still PEP 668).
+    const calls: Array<{ cmd: string; args: string[] }> = [];
+    const runner: HeadroomRunner = {
+      which(cmd: string): boolean {
+        return cmd === 'pip';
+      },
+      run(cmd: string, args: string[]): Promise<{ code: number | null; stderr: string }> {
+        calls.push({ cmd, args });
+        if (cmd === 'python3') {
+          return Promise.resolve({
+            code: 1,
+            stderr: 'error: externally-managed-environment',
+          });
+        }
+        return Promise.resolve({ code: 0, stderr: '' });
+      },
+    };
+
+    const result = await setupHeadroomForSelfHosted('claude', runner);
+
+    expect(result).toBe(false); // both attempts failed → false (never throws)
+    // Two python3 calls: first attempt + retry.
+    expect(calls.filter((c) => c.cmd === 'python3')).toHaveLength(2);
+  });
+
+  it('returns false (never throws) when no package manager is found and pip is absent', async () => {
+    // pip absent, pip3 absent, no known package manager — which() always false.
+    let runCalled = false;
+    const runner: HeadroomRunner = {
+      which(): boolean {
+        return false; // nothing is on PATH
+      },
+      run(): Promise<{ code: number | null; stderr: string }> {
+        runCalled = true;
+        return Promise.resolve({ code: 0, stderr: '' });
+      },
+    };
+
+    const result = await setupHeadroomForSelfHosted('claude', runner);
+
+    expect(result).toBe(false); // no PM detected → bail before any run() call
+    // runner.run must NOT have been called (ensurePip bailed with no PM found).
+    expect(runCalled).toBe(false);
+  });
+
+  it('bare-box provision installs ca-certificates and curl when pip is absent (apt-get)', async () => {
+    // Bare box: pip + pip3 absent, only apt-get present, headroom absent.
+    // The install must include the TLS + fetch prerequisites so the PyPI
+    // handshake during the later pip install can succeed.
+    const isRoot = process.getuid?.() === 0;
+    const runner = makeRunner(
+      ['apt-get'],
+      {
+        'apt-get': { code: 0, stderr: '' },
+        sudo: { code: 0, stderr: '' },
+        python3: { code: 0, stderr: '' },
+      },
+    );
+
+    await setupHeadroomForSelfHosted('claude', runner);
+
+    const isInstallCall = (c: { cmd: string; args: string[] }): boolean =>
+      isRoot
+        ? c.cmd === 'apt-get' && c.args.includes('install')
+        : c.cmd === 'sudo' && c.args.includes('apt-get') && c.args.includes('install');
+
+    const installCall = runner.calls.find(isInstallCall);
+    expect(installCall).toBeDefined();
+    expect(installCall!.args).toContain('python3');
+    expect(installCall!.args).toContain('python3-pip');
+    expect(installCall!.args).toContain('ca-certificates');
+    expect(installCall!.args).toContain('curl');
+  });
+
+  it('bare-box provision installs ca-certificates and curl on pacman and zypper', async () => {
+    const isRoot = process.getuid?.() === 0;
+
+    for (const pm of ['pacman', 'zypper'] as const) {
+      const runner = makeRunner([pm], {
+        [pm]: { code: 0, stderr: '' },
+        sudo: { code: 0, stderr: '' },
+        python3: { code: 0, stderr: '' },
+      });
+
+      await setupHeadroomForSelfHosted('claude', runner);
+
+      // Find the package-manager install call (root: cmd is the pm; non-root: sudo <pm> …).
+      const installCall = runner.calls.find((c) =>
+        isRoot ? c.cmd === pm : c.cmd === 'sudo' && c.args[0] === pm,
+      );
+      expect(installCall, `expected a ${pm} install call`).toBeDefined();
+      const argv = isRoot ? [installCall!.cmd, ...installCall!.args] : installCall!.args;
+      expect(argv).toContain('ca-certificates');
+      expect(argv).toContain('curl');
+      // The Python interpreter package name differs per distro.
+      expect(argv.some((a) => a === 'python3' || a === 'python')).toBe(true);
+    }
+  });
+
+  it('fast-path: when pip is present, NO package-manager install runs', async () => {
+    // pip on PATH → ensurePip short-circuits. The runner must only ever see
+    // python3 (the pip install itself) — never apt-get/apk/dnf/yum/pacman/
+    // zypper/sudo. This keeps healthy boxes from eating an apt-update on every
+    // deploy. headroom absent → init skips → overall false, but that's fine.
+    const runner = makeRunner(['pip', 'apt-get'], {
+      python3: { code: 0, stderr: '' },
+    });
+
+    await setupHeadroomForSelfHosted('claude', runner);
+
+    const pmCmds = new Set(['apt-get', 'apk', 'dnf', 'yum', 'pacman', 'zypper', 'sudo']);
+    const pmCalls = runner.calls.filter((c) => pmCmds.has(c.cmd) || c.args.some((a) => pmCmds.has(a)));
+    expect(pmCalls).toHaveLength(0);
+    // The only run() calls should be the python3 -m pip install attempt(s).
+    expect(runner.calls.every((c) => c.cmd === 'python3')).toBe(true);
+  });
+});
+
+describe('detectPackageManager — coverage across distros', () => {
+  /** Minimal runner that reports a fixed set of commands as present on PATH. */
+  function whichOnly(present: string[]): Pick<HeadroomRunner, 'which'> {
+    const set = new Set(present);
+    return { which: (cmd: string): boolean => set.has(cmd) };
+  }
+
+  it('detects pacman (Arch)', () => {
+    expect(detectPackageManager(whichOnly(['pacman']))).toBe('pacman');
+  });
+
+  it('detects zypper (openSUSE)', () => {
+    expect(detectPackageManager(whichOnly(['zypper']))).toBe('zypper');
+  });
+
+  it('detects each of the six package managers in isolation', () => {
+    expect(detectPackageManager(whichOnly(['apt-get']))).toBe('apt-get');
+    expect(detectPackageManager(whichOnly(['apk']))).toBe('apk');
+    expect(detectPackageManager(whichOnly(['dnf']))).toBe('dnf');
+    expect(detectPackageManager(whichOnly(['yum']))).toBe('yum');
+    expect(detectPackageManager(whichOnly(['pacman']))).toBe('pacman');
+    expect(detectPackageManager(whichOnly(['zypper']))).toBe('zypper');
+  });
+
+  it('prefers apt-get over later managers when several are present', () => {
+    // apt-get is first in preference order, pacman/zypper come last.
+    expect(detectPackageManager(whichOnly(['apt-get', 'dnf', 'pacman', 'zypper']))).toBe('apt-get');
+    // dnf precedes pacman/zypper.
+    expect(detectPackageManager(whichOnly(['dnf', 'pacman', 'zypper']))).toBe('dnf');
+  });
+
+  it('returns null when no known package manager is present', () => {
+    expect(detectPackageManager(whichOnly([]))).toBeNull();
+    expect(detectPackageManager(whichOnly(['brew', 'nix']))).toBeNull();
+  });
 });

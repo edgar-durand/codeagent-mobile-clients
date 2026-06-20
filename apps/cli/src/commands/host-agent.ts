@@ -276,11 +276,256 @@ interface ChildSession {
 }
 
 /**
+ * Subprocess runner injectable for `setupHeadroomForSelfHosted`.
+ *
+ * `run` returns a Promise that resolves to `{ code, stderr }` on command
+ * completion/timeout, never rejects. The `timeoutMs` bound is advisory —
+ * the runner kills the child after that many milliseconds if it is still
+ * running. Real subprocess output is captured via the default runner; tests
+ * substitute a deterministic mock without forking.
+ *
+ * `which` synchronously checks whether a command is on PATH. The default
+ * implementation shells out to `execFileSync('which', [cmd])`; tests inject
+ * a lookup function so no real subprocess runs and ESM module boundaries are
+ * never crossed.
+ */
+export interface HeadroomRunner {
+  run(
+    cmd: string,
+    args: string[],
+    opts?: { timeoutMs?: number },
+  ): Promise<{ code: number | null; stderr: string }>;
+  /** Returns true when `cmd` is present on PATH, false otherwise. */
+  which(cmd: string): boolean;
+}
+
+/** PEP 668 "externally-managed-environment" signal string (Debian 12+, Ubuntu 24.04+). */
+const PEP668_MARKER = 'externally-managed-environment';
+
+/** Timeout for the OS-level bare-box provision (python3+pip+ca-certificates+curl). */
+const PM_INSTALL_TIMEOUT_MS = 180_000;
+
+/** Timeout for each `python3 -m pip install ...` attempt. */
+const PIP_INSTALL_TIMEOUT_MS = 120_000;
+
+/**
+ * Default subprocess runner backed by Node's `spawn` (for async commands)
+ * and `execFileSync` (for synchronous `which` checks).
+ * Streams stdout/stderr to the host-agent logger, waits for exit (or
+ * timeout), and resolves — never rejects.
+ */
+const defaultHeadroomRunner: HeadroomRunner = {
+  which(cmd: string): boolean {
+    try {
+      execFileSync('which', [cmd], { stdio: 'ignore' });
+      return true;
+    } catch {
+      return false;
+    }
+  },
+  run(cmd, args, opts = {}): Promise<{ code: number | null; stderr: string }> {
+    return new Promise((resolve) => {
+      const child = spawn(cmd, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+      let stderrBuf = '';
+      let settled = false;
+      const done = (code: number | null): void => {
+        if (settled) return;
+        settled = true;
+        resolve({ code, stderr: stderrBuf });
+      };
+
+      child.stdout?.on('data', (b: Buffer) => {
+        const line = b.toString().replace(/\n+$/, '');
+        if (line) log.info('host-agent', `headroom[${cmd}]: ${line}`);
+      });
+      child.stderr?.on('data', (b: Buffer) => {
+        const chunk = b.toString();
+        stderrBuf += chunk;
+        const line = chunk.replace(/\n+$/, '');
+        if (line) log.info('host-agent', `headroom[${cmd}]: ${line}`);
+      });
+
+      const timeoutMs = opts.timeoutMs;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      if (timeoutMs !== undefined) {
+        timer = setTimeout(() => {
+          log.warn('host-agent', `headroom[${cmd}] timed out after ${timeoutMs / 1000}s — aborting`);
+          try { child.kill('SIGTERM'); } catch { /* already dead */ }
+          done(null);
+        }, timeoutMs);
+      }
+
+      child.once('exit', (code) => {
+        if (timer !== undefined) clearTimeout(timer);
+        done(code);
+      });
+      child.once('error', (e) => {
+        if (timer !== undefined) clearTimeout(timer);
+        log.trace('host-agent', `headroom[${cmd}] spawn error: ${e.message}`);
+        done(null);
+      });
+    });
+  },
+};
+
+/**
+ * Known OS package managers, in detection-preference order. apt/apk/dnf/yum
+ * cover the bulk of Linux fleets; pacman (Arch) and zypper (openSUSE) are
+ * checked last so the common distros short-circuit first.
+ */
+export type PackageManager = 'apt-get' | 'apk' | 'dnf' | 'yum' | 'pacman' | 'zypper';
+
+const PACKAGE_MANAGERS: readonly PackageManager[] = [
+  'apt-get',
+  'apk',
+  'dnf',
+  'yum',
+  'pacman',
+  'zypper',
+];
+
+/**
+ * Per-package-manager bare-box provision recipe. A bare box may have *nothing*,
+ * so every recipe installs the full minimal toolchain Headroom's pip install
+ * needs: a Python interpreter + pip, plus `ca-certificates` (without which the
+ * PyPI TLS handshake fails) and `curl`.
+ *
+ * `update` (apt-get only) runs first and is treated as a soft failure — a stale
+ * mirror shouldn't abort the install. `install` is the command + args that must
+ * exit 0; `usesSudo` is always true here (every entry escalates when non-root).
+ */
+interface ProvisionRecipe {
+  /** Optional pre-step (e.g. `apt-get update`); non-zero is non-fatal. */
+  update?: string[];
+  /** The install command + args (without sudo); must exit 0 to succeed. */
+  install: string[];
+}
+
+const PROVISION_RECIPES: Record<PackageManager, ProvisionRecipe> = {
+  'apt-get': {
+    update: ['apt-get', 'update'],
+    install: ['apt-get', 'install', '-y', 'python3', 'python3-pip', 'python3-venv', 'ca-certificates', 'curl'],
+  },
+  apk: {
+    install: ['apk', 'add', '--no-cache', 'python3', 'py3-pip', 'ca-certificates', 'curl'],
+  },
+  dnf: {
+    install: ['dnf', 'install', '-y', 'python3', 'python3-pip', 'ca-certificates', 'curl'],
+  },
+  yum: {
+    install: ['yum', 'install', '-y', 'python3', 'python3-pip', 'ca-certificates', 'curl'],
+  },
+  pacman: {
+    install: ['pacman', '-Sy', '--noconfirm', 'python', 'python-pip', 'ca-certificates', 'curl'],
+  },
+  zypper: {
+    install: ['zypper', '--non-interactive', 'install', 'python3', 'python3-pip', 'ca-certificates', 'curl'],
+  },
+};
+
+/**
+ * Detect the OS package manager available on this box, preferring faster /
+ * more common package managers. Returns the first match from
+ * {@link PACKAGE_MANAGERS} (apt-get → apk → dnf → yum → pacman → zypper), or
+ * `null` when none are present so the caller can degrade gracefully.
+ *
+ * Detection delegates `which` to the supplied runner so tests can control
+ * visibility without crossing ESM module boundaries.
+ */
+export function detectPackageManager(
+  runner: Pick<HeadroomRunner, 'which'>,
+): PackageManager | null {
+  for (const pm of PACKAGE_MANAGERS) {
+    if (runner.which(pm)) return pm;
+  }
+  return null;
+}
+
+/**
+ * Ensure pip is available. Fast path: if `pip` or `pip3` already resolves on
+ * PATH, return true immediately — a box that has pip almost certainly already
+ * has python3, ca-certificates, and curl too, so we do NOT run any
+ * package-manager install (no `apt-get update` on every healthy deploy).
+ *
+ * Only when pip is ABSENT do we treat the box as bare and run the full
+ * provision via the detected package manager — installing python3 + pip
+ * alongside `ca-certificates` (PyPI TLS) and `curl`. Best-effort and bounded:
+ * a missing package manager or a failed install returns false. Never throws.
+ */
+async function ensurePip(runner: HeadroomRunner): Promise<boolean> {
+  // Fast path: pip or pip3 is already on PATH → skip the bare-box provision.
+  if (runner.which('pip') || runner.which('pip3')) {
+    return true;
+  }
+
+  // pip is absent → assume a bare box and provision the full minimal toolchain.
+  const pm = detectPackageManager(runner);
+  if (!pm) {
+    log.warn(
+      'host-agent',
+      'pip is absent and no known package manager (apt-get/apk/dnf/yum/pacman/zypper) found — skipping Headroom',
+    );
+    return false;
+  }
+
+  // Prefix each command with sudo only when NOT running as root.
+  const isRoot = process.getuid?.() === 0;
+  const escalate = (argv: string[]): { cmd: string; args: string[] } =>
+    isRoot ? { cmd: argv[0], args: argv.slice(1) } : { cmd: 'sudo', args: argv };
+
+  const recipe = PROVISION_RECIPES[pm];
+  log.info(
+    'host-agent',
+    `pip absent — provisioning bare box (python3+pip+ca-certificates+curl) via ${pm}`,
+  );
+
+  try {
+    // Optional update step (apt-get): non-zero is a soft failure (stale mirror).
+    if (recipe.update) {
+      const { cmd, args } = escalate(recipe.update);
+      const updateResult = await runner.run(cmd, args, { timeoutMs: PM_INSTALL_TIMEOUT_MS });
+      if (updateResult.code !== 0) {
+        log.warn(
+          'host-agent',
+          `${pm} update exited ${String(updateResult.code)} — attempting install anyway`,
+        );
+      }
+    }
+
+    const { cmd, args } = escalate(recipe.install);
+    const installResult = await runner.run(cmd, args, { timeoutMs: PM_INSTALL_TIMEOUT_MS });
+    if (installResult.code !== 0) {
+      log.warn(
+        'host-agent',
+        `${pm} bare-box provision failed (code=${String(installResult.code)}) — skipping Headroom`,
+      );
+      return false;
+    }
+  } catch (e) {
+    // Unexpected error (should never happen with the runner contract, but guard anyway).
+    log.warn(
+      'host-agent',
+      `bare-box provision threw unexpectedly: ${e instanceof Error ? e.message : String(e)} — skipping Headroom`,
+    );
+    return false;
+  }
+
+  log.info('host-agent', `bare box provisioned via ${pm} (python3+pip+ca-certificates+curl)`);
+  return true;
+}
+
+/**
  * Set up Headroom on the self-hosted box so the pair-auto child's agent
  * routes through the local compression proxy and savings reach the dashboard.
  *
  * Steps (all best-effort — never throws, never blocks the deploy):
- *   1. pip install headroom-ai + companion packages (fallback pip3). 120s timeout.
+ *   0. Ensure pip is available. If neither `pip` nor `pip3` is on PATH, treat
+ *      the box as bare and provision python3 + pip + ca-certificates + curl via
+ *      the OS package manager (apt-get/apk/dnf/yum/pacman/zypper). Bounded at
+ *      180s. Best-effort: if provisioning fails, returns false.
+ *   1. `python3 -m pip install --quiet` headroom-ai + companion packages.
+ *      On PEP 668 "externally-managed-environment" error (Ubuntu 24.04+,
+ *      Debian 12+), retries with `--break-system-packages`. 120s timeout.
  *   2. `headroom init --global <agent>` to write ~/.claude/settings.json.
  *   3. Warm-start `headroom proxy --port 8787` as a detached background process.
  *
@@ -289,10 +534,13 @@ interface ChildSession {
  * must NOT set HEADROOM_* env in that case so the child reporter no-ops.
  *
  * @param agent - e.g. 'claude', passed to `headroom init --global`.
+ * @param runner - Injectable subprocess runner. Defaults to `defaultHeadroomRunner`.
+ *                 Tests pass a mock so no real apt/pip runs.
  */
-export async function setupHeadroomForSelfHosted(agent: string): Promise<boolean> {
-  // ── Step 1: pip install (best-effort, bounded) ───────────────────────────
-  const INSTALL_TIMEOUT_MS = 120_000;
+export async function setupHeadroomForSelfHosted(
+  agent: string,
+  runner: HeadroomRunner = defaultHeadroomRunner,
+): Promise<boolean> {
   const PIP_PACKAGES = [
     'headroom-ai',
     'fastapi',
@@ -302,78 +550,80 @@ export async function setupHeadroomForSelfHosted(agent: string): Promise<boolean
     'zstandard',
   ];
 
-  const installOk = await new Promise<boolean>((resolve) => {
-    // Try `pip` first; many systems symlink pip → pip3 but some (Debian/Ubuntu
-    // minimal) only ship `pip3`. If `pip` is absent the spawn errors immediately.
-    const tryPip = (cmd: string): Promise<boolean> =>
-      new Promise((res) => {
-        const child = spawn(cmd, ['install', '--quiet', ...PIP_PACKAGES], {
-          stdio: ['ignore', 'pipe', 'pipe'],
-        });
-        let settled = false;
-        const done = (ok: boolean): void => {
-          if (settled) return;
-          settled = true;
-          res(ok);
-        };
-        const onData = (b: Buffer): void => {
-          const line = b.toString().replace(/\n+$/g, '');
-          if (line) log.info('host-agent', `headroom-install: ${line}`);
-        };
-        child.stdout?.on('data', onData);
-        child.stderr?.on('data', onData);
-        const timer = setTimeout(() => {
-          log.warn('host-agent', `headroom pip install timed out (${INSTALL_TIMEOUT_MS / 1000}s) — skipping Headroom`);
-          try { child.kill('SIGTERM'); } catch { /* already dead */ }
-          done(false);
-        }, INSTALL_TIMEOUT_MS);
-        child.once('exit', (code) => {
-          clearTimeout(timer);
-          if (code === 0) {
-            log.info('host-agent', 'headroom pip install succeeded');
-          } else {
-            log.warn('host-agent', `headroom pip install exited code=${String(code)} — skipping Headroom`);
-          }
-          done(code === 0);
-        });
-        child.once('error', (e) => {
-          clearTimeout(timer);
-          done(false); // pip command not found or spawn failed
-          log.trace('host-agent', `headroom pip spawn error (${cmd}): ${e.message}`);
-        });
-      });
+  // ── Step 0: Ensure pip is available ──────────────────────────────────────
+  const pipAvailable = await ensurePip(runner);
+  if (!pipAvailable) {
+    return false;
+  }
 
-    // Try pip, fall back to pip3 on non-zero or spawn error.
-    tryPip('pip')
-      .then((ok) => (ok ? resolve(true) : tryPip('pip3').then(resolve)))
-      .catch(() => resolve(false));
-  });
+  // ── Step 1: pip install via `python3 -m pip` (best-effort, bounded) ───────
+  // Prefer `python3 -m pip` over a bare `pip`/`pip3` binary — it always
+  // resolves against the correct interpreter and avoids shebang ambiguities
+  // on multi-python boxes. PEP 668 retry: if the first attempt fails with the
+  // "externally-managed-environment" error, retry with --break-system-packages.
+  const installOk = await (async (): Promise<boolean> => {
+    const baseArgs = ['-m', 'pip', 'install', '--quiet', ...PIP_PACKAGES];
+
+    const firstResult = await runner.run('python3', baseArgs, {
+      timeoutMs: PIP_INSTALL_TIMEOUT_MS,
+    });
+
+    if (firstResult.code === 0) {
+      log.info('host-agent', 'headroom pip install succeeded');
+      return true;
+    }
+
+    // Check for PEP 668 managed-env rejection and retry with the override flag.
+    if (firstResult.stderr.includes(PEP668_MARKER)) {
+      log.info(
+        'host-agent',
+        'PEP 668 externally-managed-environment detected — retrying with --break-system-packages',
+      );
+      const retryResult = await runner.run(
+        'python3',
+        [...baseArgs, '--break-system-packages'],
+        { timeoutMs: PIP_INSTALL_TIMEOUT_MS },
+      );
+      if (retryResult.code === 0) {
+        log.info('host-agent', 'headroom pip install succeeded (--break-system-packages)');
+        return true;
+      }
+      log.warn(
+        'host-agent',
+        `headroom pip install failed even with --break-system-packages (code=${String(retryResult.code)}) — skipping Headroom`,
+      );
+      return false;
+    }
+
+    log.warn(
+      'host-agent',
+      `headroom pip install exited code=${String(firstResult.code)} — skipping Headroom`,
+    );
+    return false;
+  })();
 
   if (!installOk) {
     return false;
   }
 
   // ── Step 2: `headroom init --global <agent>` (only when headroom is on PATH) ──
+  // Verify headroom is on PATH before calling init; on some boxes pip installs
+  // to a user-local directory that isn't on the current PATH yet.
+  if (!runner.which('headroom')) {
+    log.warn('host-agent', 'headroom not found on PATH after install — skipping init');
+    return false;
+  }
   const initOk = await new Promise<boolean>((resolve) => {
-    // Verify headroom is on PATH before calling init; on some boxes pip
-    // installs to a user-local directory that isn't on the current PATH yet.
-    execFile('which', ['headroom'], (whichErr) => {
-      if (whichErr) {
-        log.warn('host-agent', 'headroom not found on PATH after install — skipping init');
+    execFile('headroom', ['init', '--global', agent], (initErr, stdout, stderr) => {
+      if (initErr) {
+        const detail = (stderr || initErr.message).replace(/\n+$/g, '');
+        log.warn('host-agent', `headroom init failed (best-effort): ${detail}`);
         resolve(false);
-        return;
+      } else {
+        if (stdout.trim()) log.info('host-agent', `headroom init: ${stdout.trim()}`);
+        log.info('host-agent', 'headroom init --global succeeded');
+        resolve(true);
       }
-      execFile('headroom', ['init', '--global', agent], (initErr, stdout, stderr) => {
-        if (initErr) {
-          const detail = (stderr || initErr.message).replace(/\n+$/g, '');
-          log.warn('host-agent', `headroom init failed (best-effort): ${detail}`);
-          resolve(false);
-        } else {
-          if (stdout.trim()) log.info('host-agent', `headroom init: ${stdout.trim()}`);
-          log.info('host-agent', 'headroom init --global succeeded');
-          resolve(true);
-        }
-      });
     });
   });
 
