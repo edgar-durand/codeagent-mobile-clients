@@ -266,10 +266,14 @@ export async function start(requestedAgent?: AgentId): Promise<void> {
       adapter,
       cwd,
       getBeads,
-      // AUTO mode in a headless GitHub Codespace: no human at the phone to
-      // answer permission prompts, so auto-approve them rather than stall the
-      // turn (the agent-agnostic equivalent of --dangerously-skip-permissions).
-      autoApprovePermissions: process.env.CODESPACES === 'true',
+      // AUTO mode for headless, mobile-driven sessions: no human at the box
+      // to answer permission prompts, so auto-approve them rather than stall
+      // the turn (the agent-agnostic equivalent of
+      // --dangerously-skip-permissions). Both surfaces qualify — a GitHub
+      // Codespace (`CODESPACES=true`) and a self-hosted deploy (the host-agent
+      // sets `CODEAM_AUTO_APPROVE=1` on the pair-auto child).
+      autoApprovePermissions:
+        process.env.CODESPACES === 'true' || process.env.CODEAM_AUTO_APPROVE === '1',
     });
     return;
   }

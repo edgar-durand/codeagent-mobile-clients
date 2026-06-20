@@ -376,6 +376,9 @@ describe('HostAgentSupervisor — command routing', () => {
     expect(resolveAgentAuth).toHaveBeenCalledWith(IDENTITY, expect.any(String));
     expect(calls).toHaveLength(1);
     expect(calls[0].env.CODEAM_AUTO_TOKEN).toBe('auto-xyz');
+    // Self-hosted is headless/autonomous → child runs in AUTO mode so the
+    // agent doesn't stall every turn on a tool-permission prompt.
+    expect(calls[0].env.CODEAM_AUTO_APPROVE).toBe('1');
     expect(calls[0].cwd).toBe(cwdTarget);
     expect(sup.childCount()).toBe(1);
 

@@ -1501,6 +1501,14 @@ export class HostAgentSupervisor {
         };
       }
 
+      // A self-hosted deploy is an AUTONOMOUS, headless session — the user
+      // drives it from their phone, there's no human at the box to answer
+      // tool-permission prompts. Mark it so the pair-auto child auto-approves
+      // permissions (the agent-agnostic equivalent of the codespace
+      // `CODESPACES=true` gate in `start.ts`), instead of stalling every turn
+      // on a confirmation.
+      childEnv = { ...childEnv, CODEAM_AUTO_APPROVE: '1' };
+
       // 1b) Install the selected agent's CLI (per-agent strategy from the
       //     backend — same one the codespace bootstrap runs). Best-effort:
       //     a failure never blocks the deploy (the chat agent runs via the
