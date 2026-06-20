@@ -663,6 +663,63 @@ export function readHeadroomChildEnv(): Record<string, string> {
 }
 
 /**
+ * Locate the directory holding the SDK-bundled `claude` binary, so it can be
+ * prepended to `headroom init`'s PATH.
+ *
+ * `headroom init --global claude` (≥0.26) HARD-FAILS with "'claude' not found
+ * in PATH. Install Claude Code first." when no `claude` is on PATH. On a
+ * self-hosted box claude ships ONLY as the platform binary under
+ * `@anthropic-ai/claude-agent-sdk-<platform>/claude` (the same binary the ACP
+ * adapter spawns by absolute path) — never on PATH. We resolve that dir here
+ * and inject it for the init call only; we never mutate the global PATH or
+ * symlink, and the runtime hooks headroom writes invoke `headroom`, not
+ * `claude`, so the child needs nothing extra. Returns null when not found
+ * (init then fails gracefully, exactly as before).
+ */
+function bundledClaudeBinDir(): string | null {
+  // Collect candidate node_modules roots by walking up from this module's dir
+  // (the bundled dist lives at <cli-root>/dist, so <cli-root>/node_modules is
+  // one hop up). We deliberately do NOT use
+  // `require.resolve('@anthropic-ai/claude-agent-sdk/package.json')` — the
+  // SDK's strict `exports` map blocks the ./package.json subpath and throws
+  // ERR_PACKAGE_PATH_NOT_EXPORTED (the v2.39.58 failure mode).
+  const roots = new Set<string>();
+  let dir = __dirname;
+  for (let i = 0; i < 6; i++) {
+    roots.add(path.join(dir, 'node_modules'));
+    const parent = path.dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  // Hoisting-proof fallback: derive the node_modules root from the SDK's MAIN
+  // entry (its main IS exported, unlike ./package.json).
+  try {
+    const main = require.resolve('@anthropic-ai/claude-agent-sdk');
+    const marker = `${path.sep}@anthropic-ai${path.sep}`;
+    const idx = main.lastIndexOf(marker);
+    if (idx !== -1) roots.add(main.slice(0, idx));
+  } catch {
+    /* ignore — the walk-up roots are the primary path */
+  }
+
+  for (const nm of roots) {
+    const atAnthropic = path.join(nm, '@anthropic-ai');
+    let entries: string[];
+    try {
+      entries = fs.readdirSync(atAnthropic);
+    } catch {
+      continue; // root doesn't exist / not readable
+    }
+    for (const entry of entries) {
+      if (!entry.startsWith('claude-agent-sdk-')) continue; // platform package
+      const bin = path.join(atAnthropic, entry, 'claude');
+      if (fs.existsSync(bin)) return path.dirname(bin);
+    }
+  }
+  return null;
+}
+
+/**
  * Set up Headroom on the self-hosted box so the pair-auto child's agent
  * routes through the local compression proxy and savings reach the dashboard.
  *
@@ -685,37 +742,6 @@ export function readHeadroomChildEnv(): Record<string, string> {
  * @param runner - Injectable subprocess runner. Defaults to `defaultHeadroomRunner`.
  *                 Tests pass a mock so no real apt/pip runs.
  */
-/**
- * Locate the directory holding the SDK-bundled `claude` binary, so it can be
- * prepended to `headroom init`'s PATH.
- *
- * `headroom init --global claude` (≥0.26) HARD-FAILS with "'claude' not found
- * in PATH. Install Claude Code first." when no `claude` is on PATH. On a
- * self-hosted box claude ships ONLY as the platform binary under
- * `@anthropic-ai/claude-agent-sdk-<platform>/claude` (the same binary the ACP
- * adapter spawns by absolute path) — never on PATH. We resolve that dir here
- * and inject it for the init call only; we never mutate the global PATH or
- * symlink, and the runtime hooks headroom writes invoke `headroom`, not
- * `claude`, so the child needs nothing extra. Returns null when not found
- * (init then fails gracefully, exactly as before).
- */
-function bundledClaudeBinDir(): string | null {
-  const require_ = require;
-  try {
-    const sdkManifest = require_.resolve('@anthropic-ai/claude-agent-sdk/package.json');
-    // …/node_modules/@anthropic-ai/claude-agent-sdk/package.json → …/@anthropic-ai
-    const atAnthropic = path.dirname(path.dirname(sdkManifest));
-    for (const entry of fs.readdirSync(atAnthropic)) {
-      if (!entry.startsWith('claude-agent-sdk-')) continue; // platform package
-      const bin = path.join(atAnthropic, entry, 'claude');
-      if (fs.existsSync(bin)) return path.dirname(bin);
-    }
-  } catch {
-    /* unresolved — fall through to null */
-  }
-  return null;
-}
-
 export async function setupHeadroomForSelfHosted(
   agent: string,
   runner: HeadroomRunner = defaultHeadroomRunner,
