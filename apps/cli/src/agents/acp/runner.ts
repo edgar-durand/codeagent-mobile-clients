@@ -658,7 +658,11 @@ export function looksLikeAuthFailure(text: string): boolean {
  */
 const AUTH_FAILURE_MESSAGE =
   '🔒 **Authentication failed — your agent credentials are invalid or expired (API 401).**\n\n' +
-  'Re-authenticate this agent in **Profile › Agents**, then send your message again.';
+  // `codeam://reauth` is an in-app deep-link the mobile chat intercepts
+  // (MarkdownAppLinkProvider → Profile › Agents, preselecting this agent).
+  // On any surface that can't handle the scheme it just renders as a tappable
+  // label, so the instruction still reads correctly.
+  'Tap [Re-authenticate this agent](codeam://reauth) to renew your credentials in Profile › Agents, then send your message again.';
 
 export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
   const publisher = new AcpPublisher({
