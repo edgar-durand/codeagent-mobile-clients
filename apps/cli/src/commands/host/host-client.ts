@@ -300,27 +300,49 @@ export interface HostSession {
 /**
  * Send a liveness heartbeat (state liveness, NOT command polling).
  *
- * Optionally carries live system metrics (additive; the backend treats
- * `metrics` as optional) and the box's currently-active supervised sessions
- * (`sessions`, also additive — an empty array reflects "0 active"). Returns
- * the measured round-trip latency of THIS request in ms, so the caller can
- * feed it back as the `latencyMs` of the next beat (the only way to send a
- * real, measured latency).
+ * Carries ONLY liveness + optional live system metrics (additive; the
+ * backend treats `metrics` as optional). Session state is deliberately NOT
+ * sent here — re-sending a discrete state on every beat is polling. Sessions
+ * flow over `reportSessionEvent` (discrete transitions) + the backend-owned
+ * START in the pairing redemption path. Returns the measured round-trip
+ * latency of THIS request in ms, so the caller can feed it back as the
+ * `latencyMs` of the next beat (the only way to send a real, measured value).
  */
 export async function sendHostHeartbeat(
   identity: SealedHostIdentity,
   metrics?: HostMetrics,
-  sessions?: HostSession[],
 ): Promise<number> {
   const start = process.hrtime.bigint();
   await postJson<{ ok: boolean }>('/api/self-hosted/heartbeat', {
     hostId: identity.hostId,
     hostToken: identity.hostToken,
     ...(metrics ? { metrics } : {}),
-    ...(sessions ? { sessions } : {}),
   });
   const elapsedNs = process.hrtime.bigint() - start;
   return Math.round(Number(elapsedNs) / 1_000_000);
+}
+
+/**
+ * Report a discrete supervised-session lifecycle transition (NOT a poll).
+ * Fired one-shot by the host-agent on a real process transition:
+ *   - `ended`     — a session child exited (pass its `deployId`).
+ *   - `reconcile` — supervisor boot (pass `activeDeployIds`, the live set);
+ *                   the backend ends every row not listed, clearing zombies
+ *                   left by a hard crash / reboot where no `ended` fired.
+ * Best-effort: a failure (offline, transient) is swallowed by the caller —
+ * the next `reconcile` on the following boot re-converges the set.
+ */
+export async function reportSessionEvent(
+  identity: Pick<SealedHostIdentity, 'hostId' | 'hostToken'>,
+  body:
+    | { event: 'ended'; deployId: string }
+    | { event: 'reconcile'; activeDeployIds: string[] },
+): Promise<void> {
+  await postJson<{ ok: boolean }>('/api/self-hosted/session-event', {
+    hostId: identity.hostId,
+    hostToken: identity.hostToken,
+    ...body,
+  });
 }
 
 /** A `SealedSecret` vault envelope (the deploy command's JSON blob). */
