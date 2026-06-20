@@ -1142,23 +1142,16 @@ describe('HostAgentSupervisor — self_hosted_wipe control command', () => {
   });
 
   it('does NOT tear down the Headroom proxy on a per-session self_hosted_stop (shared singleton)', async () => {
-    fs.mkdirSync(path.dirname(hostIdentityPath()), { recursive: true });
-    fs.writeFileSync(hostIdentityPath(), JSON.stringify(IDENTITY));
-    vi.stubGlobal(
-      'fetch',
-      vi.fn().mockResolvedValue({
-        ok: true,
-        status: 200,
-        json: async () => ({ success: true, data: { ok: true } }),
-      }),
-    );
-
+    // No start() — the self_hosted_stop path goes straight through
+    // handleCommand → stopChild and needs neither the relay nor the
+    // heartbeat/self-update timers. Starting them here and not stopping the
+    // supervisor leaks a heartbeat timer that fires during a later test and
+    // trips the default onIdentityRejected → process.exit(1).
     const teardownHeadroom = vi.fn();
     const sup = new HostAgentSupervisor(IDENTITY, {
       makeRelay: () => ({ start: vi.fn(), stop: vi.fn() }),
       teardownHeadroom,
     });
-    sup.start();
 
     await sup.handleCommand({
       id: 'cmd-stop',
