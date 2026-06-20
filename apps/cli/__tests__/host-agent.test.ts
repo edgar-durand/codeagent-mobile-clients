@@ -430,6 +430,38 @@ describe('HostAgentSupervisor — command routing', () => {
     fs.rmSync(cwdTarget, { recursive: true, force: true });
   });
 
+  it('self_hosted_refresh_credentials re-provisions the agent auth file IN PLACE (no spawn)', async () => {
+    const { sup, resolveAgentAuth } = makeSupervisor(() => fakeChild());
+
+    await sup.handleCommand({
+      id: 'cmd-refresh',
+      sessionId: 'sh-plugin-1',
+      type: 'self_hosted_refresh_credentials',
+      payload: { agentId: 'claude_code', sealedAgentAuth: 'sealed-fresh' },
+    });
+
+    // Unsealed the fresh credential…
+    expect(resolveAgentAuth).toHaveBeenCalledWith(IDENTITY, 'sealed-fresh');
+    // …and rewrote the agent's auth file in place (mock returns a claude oauth blob).
+    expect(fs.existsSync(path.join(tmpHome, '.claude', '.credentials.json'))).toBe(true);
+    // Refresh is in-place — no session child spawned.
+    expect(sup.childCount()).toBe(0);
+  });
+
+  it('ignores a malformed self_hosted_refresh_credentials payload (no unseal/write)', async () => {
+    const { sup, resolveAgentAuth } = makeSupervisor(() => fakeChild());
+
+    await sup.handleCommand({
+      id: 'cmd-bad',
+      sessionId: 'sh-plugin-1',
+      type: 'self_hosted_refresh_credentials',
+      payload: { agentId: 'claude_code' }, // missing sealedAgentAuth
+    });
+
+    expect(resolveAgentAuth).not.toHaveBeenCalled();
+    expect(fs.existsSync(path.join(tmpHome, '.claude', '.credentials.json'))).toBe(false);
+  });
+
   it('self_hosted_stop kills the matching child and untracks it', async () => {
     const cwdTarget = fs.mkdtempSync(path.join(os.tmpdir(), 'codeam-ws-'));
     const child = fakeChild();

@@ -240,6 +240,18 @@ interface StopPayload {
   sessionId: string;
 }
 
+/** Payload of `self_hosted_refresh_credentials` (re-link credential sweep). */
+interface RefreshCredentialsPayload {
+  agentId: string;
+  sealedAgentAuth: string;
+}
+
+function isRefreshCredentialsPayload(
+  p: Record<string, unknown>,
+): p is RefreshCredentialsPayload & Record<string, unknown> {
+  return typeof p.agentId === 'string' && typeof p.sealedAgentAuth === 'string';
+}
+
 function isHouseProxy(v: unknown): v is HouseProxy {
   if (typeof v !== 'object' || v === null) return false;
   const o = v as Record<string, unknown>;
@@ -1391,6 +1403,14 @@ export class HostAgentSupervisor {
       this.stopChild(cmd.payload.sessionId);
       return;
     }
+    if (cmd.type === 'self_hosted_refresh_credentials') {
+      if (!isRefreshCredentialsPayload(cmd.payload)) {
+        log.warn('host-agent', `ignoring malformed self_hosted_refresh_credentials id=${cmd.id}`);
+        return;
+      }
+      await this.refreshCredentials(cmd.payload);
+      return;
+    }
     if (cmd.type === 'self_hosted_wipe') {
       // The app deleted this host while it was ONLINE. Cleanly de-provision:
       // kill children, remove the sealed identity, best-effort disable the
@@ -1699,6 +1719,33 @@ export class HostAgentSupervisor {
       /* already gone */
     }
     this.children.delete(child.deployId);
+  }
+
+  /**
+   * Handle `self_hosted_refresh_credentials` (the user re-linked the agent).
+   * Unseal the fresh credential and re-provision the agent's on-disk auth IN
+   * PLACE (`provisionAgentCredentials` rewrites `~/.claude/.credentials.json`
+   * etc.). The running pair-auto child re-reads its auth file on the next API
+   * call, so a 401'd session recovers WITHOUT a restart — the self-hosted
+   * parallel to the codespace `refreshAgentCredentialsOnly` sweep. Best-effort:
+   * a failure is logged, never throws (the relay dispatch must not crash).
+   */
+  private async refreshCredentials(payload: RefreshCredentialsPayload): Promise<void> {
+    try {
+      const auth = await this.resolveAgentAuth(this.identity, payload.sealedAgentAuth);
+      // Rewrites the agent's auth file (and returns env we don't need here —
+      // the child reads the file, not our process env).
+      provisionAgentCredentials(payload.agentId, auth, undefined);
+      log.info(
+        'host-agent',
+        `refreshed credentials in place for agent=${payload.agentId} (${this.children.size} active child(ren))`,
+      );
+    } catch (err) {
+      log.warn(
+        'host-agent',
+        `credential refresh failed (best-effort): ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
   }
 }
 
