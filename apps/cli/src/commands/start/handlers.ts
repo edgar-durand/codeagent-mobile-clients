@@ -46,6 +46,7 @@ import {
   isJsInstallCommand,
   isPortListening,
   killPreview,
+  killProcessTree,
   parseCloudflaredUrl,
   parseExpoUrl,
   readPreviewConfig,
@@ -1311,17 +1312,54 @@ const previewStartH: CommandHandler = (ctx, _cmd, parsed) => {
         });
         return;
       }
-      void postPreviewEvent({
-        sessionId: ctx.sessionId,
-        pluginId: ctx.pluginId,
-        pluginAuthToken,
-        type: 'preview_error',
-        payload: {
-          stage: 'spawn',
-          message: `Port ${detection.port} is already in use by another process, so the dev server can't start there. Stop whatever is listening on port ${detection.port} and try the preview again.`,
-        },
-      });
-      return;
+      // The port is held by OUR OWN prior preview for this session whose
+      // parent process has already exited (exitCode !== null) but whose
+      // worker children are still bound to the port (orphaned). This is the
+      // "re-spawn on a port the same process already holds" case: reclaim it
+      // — group-kill the stale tree, drop the registry entry, and wait
+      // (bounded) for the port to actually release — then fall through and
+      // re-spawn cleanly instead of failing with EADDRINUSE.
+      if (raceExisting) {
+        log.info(
+          'preview',
+          `reclaiming stale preview holding port ${detection.port} for session=${ctx.sessionId} (exit=${raceExisting.devServer.exitCode})`,
+        );
+        await killPreview(ctx.sessionId);
+        const freeDeadline = Date.now() + 4_000;
+        while ((await isPortListening(detection.port)) && Date.now() < freeDeadline) {
+          await new Promise((r) => setTimeout(r, 200));
+        }
+        if (await isPortListening(detection.port)) {
+          // Our own teardown didn't free it in time — surface the actionable
+          // error rather than spawn into a guaranteed EADDRINUSE.
+          void postPreviewEvent({
+            sessionId: ctx.sessionId,
+            pluginId: ctx.pluginId,
+            pluginAuthToken,
+            type: 'preview_error',
+            payload: {
+              stage: 'spawn',
+              message: `Port ${detection.port} is still in use after stopping the previous preview. Wait a moment and try again.`,
+            },
+          });
+          return;
+        }
+        // Port freed — continue to the spawn below.
+      } else {
+        // A foreign process owns the port (not one of ours). Don't kill it —
+        // fail fast with an actionable error.
+        void postPreviewEvent({
+          sessionId: ctx.sessionId,
+          pluginId: ctx.pluginId,
+          pluginAuthToken,
+          type: 'preview_error',
+          payload: {
+            stage: 'spawn',
+            message: `Port ${detection.port} is already in use by another process, so the dev server can't start there. Stop whatever is listening on port ${detection.port} and try the preview again.`,
+          },
+        });
+        return;
+      }
     }
 
     const spawnable = normalizeDetectionForSpawn(detection, process.cwd());
@@ -1333,6 +1371,13 @@ const previewStartH: CommandHandler = (ctx, _cmd, parsed) => {
       cwd: process.cwd(),
       env: { ...process.env, ...(spawnable.env ?? {}) },
       stdio: ['ignore', 'pipe', 'pipe'],
+      // POSIX: lead a new process group so teardown can SIGTERM the whole
+      // tree. Dev servers fork worker children that bind the port; killing
+      // only the direct child orphans them and leaks the port, so the next
+      // preview_start hits EADDRINUSE on a port we already hold. Group-kill
+      // (killProcessTree) reaps the workers too. Windows has no process
+      // groups — leave detached off there (direct kill is the only option).
+      detached: process.platform !== 'win32',
     });
     emitProgress('BIND_PORT', String(detection.port));
     emitProgress('WAITING_FOR_READY', detection.ready_pattern);
@@ -1370,6 +1415,10 @@ const previewStartH: CommandHandler = (ctx, _cmd, parsed) => {
         : undefined,
     });
     if (outcome.kind === 'exited') {
+      // The dev server's parent exited, but it may have fork-exec'd a
+      // worker that's still bound to the port — group-kill reaps it so the
+      // next preview_start doesn't hit EADDRINUSE on a port we leaked.
+      killProcessTree(devServer, 'SIGTERM');
       void postPreviewEvent({
         sessionId: ctx.sessionId,
         pluginId: ctx.pluginId,
@@ -1384,7 +1433,7 @@ const previewStartH: CommandHandler = (ctx, _cmd, parsed) => {
       return;
     }
     if (outcome.kind === 'timeout') {
-      try { devServer.kill('SIGTERM'); } catch { /* already dead */ }
+      killProcessTree(devServer, 'SIGTERM');
       void postPreviewEvent({
         sessionId: ctx.sessionId,
         pluginId: ctx.pluginId,
@@ -1420,7 +1469,7 @@ const previewStartH: CommandHandler = (ctx, _cmd, parsed) => {
         }
       }
       if (!expoUrl) {
-        try { devServer.kill('SIGTERM'); } catch { /* already dead */ }
+        killProcessTree(devServer, 'SIGTERM');
         void postPreviewEvent({
           sessionId: ctx.sessionId,
           pluginId: ctx.pluginId,
@@ -1441,7 +1490,7 @@ const previewStartH: CommandHandler = (ctx, _cmd, parsed) => {
       try {
         bin = await resolveCloudflared();
       } catch (e) {
-        try { devServer.kill('SIGTERM'); } catch { /* already dead */ }
+        killProcessTree(devServer, 'SIGTERM');
         void postPreviewEvent({
           sessionId: ctx.sessionId,
           pluginId: ctx.pluginId,
@@ -1567,7 +1616,7 @@ const previewStartH: CommandHandler = (ctx, _cmd, parsed) => {
         }
       }
       if (!parsedUrl) {
-        try { devServer.kill('SIGTERM'); } catch { /* already dead */ }
+        killProcessTree(devServer, 'SIGTERM');
         void postPreviewEvent({
           sessionId: ctx.sessionId,
           pluginId: ctx.pluginId,

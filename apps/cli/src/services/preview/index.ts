@@ -31,43 +31,67 @@ export function registerPreview(sessionId: string, preview: ActivePreview): void
 }
 
 /**
+ * SIGTERM (or SIGKILL) a child process AND its whole process group.
+ *
+ * Dev servers (vite / next / expo) fork worker children that are the
+ * processes actually `listen()`-ing on the port. `child.kill()` signals
+ * ONLY the direct child, orphaning those workers — they keep the port
+ * bound, so the next `preview_start` for the same session hits
+ * EADDRINUSE on a port THIS process already leaked (the bug this guards
+ * against). When the child was spawned `detached` (POSIX), it is its own
+ * process-group leader and `process.kill(-pid, signal)` signals every
+ * member of the group, so the workers die with it.
+ *
+ * Falls back to a direct `child.kill` on Windows (no POSIX process
+ * groups) and when the group signal throws (leader already gone).
+ */
+export function killProcessTree(
+  child: ChildProcess,
+  signal: NodeJS.Signals = 'SIGTERM',
+): void {
+  const pid = child.pid;
+  if (pid == null) return;
+  if (process.platform !== 'win32') {
+    try {
+      // Negative pid → the whole process group (child spawned detached).
+      process.kill(-pid, signal);
+      return;
+    } catch {
+      // Group already gone, or the child wasn't a group leader — fall
+      // through to a best-effort direct kill.
+    }
+  }
+  try {
+    child.kill(signal);
+  } catch {
+    // already dead
+  }
+}
+
+/**
  * Kill the preview for a session. Order matters: the tunnel goes
  * first so cloudflared cleanly disconnects upstream before the local
  * port stops responding — otherwise the public URL serves 502s for
  * the few seconds it takes the edge to expire the tunnel record.
  *
  * 100 ms grace between tunnel SIGTERM and dev-server SIGTERM. 250 ms
- * later, SIGKILL anything that refused to exit cleanly.
+ * later, SIGKILL anything that refused to exit cleanly. Both kills go
+ * to the whole process group (see `killProcessTree`) so the dev
+ * server's worker children don't outlive it and leak the port.
  */
 export async function killPreview(sessionId: string): Promise<void> {
   const preview = activePreviews.get(sessionId);
   if (!preview) return;
 
   if (preview.tunnel) {
-    try {
-      preview.tunnel.kill('SIGTERM');
-    } catch {
-      // already dead
-    }
+    killProcessTree(preview.tunnel, 'SIGTERM');
   }
   await new Promise((r) => setTimeout(r, 100));
-  try {
-    preview.devServer.kill('SIGTERM');
-  } catch {
-    // already dead
-  }
+  killProcessTree(preview.devServer, 'SIGTERM');
 
   const sigkillTimer = setTimeout(() => {
-    try {
-      preview.devServer.kill('SIGKILL');
-    } catch {
-      // already dead
-    }
-    try {
-      preview.tunnel?.kill('SIGKILL');
-    } catch {
-      // already dead
-    }
+    killProcessTree(preview.devServer, 'SIGKILL');
+    if (preview.tunnel) killProcessTree(preview.tunnel, 'SIGKILL');
   }, 250);
   // Don't block process exit on this safety timer.
   sigkillTimer.unref?.();
