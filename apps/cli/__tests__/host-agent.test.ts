@@ -11,6 +11,7 @@ import {
   resolveHostIdentity,
   type ChildSpawner,
   setupHeadroomForSelfHosted,
+  agentIdToHeadroomKind,
   detectPackageManager,
   type HeadroomRunner,
 } from '../src/commands/host-agent';
@@ -1054,6 +1055,32 @@ describe('isDeployPayload — headroom fields back-compat', () => {
   });
 });
 
+describe('agentIdToHeadroomKind', () => {
+  it('maps claude / claude_code / claude-code → claude', () => {
+    expect(agentIdToHeadroomKind('claude')).toBe('claude');
+    expect(agentIdToHeadroomKind('claude_code')).toBe('claude');
+    expect(agentIdToHeadroomKind('claude-code')).toBe('claude');
+    expect(agentIdToHeadroomKind('Claude_Code')).toBe('claude'); // case-insensitive
+  });
+
+  it('maps codex / codex_cli → codex', () => {
+    expect(agentIdToHeadroomKind('codex')).toBe('codex');
+    expect(agentIdToHeadroomKind('codex_cli')).toBe('codex');
+  });
+
+  it('maps copilot → copilot', () => {
+    expect(agentIdToHeadroomKind('copilot')).toBe('copilot');
+    expect(agentIdToHeadroomKind('copilot-cli')).toBe('copilot');
+  });
+
+  it('defaults unknown / empty ids to claude (safe default)', () => {
+    expect(agentIdToHeadroomKind('something_else')).toBe('claude');
+    expect(agentIdToHeadroomKind('')).toBe('claude');
+    // Defensive: an undefined slipping through must not crash.
+    expect(agentIdToHeadroomKind(undefined as unknown as string)).toBe('claude');
+  });
+});
+
 describe('HostAgentSupervisor — Headroom env injection', () => {
   function makeHeadroomSupervisor(setupHeadroomResult: boolean) {
     const setupHeadroom = vi.fn<(a: string) => Promise<boolean>>().mockResolvedValue(setupHeadroomResult);
@@ -1099,6 +1126,36 @@ describe('HostAgentSupervisor — Headroom env injection', () => {
 
     // Standard deploy env vars still present (never-break check).
     expect(calls[0].env.CODEAM_AUTO_TOKEN).toBe('auto-xyz');
+
+    fs.rmSync(cwdTarget, { recursive: true, force: true });
+  });
+
+  it('maps a raw LinkedAgentId (claude_code) to the headroom kind (claude) in HEADROOM_AGENT', async () => {
+    const cwdTarget = fs.mkdtempSync(path.join(os.tmpdir(), 'codeam-hr-'));
+    const { sup, setupHeadroom, calls } = makeHeadroomSupervisor(true);
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => ({ success: true, data: {} }) }),
+    );
+
+    await sup.handleCommand(
+      deployCmd({
+        repoOrPath: cwdTarget,
+        headroomEnabled: true,
+        headroomAgent: 'claude_code', // the real self-hosted LinkedAgentId
+        headroomSavingsIngestUrl: 'https://ingest.test/savings',
+      }),
+    );
+
+    // setupHeadroom still receives the raw agent id (it maps internally for init).
+    expect(setupHeadroom).toHaveBeenCalledWith('claude_code');
+
+    // But the env injected into the child is the MAPPED kind, matching what
+    // `headroom init` registered + what codespaces report.
+    expect(calls).toHaveLength(1);
+    expect(calls[0].env.HEADROOM_ENABLED).toBe('1');
+    expect(calls[0].env.HEADROOM_AGENT).toBe('claude');
 
     fs.rmSync(cwdTarget, { recursive: true, force: true });
   });

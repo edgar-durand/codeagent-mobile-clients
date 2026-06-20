@@ -515,6 +515,27 @@ async function ensurePip(runner: HeadroomRunner): Promise<boolean> {
 }
 
 /**
+ * Map an incoming agent id (a `LinkedAgentId` like `claude_code`, `codex_cli`,
+ * or an already-normalized `claude`) to the subcommand kind that `headroom init`
+ * understands: `claude` | `codex` | `copilot`.
+ *
+ * `headroom init` only accepts those exact subcommands — passing the raw
+ * LinkedAgentId (`claude_code`) makes it fail with "No such command", and an
+ * empty id makes it print a usage error. This collapses the two id spaces.
+ *
+ * Match is case-insensitive and tolerant of `_`/`-` separators. Anything we
+ * don't recognise (including empty/undefined) defaults to `claude` — the most
+ * common path, and a safe default since a bad subcommand is worse than a guess.
+ */
+export function agentIdToHeadroomKind(agentId: string): string {
+  const normalized = (agentId ?? '').toLowerCase().replace(/[_-]/g, '');
+  if (normalized.startsWith('claude')) return 'claude';
+  if (normalized.startsWith('codex')) return 'codex';
+  if (normalized.startsWith('copilot')) return 'copilot';
+  return 'claude';
+}
+
+/**
  * Set up Headroom on the self-hosted box so the pair-auto child's agent
  * routes through the local compression proxy and savings reach the dashboard.
  *
@@ -613,8 +634,15 @@ export async function setupHeadroomForSelfHosted(
     log.warn('host-agent', 'headroom not found on PATH after install — skipping init');
     return false;
   }
+  // Map the incoming agent id (e.g. the LinkedAgentId `claude_code`) to the
+  // subcommand kind `headroom init` accepts (`claude`/`codex`/`copilot`).
+  // `headroom init` can print "claude not found in PATH" on a self-hosted box
+  // (claude is the SDK-bundled binary, not on PATH) but still writes
+  // ~/.claude/settings.json and exits 0 — execFile only reports an error on a
+  // non-zero exit, so a zero exit is treated as success even with that stderr.
+  const initKind = agentIdToHeadroomKind(agent);
   const initOk = await new Promise<boolean>((resolve) => {
-    execFile('headroom', ['init', '--global', agent], (initErr, stdout, stderr) => {
+    execFile('headroom', ['init', '--global', initKind], (initErr, stdout, stderr) => {
       if (initErr) {
         const detail = (stderr || initErr.message).replace(/\n+$/g, '');
         log.warn('host-agent', `headroom init failed (best-effort): ${detail}`);
@@ -994,7 +1022,11 @@ export class HostAgentSupervisor {
         const headroomOk = await this.setupHeadroom(payload.headroomAgent);
         if (headroomOk) {
           childEnv.HEADROOM_ENABLED = '1';
-          childEnv.HEADROOM_AGENT = payload.headroomAgent;
+          // Use the mapped headroom kind (e.g. `claude_code` → `claude`) so the
+          // env value matches what `headroom init` registered and what the
+          // reporter reports as `dto.agentId` — consistent with codespaces,
+          // which already reports `claude`.
+          childEnv.HEADROOM_AGENT = agentIdToHeadroomKind(payload.headroomAgent);
           childEnv.HEADROOM_SAVINGS_INGEST_URL = payload.headroomSavingsIngestUrl;
           log.info('host-agent', 'Headroom proxy ready; HEADROOM_* env injected into child');
         } else {
