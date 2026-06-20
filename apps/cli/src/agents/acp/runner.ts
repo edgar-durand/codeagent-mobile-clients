@@ -636,6 +636,30 @@ class AcpHistory {
   }
 }
 
+/**
+ * Patterns that mean the agent's PROVIDER credential is invalid/expired (a
+ * mid-session 401) rather than a transient network/tool error. The agent CLI
+ * (Claude Code, Codex, …) prints this to stderr and exits — it never reaches
+ * the ACP text stream — so a turn that fails on it would otherwise leave only
+ * a transient flash that's gone on the next `clear`/reconnect. We classify
+ * the failure and surface {@link AUTH_FAILURE_MESSAGE} as a persistent bubble.
+ */
+const AUTH_FAILURE_RE =
+  /invalid authentication credentials|authentication[_ ]error|please run \/login|\bunauthorized\b|\binvalid x-api-key\b|oauth token (?:expired|revoked)|(?:api error|http|status)[:\s]+401|\b401\b[^\n]{0,40}(?:unauthor|authenticat|credential|api[_ ]?key|login)/i;
+
+export function looksLikeAuthFailure(text: string): boolean {
+  return AUTH_FAILURE_RE.test(text);
+}
+
+/**
+ * Persistent, actionable message shown in the chat when a turn fails because
+ * the agent's credential is invalid/expired. Markdown — the chat renderer
+ * supports it (same as the welcome banner).
+ */
+const AUTH_FAILURE_MESSAGE =
+  '🔒 **Authentication failed — your agent credentials are invalid or expired (API 401).**\n\n' +
+  'Re-authenticate this agent in **Profile › Agents**, then send your message again.';
+
 export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
   const publisher = new AcpPublisher({
     sessionId: opts.sessionId,
@@ -643,6 +667,10 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
     pluginAuthToken: opts.pluginAuthToken,
   });
   const streaming = new StreamingState(publisher);
+  // Small ring of recent adapter stderr lines so a turn that fails on an auth
+  // 401 (printed to stderr, never to the ACP text stream) can be classified
+  // and surfaced as a persistent re-auth bubble. Capped — never unbounded.
+  const recentStderr: string[] = [];
 
   // IDE-integrated terminal: PTY data + exit events ride the same
   // /api/commands/output channel as chat. Without these handlers the
@@ -748,22 +776,28 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
         optionIdByLabel,
       });
     },
-    onStderr: (_line) => {
-      // No-op here — AcpClient.start() already mirrors every stderr
-      // line to `log.info('acpAdapter', …)` so it's visible during
-      // CODEAM_DEBUG=1 smoke tests. Keeping the option for future
-      // per-line filtering / capture.
+    onStderr: (line) => {
+      // AcpClient.start() already mirrors stderr to `log.info('acpAdapter')`
+      // for CODEAM_DEBUG smoke tests. We ALSO keep a small ring of recent
+      // lines so a turn that dies on an auth 401 (stderr-only) can be
+      // classified below and surfaced as a persistent re-auth message.
+      recentStderr.push(line);
+      if (recentStderr.length > 40) recentStderr.shift();
     },
     onUnexpectedExit: (code, signal) => {
       log.warn('acpRunner', `adapter died code=${code} signal=${signal}; shutting down session`);
       // closeAll() flushes any half-streamed text with done:true so
       // mobile flips out of "Thinking…" instead of leaving the
-      // partial reply hanging forever. Followed by a terminal error
-      // message so the user knows WHY the session died.
+      // partial reply hanging forever. Followed by a terminal message so
+      // the user knows WHY the session died — a credential 401 gets the
+      // actionable re-auth copy instead of a raw exit code.
+      const authFail = looksLikeAuthFailure(recentStderr.join('\n'));
       void streaming.closeAll().then(() =>
         publisher.publishOutput({
           type: 'text',
-          content: `Agent adapter exited unexpectedly (code=${code ?? 'null'} signal=${signal ?? 'null'}).`,
+          content: authFail
+            ? AUTH_FAILURE_MESSAGE
+            : `Agent adapter exited unexpectedly (code=${code ?? 'null'} signal=${signal ?? 'null'}).`,
           done: true,
         }),
       );
@@ -932,6 +966,8 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
         initialize.agentCapabilities,
         turnFiles,
         getBeads,
+        publisher,
+        recentStderr,
       );
     },
     { id: opts.agent, name: opts.agent, displayName: opts.agent } as never,
@@ -991,6 +1027,8 @@ async function handleCommand(
   agentCaps: { loadSession?: boolean } | undefined,
   turnFiles: TurnFileAggregator,
   getBeads: () => StartedBeads | null,
+  publisher: AcpPublisher,
+  recentStderr: string[],
 ): Promise<void> {
   switch (cmd.type) {
     case 'beads_action': {
@@ -1078,8 +1116,21 @@ async function handleCommand(
         // torn-off text could match the heuristics spuriously and
         // strand the runner with an unanswerable pending question.
         await recoverFromFailedTurn(client, streaming);
-        log.warn('acpRunner', `prompt failed: ${describeError(err)}`);
-        await relay.sendResult(cmd.id, 'failed', { error: describeError(err) });
+        const detail = describeError(err);
+        log.warn('acpRunner', `prompt failed: ${detail}`);
+        // A credential 401 (the agent printed it to stderr and bailed)
+        // would otherwise vanish — recoverFromFailedTurn's closeAll only
+        // persists accumulated ASSISTANT text, which is empty here. Emit a
+        // persistent, actionable re-auth bubble so the user knows the token
+        // expired instead of seeing a transient flash.
+        if (looksLikeAuthFailure(detail) || looksLikeAuthFailure(recentStderr.join('\n'))) {
+          await publisher.publishOutput({
+            type: 'text',
+            content: AUTH_FAILURE_MESSAGE,
+            done: true,
+          });
+        }
+        await relay.sendResult(cmd.id, 'failed', { error: detail });
       }
       return;
     }
