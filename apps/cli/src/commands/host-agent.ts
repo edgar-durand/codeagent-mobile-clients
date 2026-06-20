@@ -37,6 +37,8 @@
 
 import { execFileSync, execFile, spawn, type ChildProcess } from 'node:child_process';
 import * as os from 'node:os';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
 import { CommandRelayService, type RemoteCommand } from '../services/command-relay.service';
 import type { AgentMetadata } from '@codeagent/shared';
 import { resolveApiBaseUrl } from '@codeagent/shared';
@@ -59,9 +61,40 @@ import {
 import { isAbsolutePathTarget, prepareWorkspace } from './host/workspace';
 import { provisionAgentCredentials } from './host/agent-provisioning';
 import { HeadroomStatsReporter, type Savings, type StatsShape } from '../services/headroom/stats-reporter';
+import { compareSemver } from '../lib/updateNotifier';
 
 /** Liveness heartbeat cadence. State liveness only — NOT command polling. */
 const HEARTBEAT_INTERVAL_MS = 20_000;
+
+/**
+ * Version string injected at build time by tsup's `define` (from the CLI's
+ * own package.json — the same constant `version.ts` / `updateNotifier.ts`
+ * read). The running self-hosted box compares THIS against npm's `latest`
+ * to decide whether to self-update. Falls back to the literal `unknown`
+ * under a non-tsup build (dev tests via tsx), which the compare treats as
+ * "never newer" so a dev run can't trigger a self-update.
+ */
+declare const __CLI_VERSION__: string;
+
+/** The npm package the host-agent ships in — the self-update target. */
+const SELF_UPDATE_PKG = 'codeam-cli';
+
+/**
+ * Self-update cadence. Self-hosted boxes run `codeam host-agent` as a
+ * long-lived systemd service (`Restart=always`), so they never pick up a
+ * published fix on their own. On this interval the supervisor does a
+ * best-effort `npm view <pkg> version`, and if a newer version is
+ * published, `npm install -g <pkg>@latest` then exits so systemd
+ * relaunches the new code. Override via `CODEAM_HOST_SELF_UPDATE_MS`; set
+ * 0 (or negative) to DISABLE (tests / pinned boxes).
+ */
+const SELF_UPDATE_INTERVAL_MS = 60 * 60 * 1000;
+
+/** Timeout for the `npm view <pkg> version` registry lookup. */
+const SELF_UPDATE_VIEW_TIMEOUT_MS = 30_000;
+
+/** Timeout for the `npm install -g <pkg>@latest` install. */
+const SELF_UPDATE_INSTALL_TIMEOUT_MS = 180_000;
 
 /**
  * Context the Headroom reporter needs to authenticate its savings POST.
@@ -536,6 +569,91 @@ export function agentIdToHeadroomKind(agentId: string): string {
 }
 
 /**
+ * Persisted Headroom config the supervisor writes on a successful deploy and
+ * re-reads on every child spawn (resume / restart / fresh deploy). This is the
+ * single source of truth for the child's HEADROOM_* env so reporting survives
+ * a session resume or a supervisor restart (systemd / periodic self-update),
+ * not just the fresh-deploy path.
+ *
+ * Path: `~/.codeam/headroom-config.json`. Shape:
+ *   { "enabled": true, "agent": "claude", "ingestUrl": "https://…/savings" }
+ */
+export function headroomConfigPath(): string {
+  return path.join(os.homedir(), '.codeam', 'headroom-config.json');
+}
+
+/** The on-disk Headroom config shape (mirrors {@link readHeadroomChildEnv}). */
+interface HeadroomConfig {
+  enabled: boolean;
+  /** Mapped headroom kind (`agentIdToHeadroomKind` output, e.g. `claude`). */
+  agent?: string;
+  /** Full savings ingest URL (POST target). */
+  ingestUrl?: string;
+}
+
+/**
+ * Persist the Headroom config atomically (write a temp file, then rename) so a
+ * concurrent reader never sees a half-written file. Best-effort: a failure to
+ * persist is logged and swallowed — it must NEVER break the deploy.
+ *
+ * Pass `enabled: false` (or no agent/ingestUrl) when Headroom did NOT set up
+ * successfully so a later resume doesn't wrongly point the agent at a dead
+ * proxy via {@link readHeadroomChildEnv}.
+ */
+export function persistHeadroomConfig(config: HeadroomConfig): void {
+  try {
+    const file = headroomConfigPath();
+    fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+    const tmp = `${file}.tmp-${process.pid}`;
+    fs.writeFileSync(tmp, JSON.stringify(config, null, 2), { encoding: 'utf8', mode: 0o600 });
+    fs.renameSync(tmp, file);
+  } catch (err) {
+    log.warn(
+      'host-agent',
+      `failed to persist headroom config (best-effort): ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+}
+
+/**
+ * Read the persisted Headroom config and translate it into the HEADROOM_* env
+ * the pair-auto child needs to start its savings reporter. This is invoked at
+ * EVERY child spawn (fresh deploy AND resume / restart) so reporting survives
+ * session resumes and supervisor restarts, not just the fresh-deploy path.
+ *
+ * Returns the 3 env vars only when the persisted config is `enabled` AND both
+ * `agent` and `ingestUrl` are present non-empty strings. Otherwise (missing
+ * file, bad JSON, disabled, or incomplete) returns `{}` so the child's
+ * `maybeStartHeadroomReporter` no-ops and no dangling ANTHROPIC_BASE_URL is set.
+ *
+ * Best-effort: any read/parse error maps to `{}`. Exported for tests.
+ */
+export function readHeadroomChildEnv(): Record<string, string> {
+  try {
+    const raw = fs.readFileSync(headroomConfigPath(), 'utf8');
+    const parsed: unknown = JSON.parse(raw);
+    if (typeof parsed !== 'object' || parsed === null) return {};
+    const o = parsed as Record<string, unknown>;
+    if (
+      o.enabled === true &&
+      typeof o.agent === 'string' &&
+      o.agent.length > 0 &&
+      typeof o.ingestUrl === 'string' &&
+      o.ingestUrl.length > 0
+    ) {
+      return {
+        HEADROOM_ENABLED: '1',
+        HEADROOM_AGENT: o.agent,
+        HEADROOM_SAVINGS_INGEST_URL: o.ingestUrl,
+      };
+    }
+    return {};
+  } catch {
+    return {};
+  }
+}
+
+/**
  * Set up Headroom on the self-hosted box so the pair-auto child's agent
  * routes through the local compression proxy and savings reach the dashboard.
  *
@@ -695,6 +813,140 @@ const defaultSpawner: ChildSpawner = (env, cwd, args = []) =>
   });
 
 /**
+ * The current running CLI version, read from the tsup-injected
+ * `__CLI_VERSION__` constant (single source of truth — same one
+ * `version.ts` uses). Returns `null` when the define wasn't applied (dev
+ * tests via tsx) so the self-update compare treats it as "never newer".
+ */
+function currentCliVersion(): string | null {
+  return typeof __CLI_VERSION__ !== 'undefined' ? __CLI_VERSION__ : null;
+}
+
+/**
+ * Outcome of one self-update check. `'updated'` means a strictly-newer
+ * version was installed (the caller should restart). `'current'` means we
+ * were already on the latest. `'skipped'` covers every best-effort failure
+ * (registry/network/parse/install error) — the supervisor never crashes on
+ * it. `version` carries the newly-installed version on `'updated'`.
+ */
+export interface SelfUpdateResult {
+  status: 'updated' | 'current' | 'skipped';
+  version?: string;
+}
+
+/**
+ * Resolve the latest published version + self-update, injectable for tests.
+ *
+ * Contract: resolves to a {@link SelfUpdateResult}, NEVER rejects — every
+ * failure maps to `'skipped'`. The default implementation shells out to npm
+ * via {@link runSelfUpdate}; tests pass a deterministic mock so no real npm
+ * runs and `process.exit` is never reached.
+ */
+export type SelfUpdater = () => Promise<SelfUpdateResult>;
+
+/**
+ * Run a command via execFile, resolving to `{ code, stdout, stderr }` on
+ * completion/timeout — never rejects. Mirrors the best-effort, bounded
+ * shape the Headroom runner uses. `cmd` is `npm` for the normal path and
+ * `sudo` for the EACCES escalation retry (args then lead with `npm`).
+ */
+function runCmd(
+  cmd: string,
+  args: string[],
+  timeoutMs: number,
+): Promise<{ code: number | null; stdout: string; stderr: string }> {
+  return new Promise((resolve) => {
+    execFile(cmd, args, { timeout: timeoutMs }, (err, stdout, stderr) => {
+      // execFile sets err.code to the exit status on a non-zero exit; on a
+      // spawn error (npm missing) there's no numeric code — treat as null.
+      const code =
+        err && typeof (err as { code?: unknown }).code === 'number'
+          ? (err as { code: number }).code
+          : err
+            ? null
+            : 0;
+      resolve({ code, stdout: stdout ?? '', stderr: stderr ?? '' });
+    });
+  });
+}
+
+/**
+ * Default self-updater: check npm for a newer `codeam-cli`, install it, and
+ * report whether the version actually changed. Pure best-effort — any
+ * failure resolves `'skipped'` and is logged at warn; it NEVER rejects so
+ * the supervisor's self-update tick can't crash the process.
+ *
+ * Steps:
+ *   1. `npm view codeam-cli version` (30s) → latest published version.
+ *   2. Compare to the running `__CLI_VERSION__` via `compareSemver`. If not
+ *      strictly newer → `'current'` (no install).
+ *   3. `npm install -g codeam-cli@latest` (180s). The systemd unit runs as
+ *      root so a global install works; if it fails with EACCES AND we're
+ *      not already root, retry once with a `sudo` prefix.
+ *   4. On a successful install, re-resolve the installed version and return
+ *      `'updated'` with it (the caller restarts so systemd relaunches new code).
+ */
+export async function runSelfUpdate(): Promise<SelfUpdateResult> {
+  try {
+    const current = currentCliVersion();
+    if (!current) {
+      // No build-time version (dev/tsx) — can't reason about "newer". Skip.
+      log.trace('host-agent', 'self-update: no __CLI_VERSION__ — skipping');
+      return { status: 'skipped' };
+    }
+
+    const view = await runCmd('npm', ['view', SELF_UPDATE_PKG, 'version'], SELF_UPDATE_VIEW_TIMEOUT_MS);
+    if (view.code !== 0) {
+      log.trace('host-agent', `self-update: npm view exited ${String(view.code)} — skipping`);
+      return { status: 'skipped' };
+    }
+    const latest = view.stdout.trim();
+    if (!latest) {
+      log.trace('host-agent', 'self-update: empty npm view output — skipping');
+      return { status: 'skipped' };
+    }
+
+    // Only update on a strictly-newer published version.
+    if (compareSemver(latest, current) <= 0) {
+      return { status: 'current' };
+    }
+
+    log.info('host-agent', `self-update: ${current} → ${latest} available — installing`);
+    const installArgs = ['install', '-g', `${SELF_UPDATE_PKG}@latest`];
+    let install = await runCmd('npm', installArgs, SELF_UPDATE_INSTALL_TIMEOUT_MS);
+
+    // EACCES + not-root → retry once under sudo (the global prefix needs
+    // escalation on a box where host-agent isn't root, e.g. a dev box).
+    const isRoot = process.getuid?.() === 0;
+    if (install.code !== 0 && !isRoot && /EACCES/i.test(install.stderr)) {
+      log.info('host-agent', 'self-update: install hit EACCES — retrying with sudo');
+      install = await runCmd('sudo', ['npm', ...installArgs], SELF_UPDATE_INSTALL_TIMEOUT_MS);
+    }
+
+    if (install.code !== 0) {
+      log.warn(
+        'host-agent',
+        `self-update: install exited ${String(install.code)} — staying on ${current}`,
+      );
+      return { status: 'skipped' };
+    }
+
+    // Confirm the install actually changed the on-disk version before we
+    // tell the supervisor to restart (guards against a no-op install).
+    const after = await runCmd('npm', ['view', SELF_UPDATE_PKG, 'version'], SELF_UPDATE_VIEW_TIMEOUT_MS);
+    const installed = after.code === 0 ? after.stdout.trim() || latest : latest;
+    return { status: 'updated', version: installed };
+  } catch (err) {
+    // Defensive — runNpm never rejects, but guard so the tick never throws.
+    log.warn(
+      'host-agent',
+      `self-update: unexpected error: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    return { status: 'skipped' };
+  }
+}
+
+/**
  * Default self-heal action when the backend rejects the host identity:
  * wipe the sealed identity and exit non-zero so systemd restarts us. On
  * restart, `resolveHostIdentity` redeems a fresh env token if one is
@@ -704,6 +956,17 @@ const defaultOnIdentityRejected = (): void => {
   deleteHostIdentity();
   log.warn('host-agent', 'host identity rejected by backend — wiped sealed identity, exiting');
   process.exit(1);
+};
+
+/**
+ * Default restart action after a successful self-update: log + exit 0 so
+ * the systemd unit (`Restart=always`, `RestartSec=5`) relaunches the
+ * process on the freshly-installed binary. Injectable so tests assert the
+ * restart intent without killing the test runner.
+ */
+const defaultOnUpdated = (version: string): void => {
+  log.info('host-agent', `self-update: installed ${version}, restarting`);
+  process.exit(0);
 };
 
 /**
@@ -749,6 +1012,19 @@ export interface HostAgentDeps {
    * Injectable so tests mock away real pip/spawn without touching the file system.
    */
   setupHeadroom?: (agent: string) => Promise<boolean>;
+  /**
+   * Periodic self-update check + install. Defaults to {@link runSelfUpdate}
+   * (the real npm-backed updater). Injectable so tests assert the update
+   * logic without touching real npm or `process.exit`.
+   */
+  selfUpdate?: SelfUpdater;
+  /**
+   * Called when a self-update installed a strictly-newer version and the
+   * box is idle, so the new code can take over. Defaults to
+   * `process.exit(0)` (systemd `Restart=always` relaunches the new binary).
+   * Injectable so tests assert the restart WITHOUT killing the test runner.
+   */
+  onUpdated?: (version: string) => void;
 }
 
 /**
@@ -763,6 +1039,20 @@ export class HostAgentSupervisor {
   private readonly setupHeadroom: (agent: string) => Promise<boolean>;
   private relay: Pick<CommandRelayService, 'start' | 'stop'> | null = null;
   private heartbeatTimer: NodeJS.Timeout | null = null;
+  /** Periodic self-update timer (npm check + install + restart). */
+  private selfUpdateTimer: NodeJS.Timeout | null = null;
+  /** Self-update check + install (injectable; defaults to runSelfUpdate). */
+  private readonly selfUpdate: SelfUpdater;
+  /** Restart action after a successful self-update (defaults to process.exit). */
+  private readonly onUpdated: (version: string) => void;
+  /** Guards against overlapping self-update ticks (a slow npm install). */
+  private selfUpdating = false;
+  /**
+   * Set once a self-update installed a newer version but a child was busy,
+   * so the next idle tick restarts WITHOUT re-installing. Carries the
+   * already-installed version for the restart log.
+   */
+  private pendingRestartVersion: string | null = null;
   /** Guards the one-shot 'connected' telemetry on the first heartbeat. */
   private reportedConnected = false;
   /** Live-metrics collector — stateful across beats (CPU delta + latency). */
@@ -784,6 +1074,22 @@ export class HostAgentSupervisor {
     this.metrics = deps.metricsCollector ?? new MetricsCollector();
     this.onIdentityRejected = deps.onIdentityRejected ?? defaultOnIdentityRejected;
     this.disableService = deps.disableService ?? defaultDisableService;
+    this.selfUpdate = deps.selfUpdate ?? runSelfUpdate;
+    this.onUpdated = deps.onUpdated ?? defaultOnUpdated;
+  }
+
+  /**
+   * Resolve the self-update interval, honoring `CODEAM_HOST_SELF_UPDATE_MS`.
+   * A finite value > 0 overrides the default; 0 or negative DISABLES the
+   * periodic self-update (tests / pinned boxes); a non-numeric/absent value
+   * falls back to {@link SELF_UPDATE_INTERVAL_MS}.
+   */
+  private selfUpdateIntervalMs(): number {
+    const raw = process.env.CODEAM_HOST_SELF_UPDATE_MS;
+    if (raw === undefined || raw === '') return SELF_UPDATE_INTERVAL_MS;
+    const parsed = Number(raw);
+    if (!Number.isFinite(parsed)) return SELF_UPDATE_INTERVAL_MS;
+    return parsed;
   }
 
   /** Open the control channel (reusing the relay) + start heartbeats. */
@@ -805,6 +1111,19 @@ export class HostAgentSupervisor {
     void this.beat();
     this.heartbeatTimer = setInterval(() => void this.beat(), HEARTBEAT_INTERVAL_MS);
     this.heartbeatTimer.unref?.();
+
+    // Periodic self-update: check npm for a newer codeam-cli, install it,
+    // and restart so systemd relaunches the new code. Best-effort; the
+    // timer is unref'd so it never keeps the process alive on its own. A
+    // non-positive interval (env opt-out / tests) disables it entirely.
+    const updateMs = this.selfUpdateIntervalMs();
+    if (updateMs > 0) {
+      this.selfUpdateTimer = setInterval(() => void this.selfUpdateTick(), updateMs);
+      this.selfUpdateTimer.unref?.();
+    } else {
+      log.info('host-agent', 'self-update disabled (CODEAM_HOST_SELF_UPDATE_MS<=0)');
+    }
+
     log.info('host-agent', `supervisor up host=${this.identity.hostId.slice(0, 8)}`);
   }
 
@@ -813,6 +1132,10 @@ export class HostAgentSupervisor {
     if (this.heartbeatTimer) {
       clearInterval(this.heartbeatTimer);
       this.heartbeatTimer = null;
+    }
+    if (this.selfUpdateTimer) {
+      clearInterval(this.selfUpdateTimer);
+      this.selfUpdateTimer = null;
     }
     this.relay?.stop();
     for (const child of this.children.values()) {
@@ -868,6 +1191,71 @@ export class HostAgentSupervisor {
       }
       log.trace('host-agent', 'heartbeat failed', err);
     }
+  }
+
+  /**
+   * One self-update tick. Best-effort + never crashes the supervisor: the
+   * whole body is wrapped in try/catch and the injected updater never
+   * rejects. Sequence:
+   *
+   *   1. If a restart is already PENDING (a prior tick installed a newer
+   *      version while a child was busy), skip the npm work and just try to
+   *      restart now — no re-install.
+   *   2. Otherwise run the injected `selfUpdate`. On `'updated'`, remember
+   *      the new version as pending; on anything else, do nothing.
+   *   3. SAFETY: only restart when no child turn is in flight. If a child is
+   *      mid-work, DEFER — the install already happened, so a later idle
+   *      tick just restarts. (We prefer deferring to yanking an active turn;
+   *      systemd would restart in ~5s but the mobile would drop the turn.)
+   *
+   * `selfUpdating` guards against a slow npm install overlapping the next
+   * tick (the timer keeps firing on its interval).
+   */
+  async selfUpdateTick(): Promise<void> {
+    if (this.selfUpdating) return;
+    this.selfUpdating = true;
+    try {
+      // Fast path: a restart is already owed from a prior install — don't
+      // re-run npm, just restart as soon as the box is idle.
+      if (this.pendingRestartVersion !== null) {
+        this.maybeRestartForUpdate(this.pendingRestartVersion);
+        return;
+      }
+
+      const result = await this.selfUpdate();
+      if (result.status !== 'updated') return;
+
+      // A strictly-newer version is now installed on disk. Mark the restart
+      // as owed, then restart if idle (else defer to the next idle tick).
+      const version = result.version ?? 'latest';
+      this.pendingRestartVersion = version;
+      this.maybeRestartForUpdate(version);
+    } catch (err) {
+      // The updater contract is never-reject, but guard so a bug here can't
+      // take down the long-lived supervisor.
+      log.warn(
+        'host-agent',
+        `self-update tick failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    } finally {
+      this.selfUpdating = false;
+    }
+  }
+
+  /**
+   * Restart for an already-installed update IFF no child turn is in flight.
+   * When a child is busy we DEFER (the version stays pending for the next
+   * idle tick) rather than yank an active turn.
+   */
+  private maybeRestartForUpdate(version: string): void {
+    if (this.children.size > 0) {
+      log.info(
+        'host-agent',
+        `self-update: ${version} installed but ${this.children.size} child(ren) busy — deferring restart`,
+      );
+      return;
+    }
+    this.onUpdated(version);
   }
 
   /** Number of live children — for tests + diagnostics. */
@@ -1014,29 +1402,44 @@ export class HostAgentSupervisor {
 
       // 1d) Headroom local compression proxy — mirrors the codespace wiring.
       //     Best-effort: a failed/absent headroom install must never block the
-      //     deploy. Only inject HEADROOM_* env when setup fully succeeded so the
-      //     child's maybeStartHeadroomReporter activates correctly and no broken
-      //     ANTHROPIC_BASE_URL reaches the agent.
+      //     deploy. We PERSIST the result to ~/.codeam/headroom-config.json so a
+      //     later resume / supervisor restart (systemd / periodic self-update)
+      //     re-injects the same HEADROOM_* env from the persisted source of
+      //     truth — reporting survives, not just on the fresh-deploy path. We
+      //     only persist enabled:true when setup fully succeeded so a later
+      //     resume never points the agent at a dead proxy.
       if (payload.headroomEnabled && payload.headroomAgent && payload.headroomSavingsIngestUrl) {
         report('headroom', 'setting up Headroom proxy');
         const headroomOk = await this.setupHeadroom(payload.headroomAgent);
         if (headroomOk) {
-          childEnv.HEADROOM_ENABLED = '1';
           // Use the mapped headroom kind (e.g. `claude_code` → `claude`) so the
-          // env value matches what `headroom init` registered and what the
-          // reporter reports as `dto.agentId` — consistent with codespaces,
-          // which already reports `claude`.
-          childEnv.HEADROOM_AGENT = agentIdToHeadroomKind(payload.headroomAgent);
-          childEnv.HEADROOM_SAVINGS_INGEST_URL = payload.headroomSavingsIngestUrl;
-          log.info('host-agent', 'Headroom proxy ready; HEADROOM_* env injected into child');
+          // persisted/env value matches what `headroom init` registered and what
+          // the reporter reports as `dto.agentId` — consistent with codespaces,
+          // which already report `claude`.
+          persistHeadroomConfig({
+            enabled: true,
+            agent: agentIdToHeadroomKind(payload.headroomAgent),
+            ingestUrl: payload.headroomSavingsIngestUrl,
+          });
+          log.info('host-agent', 'Headroom proxy ready; persisted headroom config for child spawns');
         } else {
+          // Setup failed → persist disabled so a later resume doesn't point the
+          // agent at a dead proxy (and clears any stale enabled config).
+          persistHeadroomConfig({ enabled: false });
           log.warn('host-agent', 'Headroom setup failed (best-effort) — child will run without Headroom');
         }
+      } else if (payload.headroomEnabled === false) {
+        // Feature explicitly turned off for this deploy — clear any stale
+        // enabled config so a subsequent resume doesn't resurrect Headroom.
+        persistHeadroomConfig({ enabled: false });
       }
 
-      // 2) Spawn the supervised `pair-auto` child.
+      // 2) Spawn the supervised `pair-auto` child. Routed through
+      //    spawnSessionChild so the persisted HEADROOM_* env (the source of
+      //    truth shared with any resume / restart spawn) is merged in one
+      //    place — reporting survives every spawn, not just this one.
       report('spawning', 'starting agent');
-      const proc = this.spawnChild(childEnv, cwd, extraArgs);
+      const proc = this.spawnSessionChild(childEnv, cwd, extraArgs);
       // Track by deployId now; the stop command uses sessionId, which the
       // backend correlates to this deploy (the control channel pushed the
       // stop with the session the child paired into).
@@ -1087,6 +1490,25 @@ export class HostAgentSupervisor {
       }
       report('failed', message);
     }
+  }
+
+  /**
+   * Spawn a supervised `pair-auto` session child, merging the persisted
+   * Headroom env on top of the caller's env. This is the SINGLE spawn site for
+   * session children: the fresh-deploy path and any future resume / restart
+   * path both go through here, so the HEADROOM_* env (read from
+   * `~/.codeam/headroom-config.json`, the source of truth a prior deploy wrote)
+   * is injected on EVERY spawn — reporting survives session resumes and
+   * supervisor restarts (systemd / periodic self-update), not just fresh
+   * deploys. `readHeadroomChildEnv()` returns `{}` when Headroom is disabled or
+   * was never set up, so this is a no-op there (never-break).
+   */
+  private spawnSessionChild(
+    env: Record<string, string>,
+    cwd: string,
+    args: string[] = [],
+  ): ChildProcess {
+    return this.spawnChild({ ...env, ...readHeadroomChildEnv() }, cwd, args);
   }
 
   /**

@@ -13,7 +13,11 @@ import {
   setupHeadroomForSelfHosted,
   agentIdToHeadroomKind,
   detectPackageManager,
+  readHeadroomChildEnv,
+  headroomConfigPath,
+  persistHeadroomConfig,
   type HeadroomRunner,
+  type SelfUpdateResult,
 } from '../src/commands/host-agent';
 import { hostEnroll } from '../src/commands/host';
 import {
@@ -1560,5 +1564,381 @@ describe('detectPackageManager — coverage across distros', () => {
   it('returns null when no known package manager is present', () => {
     expect(detectPackageManager(whichOnly([]))).toBeNull();
     expect(detectPackageManager(whichOnly(['brew', 'nix']))).toBeNull();
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Self-update — periodic npm check + install + restart
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('HostAgentSupervisor — periodic self-update', () => {
+  /**
+   * Build a supervisor with a stubbed relay (no HTTP) and an injected
+   * `selfUpdate` + `onUpdated`, so the update logic is exercised without
+   * touching real npm or `process.exit`.
+   */
+  function makeUpdateSupervisor(over: {
+    selfUpdate: () => Promise<SelfUpdateResult>;
+    onUpdated: (version: string) => void;
+    spawnChild?: ChildSpawner;
+  }) {
+    return new HostAgentSupervisor(IDENTITY, {
+      makeRelay: () => ({ start: vi.fn(), stop: vi.fn() }),
+      // No real heartbeat collection during these unit ticks.
+      metricsCollector: { collect: () => { throw new Error('no metrics'); }, recordLatency: vi.fn() },
+      selfUpdate: over.selfUpdate,
+      onUpdated: over.onUpdated,
+      ...(over.spawnChild ? { spawnChild: over.spawnChild } : {}),
+    });
+  }
+
+  it("installs + restarts when selfUpdate reports 'updated' (idle box)", async () => {
+    const selfUpdate = vi
+      .fn<() => Promise<SelfUpdateResult>>()
+      .mockResolvedValue({ status: 'updated', version: '9.9.9' });
+    const onUpdated = vi.fn();
+    const sup = makeUpdateSupervisor({ selfUpdate, onUpdated });
+
+    await sup.selfUpdateTick();
+
+    expect(selfUpdate).toHaveBeenCalledTimes(1);
+    // No children → restart fires immediately with the new version.
+    expect(onUpdated).toHaveBeenCalledTimes(1);
+    expect(onUpdated).toHaveBeenCalledWith('9.9.9');
+  });
+
+  it("does NOT restart when selfUpdate reports 'current'", async () => {
+    const selfUpdate = vi
+      .fn<() => Promise<SelfUpdateResult>>()
+      .mockResolvedValue({ status: 'current' });
+    const onUpdated = vi.fn();
+    const sup = makeUpdateSupervisor({ selfUpdate, onUpdated });
+
+    await sup.selfUpdateTick();
+
+    expect(selfUpdate).toHaveBeenCalledTimes(1);
+    expect(onUpdated).not.toHaveBeenCalled();
+  });
+
+  it("does NOT restart and does NOT crash when selfUpdate reports 'skipped'", async () => {
+    const selfUpdate = vi
+      .fn<() => Promise<SelfUpdateResult>>()
+      .mockResolvedValue({ status: 'skipped' });
+    const onUpdated = vi.fn();
+    const sup = makeUpdateSupervisor({ selfUpdate, onUpdated });
+
+    // Should resolve cleanly (no throw) and not restart.
+    await expect(sup.selfUpdateTick()).resolves.toBeUndefined();
+    expect(onUpdated).not.toHaveBeenCalled();
+  });
+
+  it('never crashes the supervisor when the updater itself rejects', async () => {
+    const selfUpdate = vi
+      .fn<() => Promise<SelfUpdateResult>>()
+      .mockRejectedValue(new Error('npm exploded'));
+    const onUpdated = vi.fn();
+    const sup = makeUpdateSupervisor({ selfUpdate, onUpdated });
+
+    await expect(sup.selfUpdateTick()).resolves.toBeUndefined();
+    expect(onUpdated).not.toHaveBeenCalled();
+  });
+
+  it('DEFERS the restart while a child turn is in flight, then restarts when idle', async () => {
+    // Spawn a (never-exiting) child via a real deploy so childCount() > 0.
+    const cwdTarget = fs.mkdtempSync(path.join(os.tmpdir(), 'codeam-su-'));
+    const child = fakeChildWithStreams();
+    const spawnChild: ChildSpawner = () => child;
+    const selfUpdate = vi
+      .fn<() => Promise<SelfUpdateResult>>()
+      .mockResolvedValue({ status: 'updated', version: '9.9.9' });
+    const onUpdated = vi.fn();
+    const sup = new HostAgentSupervisor(IDENTITY, {
+      makeRelay: () => ({ start: vi.fn(), stop: vi.fn() }),
+      spawnChild,
+      resolveAgentAuth: vi.fn().mockResolvedValue({ kind: 'oauth_token', value: '{}' }),
+      selfUpdate,
+      onUpdated,
+    });
+
+    await sup.handleCommand(deployCmd({ repoOrPath: cwdTarget }));
+    expect(sup.childCount()).toBe(1);
+
+    // First tick: installs but a child is busy → defers (no restart).
+    await sup.selfUpdateTick();
+    expect(selfUpdate).toHaveBeenCalledTimes(1);
+    expect(onUpdated).not.toHaveBeenCalled();
+
+    // Child finishes its turn.
+    child.emit('exit', 0);
+    expect(sup.childCount()).toBe(0);
+
+    // Next idle tick: no re-install (still 1 call), and the deferred restart fires.
+    await sup.selfUpdateTick();
+    expect(selfUpdate).toHaveBeenCalledTimes(1);
+    expect(onUpdated).toHaveBeenCalledTimes(1);
+    expect(onUpdated).toHaveBeenCalledWith('9.9.9');
+
+    fs.rmSync(cwdTarget, { recursive: true, force: true });
+  });
+
+  it('disables the self-update timer when CODEAM_HOST_SELF_UPDATE_MS<=0', () => {
+    const prev = process.env.CODEAM_HOST_SELF_UPDATE_MS;
+    process.env.CODEAM_HOST_SELF_UPDATE_MS = '0';
+    // start() fires one immediate heartbeat — stub fetch so it can't hit the net.
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => ({ success: true, data: {} }) }),
+    );
+    try {
+      const selfUpdate = vi.fn<() => Promise<SelfUpdateResult>>();
+      const sup = makeUpdateSupervisor({ selfUpdate, onUpdated: vi.fn() });
+      sup.start();
+      // The self-update timer must NOT be scheduled, so the injected updater
+      // is never invoked. (The heartbeat timer is separate and still set.)
+      sup.stop();
+      expect(selfUpdate).not.toHaveBeenCalled();
+    } finally {
+      if (prev === undefined) delete process.env.CODEAM_HOST_SELF_UPDATE_MS;
+      else process.env.CODEAM_HOST_SELF_UPDATE_MS = prev;
+    }
+  });
+
+  it('schedules the self-update timer when the interval is positive', async () => {
+    const prev = process.env.CODEAM_HOST_SELF_UPDATE_MS;
+    process.env.CODEAM_HOST_SELF_UPDATE_MS = '50';
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => ({ success: true, data: {} }) }),
+    );
+    vi.useFakeTimers();
+    try {
+      const selfUpdate = vi
+        .fn<() => Promise<SelfUpdateResult>>()
+        .mockResolvedValue({ status: 'current' });
+      const onUpdated = vi.fn();
+      const sup = makeUpdateSupervisor({ selfUpdate, onUpdated });
+      sup.start();
+      // The interval-driven tick fires after the configured delay.
+      await vi.advanceTimersByTimeAsync(60);
+      expect(selfUpdate).toHaveBeenCalled();
+      sup.stop();
+    } finally {
+      vi.useRealTimers();
+      if (prev === undefined) delete process.env.CODEAM_HOST_SELF_UPDATE_MS;
+      else process.env.CODEAM_HOST_SELF_UPDATE_MS = prev;
+    }
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Headroom config persistence — survives resume / restart
+//
+// The supervisor persists the headroom config on a successful deploy and
+// re-reads it on EVERY child spawn (fresh deploy AND resume/restart) so the
+// savings reporter starts even when no fresh deploy arrives. These tests rely
+// on the tmpHome isolation set up in the top-level beforeEach so writes land in
+// a throwaway ~/.codeam.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('readHeadroomChildEnv — persisted config → child env', () => {
+  it('returns the 3 HEADROOM_* env vars when the config is enabled + complete', () => {
+    persistHeadroomConfig({
+      enabled: true,
+      agent: 'claude',
+      ingestUrl: 'https://ingest.test/savings',
+    });
+
+    expect(readHeadroomChildEnv()).toEqual({
+      HEADROOM_ENABLED: '1',
+      HEADROOM_AGENT: 'claude',
+      HEADROOM_SAVINGS_INGEST_URL: 'https://ingest.test/savings',
+    });
+  });
+
+  it('returns {} when the config is disabled', () => {
+    persistHeadroomConfig({ enabled: false });
+    expect(readHeadroomChildEnv()).toEqual({});
+  });
+
+  it('returns {} when the config file is missing', () => {
+    // No file written → nothing to read.
+    expect(fs.existsSync(headroomConfigPath())).toBe(false);
+    expect(readHeadroomChildEnv()).toEqual({});
+  });
+
+  it('returns {} when enabled but agent/ingestUrl are absent (incomplete)', () => {
+    persistHeadroomConfig({ enabled: true }); // no agent / ingestUrl
+    expect(readHeadroomChildEnv()).toEqual({});
+  });
+
+  it('returns {} on a corrupt / non-JSON config file (never throws)', () => {
+    fs.mkdirSync(path.dirname(headroomConfigPath()), { recursive: true });
+    fs.writeFileSync(headroomConfigPath(), '{ this is not json');
+    expect(readHeadroomChildEnv()).toEqual({});
+  });
+
+  it('persists atomically + 0600 and round-trips through read', () => {
+    persistHeadroomConfig({
+      enabled: true,
+      agent: 'codex',
+      ingestUrl: 'https://ingest.test/x',
+    });
+    const file = headroomConfigPath();
+    expect(fs.existsSync(file)).toBe(true);
+    if (process.platform !== 'win32') {
+      expect(fs.statSync(file).mode & 0o777).toBe(0o600);
+    }
+    // No leftover temp file from the atomic write.
+    const leftovers = fs
+      .readdirSync(path.dirname(file))
+      .filter((n) => n.startsWith('headroom-config.json.tmp'));
+    expect(leftovers).toEqual([]);
+    expect(readHeadroomChildEnv().HEADROOM_AGENT).toBe('codex');
+  });
+});
+
+describe('HostAgentSupervisor — deploy persists headroom config', () => {
+  function makeHeadroomSupervisor(setupHeadroomResult: boolean) {
+    const setupHeadroom = vi
+      .fn<(a: string) => Promise<boolean>>()
+      .mockResolvedValue(setupHeadroomResult);
+    const resolveAgentAuth = vi
+      .fn<(i: SealedHostIdentity, s: string) => Promise<AgentAuth>>()
+      .mockResolvedValue({ kind: 'oauth_token', value: '{"claudeAiOauth":{}}' });
+    const calls: Array<{ env: Record<string, string> }> = [];
+    const spawnChild: ChildSpawner = (env) => {
+      calls.push({ env });
+      return fakeChildWithStreams();
+    };
+    const sup = new HostAgentSupervisor(IDENTITY, { spawnChild, resolveAgentAuth, setupHeadroom });
+    return { sup, calls };
+  }
+
+  function readConfig(): Record<string, unknown> | null {
+    try {
+      return JSON.parse(fs.readFileSync(headroomConfigPath(), 'utf8')) as Record<string, unknown>;
+    } catch {
+      return null;
+    }
+  }
+
+  beforeEach(() => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => ({ success: true, data: {} }) }),
+    );
+  });
+
+  it('persists enabled config with the MAPPED agent + ingestUrl when setup succeeds', async () => {
+    const cwdTarget = fs.mkdtempSync(path.join(os.tmpdir(), 'codeam-hrp-'));
+    const { sup, calls } = makeHeadroomSupervisor(true);
+
+    await sup.handleCommand(
+      deployCmd({
+        repoOrPath: cwdTarget,
+        headroomEnabled: true,
+        headroomAgent: 'claude_code', // raw LinkedAgentId → mapped to `claude`
+        headroomSavingsIngestUrl: 'https://ingest.test/savings',
+      }),
+    );
+
+    // Persisted with the mapped kind, not the raw LinkedAgentId.
+    expect(readConfig()).toEqual({
+      enabled: true,
+      agent: 'claude',
+      ingestUrl: 'https://ingest.test/savings',
+    });
+
+    // And the spawned child got the env (read from the persisted file).
+    expect(calls[0].env.HEADROOM_ENABLED).toBe('1');
+    expect(calls[0].env.HEADROOM_AGENT).toBe('claude');
+    expect(calls[0].env.HEADROOM_SAVINGS_INGEST_URL).toBe('https://ingest.test/savings');
+
+    fs.rmSync(cwdTarget, { recursive: true, force: true });
+  });
+
+  it('persists disabled config when headroom setup fails (no dead-proxy on resume)', async () => {
+    const cwdTarget = fs.mkdtempSync(path.join(os.tmpdir(), 'codeam-hrp-'));
+    const { sup, calls } = makeHeadroomSupervisor(false); // setup fails
+
+    await sup.handleCommand(
+      deployCmd({
+        repoOrPath: cwdTarget,
+        headroomEnabled: true,
+        headroomAgent: 'claude',
+        headroomSavingsIngestUrl: 'https://ingest.test/savings',
+      }),
+    );
+
+    expect(readConfig()).toEqual({ enabled: false });
+    // Child still spawned, but with NO headroom env.
+    expect(calls[0].env.HEADROOM_ENABLED).toBeUndefined();
+
+    fs.rmSync(cwdTarget, { recursive: true, force: true });
+  });
+
+  it('persists disabled config when headroomEnabled is false (clears stale enabled)', async () => {
+    // Pre-seed an ENABLED config (as if a prior deploy turned it on).
+    persistHeadroomConfig({ enabled: true, agent: 'claude', ingestUrl: 'https://old/x' });
+
+    const cwdTarget = fs.mkdtempSync(path.join(os.tmpdir(), 'codeam-hrp-'));
+    const { sup, calls } = makeHeadroomSupervisor(true);
+
+    await sup.handleCommand(deployCmd({ repoOrPath: cwdTarget, headroomEnabled: false }));
+
+    // The explicit-off deploy cleared the stale enabled config.
+    expect(readConfig()).toEqual({ enabled: false });
+    expect(calls[0].env.HEADROOM_ENABLED).toBeUndefined();
+
+    fs.rmSync(cwdTarget, { recursive: true, force: true });
+  });
+});
+
+describe('HostAgentSupervisor — resume/restart spawn re-injects persisted headroom env', () => {
+  it('a spawn AFTER a prior deploy enabled headroom (no fresh headroom payload) gets HEADROOM_* env', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => ({ success: true, data: {} }) }),
+    );
+
+    // Simulate the state a prior successful headroom deploy left behind: the
+    // persisted config on disk. This is exactly what survives a supervisor
+    // restart (systemd / self-update) — the in-memory deploy payload is gone.
+    persistHeadroomConfig({
+      enabled: true,
+      agent: 'claude',
+      ingestUrl: 'https://ingest.test/savings',
+    });
+
+    const calls: Array<{ env: Record<string, string> }> = [];
+    const spawnChild: ChildSpawner = (env) => {
+      calls.push({ env });
+      return fakeChildWithStreams();
+    };
+    const resolveAgentAuth = vi
+      .fn<(i: SealedHostIdentity, s: string) => Promise<AgentAuth>>()
+      .mockResolvedValue({ kind: 'oauth_token', value: '{"claudeAiOauth":{}}' });
+    // setupHeadroom must NOT be invoked on this spawn — the payload carries NO
+    // headroom fields (a resume/restart deploy), yet the env still flows from
+    // the persisted config.
+    const setupHeadroom = vi.fn<(a: string) => Promise<boolean>>().mockResolvedValue(true);
+    const sup = new HostAgentSupervisor(IDENTITY, { spawnChild, resolveAgentAuth, setupHeadroom });
+
+    const cwdTarget = fs.mkdtempSync(path.join(os.tmpdir(), 'codeam-hrr-'));
+    // A plain deploy with NO headroom fields (mirrors a resume that re-spawns
+    // the session child without the original headroom payload).
+    await sup.handleCommand(deployCmd({ repoOrPath: cwdTarget }));
+
+    // setupHeadroom was NOT called (no fresh headroom payload)…
+    expect(setupHeadroom).not.toHaveBeenCalled();
+    // …but the child STILL received the HEADROOM_* env from the persisted config.
+    expect(calls).toHaveLength(1);
+    expect(calls[0].env.HEADROOM_ENABLED).toBe('1');
+    expect(calls[0].env.HEADROOM_AGENT).toBe('claude');
+    expect(calls[0].env.HEADROOM_SAVINGS_INGEST_URL).toBe('https://ingest.test/savings');
+    // Standard token still present (never-break).
+    expect(calls[0].env.CODEAM_AUTO_TOKEN).toBe('auto-xyz');
+
+    fs.rmSync(cwdTarget, { recursive: true, force: true });
   });
 });

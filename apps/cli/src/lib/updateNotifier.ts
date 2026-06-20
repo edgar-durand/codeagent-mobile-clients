@@ -68,7 +68,7 @@ function writeCache(cache: CacheShape): void {
  * any pre-release suffix (`-rc.1` etc.) — we never want to nag a
  * user using a stable build to install a pre-release.
  */
-function compareSemver(a: string, b: string): number {
+export function compareSemver(a: string, b: string): number {
   const stripPre = (s: string) => s.split('-')[0];
   const aParts = stripPre(a).split('.').map(Number);
   const bParts = stripPre(b).split('.').map(Number);
