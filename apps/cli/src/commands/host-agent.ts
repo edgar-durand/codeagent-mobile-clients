@@ -51,6 +51,7 @@ import {
   redeemEnrollToken,
   reportDeployProgress,
   reportProgress,
+  reportSessionEvent,
   saveHostIdentity,
   sendHostHeartbeat,
   unsealAgentAuth,
@@ -1120,6 +1121,17 @@ export class HostAgentSupervisor {
     this.heartbeatTimer = setInterval(() => void this.beat(), HEARTBEAT_INTERVAL_MS);
     this.heartbeatTimer.unref?.();
 
+    // Boot reconcile: a fresh supervisor owns NO children yet (a restart /
+    // crash / reboot killed any previous ones), so the authoritative live
+    // set is whatever we currently supervise — empty at this point. Reporting
+    // it ends any rows the backend still has marked active for this host,
+    // clearing zombies that a hard crash left without an `ended` event.
+    // One-shot, best-effort; the next boot re-converges if this POST fails.
+    void reportSessionEvent(
+      { hostId: this.identity.hostId, hostToken: this.identity.hostToken },
+      { event: 'reconcile', activeDeployIds: this.activeSessions().map((s) => s.id) },
+    ).catch((err) => log.trace('host-agent', 'boot reconcile failed (best-effort)', err));
+
     // Periodic self-update: check npm for a newer codeam-cli, install it,
     // and restart so systemd relaunches the new code. Best-effort; the
     // timer is unref'd so it never keeps the process alive on its own. A
@@ -1167,13 +1179,12 @@ export class HostAgentSupervisor {
       } catch (err) {
         log.trace('host-agent', 'metrics collection failed', err);
       }
-      // Active supervised sessions, derived from the live children map. Always
-      // an array (empty when no children) so the backend reflects "0 active".
-      // Additive to the heartbeat body — older backends ignore it.
-      const sessions = this.activeSessions();
+      // The heartbeat carries liveness + metrics ONLY. Session state is
+      // event-driven (reportSessionEvent + the backend-owned START) — NOT
+      // sampled here. Re-sending a discrete state every beat is polling.
       // Measure this beat's round-trip and feed it back as the next beat's
       // latencyMs (a real measured value, not a guess).
-      const latencyMs = await sendHostHeartbeat(this.identity, metrics, sessions);
+      const latencyMs = await sendHostHeartbeat(this.identity, metrics);
       this.metrics.recordLatency(latencyMs);
       // First successful heartbeat means the control channel is live —
       // report 'connected' once (host-token auth). Best-effort, fire it
@@ -1497,6 +1508,15 @@ export class HostAgentSupervisor {
         // Self-heal the map when a child dies on its own.
         if (tracked) {
           this.children.delete(payload.deployId);
+        }
+        // END: a supervised child exited — report it one-shot so the backend
+        // drops the active-sessions row (covers clean teardown AND crash;
+        // a SIGTERM-stop also lands here). Discrete event, never a poll.
+        if (tracked) {
+          void reportSessionEvent(
+            { hostId: this.identity.hostId, hostToken: this.identity.hostToken },
+            { event: 'ended', deployId: payload.deployId },
+          ).catch((err) => log.trace('host-agent', 'session ended report failed (best-effort)', err));
         }
         // A non-zero exit means the agent failed to come up. Report it as a
         // deploy failure with the captured tail (best-effort). A clean exit
