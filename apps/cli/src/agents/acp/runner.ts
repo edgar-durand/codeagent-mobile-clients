@@ -1129,6 +1129,12 @@ async function handleCommand(
             content: AUTH_FAILURE_MESSAGE,
             done: true,
           });
+          // Persist it in the DURABLE conversation (the output stream is just
+          // a 3-min buffer the next turn's `clear` wipes — and mobile
+          // re-fetches `get_conversation` on a loop). Without this append the
+          // bubble shows live then disappears on the next refresh.
+          history.appendAgentReply(AUTH_FAILURE_MESSAGE);
+          void history.flush();
         }
         await relay.sendResult(cmd.id, 'failed', { error: detail });
       }
