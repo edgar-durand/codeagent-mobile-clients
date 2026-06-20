@@ -685,6 +685,37 @@ export function readHeadroomChildEnv(): Record<string, string> {
  * @param runner - Injectable subprocess runner. Defaults to `defaultHeadroomRunner`.
  *                 Tests pass a mock so no real apt/pip runs.
  */
+/**
+ * Locate the directory holding the SDK-bundled `claude` binary, so it can be
+ * prepended to `headroom init`'s PATH.
+ *
+ * `headroom init --global claude` (≥0.26) HARD-FAILS with "'claude' not found
+ * in PATH. Install Claude Code first." when no `claude` is on PATH. On a
+ * self-hosted box claude ships ONLY as the platform binary under
+ * `@anthropic-ai/claude-agent-sdk-<platform>/claude` (the same binary the ACP
+ * adapter spawns by absolute path) — never on PATH. We resolve that dir here
+ * and inject it for the init call only; we never mutate the global PATH or
+ * symlink, and the runtime hooks headroom writes invoke `headroom`, not
+ * `claude`, so the child needs nothing extra. Returns null when not found
+ * (init then fails gracefully, exactly as before).
+ */
+function bundledClaudeBinDir(): string | null {
+  const require_ = require;
+  try {
+    const sdkManifest = require_.resolve('@anthropic-ai/claude-agent-sdk/package.json');
+    // …/node_modules/@anthropic-ai/claude-agent-sdk/package.json → …/@anthropic-ai
+    const atAnthropic = path.dirname(path.dirname(sdkManifest));
+    for (const entry of fs.readdirSync(atAnthropic)) {
+      if (!entry.startsWith('claude-agent-sdk-')) continue; // platform package
+      const bin = path.join(atAnthropic, entry, 'claude');
+      if (fs.existsSync(bin)) return path.dirname(bin);
+    }
+  } catch {
+    /* unresolved — fall through to null */
+  }
+  return null;
+}
+
 export async function setupHeadroomForSelfHosted(
   agent: string,
   runner: HeadroomRunner = defaultHeadroomRunner,
@@ -763,13 +794,22 @@ export async function setupHeadroomForSelfHosted(
   }
   // Map the incoming agent id (e.g. the LinkedAgentId `claude_code`) to the
   // subcommand kind `headroom init` accepts (`claude`/`codex`/`copilot`).
-  // `headroom init` can print "claude not found in PATH" on a self-hosted box
-  // (claude is the SDK-bundled binary, not on PATH) but still writes
-  // ~/.claude/settings.json and exits 0 — execFile only reports an error on a
-  // non-zero exit, so a zero exit is treated as success even with that stderr.
   const initKind = agentIdToHeadroomKind(agent);
+  // `headroom init --global claude` HARD-FAILS when no `claude` is on PATH.
+  // On a self-hosted box claude is the SDK-bundled binary (never on PATH), so
+  // prepend its dir to the init call's PATH. Init-call only — no global mutation.
+  const initEnv = { ...process.env };
+  if (initKind === 'claude') {
+    const claudeDir = bundledClaudeBinDir();
+    if (claudeDir) {
+      initEnv.PATH = `${claudeDir}${path.delimiter}${process.env['PATH'] ?? ''}`;
+      log.info('host-agent', `headroom init: bundled claude on PATH (${claudeDir})`);
+    } else {
+      log.warn('host-agent', 'headroom init: bundled claude binary not found — init may fail');
+    }
+  }
   const initOk = await new Promise<boolean>((resolve) => {
-    execFile('headroom', ['init', '--global', initKind], (initErr, stdout, stderr) => {
+    execFile('headroom', ['init', '--global', initKind], { env: initEnv }, (initErr, stdout, stderr) => {
       if (initErr) {
         const detail = (stderr || initErr.message).replace(/\n+$/g, '');
         log.warn('host-agent', `headroom init failed (best-effort): ${detail}`);
