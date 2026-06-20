@@ -35,7 +35,7 @@
  * Everything else here is complete + tested via an injected resolver.
  */
 
-import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
+import { execFileSync, execFile, spawn, type ChildProcess } from 'node:child_process';
 import * as os from 'node:os';
 import { CommandRelayService, type RemoteCommand } from '../services/command-relay.service';
 import type { AgentMetadata } from '@codeagent/shared';
@@ -181,6 +181,23 @@ interface DeployPayload {
   previewTunnelToken?: string;
   /** Stable preview hostname for this box's tunnel; exported as `PREVIEW_TUNNEL_HOSTNAME`. */
   previewHostname?: string;
+  /**
+   * When true, set up the Headroom local compression proxy before spawning
+   * the pair-auto child and inject HEADROOM_* env vars so the child's
+   * maybeStartHeadroomReporter activates. Best-effort — a failed or absent
+   * Headroom install must NEVER block the deploy. Absent = false.
+   */
+  headroomEnabled?: boolean;
+  /**
+   * Agent identifier passed to `headroom init --global <agent>`.
+   * e.g. 'claude'. Required when headroomEnabled is true.
+   */
+  headroomAgent?: string;
+  /**
+   * Full ingest URL for the Headroom savings reporter (POST target).
+   * Required when headroomEnabled is true.
+   */
+  headroomSavingsIngestUrl?: string;
 }
 
 /** The stop command payload (mirrors the backend `SelfHostedStopCommand`). */
@@ -209,6 +226,17 @@ function isDeployPayload(p: Record<string, unknown>): p is DeployPayload & Recor
   }
   // cloneToken is optional, but must be a string when present.
   if (p.cloneToken !== undefined && typeof p.cloneToken !== 'string') {
+    return false;
+  }
+  // headroom fields are optional (back-compat: older backends omit them).
+  // When present they must have the right types; absence is treated as disabled.
+  if (p.headroomEnabled !== undefined && typeof p.headroomEnabled !== 'boolean') {
+    return false;
+  }
+  if (p.headroomAgent !== undefined && typeof p.headroomAgent !== 'string') {
+    return false;
+  }
+  if (p.headroomSavingsIngestUrl !== undefined && typeof p.headroomSavingsIngestUrl !== 'string') {
     return false;
   }
   // Exactly one credential source must be present + well-formed.
@@ -245,6 +273,127 @@ const CONTROL_AGENT_META: AgentMetadata = {
 interface ChildSession {
   deployId: string;
   proc: ChildProcess;
+}
+
+/**
+ * Set up Headroom on the self-hosted box so the pair-auto child's agent
+ * routes through the local compression proxy and savings reach the dashboard.
+ *
+ * Steps (all best-effort — never throws, never blocks the deploy):
+ *   1. pip install headroom-ai + companion packages (fallback pip3). 120s timeout.
+ *   2. `headroom init --global <agent>` to write ~/.claude/settings.json.
+ *   3. Warm-start `headroom proxy --port 8787` as a detached background process.
+ *
+ * Returns true when setup succeeded well enough to pass HEADROOM_* env to the
+ * child (install + init both ok). Returns false on any failure — the caller
+ * must NOT set HEADROOM_* env in that case so the child reporter no-ops.
+ *
+ * @param agent - e.g. 'claude', passed to `headroom init --global`.
+ */
+export async function setupHeadroomForSelfHosted(agent: string): Promise<boolean> {
+  // ── Step 1: pip install (best-effort, bounded) ───────────────────────────
+  const INSTALL_TIMEOUT_MS = 120_000;
+  const PIP_PACKAGES = [
+    'headroom-ai',
+    'fastapi',
+    'uvicorn',
+    'httpx[http2]',
+    'websockets',
+    'zstandard',
+  ];
+
+  const installOk = await new Promise<boolean>((resolve) => {
+    // Try `pip` first; many systems symlink pip → pip3 but some (Debian/Ubuntu
+    // minimal) only ship `pip3`. If `pip` is absent the spawn errors immediately.
+    const tryPip = (cmd: string): Promise<boolean> =>
+      new Promise((res) => {
+        const child = spawn(cmd, ['install', '--quiet', ...PIP_PACKAGES], {
+          stdio: ['ignore', 'pipe', 'pipe'],
+        });
+        let settled = false;
+        const done = (ok: boolean): void => {
+          if (settled) return;
+          settled = true;
+          res(ok);
+        };
+        const onData = (b: Buffer): void => {
+          const line = b.toString().replace(/\n+$/g, '');
+          if (line) log.info('host-agent', `headroom-install: ${line}`);
+        };
+        child.stdout?.on('data', onData);
+        child.stderr?.on('data', onData);
+        const timer = setTimeout(() => {
+          log.warn('host-agent', `headroom pip install timed out (${INSTALL_TIMEOUT_MS / 1000}s) — skipping Headroom`);
+          try { child.kill('SIGTERM'); } catch { /* already dead */ }
+          done(false);
+        }, INSTALL_TIMEOUT_MS);
+        child.once('exit', (code) => {
+          clearTimeout(timer);
+          if (code === 0) {
+            log.info('host-agent', 'headroom pip install succeeded');
+          } else {
+            log.warn('host-agent', `headroom pip install exited code=${String(code)} — skipping Headroom`);
+          }
+          done(code === 0);
+        });
+        child.once('error', (e) => {
+          clearTimeout(timer);
+          done(false); // pip command not found or spawn failed
+          log.trace('host-agent', `headroom pip spawn error (${cmd}): ${e.message}`);
+        });
+      });
+
+    // Try pip, fall back to pip3 on non-zero or spawn error.
+    tryPip('pip')
+      .then((ok) => (ok ? resolve(true) : tryPip('pip3').then(resolve)))
+      .catch(() => resolve(false));
+  });
+
+  if (!installOk) {
+    return false;
+  }
+
+  // ── Step 2: `headroom init --global <agent>` (only when headroom is on PATH) ──
+  const initOk = await new Promise<boolean>((resolve) => {
+    // Verify headroom is on PATH before calling init; on some boxes pip
+    // installs to a user-local directory that isn't on the current PATH yet.
+    execFile('which', ['headroom'], (whichErr) => {
+      if (whichErr) {
+        log.warn('host-agent', 'headroom not found on PATH after install — skipping init');
+        resolve(false);
+        return;
+      }
+      execFile('headroom', ['init', '--global', agent], (initErr, stdout, stderr) => {
+        if (initErr) {
+          const detail = (stderr || initErr.message).replace(/\n+$/g, '');
+          log.warn('host-agent', `headroom init failed (best-effort): ${detail}`);
+          resolve(false);
+        } else {
+          if (stdout.trim()) log.info('host-agent', `headroom init: ${stdout.trim()}`);
+          log.info('host-agent', 'headroom init --global succeeded');
+          resolve(true);
+        }
+      });
+    });
+  });
+
+  if (!initOk) {
+    return false;
+  }
+
+  // ── Step 3: warm-start the proxy (detached, best-effort, don't await) ───
+  try {
+    const proxy = spawn('headroom', ['proxy', '--port', '8787'], {
+      stdio: 'ignore',
+      detached: true,
+    });
+    proxy.unref(); // don't keep the supervisor process alive for the proxy
+  } catch (e) {
+    // Non-fatal — the SessionStart hook in settings.json also ensures the proxy.
+    log.warn('host-agent', `headroom proxy warm-start failed (best-effort): ${e instanceof Error ? e.message : String(e)}`);
+  }
+
+  return true;
 }
 
 /** How the supervisor spawns a child — injectable so tests don't fork. */
@@ -317,6 +466,11 @@ export interface HostAgentDeps {
   onIdentityRejected?: () => void;
   /** Best-effort de-provision for `self_hosted_wipe`. Injectable for tests. */
   disableService?: () => void;
+  /**
+   * Headroom setup function. Defaults to `setupHeadroomForSelfHosted`.
+   * Injectable so tests mock away real pip/spawn without touching the file system.
+   */
+  setupHeadroom?: (agent: string) => Promise<boolean>;
 }
 
 /**
@@ -328,6 +482,7 @@ export class HostAgentSupervisor {
   private readonly children = new Map<string, ChildSession>();
   private readonly spawnChild: ChildSpawner;
   private readonly resolveAgentAuth: AgentAuthResolver;
+  private readonly setupHeadroom: (agent: string) => Promise<boolean>;
   private relay: Pick<CommandRelayService, 'start' | 'stop'> | null = null;
   private heartbeatTimer: NodeJS.Timeout | null = null;
   /** Guards the one-shot 'connected' telemetry on the first heartbeat. */
@@ -347,6 +502,7 @@ export class HostAgentSupervisor {
   ) {
     this.spawnChild = deps.spawnChild ?? defaultSpawner;
     this.resolveAgentAuth = deps.resolveAgentAuth ?? unsealAgentAuth;
+    this.setupHeadroom = deps.setupHeadroom ?? setupHeadroomForSelfHosted;
     this.metrics = deps.metricsCollector ?? new MetricsCollector();
     this.onIdentityRejected = deps.onIdentityRejected ?? defaultOnIdentityRejected;
     this.disableService = deps.disableService ?? defaultDisableService;
@@ -576,6 +732,24 @@ export class HostAgentSupervisor {
       if (payload.previewTunnelToken && payload.previewHostname) {
         childEnv.PREVIEW_TUNNEL_TOKEN = payload.previewTunnelToken;
         childEnv.PREVIEW_TUNNEL_HOSTNAME = payload.previewHostname;
+      }
+
+      // 1d) Headroom local compression proxy — mirrors the codespace wiring.
+      //     Best-effort: a failed/absent headroom install must never block the
+      //     deploy. Only inject HEADROOM_* env when setup fully succeeded so the
+      //     child's maybeStartHeadroomReporter activates correctly and no broken
+      //     ANTHROPIC_BASE_URL reaches the agent.
+      if (payload.headroomEnabled && payload.headroomAgent && payload.headroomSavingsIngestUrl) {
+        report('headroom', 'setting up Headroom proxy');
+        const headroomOk = await this.setupHeadroom(payload.headroomAgent);
+        if (headroomOk) {
+          childEnv.HEADROOM_ENABLED = '1';
+          childEnv.HEADROOM_AGENT = payload.headroomAgent;
+          childEnv.HEADROOM_SAVINGS_INGEST_URL = payload.headroomSavingsIngestUrl;
+          log.info('host-agent', 'Headroom proxy ready; HEADROOM_* env injected into child');
+        } else {
+          log.warn('host-agent', 'Headroom setup failed (best-effort) — child will run without Headroom');
+        }
       }
 
       // 2) Spawn the supervised `pair-auto` child.

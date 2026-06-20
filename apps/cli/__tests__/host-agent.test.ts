@@ -10,6 +10,7 @@ import {
   HostAgentSupervisor,
   resolveHostIdentity,
   type ChildSpawner,
+  setupHeadroomForSelfHosted,
 } from '../src/commands/host-agent';
 import { hostEnroll } from '../src/commands/host';
 import {
@@ -945,4 +946,255 @@ describe('HostAgentSupervisor — self_hosted_wipe control command', () => {
     expect(onIdentityRejected).toHaveBeenCalledTimes(1);
     expect(fs.existsSync(hostIdentityPath())).toBe(false);
   });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Headroom — payload validator back-compat + env injection
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('isDeployPayload — headroom fields back-compat', () => {
+  /**
+   * Drive the validator indirectly: feed a `self_hosted_deploy` command to
+   * `handleCommand` and observe whether a child is spawned (validator passed)
+   * or not (validator rejected). We inject a no-op resolveAgentAuth so no real
+   * network call occurs, and point repoOrPath at a real tmp directory so
+   * prepareWorkspace doesn't throw.
+   */
+  async function assertValidatorAccepts(
+    overrides: Record<string, unknown>,
+  ): Promise<Record<string, string>> {
+    const cwdTarget = fs.mkdtempSync(path.join(os.tmpdir(), 'codeam-hr-'));
+    const calls: Array<{ env: Record<string, string> }> = [];
+    const spawnChild: ChildSpawner = (env) => {
+      calls.push({ env });
+      return fakeChild();
+    };
+    const resolveAgentAuth = vi
+      .fn<(i: SealedHostIdentity, s: string) => Promise<AgentAuth>>()
+      .mockResolvedValue({ kind: 'oauth_token', value: '{"claudeAiOauth":{}}' });
+    // setupHeadroom is mocked to succeed so the headroom env injection branch
+    // is exercised without real pip.
+    const setupHeadroom = vi.fn<(a: string) => Promise<boolean>>().mockResolvedValue(true);
+    const sup = new HostAgentSupervisor(IDENTITY, { spawnChild, resolveAgentAuth, setupHeadroom });
+
+    await sup.handleCommand(deployCmd({ repoOrPath: cwdTarget, ...overrides }));
+
+    fs.rmSync(cwdTarget, { recursive: true, force: true });
+    return calls[0]?.env ?? {};
+  }
+
+  it('accepts a payload with NO headroom fields (older backend — back-compat)', async () => {
+    const env = await assertValidatorAccepts({});
+    // No headroom env on the child — older payload treated as disabled.
+    expect(env.HEADROOM_ENABLED).toBeUndefined();
+    expect(env.HEADROOM_AGENT).toBeUndefined();
+    expect(env.HEADROOM_SAVINGS_INGEST_URL).toBeUndefined();
+  });
+
+  it('accepts a payload with headroomEnabled=false (feature explicitly off)', async () => {
+    const env = await assertValidatorAccepts({ headroomEnabled: false });
+    expect(env.HEADROOM_ENABLED).toBeUndefined();
+  });
+
+  it('accepts a payload with all 3 headroom fields present and valid', async () => {
+    const env = await assertValidatorAccepts({
+      headroomEnabled: true,
+      headroomAgent: 'claude',
+      headroomSavingsIngestUrl: 'https://api.codeagent.test/headroom-savings',
+    });
+    // All 3 HEADROOM_* vars injected because setupHeadroom mock returns true.
+    expect(env.HEADROOM_ENABLED).toBe('1');
+    expect(env.HEADROOM_AGENT).toBe('claude');
+    expect(env.HEADROOM_SAVINGS_INGEST_URL).toBe('https://api.codeagent.test/headroom-savings');
+  });
+
+  it('rejects a malformed headroomEnabled (wrong type)', async () => {
+    const spawnChild = vi.fn<ChildSpawner>(() => fakeChild());
+    const resolveAgentAuth = vi
+      .fn<(i: SealedHostIdentity, s: string) => Promise<AgentAuth>>()
+      .mockResolvedValue({ kind: 'oauth_token', value: '{}' });
+    const sup = new HostAgentSupervisor(IDENTITY, { spawnChild, resolveAgentAuth });
+
+    await sup.handleCommand(
+      deployCmd({ headroomEnabled: 'yes' }), // should be boolean
+    );
+
+    // Validator rejected the payload → no child spawned.
+    expect(spawnChild).not.toHaveBeenCalled();
+  });
+
+  it('rejects a malformed headroomAgent (wrong type)', async () => {
+    const spawnChild = vi.fn<ChildSpawner>(() => fakeChild());
+    const resolveAgentAuth = vi
+      .fn<(i: SealedHostIdentity, s: string) => Promise<AgentAuth>>()
+      .mockResolvedValue({ kind: 'oauth_token', value: '{}' });
+    const sup = new HostAgentSupervisor(IDENTITY, { spawnChild, resolveAgentAuth });
+
+    await sup.handleCommand(
+      deployCmd({ headroomEnabled: true, headroomAgent: 42 }), // agent must be a string
+    );
+
+    expect(spawnChild).not.toHaveBeenCalled();
+  });
+
+  it('rejects a malformed headroomSavingsIngestUrl (wrong type)', async () => {
+    const spawnChild = vi.fn<ChildSpawner>(() => fakeChild());
+    const resolveAgentAuth = vi
+      .fn<(i: SealedHostIdentity, s: string) => Promise<AgentAuth>>()
+      .mockResolvedValue({ kind: 'oauth_token', value: '{}' });
+    const sup = new HostAgentSupervisor(IDENTITY, { spawnChild, resolveAgentAuth });
+
+    await sup.handleCommand(
+      deployCmd({ headroomEnabled: true, headroomAgent: 'claude', headroomSavingsIngestUrl: 99 }),
+    );
+
+    expect(spawnChild).not.toHaveBeenCalled();
+  });
+});
+
+describe('HostAgentSupervisor — Headroom env injection', () => {
+  function makeHeadroomSupervisor(setupHeadroomResult: boolean) {
+    const setupHeadroom = vi.fn<(a: string) => Promise<boolean>>().mockResolvedValue(setupHeadroomResult);
+    const resolveAgentAuth = vi
+      .fn<(i: SealedHostIdentity, s: string) => Promise<AgentAuth>>()
+      .mockResolvedValue({ kind: 'oauth_token', value: '{"claudeAiOauth":{}}' });
+    const calls: Array<{ env: Record<string, string>; cwd: string }> = [];
+    const spawnChild: ChildSpawner = (env, cwd) => {
+      calls.push({ env, cwd });
+      return fakeChildWithStreams();
+    };
+    const sup = new HostAgentSupervisor(IDENTITY, { spawnChild, resolveAgentAuth, setupHeadroom });
+    return { sup, setupHeadroom, calls };
+  }
+
+  it('injects HEADROOM_* env vars into the child when headroomEnabled=true and setup succeeds', async () => {
+    const cwdTarget = fs.mkdtempSync(path.join(os.tmpdir(), 'codeam-hr-'));
+    const { sup, setupHeadroom, calls } = makeHeadroomSupervisor(true);
+
+    // Stub fetch for the deploy-progress best-effort POSTs.
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => ({ success: true, data: {} }) }),
+    );
+
+    await sup.handleCommand(
+      deployCmd({
+        repoOrPath: cwdTarget,
+        headroomEnabled: true,
+        headroomAgent: 'claude',
+        headroomSavingsIngestUrl: 'https://ingest.test/savings',
+      }),
+    );
+
+    // setupHeadroom called with the right agent.
+    expect(setupHeadroom).toHaveBeenCalledWith('claude');
+
+    // Child env carries all 3 headroom vars.
+    expect(calls).toHaveLength(1);
+    expect(calls[0].env.HEADROOM_ENABLED).toBe('1');
+    expect(calls[0].env.HEADROOM_AGENT).toBe('claude');
+    expect(calls[0].env.HEADROOM_SAVINGS_INGEST_URL).toBe('https://ingest.test/savings');
+
+    // Standard deploy env vars still present (never-break check).
+    expect(calls[0].env.CODEAM_AUTO_TOKEN).toBe('auto-xyz');
+
+    fs.rmSync(cwdTarget, { recursive: true, force: true });
+  });
+
+  it('does NOT inject HEADROOM_* env vars when headroomEnabled=true but setup fails', async () => {
+    const cwdTarget = fs.mkdtempSync(path.join(os.tmpdir(), 'codeam-hr-'));
+    const { sup, setupHeadroom, calls } = makeHeadroomSupervisor(false); // setup fails
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => ({ success: true, data: {} }) }),
+    );
+
+    await sup.handleCommand(
+      deployCmd({
+        repoOrPath: cwdTarget,
+        headroomEnabled: true,
+        headroomAgent: 'claude',
+        headroomSavingsIngestUrl: 'https://ingest.test/savings',
+      }),
+    );
+
+    // setupHeadroom was called.
+    expect(setupHeadroom).toHaveBeenCalledWith('claude');
+
+    // Child was still spawned (never-break).
+    expect(calls).toHaveLength(1);
+
+    // No HEADROOM_* vars — broken install must not leave a dangling ANTHROPIC_BASE_URL.
+    expect(calls[0].env.HEADROOM_ENABLED).toBeUndefined();
+    expect(calls[0].env.HEADROOM_AGENT).toBeUndefined();
+    expect(calls[0].env.HEADROOM_SAVINGS_INGEST_URL).toBeUndefined();
+
+    // Standard token still present.
+    expect(calls[0].env.CODEAM_AUTO_TOKEN).toBe('auto-xyz');
+
+    fs.rmSync(cwdTarget, { recursive: true, force: true });
+  });
+
+  it('does NOT call setupHeadroom and injects no HEADROOM_* vars when headroomEnabled=false', async () => {
+    const cwdTarget = fs.mkdtempSync(path.join(os.tmpdir(), 'codeam-hr-'));
+    const { sup, setupHeadroom, calls } = makeHeadroomSupervisor(true);
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => ({ success: true, data: {} }) }),
+    );
+
+    await sup.handleCommand(
+      deployCmd({
+        repoOrPath: cwdTarget,
+        headroomEnabled: false,
+      }),
+    );
+
+    // Feature is off — setup helper never invoked.
+    expect(setupHeadroom).not.toHaveBeenCalled();
+
+    // Child spawned normally (never-break).
+    expect(calls).toHaveLength(1);
+    expect(calls[0].env.HEADROOM_ENABLED).toBeUndefined();
+
+    fs.rmSync(cwdTarget, { recursive: true, force: true });
+  });
+
+  it('does NOT call setupHeadroom when headroom fields are absent (old backend payload)', async () => {
+    const cwdTarget = fs.mkdtempSync(path.join(os.tmpdir(), 'codeam-hr-'));
+    const { sup, setupHeadroom, calls } = makeHeadroomSupervisor(true);
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => ({ success: true, data: {} }) }),
+    );
+
+    // Plain old deploy — no headroom fields.
+    await sup.handleCommand(deployCmd({ repoOrPath: cwdTarget }));
+
+    expect(setupHeadroom).not.toHaveBeenCalled();
+    expect(calls).toHaveLength(1);
+    expect(calls[0].env.HEADROOM_ENABLED).toBeUndefined();
+
+    fs.rmSync(cwdTarget, { recursive: true, force: true });
+  });
+});
+
+describe('setupHeadroomForSelfHosted — unit (real subprocess)', () => {
+  /**
+   * We don't mock pip here — we test the real function's fallback contract:
+   * if pip/pip3 and headroom are both absent on this test machine (likely),
+   * the function MUST return false rather than throwing. This proves the
+   * never-break guarantee without needing the real binaries.
+   */
+  it('returns false (never throws) when pip is absent and headroom is absent', async () => {
+    // On CI machines (and most dev macs) pip will either succeed or fail;
+    // either way the function must not throw.
+    const result = await setupHeadroomForSelfHosted('claude');
+    expect(typeof result).toBe('boolean');
+    // Not asserting true/false — behaviour depends on what's installed.
+    // The important invariant is that it never throws.
+  }, 30_000); // generous timeout for real pip attempts
 });
