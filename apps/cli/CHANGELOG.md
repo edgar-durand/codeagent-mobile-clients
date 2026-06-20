@@ -4,6 +4,12 @@ All notable changes to `codeam-cli` are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.39.65] — 2026-06-20
+
+### Added
+
+- **self-hosted:** Run sessions in AUTO mode (auto-approve permissions)
+
 ## [2.39.64] — 2026-06-20
 
 ### Added
