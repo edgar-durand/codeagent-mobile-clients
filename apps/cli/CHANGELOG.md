@@ -4,6 +4,12 @@ All notable changes to `codeam-cli` are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.39.53] — 2026-06-20
+
+### Added
+
+- **cli:** Self-hosted headroom auto-provisions a bare environment
+
 ## [2.39.52] — 2026-06-20
 
 ### Added
