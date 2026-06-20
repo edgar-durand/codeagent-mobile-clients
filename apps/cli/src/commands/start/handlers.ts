@@ -1095,6 +1095,26 @@ const previewStartH: CommandHandler = (ctx, _cmd, parsed) => {
   };
 
   void (async () => {
+    // Reuse guard: if a dev server for this session is already running,
+    // re-opening the preview must NOT re-spawn it on the same port
+    // (that hits EADDRINUSE → ERR_SPAWN_FAILED "Port N already in use").
+    const existing = activePreviews.get(ctx.sessionId);
+    if (existing && existing.devServer.exitCode === null) {
+      log.info(
+        'preview',
+        `reusing running preview for session=${ctx.sessionId} url=${existing.url}`,
+      );
+      emitProgress('READY_DETECTED', 'reusing running preview');
+      void postPreviewEvent({
+        sessionId: ctx.sessionId,
+        pluginId: ctx.pluginId,
+        pluginAuthToken,
+        type: 'preview_ready',
+        payload: { url: existing.url, framework: existing.framework, port: detection.port },
+      });
+      return;
+    }
+
     void postPreviewEvent({
       sessionId: ctx.sessionId,
       pluginId: ctx.pluginId,
@@ -1270,6 +1290,27 @@ const previewStartH: CommandHandler = (ctx, _cmd, parsed) => {
     // /tmp directory listing through the tunnel). Fail fast with an actionable
     // error instead of tunnelling the wrong process.
     if (await isPortListening(detection.port)) {
+      // Race-condition safety: if the port is already ours (a live devServer
+      // registered in activePreviews for this session), treat it as a reuse
+      // rather than an error — a second preview_start arrived while our server
+      // was already up (or the top-of-IIFE guard above was bypassed because
+      // exitCode had already been set by the time we checked it).
+      const raceExisting = activePreviews.get(ctx.sessionId);
+      if (raceExisting && raceExisting.devServer.exitCode === null) {
+        log.info(
+          'preview',
+          `port race: reusing running preview for session=${ctx.sessionId} url=${raceExisting.url}`,
+        );
+        emitProgress('READY_DETECTED', 'reusing running preview');
+        void postPreviewEvent({
+          sessionId: ctx.sessionId,
+          pluginId: ctx.pluginId,
+          pluginAuthToken,
+          type: 'preview_ready',
+          payload: { url: raceExisting.url, framework: raceExisting.framework, port: detection.port },
+        });
+        return;
+      }
       void postPreviewEvent({
         sessionId: ctx.sessionId,
         pluginId: ctx.pluginId,
