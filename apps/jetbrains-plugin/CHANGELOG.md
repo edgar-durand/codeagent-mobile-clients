@@ -4,6 +4,12 @@ All notable changes to the CodeAgent-Mobile JetBrains plugin are documented here
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.39.68] — 2026-06-20
+
+### Tests
+
+- **host-agent:** Don't leak a heartbeat timer in the self_hosted_stop test
+
 ## [2.39.66] — 2026-06-20
 
 ### Fixed
