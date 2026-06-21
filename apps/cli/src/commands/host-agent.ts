@@ -41,7 +41,17 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { CommandRelayService, type RemoteCommand } from '../services/command-relay.service';
 import type { AgentMetadata } from '@codeagent/shared';
-import { resolveApiBaseUrl } from '@codeagent/shared';
+import { resolveApiBaseUrl, getPricing } from '@codeagent/shared';
+
+/** Input $/M for the running agent's representative model — values the
+ *  compressed-away tokens for the savings reporter. Claude agents → Sonnet
+ *  ($3/M); Codex/GPT → the gpt-5.x row (no public price in our table → 0, so
+ *  compression-$ stays 0 rather than mispriced at Claude rates). */
+function resolveInputPricePerMillion(agentId: string): number {
+  const a = agentId.toLowerCase();
+  const model = a.includes('codex') || a.includes('gpt') ? 'gpt-5.5' : 'claude-sonnet-4';
+  return getPricing(model).input;
+}
 import { log } from '../services/logger';
 import {
   deleteHostIdentity,
@@ -138,6 +148,9 @@ export function maybeStartHeadroomReporter(
       `${resolveApiBaseUrl()}/api/codespaces/${ctx.codespaceId}/headroom-savings`;
 
     const reporter = new HeadroomStatsReporter({
+      inputPricePerMillionUsd: resolveInputPricePerMillion(
+        process.env['HEADROOM_AGENT'] ?? 'claude',
+      ),
       fetchStats: async () => {
         const res = await fetch('http://localhost:8787/stats');
         // res.json() returns unknown; cast at this validated boundary.

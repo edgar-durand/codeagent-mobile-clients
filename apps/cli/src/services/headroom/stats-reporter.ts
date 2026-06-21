@@ -12,7 +12,16 @@ export interface Savings {
    *  `cachedTokens` (which feeds the compression dollar formula server-side). */
   cacheReadTokens: number;
   cacheSavingsUsd: number;
+  /** COMPRESSION dollar saving — the eliminated (rawTokensEst − sentTokensEst)
+   *  tokens valued at the agent model's INPUT price. The proxy doesn't expose
+   *  this (only cache_savings_usd), so the reporter computes it from the token
+   *  delta × `inputPricePerMillionUsd`. The backend sums it with cacheSavingsUsd
+   *  into the per-session CostSaving.usdSaved. */
+  compressionSavingsUsd: number;
 }
+
+/** Claude Sonnet input $/M — the default when the agent's price is unknown. */
+const DEFAULT_INPUT_PRICE_PER_MILLION = 3;
 
 /**
  * Real shape returned by headroom-ai 0.26.0 GET /stats.
@@ -54,6 +63,7 @@ const ZERO: Savings = {
   retrieveHops: 0,
   cacheReadTokens: 0,
   cacheSavingsUsd: 0,
+  compressionSavingsUsd: 0,
 };
 
 /**
@@ -65,7 +75,7 @@ const ZERO: Savings = {
  * cacheReadTokens: prefix_cache.totals.cache_read_tokens (prompt-cache reads).
  * cacheSavingsUsd: summary.cost.breakdown.cache_savings_usd (proxy-computed $).
  */
-function read(stats: StatsShape): Savings {
+function read(stats: StatsShape, inputPricePerMillion: number): Savings {
   const totals = stats.agent_usage?.totals;
   const compression = stats.summary?.compression;
 
@@ -78,6 +88,11 @@ function read(stats: StatsShape): Savings {
     totals?.after_tokens ??
     (rawTokensEst - (compression?.total_tokens_removed ?? 0));
 
+  // Cumulative compression $: eliminated tokens × the model's input price.
+  // Cumulative (like raw/sent) so mapStatsToSavings can diff it into a delta.
+  const compressionSavingsUsd =
+    (Math.max(0, rawTokensEst - sentTokensEst) / 1_000_000) * inputPricePerMillion;
+
   return {
     rawTokensEst,
     sentTokensEst,
@@ -85,13 +100,18 @@ function read(stats: StatsShape): Savings {
     retrieveHops: stats.summary?.mcp?.retrievals ?? 0,
     cacheReadTokens: stats.prefix_cache?.totals?.cache_read_tokens ?? 0,
     cacheSavingsUsd: stats.summary?.cost?.breakdown?.cache_savings_usd ?? 0,
+    compressionSavingsUsd,
   };
 }
 
 /** Pure: turn a cumulative /stats reading into the next-cursor + the delta to
  *  report. Clamps negatives to 0 (a proxy restart resets the counters). */
-export function mapStatsToSavings(stats: StatsShape, prev: Savings): { next: Savings; delta: Savings } {
-  const next = read(stats);
+export function mapStatsToSavings(
+  stats: StatsShape,
+  prev: Savings,
+  inputPricePerMillion: number = DEFAULT_INPUT_PRICE_PER_MILLION,
+): { next: Savings; delta: Savings } {
+  const next = read(stats, inputPricePerMillion);
   const d = (a: number, b: number) => Math.max(0, a - b);
   const delta: Savings = next.rawTokensEst < prev.rawTokensEst
     ? next // counter reset → report the post-reset reading as the delta
@@ -102,6 +122,7 @@ export function mapStatsToSavings(stats: StatsShape, prev: Savings): { next: Sav
         retrieveHops: d(next.retrieveHops, prev.retrieveHops),
         cacheReadTokens: d(next.cacheReadTokens, prev.cacheReadTokens),
         cacheSavingsUsd: d(next.cacheSavingsUsd, prev.cacheSavingsUsd),
+        compressionSavingsUsd: d(next.compressionSavingsUsd, prev.compressionSavingsUsd),
       };
   return { next, delta };
 }
@@ -110,6 +131,9 @@ export interface ReporterDeps {
   fetchStats: () => Promise<StatsShape>;            // GET localhost:8787/stats
   postSavings: (delta: Savings) => Promise<void>;   // POST to the backend ingest endpoint
   intervalMs?: number;                              // default from HEADROOM_STATS_POLL_INTERVAL_MS or 30_000
+  /** Input $/M for the running agent's model — values the compressed-away
+   *  tokens. Defaults to Claude Sonnet ($3/M) when the caller can't resolve it. */
+  inputPricePerMillionUsd?: number;
 }
 
 /**
@@ -129,12 +153,21 @@ export class HeadroomStatsReporter {
   }
   async tick(): Promise<void> {
     try {
-      const { next, delta } = mapStatsToSavings(await this.deps.fetchStats(), this.prev);
+      const { next, delta } = mapStatsToSavings(
+        await this.deps.fetchStats(),
+        this.prev,
+        this.deps.inputPricePerMillionUsd ?? DEFAULT_INPUT_PRICE_PER_MILLION,
+      );
       this.prev = next;
       // Report when ANY dimension advanced — a BYO coding agent compresses
       // ~nothing (rawTokensEst flat) yet still accrues prompt-cache savings, so
       // gating only on rawTokensEst would never report the cache dimension.
-      if (delta.rawTokensEst > 0 || delta.cacheReadTokens > 0 || delta.cacheSavingsUsd > 0) {
+      if (
+        delta.rawTokensEst > 0 ||
+        delta.cacheReadTokens > 0 ||
+        delta.cacheSavingsUsd > 0 ||
+        delta.compressionSavingsUsd > 0
+      ) {
         await this.deps.postSavings(delta);
       }
     } catch {

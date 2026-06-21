@@ -50,6 +50,7 @@ const ZERO = {
   retrieveHops: 0,
   cacheReadTokens: 0,
   cacheSavingsUsd: 0,
+  compressionSavingsUsd: 0,
 };
 
 describe('read() — parses the real /stats shape', () => {
@@ -69,6 +70,16 @@ describe('read() — parses the real /stats shape', () => {
     const { next } = mapStatsToSavings(REAL_STATS, ZERO);
     expect(next.cacheReadTokens).toBe(2596682); // prefix_cache.totals.cache_read_tokens
     expect(next.cacheSavingsUsd).toBe(11.69); // summary.cost.breakdown.cache_savings_usd
+  });
+
+  it('computes compressionSavingsUsd from eliminated tokens × input price', () => {
+    // 211215 − 210217 = 998 tokens eliminated.
+    // Default price ($3/M): 998/1e6 × 3 = 0.002994.
+    const def = mapStatsToSavings(REAL_STATS, ZERO).next;
+    expect(def.compressionSavingsUsd).toBeCloseTo(0.002994, 6);
+    // Explicit Opus price ($15/M): 998/1e6 × 15 = 0.01497.
+    const opus = mapStatsToSavings(REAL_STATS, ZERO, 15).next;
+    expect(opus.compressionSavingsUsd).toBeCloseTo(0.01497, 5);
   });
 });
 
@@ -93,6 +104,7 @@ describe('mapStatsToSavings — delta logic', () => {
       retrieveHops: 0,
       cacheReadTokens: 0,
       cacheSavingsUsd: 0,
+      compressionSavingsUsd: 0,
     };
     // Proxy restarted — counters back to a small number
     const resetStats = {
