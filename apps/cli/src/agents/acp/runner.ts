@@ -796,6 +796,22 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
       // the user knows WHY the session died — a credential 401 gets the
       // actionable re-auth copy instead of a raw exit code.
       const authFail = looksLikeAuthFailure(recentStderr.join('\n'));
+      if (authFail) {
+        // Durably flag the LinkedAgent credential invalid so Profile › Agents
+        // shows EXPIRED + the re-auth CTA (instead of CONNECTED from a
+        // dead-but-present refresh token). Best-effort — never blocks exit.
+        void fetch(
+          `${resolveApiBaseUrl()}/api/plugin/agents/${encodeURIComponent(opts.agent)}/credential-invalid`,
+          {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'X-Plugin-Auth-Token': opts.pluginAuthToken,
+            },
+            body: JSON.stringify({ sessionId: opts.sessionId, pluginId: opts.pluginId }),
+          },
+        ).catch(() => undefined);
+      }
       void streaming.closeAll().then(() =>
         publisher.publishOutput({
           type: 'text',
