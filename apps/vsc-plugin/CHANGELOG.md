@@ -4,6 +4,16 @@ All notable changes to the CodeAgent Mobile VS Code extension are documented her
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.39.76] — 2026-06-21
+
+### Added
+
+- **cli:** Report compression-$ savings (eliminated tokens × model input price)
+
+### Fixed
+
+- **cli:** Smoke probe /health not /api/health
+
 ## [2.39.75] — 2026-06-21
 
 ### Fixed
