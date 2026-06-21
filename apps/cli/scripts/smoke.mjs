@@ -176,12 +176,13 @@ if (process.env.SMOKE_SKIP_BACKEND === '1') {
     /Link dry-run OK/,
   );
 
-  // 3. /api/health connectivity probe. Treat ANY non-5xx response as
-  //    "backend reachable" — the endpoint may legitimately 404 in
-  //    older api-v2 cuts. A 5xx or network error means the backend
-  //    layer is broken and we want the CI to gate on it.
-  await probeUrl(`GET ${API_BASE}/api/health`, `${API_BASE}/api/health`, {
-    acceptStatuses: [200, 201, 204, 301, 302, 401, 403, 404],
+  // 3. Health probe. The backend mounts the @nestjs/terminus HealthController
+  //    at the ROOT (`/health`, NOT `/api/health` — health is excluded from the
+  //    global `api` prefix). Probing `/api/health` always 404s, which both
+  //    failed to actually verify health AND polluted prod 4xx logs (~12/day of
+  //    CI noise). Hit the real endpoint and expect a 2xx.
+  await probeUrl(`GET ${API_BASE}/health`, `${API_BASE}/health`, {
+    acceptStatuses: [200, 204],
   });
   advisoryMode = false;
 }
