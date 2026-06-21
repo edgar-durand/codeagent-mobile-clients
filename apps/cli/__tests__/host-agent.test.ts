@@ -1457,22 +1457,12 @@ describe('HostAgentSupervisor — Headroom env injection', () => {
   });
 });
 
-describe('setupHeadroomForSelfHosted — unit (real subprocess)', () => {
-  /**
-   * We don't mock pip here — we test the real function's fallback contract:
-   * if pip/pip3 and headroom are both absent on this test machine (likely),
-   * the function MUST return false rather than throwing. This proves the
-   * never-break guarantee without needing the real binaries.
-   */
-  it('returns false (never throws) when pip is absent and headroom is absent', async () => {
-    // On CI machines (and most dev macs) pip will either succeed or fail;
-    // either way the function must not throw.
-    const result = await setupHeadroomForSelfHosted('claude');
-    expect(typeof result).toBe('boolean');
-    // Not asserting true/false — behaviour depends on what's installed.
-    // The important invariant is that it never throws.
-  }, 30_000); // generous timeout for real pip attempts
-});
+// NOTE: a previous "real subprocess" test called setupHeadroomForSelfHosted()
+// with the default runner. Now that the install pulls the real CPU-PyTorch +
+// engine wheels, that test actually downloaded PyTorch on every CI run (slow,
+// network-flaky, 30s timeout). The never-throw / false-when-absent contract is
+// covered deterministically by the injectable-runner suite below, so the
+// real-subprocess test was removed rather than have CI download torch.
 
 // ─────────────────────────────────────────────────────────────────────────────
 // setupHeadroomForSelfHosted — injectable runner tests
