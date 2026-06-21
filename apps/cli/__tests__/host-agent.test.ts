@@ -1591,23 +1591,36 @@ describe('setupHeadroomForSelfHosted — injectable runner (no real subprocess)'
 
     const result = await setupHeadroomForSelfHosted('claude', runner);
 
-    // Install runs in two stages (CPU torch, then headroom + engines), each
-    // with a PEP 668 retry — so we assert behavior, not an exact call count.
     const pipCalls = calls.filter((c) => c.cmd === 'python3');
 
     // PEP 668 retry path exercised: at least one call carries the override.
     expect(pipCalls.some((c) => c.args.includes('--break-system-packages'))).toBe(true);
 
-    // The Headroom ENGINE package is installed (with a [code,ml]/[code] extra) —
-    // this is the fix: we no longer install bare `headroom-ai`.
+    // The Headroom ENGINE package is installed with the ONNX `[proxy,code]`
+    // extras — this is the fix: no bare `headroom-ai`, and NO torch/`[ml]`.
     const headroomCall = pipCalls.find((c) => c.args.some((a) => a.startsWith('headroom-ai')));
     expect(headroomCall).toBeDefined();
-    expect(headroomCall!.args.some((a) => a.startsWith('headroom-ai[') && a.includes('code'))).toBe(
-      true,
-    );
+    expect(headroomCall!.args).toContain('headroom-ai[proxy,code]');
 
-    // Every pip INSTALL call is `python3 -m pip install --quiet ...`. (Other
-    // python3 calls — e.g. the `-c "import torch"` validation — are not pip.)
+    // Kompress runs on ONNX, not PyTorch — torch must NEVER be installed
+    // (it's heavy + fragile + can hang the proxy). No call mentions torch.
+    expect(
+      pipCalls.some((c) =>
+        c.args.some((a) => a === 'torch' || a.includes('download.pytorch.org') || a === '[code,ml]'),
+      ),
+    ).toBe(false);
+
+    // The Kompress model is pre-downloaded (both HF repos) so the proxy's
+    // eager-preload hits a warm cache and the first prompt isn't stalled.
+    const predownloadCall = pipCalls.find(
+      (c) => c.args[0] === '-c' && c.args[1]?.includes('snapshot_download'),
+    );
+    expect(predownloadCall).toBeDefined();
+    expect(predownloadCall!.args[1]).toContain('chopratejas/kompress-v2-base');
+    expect(predownloadCall!.args[1]).toContain('answerdotai/ModernBERT-base');
+
+    // Every pip INSTALL call is `python3 -m pip install --quiet ...`. (The
+    // `-c "...snapshot_download..."` pre-download call is not a pip install.)
     const installCalls = pipCalls.filter((c) => c.args[0] === '-m');
     for (const c of installCalls) {
       expect(c.args.slice(0, 4)).toEqual(['-m', 'pip', 'install', '--quiet']);

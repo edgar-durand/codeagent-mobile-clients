@@ -366,10 +366,11 @@ const PIP_INSTALL_TIMEOUT_MS = 120_000;
  *  extras are large — several minutes on a cold box). */
 const ENGINE_INSTALL_TIMEOUT_MS = 360_000;
 
-/** Free disk Headroom's engines need (CPU PyTorch + transformers +
- *  tree-sitter ≈ 2 GB unpacked, plus headroom + pip temp). Below this we skip
- *  the install and tell the user rather than fill the host's disk. */
-const HEADROOM_MIN_FREE_DISK_BYTES = 3 * 1024 * 1024 * 1024;
+/** Free disk Headroom's ONNX engines need (onnxruntime + transformers +
+ *  tree-sitter + the ~840 MB Kompress model + pip temp ≈ 1.5 GB; 2 GB leaves
+ *  headroom). Below this we skip the install and tell the user rather than
+ *  fill the host's disk. ONNX is far lighter than the old torch path (>3 GB). */
+const HEADROOM_MIN_FREE_DISK_BYTES = 2 * 1024 * 1024 * 1024;
 
 /**
  * Default subprocess runner backed by Node's `spawn` (for async commands)
@@ -811,64 +812,53 @@ export async function setupHeadroomForSelfHosted(
     return false;
   };
 
-  // ── Step 1: install Headroom WITH its compression engines ─────────────────
+  // ── Step 1: install Headroom WITH its compression engines (ONNX) ──────────
   // This is the whole point of Headroom and what we previously got wrong: the
   // engines that actually compress a coding agent's code+prose context are
-  //   • Kompress — the trained ML compressor (the `[ml]` extra → PyTorch), and
+  //   • Kompress — the trained ML compressor that delivers the real savings, and
   //   • CodeCompressor — AST-aware (the `[code]` extra → tree-sitter).
   // Installing bare `headroom-ai` (as we used to) leaves only the JSON
   // compressor, which finds nothing to do on coding traffic → ~0% saved.
-  // [ml] pulls PyTorch; install the CPU-ONLY wheel FIRST so the extra's torch
-  // dependency is already satisfied and pip doesn't drag in the multi-GB CUDA
-  // build (which exhausted a box's disk in testing). All best-effort + bounded:
-  // a box too small for the engines falls back to launching the agent direct.
-  const torchInstalled = await pipInstall(
-    ['torch'],
-    ['--index-url', 'https://download.pytorch.org/whl/cpu'],
-    ENGINE_INSTALL_TIMEOUT_MS,
-  );
-  // CRITICAL: a torch that INSTALLS but doesn't actually WORK is worse than no
-  // torch — Kompress lazy-loads it on the first request and, if it's broken,
-  // the import throws and the request HANGS forever (observed live: a torch
-  // corrupted by an ENOSPC install threw "torch has no attribute 'library' —
-  // circular import", wedging every prompt at "Thinking…"). So we only enable
-  // Kompress ([ml]) when torch DEEP-imports cleanly (the exact path Kompress
-  // pulls). Otherwise install [code] only: the AST CodeCompressor still works,
-  // and with no [ml]/transformers present Kompress is cleanly absent — the
-  // proxy never touches the broken torch and never hangs.
-  let torchOk = false;
-  if (torchInstalled) {
-    const v = await runner.run('python3', ['-c', 'import torch; import torch.export'], {
-      timeoutMs: 60_000,
-    });
-    torchOk = v.code === 0;
-    if (!torchOk) {
-      log.warn(
-        'host-agent',
-        `torch installed but failed its deep-import validation (code=${String(v.code)}) — ` +
-          'disabling Kompress to avoid a hung proxy; using the AST code engine only',
-      );
-    }
-  }
-  log.info(
-    'host-agent',
-    torchOk
-      ? 'PyTorch installed + validated — Kompress (ML) compressor enabled'
-      : 'Kompress unavailable (torch absent/broken) — installing the AST code engine only',
-  );
-  // torch healthy → [code,ml] (both engines). Otherwise [code] only — AST
-  // CodeCompressor still compresses code, and Kompress stays cleanly off.
-  const headroomPkg = torchOk ? 'headroom-ai[code,ml]' : 'headroom-ai[code]';
-  const installOk = await pipInstall(
-    [headroomPkg, ...SERVER_DEPS],
-    [],
-    ENGINE_INSTALL_TIMEOUT_MS,
-  );
+  //
+  // CRITICAL: Kompress runs on the ONNX Runtime, NOT PyTorch. The `[proxy]`
+  // extra pulls onnxruntime + transformers (everything Kompress needs); we do
+  // NOT install `[ml]`/torch. torch is multi-GB, disk-fragile, and a broken
+  // torch makes the proxy HANG every request when Kompress lazy-loads it
+  // (observed live: a torch corrupted by an ENOSPC install threw "torch has no
+  // attribute 'library' — circular import", wedging every prompt at
+  // "Thinking…"). ONNX is lighter (~1.5 GB total) and robust. All best-effort +
+  // bounded: a box too small falls back to launching the agent direct.
+  const headroomPkg = 'headroom-ai[proxy,code]';
+  const installOk = await pipInstall([headroomPkg, ...SERVER_DEPS], [], ENGINE_INSTALL_TIMEOUT_MS);
   if (!installOk) {
     log.warn('host-agent', `headroom engine install failed (${headroomPkg}) — skipping Headroom`);
     return false;
   }
-  log.info('host-agent', `headroom + engines installed (${headroomPkg})`);
+  log.info('host-agent', `headroom + ONNX engines installed (${headroomPkg})`);
+
+  // ── Step 1b: pre-download the Kompress model so the first prompt isn't slow ─
+  // The proxy eager-preloads the model at startup with allow_download=False and
+  // DEFERS the ~840 MB download to the FIRST prompt on a cache miss — that
+  // deferred download blows the agent's 90s idle timeout → "Thinking…" forever
+  // on message 1. Warming the cache here moves the download to setup time. Two
+  // separate HF repos are required: kompress-v2-base (the ONNX model; skip its
+  // .pt/.safetensors torch artifacts) and ModernBERT-base (TOKENIZER ONLY —
+  // Kompress loads its tokenizer from there; skip its model weights). Best-
+  // effort: a download failure leaves Kompress to lazy-load later.
+  const predownloadPy = [
+    'from huggingface_hub import snapshot_download',
+    'snapshot_download("chopratejas/kompress-v2-base", allow_patterns=["*.json","onnx/*.onnx","kompress-int8-wo.onnx"])',
+    'snapshot_download("answerdotai/ModernBERT-base", allow_patterns=["*.json","tokenizer*","*.txt","vocab*","merges*"])',
+  ].join('\n');
+  const dl = await runner.run('python3', ['-c', predownloadPy], {
+    timeoutMs: ENGINE_INSTALL_TIMEOUT_MS,
+  });
+  log.info(
+    'host-agent',
+    dl.code === 0
+      ? 'Kompress model pre-downloaded — first prompt will be fast'
+      : 'Kompress model pre-download failed (best-effort) — first prompt may be slow',
+  );
 
   // ── Step 2: `headroom init --global <agent>` (only when headroom is on PATH) ──
   // Verify headroom is on PATH before calling init; on some boxes pip installs
@@ -912,10 +902,14 @@ export async function setupHeadroomForSelfHosted(
   }
 
   // ── Step 3: warm-start the proxy (detached, best-effort, don't await) ───
+  // Pin Kompress to the ONNX CPU backend so it never tries to import torch
+  // (absent by design). The proxy eager-preloads the pre-downloaded model from
+  // cache at bind time, so the first prompt is compressed without a stall.
   try {
     const proxy = spawn('headroom', ['proxy', '--port', '8787'], {
       stdio: 'ignore',
       detached: true,
+      env: { ...process.env, HEADROOM_KOMPRESS_BACKEND: 'onnx_cpu' },
     });
     proxy.unref(); // don't keep the supervisor process alive for the proxy
   } catch (e) {
