@@ -1606,8 +1606,10 @@ describe('setupHeadroomForSelfHosted — injectable runner (no real subprocess)'
       true,
     );
 
-    // Every pip call is `python3 -m pip install --quiet ...`.
-    for (const c of pipCalls) {
+    // Every pip INSTALL call is `python3 -m pip install --quiet ...`. (Other
+    // python3 calls — e.g. the `-c "import torch"` validation — are not pip.)
+    const installCalls = pipCalls.filter((c) => c.args[0] === '-m');
+    for (const c of installCalls) {
       expect(c.args.slice(0, 4)).toEqual(['-m', 'pip', 'install', '--quiet']);
     }
 

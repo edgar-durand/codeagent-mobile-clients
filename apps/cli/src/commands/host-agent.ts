@@ -822,20 +822,42 @@ export async function setupHeadroomForSelfHosted(
   // dependency is already satisfied and pip doesn't drag in the multi-GB CUDA
   // build (which exhausted a box's disk in testing). All best-effort + bounded:
   // a box too small for the engines falls back to launching the agent direct.
-  const torchOk = await pipInstall(
+  const torchInstalled = await pipInstall(
     ['torch'],
     ['--index-url', 'https://download.pytorch.org/whl/cpu'],
     ENGINE_INSTALL_TIMEOUT_MS,
   );
+  // CRITICAL: a torch that INSTALLS but doesn't actually WORK is worse than no
+  // torch — Kompress lazy-loads it on the first request and, if it's broken,
+  // the import throws and the request HANGS forever (observed live: a torch
+  // corrupted by an ENOSPC install threw "torch has no attribute 'library' —
+  // circular import", wedging every prompt at "Thinking…"). So we only enable
+  // Kompress ([ml]) when torch DEEP-imports cleanly (the exact path Kompress
+  // pulls). Otherwise install [code] only: the AST CodeCompressor still works,
+  // and with no [ml]/transformers present Kompress is cleanly absent — the
+  // proxy never touches the broken torch and never hangs.
+  let torchOk = false;
+  if (torchInstalled) {
+    const v = await runner.run('python3', ['-c', 'import torch; import torch.export'], {
+      timeoutMs: 60_000,
+    });
+    torchOk = v.code === 0;
+    if (!torchOk) {
+      log.warn(
+        'host-agent',
+        `torch installed but failed its deep-import validation (code=${String(v.code)}) — ` +
+          'disabling Kompress to avoid a hung proxy; using the AST code engine only',
+      );
+    }
+  }
   log.info(
     'host-agent',
     torchOk
-      ? 'CPU-only PyTorch installed — Kompress (ML) compressor available'
-      : 'CPU torch install failed — installing code-aware engine only (Kompress unavailable)',
+      ? 'PyTorch installed + validated — Kompress (ML) compressor enabled'
+      : 'Kompress unavailable (torch absent/broken) — installing the AST code engine only',
   );
-  // With torch present → [code,ml] (both engines). Without → [code] only
-  // (AST CodeCompressor still works; skip the ML extra so pip can't fall back
-  // to a CUDA torch build that bloats/breaks the install).
+  // torch healthy → [code,ml] (both engines). Otherwise [code] only — AST
+  // CodeCompressor still compresses code, and Kompress stays cleanly off.
   const headroomPkg = torchOk ? 'headroom-ai[code,ml]' : 'headroom-ai[code]';
   const installOk = await pipInstall(
     [headroomPkg, ...SERVER_DEPS],
