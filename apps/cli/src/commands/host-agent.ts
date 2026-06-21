@@ -72,7 +72,11 @@ import {
 } from './host/host-client';
 import { isAbsolutePathTarget, prepareWorkspace } from './host/workspace';
 import { provisionAgentCredentials } from './host/agent-provisioning';
-import { HeadroomStatsReporter, type Savings, type StatsShape } from '../services/headroom/stats-reporter';
+import {
+  HeadroomStatsReporter,
+  type Savings,
+  type StatsShape,
+} from '../services/headroom/stats-reporter';
 import { compareSemver } from '../lib/updateNotifier';
 
 /** Liveness heartbeat cadence. State liveness only — NOT command polling. */
@@ -137,9 +141,7 @@ export interface HeadroomReporterCtx {
  *   2. Constructed from `resolveApiBaseUrl()` as the fallback:
  *      `${apiBase}/api/codespaces/${ctx.codespaceId}/headroom-savings`
  */
-export function maybeStartHeadroomReporter(
-  ctx: HeadroomReporterCtx,
-): HeadroomStatsReporter | null {
+export function maybeStartHeadroomReporter(ctx: HeadroomReporterCtx): HeadroomStatsReporter | null {
   if (process.env['HEADROOM_ENABLED'] !== '1') return null;
 
   try {
@@ -175,7 +177,10 @@ export function maybeStartHeadroomReporter(
     reporter.start();
     return reporter;
   } catch (err) {
-    log.warn('headroom', `failed to start Headroom reporter (best-effort): ${err instanceof Error ? err.message : String(err)}`);
+    log.warn(
+      'headroom',
+      `failed to start Headroom reporter (best-effort): ${err instanceof Error ? err.message : String(err)}`,
+    );
     return null;
   }
 }
@@ -269,9 +274,7 @@ function isHouseProxy(v: unknown): v is HouseProxy {
   if (typeof v !== 'object' || v === null) return false;
   const o = v as Record<string, unknown>;
   return (
-    typeof o.baseUrl === 'string' &&
-    typeof o.token === 'string' &&
-    typeof o.agentKind === 'string'
+    typeof o.baseUrl === 'string' && typeof o.token === 'string' && typeof o.agentKind === 'string'
   );
 }
 
@@ -426,8 +429,15 @@ const defaultHeadroomRunner: HeadroomRunner = {
       let timer: ReturnType<typeof setTimeout> | undefined;
       if (timeoutMs !== undefined) {
         timer = setTimeout(() => {
-          log.warn('host-agent', `headroom[${cmd}] timed out after ${timeoutMs / 1000}s — aborting`);
-          try { child.kill('SIGTERM'); } catch { /* already dead */ }
+          log.warn(
+            'host-agent',
+            `headroom[${cmd}] timed out after ${timeoutMs / 1000}s — aborting`,
+          );
+          try {
+            child.kill('SIGTERM');
+          } catch {
+            /* already dead */
+          }
           done(null);
         }, timeoutMs);
       }
@@ -481,7 +491,16 @@ interface ProvisionRecipe {
 const PROVISION_RECIPES: Record<PackageManager, ProvisionRecipe> = {
   'apt-get': {
     update: ['apt-get', 'update'],
-    install: ['apt-get', 'install', '-y', 'python3', 'python3-pip', 'python3-venv', 'ca-certificates', 'curl'],
+    install: [
+      'apt-get',
+      'install',
+      '-y',
+      'python3',
+      'python3-pip',
+      'python3-venv',
+      'ca-certificates',
+      'curl',
+    ],
   },
   apk: {
     install: ['apk', 'add', '--no-cache', 'python3', 'py3-pip', 'ca-certificates', 'curl'],
@@ -496,7 +515,15 @@ const PROVISION_RECIPES: Record<PackageManager, ProvisionRecipe> = {
     install: ['pacman', '-Sy', '--noconfirm', 'python', 'python-pip', 'ca-certificates', 'curl'],
   },
   zypper: {
-    install: ['zypper', '--non-interactive', 'install', 'python3', 'python3-pip', 'ca-certificates', 'curl'],
+    install: [
+      'zypper',
+      '--non-interactive',
+      'install',
+      'python3',
+      'python3-pip',
+      'ca-certificates',
+      'curl',
+    ],
   },
 };
 
@@ -509,9 +536,7 @@ const PROVISION_RECIPES: Record<PackageManager, ProvisionRecipe> = {
  * Detection delegates `which` to the supplied runner so tests can control
  * visibility without crossing ESM module boundaries.
  */
-export function detectPackageManager(
-  runner: Pick<HeadroomRunner, 'which'>,
-): PackageManager | null {
+export function detectPackageManager(runner: Pick<HeadroomRunner, 'which'>): PackageManager | null {
   for (const pm of PACKAGE_MANAGERS) {
     if (runner.which(pm)) return pm;
   }
@@ -897,17 +922,22 @@ export async function setupHeadroomForSelfHosted(
     }
   }
   const initOk = await new Promise<boolean>((resolve) => {
-    execFile('headroom', ['init', '--global', initKind], { env: initEnv }, (initErr, stdout, stderr) => {
-      if (initErr) {
-        const detail = (stderr || initErr.message).replace(/\n+$/g, '');
-        log.warn('host-agent', `headroom init failed (best-effort): ${detail}`);
-        resolve(false);
-      } else {
-        if (stdout.trim()) log.info('host-agent', `headroom init: ${stdout.trim()}`);
-        log.info('host-agent', 'headroom init --global succeeded');
-        resolve(true);
-      }
-    });
+    execFile(
+      'headroom',
+      ['init', '--global', initKind],
+      { env: initEnv },
+      (initErr, stdout, stderr) => {
+        if (initErr) {
+          const detail = (stderr || initErr.message).replace(/\n+$/g, '');
+          log.warn('host-agent', `headroom init failed (best-effort): ${detail}`);
+          resolve(false);
+        } else {
+          if (stdout.trim()) log.info('host-agent', `headroom init: ${stdout.trim()}`);
+          log.info('host-agent', 'headroom init --global succeeded');
+          resolve(true);
+        }
+      },
+    );
   });
 
   if (!initOk) {
@@ -927,7 +957,10 @@ export async function setupHeadroomForSelfHosted(
     proxy.unref(); // don't keep the supervisor process alive for the proxy
   } catch (e) {
     // Non-fatal — the SessionStart hook in settings.json also ensures the proxy.
-    log.warn('host-agent', `headroom proxy warm-start failed (best-effort): ${e instanceof Error ? e.message : String(e)}`);
+    log.warn(
+      'host-agent',
+      `headroom proxy warm-start failed (best-effort): ${e instanceof Error ? e.message : String(e)}`,
+    );
   }
 
   return true;
@@ -1036,7 +1069,11 @@ export async function runSelfUpdate(): Promise<SelfUpdateResult> {
       return { status: 'skipped' };
     }
 
-    const view = await runCmd('npm', ['view', SELF_UPDATE_PKG, 'version'], SELF_UPDATE_VIEW_TIMEOUT_MS);
+    const view = await runCmd(
+      'npm',
+      ['view', SELF_UPDATE_PKG, 'version'],
+      SELF_UPDATE_VIEW_TIMEOUT_MS,
+    );
     if (view.code !== 0) {
       log.trace('host-agent', `self-update: npm view exited ${String(view.code)} — skipping`);
       return { status: 'skipped' };
@@ -1074,7 +1111,11 @@ export async function runSelfUpdate(): Promise<SelfUpdateResult> {
 
     // Confirm the install actually changed the on-disk version before we
     // tell the supervisor to restart (guards against a no-op install).
-    const after = await runCmd('npm', ['view', SELF_UPDATE_PKG, 'version'], SELF_UPDATE_VIEW_TIMEOUT_MS);
+    const after = await runCmd(
+      'npm',
+      ['view', SELF_UPDATE_PKG, 'version'],
+      SELF_UPDATE_VIEW_TIMEOUT_MS,
+    );
     const installed = after.code === 0 ? after.stdout.trim() || latest : latest;
     return { status: 'updated', version: installed };
   } catch (err) {
@@ -1200,6 +1241,20 @@ export interface HostAgentDeps {
    */
   setupHeadroom?: (agent: string) => Promise<boolean>;
   /**
+   * Probe whether Headroom is ALREADY installed on this box (binary on PATH).
+   * Defaults to a `which headroom` check. The disk gate uses it to bypass the
+   * install-disk preflight for a box that already has Headroom — so a low-disk
+   * reading never disables reporting on a proxy that's already running.
+   * Injectable so tests drive the bypass without a real PATH lookup.
+   */
+  isHeadroomInstalled?: () => boolean;
+  /**
+   * Read free disk bytes for the install preflight. Defaults to
+   * {@link getFreeDiskBytes}. Injectable so tests drive the disk gate
+   * deterministically without depending on the host's real free space.
+   */
+  getFreeDisk?: (dir: string) => Promise<number | null>;
+  /**
    * Periodic self-update check + install. Defaults to {@link runSelfUpdate}
    * (the real npm-backed updater). Injectable so tests assert the update
    * logic without touching real npm or `process.exit`.
@@ -1224,6 +1279,10 @@ export class HostAgentSupervisor {
   private readonly spawnChild: ChildSpawner;
   private readonly resolveAgentAuth: AgentAuthResolver;
   private readonly setupHeadroom: (agent: string) => Promise<boolean>;
+  /** Probe whether Headroom is already installed (defaults to `which headroom`). */
+  private readonly isHeadroomInstalled: () => boolean;
+  /** Free-disk reader for the install preflight (defaults to getFreeDiskBytes). */
+  private readonly getFreeDisk: (dir: string) => Promise<number | null>;
   private relay: Pick<CommandRelayService, 'start' | 'stop'> | null = null;
   private heartbeatTimer: NodeJS.Timeout | null = null;
   /** Periodic self-update timer (npm check + install + restart). */
@@ -1259,6 +1318,9 @@ export class HostAgentSupervisor {
     this.spawnChild = deps.spawnChild ?? defaultSpawner;
     this.resolveAgentAuth = deps.resolveAgentAuth ?? unsealAgentAuth;
     this.setupHeadroom = deps.setupHeadroom ?? setupHeadroomForSelfHosted;
+    this.isHeadroomInstalled =
+      deps.isHeadroomInstalled ?? (() => defaultHeadroomRunner.which('headroom'));
+    this.getFreeDisk = deps.getFreeDisk ?? getFreeDiskBytes;
     this.metrics = deps.metricsCollector ?? new MetricsCollector();
     this.onIdentityRejected = deps.onIdentityRejected ?? defaultOnIdentityRejected;
     this.disableService = deps.disableService ?? defaultDisableService;
@@ -1654,8 +1716,17 @@ export class HostAgentSupervisor {
         // extras) need ~2 GB. On a host without the room, SKIP the install and
         // tell the user in the app rather than fill their disk — the agent
         // still runs, just without token-saving compression.
-        const freeBytes = await getFreeDiskBytes(os.homedir());
-        if (freeBytes !== null && freeBytes < HEADROOM_MIN_FREE_DISK_BYTES) {
+        const freeBytes = await this.getFreeDisk(os.homedir());
+        // The disk gate is an INSTALL preflight — the ~1.5 GB of ONNX engines +
+        // the Kompress model. A box where Headroom is ALREADY installed needs
+        // none of that room to keep compressing + reporting, so a low-disk
+        // reading must NOT disable an existing, working proxy. (Observed live:
+        // a box compressing 22.8% had reporting silently turned off here —
+        // free=2.0GB rounding under the 2GB gate — dropping real savings.)
+        // setupHeadroom below is idempotent on an installed box: pip is a fast
+        // "already satisfied" no-op and `headroom init` re-runs cleanly.
+        const alreadyInstalled = this.isHeadroomInstalled();
+        if (!alreadyInstalled && freeBytes !== null && freeBytes < HEADROOM_MIN_FREE_DISK_BYTES) {
           const freeGb = (freeBytes / 1e9).toFixed(1);
           const needGb = Math.round(HEADROOM_MIN_FREE_DISK_BYTES / 1e9);
           report(
@@ -1669,24 +1740,36 @@ export class HostAgentSupervisor {
           persistHeadroomConfig({ enabled: false });
           // fall through to spawn the agent without Headroom
         } else {
-        const headroomOk = await this.setupHeadroom(payload.headroomAgent);
-        if (headroomOk) {
-          // Use the mapped headroom kind (e.g. `claude_code` → `claude`) so the
-          // persisted/env value matches what `headroom init` registered and what
-          // the reporter reports as `dto.agentId` — consistent with codespaces,
-          // which already report `claude`.
-          persistHeadroomConfig({
-            enabled: true,
-            agent: agentIdToHeadroomKind(payload.headroomAgent),
-            ingestUrl: payload.headroomSavingsIngestUrl,
-          });
-          log.info('host-agent', 'Headroom proxy ready; persisted headroom config for child spawns');
-        } else {
-          // Setup failed → persist disabled so a later resume doesn't point the
-          // agent at a dead proxy (and clears any stale enabled config).
-          persistHeadroomConfig({ enabled: false });
-          log.warn('host-agent', 'Headroom setup failed (best-effort) — child will run without Headroom');
-        }
+          if (alreadyInstalled && freeBytes !== null && freeBytes < HEADROOM_MIN_FREE_DISK_BYTES) {
+            log.info(
+              'host-agent',
+              `Headroom already installed — bypassing install disk gate (free=${(freeBytes / 1e9).toFixed(1)}GB); reporting stays enabled`,
+            );
+          }
+          const headroomOk = await this.setupHeadroom(payload.headroomAgent);
+          if (headroomOk) {
+            // Use the mapped headroom kind (e.g. `claude_code` → `claude`) so the
+            // persisted/env value matches what `headroom init` registered and what
+            // the reporter reports as `dto.agentId` — consistent with codespaces,
+            // which already report `claude`.
+            persistHeadroomConfig({
+              enabled: true,
+              agent: agentIdToHeadroomKind(payload.headroomAgent),
+              ingestUrl: payload.headroomSavingsIngestUrl,
+            });
+            log.info(
+              'host-agent',
+              'Headroom proxy ready; persisted headroom config for child spawns',
+            );
+          } else {
+            // Setup failed → persist disabled so a later resume doesn't point the
+            // agent at a dead proxy (and clears any stale enabled config).
+            persistHeadroomConfig({ enabled: false });
+            log.warn(
+              'host-agent',
+              'Headroom setup failed (best-effort) — child will run without Headroom',
+            );
+          }
         }
       } else if (payload.headroomEnabled === false) {
         // Feature explicitly turned off for this deploy — clear any stale
@@ -1736,7 +1819,9 @@ export class HostAgentSupervisor {
           void reportSessionEvent(
             { hostId: this.identity.hostId, hostToken: this.identity.hostToken },
             { event: 'ended', deployId: payload.deployId },
-          ).catch((err) => log.trace('host-agent', 'session ended report failed (best-effort)', err));
+          ).catch((err) =>
+            log.trace('host-agent', 'session ended report failed (best-effort)', err),
+          );
         }
         // A non-zero exit means the agent failed to come up. Report it as a
         // deploy failure with the captured tail (best-effort). A clean exit
@@ -1814,14 +1899,24 @@ export class HostAgentSupervisor {
         resolve();
       };
       const timer = setTimeout(() => {
-        log.warn('host-agent', 'agent install timed out (180s) — preview detection may be unavailable');
-        try { child.kill('SIGTERM'); } catch { /* already dead */ }
+        log.warn(
+          'host-agent',
+          'agent install timed out (180s) — preview detection may be unavailable',
+        );
+        try {
+          child.kill('SIGTERM');
+        } catch {
+          /* already dead */
+        }
         done();
       }, 180_000);
       child.once('exit', (code) => {
         clearTimeout(timer);
         if (code !== 0) {
-          log.warn('host-agent', `agent install exited code=${code} — preview detection may be unavailable; agent still runs`);
+          log.warn(
+            'host-agent',
+            `agent install exited code=${code} — preview detection may be unavailable; agent still runs`,
+          );
         } else {
           log.info('host-agent', 'agent CLI installed');
         }
