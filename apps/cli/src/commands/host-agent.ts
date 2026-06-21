@@ -362,6 +362,15 @@ const PM_INSTALL_TIMEOUT_MS = 180_000;
 /** Timeout for each `python3 -m pip install ...` attempt. */
 const PIP_INSTALL_TIMEOUT_MS = 120_000;
 
+/** Timeout for the heavier Headroom-engine installs (PyTorch + the ML/AST
+ *  extras are large — several minutes on a cold box). */
+const ENGINE_INSTALL_TIMEOUT_MS = 360_000;
+
+/** Free disk Headroom's engines need (CPU PyTorch + transformers +
+ *  tree-sitter ≈ 2 GB unpacked, plus headroom + pip temp). Below this we skip
+ *  the install and tell the user rather than fill the host's disk. */
+const HEADROOM_MIN_FREE_DISK_BYTES = 3 * 1024 * 1024 * 1024;
+
 /**
  * Default subprocess runner backed by Node's `spawn` (for async commands)
  * and `execFileSync` (for synchronous `which` checks).
@@ -732,6 +741,20 @@ function bundledClaudeBinDir(): string | null {
 }
 
 /**
+ * Free bytes on the filesystem backing `dir`, or null when it can't be
+ * determined (statfs unavailable / errored). Callers treat null as "unknown —
+ * don't block." Exported for testing. Node ≥ 20 provides `fs.promises.statfs`.
+ */
+export async function getFreeDiskBytes(dir: string): Promise<number | null> {
+  try {
+    const s = await fs.promises.statfs(dir);
+    return s.bsize * s.bavail;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Set up Headroom on the self-hosted box so the pair-auto child's agent
  * routes through the local compression proxy and savings reach the dashboard.
  *
@@ -758,70 +781,72 @@ export async function setupHeadroomForSelfHosted(
   agent: string,
   runner: HeadroomRunner = defaultHeadroomRunner,
 ): Promise<boolean> {
-  const PIP_PACKAGES = [
-    'headroom-ai',
-    'fastapi',
-    'uvicorn',
-    'httpx[http2]',
-    'websockets',
-    'zstandard',
-  ];
+  // The proxy's HTTP/server deps. The COMPRESSION ENGINES come from the
+  // headroom-ai extras below — NOT this list.
+  const SERVER_DEPS = ['fastapi', 'uvicorn', 'httpx[http2]', 'websockets', 'zstandard'];
 
   // ── Step 0: Ensure pip is available ──────────────────────────────────────
+  // Disk preflight lives in the deploy caller (it owns the app-feedback
+  // channel) — see the headroom step in prepareAndSpawn.
   const pipAvailable = await ensurePip(runner);
   if (!pipAvailable) {
     return false;
   }
 
-  // ── Step 1: pip install via `python3 -m pip` (best-effort, bounded) ───────
-  // Prefer `python3 -m pip` over a bare `pip`/`pip3` binary — it always
-  // resolves against the correct interpreter and avoids shebang ambiguities
-  // on multi-python boxes. PEP 668 retry: if the first attempt fails with the
-  // "externally-managed-environment" error, retry with --break-system-packages.
-  const installOk = await (async (): Promise<boolean> => {
-    const baseArgs = ['-m', 'pip', 'install', '--quiet', ...PIP_PACKAGES];
-
-    const firstResult = await runner.run('python3', baseArgs, {
-      timeoutMs: PIP_INSTALL_TIMEOUT_MS,
-    });
-
-    if (firstResult.code === 0) {
-      log.info('host-agent', 'headroom pip install succeeded');
-      return true;
+  // pip install with the PEP 668 "externally-managed-environment" retry
+  // (Ubuntu 24.04+/Debian 12+). `python3 -m pip` resolves against the right
+  // interpreter regardless of shebang ambiguity on multi-python boxes.
+  const pipInstall = async (
+    pkgs: string[],
+    extraArgs: string[],
+    timeoutMs: number,
+  ): Promise<boolean> => {
+    const base = ['-m', 'pip', 'install', '--quiet', ...extraArgs, ...pkgs];
+    const r = await runner.run('python3', base, { timeoutMs });
+    if (r.code === 0) return true;
+    if (r.stderr.includes(PEP668_MARKER)) {
+      const r2 = await runner.run('python3', [...base, '--break-system-packages'], { timeoutMs });
+      return r2.code === 0;
     }
-
-    // Check for PEP 668 managed-env rejection and retry with the override flag.
-    if (firstResult.stderr.includes(PEP668_MARKER)) {
-      log.info(
-        'host-agent',
-        'PEP 668 externally-managed-environment detected — retrying with --break-system-packages',
-      );
-      const retryResult = await runner.run(
-        'python3',
-        [...baseArgs, '--break-system-packages'],
-        { timeoutMs: PIP_INSTALL_TIMEOUT_MS },
-      );
-      if (retryResult.code === 0) {
-        log.info('host-agent', 'headroom pip install succeeded (--break-system-packages)');
-        return true;
-      }
-      log.warn(
-        'host-agent',
-        `headroom pip install failed even with --break-system-packages (code=${String(retryResult.code)}) — skipping Headroom`,
-      );
-      return false;
-    }
-
-    log.warn(
-      'host-agent',
-      `headroom pip install exited code=${String(firstResult.code)} — skipping Headroom`,
-    );
     return false;
-  })();
+  };
 
+  // ── Step 1: install Headroom WITH its compression engines ─────────────────
+  // This is the whole point of Headroom and what we previously got wrong: the
+  // engines that actually compress a coding agent's code+prose context are
+  //   • Kompress — the trained ML compressor (the `[ml]` extra → PyTorch), and
+  //   • CodeCompressor — AST-aware (the `[code]` extra → tree-sitter).
+  // Installing bare `headroom-ai` (as we used to) leaves only the JSON
+  // compressor, which finds nothing to do on coding traffic → ~0% saved.
+  // [ml] pulls PyTorch; install the CPU-ONLY wheel FIRST so the extra's torch
+  // dependency is already satisfied and pip doesn't drag in the multi-GB CUDA
+  // build (which exhausted a box's disk in testing). All best-effort + bounded:
+  // a box too small for the engines falls back to launching the agent direct.
+  const torchOk = await pipInstall(
+    ['torch'],
+    ['--index-url', 'https://download.pytorch.org/whl/cpu'],
+    ENGINE_INSTALL_TIMEOUT_MS,
+  );
+  log.info(
+    'host-agent',
+    torchOk
+      ? 'CPU-only PyTorch installed — Kompress (ML) compressor available'
+      : 'CPU torch install failed — installing code-aware engine only (Kompress unavailable)',
+  );
+  // With torch present → [code,ml] (both engines). Without → [code] only
+  // (AST CodeCompressor still works; skip the ML extra so pip can't fall back
+  // to a CUDA torch build that bloats/breaks the install).
+  const headroomPkg = torchOk ? 'headroom-ai[code,ml]' : 'headroom-ai[code]';
+  const installOk = await pipInstall(
+    [headroomPkg, ...SERVER_DEPS],
+    [],
+    ENGINE_INSTALL_TIMEOUT_MS,
+  );
   if (!installOk) {
+    log.warn('host-agent', `headroom engine install failed (${headroomPkg}) — skipping Headroom`);
     return false;
   }
+  log.info('host-agent', `headroom + engines installed (${headroomPkg})`);
 
   // ── Step 2: `headroom init --global <agent>` (only when headroom is on PATH) ──
   // Verify headroom is on PATH before calling init; on some boxes pip installs
@@ -1596,6 +1621,25 @@ export class HostAgentSupervisor {
       //     resume never points the agent at a dead proxy.
       if (payload.headroomEnabled && payload.headroomAgent && payload.headroomSavingsIngestUrl) {
         report('headroom', 'setting up Headroom proxy');
+        // Disk preflight: Headroom's compression engines (CPU PyTorch + ML/AST
+        // extras) need ~2 GB. On a host without the room, SKIP the install and
+        // tell the user in the app rather than fill their disk — the agent
+        // still runs, just without token-saving compression.
+        const freeBytes = await getFreeDiskBytes(os.homedir());
+        if (freeBytes !== null && freeBytes < HEADROOM_MIN_FREE_DISK_BYTES) {
+          const freeGb = (freeBytes / 1e9).toFixed(1);
+          const needGb = Math.round(HEADROOM_MIN_FREE_DISK_BYTES / 1e9);
+          report(
+            'headroom',
+            `Token-saving optimizer skipped — needs ~${needGb} GB free, host has ${freeGb} GB. The agent runs normally without it.`,
+          );
+          log.warn(
+            'host-agent',
+            `Headroom skipped: insufficient disk (free=${freeGb}GB < ${needGb}GB)`,
+          );
+          persistHeadroomConfig({ enabled: false });
+          // fall through to spawn the agent without Headroom
+        } else {
         const headroomOk = await this.setupHeadroom(payload.headroomAgent);
         if (headroomOk) {
           // Use the mapped headroom kind (e.g. `claude_code` → `claude`) so the
@@ -1613,6 +1657,7 @@ export class HostAgentSupervisor {
           // agent at a dead proxy (and clears any stale enabled config).
           persistHeadroomConfig({ enabled: false });
           log.warn('host-agent', 'Headroom setup failed (best-effort) — child will run without Headroom');
+        }
         }
       } else if (payload.headroomEnabled === false) {
         // Feature explicitly turned off for this deploy — clear any stale

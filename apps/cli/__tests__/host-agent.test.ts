@@ -11,6 +11,7 @@ import {
   resolveHostIdentity,
   type ChildSpawner,
   setupHeadroomForSelfHosted,
+  getFreeDiskBytes,
   agentIdToHeadroomKind,
   detectPackageManager,
   readHeadroomChildEnv,
@@ -1600,25 +1601,27 @@ describe('setupHeadroomForSelfHosted — injectable runner (no real subprocess)'
 
     const result = await setupHeadroomForSelfHosted('claude', runner);
 
-    // Exactly 2 python3 calls: first attempt + retry.
+    // Install runs in two stages (CPU torch, then headroom + engines), each
+    // with a PEP 668 retry — so we assert behavior, not an exact call count.
     const pipCalls = calls.filter((c) => c.cmd === 'python3');
-    expect(pipCalls).toHaveLength(2);
 
-    // First call: no --break-system-packages.
-    expect(pipCalls[0].args).not.toContain('--break-system-packages');
+    // PEP 668 retry path exercised: at least one call carries the override.
+    expect(pipCalls.some((c) => c.args.includes('--break-system-packages'))).toBe(true);
 
-    // Second (retry) call: must have --break-system-packages.
-    expect(pipCalls[1].args).toContain('--break-system-packages');
+    // The Headroom ENGINE package is installed (with a [code,ml]/[code] extra) —
+    // this is the fix: we no longer install bare `headroom-ai`.
+    const headroomCall = pipCalls.find((c) => c.args.some((a) => a.startsWith('headroom-ai')));
+    expect(headroomCall).toBeDefined();
+    expect(headroomCall!.args.some((a) => a.startsWith('headroom-ai[') && a.includes('code'))).toBe(
+      true,
+    );
 
-    // Both calls use `python3 -m pip install --quiet ... headroom-ai ...`.
+    // Every pip call is `python3 -m pip install --quiet ...`.
     for (const c of pipCalls) {
-      expect(c.args[0]).toBe('-m');
-      expect(c.args[1]).toBe('pip');
-      expect(c.args[2]).toBe('install');
-      expect(c.args).toContain('headroom-ai');
+      expect(c.args.slice(0, 4)).toEqual(['-m', 'pip', 'install', '--quiet']);
     }
 
-    // Retry succeeded (install ok) but headroom not on PATH → init skips → false.
+    // Install ok, but headroom not on PATH → init skips → false.
     expect(result).toBe(false);
   });
 
@@ -1643,9 +1646,18 @@ describe('setupHeadroomForSelfHosted — injectable runner (no real subprocess)'
 
     const result = await setupHeadroomForSelfHosted('claude', runner);
 
-    expect(result).toBe(false); // both attempts failed → false (never throws)
-    // Two python3 calls: first attempt + retry.
-    expect(calls.filter((c) => c.cmd === 'python3')).toHaveLength(2);
+    expect(result).toBe(false); // every install attempt failed → false (never throws)
+    // The PEP 668 override retry was attempted before giving up.
+    const pipCalls = calls.filter((c) => c.cmd === 'python3');
+    expect(pipCalls.some((c) => c.args.includes('--break-system-packages'))).toBe(true);
+  });
+
+  it('getFreeDiskBytes returns a positive number for a real dir, null for a bogus path', async () => {
+    const real = await getFreeDiskBytes(os.tmpdir());
+    expect(typeof real).toBe('number');
+    expect(real as number).toBeGreaterThan(0);
+    // statfs on a nonexistent path errors → null (caller treats as "unknown").
+    expect(await getFreeDiskBytes('/no/such/path/xyzzy-12345')).toBeNull();
   });
 
   it('returns false (never throws) when no package manager is found and pip is absent', async () => {
