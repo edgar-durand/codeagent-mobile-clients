@@ -18,7 +18,9 @@ const REAL_STATS = {
       total_tokens_before_with_rtk: 211215,
     },
     mcp: { compressions: 0, tokens_removed: 0, retrievals: 0 },
+    cost: { breakdown: { cache_savings_usd: 11.69, compression_savings_usd: 0 } },
   },
+  prefix_cache: { totals: { cache_read_tokens: 2596682, cache_write_tokens: 494361 } },
   agent_usage: {
     agents: [
       {
@@ -41,7 +43,14 @@ const REAL_STATS = {
   },
 };
 
-const ZERO = { rawTokensEst: 0, sentTokensEst: 0, cachedTokens: 0, retrieveHops: 0 };
+const ZERO = {
+  rawTokensEst: 0,
+  sentTokensEst: 0,
+  cachedTokens: 0,
+  retrieveHops: 0,
+  cacheReadTokens: 0,
+  cacheSavingsUsd: 0,
+};
 
 describe('read() — parses the real /stats shape', () => {
   it('extracts rawTokensEst and sentTokensEst from agent_usage.totals', () => {
@@ -51,9 +60,15 @@ describe('read() — parses the real /stats shape', () => {
     expect(next.retrieveHops).toBe(0);
   });
 
-  it('sets cachedTokens to 0 (no such field in /stats)', () => {
+  it('sets cachedTokens to 0 (no compression-cache field in /stats)', () => {
     const { next } = mapStatsToSavings(REAL_STATS, ZERO);
     expect(next.cachedTokens).toBe(0);
+  });
+
+  it('parses the prompt-cache dimension (the real BYO-agent saving)', () => {
+    const { next } = mapStatsToSavings(REAL_STATS, ZERO);
+    expect(next.cacheReadTokens).toBe(2596682); // prefix_cache.totals.cache_read_tokens
+    expect(next.cacheSavingsUsd).toBe(11.69); // summary.cost.breakdown.cache_savings_usd
   });
 });
 
@@ -71,7 +86,14 @@ describe('mapStatsToSavings — delta logic', () => {
   });
 
   it('counter reset (next < prev) → reports next reading as the delta', () => {
-    const prev = { rawTokensEst: 211215, sentTokensEst: 210217, cachedTokens: 0, retrieveHops: 0 };
+    const prev = {
+      rawTokensEst: 211215,
+      sentTokensEst: 210217,
+      cachedTokens: 0,
+      retrieveHops: 0,
+      cacheReadTokens: 0,
+      cacheSavingsUsd: 0,
+    };
     // Proxy restarted — counters back to a small number
     const resetStats = {
       summary: { compression: { total_tokens_before_with_cli_filtering: 0, total_tokens_removed: 0 }, mcp: { retrievals: 0 } },
