@@ -219,8 +219,10 @@ export async function link(args: string[] = []): Promise<void> {
   }
   spin.stop('Got pairing code');
   showPairingCode(pairing.code);
-  console.log(pc.dim('  Scan the QR or enter the code in CodeAgent Mobile.'));
-  console.log('');
+  // stderr, matching showPairingCode + the clack spinner stream (see #356).
+  process.stderr.write(
+    `${pc.dim('  Scan the QR or enter the code in CodeAgent Mobile.')}\n\n`,
+  );
 
   const waitSpin = p.spinner();
   const waitMsg = (): string =>

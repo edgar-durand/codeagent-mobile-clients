@@ -88,21 +88,27 @@ export function showPairingCode(code: string): void {
   // wide letter-spacing + bold + a bright color so each character is easy to
   // pick out for low-vision users, while staying copy/screen-reader friendly.
   const spaced = code.split('').join(' '); // "U J L U 3 4"
-  console.log(BOX_BORDER_TOP);
+  // Render on STDERR (via `out`) like every other banner element — NOT stdout.
+  // The clack waiting-spinner that follows runs on stdout and drives the
+  // cursor (erase/redraw each tick); a code box + QR printed to the SAME
+  // stdout stream gets clobbered by that redraw (or vanishes entirely when
+  // stdout is piped / not a TTY), which is the "pair keeps loading, no QR"
+  // bug (#356). stderr keeps the QR on its own interactive stream, decoupled
+  // from the spinner, and also stops a short-lived pairing secret leaking
+  // into a piped stdout.
+  out(BOX_BORDER_TOP);
   // Visible prefix "  Code:   " plus the spaced code; pad honestly (ANSI
   // styling is applied after measuring so the trailing │ stays aligned).
   const label = '  Code:   ';
   const codeVisible = `${label}${spaced}`.length;
-  console.log(
-    boxRow(`${label}${pc.bold(pc.yellow(spaced))}`, codeVisible),
-  );
-  console.log(BOX_BORDER_BOT);
-  console.log('');
+  out(boxRow(`${label}${pc.bold(pc.yellow(spaced))}`, codeVisible));
+  out(BOX_BORDER_BOT);
+  out('');
 
   qrcode.generate(code, { small: true }, (qr: string) => {
-    qr.split('\n').forEach((line) => console.log('  ' + line));
+    qr.split('\n').forEach((line) => out('  ' + line));
   });
-  console.log('');
+  out('');
 }
 
 /** Format a remaining-seconds value as `M:SS`. */
