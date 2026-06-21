@@ -336,7 +336,13 @@ describe('HostAgentSupervisor — control channel reuse', () => {
     });
     vi.stubGlobal(
       'fetch',
-      vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => ({ success: true, data: { ok: true } }) }),
+      vi
+        .fn()
+        .mockResolvedValue({
+          ok: true,
+          status: 200,
+          json: async () => ({ success: true, data: { ok: true } }),
+        }),
     );
     sup.start();
 
@@ -788,7 +794,9 @@ describe('HostAgentSupervisor — heartbeat metrics', () => {
     });
     vi.stubGlobal('fetch', fetchMock);
 
-    const sup = new HostAgentSupervisor(IDENTITY, { makeRelay: () => ({ start: vi.fn(), stop: vi.fn() }) });
+    const sup = new HostAgentSupervisor(IDENTITY, {
+      makeRelay: () => ({ start: vi.fn(), stop: vi.fn() }),
+    });
     sup.start(); // fires one beat immediately (void this.beat())
     // Let the fire-and-forget beat's microtasks settle.
     await Promise.resolve();
@@ -867,9 +875,7 @@ describe('sendHostHeartbeat — never carries session state (no polling)', () =>
 });
 
 describe('reportSessionEvent — discrete session lifecycle (event-driven)', () => {
-  function lastSessionEventBody(
-    fetchMock: ReturnType<typeof vi.fn>,
-  ): Record<string, unknown> {
+  function lastSessionEventBody(fetchMock: ReturnType<typeof vi.fn>): Record<string, unknown> {
     const calls = fetchMock.mock.calls.filter((c) =>
       String(c[0]).includes('/api/self-hosted/session-event'),
     );
@@ -914,9 +920,7 @@ describe('reportSessionEvent — discrete session lifecycle (event-driven)', () 
 
 describe('HostAgentSupervisor — event-driven session lifecycle', () => {
   /** All session-event POST bodies seen by a fetch mock, in order. */
-  function sessionEventBodies(
-    fetchMock: ReturnType<typeof vi.fn>,
-  ): Array<Record<string, unknown>> {
+  function sessionEventBodies(fetchMock: ReturnType<typeof vi.fn>): Array<Record<string, unknown>> {
     return fetchMock.mock.calls
       .filter((c) => String(c[0]).includes('/api/self-hosted/session-event'))
       .map((c) => JSON.parse((c[1] as { body: string }).body));
@@ -1298,8 +1302,16 @@ describe('agentIdToHeadroomKind', () => {
 });
 
 describe('HostAgentSupervisor — Headroom env injection', () => {
-  function makeHeadroomSupervisor(setupHeadroomResult: boolean) {
-    const setupHeadroom = vi.fn<(a: string) => Promise<boolean>>().mockResolvedValue(setupHeadroomResult);
+  function makeHeadroomSupervisor(
+    setupHeadroomResult: boolean,
+    overrides: {
+      isHeadroomInstalled?: () => boolean;
+      getFreeDisk?: (dir: string) => Promise<number | null>;
+    } = {},
+  ) {
+    const setupHeadroom = vi
+      .fn<(a: string) => Promise<boolean>>()
+      .mockResolvedValue(setupHeadroomResult);
     const resolveAgentAuth = vi
       .fn<(i: SealedHostIdentity, s: string) => Promise<AgentAuth>>()
       .mockResolvedValue({ kind: 'oauth_token', value: '{"claudeAiOauth":{}}' });
@@ -1308,9 +1320,91 @@ describe('HostAgentSupervisor — Headroom env injection', () => {
       calls.push({ env, cwd });
       return fakeChildWithStreams();
     };
-    const sup = new HostAgentSupervisor(IDENTITY, { spawnChild, resolveAgentAuth, setupHeadroom });
+    const sup = new HostAgentSupervisor(IDENTITY, {
+      spawnChild,
+      resolveAgentAuth,
+      setupHeadroom,
+      ...overrides,
+    });
     return { sup, setupHeadroom, calls };
   }
+
+  /** 1 GB — below the 2 GB install gate. */
+  const LOW_DISK_BYTES = 1 * 1024 * 1024 * 1024;
+
+  it('bypasses the install disk gate when Headroom is already installed (low disk still reports)', async () => {
+    const cwdTarget = fs.mkdtempSync(path.join(os.tmpdir(), 'codeam-hr-'));
+    // Disk is BELOW the gate, but Headroom is already installed → setup should
+    // still run (idempotent) and the child should carry the HEADROOM_* env so
+    // savings keep being reported. This is the regression: a 2.0 GB box that was
+    // already compressing got reporting silently disabled.
+    const { sup, setupHeadroom, calls } = makeHeadroomSupervisor(true, {
+      isHeadroomInstalled: () => true,
+      getFreeDisk: async () => LOW_DISK_BYTES,
+    });
+
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn()
+        .mockResolvedValue({
+          ok: true,
+          status: 200,
+          json: async () => ({ success: true, data: {} }),
+        }),
+    );
+
+    await sup.handleCommand(
+      deployCmd({
+        repoOrPath: cwdTarget,
+        headroomEnabled: true,
+        headroomAgent: 'claude',
+        headroomSavingsIngestUrl: 'https://ingest.test/savings',
+      }),
+    );
+
+    expect(setupHeadroom).toHaveBeenCalledWith('claude');
+    expect(calls).toHaveLength(1);
+    expect(calls[0].env.HEADROOM_ENABLED).toBe('1');
+    expect(calls[0].env.HEADROOM_SAVINGS_INGEST_URL).toBe('https://ingest.test/savings');
+
+    fs.rmSync(cwdTarget, { recursive: true, force: true });
+  });
+
+  it('honors the disk gate (skips setup) when Headroom is NOT already installed and disk is low', async () => {
+    const cwdTarget = fs.mkdtempSync(path.join(os.tmpdir(), 'codeam-hr-'));
+    const { sup, setupHeadroom, calls } = makeHeadroomSupervisor(true, {
+      isHeadroomInstalled: () => false,
+      getFreeDisk: async () => LOW_DISK_BYTES,
+    });
+
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn()
+        .mockResolvedValue({
+          ok: true,
+          status: 200,
+          json: async () => ({ success: true, data: {} }),
+        }),
+    );
+
+    await sup.handleCommand(
+      deployCmd({
+        repoOrPath: cwdTarget,
+        headroomEnabled: true,
+        headroomAgent: 'claude',
+        headroomSavingsIngestUrl: 'https://ingest.test/savings',
+      }),
+    );
+
+    // Install skipped → setupHeadroom never called, no HEADROOM_* env injected.
+    expect(setupHeadroom).not.toHaveBeenCalled();
+    expect(calls).toHaveLength(1);
+    expect(calls[0].env.HEADROOM_ENABLED).toBeUndefined();
+
+    fs.rmSync(cwdTarget, { recursive: true, force: true });
+  });
 
   it('injects HEADROOM_* env vars into the child when headroomEnabled=true and setup succeeds', async () => {
     const cwdTarget = fs.mkdtempSync(path.join(os.tmpdir(), 'codeam-hr-'));
@@ -1319,7 +1413,13 @@ describe('HostAgentSupervisor — Headroom env injection', () => {
     // Stub fetch for the deploy-progress best-effort POSTs.
     vi.stubGlobal(
       'fetch',
-      vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => ({ success: true, data: {} }) }),
+      vi
+        .fn()
+        .mockResolvedValue({
+          ok: true,
+          status: 200,
+          json: async () => ({ success: true, data: {} }),
+        }),
     );
 
     await sup.handleCommand(
@@ -1352,7 +1452,13 @@ describe('HostAgentSupervisor — Headroom env injection', () => {
 
     vi.stubGlobal(
       'fetch',
-      vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => ({ success: true, data: {} }) }),
+      vi
+        .fn()
+        .mockResolvedValue({
+          ok: true,
+          status: 200,
+          json: async () => ({ success: true, data: {} }),
+        }),
     );
 
     await sup.handleCommand(
@@ -1382,7 +1488,13 @@ describe('HostAgentSupervisor — Headroom env injection', () => {
 
     vi.stubGlobal(
       'fetch',
-      vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => ({ success: true, data: {} }) }),
+      vi
+        .fn()
+        .mockResolvedValue({
+          ok: true,
+          status: 200,
+          json: async () => ({ success: true, data: {} }),
+        }),
     );
 
     await sup.handleCommand(
@@ -1417,7 +1529,13 @@ describe('HostAgentSupervisor — Headroom env injection', () => {
 
     vi.stubGlobal(
       'fetch',
-      vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => ({ success: true, data: {} }) }),
+      vi
+        .fn()
+        .mockResolvedValue({
+          ok: true,
+          status: 200,
+          json: async () => ({ success: true, data: {} }),
+        }),
     );
 
     await sup.handleCommand(
@@ -1443,7 +1561,13 @@ describe('HostAgentSupervisor — Headroom env injection', () => {
 
     vi.stubGlobal(
       'fetch',
-      vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => ({ success: true, data: {} }) }),
+      vi
+        .fn()
+        .mockResolvedValue({
+          ok: true,
+          status: 200,
+          json: async () => ({ success: true, data: {} }),
+        }),
     );
 
     // Plain old deploy — no headroom fields.
@@ -1606,7 +1730,9 @@ describe('setupHeadroomForSelfHosted — injectable runner (no real subprocess)'
     // (it's heavy + fragile + can hang the proxy). No call mentions torch.
     expect(
       pipCalls.some((c) =>
-        c.args.some((a) => a === 'torch' || a.includes('download.pytorch.org') || a === '[code,ml]'),
+        c.args.some(
+          (a) => a === 'torch' || a.includes('download.pytorch.org') || a === '[code,ml]',
+        ),
       ),
     ).toBe(false);
 
@@ -1690,14 +1816,11 @@ describe('setupHeadroomForSelfHosted — injectable runner (no real subprocess)'
     // The install must include the TLS + fetch prerequisites so the PyPI
     // handshake during the later pip install can succeed.
     const isRoot = process.getuid?.() === 0;
-    const runner = makeRunner(
-      ['apt-get'],
-      {
-        'apt-get': { code: 0, stderr: '' },
-        sudo: { code: 0, stderr: '' },
-        python3: { code: 0, stderr: '' },
-      },
-    );
+    const runner = makeRunner(['apt-get'], {
+      'apt-get': { code: 0, stderr: '' },
+      sudo: { code: 0, stderr: '' },
+      python3: { code: 0, stderr: '' },
+    });
 
     await setupHeadroomForSelfHosted('claude', runner);
 
@@ -1751,7 +1874,9 @@ describe('setupHeadroomForSelfHosted — injectable runner (no real subprocess)'
     await setupHeadroomForSelfHosted('claude', runner);
 
     const pmCmds = new Set(['apt-get', 'apk', 'dnf', 'yum', 'pacman', 'zypper', 'sudo']);
-    const pmCalls = runner.calls.filter((c) => pmCmds.has(c.cmd) || c.args.some((a) => pmCmds.has(a)));
+    const pmCalls = runner.calls.filter(
+      (c) => pmCmds.has(c.cmd) || c.args.some((a) => pmCmds.has(a)),
+    );
     expect(pmCalls).toHaveLength(0);
     // The only run() calls should be the python3 -m pip install attempt(s).
     expect(runner.calls.every((c) => c.cmd === 'python3')).toBe(true);
@@ -1813,7 +1938,12 @@ describe('HostAgentSupervisor — periodic self-update', () => {
     return new HostAgentSupervisor(IDENTITY, {
       makeRelay: () => ({ start: vi.fn(), stop: vi.fn() }),
       // No real heartbeat collection during these unit ticks.
-      metricsCollector: { collect: () => { throw new Error('no metrics'); }, recordLatency: vi.fn() },
+      metricsCollector: {
+        collect: () => {
+          throw new Error('no metrics');
+        },
+        recordLatency: vi.fn(),
+      },
       selfUpdate: over.selfUpdate,
       onUpdated: over.onUpdated,
       ...(over.spawnChild ? { spawnChild: over.spawnChild } : {}),
@@ -1915,7 +2045,13 @@ describe('HostAgentSupervisor — periodic self-update', () => {
     // start() fires one immediate heartbeat — stub fetch so it can't hit the net.
     vi.stubGlobal(
       'fetch',
-      vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => ({ success: true, data: {} }) }),
+      vi
+        .fn()
+        .mockResolvedValue({
+          ok: true,
+          status: 200,
+          json: async () => ({ success: true, data: {} }),
+        }),
     );
     try {
       const selfUpdate = vi.fn<() => Promise<SelfUpdateResult>>();
@@ -1936,7 +2072,13 @@ describe('HostAgentSupervisor — periodic self-update', () => {
     process.env.CODEAM_HOST_SELF_UPDATE_MS = '50';
     vi.stubGlobal(
       'fetch',
-      vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => ({ success: true, data: {} }) }),
+      vi
+        .fn()
+        .mockResolvedValue({
+          ok: true,
+          status: 200,
+          json: async () => ({ success: true, data: {} }),
+        }),
     );
     vi.useFakeTimers();
     try {
@@ -2053,7 +2195,13 @@ describe('HostAgentSupervisor — deploy persists headroom config', () => {
   beforeEach(() => {
     vi.stubGlobal(
       'fetch',
-      vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => ({ success: true, data: {} }) }),
+      vi
+        .fn()
+        .mockResolvedValue({
+          ok: true,
+          status: 200,
+          json: async () => ({ success: true, data: {} }),
+        }),
     );
   });
 
@@ -2126,7 +2274,13 @@ describe('HostAgentSupervisor — resume/restart spawn re-injects persisted head
   it('a spawn AFTER a prior deploy enabled headroom (no fresh headroom payload) gets HEADROOM_* env', async () => {
     vi.stubGlobal(
       'fetch',
-      vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => ({ success: true, data: {} }) }),
+      vi
+        .fn()
+        .mockResolvedValue({
+          ok: true,
+          status: 200,
+          json: async () => ({ success: true, data: {} }),
+        }),
     );
 
     // Simulate the state a prior successful headroom deploy left behind: the
