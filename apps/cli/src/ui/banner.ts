@@ -82,13 +82,19 @@ function boxRow(content: string, visibleLength: number): string {
  * printed once and never updated).
  */
 export function showPairingCode(code: string): void {
+  // The code is the line users must read + type, so make it the largest,
+  // highest-contrast element — but keep it to ONE line (terminals can't
+  // actually resize a font; block-art was too much). Legibility comes from
+  // wide letter-spacing + bold + a bright color so each character is easy to
+  // pick out for low-vision users, while staying copy/screen-reader friendly.
+  const spaced = code.split('').join(' '); // "U J L U 3 4"
   console.log(BOX_BORDER_TOP);
-  // Visible prefix "  Code:  " = 9 chars; code is 6 chars; total 15
-  // visible, padded out to BOX_INTERIOR. The ANSI bold+yellow wraps the
-  // code AFTER we've computed the visible length so the pad is honest.
-  const codeVisible = `  Code:  ${code}`.length;
+  // Visible prefix "  Code:   " plus the spaced code; pad honestly (ANSI
+  // styling is applied after measuring so the trailing │ stays aligned).
+  const label = '  Code:   ';
+  const codeVisible = `${label}${spaced}`.length;
   console.log(
-    boxRow(`  Code:  ${pc.bold(pc.yellow(code))}`, codeVisible),
+    boxRow(`${label}${pc.bold(pc.yellow(spaced))}`, codeVisible),
   );
   console.log(BOX_BORDER_BOT);
   console.log('');
