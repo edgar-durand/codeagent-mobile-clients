@@ -25,7 +25,7 @@ Return ONLY a JSON object on stdout (no prose, no markdown fences):
   "port": <number>,
   "ready_pattern": "<regex matching the server-ready stdout line>",
   "env": { "HOST": "0.0.0.0" },
-  "setup_commands": [],
+  "setup_commands": [{ "cmd": "<executable>", "args": ["..."] }],
   "notes": "<one-line caveat or null>"
 }
 
@@ -47,6 +47,8 @@ CRITICAL — setup_commands:
 - ONLY include setup_commands for genuinely non-install work the project needs
   before its dev server can boot: prisma generate, codegen, prebuild scripts,
   database migrations against a local SQLite, etc.
+- Each setup_commands entry MUST be an object {"cmd": "...", "args": ["..."]} —
+  e.g. {"cmd": "npx", "args": ["prisma", "generate"]}. NOT a bare string.
 - For most projects, setup_commands should be an empty array [].
 
 OUTPUT JSON ONLY. NO MARKDOWN. NO COMMENTARY.

@@ -1226,11 +1226,31 @@ const previewStartH: CommandHandler = (ctx, _cmd, parsed) => {
     //    authoritative — the agent's install is at best redundant, at
     //    worst destructive. Non-install setup steps (`prisma generate`,
     //    `prebuild`, etc.) still run.
+    // The agent emits setup_commands as either {cmd,args} objects OR bare
+    // strings ("npx prisma generate") — the detection prompt's example never
+    // pinned the entry shape, so both occur in the wild. Normalize to {cmd,args}
+    // here so the loop below never does `undefined.join(...)` on a string entry,
+    // which threw inside this detached IIFE → unhandled rejection → a SILENT
+    // black-screen preview (observed live on a Prisma/Next.js project whose
+    // setup_commands was ["npx prisma generate"]).
+    const normalizedSetup = ((detection.setup_commands ?? []) as Array<unknown>)
+      .map((entry) => {
+        if (typeof entry === 'string') {
+          const parts = entry.trim().split(/\s+/).filter(Boolean);
+          return { cmd: parts[0] ?? '', args: parts.slice(1) };
+        }
+        const o = (entry ?? {}) as { cmd?: unknown; args?: unknown };
+        return {
+          cmd: typeof o.cmd === 'string' ? o.cmd : '',
+          args: Array.isArray(o.args)
+            ? o.args.filter((a): a is string => typeof a === 'string')
+            : [],
+        };
+      })
+      .filter((s) => s.cmd.length > 0);
     const agentSetupCommands = preflightRan
-      ? (detection.setup_commands ?? []).filter(
-          (s) => !isJsInstallCommand(s.cmd, s.args),
-        )
-      : (detection.setup_commands ?? []);
+      ? normalizedSetup.filter((s) => !isJsInstallCommand(s.cmd, s.args))
+      : normalizedSetup;
     for (const setup of agentSetupCommands) {
       emitProgress('SETUP_RUN', `${setup.cmd} ${setup.args.join(' ')}`);
       // An install command (the agent may emit one for a project the
@@ -1649,7 +1669,21 @@ const previewStartH: CommandHandler = (ctx, _cmd, parsed) => {
       type: 'preview_ready',
       payload: { url, framework: detection.framework, port: detection.port },
     });
-  })();
+  })().catch((err) => {
+    // Safety net: any UNEXPECTED throw in the detached bring-up (a malformed
+    // detection field, a parser bug, etc.) must NOT become a silent unhandled
+    // rejection that leaves the mobile preview on a black screen forever.
+    // Surface it as a preview_error so the UI can show something actionable.
+    const message = err instanceof Error ? err.message : String(err);
+    log.warn('preview', `start crashed before ready: ${message}`);
+    void postPreviewEvent({
+      sessionId: ctx.sessionId,
+      pluginId: ctx.pluginId,
+      pluginAuthToken,
+      type: 'preview_error',
+      payload: { stage: 'spawn', message: `Preview failed to start: ${message}` },
+    });
+  });
 };
 
 const previewStopH: CommandHandler = (ctx) => {

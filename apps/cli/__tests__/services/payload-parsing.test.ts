@@ -33,6 +33,41 @@ describe('parsePayload', () => {
     expect(r?.id).toBeUndefined();
   });
 
+  // Regression: the agent writes preview setup_commands as bare strings
+  // ("npx prisma generate"); the schema must accept them and normalize to
+  // {cmd,args} rather than rejecting the whole detection (which silently
+  // dropped the preview → black screen on a Prisma/Next.js codespace).
+  const baseDetection = {
+    framework: 'Next.js',
+    command: 'npx',
+    args: ['next', 'dev', '-H', '0.0.0.0', '-p', '3000'],
+    port: 3000,
+    ready_pattern: '(Ready in|Local:\\s+http)',
+    env: { HOST: '0.0.0.0' },
+  };
+
+  test('normalizes string setup_commands into {cmd,args}', () => {
+    const r = parsePayload(startCommandSchema, {
+      detection: { ...baseDetection, setup_commands: ['npx prisma generate'] },
+    });
+    expect(r).not.toBeNull();
+    expect(r?.detection?.setup_commands).toEqual([
+      { cmd: 'npx', args: ['prisma', 'generate'] },
+    ]);
+  });
+
+  test('accepts object setup_commands unchanged', () => {
+    const r = parsePayload(startCommandSchema, {
+      detection: {
+        ...baseDetection,
+        setup_commands: [{ cmd: 'npx', args: ['prisma', 'generate'] }],
+      },
+    });
+    expect(r?.detection?.setup_commands).toEqual([
+      { cmd: 'npx', args: ['prisma', 'generate'] },
+    ]);
+  });
+
   test('rejects when filename exceeds 256 chars', () => {
     expect(
       parsePayload(fileEntrySchema, {

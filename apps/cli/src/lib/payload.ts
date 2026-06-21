@@ -133,12 +133,25 @@ export const startCommandSchema = z.object({
       port: z.number().int().min(1).max(65535),
       ready_pattern: z.string().min(1).max(4096),
       env: z.record(z.string(), z.string().max(8192)).optional(),
+      // The agent emits entries as either {cmd,args} objects OR bare command
+      // strings ("npx prisma generate"). Accept both and normalize strings to
+      // {cmd,args} so a string entry doesn't reject the whole detection (which
+      // would silently drop the preview) and downstream always gets objects.
       setup_commands: z
         .array(
-          z.object({
-            cmd: z.string().min(1).max(256),
-            args: z.array(z.string().max(1024)).max(64),
-          }),
+          z
+            .union([
+              z.string().min(1).max(1024),
+              z.object({
+                cmd: z.string().min(1).max(256),
+                args: z.array(z.string().max(1024)).max(64),
+              }),
+            ])
+            .transform((entry) => {
+              if (typeof entry !== 'string') return entry;
+              const parts = entry.trim().split(/\s+/).filter(Boolean);
+              return { cmd: parts[0] ?? '', args: parts.slice(1) };
+            }),
         )
         .max(32)
         .optional(),
