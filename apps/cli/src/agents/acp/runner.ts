@@ -664,6 +664,41 @@ const AUTH_FAILURE_MESSAGE =
   // label, so the instruction still reads correctly.
   'Tap [Re-authenticate this agent](codeam://reauth) to renew your credentials in Profile › Agents, then send your message again.';
 
+/**
+ * Persistent, actionable message for a NON-auth turn failure that produced no
+ * assistant text (e.g. the local Headroom proxy not ready on the first prompt,
+ * a network/adapter error). Without this the only frame published is the empty
+ * `done:true` from `closeAll`, which the mobile snapshot-guard drops — leaving
+ * the chat with no reply AND no error (the silent "first message never
+ * answers" bug). Surfacing this guarantees every turn visibly ends.
+ */
+export const TURN_FAILURE_MESSAGE =
+  '⚠️ **The agent hit an error and couldn’t finish this turn.** Please send your message again.';
+
+export { AUTH_FAILURE_MESSAGE };
+
+/**
+ * Decide the terminal failure bubble to publish when a `start_task` turn
+ * throws — the contract that guarantees a turn NEVER ends silently:
+ *   - auth failure → the actionable re-auth bubble.
+ *   - any other failure that streamed NO assistant text → a generic retry
+ *     bubble (the fix for the silent "first message never answers" bug: the
+ *     only other frame is an empty `done:true` the mobile snapshot-guard drops).
+ *   - a failure that DID stream partial text → null: `closeAll` already
+ *     published that partial reply as the terminal frame; don't clobber it.
+ */
+export function failureBubble(opts: {
+  detail: string;
+  recentStderr: string;
+  hadText: boolean;
+}): string | null {
+  if (looksLikeAuthFailure(opts.detail) || looksLikeAuthFailure(opts.recentStderr)) {
+    return AUTH_FAILURE_MESSAGE;
+  }
+  if (!opts.hadText) return TURN_FAILURE_MESSAGE;
+  return null;
+}
+
 export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
   const publisher = new AcpPublisher({
     sessionId: opts.sessionId,
@@ -1132,28 +1167,36 @@ async function handleCommand(
         log.info('acpRunner', `start_task ← done stopReason=${reply.stopReason ?? '?'} id=${cmd.id.slice(0, 8)}`);
         await relay.sendResult(cmd.id, 'completed', { stopReason: reply.stopReason });
       } catch (err) {
+        // Whether the turn streamed any assistant text BEFORE recover resets
+        // it. When it did, `closeAll` already published that partial reply as
+        // the terminal frame — we must NOT clobber it. When it didn't, the only
+        // frame is an empty `done:true` (dropped by the mobile snapshot-guard),
+        // so we MUST synthesize a visible failure bubble below.
+        const hadText = streaming.getCurrentText().trim().length > 0;
         // Error path uses the safe closeAll (no extraction) — a
         // torn-off text could match the heuristics spuriously and
         // strand the runner with an unanswerable pending question.
         await recoverFromFailedTurn(client, streaming);
         const detail = describeError(err);
         log.warn('acpRunner', `prompt failed: ${detail}`);
-        // A credential 401 (the agent printed it to stderr and bailed)
-        // would otherwise vanish — recoverFromFailedTurn's closeAll only
-        // persists accumulated ASSISTANT text, which is empty here. Emit a
-        // persistent, actionable re-auth bubble so the user knows the token
-        // expired instead of seeing a transient flash.
-        if (looksLikeAuthFailure(detail) || looksLikeAuthFailure(recentStderr.join('\n'))) {
-          await publisher.publishOutput({
-            type: 'text',
-            content: AUTH_FAILURE_MESSAGE,
-            done: true,
-          });
-          // Persist it in the DURABLE conversation (the output stream is just
-          // a 3-min buffer the next turn's `clear` wipes — and mobile
-          // re-fetches `get_conversation` on a loop). Without this append the
-          // bubble shows live then disappears on the next refresh.
-          history.appendAgentReply(AUTH_FAILURE_MESSAGE);
+        // GUARANTEE a visible terminal frame: recoverFromFailedTurn's closeAll
+        // only published the accumulated ASSISTANT text — empty on a first-turn
+        // proxy/network/auth failure, which the mobile snapshot-guard drops,
+        // leaving the chat with no reply AND no error. failureBubble() decides
+        // the actionable message (re-auth, or generic retry when no text
+        // streamed); null only when a partial reply already serves as terminal.
+        const bubble = failureBubble({
+          detail,
+          recentStderr: recentStderr.join('\n'),
+          hadText,
+        });
+        if (bubble) {
+          await publisher.publishOutput({ type: 'text', content: bubble, done: true });
+          // Persist it in the DURABLE conversation (the output stream is just a
+          // 3-min buffer the next turn's `clear` wipes — and mobile re-fetches
+          // `get_conversation` on a loop). Without this the bubble shows live
+          // then disappears on the next refresh.
+          history.appendAgentReply(bubble);
           void history.flush();
         }
         await relay.sendResult(cmd.id, 'failed', { error: detail });
