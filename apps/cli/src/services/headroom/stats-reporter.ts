@@ -12,12 +12,21 @@ export interface Savings {
    *  `cachedTokens` (which feeds the compression dollar formula server-side). */
   cacheReadTokens: number;
   cacheSavingsUsd: number;
-  /** COMPRESSION dollar saving — the eliminated (rawTokensEst − sentTokensEst)
-   *  tokens valued at the agent model's INPUT price. The proxy doesn't expose
-   *  this (only cache_savings_usd), so the reporter computes it from the token
-   *  delta × `inputPricePerMillionUsd`. The backend sums it with cacheSavingsUsd
-   *  into the per-session CostSaving.usdSaved. */
+  /** COMPRESSION tokens saved — the proxy's authoritative headline number
+   *  (`summary.compression.total_tokens_saved_with_cli_filtering`, = tokens
+   *  removed by compression + CLI filtering). This is what the badge shows as
+   *  "saved with Headroom". Falls back to (rawTokensEst − sentTokensEst). */
+  compressionTokens: number;
+  /** COMPRESSION dollar saving — the proxy's own
+   *  `cost.breakdown.compression_savings_usd` (eliminated tokens at the model's
+   *  LIST input price). When the proxy doesn't expose it, computed from
+   *  `compressionTokens × inputPricePerMillionUsd`. The backend stores this as
+   *  CostSaving.usdSaved (compression only — cache$ is NOT credited to Headroom). */
   compressionSavingsUsd: number;
+  /** COMPRESSION RATE (0–100) — the proxy's `avg_compression_pct`. A RATE, not a
+   *  cumulative counter, so it is carried through as the latest absolute value
+   *  (never diffed). Drives the Home card's "avg compression" pill. */
+  compressionPct: number;
 }
 
 /** Claude Sonnet input $/M — the default when the agent's price is unknown. */
@@ -32,6 +41,10 @@ export interface StatsShape {
     compression?: {
       total_tokens_before_with_cli_filtering?: number;
       total_tokens_removed?: number;
+      /** Headroom's headline "tokens saved" — compression + CLI filtering. */
+      total_tokens_saved_with_cli_filtering?: number;
+      /** Headroom's avg compression rate (0–100) over compressed requests. */
+      avg_compression_pct?: number;
     };
     mcp?: {
       retrievals?: number;
@@ -39,6 +52,8 @@ export interface StatsShape {
     cost?: {
       breakdown?: {
         cache_savings_usd?: number;
+        /** The proxy's own compression $ (eliminated tokens at model list price). */
+        compression_savings_usd?: number;
       };
     };
   };
@@ -63,7 +78,9 @@ const ZERO: Savings = {
   retrieveHops: 0,
   cacheReadTokens: 0,
   cacheSavingsUsd: 0,
+  compressionTokens: 0,
   compressionSavingsUsd: 0,
+  compressionPct: 0,
 };
 
 /**
@@ -88,10 +105,20 @@ function read(stats: StatsShape, inputPricePerMillion: number): Savings {
     totals?.after_tokens ??
     (rawTokensEst - (compression?.total_tokens_removed ?? 0));
 
-  // Cumulative compression $: eliminated tokens × the model's input price.
-  // Cumulative (like raw/sent) so mapStatsToSavings can diff it into a delta.
+  // COMPRESSION tokens saved — prefer the proxy's authoritative headline
+  // (compression + CLI filtering), then tokens_removed, then (raw − sent).
+  const compressionTokens =
+    compression?.total_tokens_saved_with_cli_filtering ??
+    compression?.total_tokens_removed ??
+    Math.max(0, rawTokensEst - sentTokensEst);
+
+  // COMPRESSION $ — prefer the proxy's own figure (eliminated tokens at the
+  // model's LIST price, more accurate than our flat default); otherwise compute
+  // from the compression tokens × the resolved input price. Cumulative (like
+  // raw/sent) so mapStatsToSavings can diff it into a delta.
   const compressionSavingsUsd =
-    (Math.max(0, rawTokensEst - sentTokensEst) / 1_000_000) * inputPricePerMillion;
+    stats.summary?.cost?.breakdown?.compression_savings_usd ??
+    (Math.max(0, compressionTokens) / 1_000_000) * inputPricePerMillion;
 
   return {
     rawTokensEst,
@@ -100,7 +127,9 @@ function read(stats: StatsShape, inputPricePerMillion: number): Savings {
     retrieveHops: stats.summary?.mcp?.retrievals ?? 0,
     cacheReadTokens: stats.prefix_cache?.totals?.cache_read_tokens ?? 0,
     cacheSavingsUsd: stats.summary?.cost?.breakdown?.cache_savings_usd ?? 0,
+    compressionTokens,
     compressionSavingsUsd,
+    compressionPct: compression?.avg_compression_pct ?? 0,
   };
 }
 
@@ -122,7 +151,10 @@ export function mapStatsToSavings(
         retrieveHops: d(next.retrieveHops, prev.retrieveHops),
         cacheReadTokens: d(next.cacheReadTokens, prev.cacheReadTokens),
         cacheSavingsUsd: d(next.cacheSavingsUsd, prev.cacheSavingsUsd),
+        compressionTokens: d(next.compressionTokens, prev.compressionTokens),
         compressionSavingsUsd: d(next.compressionSavingsUsd, prev.compressionSavingsUsd),
+        // RATE — carry the latest absolute value through, never diff it.
+        compressionPct: next.compressionPct,
       };
   return { next, delta };
 }
@@ -159,14 +191,16 @@ export class HeadroomStatsReporter {
         this.deps.inputPricePerMillionUsd ?? DEFAULT_INPUT_PRICE_PER_MILLION,
       );
       this.prev = next;
-      // Report when ANY dimension advanced — a BYO coding agent compresses
-      // ~nothing (rawTokensEst flat) yet still accrues prompt-cache savings, so
-      // gating only on rawTokensEst would never report the cache dimension.
+      // Report when ANY dimension advanced. The badge counts only compression
+      // (compressionTokens / compressionSavingsUsd), but we still post when the
+      // prompt-cache dimension moves so the observability columns
+      // (cacheReadTokens) stay populated server-side.
       if (
+        delta.compressionTokens > 0 ||
+        delta.compressionSavingsUsd > 0 ||
         delta.rawTokensEst > 0 ||
         delta.cacheReadTokens > 0 ||
-        delta.cacheSavingsUsd > 0 ||
-        delta.compressionSavingsUsd > 0
+        delta.cacheSavingsUsd > 0
       ) {
         await this.deps.postSavings(delta);
       }

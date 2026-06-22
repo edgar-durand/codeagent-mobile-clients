@@ -50,7 +50,9 @@ const ZERO = {
   retrieveHops: 0,
   cacheReadTokens: 0,
   cacheSavingsUsd: 0,
+  compressionTokens: 0,
   compressionSavingsUsd: 0,
+  compressionPct: 0,
 };
 
 describe('read() — parses the real /stats shape', () => {
@@ -66,20 +68,43 @@ describe('read() — parses the real /stats shape', () => {
     expect(next.cachedTokens).toBe(0);
   });
 
-  it('parses the prompt-cache dimension (the real BYO-agent saving)', () => {
+  it('parses the prompt-cache dimension for OBSERVABILITY (not credited as savings)', () => {
     const { next } = mapStatsToSavings(REAL_STATS, ZERO);
     expect(next.cacheReadTokens).toBe(2596682); // prefix_cache.totals.cache_read_tokens
     expect(next.cacheSavingsUsd).toBe(11.69); // summary.cost.breakdown.cache_savings_usd
   });
 
-  it('computes compressionSavingsUsd from eliminated tokens × input price', () => {
-    // 211215 − 210217 = 998 tokens eliminated.
+  it('takes compressionTokens from the proxy headline (total_tokens_saved_with_cli_filtering)', () => {
+    const { next } = mapStatsToSavings(REAL_STATS, ZERO);
+    expect(next.compressionTokens).toBe(998);
+  });
+
+  it('reads the avg compression rate (avg_compression_pct) for the pill', () => {
+    const { next } = mapStatsToSavings(REAL_STATS, ZERO);
+    expect(next.compressionPct).toBe(0.8);
+  });
+
+  it('prefers the proxy compression_savings_usd over the computed estimate', () => {
+    // REAL_STATS exposes compression_savings_usd: 0 → authoritative, used as-is
+    // (NOT re-estimated from token×price). This is the proxy at avg 0.8% on
+    // opus traffic — a real, honest, small number.
+    const { next } = mapStatsToSavings(REAL_STATS, ZERO);
+    expect(next.compressionSavingsUsd).toBe(0);
+  });
+
+  it('computes compressionSavingsUsd from tokens × price when the proxy omits it', () => {
+    // No cost.breakdown.compression_savings_usd → fall back to compressionTokens × price.
+    const stats = {
+      summary: {
+        compression: { total_tokens_saved_with_cli_filtering: 998 },
+        mcp: { retrievals: 0 },
+      },
+      agent_usage: { totals: { before_tokens: 211215, after_tokens: 210217 } },
+    };
     // Default price ($3/M): 998/1e6 × 3 = 0.002994.
-    const def = mapStatsToSavings(REAL_STATS, ZERO).next;
-    expect(def.compressionSavingsUsd).toBeCloseTo(0.002994, 6);
+    expect(mapStatsToSavings(stats, ZERO).next.compressionSavingsUsd).toBeCloseTo(0.002994, 6);
     // Explicit Opus price ($15/M): 998/1e6 × 15 = 0.01497.
-    const opus = mapStatsToSavings(REAL_STATS, ZERO, 15).next;
-    expect(opus.compressionSavingsUsd).toBeCloseTo(0.01497, 5);
+    expect(mapStatsToSavings(stats, ZERO, 15).next.compressionSavingsUsd).toBeCloseTo(0.01497, 5);
   });
 });
 
@@ -90,10 +115,15 @@ describe('mapStatsToSavings — delta logic', () => {
     expect(delta.sentTokensEst).toBe(210217);
   });
 
-  it('second call with identical stats → delta is all-zero (no double-count)', () => {
+  it('second call with identical stats → cumulative deltas all-zero (no double-count)', () => {
     const { next } = mapStatsToSavings(REAL_STATS, ZERO);
     const { delta } = mapStatsToSavings(REAL_STATS, next);
-    expect(delta).toEqual(ZERO);
+    // compressionPct is a RATE — always carried as the latest value (0.8 here),
+    // never diffed. Every cumulative dimension must be zero so nothing is
+    // double-counted, and the tick() gate (which ignores compressionPct) won't
+    // POST.
+    expect(delta.compressionPct).toBe(0.8);
+    expect({ ...delta, compressionPct: 0 }).toEqual(ZERO);
   });
 
   it('counter reset (next < prev) → reports next reading as the delta', () => {
@@ -104,7 +134,9 @@ describe('mapStatsToSavings — delta logic', () => {
       retrieveHops: 0,
       cacheReadTokens: 0,
       cacheSavingsUsd: 0,
+      compressionTokens: 998,
       compressionSavingsUsd: 0,
+      compressionPct: 0,
     };
     // Proxy restarted — counters back to a small number
     const resetStats = {
