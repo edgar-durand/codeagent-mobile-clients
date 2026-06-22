@@ -73,6 +73,12 @@ import {
 import { isAbsolutePathTarget, prepareWorkspace } from './host/workspace';
 import { provisionAgentCredentials } from './host/agent-provisioning';
 import {
+  ensureGhCli,
+  ensureGhAuth,
+  defaultGitToolingRunner,
+  codeamBinDir,
+} from './host/git-tooling';
+import {
   HeadroomStatsReporter,
   type Savings,
   type StatsShape,
@@ -1692,6 +1698,30 @@ export class HostAgentSupervisor {
       // installs (codex) already land on PATH; this is the additive case.
       const home = process.env.HOME || os.homedir();
       childEnv.PATH = `${home}/.local/bin:${process.env.PATH ?? ''}`;
+
+      // 1b2) GitHub `gh` CLI — a bare self-hosted box may have neither `gh`
+      //      installed nor any GitHub account configured. Best-effort: install
+      //      `gh` (official static binary, no root) if absent, then authenticate
+      //      it with the user's token UNLESS the box already has a login (never
+      //      clobber the user's own gh). Gated on a clone token (only meaningful
+      //      for GitHub deploys). A failure NEVER blocks the deploy — `git pull`/
+      //      `push` already work via the credential helper from prepareWorkspace.
+      if (payload.cloneToken) {
+        try {
+          report('preparing', 'configuring git tooling');
+          const ghCmd = await ensureGhCli(defaultGitToolingRunner, payload.cloneToken);
+          if (ghCmd) {
+            // Make the installed binary findable by the agent.
+            childEnv.PATH = `${codeamBinDir()}:${childEnv.PATH}`;
+            await ensureGhAuth(defaultGitToolingRunner, ghCmd, payload.cloneToken);
+          }
+        } catch (e) {
+          log.warn(
+            'host-agent',
+            `gh tooling setup skipped: ${e instanceof Error ? e.message : String(e)}`,
+          );
+        }
+      }
 
       // 1c) Named preview tunnel — same unified env contract the codespace
       //     bootstrap uses. The preview start handler reads these and runs
