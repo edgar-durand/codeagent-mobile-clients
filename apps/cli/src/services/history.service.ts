@@ -588,6 +588,47 @@ export class HistoryService {
     if (last) this.lastUploadedUuid.set(sessionId, last.id);
   }
 
+  /** Per-session JSONL mtime at the last upload — gates {@link uploadConversationIfChanged}. */
+  private readonly lastTranscriptMtimeMs = new Map<string, number>();
+
+  /**
+   * Upload a session's transcript when its JSONL changed since the last upload.
+   * Scales to long/heavy conversations: the ACP `get_conversation` handler is
+   * polled (~20 s) and a conversation can grow to many MB, so this must never
+   * re-ship the whole file each tick. Two guards:
+   *   1. a cheap `stat` mtime short-circuits unchanged files (zero work on a
+   *      poll with no new turn);
+   *   2. on a real change, ship the FIRST upload as a batched full baseline,
+   *      then only the DELTA (messages added since our high-water mark) — O(new
+   *      messages), not O(full transcript). A 5 MB / 500-message conversation
+   *      re-ships just the latest turn, not the 5 MB, on every subsequent turn.
+   * Pinned to the explicit ACP `sessionId` (never the mtime-based
+   * `detectCurrentConversation`, which can pick a stray parallel JSONL — the
+   * "7 JSONLs" case). Returns true when it uploaded; false when nothing changed
+   * or no transcript exists yet (not an error).
+   */
+  async uploadConversationIfChanged(sessionId: string): Promise<boolean> {
+    const filePath = path.join(this.projectDir, `${sessionId}.jsonl`);
+    let mtimeMs: number;
+    try {
+      mtimeMs = fs.statSync(filePath).mtimeMs;
+    } catch {
+      return false; // no transcript yet
+    }
+    if (this.lastTranscriptMtimeMs.get(sessionId) === mtimeMs) return false;
+    // First upload for this session → batched full baseline (also sets the
+    // high-water mark). Afterwards → incremental delta only.
+    let uploaded: boolean;
+    if (this.lastUploadedUuid.has(sessionId)) {
+      uploaded = (await this.uploadDelta(sessionId)) > 0;
+    } else {
+      await this.loadConversation(sessionId);
+      uploaded = true;
+    }
+    this.lastTranscriptMtimeMs.set(sessionId, mtimeMs);
+    return uploaded;
+  }
+
   /**
    * Incremental upload — ships only the messages added since the last
    * `loadConversation` / `uploadDelta` call for this conversation.
@@ -605,7 +646,7 @@ export class HistoryService {
    *
    * Returns the number of messages uploaded (0 means nothing new).
    */
-  async uploadDelta(): Promise<number> {
+  async uploadDelta(explicitSessionId?: string): Promise<number> {
     // Lazy-detect the conversation id when uploadDelta is the first
     // path that needs it. The eager detect at start.ts T+2000ms
     // misses the case where claude takes longer than 2s to spawn
@@ -618,11 +659,15 @@ export class HistoryService {
     // (no `\`\`\`` fences → CodeBlock never renders, code shows as
     // plain monospace with template-literal backticks misparsed
     // as inline-code pills).
-    if (!this.currentConversationId) {
+    // Prefer an EXPLICIT (ACP) session id when the caller has one — pinned,
+    // never mtime-guessed (avoids picking a stray parallel JSONL). Fall back to
+    // the lazily-detected current conversation for the legacy/PTY callers.
+    let sessionId = explicitSessionId ?? this.currentConversationId;
+    if (!sessionId) {
       this.detectCurrentConversation();
-      if (!this.currentConversationId) return 0;
+      sessionId = this.currentConversationId;
+      if (!sessionId) return 0;
     }
-    const sessionId = this.currentConversationId;
     const filePath = path.join(this.projectDir, `${sessionId}.jsonl`);
     const messages = parseJsonl(filePath);
     if (messages.length === 0) return 0;
