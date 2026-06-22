@@ -15,6 +15,7 @@ import {
   cursorCredentialsPaths,
 } from './local-token';
 import type { OsStrategy } from '../../os';
+import { validateNonEmptyCredential } from '../strategy';
 import type {
   AgentCredentialLocator,
   AgentLoginLauncher,
@@ -27,6 +28,7 @@ export function cursorCredentialLocator(): AgentCredentialLocator {
     hint: '~/.cursor/auth.json',
     watchPaths: cursorCredentialsPaths,
     extract: extractLocalCursorToken,
+    validate: validateNonEmptyCredential,
   };
 }
 

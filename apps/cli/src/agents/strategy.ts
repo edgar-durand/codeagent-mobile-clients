@@ -66,14 +66,34 @@ export interface AgentCredentialLocator {
   watchPaths(): string[];
   extract(): Promise<LocalAgentToken | null>;
   /**
-   * Optional pre-upload validation. When set, the link command calls
-   * this on the captured token before POSTing it and aborts on
-   * `expired` so a stale snapshot doesn't land in the vault.
-   * Locators that have no good way to detect staleness (raw API key
-   * agents) leave this undefined — the link command treats that as
-   * `unknown` and proceeds.
+   * REQUIRED pre-upload validation — every agent strategy validates its own
+   * credential format. The link command calls this on the captured token
+   * before POSTing it and aborts on `expired` so a dead credential never lands
+   * in the vault (and the user gets the "session expired, re-login" guidance
+   * instead of a cheerful-but-broken "connected"). Agents with a clock-based
+   * credential (Claude OAuth, Codex JWT) check real expiry; agents with no
+   * inspectable expiry (raw API keys) use {@link validateNonEmptyCredential}
+   * to confirm a credential is at least present. `unknown` means "can't tell —
+   * proceed"; only `expired` blocks the upload.
+   *
+   * Optional on the type so partial test stubs compile, but EVERY real agent
+   * strategy implements it (claude, codex, cursor, aider, coderabbit, gemini);
+   * the link command treats a missing validator as `unknown` (proceed).
    */
   validate?(token: LocalAgentToken): LocalAgentTokenValidation;
+}
+
+/**
+ * Shared fallback validator for agents whose credential is an opaque API key /
+ * token with no inspectable expiry: a non-empty credential is `valid` (it's
+ * present and well-formed enough to upload), an empty one is `unknown`. We
+ * never return `expired` because there's no clock to check — revocation can
+ * only be caught by a live probe, which is out of scope here.
+ */
+export function validateNonEmptyCredential(
+  token: LocalAgentToken,
+): LocalAgentTokenValidation {
+  return { status: token.credential.trim().length > 0 ? 'valid' : 'unknown' };
 }
 
 /**

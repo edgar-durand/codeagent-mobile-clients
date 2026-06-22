@@ -16,6 +16,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { ensureCoderabbitInstalled } from './installer';
 import type { OsStrategy } from '../../os';
+import { validateNonEmptyCredential } from '../strategy';
 import type {
   AgentCredentialLocator,
   AgentLoginLauncher,
@@ -41,6 +42,7 @@ export function coderabbitCredentialLocator(): AgentCredentialLocator {
     hint: '~/.coderabbit/auth.json',
     watchPaths: () => [authPath()],
     extract: extractLocalCoderabbitToken,
+    validate: validateNonEmptyCredential,
   };
 }
 

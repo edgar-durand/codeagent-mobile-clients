@@ -19,7 +19,44 @@ import { ensureClaudeInstalled } from './installer';
 import type {
   AgentCredentialLocator,
   AgentLoginLauncher,
+  LocalAgentToken,
+  LocalAgentTokenValidation,
 } from '../strategy';
+
+/**
+ * Validate a captured Claude OAuth credential before we upload it.
+ *
+ * We refuse ONLY a credential that is GENUINELY unrecoverable — the access
+ * token has expired AND there is no refresh token to renew it. An expired
+ * access token WITH a refresh token is normal and recoverable (Claude refreshes
+ * it on first use), so we DON'T block it (no false positives that would reject
+ * a working credential). API keys and unparseable/clockless blobs are
+ * `unknown` (let through). This catches the "uploaded a dead credential, but
+ * the app cheerfully said connected" class of bug; a fully-live probe (which
+ * would also catch a refresh token revoked server-side) is a follow-up.
+ */
+export function validateClaudeToken(token: LocalAgentToken): LocalAgentTokenValidation {
+  if (token.method !== 'oauth') return { status: 'unknown' };
+  let oauth: Record<string, unknown>;
+  try {
+    const parsed = JSON.parse(token.credential) as Record<string, unknown>;
+    const inner = parsed.claudeAiOauth;
+    oauth = inner && typeof inner === 'object' ? (inner as Record<string, unknown>) : parsed;
+  } catch {
+    return { status: 'unknown' };
+  }
+  const expiresAt = typeof oauth.expiresAt === 'number' ? oauth.expiresAt : null;
+  if (expiresAt === null) return { status: 'unknown' };
+  if (expiresAt >= Date.now()) return { status: 'valid' };
+  // Expired access token. Recoverable only if a refresh token is present.
+  const hasRefresh =
+    typeof oauth.refreshToken === 'string' && oauth.refreshToken.length > 0;
+  if (hasRefresh) return { status: 'unknown' };
+  return {
+    status: 'expired',
+    reason: 'Your local Claude session has expired with no refresh token.',
+  };
+}
 
 export function claudeCredentialLocator(): AgentCredentialLocator {
   return {
@@ -28,6 +65,7 @@ export function claudeCredentialLocator(): AgentCredentialLocator {
     hint: '~/.claude/.credentials.json or the macOS Keychain',
     watchPaths: claudeCredentialsPaths,
     extract: extractLocalClaudeToken,
+    validate: validateClaudeToken,
   };
 }
 

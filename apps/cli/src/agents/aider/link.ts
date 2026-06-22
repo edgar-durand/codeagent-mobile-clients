@@ -22,6 +22,7 @@ import {
   aiderCredentialsPaths,
 } from './local-token';
 import type { OsStrategy } from '../../os';
+import { validateNonEmptyCredential } from '../strategy';
 import type {
   AgentCredentialLocator,
   AgentLoginLauncher,
@@ -34,6 +35,7 @@ export function aiderCredentialLocator(): AgentCredentialLocator {
     hint: 'ANTHROPIC_API_KEY / OPENAI_API_KEY env var or ~/.aider.conf.yml',
     watchPaths: aiderCredentialsPaths,
     extract: extractLocalAiderToken,
+    validate: validateNonEmptyCredential,
   };
 }
 

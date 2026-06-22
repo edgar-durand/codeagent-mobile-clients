@@ -383,6 +383,10 @@ async function refuseIfStale(
   pluginAuthToken: string,
   token: LocalAgentToken,
 ): Promise<boolean> {
+  // Agent-agnostic: every strategy's locator implements validate(); the link
+  // command just asks the loaded strategy whether the captured credential is
+  // usable. A missing validator (partial stub) → unknown → proceed. Only an
+  // `expired` verdict blocks the upload.
   const verdict = ctx.locator.validate?.(token);
   if (!verdict || verdict.status !== 'expired') return false;
   const reason = verdict.reason ?? 'Token expired';
