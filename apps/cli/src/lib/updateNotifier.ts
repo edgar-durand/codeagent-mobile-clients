@@ -216,6 +216,49 @@ function maybeAutoUpdate(currentVersion: string, latest: string): void {
 }
 
 /**
+ * Synchronous, same-run auto-upgrade for the critical interactive commands
+ * `link` and `pair`. Unlike {@link checkForUpdates}'s lazy two-run cadence
+ * (first run only warms the cache, the upgrade fires on the *next* run), this
+ * BLOCKS briefly to learn the latest version and upgrades + re-execs on THIS
+ * run.
+ *
+ * Why these two commands specifically: `link` / `pair` capture credentials,
+ * and a CLI older than v2.39.80 lacks the `/api/pairing/reconnect` fallback,
+ * so under PoP enforcement it hard-fails with "Backend did not return a
+ * pluginAuthToken" (the bug a user hit re-authenticating Claude on a fresh
+ * codespace). A one-shot re-auth must never run on a stale binary, and the
+ * lazy cadence would only fix it on a second attempt the user rarely makes.
+ *
+ * Best-effort: offline / npm-link dev / opt-out (`CODEAM_NO_AUTO_UPDATE=1`) /
+ * install failure all fall through and continue on the current version
+ * (delegated to {@link maybeAutoUpdate}). Honours the same NODE_ENV/CI/
+ * disable guards as the notifier.
+ */
+export async function autoUpgradeBeforeCriticalCommand(): Promise<void> {
+  if (process.env.NODE_ENV === 'test') return;
+  if (process.env.CODEAM_DISABLE_UPDATE_CHECK === '1') return;
+  if (process.env.CI) return;
+
+  const current = typeof __CLI_VERSION__ !== 'undefined' ? __CLI_VERSION__ : null;
+  if (!current) return;
+
+  // Prefer a fresh cache; otherwise fetch synchronously (short timeout) so the
+  // upgrade can act on THIS run instead of the next.
+  const cache = readCache();
+  const fresh = cache && Date.now() - cache.fetchedAt < TTL_MS;
+  let latest = fresh && cache ? cache.latest : null;
+  if (!latest) {
+    latest = await fetchLatest();
+    if (latest) writeCache({ fetchedAt: Date.now(), latest });
+  }
+  if (!latest) return;
+
+  // Shared upgrade path: handles the semver compare, opt-out, npm-link
+  // detection, the `npm install -g` + re-exec, and the stale-banner fallback.
+  maybeAutoUpdate(current, latest);
+}
+
+/**
  * Fire-and-forget. Reads the cache, prints if stale, and (in the
  * background) refreshes the cache so the *next* invocation sees the
  * latest. Never returns a promise the caller needs to await.

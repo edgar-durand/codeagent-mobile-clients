@@ -14,7 +14,7 @@ import { completion } from './commands/completion';
 import { version } from './commands/version';
 import { help } from './commands/help';
 import { tryShowSubcommandHelp } from './commands/subcommand-help';
-import { checkForUpdates } from './lib/updateNotifier';
+import { checkForUpdates, autoUpgradeBeforeCriticalCommand } from './lib/updateNotifier';
 import { isKnownAgentId } from '@codeagent/shared';
 import {
   initTelemetry,
@@ -91,7 +91,17 @@ async function main(): Promise<void> {
   const isMetaCommand =
     command === '--version' || command === '-v' || command === 'version' ||
     command === '--help' || command === '-h' || command === 'help';
-  if (!isMetaCommand) checkForUpdates();
+  if (!isMetaCommand) {
+    // `link` / `pair` capture credentials and MUST NOT run on a stale binary —
+    // pre-v2.39.80 CLIs hard-fail credential capture under PoP enforcement. So
+    // for these two we upgrade SYNCHRONOUSLY on this run (and re-exec) before
+    // dispatching. Everything else uses the lazy fire-and-forget notifier.
+    if (command === 'link' || command === 'pair') {
+      await autoUpgradeBeforeCriticalCommand();
+    } else {
+      checkForUpdates();
+    }
+  }
 
   if (initTelemetry()) {
     maybePrintFirstRunBanner();
