@@ -160,13 +160,18 @@ export async function configureGitCredentials(
 
   // Reset this repo's helper chain, then point it at our scoped store file.
   // An empty value clears any inherited helper so OURS is authoritative here.
+  // Use a FORWARD-SLASH path: git config treats backslashes as escapes, so a
+  // Windows path (`C:\Users\…`) in `--file=` is mangled and the store helper
+  // silently can't find the file (git then prompts and push/pull fail). Git
+  // accepts forward slashes on every OS, so this is the OS-agnostic form.
+  const credFilePosix = credFile.split(path.sep).join('/');
   await git(['config', '--local', '--replace-all', 'credential.helper', '']).catch(() => {});
   await git([
     'config',
     '--local',
     '--add',
     'credential.helper',
-    `store --file=${credFile}`,
+    `store --file=${credFilePosix}`,
   ]).catch(() => {});
   // Strip the token from the remote URL — the helper supplies it now, and the
   // remote should never carry a secret that ends up in logs / `git remote -v`.

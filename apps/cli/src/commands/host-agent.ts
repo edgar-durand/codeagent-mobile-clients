@@ -1711,8 +1711,9 @@ export class HostAgentSupervisor {
           report('preparing', 'configuring git tooling');
           const ghCmd = await ensureGhCli(defaultGitToolingRunner, payload.cloneToken);
           if (ghCmd) {
-            // Make the installed binary findable by the agent.
-            childEnv.PATH = `${codeamBinDir()}:${childEnv.PATH}`;
+            // Make the installed binary findable by the agent (OS-agnostic
+            // PATH separator).
+            childEnv.PATH = `${codeamBinDir()}${path.delimiter}${childEnv.PATH}`;
             await ensureGhAuth(defaultGitToolingRunner, ghCmd, payload.cloneToken);
           }
         } catch (e) {

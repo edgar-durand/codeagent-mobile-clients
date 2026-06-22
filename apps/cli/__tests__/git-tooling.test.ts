@@ -53,19 +53,20 @@ describe('ensureGhCli', () => {
   });
 
   it('installs the binary to the bin dir and returns its path on success', async () => {
-    // The injected runner stands in for `tar`: it materialises the extracted
-    // gh binary at <tmpRoot>/<asset>/bin/gh so the copy-out step succeeds.
+    // Per-OS binary name (gh.exe on Windows). The feature is OS-agnostic.
+    const binaryName = process.platform === 'win32' ? 'gh.exe' : 'gh';
+    // The injected runner stands in for `tar -xf`: it materialises the
+    // extracted gh binary at <tmpRoot>/<asset>/bin/<binaryName> so the copy-out
+    // step succeeds.
     const runner = makeRunner({
       which: () => false,
       run: async (_cmd, args) => {
-        // Works for both `tar -C <dir>` (linux) and `unzip -d <dir>` (macOS).
         const ci = args.indexOf('-C');
-        const di = args.indexOf('-d');
-        const tmpRoot = ci >= 0 ? args[ci + 1] : args[di + 1];
+        const tmpRoot = args[ci + 1];
         const archive = args.find((a) => a.endsWith('.tar.gz') || a.endsWith('.zip'))!;
         const asset = path.basename(archive).replace(/\.(tar\.gz|zip)$/, '');
         fs.mkdirSync(path.join(tmpRoot, asset, 'bin'), { recursive: true });
-        fs.writeFileSync(path.join(tmpRoot, asset, 'bin', 'gh'), '#!/bin/sh\n');
+        fs.writeFileSync(path.join(tmpRoot, asset, 'bin', binaryName), '#!/bin/sh\n');
         return { code: 0, stderr: '' };
       },
     });
@@ -73,8 +74,8 @@ describe('ensureGhCli', () => {
       downloadFn: async () => true,
       resolveVersionFn: async () => '2.62.0',
     });
-    expect(result).toBe(path.join(binDir, 'gh'));
-    expect(fs.existsSync(path.join(binDir, 'gh'))).toBe(true);
+    expect(result).toBe(path.join(binDir, binaryName));
+    expect(fs.existsSync(path.join(binDir, binaryName))).toBe(true);
   });
 });
 

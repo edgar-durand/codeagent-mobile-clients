@@ -113,18 +113,21 @@ export async function ensureGhCli(
 
   const arch = ghArch();
   const platform = process.platform;
-  if (arch === null || (platform !== 'linux' && platform !== 'darwin')) {
+  if (arch === null || (platform !== 'linux' && platform !== 'darwin' && platform !== 'win32')) {
     log.warn('host-agent', `gh auto-install unsupported on ${platform}/${process.arch} — skipping`);
     return null;
   }
+
+  // OS-agnostic asset/binary selection. GitHub ships gh for linux/macOS/windows.
+  const osToken = platform === 'darwin' ? 'macOS' : platform === 'win32' ? 'windows' : 'linux';
+  const ext = platform === 'linux' ? 'tar.gz' : 'zip';
+  const binaryName = platform === 'win32' ? 'gh.exe' : 'gh';
 
   const downloadFn = deps.downloadFn ?? download;
   const resolveVersionFn = deps.resolveVersionFn ?? resolveLatestGhVersion;
 
   try {
     const version = await resolveVersionFn(token);
-    const osToken = platform === 'darwin' ? 'macOS' : 'linux';
-    const ext = platform === 'darwin' ? 'zip' : 'tar.gz';
     const asset = `gh_${version}_${osToken}_${arch}`;
     const url = `https://github.com/cli/cli/releases/download/v${version}/${asset}.${ext}`;
 
@@ -135,21 +138,16 @@ export async function ensureGhCli(
       return null;
     }
 
-    // Extract: tar for linux, unzip/ditto for macOS (best-effort).
-    let extractCode: number | null = null;
-    if (platform === 'darwin') {
-      const r = await runner.run('unzip', ['-o', archive, '-d', tmpRoot], { timeoutMs: 60_000 });
-      extractCode = r.code;
-    } else {
-      const r = await runner.run('tar', ['-xzf', archive, '-C', tmpRoot], { timeoutMs: 60_000 });
-      extractCode = r.code;
-    }
-    if (extractCode !== 0) {
-      log.warn('host-agent', `gh archive extraction failed (code=${String(extractCode)}) — skipping`);
+    // Extract with `tar -xf`: bsdtar (macOS + Windows 10+) handles .zip and GNU
+    // tar (Linux) auto-detects the .tar.gz, so one command works on every OS —
+    // no dependency on `unzip` being present.
+    const extract = await runner.run('tar', ['-xf', archive, '-C', tmpRoot], { timeoutMs: 60_000 });
+    if (extract.code !== 0) {
+      log.warn('host-agent', `gh archive extraction failed (code=${String(extract.code)}) — skipping`);
       return null;
     }
 
-    const extractedBin = path.join(tmpRoot, asset, 'bin', 'gh');
+    const extractedBin = path.join(tmpRoot, asset, 'bin', binaryName);
     if (!fs.existsSync(extractedBin)) {
       log.warn('host-agent', 'gh binary not found in the extracted archive — skipping');
       return null;
@@ -157,9 +155,9 @@ export async function ensureGhCli(
 
     const binDir = codeamBinDir();
     fs.mkdirSync(binDir, { recursive: true });
-    const target = path.join(binDir, 'gh');
+    const target = path.join(binDir, binaryName);
     fs.copyFileSync(extractedBin, target);
-    fs.chmodSync(target, 0o755);
+    fs.chmodSync(target, 0o755); // no-op on Windows (NTFS ACLs) — harmless
     log.info('host-agent', `gh installed to ${target} (v${version})`);
     return target;
   } catch (e) {
@@ -209,7 +207,9 @@ export async function ensureGhAuth(
 export const defaultGitToolingRunner: GitToolingRunner = {
   which(cmd: string): boolean {
     try {
-      execFileSync('which', [cmd], { stdio: 'ignore' });
+      // OS-agnostic command probe: `where` on Windows, `which` elsewhere.
+      const probe = process.platform === 'win32' ? 'where' : 'which';
+      execFileSync(probe, [cmd], { stdio: 'ignore' });
       return true;
     } catch {
       return false;

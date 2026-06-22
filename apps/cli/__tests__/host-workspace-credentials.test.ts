@@ -55,7 +55,10 @@ describe('configureGitCredentials — real git (push/pull auth persists)', () =>
     //    scoped store file (this is what makes a later push/pull authenticate).
     const helpers = git(repo, 'config', '--local', '--get-all', 'credential.helper');
     expect(helpers).toContain('store --file=');
-    expect(helpers).toContain(path.join(repo, '.git', 'codeam-credentials'));
+    // The stored path is forward-slash (OS-agnostic — git escapes backslashes),
+    // so compare against the posix form on every platform.
+    const credPosix = path.join(repo, '.git', 'codeam-credentials').split(path.sep).join('/');
+    expect(helpers).toContain(credPosix);
 
     // 2) The token is GONE from origin — no secret left in .git/config.
     const originUrl = git(repo, 'remote', 'get-url', 'origin');
@@ -73,9 +76,14 @@ describe('configureGitCredentials — real git (push/pull auth persists)', () =>
 
     // 4) git's credential machinery resolves OUR token from the helper for a
     //    github.com URL — i.e. a subsequent fetch/push is authenticated.
+    //    GIT_TERMINAL_PROMPT=0 so that if the helper ever fails to supply the
+    //    creds, git errors immediately instead of prompting (which would hang /
+    //    fail on a /dev/tty-less CI runner) — turning a real regression into a
+    //    clean test failure rather than a flaky timeout.
     const filled = execFileSync('git', ['-C', repo, 'credential', 'fill'], {
       input: 'protocol=https\nhost=github.com\n\n',
       encoding: 'utf8',
+      env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
     });
     expect(filled).toContain('username=x-access-token');
     expect(filled).toContain('password=ghs_SHORTLIVED');
