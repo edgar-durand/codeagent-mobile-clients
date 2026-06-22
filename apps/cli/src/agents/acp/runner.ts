@@ -176,6 +176,21 @@ export class StreamingState {
    */
   private turnTextChunkId: string | null = null;
 
+  /**
+   * Monotonic turn counter, bumped each {@link beginTurn}. Used to NAMESPACE
+   * every streaming-chunk id so an id the ACP adapter REUSES across turns can't
+   * collide on the mobile feed. `claude-agent-acp` emits `toolu_01` for the
+   * first tool of EVERY turn (and reuses it for sequential tools), so without a
+   * per-turn prefix, once turn 1's `toolu_01` chunk was flushed `isFinal:true`,
+   * a later turn's `toolu_01` was treated as the already-final chunk and
+   * DROPPED — thinking/tool-call chips rendered on the first turn then
+   * disappeared on subsequent ones (the "tool calls stop showing after a couple
+   * messages" bug). Text is unaffected (it collapses onto a per-turn-reset
+   * {@link turnTextChunkId}); this protects the thinking/tool_use/tool_result
+   * kinds that key purely off the adapter id.
+   */
+  private turnSeq = 0;
+
   constructor(private readonly publisher: AcpPublisher) {}
 
   /**
@@ -282,6 +297,9 @@ export class StreamingState {
     this.text = '';
     this.streamingChunks.clear();
     this.turnTextChunkId = null;
+    // New turn → new namespace, so a reused adapter chunkId (e.g. `toolu_01`)
+    // never collides with a prior turn's already-finalized chunk on the feed.
+    this.turnSeq += 1;
     // Any leftover pending interactive question from a previous turn
     // is now stale — a fresh prompt supersedes it. Clear timers so we
     // don't auto-cancel a question that no longer exists.
@@ -313,9 +331,16 @@ export class StreamingState {
     // under a second message id reconciles in place (REPLACE) instead of
     // landing in a second buffer that recomputeText would concatenate —
     // the reply-doubling bug (see turnTextChunkId). Non-text kinds keep
-    // their own id: thinking / tool_use / tool_result are distinct bubbles.
-    const chunkId =
+    // their own id within the turn: thinking / tool_use / tool_result are
+    // distinct bubbles.
+    const baseId =
       delta.kind === 'text' ? (this.turnTextChunkId ??= delta.chunkId) : delta.chunkId;
+    // Prefix with the turn counter so an adapter chunkId reused across turns
+    // (`toolu_01` every turn) maps to a DISTINCT feed id each turn — otherwise
+    // the mobile drops it as the prior turn's already-finalized chunk and the
+    // tool/thinking chips stop rendering after turn 1. Within a turn the prefix
+    // is constant, so a tool_call_update still lands on its tool_call's chunk.
+    const chunkId = `t${this.turnSeq}:${baseId}`;
     const existing = this.streamingChunks.get(chunkId);
     if (existing && existing.kind !== delta.kind) {
       log.warn(
