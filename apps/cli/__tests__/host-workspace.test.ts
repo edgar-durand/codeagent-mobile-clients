@@ -18,17 +18,32 @@ vi.mock('node:child_process', () => ({
   ) => {
     execFileCalls.push({ file, args, options });
     if (execFileBehavior === 'fail') {
-      // Surface the full clone URL in the error so we can prove it gets masked.
-      const url = args[args.length - 2];
-      callback(new Error(`fatal: could not read from ${url}`), { stdout: '', stderr: '' });
-      return;
+      // Only the clone fails; surface the full clone URL so we prove it's masked.
+      if (args[0] === 'clone') {
+        const url = args[args.length - 2];
+        callback(new Error(`fatal: could not read from ${url}`), { stdout: '', stderr: '' });
+        return;
+      }
     }
-    // Simulate a successful clone by creating the dest .git dir.
-    const dest = args[args.length - 1];
-    fs.mkdirSync(path.join(dest, '.git'), { recursive: true });
+    // Simulate a successful `git clone` by creating the dest .git dir. Other
+    // subcommands (config / remote set-url, issued by configureGitCredentials)
+    // just record + succeed.
+    if (args[0] === 'clone') {
+      const dest = args[args.length - 1];
+      fs.mkdirSync(path.join(dest, '.git'), { recursive: true });
+    }
     callback(null, { stdout: '', stderr: '' });
   },
 }));
+
+/**
+ * Filter helper: the git subcommands prepareWorkspace issued, by name. Skips a
+ * leading `-C <dir>` so `git -C <dir> config …` matches `config`.
+ */
+function gitCalls(sub: string): Array<{ file: string; args: string[] }> {
+  const subcommand = (args: string[]): string => (args[0] === '-C' ? args[2] : args[0]);
+  return execFileCalls.filter((c) => c.file === 'git' && subcommand(c.args) === sub);
+}
 
 import {
   prepareWorkspace,
@@ -89,9 +104,9 @@ describe('prepareWorkspace — clone auth + no-hang env', () => {
   it('clones with the token-bearing URL AND a non-interactive git env when cloneToken is present', async () => {
     await prepareWorkspace('owner/repo', 'deploy-A', 'ghs_TOKEN');
 
-    expect(execFileCalls).toHaveLength(1);
-    const call = execFileCalls[0];
-    expect(call.file).toBe('git');
+    const clones = execFileCalls.filter((c) => c.file === 'git' && c.args[0] === 'clone');
+    expect(clones).toHaveLength(1);
+    const call = clones[0];
     // The clone URL is the token-bearing one.
     const url = call.args[call.args.length - 2];
     expect(url).toBe('https://x-access-token:ghs_TOKEN@github.com/owner/repo.git');
@@ -103,16 +118,50 @@ describe('prepareWorkspace — clone auth + no-hang env', () => {
     expect(env.GCM_INTERACTIVE).toBe('never');
   });
 
-  it('still sets the non-interactive env when no cloneToken is supplied', async () => {
+  it('installs a persistent workspace-local credential helper + strips the token from origin', async () => {
+    await prepareWorkspace('owner/repo', 'deploy-cred', 'ghs_TOKEN');
+
+    // A repo-LOCAL `store` helper is configured (so push/pull authenticate
+    // after the token would have expired from the remote URL).
+    const cfg = gitCalls('config').map((c) => c.args.join(' '));
+    expect(cfg.some((a) => a.includes('--local') && a.includes('credential.helper store --file='))).toBe(
+      true,
+    );
+
+    // The token is STRIPPED from the origin remote — no secret left in .git/config.
+    const setUrl = gitCalls('remote').find((c) => c.args.includes('set-url'));
+    expect(setUrl).toBeTruthy();
+    expect(setUrl!.args[setUrl!.args.length - 1]).toBe('https://github.com/owner/repo.git');
+    expect(setUrl!.args.join(' ')).not.toContain('ghs_TOKEN');
+
+    // The on-disk credentials file holds the token at 0600.
+    const credFile = path.join(
+      os.homedir(),
+      '.codeam',
+      'self-hosted',
+      'deploy-cred',
+      '.git',
+      'codeam-credentials',
+    );
+    expect(fs.readFileSync(credFile, 'utf8')).toContain(
+      'https://x-access-token:ghs_TOKEN@github.com',
+    );
+    expect(fs.statSync(credFile).mode & 0o777).toBe(0o600);
+  });
+
+  it('still sets the non-interactive env when no cloneToken is supplied (and configures NO helper)', async () => {
     await prepareWorkspace('owner/repo', 'deploy-B');
 
-    const env = execFileCalls[0].options.env as NodeJS.ProcessEnv;
+    const clone = execFileCalls.find((c) => c.args[0] === 'clone')!;
+    const env = clone.options.env as NodeJS.ProcessEnv;
     expect(env.GIT_TERMINAL_PROMPT).toBe('0');
     expect(env.GIT_ASKPASS).toBe('');
     expect(env.GCM_INTERACTIVE).toBe('never');
     // No token in the URL.
-    const url = execFileCalls[0].args[execFileCalls[0].args.length - 2];
+    const url = clone.args[clone.args.length - 2];
     expect(url).toBe('https://github.com/owner/repo.git');
+    // With no token there is nothing to persist — no credential helper config.
+    expect(gitCalls('config')).toHaveLength(0);
   });
 
   it('masks the token in the error message when the clone fails (never logs the token)', async () => {
@@ -139,11 +188,13 @@ describe('prepareWorkspace — clone auth + no-hang env', () => {
     fs.rmSync(dir, { recursive: true, force: true });
   });
 
-  it('reuses an existing clone for the same deployId (idempotent, no re-clone)', async () => {
+  it('reuses an existing clone for the same deployId (idempotent, no re-clone) but refreshes creds', async () => {
     await prepareWorkspace('owner/repo', 'deploy-E', 'ghs_TOKEN');
-    expect(execFileCalls).toHaveLength(1);
-    // Second call for the same deployId finds the .git dir and skips cloning.
+    expect(gitCalls('clone')).toHaveLength(1);
+    // Second call for the same deployId finds the .git dir and skips cloning…
     await prepareWorkspace('owner/repo', 'deploy-E', 'ghs_TOKEN');
-    expect(execFileCalls).toHaveLength(1);
+    expect(gitCalls('clone')).toHaveLength(1); // still only ONE clone
+    // …but re-runs the credential setup so a re-deploy gets a fresh token.
+    expect(gitCalls('config').length).toBeGreaterThanOrEqual(2);
   });
 });

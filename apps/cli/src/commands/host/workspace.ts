@@ -93,6 +93,104 @@ function maskCloneUrl(url: string): string {
   return url.replace(/(https?:\/\/)[^@/]+@/, '$1***@');
 }
 
+/**
+ * Configure a workspace-LOCAL git credential helper so the agent's later
+ * `git pull` / `git push` authenticate the same way the clone did.
+ *
+ * Why this exists: previously the only auth was the `cloneToken` embedded in
+ * the `origin` remote URL. Git persists that URL (token and all) into
+ * `.git/config`, so push/pull "worked" only until the short-lived token
+ * expired — after which the agent hit "access denied" mid-session (the bug a
+ * user lost an interview over). It also left the token sitting as a stale
+ * secret in `.git/config`.
+ *
+ * The fix points git at a credentials file inside `<dest>/.git/` (mode 0600,
+ * never pushed) via a **repo-local** `credential.helper store` — scoped to this
+ * workspace, so it does NOT pollute the user's global `~/.gitconfig` /
+ * `~/.git-credentials` on their own box. The token is then STRIPPED from the
+ * `origin` URL so nothing logs or persists it there; the helper supplies it.
+ * Re-running (a re-deploy) refreshes the stored token in place.
+ *
+ * No-op for non-GitHub remotes — we leave the box's ambient git auth alone.
+ */
+/**
+ * Resolve the user's GitHub login + primary email from a token (best-effort).
+ * Returns null on any failure (network down, non-user/installation token, etc.)
+ * — callers must treat the identity as optional.
+ */
+async function fetchGithubIdentity(
+  token: string,
+): Promise<{ login?: string; email?: string } | null> {
+  try {
+    const res = await fetch('https://api.github.com/user', {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'User-Agent': 'codeam-cli',
+        Accept: 'application/vnd.github+json',
+      },
+    });
+    if (!res.ok) return null;
+    const body = (await res.json()) as { login?: string; email?: string | null };
+    return { login: body.login, email: body.email ?? undefined };
+  } catch {
+    return null;
+  }
+}
+
+export async function configureGitCredentials(
+  dest: string,
+  repoRef: string,
+  cloneToken: string,
+): Promise<void> {
+  const gh = githubOwnerRepo(repoRef.trim());
+  if (!gh || !cloneToken) return;
+
+  const credFile = path.join(dest, '.git', 'codeam-credentials');
+  // 0600 credentials file holding the token, inside .git (never committed/pushed).
+  fs.writeFileSync(credFile, `https://x-access-token:${cloneToken}@github.com\n`, { mode: 0o600 });
+  try {
+    fs.chmodSync(credFile, 0o600); // belt-and-suspenders if a prior umask widened it
+  } catch {
+    /* best-effort */
+  }
+
+  const env = nonInteractiveGitEnv();
+  const git = (args: string[]): Promise<unknown> =>
+    execFileP('git', ['-C', dest, ...args], { timeout: 30_000, env });
+
+  // Reset this repo's helper chain, then point it at our scoped store file.
+  // An empty value clears any inherited helper so OURS is authoritative here.
+  await git(['config', '--local', '--replace-all', 'credential.helper', '']).catch(() => {});
+  await git([
+    'config',
+    '--local',
+    '--add',
+    'credential.helper',
+    `store --file=${credFile}`,
+  ]).catch(() => {});
+  // Strip the token from the remote URL — the helper supplies it now, and the
+  // remote should never carry a secret that ends up in logs / `git remote -v`.
+  await git(['remote', 'set-url', 'origin', repoCloneUrl(repoRef)]).catch(() => {});
+
+  // Commit identity: without user.name/user.email, `git commit` aborts ("Please
+  // tell me who you are"), so the agent's push would have nothing to send. Set
+  // it LOCALLY and ONLY when the box has no identity at all — never clobber the
+  // user's own global git identity on their own machine.
+  const hasIdentity = await git(['config', 'user.email'])
+    .then(() => true)
+    .catch(() => false);
+  if (!hasIdentity) {
+    const who = await fetchGithubIdentity(cloneToken);
+    if (who?.login) {
+      await git(['config', '--local', 'user.name', who.login]).catch(() => {});
+    }
+    const email = who?.email ?? (who?.login ? `${who.login}@users.noreply.github.com` : undefined);
+    if (email) {
+      await git(['config', '--local', 'user.email', email]).catch(() => {});
+    }
+  }
+}
+
 /** Mask any embedded token in an arbitrary string (defensive, for error text). */
 function maskToken(text: string, cloneToken?: string): string {
   const masked = maskCloneUrl(text);
@@ -127,7 +225,10 @@ export async function prepareWorkspace(
 
   const dest = path.join(selfHostedWorkspaceRoot(), deployId);
   if (fs.existsSync(path.join(dest, '.git'))) {
-    return dest; // already cloned for this deploy
+    // Already cloned for this deploy — refresh the scoped credential helper so a
+    // re-deploy picks up a newer token and push/pull keep working.
+    if (cloneToken) await configureGitCredentials(dest, repoOrPath, cloneToken);
+    return dest;
   }
   fs.mkdirSync(selfHostedWorkspaceRoot(), { recursive: true, mode: 0o700 });
   const cloneUrl = repoCloneUrl(repoOrPath, cloneToken);
@@ -142,5 +243,9 @@ export async function prepareWorkspace(
     const reason = err instanceof Error ? err.message : String(err);
     throw new Error(`git clone failed for ${maskCloneUrl(cloneUrl)}: ${maskToken(reason, cloneToken)}`);
   }
+  // Install a persistent, workspace-local git credential helper so the agent's
+  // later `git pull` / `git push` authenticate even after the token would have
+  // expired from the (now stripped) remote URL — the "access denied" fix.
+  if (cloneToken) await configureGitCredentials(dest, repoOrPath, cloneToken);
   return dest;
 }
