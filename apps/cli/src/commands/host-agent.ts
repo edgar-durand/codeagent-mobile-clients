@@ -1663,6 +1663,22 @@ export class HostAgentSupervisor {
           API_TIMEOUT_MS: '3000000',
           CODEAM_AUTO_TOKEN: payload.autoPairToken,
         };
+        // Isolate the house agent's Claude config from the box's PERSONAL one.
+        // A self-hosted box is reused and often already has a real
+        // ~/.claude/.credentials.json + ~/.claude.json (oauthAccount) from the
+        // user's own Claude login. Claude Code then prefers that stale OAuth
+        // identity over our ANTHROPIC_AUTH_TOKEN proxy token and sends the wrong
+        // credential to the CodeAgent Cloud proxy → 401. (Codespaces are fresh,
+        // so they never hit this.) Point the house agent at a dedicated, empty
+        // config dir so it boots clean in gateway mode (ANTHROPIC_AUTH_TOKEN +
+        // the proxy) and NEVER touches the user's personal Claude login.
+        const houseConfigDir = path.join(os.homedir(), '.codeam', 'house-claude');
+        try {
+          fs.mkdirSync(houseConfigDir, { recursive: true, mode: 0o700 });
+        } catch {
+          /* best-effort — claude will create it on first run */
+        }
+        childEnv.CLAUDE_CONFIG_DIR = houseConfigDir;
         extraArgs = [`--agent=${agentKind || 'claude'}`];
       } else {
         // Non-house path: `sealedAgentAuth` is guaranteed present by
