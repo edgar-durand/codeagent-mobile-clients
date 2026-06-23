@@ -197,7 +197,7 @@ export async function postLinkCredential(input: {
   sessionId: string;
   pluginId: string;
   pluginAuthToken: string;
-  method: 'oauth' | 'api_key';
+  method: 'oauth' | 'api_key' | 'setup_token';
   credential: string;
   modelPreference?: string;
   /**
