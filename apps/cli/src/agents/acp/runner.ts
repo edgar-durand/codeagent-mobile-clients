@@ -726,6 +726,33 @@ export function failureBubble(opts: {
 }
 
 /**
+ * Best-effort durable flag: tell the backend this LinkedAgent credential is
+ * invalid so Profile › Agents shows EXPIRED + the re-auth CTA (instead of
+ * CONNECTED from a dead-but-present refresh token). Never throws — credential
+ * recovery must not break the runner. `fetchImpl` is injectable for tests.
+ */
+export async function reportCredentialInvalid(
+  opts: { agent: string; sessionId: string; pluginId: string; pluginAuthToken: string },
+  fetchImpl: typeof fetch = fetch,
+): Promise<void> {
+  try {
+    await fetchImpl(
+      `${resolveApiBaseUrl()}/api/plugin/agents/${encodeURIComponent(opts.agent)}/credential-invalid`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Plugin-Auth-Token': opts.pluginAuthToken,
+        },
+        body: JSON.stringify({ sessionId: opts.sessionId, pluginId: opts.pluginId }),
+      },
+    );
+  } catch {
+    // Best-effort — credential recovery must never break the runner.
+  }
+}
+
+/**
  * Handle a `get_conversation` command for an ACP agent: upload the on-disk
  * JSONL transcript (`<acpSessionId>.jsonl`) as the canonical conversation so
  * the app can fetch the full history and HEAL a truncated live turn, then ack
@@ -893,17 +920,7 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
         // Durably flag the LinkedAgent credential invalid so Profile › Agents
         // shows EXPIRED + the re-auth CTA (instead of CONNECTED from a
         // dead-but-present refresh token). Best-effort — never blocks exit.
-        void fetch(
-          `${resolveApiBaseUrl()}/api/plugin/agents/${encodeURIComponent(opts.agent)}/credential-invalid`,
-          {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              'X-Plugin-Auth-Token': opts.pluginAuthToken,
-            },
-            body: JSON.stringify({ sessionId: opts.sessionId, pluginId: opts.pluginId }),
-          },
-        ).catch(() => undefined);
+        void reportCredentialInvalid(opts);
       }
       void streaming.closeAll().then(() =>
         publisher.publishOutput({
@@ -1271,6 +1288,13 @@ async function handleCommand(
           // then disappears on the next refresh.
           history.appendAgentReply(bubble);
           void history.flush();
+        }
+        if (bubble === AUTH_FAILURE_MESSAGE) {
+          // Same durable flag as onUnexpectedExit — covers the case where the
+          // adapter 401s mid-turn (stalls → idle timeout) instead of exiting,
+          // so Profile › Agents still surfaces the re-auth CTA rather than
+          // leaving the user stuck on a CONNECTED-but-dead credential.
+          void reportCredentialInvalid(opts);
         }
         await relay.sendResult(cmd.id, 'failed', { error: detail });
       }
