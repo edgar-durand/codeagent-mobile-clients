@@ -15,13 +15,14 @@ export interface ChangeModelInstruction {
  * so both per-agent link strategies + the link command share one type.
  */
 export interface LocalAgentToken {
-  /** OAuth bundle from `<agent> login`, or a raw API key when the
-   *  user explicitly passed --api-key. */
-  method: 'oauth' | 'api_key';
+  /** OAuth bundle from `<agent> login`, a raw API key (--api-key), or a
+   *  long-lived setup-token (`claude setup-token`, `sk-ant-oat01-…`) that
+   *  the backend ships to codespaces via CLAUDE_CODE_OAUTH_TOKEN. */
+  method: 'oauth' | 'api_key' | 'setup_token';
   /** Opaque token string — the backend stores it verbatim. */
   credential: string;
   /** Where we found it — drives the user-facing success message. */
-  source: 'flat-file' | 'macos-keychain' | 'manual';
+  source: 'flat-file' | 'macos-keychain' | 'manual' | 'setup-token';
   /**
    * Optional companion local-state blob the link flow captured next
    * to the credential — typically `~/.claude.json` for Claude. The
@@ -108,6 +109,15 @@ export function validateNonEmptyCredential(
 export interface AgentLoginLauncher {
   ensureInstalled(): Promise<boolean>;
   launch(): ChildProcess;
+  /**
+   * Optional: capture a dedicated long-lived credential (e.g. Claude's
+   * `setup-token`) instead of cloning the interactive session. When an
+   * agent provides this, `codeam link` prefers it — a cloned interactive
+   * credential shares its rotating refresh-token chain with the user's
+   * laptop, which Anthropic's reuse-detection revokes when both refresh.
+   * Resolves to the captured token; rejects if the user doesn't finish.
+   */
+  captureSetupToken?(): Promise<LocalAgentToken>;
 }
 
 // ─── Base agent strategy (shared by Interactive + Batch) ─────────────

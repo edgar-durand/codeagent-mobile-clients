@@ -336,6 +336,28 @@ export async function link(args: string[] = []): Promise<void> {
   }
   installSpin.stop(`${ctx.displayName} is installed`);
 
+  // ─── 4b. Preferred: dedicated setup-token (avoids the shared-refresh bug) ──
+  //
+  // When the agent exposes a setup-token capture (Claude), prefer it over
+  // cloning the interactive credential: a cloned credential shares its
+  // rotating refresh-token chain with the user's laptop, and Anthropic's
+  // reuse-detection revokes the whole family when both the codespace and
+  // the laptop refresh — logging the user out + 401ing the codespace. A
+  // `claude setup-token` is a long-lived, non-rotating bearer with its own
+  // chain, so it sidesteps that entirely. `--reuse-existing` opts back into
+  // the legacy clone path.
+  if (ctx.launcher.captureSetupToken && !parsed.reuseExisting) {
+    showInfo(
+      `Creating a dedicated ${ctx.displayName} token for your codespaces — complete the ` +
+        `sign-in in your browser and paste the code when prompted.`,
+    );
+    console.log('');
+    const setupToken = await ctx.launcher.captureSetupToken();
+    console.log('');
+    await uploadAndSucceed(ctx, paired, pluginId, pluginAuthToken, setupToken);
+    return;
+  }
+
   // ─── 5. Probe existing credentials ──────────────────────────────
   const existing = await ctx.locator.extract();
   if (existing) {

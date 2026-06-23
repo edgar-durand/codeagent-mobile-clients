@@ -69,6 +69,60 @@ export function claudeCredentialLocator(): AgentCredentialLocator {
   };
 }
 
+/**
+ * The long-lived bearer `claude setup-token` prints to stdout
+ * (`sk-ant-oat01-…`). Tolerant charset: base64url-ish + dashes.
+ */
+const SETUP_TOKEN_RE = /sk-ant-oat01-[A-Za-z0-9_-]+/;
+
+/** Pull the setup-token out of the `claude setup-token` stdout, or null. */
+export function extractSetupTokenFromOutput(output: string): string | null {
+  const m = output.match(SETUP_TOKEN_RE);
+  return m ? m[0] : null;
+}
+
+/**
+ * Capture a dedicated codespace credential via `claude setup-token`
+ * instead of cloning the user's interactive `~/.claude/.credentials.json`.
+ *
+ * Why: the setup-token is a long-lived (1-year) bearer that does NOT rotate,
+ * so the codespace using it can't trip Anthropic's refresh-token reuse-
+ * detection and revoke the user's laptop session (the root-cause bug). The
+ * user completes the browser authorization + pastes the code into the
+ * spawned flow; we tee stdout (so they see the prompts + token) while
+ * capturing the `sk-ant-oat01-…` token to upload with method `setup_token`.
+ */
+export function captureClaudeSetupToken(): Promise<LocalAgentToken> {
+  return new Promise<LocalAgentToken>((resolve, reject) => {
+    // stdin inherited → user pastes the auth code; stderr inherited →
+    // prompts/URL visible; stdout piped → we capture the printed token
+    // (and tee it back so the user still sees everything).
+    const child = spawn('claude', ['setup-token'], {
+      stdio: ['inherit', 'pipe', 'inherit'],
+    });
+    let out = '';
+    child.stdout?.on('data', (chunk: Buffer) => {
+      const s = chunk.toString('utf8');
+      out += s;
+      process.stdout.write(s);
+    });
+    child.on('error', (err) => reject(err));
+    child.on('exit', (code) => {
+      const token = extractSetupTokenFromOutput(out);
+      if (token) {
+        resolve({ method: 'setup_token', credential: token, source: 'setup-token' });
+        return;
+      }
+      reject(
+        new Error(
+          `\`claude setup-token\` exited (code=${code ?? 'null'}) without producing a token. ` +
+            'Complete the browser authorization and paste the code when prompted, then re-run.',
+        ),
+      );
+    });
+  });
+}
+
 export function claudeLoginLauncher(): AgentLoginLauncher {
   return {
     ensureInstalled: ensureClaudeInstalled,
@@ -86,5 +140,9 @@ export function claudeLoginLauncher(): AgentLoginLauncher {
       // menu navigation) without their input being dropped.
       return child;
     },
+    // Preferred path for Claude: a dedicated non-rotating setup-token,
+    // so the codespace credential never shares a refresh chain with the
+    // user's laptop session.
+    captureSetupToken: captureClaudeSetupToken,
   };
 }
