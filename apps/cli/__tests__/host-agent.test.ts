@@ -389,6 +389,12 @@ describe('HostAgentSupervisor — command routing', () => {
     expect(calls[0].cwd).toBe(cwdTarget);
     expect(sup.childCount()).toBe(1);
 
+    // Counterpart to the house-agent regression guard: a real LinkedAgent
+    // (sealedAgentAuth) deploy must NOT relocate Claude's config — it runs as
+    // the box owner's own authenticated `claude`, writing creds the normal way
+    // (asserted below). CLAUDE_CONFIG_DIR isolation is house-agent-only.
+    expect(calls[0].env.CLAUDE_CONFIG_DIR).toBeUndefined();
+
     // Credential was written the codespace way: ~/.claude/.credentials.json (0600).
     const credFile = path.join(tmpHome, '.claude', '.credentials.json');
     expect(fs.existsSync(credFile)).toBe(true);
@@ -432,6 +438,21 @@ describe('HostAgentSupervisor — command routing', () => {
     expect(calls[0].env.CODEAM_AUTO_TOKEN).toBe('auto-xyz');
     expect(calls[0].args).toEqual(['--agent=claude']);
     expect(sup.childCount()).toBe(1);
+
+    // REGRESSION GUARD (self-hosted house-agent 401): the house agent is
+    // Claude Code wired to the managed proxy via ANTHROPIC_AUTH_TOKEN. On a
+    // REUSED self-hosted box, Claude's on-disk OAuth identity
+    // (~/.claude/.credentials.json + ~/.claude.json) takes precedence over the
+    // ANTHROPIC_AUTH_TOKEN gateway, so the box owner's stale personal login
+    // wins and the proxy returns 401. The fix isolates the house agent's Claude
+    // config into its own dir (CLAUDE_CONFIG_DIR) so it can NEVER read the box
+    // owner's personal credentials. Without this env var the house deploy
+    // regresses to a 401 on any box that already has a personal `claude` login.
+    const houseConfigDir = path.join(tmpHome, '.codeam', 'house-claude');
+    expect(calls[0].env.CLAUDE_CONFIG_DIR).toBe(houseConfigDir);
+    // …and the isolated dir is actually created up-front so Claude writes its
+    // own session/config state there instead of falling back to ~/.claude.
+    expect(fs.existsSync(houseConfigDir)).toBe(true);
 
     // No cred files written for the house agent.
     const credFile = path.join(tmpHome, '.claude', '.credentials.json');
