@@ -44,7 +44,7 @@ import { AcpPublisher } from './publisher';
 import { buildAcpPromptBlocks } from './buildAcpPromptBlocks';
 import { reconcileCumulative } from './reconcileDelta';
 import { maybeSendOnboardingWelcome } from './onboarding';
-import { formatPromptEchoLine } from './promptEcho';
+import { formatPromptEchoLine, formatAgentReplyLine } from './promptEcho';
 import {
   registerTerminalHandlers,
   closeAllTerminals,
@@ -1261,6 +1261,10 @@ async function handleCommand(
         // for "¿continuar? 1. sí 2. no").
         const finalText = streaming.getCurrentText();
         await streaming.closeTurnWithInteractiveDetection();
+        const replyLine = formatAgentReplyLine(finalText);
+        if (replyLine.length > 0) {
+          showInfo(replyLine);
+        }
         history.appendAgentReply(finalText);
         void history.flush();
         // End-of-turn file changeset — agent likely edited files
