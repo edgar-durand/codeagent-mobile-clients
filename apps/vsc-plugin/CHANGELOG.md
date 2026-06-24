@@ -4,6 +4,25 @@ All notable changes to the CodeAgent Mobile VS Code extension are documented her
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.43.0] — 2026-06-24
+
+### Added
+
+- **cli:** Classify the 1M-context usage-credits error
+- **cli:** Persist per-session disable1mContext flag
+- **cli:** AcpClient accepts extraEnv for the adapter spawn
+- **cli:** OneMContextRecovery offer + decision helper
+- **cli:** OneMContextRecovery offer + decision helper + DI recovery factory
+- **cli:** On-demand 1M-context disable recovery — offer action, re-spawn ACP with the knob, auto-rerun
+
+### Changed
+
+- **cli:** Move 1M-context classifier into oneMContextRecovery (break runner import cycle)
+
+### Documentation
+
+- **meta:** Record agent-failure-messaging + heartbeat + credential rules (AGENTS.md + CLAUDE.md)
+
 ## [2.42.0] — 2026-06-24
 
 ### Added
