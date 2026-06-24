@@ -735,21 +735,39 @@ export function failureBubble(opts: {
  * recovery must not break the runner. `fetchImpl` is injectable for tests.
  */
 export async function reportCredentialInvalid(
-  opts: { agent: string; sessionId: string; pluginId: string; pluginAuthToken: string },
+  opts: {
+    agent: string;
+    sessionId: string;
+    pluginId: string;
+    pluginAuthToken: string;
+    pollSecret?: string;
+  },
   fetchImpl: typeof fetch = fetch,
 ): Promise<void> {
+  const url = `${resolveApiBaseUrl()}/api/plugin/agents/${encodeURIComponent(opts.agent)}/credential-invalid`;
+  const body = JSON.stringify({ sessionId: opts.sessionId, pluginId: opts.pluginId });
   try {
-    await fetchImpl(
-      `${resolveApiBaseUrl()}/api/plugin/agents/${encodeURIComponent(opts.agent)}/credential-invalid`,
-      {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-Plugin-Auth-Token': opts.pluginAuthToken,
-        },
-        body: JSON.stringify({ sessionId: opts.sessionId, pluginId: opts.pluginId }),
-      },
-    );
+    const makeHeaders = (token: string): Record<string, string> => ({
+      'Content-Type': 'application/json',
+      'X-Plugin-Auth-Token': token,
+    });
+
+    const response = await fetchImpl(url, {
+      method: 'POST',
+      headers: makeHeaders(opts.pluginAuthToken),
+      body,
+    });
+
+    if (response.status === 401 || response.status === 403) {
+      const freshToken = await fetchCurrentPluginAuthToken(
+        opts.sessionId,
+        opts.pluginId,
+        opts.pollSecret,
+      );
+      if (freshToken !== null) {
+        await fetchImpl(url, { method: 'POST', headers: makeHeaders(freshToken), body });
+      }
+    }
   } catch {
     // Best-effort — credential recovery must never break the runner.
   }
