@@ -90,6 +90,14 @@ const CLIENT_CAPABILITIES = {
 export interface AcpClientOptions {
   /** Spec resolved from {@link getAcpAdapter}. */
   adapter: AdapterSpec;
+  /**
+   * Extra environment variables merged into the adapter spawn (on top of
+   * `process.env`, before the augmented `PATH`). Lets the runner inject
+   * `CLAUDE_CODE_DISABLE_1M_CONTEXT=1` on an on-demand re-spawn — claude
+   * reads that knob only at process start, so it must be in the spawn env,
+   * not set after the fact. Empty/omitted by default.
+   */
+  extraEnv?: Record<string, string>;
   /** Working directory for the agent's session (becomes the
    *  primary `cwd` ACP root). */
   cwd: string;
@@ -175,7 +183,10 @@ export class AcpClient {
     );
     const child = spawn(adapter.command, adapter.args, {
       cwd,
-      env: { ...process.env, PATH: augmentedPath },
+      // extraEnv (e.g. CLAUDE_CODE_DISABLE_1M_CONTEXT=1 on an on-demand
+      // re-spawn) layers over process.env; PATH stays last so the augmented
+      // PATH always wins.
+      env: { ...process.env, ...(this.opts.extraEnv ?? {}), PATH: augmentedPath },
       stdio: ['pipe', 'pipe', 'pipe'],
     });
     this.child = child;
