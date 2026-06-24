@@ -29,7 +29,7 @@
 
 import { randomUUID } from 'node:crypto';
 import { CommandRelayService, type RemoteCommand } from '../../services/command-relay.service';
-import { _postJsonAuthed } from '../../services/pairing.service';
+import { _postJsonAuthed, fetchCurrentPluginAuthToken } from '../../services/pairing.service';
 import { resolveApiBaseUrl } from '@codeagent/shared';
 import { log } from '../../services/logger';
 import { HistoryService } from '../../services/history.service';
@@ -528,6 +528,8 @@ export interface AcpRunnerOptions {
    * agent-agnostic equivalent of `claude --dangerously-skip-permissions`.
    */
   autoApprovePermissions?: boolean;
+  /** Replayed raw to the gated /api/pairing/reconnect for token refresh. */
+  pollSecret?: string;
 }
 
 /** Auto-cancel a permission Promise after this ms. Matches the
@@ -789,6 +791,8 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
     sessionId: opts.sessionId,
     pluginId: opts.pluginId,
     pluginAuthToken: opts.pluginAuthToken,
+    refreshAuthToken: () =>
+      fetchCurrentPluginAuthToken(opts.sessionId, opts.pluginId, opts.pollSecret),
   });
   const streaming = new StreamingState(publisher);
   // Small ring of recent adapter stderr lines so a turn that fails on an auth

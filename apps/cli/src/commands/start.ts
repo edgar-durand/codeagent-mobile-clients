@@ -266,6 +266,7 @@ export async function start(requestedAgent?: AgentId): Promise<void> {
       adapter,
       cwd,
       getBeads,
+      pollSecret: session.pollSecret,
       // AUTO mode for headless, mobile-driven sessions: no human at the box
       // to answer permission prompts, so auto-approve them rather than stall
       // the turn (the agent-agnostic equivalent of
