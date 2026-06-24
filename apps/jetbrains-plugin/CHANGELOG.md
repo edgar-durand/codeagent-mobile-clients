@@ -4,6 +4,17 @@ All notable changes to the CodeAgent-Mobile JetBrains plugin are documented here
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.42.0] — 2026-06-24
+
+### Added
+
+- **cli:** Confirm provider outage via status page on turn stall/failure (catch-all)
+
+### Fixed
+
+- **cli:** Make agent-failure messaging honest — outage only on real provider error, re-auth on auth-notice replies
+- **cli:** Keep the heartbeat punctual by detecting the git branch off the hot path
+
 ## [2.41.0] — 2026-06-24
 
 ### Added
