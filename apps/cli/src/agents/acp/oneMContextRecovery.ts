@@ -58,3 +58,88 @@ export function oneMRecoverySelectPrompt(): { question: string; options: string[
     options: [ONE_M_DISABLE_OPTION],
   };
 }
+
+/**
+ * Dependencies the recovery needs from the runner. All side-effecting calls
+ * are injected so the offer/tryRecover behavior is unit-testable with fakes
+ * (the runner wires them to the live publisher/relay/streaming/AcpClient).
+ * Generic over the prompt-block type `B` so the stashed blocks round-trip to
+ * `client.prompt` without a cast.
+ */
+export interface OneMRecoveryDeps<B> {
+  publishText: (text: string) => Promise<void>;
+  publishSelectPrompt: (question: string, options: string[]) => Promise<void>;
+  sendResult: (commandId: string, status: 'completed' | 'failed', result: Record<string, unknown>) => Promise<void>;
+  appendAgentReply: (text: string) => void;
+  flushHistory: () => void;
+  beginTurn: () => Promise<void>;
+  getCurrentText: () => string;
+  closeTurn: () => Promise<void>;
+  recoverFromFailedTurn: () => Promise<void>;
+  /** Disable 1M (persist) + re-spawn the agent so the next prompt drops the
+   *  `context-1m` beta. */
+  reconnectWith1mDisabled: () => Promise<void>;
+  /** Run a prompt on the (post-reconnect) live agent. */
+  promptAgent: (blocks: readonly B[]) => Promise<{ stopReason?: string }>;
+  /** failureBubble(detail) for the re-run's own failure path. */
+  failureBubbleFor: (detail: string) => string | null;
+  describeError: (err: unknown) => string;
+  log?: (msg: string) => void;
+}
+
+export interface OneMRecovery<B> {
+  /** Publish the tappable action + stash the failed prompt; ends the turn as
+   *  `failed` (recovery offered). */
+  offer: (commandId: string, blocks: readonly B[]) => Promise<void>;
+  /** If a recovery is pending, disable 1M + re-spawn + re-run the stashed
+   *  prompt and return true; otherwise return false (caller falls through). */
+  tryRecover: (commandId: string) => Promise<boolean>;
+}
+
+export function createOneMRecovery<B>(deps: OneMRecoveryDeps<B>): OneMRecovery<B> {
+  let pending: { blocks: readonly B[] } | null = null;
+  const sp = oneMRecoverySelectPrompt();
+
+  return {
+    offer: async (commandId, blocks) => {
+      pending = { blocks };
+      // The select_prompt chunk alone makes mobile render the button + send
+      // back select_option — no awaiting-answer sheet needed.
+      await deps.publishText(sp.question);
+      await deps.publishSelectPrompt(sp.question, sp.options);
+      deps.appendAgentReply(sp.question);
+      deps.flushHistory();
+      deps.log?.(`1M-context credits gate — recovery offered id=${commandId.slice(0, 8)}`);
+      await deps.sendResult(commandId, 'failed', {
+        error: '1M context requires usage credits — recovery offered',
+      });
+    },
+    tryRecover: async (commandId) => {
+      if (!pending) return false;
+      const blocks = pending.blocks;
+      pending = null;
+      deps.log?.('1M-context recovery → disable + reconnect + rerun');
+      await deps.reconnectWith1mDisabled();
+      await deps.beginTurn();
+      try {
+        const reply = await deps.promptAgent(blocks);
+        const finalText = deps.getCurrentText();
+        await deps.closeTurn();
+        deps.appendAgentReply(finalText);
+        deps.flushHistory();
+        await deps.sendResult(commandId, 'completed', { stopReason: reply.stopReason });
+      } catch (err) {
+        await deps.recoverFromFailedTurn();
+        const d = deps.describeError(err);
+        const b = deps.failureBubbleFor(d);
+        if (b) {
+          await deps.publishText(b);
+          deps.appendAgentReply(b);
+          deps.flushHistory();
+        }
+        await deps.sendResult(commandId, 'failed', { error: d });
+      }
+      return true;
+    },
+  };
+}
