@@ -19,6 +19,7 @@
  * never sees a silent stall during an upstream incident.
  */
 import { describe, expect, it } from 'vitest';
+import { vi } from 'vitest';
 import {
   failureBubble,
   AUTH_FAILURE_MESSAGE,
@@ -26,7 +27,19 @@ import {
   looksLikeProviderOutage,
   providerOutageMessage,
   agentStatusPage,
+  checkProviderStatus,
 } from '../../src/agents/acp/runner';
+
+/** Build a minimal fetch stub returning a Statuspage status.json body. */
+function statusFetch(
+  indicator: string | null,
+  ok = true,
+): typeof fetch {
+  return vi.fn(async () => ({
+    ok,
+    json: async () => (indicator === null ? {} : { status: { indicator } }),
+  })) as unknown as typeof fetch;
+}
 
 describe('failureBubble — every failed start_task ends with a visible terminal frame', () => {
   it('auth failure → the actionable re-auth bubble (regardless of streamed text)', () => {
@@ -149,5 +162,37 @@ describe('agentStatusPage / providerOutageMessage', () => {
     const msg = providerOutageMessage('mystery-agent');
     expect(msg).toContain('The agent provider');
     expect(msg).not.toContain('https://');
+  });
+  it('exposes a Statuspage status.json API for the Statuspage providers', () => {
+    expect(agentStatusPage('claude')?.statusApi).toBe('https://status.anthropic.com/api/v2/status.json');
+    expect(agentStatusPage('codex')?.statusApi).toBe('https://status.openai.com/api/v2/status.json');
+    expect(agentStatusPage('copilot')?.statusApi).toContain('githubstatus.com/api/v2/status.json');
+    // Google Cloud isn't Statuspage-based — page link but no machine API.
+    expect(agentStatusPage('gemini')?.statusApi).toBeUndefined();
+  });
+});
+
+describe('checkProviderStatus — the catch-all that confirms an outage from the status page', () => {
+  it('true when the provider reports a degradation (indicator !== none)', async () => {
+    expect(await checkProviderStatus('claude', statusFetch('major'))).toBe(true);
+    expect(await checkProviderStatus('codex', statusFetch('minor'))).toBe(true);
+    expect(await checkProviderStatus('claude', statusFetch('critical'))).toBe(true);
+  });
+  it('false when the provider is all-clear (indicator === none)', async () => {
+    expect(await checkProviderStatus('claude', statusFetch('none'))).toBe(false);
+  });
+  it('false (never throws) on a non-ok response, a malformed body, or a thrown fetch', async () => {
+    expect(await checkProviderStatus('claude', statusFetch('major', false))).toBe(false);
+    expect(await checkProviderStatus('claude', statusFetch(null))).toBe(false);
+    const throwing = vi.fn(async () => {
+      throw new Error('network down');
+    }) as unknown as typeof fetch;
+    expect(await checkProviderStatus('claude', throwing)).toBe(false);
+  });
+  it('false WITHOUT calling fetch for a provider with no Statuspage API (Google / unknown)', async () => {
+    const spy = vi.fn() as unknown as typeof fetch;
+    expect(await checkProviderStatus('gemini', spy)).toBe(false);
+    expect(await checkProviderStatus('mystery', spy)).toBe(false);
+    expect(spy).not.toHaveBeenCalled();
   });
 });

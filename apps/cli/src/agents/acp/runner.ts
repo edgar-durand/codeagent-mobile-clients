@@ -728,17 +728,67 @@ export function looksLikeProviderOutage(text: string): boolean {
  * Returns null for agents whose provider we don't have a status URL for — the
  * outage message then degrades gracefully to a vendor-less form.
  */
-export function agentStatusPage(agent: string): { vendor: string; url: string } | null {
+export function agentStatusPage(
+  agent: string,
+): { vendor: string; url: string; statusApi?: string } | null {
   const a = (agent ?? '').toLowerCase();
+  // `statusApi` is the Atlassian Statuspage JSON endpoint (most providers use
+  // Statuspage), polled by `checkProviderStatus` to CONFIRM an outage. Google
+  // Cloud isn't Statuspage-based, so it has the page link but no machine API.
   if (a.includes('claude') || a.includes('anthropic'))
-    return { vendor: 'Anthropic', url: 'https://status.anthropic.com' };
+    return {
+      vendor: 'Anthropic',
+      url: 'https://status.anthropic.com',
+      statusApi: 'https://status.anthropic.com/api/v2/status.json',
+    };
   if (a.includes('codex') || a.includes('openai'))
-    return { vendor: 'OpenAI', url: 'https://status.openai.com' };
+    return {
+      vendor: 'OpenAI',
+      url: 'https://status.openai.com',
+      statusApi: 'https://status.openai.com/api/v2/status.json',
+    };
   if (a.includes('gemini') || a.includes('google'))
     return { vendor: 'Google', url: 'https://status.cloud.google.com' };
-  if (a.includes('copilot')) return { vendor: 'GitHub', url: 'https://www.githubstatus.com' };
-  if (a.includes('cursor')) return { vendor: 'Cursor', url: 'https://status.cursor.com' };
+  if (a.includes('copilot'))
+    return {
+      vendor: 'GitHub',
+      url: 'https://www.githubstatus.com',
+      statusApi: 'https://www.githubstatus.com/api/v2/status.json',
+    };
+  if (a.includes('cursor'))
+    return {
+      vendor: 'Cursor',
+      url: 'https://status.cursor.com',
+      statusApi: 'https://status.cursor.com/api/v2/status.json',
+    };
   return null;
+}
+
+/**
+ * Best-effort check of the provider's public status page (Atlassian Statuspage
+ * `/api/v2/status.json`). Returns true when the page reports a degradation
+ * (`status.indicator !== 'none'`). This is the CATCH-ALL that guarantees a
+ * provider incident is surfaced transparently even when the SDK SWALLOWED the
+ * 529 — it retried internally, then the turn timed out, so the surfaced error
+ * says "timed out" (not "overloaded") and the text classifier alone would miss
+ * it. Never throws; returns false on any error / timeout / non-Statuspage
+ * provider, so a flaky status page can't itself break the turn.
+ */
+export async function checkProviderStatus(
+  agent: string,
+  fetchImpl: typeof fetch = fetch,
+): Promise<boolean> {
+  const info = agentStatusPage(agent);
+  if (!info?.statusApi) return false;
+  try {
+    const res = await withTimeout(fetchImpl(info.statusApi), 4_000);
+    if (!res || !res.ok) return false;
+    const body = (await res.json()) as { status?: { indicator?: string } };
+    const indicator = body?.status?.indicator;
+    return typeof indicator === 'string' && indicator.toLowerCase() !== 'none';
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -1379,12 +1429,24 @@ async function handleCommand(
         // leaving the chat with no reply AND no error. failureBubble() decides
         // the actionable message (re-auth, or generic retry when no text
         // streamed); null only when a partial reply already serves as terminal.
-        const bubble = failureBubble({
+        let bubble = failureBubble({
           detail,
           recentStderr: recentStderr.join('\n'),
           hadText,
           agent: opts.agent,
         });
+        // CATCH-ALL transparency: if this isn't already an auth or outage
+        // message, the provider's status page may reveal an outage the SDK
+        // swallowed (it retried the 529 internally, then the turn timed out —
+        // so `detail`/stderr say "timed out", not "overloaded"). Confirm via
+        // the status page and upgrade to the friendly outage bubble (with the
+        // status link), even overriding the partial-text `null`, so a provider
+        // incident is NEVER a silent or cryptic stall.
+        if (bubble !== AUTH_FAILURE_MESSAGE && bubble !== providerOutageMessage(opts.agent)) {
+          if (await checkProviderStatus(opts.agent)) {
+            bubble = providerOutageMessage(opts.agent);
+          }
+        }
         if (bubble) {
           await publisher.publishOutput({ type: 'text', content: bubble, done: true });
           // Persist it in the DURABLE conversation (the output stream is just a
