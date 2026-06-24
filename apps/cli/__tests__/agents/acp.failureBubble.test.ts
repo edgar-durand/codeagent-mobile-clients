@@ -13,13 +13,15 @@
  * `failureBubble` is the contract that prevents that: every non-text failure
  * yields a non-empty, actionable bubble the runner publishes with done:true.
  *
- * It also classifies a PROVIDER OUTAGE (Anthropic 529 / upstream 5xx) — the
- * leading cause of an agent that appears to "hang" — into a transparent
- * "provider is down" bubble with the provider's status-page link, so the user
- * never sees a silent stall during an upstream incident.
+ * It also classifies a PROVIDER OUTAGE — but ONLY from the AGENT'S OWN error
+ * (Anthropic 529 / upstream 5xx / "overloaded"). The provider's status page is
+ * NOT consulted as a catch-all: a status-page incident can be live while this
+ * user's local agent is still operational (partial/regional degradation, or a
+ * stale/unrelated advisory). Surfacing a "service disruption" wall on a turn
+ * the provider didn't actually reject is a false positive — so the agent's
+ * error text is the sole trigger.
  */
 import { describe, expect, it } from 'vitest';
-import { vi } from 'vitest';
 import {
   failureBubble,
   AUTH_FAILURE_MESSAGE,
@@ -27,19 +29,8 @@ import {
   looksLikeProviderOutage,
   providerOutageMessage,
   agentStatusPage,
-  checkProviderStatus,
+  replyIsAuthFailure,
 } from '../../src/agents/acp/runner';
-
-/** Build a minimal fetch stub returning a Statuspage status.json body. */
-function statusFetch(
-  indicator: string | null,
-  ok = true,
-): typeof fetch {
-  return vi.fn(async () => ({
-    ok,
-    json: async () => (indicator === null ? {} : { status: { indicator } }),
-  })) as unknown as typeof fetch;
-}
 
 describe('failureBubble — every failed start_task ends with a visible terminal frame', () => {
   it('auth failure → the actionable re-auth bubble (regardless of streamed text)', () => {
@@ -163,36 +154,72 @@ describe('agentStatusPage / providerOutageMessage', () => {
     expect(msg).toContain('The agent provider');
     expect(msg).not.toContain('https://');
   });
-  it('exposes a Statuspage status.json API for the Statuspage providers', () => {
-    expect(agentStatusPage('claude')?.statusApi).toBe('https://status.anthropic.com/api/v2/status.json');
-    expect(agentStatusPage('codex')?.statusApi).toBe('https://status.openai.com/api/v2/status.json');
-    expect(agentStatusPage('copilot')?.statusApi).toContain('githubstatus.com/api/v2/status.json');
-    // Google Cloud isn't Statuspage-based — page link but no machine API.
-    expect(agentStatusPage('gemini')?.statusApi).toBeUndefined();
+});
+
+describe('outage verdict comes ONLY from the agent error, never the status page', () => {
+  // Regression for the false "Anthropic is having a service disruption" wall
+  // Rafael hit on a plain "Hola" (2026-06-24): the provider's status page had
+  // a live (minor / unrelated) advisory, but his local agent was operational.
+  // failureBubble must NOT manufacture an outage from anything other than the
+  // agent's own provider-overload error — the status page is informational
+  // (the link inside the bubble), not a trigger.
+  it('a generic failure stays a generic retry — it is NEVER upgraded to an outage', () => {
+    expect(
+      failureBubble({
+        detail: 'Internal error: socket hang up',
+        recentStderr: 'some unrelated log line',
+        hadText: false,
+        agent: 'claude',
+      }),
+    ).toBe(TURN_FAILURE_MESSAGE);
+  });
+  it('a generic failure that already streamed text → null (no outage override)', () => {
+    expect(
+      failureBubble({
+        detail: 'Request timed out after 90000ms',
+        recentStderr: '',
+        hadText: true,
+        agent: 'claude',
+      }),
+    ).toBeNull();
+  });
+  it('only an actual provider-overload error yields the outage bubble', () => {
+    expect(
+      failureBubble({
+        detail: 'API Error: 529 overloaded_error',
+        recentStderr: '',
+        hadText: false,
+        agent: 'claude',
+      }),
+    ).toBe(providerOutageMessage('claude'));
   });
 });
 
-describe('checkProviderStatus — the catch-all that confirms an outage from the status page', () => {
-  it('true when the provider reports a degradation (indicator !== none)', async () => {
-    expect(await checkProviderStatus('claude', statusFetch('major'))).toBe(true);
-    expect(await checkProviderStatus('codex', statusFetch('minor'))).toBe(true);
-    expect(await checkProviderStatus('claude', statusFetch('critical'))).toBe(true);
+describe('replyIsAuthFailure — auth error arriving as a COMPLETED-turn reply', () => {
+  // Rafael (2026-06-24): a codespace whose Claude wasn't logged in printed
+  // "Not logged in · Please run /login" as a NORMAL assistant reply and ended
+  // the turn cleanly — no throw, no process exit. Neither auth path fired, so
+  // the raw CLI text leaked into the chat (and the credential was never flagged
+  // EXPIRED). Detect it on the success path too.
+  it('flags a short reply that IS the auth notice', () => {
+    expect(replyIsAuthFailure('Not logged in · Please run /login')).toBe(true);
+    expect(replyIsAuthFailure('  Please run /login  ')).toBe(true);
   });
-  it('false when the provider is all-clear (indicator === none)', async () => {
-    expect(await checkProviderStatus('claude', statusFetch('none'))).toBe(false);
+  it('does NOT flag an empty reply', () => {
+    expect(replyIsAuthFailure('')).toBe(false);
+    expect(replyIsAuthFailure('   ')).toBe(false);
   });
-  it('false (never throws) on a non-ok response, a malformed body, or a thrown fetch', async () => {
-    expect(await checkProviderStatus('claude', statusFetch('major', false))).toBe(false);
-    expect(await checkProviderStatus('claude', statusFetch(null))).toBe(false);
-    const throwing = vi.fn(async () => {
-      throw new Error('network down');
-    }) as unknown as typeof fetch;
-    expect(await checkProviderStatus('claude', throwing)).toBe(false);
+  it('does NOT flag a substantive reply that merely DISCUSSES login (length guard)', () => {
+    const longReply =
+      'To authenticate the Claude CLI you run the login command. When you see ' +
+      '"please run /login" it means your OAuth token expired, so open a terminal ' +
+      'and run `claude /login`, complete the browser flow, and then re-run your ' +
+      'task. This is unrelated to your actual prompt about the build pipeline, ' +
+      'which I have now finished implementing across the three services.';
+    expect(longReply.length).toBeGreaterThan(200);
+    expect(replyIsAuthFailure(longReply)).toBe(false);
   });
-  it('false WITHOUT calling fetch for a provider with no Statuspage API (Google / unknown)', async () => {
-    const spy = vi.fn() as unknown as typeof fetch;
-    expect(await checkProviderStatus('gemini', spy)).toBe(false);
-    expect(await checkProviderStatus('mystery', spy)).toBe(false);
-    expect(spy).not.toHaveBeenCalled();
+  it('does NOT flag a normal short reply', () => {
+    expect(replyIsAuthFailure('Done — pushed the commit.')).toBe(false);
   });
 });

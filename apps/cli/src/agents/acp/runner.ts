@@ -412,6 +412,23 @@ export class StreamingState {
   }
 
   /**
+   * Close the turn but REPLACE the streamed reply with `bubble` as the
+   * terminal chat frame. The chat pipe treats each `text` chunk's content as
+   * the full (replacing) bubble body, so a final `done:true` carrying the
+   * bubble overwrites whatever raw text streamed. Used when the agent's
+   * completed-turn reply was itself an auth-failure notice
+   * ({@link replyIsAuthFailure}) → swap the raw "Please run /login" for the
+   * actionable re-auth bubble.
+   */
+  async closeWithBubble(bubble: string): Promise<void> {
+    this.text = '';
+    await Promise.all([
+      this.publisher.publishOutput({ type: 'text', content: bubble, done: true }),
+      this.flushStreamingChunks(),
+    ]);
+  }
+
+  /**
    * Re-emit every open streaming-chunk buffer with `isFinal: true`
    * so SessionDetailScreen's bubbles flip out of "still streaming"
    * state. Idempotent — clears the map after, so a second call is a
@@ -681,6 +698,21 @@ export function looksLikeAuthFailure(text: string): boolean {
 }
 
 /**
+ * True when an agent's COMPLETED-turn reply IS itself an auth-failure notice.
+ * Claude Code, when its credential is missing/expired, prints
+ * "Not logged in · Please run /login" as a plain assistant message and ends
+ * the turn cleanly — no thrown error, no process exit — so the throw/exit auth
+ * paths never see it and the raw CLI text leaks into the chat (and the
+ * credential is never flagged EXPIRED). Length-guarded so a substantive reply
+ * that merely DISCUSSES login (e.g. the user asked how to fix it) is not
+ * misclassified — a genuine auth notice is short.
+ */
+export function replyIsAuthFailure(finalText: string): boolean {
+  const t = finalText.trim();
+  return t.length > 0 && t.length <= 200 && looksLikeAuthFailure(t);
+}
+
+/**
  * Persistent, actionable message shown in the chat when a turn fails because
  * the agent's credential is invalid/expired. Markdown — the chat renderer
  * supports it (same as the welcome banner).
@@ -730,65 +762,19 @@ export function looksLikeProviderOutage(text: string): boolean {
  */
 export function agentStatusPage(
   agent: string,
-): { vendor: string; url: string; statusApi?: string } | null {
+): { vendor: string; url: string } | null {
   const a = (agent ?? '').toLowerCase();
-  // `statusApi` is the Atlassian Statuspage JSON endpoint (most providers use
-  // Statuspage), polled by `checkProviderStatus` to CONFIRM an outage. Google
-  // Cloud isn't Statuspage-based, so it has the page link but no machine API.
   if (a.includes('claude') || a.includes('anthropic'))
-    return {
-      vendor: 'Anthropic',
-      url: 'https://status.anthropic.com',
-      statusApi: 'https://status.anthropic.com/api/v2/status.json',
-    };
+    return { vendor: 'Anthropic', url: 'https://status.anthropic.com' };
   if (a.includes('codex') || a.includes('openai'))
-    return {
-      vendor: 'OpenAI',
-      url: 'https://status.openai.com',
-      statusApi: 'https://status.openai.com/api/v2/status.json',
-    };
+    return { vendor: 'OpenAI', url: 'https://status.openai.com' };
   if (a.includes('gemini') || a.includes('google'))
     return { vendor: 'Google', url: 'https://status.cloud.google.com' };
   if (a.includes('copilot'))
-    return {
-      vendor: 'GitHub',
-      url: 'https://www.githubstatus.com',
-      statusApi: 'https://www.githubstatus.com/api/v2/status.json',
-    };
+    return { vendor: 'GitHub', url: 'https://www.githubstatus.com' };
   if (a.includes('cursor'))
-    return {
-      vendor: 'Cursor',
-      url: 'https://status.cursor.com',
-      statusApi: 'https://status.cursor.com/api/v2/status.json',
-    };
+    return { vendor: 'Cursor', url: 'https://status.cursor.com' };
   return null;
-}
-
-/**
- * Best-effort check of the provider's public status page (Atlassian Statuspage
- * `/api/v2/status.json`). Returns true when the page reports a degradation
- * (`status.indicator !== 'none'`). This is the CATCH-ALL that guarantees a
- * provider incident is surfaced transparently even when the SDK SWALLOWED the
- * 529 — it retried internally, then the turn timed out, so the surfaced error
- * says "timed out" (not "overloaded") and the text classifier alone would miss
- * it. Never throws; returns false on any error / timeout / non-Statuspage
- * provider, so a flaky status page can't itself break the turn.
- */
-export async function checkProviderStatus(
-  agent: string,
-  fetchImpl: typeof fetch = fetch,
-): Promise<boolean> {
-  const info = agentStatusPage(agent);
-  if (!info?.statusApi) return false;
-  try {
-    const res = await withTimeout(fetchImpl(info.statusApi), 4_000);
-    if (!res || !res.ok) return false;
-    const body = (await res.json()) as { status?: { indicator?: string } };
-    const indicator = body?.status?.indicator;
-    return typeof indicator === 'string' && indicator.toLowerCase() !== 'none';
-  } catch {
-    return false;
-  }
 }
 
 /**
@@ -1393,23 +1379,45 @@ async function handleCommand(
         // instead of staying as plain text (Gemini's typical shape
         // for "¿continuar? 1. sí 2. no").
         const finalText = streaming.getCurrentText();
-        await streaming.closeTurnWithInteractiveDetection();
-        const replyLine = formatAgentReplyLine(finalText);
-        if (replyLine.length > 0) {
-          showInfo(replyLine);
+        if (replyIsAuthFailure(finalText)) {
+          // The agent COMPLETED the turn but its reply IS an auth-failure
+          // notice ("Not logged in · Please run /login") — a missing/expired
+          // credential the agent surfaced as plain text instead of throwing.
+          // Swap the raw CLI text for the actionable re-auth bubble and flag
+          // the LinkedAgent credential invalid so Profile › Agents shows
+          // EXPIRED + the re-link CTA, identical to the throw/exit auth paths.
+          await streaming.closeWithBubble(AUTH_FAILURE_MESSAGE);
+          history.appendAgentReply(AUTH_FAILURE_MESSAGE);
+          void history.flush();
+          // Symmetry with the happy path: flush any file changeset the agent
+          // produced BEFORE it hit the auth wall. No-ops when there are no
+          // hunks (the typical not-logged-in case), so it's pure insurance
+          // against silently dropping partial edits.
+          turnFiles.flushTurn().catch((err) => {
+            log.warn('acpRunner', `turnFiles.flushTurn failed: ${describeError(err)}`);
+          });
+          void reportCredentialInvalid(opts);
+          log.info('acpRunner', `start_task ← auth-failure-in-reply id=${cmd.id.slice(0, 8)}`);
+          await relay.sendResult(cmd.id, 'failed', { error: 'agent reply reported auth failure' });
+        } else {
+          await streaming.closeTurnWithInteractiveDetection();
+          const replyLine = formatAgentReplyLine(finalText);
+          if (replyLine.length > 0) {
+            showInfo(replyLine);
+          }
+          history.appendAgentReply(finalText);
+          void history.flush();
+          // End-of-turn file changeset — agent likely edited files
+          // during the turn (tool_call write_file / bash). The
+          // aggregator runs git diff once and batch-posts the hunks
+          // so mobile's PENDING REVIEW counter + Files rail update.
+          // Fire-and-forget; the aggregator owns its own outbox.
+          turnFiles.flushTurn().catch((err) => {
+            log.warn('acpRunner', `turnFiles.flushTurn failed: ${describeError(err)}`);
+          });
+          log.info('acpRunner', `start_task ← done stopReason=${reply.stopReason ?? '?'} id=${cmd.id.slice(0, 8)}`);
+          await relay.sendResult(cmd.id, 'completed', { stopReason: reply.stopReason });
         }
-        history.appendAgentReply(finalText);
-        void history.flush();
-        // End-of-turn file changeset — agent likely edited files
-        // during the turn (tool_call write_file / bash). The
-        // aggregator runs git diff once and batch-posts the hunks
-        // so mobile's PENDING REVIEW counter + Files rail update.
-        // Fire-and-forget; the aggregator owns its own outbox.
-        turnFiles.flushTurn().catch((err) => {
-          log.warn('acpRunner', `turnFiles.flushTurn failed: ${describeError(err)}`);
-        });
-        log.info('acpRunner', `start_task ← done stopReason=${reply.stopReason ?? '?'} id=${cmd.id.slice(0, 8)}`);
-        await relay.sendResult(cmd.id, 'completed', { stopReason: reply.stopReason });
       } catch (err) {
         // Whether the turn streamed any assistant text BEFORE recover resets
         // it. When it did, `closeAll` already published that partial reply as
@@ -1429,24 +1437,22 @@ async function handleCommand(
         // leaving the chat with no reply AND no error. failureBubble() decides
         // the actionable message (re-auth, or generic retry when no text
         // streamed); null only when a partial reply already serves as terminal.
-        let bubble = failureBubble({
+        // The outage bubble is shown ONLY when the agent's OWN error
+        // indicates a provider overload (`looksLikeProviderOutage` inside
+        // failureBubble). We deliberately do NOT consult the provider's
+        // status page as a catch-all: a status-page incident can be live
+        // while THIS user's local agent is still operational (a partial /
+        // regional degradation, or a stale/unrelated advisory like a model
+        // suspension). Blaming the provider for a failure it didn't cause —
+        // or worse, on a turn that merely failed for an unrelated reason —
+        // is a false "service disruption" wall. The error text is the only
+        // trustworthy signal that the provider actually rejected the call.
+        const bubble = failureBubble({
           detail,
           recentStderr: recentStderr.join('\n'),
           hadText,
           agent: opts.agent,
         });
-        // CATCH-ALL transparency: if this isn't already an auth or outage
-        // message, the provider's status page may reveal an outage the SDK
-        // swallowed (it retried the 529 internally, then the turn timed out —
-        // so `detail`/stderr say "timed out", not "overloaded"). Confirm via
-        // the status page and upgrade to the friendly outage bubble (with the
-        // status link), even overriding the partial-text `null`, so a provider
-        // incident is NEVER a silent or cryptic stall.
-        if (bubble !== AUTH_FAILURE_MESSAGE && bubble !== providerOutageMessage(opts.agent)) {
-          if (await checkProviderStatus(opts.agent)) {
-            bubble = providerOutageMessage(opts.agent);
-          }
-        }
         if (bubble) {
           await publisher.publishOutput({ type: 'text', content: bubble, done: true });
           // Persist it in the DURABLE conversation (the output stream is just a
