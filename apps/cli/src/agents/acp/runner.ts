@@ -707,9 +707,64 @@ export const TURN_FAILURE_MESSAGE =
 export { AUTH_FAILURE_MESSAGE };
 
 /**
+ * Detects a turn failure caused by the AGENT PROVIDER being down / overloaded
+ * (Anthropic, OpenAI, …) rather than the user's session or credential — e.g.
+ * Anthropic's HTTP 529 `overloaded_error`, or an upstream 5xx / "service
+ * unavailable". This is a leading cause of an agent that appears to "hang":
+ * the provider is having an incident, so the call never completes. We surface
+ * a friendly, transparent message (with the provider's status page) instead of
+ * a silent stall or a misleading generic "try again".
+ */
+const PROVIDER_OUTAGE_RE =
+  /overloaded_error|\boverloaded\b|service[ _]unavailable|temporarily[ _]unavailable|(?:api error|http|status)[:\s]+(?:529|503|502|504)\b|\b(?:529|503|502|504)\b[^\n]{0,40}(?:overload|unavailable|gateway|upstream|server error)|bad gateway|gateway time-?out|upstream (?:error|connect|timeout)/i;
+
+export function looksLikeProviderOutage(text: string): boolean {
+  return PROVIDER_OUTAGE_RE.test(text);
+}
+
+/**
+ * Public status page for an agent's upstream provider, resolved by substring
+ * so it's robust to the runtime id (`claude`) vs the public id (`claude_code`).
+ * Returns null for agents whose provider we don't have a status URL for — the
+ * outage message then degrades gracefully to a vendor-less form.
+ */
+export function agentStatusPage(agent: string): { vendor: string; url: string } | null {
+  const a = (agent ?? '').toLowerCase();
+  if (a.includes('claude') || a.includes('anthropic'))
+    return { vendor: 'Anthropic', url: 'https://status.anthropic.com' };
+  if (a.includes('codex') || a.includes('openai'))
+    return { vendor: 'OpenAI', url: 'https://status.openai.com' };
+  if (a.includes('gemini') || a.includes('google'))
+    return { vendor: 'Google', url: 'https://status.cloud.google.com' };
+  if (a.includes('copilot')) return { vendor: 'GitHub', url: 'https://www.githubstatus.com' };
+  if (a.includes('cursor')) return { vendor: 'Cursor', url: 'https://status.cursor.com' };
+  return null;
+}
+
+/**
+ * Friendly, transparent bubble for a provider-side outage/overload. Names the
+ * vendor, reassures the user it isn't their session, and links the provider's
+ * status page so they can follow the incident. Markdown (the chat renderer
+ * supports links).
+ */
+export function providerOutageMessage(agent: string): string {
+  const info = agentStatusPage(agent);
+  const who = info ? info.vendor : 'The agent provider';
+  return (
+    `🌐 **${who} is having a service disruption — this isn’t your session.**\n\n` +
+    'The agent provider returned an overload/outage error, so this turn couldn’t finish. ' +
+    'It usually clears up on its own — just send your message again in a bit.' +
+    (info ? `\n\nFollow the status here: [${info.url}](${info.url})` : '')
+  );
+}
+
+/**
  * Decide the terminal failure bubble to publish when a `start_task` turn
  * throws — the contract that guarantees a turn NEVER ends silently:
  *   - auth failure → the actionable re-auth bubble.
+ *   - provider outage (529 / 5xx / overloaded) → a transparent "provider is
+ *     down" bubble with the status-page link, shown even if partial text
+ *     streamed (the user must know it's the provider, not a stuck session).
  *   - any other failure that streamed NO assistant text → a generic retry
  *     bubble (the fix for the silent "first message never answers" bug: the
  *     only other frame is an empty `done:true` the mobile snapshot-guard drops).
@@ -720,9 +775,13 @@ export function failureBubble(opts: {
   detail: string;
   recentStderr: string;
   hadText: boolean;
+  agent: string;
 }): string | null {
   if (looksLikeAuthFailure(opts.detail) || looksLikeAuthFailure(opts.recentStderr)) {
     return AUTH_FAILURE_MESSAGE;
+  }
+  if (looksLikeProviderOutage(opts.detail) || looksLikeProviderOutage(opts.recentStderr)) {
+    return providerOutageMessage(opts.agent);
   }
   if (!opts.hadText) return TURN_FAILURE_MESSAGE;
   return null;
@@ -939,6 +998,10 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
       // the user knows WHY the session died — a credential 401 gets the
       // actionable re-auth copy instead of a raw exit code.
       const authFail = looksLikeAuthFailure(recentStderr.join('\n'));
+      // Provider outage (Anthropic 529 / upstream 5xx) can crash the adapter
+      // too — surface the transparent "provider is down + status link" bubble
+      // instead of a cryptic exit-code message.
+      const outageFail = !authFail && looksLikeProviderOutage(recentStderr.join('\n'));
       if (authFail) {
         // Durably flag the LinkedAgent credential invalid so Profile › Agents
         // shows EXPIRED + the re-auth CTA (instead of CONNECTED from a
@@ -959,7 +1022,9 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
               type: 'text',
               content: authFail
                 ? AUTH_FAILURE_MESSAGE
-                : `Agent adapter exited unexpectedly (code=${code ?? 'null'} signal=${signal ?? 'null'}).`,
+                : outageFail
+                  ? providerOutageMessage(opts.agent)
+                  : `Agent adapter exited unexpectedly (code=${code ?? 'null'} signal=${signal ?? 'null'}).`,
               done: true,
             });
           })(),
@@ -1318,6 +1383,7 @@ async function handleCommand(
           detail,
           recentStderr: recentStderr.join('\n'),
           hadText,
+          agent: opts.agent,
         });
         if (bubble) {
           await publisher.publishOutput({ type: 'text', content: bubble, done: true });
