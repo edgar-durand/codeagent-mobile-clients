@@ -37,6 +37,13 @@ describe('makeConfig', () => {
     expect(cfg.getConfig().activeSessionId).toBe('s1');
   });
 
+  it('setDisable1mContext persists the per-session flag by pluginId', () => {
+    cfg.addSession({ id: 's1', pluginId: 'p1', userName: 'A', userEmail: 'a@a.com', plan: 'PRO', pairedAt: 1000, agent: 'claude' });
+    cfg.setDisable1mContext('p1', true);
+    const s = cfg.getConfig().sessions.find((x) => x.pluginId === 'p1');
+    expect(s?.disable1mContext).toBe(true);
+  });
+
   it('addSession promotes the newly paired session to active', () => {
     // Rationale: pair → start should use the most recently paired session's
     // pluginId, so each addSession takes over as the active one (see

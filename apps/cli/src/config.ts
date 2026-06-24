@@ -32,6 +32,14 @@ export interface SavedSession {
    */
   pollSecret?: string;
   agent: AgentId;
+  /**
+   * Set on demand when the user picks "Disable 1M context and continue" after
+   * Anthropic's 1M-context usage-credits 429 (claude Code v2.1.x sends the
+   * `context-1m` beta even on accounts without 1M credits). Read at agent
+   * spawn to inject `CLAUDE_CODE_DISABLE_1M_CONTEXT=1` so the gate never
+   * recurs for this session, even across a codeam restart.
+   */
+  disable1mContext?: boolean;
 }
 
 export interface CliConfig {
@@ -166,6 +174,19 @@ export function makeConfig(baseDir?: string) {
     return matches[0];
   }
 
+  /**
+   * On-demand toggle of the per-session 1M-context disable flag. Looked up by
+   * pluginId (the relay's stable session key). No-op when the session isn't
+   * found (it may have been removed between the failed turn and the user's tap).
+   */
+  function setDisable1mContext(pluginId: string, value: boolean): void {
+    const c = load();
+    const s = c.sessions.find(x => x.pluginId === pluginId);
+    if (!s) return;
+    s.disable1mContext = value;
+    save(c);
+  }
+
   function clearAll(): void {
     try {
       fs.unlinkSync(file);
@@ -182,7 +203,7 @@ export function makeConfig(baseDir?: string) {
     return load();
   }
 
-  return { getConfig, ensurePluginId, addSession, removeSession, setActiveSession, getActiveSession, getActiveSessionForAgent, clearAll, saveCliConfig, loadCliConfig };
+  return { getConfig, ensurePluginId, addSession, removeSession, setActiveSession, getActiveSession, getActiveSessionForAgent, setDisable1mContext, clearAll, saveCliConfig, loadCliConfig };
 }
 
 /**
@@ -238,5 +259,5 @@ export function loadCodespaceEnv(): void {
 
 // Default instance — uses ~/.codeam/config.json
 const _default = makeConfig();
-export const { getConfig, ensurePluginId, addSession, removeSession, setActiveSession, getActiveSession, getActiveSessionForAgent, clearAll, saveCliConfig, loadCliConfig } =
+export const { getConfig, ensurePluginId, addSession, removeSession, setActiveSession, getActiveSession, getActiveSessionForAgent, setDisable1mContext, clearAll, saveCliConfig, loadCliConfig } =
   _default;
