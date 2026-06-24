@@ -4,6 +4,23 @@ All notable changes to the CodeAgent Mobile VS Code extension are documented her
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.40.0] — 2026-06-24
+
+### Added
+
+- **cli:** Add formatAgentReplyLine for the pair full-thread echo
+- **cli:** Echo agent reply in codeam pair so the full thread is visible
+
+### Fixed
+
+- **cli:** Refresh plugin-auth token and retry once on 401/403 output POST
+- **cli:** Wire plugin-auth token refresh into ACP publisher
+- **cli:** Await bounded terminal-frame flush before adapter-exit teardown
+
+### Merge
+
+- Session-hang CLI fix (token self-heal + flush-before-exit) + codeam pair agent-reply echo
+
 ## [2.39.87] — 2026-06-23
 
 ### Added
