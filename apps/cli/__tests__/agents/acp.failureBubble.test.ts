@@ -30,6 +30,7 @@ import {
   providerOutageMessage,
   agentStatusPage,
   replyIsAuthFailure,
+  looksLike1mContextCreditsError,
 } from '../../src/agents/acp/runner';
 
 describe('failureBubble — every failed start_task ends with a visible terminal frame', () => {
@@ -221,5 +222,27 @@ describe('replyIsAuthFailure — auth error arriving as a COMPLETED-turn reply',
   });
   it('does NOT flag a normal short reply', () => {
     expect(replyIsAuthFailure('Done — pushed the commit.')).toBe(false);
+  });
+});
+
+describe('looksLike1mContextCreditsError', () => {
+  it('matches the 1M-context usage-credits error (Rafael 2026-06-24)', () => {
+    for (const t of [
+      'API Error: Usage credits required for 1M context · turn on usage credits at claude.ai/settings/usage, or use --model to switch to standard context',
+      'usage credits required for 1m context',
+      'Usage credits required for 1M context',
+    ]) {
+      expect(looksLike1mContextCreditsError(t)).toBe(true);
+    }
+  });
+  it('does NOT match unrelated errors', () => {
+    for (const t of [
+      'API Error: 401 Invalid authentication credentials',
+      'overloaded_error',
+      'rate limit: 429 too many requests',
+      'Usage limit reached',
+    ]) {
+      expect(looksLike1mContextCreditsError(t)).toBe(false);
+    }
   });
 });

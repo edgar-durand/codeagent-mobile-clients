@@ -755,6 +755,21 @@ export function looksLikeProviderOutage(text: string): boolean {
 }
 
 /**
+ * Detects Anthropic's "Usage credits required for 1M context" gate. claude
+ * Code v2.1.x sends the `context-1m` beta even when the account has
+ * `s1mAccessCache.hasAccess=false`; an account without usage credits then
+ * gets a 429 with this body. Distinct from a generic rate-limit / usage-limit
+ * — it is specifically recoverable by disabling 1M context
+ * (`CLAUDE_CODE_DISABLE_1M_CONTEXT=1`), which {@link makeOneMRecoveryState}
+ * offers on demand.
+ */
+const ONE_M_CONTEXT_CREDITS_RE = /usage credits required for 1m context/i;
+
+export function looksLike1mContextCreditsError(text: string): boolean {
+  return ONE_M_CONTEXT_CREDITS_RE.test(text);
+}
+
+/**
  * Public status page for an agent's upstream provider, resolved by substring
  * so it's robust to the runtime id (`claude`) vs the public id (`claude_code`).
  * Returns null for agents whose provider we don't have a status URL for — the
