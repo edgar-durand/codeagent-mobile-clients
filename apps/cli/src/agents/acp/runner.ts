@@ -38,10 +38,11 @@ import { AGENT_REGISTRY, type AgentId, type AgentModel, type StreamingChunkKind 
 import type { RequestPermissionResponse } from '@agentclientprotocol/sdk';
 import { createOsStrategy } from '../../os';
 import { createInteractiveAgentStrategy } from '../registry';
-import { AcpClient } from './client';
+import { AcpClient, type AcpClientOptions } from './client';
 import type { AdapterSpec } from './adapters';
 import { AcpPublisher } from './publisher';
-import { buildAcpPromptBlocks } from './buildAcpPromptBlocks';
+import { buildAcpPromptBlocks, type PromptBlock } from './buildAcpPromptBlocks';
+import { shouldOfferOneMRecovery, createOneMRecovery, type OneMRecovery } from './oneMContextRecovery';
 import { reconcileCumulative } from './reconcileDelta';
 import { maybeSendOnboardingWelcome } from './onboarding';
 import { formatPromptEchoLine, formatAgentReplyLine } from './promptEcho';
@@ -58,7 +59,7 @@ import {
   type HandlerContext,
 } from '../../commands/start/handlers';
 import type { RuntimeStrategy } from '../strategy';
-import { removeSession } from '../../config';
+import { removeSession, loadCliConfig, setDisable1mContext } from '../../config';
 import { FileWatcherService } from '../../services/file-watcher.service';
 import { TurnFileAggregator } from '../../services/turn-files/turn-file-aggregator';
 import { beadsActionFromPayload } from '../../beads/wiring';
@@ -956,9 +957,17 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
   // we surface the variant kind + a count to confirm the SDK is
   // delivering notifications without spamming a line per chunk.
   let updateCount = 0;
-  const client = new AcpClient({
+  // On-demand 1M-context disable (Rafael 2026-06-24): claude Code v2.1.x sends
+  // the `context-1m` beta even on accounts without 1M usage credits → 429
+  // "Usage credits required for 1M context". When the user previously chose
+  // "Disable 1M context and continue" for THIS session, the flag is persisted
+  // and re-applied on every (re)spawn via the adapter env.
+  const disable1mContext =
+    loadCliConfig().sessions.find((s) => s.pluginId === opts.pluginId)?.disable1mContext === true;
+  const clientOptions: AcpClientOptions = {
     adapter: opts.adapter,
     cwd: opts.cwd,
+    extraEnv: disable1mContext ? { CLAUDE_CODE_DISABLE_1M_CONTEXT: '1' } : {},
     onSessionUpdate: (notification) => {
       updateCount += 1;
       const variant = (notification.update as { sessionUpdate?: string })?.sessionUpdate ?? 'unknown';
@@ -1084,6 +1093,50 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
         process.exit(1);
       })();
     },
+  };
+  let client = new AcpClient(clientOptions);
+
+  // ─── On-demand 1M-context recovery ───────────────────────────────
+  // Re-spawn the adapter/claude with 1M context disabled, persisting the choice
+  // for this session. claude reads CLAUDE_CODE_DISABLE_1M_CONTEXT only at
+  // process start, so the only way to apply it on demand is a fresh spawn.
+  const reconnectWith1mDisabled = async (): Promise<void> => {
+    setDisable1mContext(opts.pluginId, true);
+    try {
+      await client.stop();
+    } catch {
+      /* adapter already gone */
+    }
+    client = new AcpClient({ ...clientOptions, extraEnv: { CLAUDE_CODE_DISABLE_1M_CONTEXT: '1' } });
+    await client.start();
+  };
+  // Behavior lives in the DI factory (unit-tested in oneMContextRecovery.test);
+  // here we just wire it to the live publisher/relay/streaming + the mutable
+  // `client` (promptAgent/recover read the post-reconnect instance).
+  const oneMRecovery = createOneMRecovery<PromptBlock>({
+    publishText: (text) => publisher.publishOutput({ type: 'text', content: text, done: true }),
+    publishSelectPrompt: (question, options) =>
+      publisher.publishOutput({
+        type: 'select_prompt',
+        content: question,
+        options,
+        optionDescriptions: options.map(() => ''),
+        currentIndex: 0,
+        done: true,
+      }),
+    sendResult: (commandId, status, result) => relay.sendResult(commandId, status, result),
+    appendAgentReply: (text) => history.appendAgentReply(text),
+    flushHistory: () => void history.flush(),
+    beginTurn: () => streaming.beginTurn(),
+    getCurrentText: () => streaming.getCurrentText(),
+    closeTurn: () => streaming.closeTurnWithInteractiveDetection(),
+    recoverFromFailedTurn: () => recoverFromFailedTurn(client, streaming),
+    reconnectWith1mDisabled,
+    promptAgent: (blocks) => client.prompt(blocks),
+    failureBubbleFor: (detail) =>
+      failureBubble({ detail, recentStderr: recentStderr.join('\n'), hadText: false, agent: opts.agent }),
+    describeError,
+    log: (msg) => log.info('acpRunner', msg),
   });
 
   showInfo(`Starting ${opts.agent} via ACP adapter (${opts.adapter.requiresAgentBinary})…`);
@@ -1263,6 +1316,7 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
         getBeads,
         publisher,
         recentStderr,
+        oneMRecovery,
       );
     },
     { id: opts.agent, name: opts.agent, displayName: opts.agent } as never,
@@ -1325,6 +1379,10 @@ async function handleCommand(
   getBeads: () => StartedBeads | null,
   publisher: AcpPublisher,
   recentStderr: string[],
+  /** On-demand 1M-context-credits recovery (offer the disable action +
+   *  re-spawn/re-run on tap). Built by runAcpSession so it can mutate the
+   *  live `client`. */
+  oneMRecovery: OneMRecovery<PromptBlock>,
 ): Promise<void> {
   switch (cmd.type) {
     case 'beads_action': {
@@ -1414,6 +1472,13 @@ async function handleCommand(
           void reportCredentialInvalid(opts);
           log.info('acpRunner', `start_task ← auth-failure-in-reply id=${cmd.id.slice(0, 8)}`);
           await relay.sendResult(cmd.id, 'failed', { error: 'agent reply reported auth failure' });
+        } else if (
+          shouldOfferOneMRecovery({ detail: '', recentStderr: recentStderr.join('\n'), finalText })
+        ) {
+          // The turn COMPLETED but the reply IS Anthropic's "Usage credits
+          // required for 1M context" 429 body. Offer the on-demand disable
+          // action instead of leaking the raw API error.
+          await oneMRecovery.offer(cmd.id, blocks);
         } else {
           await streaming.closeTurnWithInteractiveDetection();
           const replyLine = formatAgentReplyLine(finalText);
@@ -1462,6 +1527,15 @@ async function handleCommand(
         // or worse, on a turn that merely failed for an unrelated reason —
         // is a false "service disruption" wall. The error text is the only
         // trustworthy signal that the provider actually rejected the call.
+        //
+        // 1M-context usage-credits gate (Rafael 2026-06-24): offer the
+        // on-demand "Disable 1M context and continue" action instead of a dead
+        // generic-retry bubble — the only recoverable path for a credit-less
+        // account is dropping the context-1m beta on a re-spawn.
+        if (shouldOfferOneMRecovery({ detail, recentStderr: recentStderr.join('\n'), finalText: '' })) {
+          await oneMRecovery.offer(cmd.id, blocks);
+          return;
+        }
         const bubble = failureBubble({
           detail,
           recentStderr: recentStderr.join('\n'),
@@ -1584,6 +1658,11 @@ async function handleCommand(
       return;
     }
     case 'select_option': {
+      // On-demand 1M-context recovery: if THIS select is the
+      // "Disable 1M context and continue" action we offered after a 1M-credits
+      // 429, handle it locally (disable + re-spawn + re-run the failed prompt)
+      // — never route it into the agent's resolveSelection.
+      if (await oneMRecovery.tryRecover(cmd.id)) return;
       // Event-driven answer arrival — the user tapped an option on
       // mobile's awaiting-answer sheet or select_prompt block, and
       // the backend pushed the command via the CLI's SSE relay.
