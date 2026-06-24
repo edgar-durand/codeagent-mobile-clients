@@ -63,6 +63,7 @@ import { FileWatcherService } from '../../services/file-watcher.service';
 import { TurnFileAggregator } from '../../services/turn-files/turn-file-aggregator';
 import { beadsActionFromPayload } from '../../beads/wiring';
 import { handleBeadsActionCommand, type StartedBeads } from '../../beads';
+import { withTimeout } from './withTimeout';
 
 /**
  * Per-turn accumulator that bridges ACP's delta-shaped notifications
@@ -926,16 +927,28 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
         // dead-but-present refresh token). Best-effort — never blocks exit.
         void reportCredentialInvalid(opts);
       }
-      void streaming.closeAll().then(() =>
-        publisher.publishOutput({
-          type: 'text',
-          content: authFail
-            ? AUTH_FAILURE_MESSAGE
-            : `Agent adapter exited unexpectedly (code=${code ?? 'null'} signal=${signal ?? 'null'}).`,
-          done: true,
-        }),
-      );
-      process.exit(1);
+      // Flush the terminal frame BEFORE exiting. The old code chained
+      // the error POST off closeAll().then(...) and called
+      // process.exit(1) synchronously, so the frame almost never made
+      // it onto the wire — mobile then sat on "Thinking…" forever.
+      // Await it under a 5 s deadline so a wedged socket can't hang
+      // teardown. (Task 1 makes these POSTs survive a stale token.)
+      void (async () => {
+        await withTimeout(
+          (async () => {
+            await streaming.closeAll();
+            await publisher.publishOutput({
+              type: 'text',
+              content: authFail
+                ? AUTH_FAILURE_MESSAGE
+                : `Agent adapter exited unexpectedly (code=${code ?? 'null'} signal=${signal ?? 'null'}).`,
+              done: true,
+            });
+          })(),
+          5_000,
+        );
+        process.exit(1);
+      })();
     },
   });
 
