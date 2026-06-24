@@ -87,10 +87,28 @@ const claudeProvisioner: AgentProvisioner = {
       // Claude reads the raw key from ANTHROPIC_API_KEY. No file.
       return { ANTHROPIC_API_KEY: auth.value };
     }
-    // oauth_token → the value is the FULL contents of
-    // ~/.claude/.credentials.json (the JSON the local link flow
-    // captured), written verbatim. Mirrors the backend snippet.
-    writeFile0600(path.join(home, '.claude', '.credentials.json'), auth.value);
+    // oauth_token comes in two shapes depending on the link flow:
+    //
+    //   1. Bare setup-token  (e.g. `sk-ant-oat01-…`): produced by
+    //      `codeam link claude`. This is NOT JSON — writing it verbatim
+    //      to `.credentials.json` creates a malformed file that makes
+    //      Claude return 401. The live-verified fix is to pass it as the
+    //      CLAUDE_CODE_OAUTH_TOKEN env var instead, which Claude reads
+    //      before checking the file (env var takes precedence).
+    //
+    //   2. JSON blob  (value starts with `{`): the full contents of
+    //      `~/.claude/.credentials.json` captured by the interactive-
+    //      login flow. Keep the existing behaviour — write verbatim.
+    const value = auth.value.trim();
+    const isJsonBlob = value.startsWith('{');
+
+    if (isJsonBlob) {
+      // Interactive-login JSON blob → write to disk, nothing in env.
+      writeFile0600(path.join(home, '.claude', '.credentials.json'), value);
+    }
+    // else: bare setup-token → do NOT write .credentials.json (would be
+    // malformed JSON → 401). Return via env var below.
+
     // Minimal onboarding-skip state file so the agent doesn't drop into
     // first-run UX. The richer (real ~/.claude.json) variant is only
     // available when the link flow captured it; the deploy command does
@@ -103,7 +121,8 @@ const claudeProvisioner: AgentProvisioner = {
         JSON.stringify({ hasCompletedOnboarding: true, customApiKeyResponses: { approved: [] } }),
       );
     }
-    return {};
+
+    return isJsonBlob ? {} : { CLAUDE_CODE_OAUTH_TOKEN: value };
   },
 };
 
