@@ -7,6 +7,7 @@ vi.mock('../src/services/pairing.service', () => ({
 }));
 
 import { CommandRelayService } from '../src/services/command-relay.service';
+import * as gitBranch from '../src/lib/git-branch';
 import { AGENT_REGISTRY } from '@codeagent/shared';
 
 // Tests historically constructed CommandRelayService with 2 args; as
@@ -31,6 +32,44 @@ describe('CommandRelayService', () => {
     expect(pairing._postJson).toHaveBeenCalledWith(
       expect.stringContaining('/api/plugin/heartbeat'),
       expect.objectContaining({ pluginId: 'plugin-1', online: true }),
+    );
+    relay.stop();
+  });
+
+  it('heartbeat stays turn-independent: syncs git ONCE at start, refreshes async on recurring ticks', async () => {
+    // The 20 s beat must stay punctual even while a long agent tool
+    // call hammers the event loop. A synchronous `git` spawn on the
+    // recurring tick would couple the beat to git latency — so the
+    // sync seam may fire only at start(), and every later refresh goes
+    // through the non-blocking async seam. Regression for the
+    // "LAST PING —" hang.
+    const syncSeam = vi
+      .spyOn(gitBranch._execSeam, 'exec')
+      .mockReturnValue('main\n');
+    const asyncSeam = vi
+      .spyOn(gitBranch._execSeamAsync, 'exec')
+      .mockResolvedValue('feature/x\n');
+
+    const relay = new CommandRelayService('plugin-hb', vi.fn(), META);
+    relay.start();
+    await vi.advanceTimersByTimeAsync(10); // initial (sync-seeded) beat
+    const syncCallsAfterStart = syncSeam.mock.calls.length;
+    expect(syncCallsAfterStart).toBeGreaterThanOrEqual(1); // seeded once
+    expect(pairing._postJson).toHaveBeenCalledWith(
+      expect.stringContaining('/api/plugin/heartbeat'),
+      expect.objectContaining({ branch: 'main' }), // first beat = sync seed
+    );
+
+    await vi.advanceTimersByTimeAsync(20_000 * 3 + 100); // 3 recurring ticks
+
+    // The sync seam is NEVER called again on the recurring hot path.
+    expect(syncSeam.mock.calls.length).toBe(syncCallsAfterStart);
+    // The async refresh drives the recurring branch updates instead.
+    expect(asyncSeam).toHaveBeenCalled();
+    // And the refreshed branch propagates onto a later heartbeat.
+    expect(pairing._postJson).toHaveBeenCalledWith(
+      expect.stringContaining('/api/plugin/heartbeat'),
+      expect.objectContaining({ branch: 'feature/x' }),
     );
     relay.stop();
   });

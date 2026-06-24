@@ -54,3 +54,34 @@ describe('detectCurrentBranch', () => {
     expect(gitBranch.detectCurrentBranch()).toBe('develop');
   });
 });
+
+describe('detectCurrentBranchAsync — non-blocking branch detection', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('returns the trimmed branch name on a normal branch', async () => {
+    vi.spyOn(gitBranch._execSeamAsync, 'exec').mockResolvedValue('feat/headroom\n');
+    await expect(gitBranch.detectCurrentBranchAsync()).resolves.toBe('feat/headroom');
+  });
+
+  it('returns null on detached HEAD (empty stdout)', async () => {
+    vi.spyOn(gitBranch._execSeamAsync, 'exec').mockResolvedValue('\n');
+    await expect(gitBranch.detectCurrentBranchAsync()).resolves.toBeNull();
+  });
+
+  it('returns null (never rejects) when git fails / is unavailable', async () => {
+    vi.spyOn(gitBranch._execSeamAsync, 'exec').mockRejectedValue(new Error('spawn git ENOENT'));
+    await expect(gitBranch.detectCurrentBranchAsync()).resolves.toBeNull();
+  });
+
+  it('uses the provided cwd and the fixed argv', async () => {
+    const spy = vi.spyOn(gitBranch._execSeamAsync, 'exec').mockResolvedValue('main\n');
+    await gitBranch.detectCurrentBranchAsync('/some/other/dir');
+    expect(spy).toHaveBeenCalledTimes(1);
+    const [file, args, opts] = spy.mock.calls[0];
+    expect(file).toBe('git');
+    expect(args).toEqual(['branch', '--show-current']);
+    expect((opts as { cwd?: string }).cwd).toBe('/some/other/dir');
+  });
+});

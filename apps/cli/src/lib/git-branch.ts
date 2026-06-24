@@ -1,4 +1,9 @@
-import { execFileSync, type ExecFileSyncOptions } from 'child_process';
+import {
+  execFile,
+  execFileSync,
+  type ExecFileOptions,
+  type ExecFileSyncOptions,
+} from 'child_process';
 
 /**
  * Detect the current git branch of `cwd`. Returns the branch name on
@@ -65,3 +70,46 @@ export const _execSeam = {
     return typeof out === 'string' ? out : out.toString('utf8');
   },
 };
+
+/**
+ * Async sibling of {@link _execSeam.exec}, backed by the non-blocking
+ * `execFile`. The recurring 20 s heartbeat refreshes the branch
+ * through this seam so a slow `git` (a repo holding `index.lock`
+ * during a long agent tool call, a network filesystem) can NEVER
+ * stall the event loop and delay the heartbeat — the heartbeat must
+ * stay punctual INDEPENDENTLY of whatever turn is in flight. Tests
+ * stub `_execSeamAsync.exec` the same way they stub the sync seam.
+ */
+export const _execSeamAsync = {
+  exec: (file: string, args: readonly string[], opts: ExecFileOptions): Promise<string> =>
+    new Promise((resolve, reject) => {
+      execFile(file, args, opts, (err, stdout) => {
+        if (err) reject(err);
+        else resolve(typeof stdout === 'string' ? stdout : stdout.toString('utf8'));
+      });
+    }),
+};
+
+/**
+ * Non-blocking variant of {@link detectCurrentBranch}. Same contract
+ * (branch name, or `null` for detached HEAD / non-repo / failure) but
+ * spawns `git` asynchronously so the caller's event loop is never
+ * blocked. Used by the heartbeat's off-hot-path branch refresh.
+ */
+export async function detectCurrentBranchAsync(
+  cwd: string = process.cwd(),
+): Promise<string | null> {
+  try {
+    const raw = await _execSeamAsync.exec('git', ['branch', '--show-current'], {
+      cwd,
+      timeout: 1000,
+      encoding: 'utf8',
+      windowsHide: true,
+    });
+    const trimmed = raw.trim();
+    return trimmed.length > 0 ? trimmed : null;
+  } catch {
+    // Not a git repo, git missing, timeout, or any other failure.
+    return null;
+  }
+}

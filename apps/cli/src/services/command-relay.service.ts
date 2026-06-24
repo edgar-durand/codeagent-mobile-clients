@@ -6,7 +6,7 @@ import { _postJson, _getJson } from './pairing.service';
 import { loadCliConfig } from '../config';
 import { vercelBypassHeader } from '../lib/backend-headers';
 import { computePollDelay } from '../lib/poll-delay';
-import { detectCurrentBranch } from '../lib/git-branch';
+import { detectCurrentBranch, detectCurrentBranchAsync } from '../lib/git-branch';
 import { log } from './logger';
 import { capture } from './telemetry.service';
 
@@ -72,6 +72,20 @@ export class CommandRelayService {
    */
   private sseWatchdog: NodeJS.Timeout | null = null;
   private sseLastByteAt = 0;
+  /**
+   * Last-known git branch, shipped on every heartbeat. Seeded with a
+   * single SYNCHRONOUS read at `start()` (before any turn is running)
+   * for an accurate first beat, then refreshed ASYNCHRONOUSLY off the
+   * recurring heartbeat tick. The heartbeat POST reads this cached
+   * value and never spawns `git` synchronously — so the 20 s beat
+   * stays punctual even while a long agent tool call is hammering the
+   * event loop. Trade-off: because the async refresh fires alongside
+   * the POST (not before it), a `git checkout` propagates on the NEXT
+   * beat — up to ~40 s worst case vs the old at-POST-time read. The
+   * backend dedupes a stable branch, so this lag costs nothing but
+   * freshness, and a punctual heartbeat matters far more.
+   */
+  private cachedBranch: string | null = null;
 
   constructor(
     private readonly pluginId: string,
@@ -114,8 +128,19 @@ export class CommandRelayService {
     this._running = true;
     this.agentsRegistered = false;
     log.info('relay', `start pluginId=${this.pluginId.slice(0, 8)} agent=${this.agentMeta.id}`);
+    // Seed the branch synchronously ONCE here — `start()` runs before
+    // any agent turn, so the one-time blocking read is harmless and
+    // gives the first heartbeat an accurate branch. Every subsequent
+    // refresh is async (see `refreshBranch`), keeping the recurring
+    // beat off the synchronous-git path.
+    this.cachedBranch = detectCurrentBranch();
     this.sendHeartbeat(true);
-    this.heartbeatTimer = setInterval(() => this.sendHeartbeat(true), 20_000);
+    this.heartbeatTimer = setInterval(() => {
+      // Refresh the branch off the hot path, then beat with the cached
+      // value. The async refresh can never delay this tick's POST.
+      void this.refreshBranch();
+      this.sendHeartbeat(true);
+    }, 20_000);
     this.agentsTimer = setInterval(() => {
       if (this._running && !this.agentsRegistered) this.reportAgents();
     }, 5_000);
@@ -420,10 +445,24 @@ export class CommandRelayService {
       pluginId: this.pluginId,
       online,
       agentId: this.agentMeta.id,
-      branch: detectCurrentBranch(),
+      branch: this.cachedBranch,
     })
       .then(() => log.trace('relay', `heartbeat ok online=${online}`))
       .catch((err: unknown) => log.trace('relay', `heartbeat failed online=${online}`, err));
+  }
+
+  /**
+   * Refresh {@link cachedBranch} without blocking the event loop.
+   * Fire-and-forget from the heartbeat tick; failures leave the last
+   * known value in place (the backend dedupes a stable branch).
+   */
+  private async refreshBranch(): Promise<void> {
+    try {
+      this.cachedBranch = await detectCurrentBranchAsync();
+    } catch {
+      // detectCurrentBranchAsync never rejects, but guard anyway —
+      // keep the previous cached value on any unexpected failure.
+    }
   }
 
   private reportAgents(): void {
