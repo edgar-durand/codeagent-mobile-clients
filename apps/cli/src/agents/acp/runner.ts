@@ -1116,6 +1116,11 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
         currentIndex: 0,
         done: true,
       }),
+    // The button driver — mobile renders the tappable option from this
+    // awaiting-answer event; the user's tap returns as a `select_option`
+    // command, caught at the top of the select_option case by tryRecover.
+    publishAwaitingAnswer: (prompt, options) =>
+      publisher.publishAwaitingAnswer({ questionId: randomUUID(), prompt, options }),
     sendResult: (commandId, status, result) => relay.sendResult(commandId, status, result),
     appendAgentReply: (text) => history.appendAgentReply(text),
     flushHistory: () => void history.flush(),

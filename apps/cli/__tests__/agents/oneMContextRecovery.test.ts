@@ -39,12 +39,17 @@ import { vi } from 'vitest';
 import { createOneMRecovery } from '../../src/agents/acp/oneMContextRecovery';
 
 function makeDeps(overrides: Partial<Record<string, unknown>> = {}) {
-  const calls: { selectPrompt: string[][]; texts: string[]; results: Array<[string, string]> } = {
-    selectPrompt: [], texts: [], results: [],
+  const calls: { selectPrompt: string[][]; awaiting: string[][]; texts: string[]; results: Array<[string, string]> } = {
+    selectPrompt: [], awaiting: [], texts: [], results: [],
   };
   const deps = {
     publishText: vi.fn(async (t: string) => { calls.texts.push(t); }),
     publishSelectPrompt: vi.fn(async (_q: string, options: string[]) => { calls.selectPrompt.push(options); }),
+    // The button-driver: mobile renders the tappable option from the
+    // awaiting-answer event (the select_prompt CHUNK is dropped on
+    // SessionDetail). Capturing this is the regression — the original offer
+    // never called it, so Rafael saw text with no button (2026-06-24).
+    publishAwaitingAnswer: vi.fn(async (_prompt: string, options: string[]) => { calls.awaiting.push(options); }),
     sendResult: vi.fn(async (_id: string, status: string) => { calls.results.push([_id, status]); }),
     appendAgentReply: vi.fn(),
     flushHistory: vi.fn(),
@@ -65,11 +70,14 @@ function makeDeps(overrides: Partial<Record<string, unknown>> = {}) {
 describe('createOneMRecovery', () => {
   const BLOCKS = [{ type: 'text', text: 'Hola' }];
 
-  it('offer publishes the disable action + ends the turn failed + stashes the prompt', async () => {
+  it('offer surfaces a TAPPABLE awaiting-answer (the button driver), not just text', async () => {
     const { deps, calls } = makeDeps();
     const rec = createOneMRecovery(deps as never);
     await rec.offer('cmd-1', BLOCKS);
-    expect(calls.selectPrompt).toEqual([[ONE_M_DISABLE_OPTION]]);
+    // REGRESSION: the button comes from the awaiting-answer event — mobile
+    // drops the select_prompt chunk on SessionDetail. The original offer
+    // skipped this, so the user saw text with no tappable option.
+    expect(calls.awaiting).toEqual([[ONE_M_DISABLE_OPTION]]);
     expect(deps.appendAgentReply).toHaveBeenCalled();
     expect(calls.results).toEqual([['cmd-1', 'failed']]);
   });

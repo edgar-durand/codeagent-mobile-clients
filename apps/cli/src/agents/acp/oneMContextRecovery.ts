@@ -80,6 +80,12 @@ export function oneMRecoverySelectPrompt(): { question: string; options: string[
 export interface OneMRecoveryDeps<B> {
   publishText: (text: string) => Promise<void>;
   publishSelectPrompt: (question: string, options: string[]) => Promise<void>;
+  /** Surface the prompt as a TAPPABLE awaiting-answer. This is what actually
+   *  renders the option button on mobile — the SessionDetail surface drops
+   *  the select_prompt CHUNK and builds its tappable `pendingQuestion` from
+   *  the awaiting-answer event. The user's tap returns as a `select_option`
+   *  command that the runner routes back into `tryRecover`. */
+  publishAwaitingAnswer: (prompt: string, options: string[]) => Promise<void>;
   sendResult: (commandId: string, status: 'completed' | 'failed', result: Record<string, unknown>) => Promise<void>;
   appendAgentReply: (text: string) => void;
   flushHistory: () => void;
@@ -114,10 +120,14 @@ export function createOneMRecovery<B>(deps: OneMRecoveryDeps<B>): OneMRecovery<B
   return {
     offer: async (commandId, blocks) => {
       pending = { blocks };
-      // The select_prompt chunk alone makes mobile render the button + send
-      // back select_option — no awaiting-answer sheet needed.
+      // The visible bubble (context) ...
       await deps.publishText(sp.question);
+      // ... the select_prompt chunk (legacy chat surface) ...
       await deps.publishSelectPrompt(sp.question, sp.options);
+      // ... and the awaiting-answer event — THE button driver on SessionDetail
+      // (it drops the select_prompt chunk and renders `pendingQuestion` from
+      // this). Omitting it was the bug: text showed, but no tappable option.
+      await deps.publishAwaitingAnswer(sp.question, sp.options);
       deps.appendAgentReply(sp.question);
       deps.flushHistory();
       deps.log?.(`1M-context credits gate — recovery offered id=${commandId.slice(0, 8)}`);
