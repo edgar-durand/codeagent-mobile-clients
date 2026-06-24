@@ -156,6 +156,18 @@ JetBrains plugin is Kotlin and does **not** consume the shared package — if th
 
 **Critical: parallel-Claude JSONL detection.** `apps/cli/src/services/history.service.ts` captures a `bootTimeMs` at construction and `detectCurrentConversation()` / `getCurrentUsage()` filter `~/.claude/projects/<cwd>/*.jsonl` entries by `birthtime >= bootTimeMs - 5 s grace`. Without this filter, if the user runs `codeam pair` in a directory where another Claude session is already chatting (common when developing this project itself), the actively-written JSONL of the parallel session wins the mtime sort and the CLI publishes the wrong conversation to the mobile app — bug fixed in `v2.10.8`. Similarly, `tryExtractSessionId` (in `OutputService`) only matches the unambiguous `Resuming session: <uuid>` pattern; the older broader `/Session:|/Conversation:` patterns matched incidental log lines and were dropped in the same fix.
 
+### Agent-failure messaging — every failed turn ends with a HONEST, visible frame
+
+`apps/cli/src/agents/acp/runner.ts` owns the contract that a turn NEVER ends silently or with a misleading status. Rules (each backed by `__tests__/agents/acp.failureBubble.test.ts`):
+
+- **`failureBubble` is the SOLE arbiter of the failure bubble**, keyed on the agent's OWN error (`detail` / `recentStderr`): auth → re-auth bubble; `looksLikeProviderOutage` → outage bubble; non-auth/non-outage with no streamed text → generic retry; partial text already streamed → `null`.
+- **The provider-outage bubble fires ONLY from the agent's error — NEVER from polling the provider status page.** A status-page incident can be live while the user's local agent is perfectly fine (partial/regional degradation, or a stale/unrelated advisory like a model suspension). The old `checkProviderStatus` status-page catch-all was removed for exactly this false-positive (`v2.42.0`). The status page is informational only — it's the link *inside* the bubble, not a trigger.
+- **Auth notices that arrive as a COMPLETED-turn reply** (Claude prints `Not logged in · Please run /login` as plain text and ends cleanly — no throw, no exit) are caught by `replyIsAuthFailure` (length-guarded ≤200 chars so a reply that merely *discusses* login isn't misclassified) → swapped for the re-auth bubble + `reportCredentialInvalid`.
+
+### Heartbeat must stay punctual — no synchronous work on the 20 s tick
+
+`command-relay.service.ts`'s heartbeat is a `setInterval(20s)` in the SAME event loop as the ACP turn. It must do ZERO synchronous I/O: the git branch is seeded once at `start()` then refreshed via the async `detectCurrentBranchAsync` off the hot path (`v2.42.0`). A synchronous `execFileSync` on the tick couples the beat to git latency during a turn and can starve it (the "LAST PING —" stall).
+
 ### VS Code PTY
 
 `apps/vsc-plugin/src/services/claude-pseudoterminal.ts` implements a custom `vscode.Pseudoterminal` backed by a `node-pty`-spawned `claude` process. `apps/vsc-plugin/src/services/terminal-agent.service.ts` waits for the `? for shortcuts` readiness marker before submitting the first prompt — a fixed-delay idle check drops the first prompt during Ink's initial render pause.
