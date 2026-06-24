@@ -18,6 +18,7 @@ A turn must NEVER end silently or with a misleading status. Tests: `__tests__/ag
 - **`failureBubble` is the sole arbiter**, keyed on the agent's OWN error.
 - **The provider-outage bubble fires ONLY from the agent's error — NEVER from polling the status page.** A status-page incident can be live while the user's local agent is fine. The `checkProviderStatus` status-page catch-all was removed in `v2.42.0` for that false positive. The status page is the link *inside* the bubble, not a trigger.
 - **Auth notice as a completed-turn reply** (`Not logged in · Please run /login` printed as plain text, turn ends cleanly) → caught by `replyIsAuthFailure` (≤200-char guard) → re-auth bubble + `reportCredentialInvalid`.
+- **1M-context usage-credits gate** (`v2.43.0`): claude Code v2.1.x always sends the `context-1m` beta even on credit-less accounts → 429 "Usage credits required for 1M context" every turn (NOT Headroom — it forwards the beta unchanged). On-demand recovery only: `looksLike1mContextCreditsError` → offer a "Disable 1M context and continue" `select_prompt` → on tap, persist `disable1mContext`, re-spawn the ACP adapter with `CLAUDE_CODE_DISABLE_1M_CONTEXT=1`, re-run the failed prompt. Never disabled for all users.
 
 ## Heartbeat must stay punctual
 

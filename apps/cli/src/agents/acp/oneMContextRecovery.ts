@@ -9,7 +9,18 @@
  * owns the side-effecting re-spawn + persistence.
  */
 
-import { looksLike1mContextCreditsError } from './runner';
+/**
+ * Detects Anthropic's "Usage credits required for 1M context" gate. claude
+ * Code v2.1.x sends the `context-1m` beta even when the account has
+ * `s1mAccessCache.hasAccess=false`; an account without usage credits then
+ * gets a 429 with this body. Lives here (not in runner.ts) so this module has
+ * NO import back into the heavy runner graph — runner re-exports it.
+ */
+const ONE_M_CONTEXT_CREDITS_RE = /usage credits required for 1m context/i;
+
+export function looksLike1mContextCreditsError(text: string): boolean {
+  return ONE_M_CONTEXT_CREDITS_RE.test(text);
+}
 
 /** The single option label. The runner maps `select_option {index:0}` to it. */
 export const ONE_M_DISABLE_OPTION = 'Disable 1M context and continue';
