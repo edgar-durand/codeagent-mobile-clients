@@ -4,6 +4,12 @@ All notable changes to `codeam-cli` are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.43.1] — 2026-06-24
+
+### Fixed
+
+- **cli:** 1M-context recovery must publish an awaiting-answer (the tappable button), not just a select_prompt chunk
+
 ## [2.43.0] — 2026-06-24
 
 ### Added
