@@ -14,6 +14,9 @@
  */
 const MAX_PROMPT_CHARS = 200;
 
+/** Cap for the echoed agent reply line in `codeam pair`. */
+const MAX_AGENT_REPLY_CHARS = 280;
+
 export interface PromptEchoPayload {
   prompt?: string;
   files?: Array<{ filename: string; base64?: string; mimeType?: string }>;
@@ -40,4 +43,22 @@ export function formatPromptEchoLine(payload: PromptEchoPayload): string {
     parts.push(`+ ${imageCount} image${imageCount === 1 ? '' : 's'}`);
   }
   return `› ${parts.join(' ')}`;
+}
+
+/**
+ * Format the agent's reply for the `codeam pair` terminal — the
+ * OUTBOUND counterpart to {@link formatPromptEchoLine}. Gives the
+ * operator the full thread (inbound `› Mobile: …` + outbound
+ * `‹ Agent: …`) and surfaces, at a glance, whether the agent actually
+ * produced a reply for the turn. Returns '' for an empty reply so the
+ * caller prints nothing.
+ */
+export function formatAgentReplyLine(text: string): string {
+  const collapsed = (text ?? '').replace(/\s+/g, ' ').trim();
+  if (collapsed.length === 0) return '';
+  const truncated =
+    collapsed.length > MAX_AGENT_REPLY_CHARS
+      ? collapsed.slice(0, MAX_AGENT_REPLY_CHARS) + '…'
+      : collapsed;
+  return `‹ Agent: ${truncated}`;
 }

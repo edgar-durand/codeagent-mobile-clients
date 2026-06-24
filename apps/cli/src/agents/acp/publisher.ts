@@ -36,19 +36,52 @@ export interface AcpPublisherOptions {
   pluginAuthToken: string;
   /** Override the API base URL (defaults to env / prod). Used by tests. */
   apiBaseUrl?: string;
+  /**
+   * Fetch a fresh `X-Plugin-Auth-Token`. Called when an authed POST
+   * comes back 401/403 — the baked-in token went stale because the
+   * backend's JWT_SECRET rotated (a deploy) or the session re-paired.
+   * Returns null when no fresh token can be obtained (offline / not
+   * paired), in which case the POST is NOT retried.
+   */
+  refreshAuthToken?: () => Promise<string | null>;
 }
 
 export class AcpPublisher {
   private readonly apiBase: string;
-  private readonly headers: Record<string, string>;
+  private token: string;
 
   constructor(private readonly opts: AcpPublisherOptions) {
     this.apiBase = opts.apiBaseUrl ?? resolveApiBaseUrl();
-    this.headers = {
+    this.token = opts.pluginAuthToken;
+  }
+
+  private authHeaders(): Record<string, string> {
+    return {
       'Content-Type': 'application/json',
       'X-Codeam-Protocol-Version': '2.0.0',
-      'X-Plugin-Auth-Token': opts.pluginAuthToken,
+      'X-Plugin-Auth-Token': this.token,
     };
+  }
+
+  /**
+   * POST with the current plugin-auth token. On a 401/403 the token is
+   * stale (JWT_SECRET rotated on deploy, or the session re-paired);
+   * refresh it via the injected callback and retry ONCE. Any other
+   * status (or a refresh that yields no token) returns the first
+   * response unchanged — callers log non-2xx but never throw.
+   */
+  private async postWithReauth(
+    url: string,
+    payload: string,
+  ): Promise<{ statusCode: number; body: string }> {
+    const first = await _transport.post(url, this.authHeaders(), payload);
+    if (first.statusCode !== 401 && first.statusCode !== 403) return first;
+    if (!this.opts.refreshAuthToken) return first;
+    const fresh = await this.opts.refreshAuthToken();
+    if (!fresh) return first;
+    this.token = fresh;
+    log.info('acpPublisher', `plugin-auth token refreshed after ${first.statusCode}; retrying POST`);
+    return _transport.post(url, this.authHeaders(), payload);
   }
 
   /**
@@ -82,16 +115,11 @@ export class AcpPublisher {
   async publishOutput(body: Record<string, unknown>): Promise<void> {
     const url = `${this.apiBase}/api/commands/output`;
     try {
-      const { statusCode, body: resBody } = await _transport.post(
-        url,
-        this.headers,
-        this.envelope(body),
-      );
+      const { statusCode, body: resBody } = await this.postWithReauth(url, this.envelope(body));
       if (statusCode < 200 || statusCode >= 300) {
-        const tok = this.opts.pluginAuthToken;
         log.warn(
           'acpPublisher',
-          `output type=${String(body.type)} done=${body.done === true} status=${statusCode} body=${resBody.slice(0, 200)} | sentSessionId=${this.opts.sessionId} sentPluginId=${this.opts.pluginId} tokenLen=${tok.length} tokenHead=${tok.slice(0, 12)} tokenTail=${tok.slice(-8)}`,
+          `output type=${String(body.type)} done=${body.done === true} status=${statusCode} body=${resBody.slice(0, 200)} | sentSessionId=${this.opts.sessionId} sentPluginId=${this.opts.pluginId} tokenLen=${this.token.length} tokenHead=${this.token.slice(0, 12)} tokenTail=${this.token.slice(-8)}`,
         );
       }
     } catch (err) {
@@ -111,9 +139,8 @@ export class AcpPublisher {
   async publishAwaitingAnswer(event: AwaitingAnswerEvent): Promise<void> {
     const url = `${this.apiBase}/api/sessions/${encodeURIComponent(this.opts.sessionId)}/awaiting-answer`;
     try {
-      const { statusCode, body } = await _transport.post(
+      const { statusCode, body } = await this.postWithReauth(
         url,
-        this.headers,
         this.envelope(event as unknown as Record<string, unknown>),
       );
       if (statusCode < 200 || statusCode >= 300) {
@@ -146,9 +173,8 @@ export class AcpPublisher {
   async publishStreamingChunk(event: StreamingChunkEvent): Promise<void> {
     const url = `${this.apiBase}/api/sessions/${encodeURIComponent(this.opts.sessionId)}/streaming-chunk`;
     try {
-      const { statusCode, body } = await _transport.post(
+      const { statusCode, body } = await this.postWithReauth(
         url,
-        this.headers,
         this.envelope(event as unknown as Record<string, unknown>),
       );
       if (statusCode < 200 || statusCode >= 300) {
@@ -187,7 +213,7 @@ export class AcpPublisher {
       sessions: args.sessions,
     });
     try {
-      const { statusCode, body: resBody } = await _transport.post(url, this.headers, body);
+      const { statusCode, body: resBody } = await this.postWithReauth(url, body);
       if (statusCode < 200 || statusCode >= 300) {
         log.warn(
           'acpPublisher',
@@ -227,7 +253,7 @@ export class AcpPublisher {
       mode: 'replace',
     });
     try {
-      const { statusCode, body: resBody } = await _transport.post(url, this.headers, body);
+      const { statusCode, body: resBody } = await this.postWithReauth(url, body);
       if (statusCode < 200 || statusCode >= 300) {
         log.warn(
           'acpPublisher',

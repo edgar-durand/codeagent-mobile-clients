@@ -29,7 +29,7 @@
 
 import { randomUUID } from 'node:crypto';
 import { CommandRelayService, type RemoteCommand } from '../../services/command-relay.service';
-import { _postJsonAuthed } from '../../services/pairing.service';
+import { _postJsonAuthed, fetchCurrentPluginAuthToken } from '../../services/pairing.service';
 import { resolveApiBaseUrl } from '@codeagent/shared';
 import { log } from '../../services/logger';
 import { HistoryService } from '../../services/history.service';
@@ -44,7 +44,7 @@ import { AcpPublisher } from './publisher';
 import { buildAcpPromptBlocks } from './buildAcpPromptBlocks';
 import { reconcileCumulative } from './reconcileDelta';
 import { maybeSendOnboardingWelcome } from './onboarding';
-import { formatPromptEchoLine } from './promptEcho';
+import { formatPromptEchoLine, formatAgentReplyLine } from './promptEcho';
 import {
   registerTerminalHandlers,
   closeAllTerminals,
@@ -63,6 +63,7 @@ import { FileWatcherService } from '../../services/file-watcher.service';
 import { TurnFileAggregator } from '../../services/turn-files/turn-file-aggregator';
 import { beadsActionFromPayload } from '../../beads/wiring';
 import { handleBeadsActionCommand, type StartedBeads } from '../../beads';
+import { withTimeout } from './withTimeout';
 
 /**
  * Per-turn accumulator that bridges ACP's delta-shaped notifications
@@ -528,6 +529,8 @@ export interface AcpRunnerOptions {
    * agent-agnostic equivalent of `claude --dangerously-skip-permissions`.
    */
   autoApprovePermissions?: boolean;
+  /** Replayed raw to the gated /api/pairing/reconnect for token refresh. */
+  pollSecret?: string;
 }
 
 /** Auto-cancel a permission Promise after this ms. Matches the
@@ -789,6 +792,8 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
     sessionId: opts.sessionId,
     pluginId: opts.pluginId,
     pluginAuthToken: opts.pluginAuthToken,
+    refreshAuthToken: () =>
+      fetchCurrentPluginAuthToken(opts.sessionId, opts.pluginId, opts.pollSecret),
   });
   const streaming = new StreamingState(publisher);
   // Small ring of recent adapter stderr lines so a turn that fails on an auth
@@ -922,16 +927,28 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
         // dead-but-present refresh token). Best-effort — never blocks exit.
         void reportCredentialInvalid(opts);
       }
-      void streaming.closeAll().then(() =>
-        publisher.publishOutput({
-          type: 'text',
-          content: authFail
-            ? AUTH_FAILURE_MESSAGE
-            : `Agent adapter exited unexpectedly (code=${code ?? 'null'} signal=${signal ?? 'null'}).`,
-          done: true,
-        }),
-      );
-      process.exit(1);
+      // Flush the terminal frame BEFORE exiting. The old code chained
+      // the error POST off closeAll().then(...) and called
+      // process.exit(1) synchronously, so the frame almost never made
+      // it onto the wire — mobile then sat on "Thinking…" forever.
+      // Await it under a 5 s deadline so a wedged socket can't hang
+      // teardown. (Task 1 makes these POSTs survive a stale token.)
+      void (async () => {
+        await withTimeout(
+          (async () => {
+            await streaming.closeAll();
+            await publisher.publishOutput({
+              type: 'text',
+              content: authFail
+                ? AUTH_FAILURE_MESSAGE
+                : `Agent adapter exited unexpectedly (code=${code ?? 'null'} signal=${signal ?? 'null'}).`,
+              done: true,
+            });
+          })(),
+          5_000,
+        );
+        process.exit(1);
+      })();
     },
   });
 
@@ -1244,6 +1261,10 @@ async function handleCommand(
         // for "¿continuar? 1. sí 2. no").
         const finalText = streaming.getCurrentText();
         await streaming.closeTurnWithInteractiveDetection();
+        const replyLine = formatAgentReplyLine(finalText);
+        if (replyLine.length > 0) {
+          showInfo(replyLine);
+        }
         history.appendAgentReply(finalText);
         void history.flush();
         // End-of-turn file changeset — agent likely edited files
