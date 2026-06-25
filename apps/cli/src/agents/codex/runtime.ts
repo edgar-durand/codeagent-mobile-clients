@@ -82,6 +82,10 @@ export class CodexRuntimeStrategy implements RuntimeStrategy {
     return history.parseHistoryFile(filePath);
   }
 
+  resolveHistoryFile(cwd: string, sessionId: string): string | null {
+    return history.resolveHistoryFile(cwd, sessionId);
+  }
+
   getCurrentUsage(historyDir: string) {
     return history.getCurrentUsage(historyDir);
   }

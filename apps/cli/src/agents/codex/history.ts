@@ -279,6 +279,82 @@ export function listResumableSessions(
 }
 
 /**
+ * Resolve the rollout file for a given Codex session id, or null.
+ *
+ * `HistoryService` keys a conversation by its session id (Codex's
+ * `session_meta.id`), but Codex names the file `rollout-<ts>-<uuid>.jsonl`
+ * and stores the id INSIDE — so the Claude `<dir>/<id>.jsonl` layout can't
+ * find it (the resume-shows-nothing bug). Walk the same 7-day window
+ * {@link listResumableSessions} uses and return the first rollout whose
+ * `session_meta.id` matches AND whose `session_meta.cwd` matches the
+ * current project, so a same-id collision across projects can't leak.
+ */
+export function resolveHistoryFile(
+  cwd: string,
+  sessionId: string,
+  homeOverride?: string,
+): string | null {
+  const home = homeOverride ?? os.homedir();
+  const sessionsRoot = path.join(home, '.codex', 'sessions');
+  if (!fs.existsSync(sessionsRoot)) return null;
+
+  let resolvedCurrent: string;
+  try {
+    resolvedCurrent = fs.realpathSync(cwd);
+  } catch {
+    resolvedCurrent = path.resolve(cwd);
+  }
+
+  const now = new Date();
+  for (let dayOffset = 0; dayOffset < 7; dayOffset += 1) {
+    const d = new Date(now.getTime() - dayOffset * 24 * 60 * 60 * 1000);
+    const yyyy = String(d.getUTCFullYear());
+    const mm = String(d.getUTCMonth() + 1).padStart(2, '0');
+    const dd = String(d.getUTCDate()).padStart(2, '0');
+    const dayDir = path.join(sessionsRoot, yyyy, mm, dd);
+    if (!fs.existsSync(dayDir)) continue;
+    let dayFiles: fs.Dirent[];
+    try {
+      dayFiles = fs.readdirSync(dayDir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of dayFiles) {
+      if (!entry.isFile()) continue;
+      if (!entry.name.startsWith('rollout-') || !entry.name.endsWith('.jsonl')) continue;
+      const filePath = path.join(dayDir, entry.name);
+      let metaCwd: string | undefined;
+      let metaId: string | undefined;
+      try {
+        const raw = fs.readFileSync(filePath, 'utf8');
+        for (const line of raw.split('\n')) {
+          if (!line.trim()) continue;
+          const rec = parseLine(line);
+          if (!rec) continue;
+          if (rec.type === 'session_meta') {
+            const meta = rec.payload as SessionMetaPayload | undefined;
+            metaCwd = typeof meta?.cwd === 'string' ? meta.cwd : undefined;
+            metaId = typeof meta?.id === 'string' ? meta.id : undefined;
+            break; // session_meta leads the rollout; nothing else to read
+          }
+        }
+      } catch {
+        continue;
+      }
+      if (metaId !== sessionId || !metaCwd) continue;
+      let resolvedMeta: string;
+      try {
+        resolvedMeta = fs.realpathSync(metaCwd);
+      } catch {
+        resolvedMeta = path.resolve(metaCwd);
+      }
+      if (resolvedMeta === resolvedCurrent) return filePath;
+    }
+  }
+  return null;
+}
+
+/**
  * Aggregated token usage for the most recent rollout in the given dir.
  * Returns null if no rollout files or no TokenCount events found.
  */

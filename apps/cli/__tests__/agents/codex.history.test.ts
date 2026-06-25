@@ -2,11 +2,22 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtempSync, writeFileSync, rmSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { realpathSync } from 'node:fs';
 import {
   resolveHistoryDir,
   parseHistoryFile,
   getCurrentUsage,
+  resolveHistoryFile,
 } from '../../src/agents/codex/history';
+
+/** Build today's UTC date-bucket dir under a fake ~/.codex/sessions home. */
+function todayBucket(home: string): string {
+  const now = new Date();
+  const yyyy = String(now.getUTCFullYear());
+  const mm = String(now.getUTCMonth() + 1).padStart(2, '0');
+  const dd = String(now.getUTCDate()).padStart(2, '0');
+  return path.join(home, '.codex', 'sessions', yyyy, mm, dd);
+}
 
 describe('codex/history (rollouts)', () => {
   describe('resolveHistoryDir', () => {
@@ -186,6 +197,76 @@ describe('codex/history (rollouts)', () => {
       const out = parseHistoryFile(filePath);
       expect(out).toHaveLength(1);
       expect(out[0].text).toBe('keep me');
+    });
+  });
+
+  describe('resolveHistoryFile', () => {
+    const dirsToClean: string[] = [];
+    afterEach(() => {
+      while (dirsToClean.length > 0) {
+        const d = dirsToClean.pop()!;
+        try {
+          rmSync(d, { recursive: true, force: true });
+        } catch {
+          /* best-effort */
+        }
+      }
+    });
+
+    function seedRollout(home: string, fileName: string, id: string, cwd: string): string {
+      const bucket = todayBucket(home);
+      mkdirSync(bucket, { recursive: true });
+      const filePath = path.join(bucket, fileName);
+      writeFileSync(
+        filePath,
+        [
+          JSON.stringify({
+            timestamp: '2025-05-07T17:24:21.000Z',
+            type: 'session_meta',
+            payload: { id, cwd, timestamp: '2025-05-07T17:24:21.000Z' },
+          }),
+          JSON.stringify({
+            timestamp: '2025-05-07T17:24:22.000Z',
+            type: 'response_item',
+            payload: { Message: { role: 'user', content: [{ type: 'input_text', text: 'hi' }] } },
+          }),
+        ].join('\n'),
+      );
+      return filePath;
+    }
+
+    it('returns null when ~/.codex/sessions does not exist', () => {
+      const fakeHome = path.join(tmpdir(), 'codex-rhf-none-' + Date.now());
+      expect(resolveHistoryFile('/any/cwd', 'sess1', fakeHome)).toBeNull();
+    });
+
+    it('returns the rollout path whose session_meta.id matches (for this cwd)', () => {
+      const home = mkdtempSync(path.join(tmpdir(), 'codex-rhf-'));
+      const proj = mkdtempSync(path.join(tmpdir(), 'codex-proj-'));
+      dirsToClean.push(home, proj);
+      const expected = seedRollout(home, 'rollout-a.jsonl', 'sess-target', realpathSync(proj));
+
+      expect(resolveHistoryFile(proj, 'sess-target', home)).toBe(expected);
+    });
+
+    it('returns null when no rollout carries the requested id', () => {
+      const home = mkdtempSync(path.join(tmpdir(), 'codex-rhf-'));
+      const proj = mkdtempSync(path.join(tmpdir(), 'codex-proj-'));
+      dirsToClean.push(home, proj);
+      seedRollout(home, 'rollout-a.jsonl', 'sess-other', realpathSync(proj));
+
+      expect(resolveHistoryFile(proj, 'sess-missing', home)).toBeNull();
+    });
+
+    it('does NOT match a same-id rollout from a different project cwd (isolation)', () => {
+      const home = mkdtempSync(path.join(tmpdir(), 'codex-rhf-'));
+      const proj = mkdtempSync(path.join(tmpdir(), 'codex-proj-'));
+      const otherProj = mkdtempSync(path.join(tmpdir(), 'codex-other-'));
+      dirsToClean.push(home, proj, otherProj);
+      // Rollout with the right id but recorded under a DIFFERENT cwd.
+      seedRollout(home, 'rollout-a.jsonl', 'sess-x', realpathSync(otherProj));
+
+      expect(resolveHistoryFile(proj, 'sess-x', home)).toBeNull();
     });
   });
 

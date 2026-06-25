@@ -4,7 +4,12 @@ import * as os from 'os';
 import * as https from 'https';
 import * as http from 'http';
 import { z } from 'zod';
-import { resolveApiBaseUrl, getContextWindow, getPricing } from '@codeagent/shared';
+import {
+  resolveApiBaseUrl,
+  getContextWindow,
+  getPricing,
+  type NormalizedMessage,
+} from '@codeagent/shared';
 import { vercelBypassHeader } from '../lib/backend-headers';
 import { log } from './logger';
 import { encodeCwd } from '../agents/claude/history';
@@ -549,9 +554,63 @@ export class HistoryService {
    * still fails after all attempts so callers skip newTurnResume instead of
    * showing an empty conversation.
    */
+  /**
+   * Resolve the on-disk transcript file for a conversation, agent-aware.
+   *
+   * Claude stores `<projectDir>/<sessionId>.jsonl`. Other agents name the
+   * file differently and key the session id INSIDE it (Codex rollouts), so
+   * when the strategy exposes `resolveHistoryFile` we defer to it. Returns
+   * null when no transcript exists for this session yet.
+   */
+  private resolveConversationFile(sessionId: string): string | null {
+    if (this.runtime.resolveHistoryFile) {
+      return this.runtime.resolveHistoryFile(this.cwd, sessionId);
+    }
+    return path.join(this.projectDir, `${sessionId}.jsonl`);
+  }
+
+  /**
+   * Parse a conversation's messages from disk, agent-aware. Claude uses the
+   * service's own JSONL parser (unchanged); agents with a custom on-disk
+   * layout parse via their strategy's {@link RuntimeStrategy.parseHistoryFile}
+   * (e.g. Codex rollouts), mapping the shared NormalizedMessage shape onto our
+   * wire shape and dropping `system` rows (the conversation view renders only
+   * user/agent). Returns [] when the file is missing/unreadable — same
+   * convention as parseJsonl.
+   */
+  private readConversation(sessionId: string): ClaudeHistoryMessage[] {
+    if (this.runtime.resolveHistoryFile) {
+      const filePath = this.runtime.resolveHistoryFile(this.cwd, sessionId);
+      if (!filePath) return [];
+      let parsed: NormalizedMessage[];
+      try {
+        parsed = this.runtime.parseHistoryFile(filePath);
+      } catch (err) {
+        log.warn('history:readConversation', `parseHistoryFile failed for ${filePath}`, err);
+        return [];
+      }
+      return parsed
+        .filter(
+          (m): m is NormalizedMessage & { role: 'user' | 'agent' } =>
+            m.role === 'user' || m.role === 'agent',
+        )
+        .map((m) => {
+          // NormalizedMessage carries an ISO timestamp; our wire shape (and
+          // the Claude path the backend already ingests) uses epoch ms.
+          const ms = new Date(m.timestamp).getTime();
+          return {
+            id: m.id,
+            role: m.role,
+            text: m.text,
+            timestamp: Number.isFinite(ms) ? ms : Date.now(),
+          };
+        });
+    }
+    return parseJsonl(path.join(this.projectDir, `${sessionId}.jsonl`));
+  }
+
   async loadConversation(sessionId: string): Promise<void> {
-    const filePath = path.join(this.projectDir, `${sessionId}.jsonl`);
-    const messages = parseJsonl(filePath);
+    const messages = this.readConversation(sessionId);
     if (messages.length === 0) return;
 
     const totalBatches = Math.ceil(messages.length / CONVERSATION_BATCH_SIZE);
@@ -608,7 +667,8 @@ export class HistoryService {
    * or no transcript exists yet (not an error).
    */
   async uploadConversationIfChanged(sessionId: string): Promise<boolean> {
-    const filePath = path.join(this.projectDir, `${sessionId}.jsonl`);
+    const filePath = this.resolveConversationFile(sessionId);
+    if (!filePath) return false; // no transcript on disk for this session yet
     let mtimeMs: number;
     try {
       mtimeMs = fs.statSync(filePath).mtimeMs;
@@ -668,8 +728,7 @@ export class HistoryService {
       sessionId = this.currentConversationId;
       if (!sessionId) return 0;
     }
-    const filePath = path.join(this.projectDir, `${sessionId}.jsonl`);
-    const messages = parseJsonl(filePath);
+    const messages = this.readConversation(sessionId);
     if (messages.length === 0) return 0;
 
     const marker = this.lastUploadedUuid.get(sessionId);
