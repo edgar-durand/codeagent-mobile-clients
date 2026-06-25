@@ -81,10 +81,24 @@ function writeFile0600(filePath: string, contents: string): void {
   fs.chmodSync(filePath, 0o600);
 }
 
+/** Remove a stale credential file if present (best-effort, never throws). */
+function rmIfExists(filePath: string): void {
+  try {
+    fs.rmSync(filePath, { force: true });
+  } catch {
+    // best-effort cleanup — a leftover stale file is the exact bug we guard,
+    // but failing to delete it must never abort provisioning.
+  }
+}
+
 const claudeProvisioner: AgentProvisioner = {
   write(auth, home): Record<string, string> {
+    const credentialsJson = path.join(home, '.claude', '.credentials.json');
     if (auth.kind === 'api_key') {
-      // Claude reads the raw key from ANTHROPIC_API_KEY. No file.
+      // Claude reads the raw key from ANTHROPIC_API_KEY. No file. Remove any
+      // stale OAuth credentials file so it can't shadow the new api_key on a
+      // re-provision that changed the authType.
+      rmIfExists(credentialsJson);
       return { ANTHROPIC_API_KEY: auth.value };
     }
     // oauth_token comes in two shapes depending on the link flow:
@@ -104,10 +118,13 @@ const claudeProvisioner: AgentProvisioner = {
 
     if (isJsonBlob) {
       // Interactive-login JSON blob → write to disk, nothing in env.
-      writeFile0600(path.join(home, '.claude', '.credentials.json'), value);
+      writeFile0600(credentialsJson, value);
+    } else {
+      // Bare setup-token → do NOT write .credentials.json (would be malformed
+      // JSON → 401); it goes in CLAUDE_CODE_OAUTH_TOKEN below. Remove any stale
+      // OAuth file so it can't shadow the env-var token on a re-provision.
+      rmIfExists(credentialsJson);
     }
-    // else: bare setup-token → do NOT write .credentials.json (would be
-    // malformed JSON → 401). Return via env var below.
 
     // Minimal onboarding-skip state file so the agent doesn't drop into
     // first-run UX. The richer (real ~/.claude.json) variant is only
@@ -128,11 +145,16 @@ const claudeProvisioner: AgentProvisioner = {
 
 const codexProvisioner: AgentProvisioner = {
   write(auth, home): Record<string, string> {
+    const authJson = path.join(home, '.codex', 'auth.json');
     if (auth.kind === 'api_key') {
+      // Codex prefers ~/.codex/auth.json over OPENAI_API_KEY when both exist,
+      // so a stale auth.json from a prior ChatGPT-subscription deploy would
+      // shadow the new api_key. Remove it before handing back the env var.
+      rmIfExists(authJson);
       return { OPENAI_API_KEY: auth.value };
     }
-    // oauth_token → ~/.codex/auth.json verbatim.
-    writeFile0600(path.join(home, '.codex', 'auth.json'), auth.value);
+    // oauth_token → ~/.codex/auth.json verbatim (the ChatGPT subscription blob).
+    writeFile0600(authJson, auth.value);
     return {};
   },
 };
