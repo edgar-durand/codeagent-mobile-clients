@@ -645,6 +645,23 @@ export function agentIdToHeadroomKind(agentId: string): string {
 }
 
 /**
+ * Whether Headroom can wrap this agent. The Headroom kind IS the agent
+ * Headroom launches, so wrapping an UNSUPPORTED agent would mislaunch it as
+ * the `agentIdToHeadroomKind` fallback (Claude). For unsupported agents
+ * (e.g. gemini) Headroom must be DISABLED so the agent runs natively.
+ * Keep this set in lockstep with `agentIdToHeadroomKind`'s explicit branches.
+ */
+export function isHeadroomSupportedAgent(agentId: string): boolean {
+  const n = (agentId ?? '').toLowerCase().replace(/[_-]/g, '');
+  return (
+    n.startsWith('claude') ||
+    n.startsWith('codex') ||
+    n.startsWith('copilot') ||
+    n.startsWith('cursor')
+  );
+}
+
+/**
  * Persisted Headroom config the supervisor writes on a successful deploy and
  * re-reads on every child spawn (resume / restart / fresh deploy). This is the
  * single source of truth for the child's HEADROOM_* env so reporting survives
@@ -1758,7 +1775,12 @@ export class HostAgentSupervisor {
       //     truth — reporting survives, not just on the fresh-deploy path. We
       //     only persist enabled:true when setup fully succeeded so a later
       //     resume never points the agent at a dead proxy.
-      if (payload.headroomEnabled && payload.headroomAgent && payload.headroomSavingsIngestUrl) {
+      if (
+        payload.headroomEnabled &&
+        payload.headroomAgent &&
+        payload.headroomSavingsIngestUrl &&
+        isHeadroomSupportedAgent(payload.headroomAgent)
+      ) {
         report('headroom', 'setting up Headroom proxy');
         // Disk preflight: Headroom's compression engines (CPU PyTorch + ML/AST
         // extras) need ~2 GB. On a host without the room, SKIP the install and
@@ -1822,6 +1844,15 @@ export class HostAgentSupervisor {
       } else if (payload.headroomEnabled === false) {
         // Feature explicitly turned off for this deploy — clear any stale
         // enabled config so a subsequent resume doesn't resurrect Headroom.
+        persistHeadroomConfig({ enabled: false });
+      } else if (payload.headroomEnabled && payload.headroomAgent && !isHeadroomSupportedAgent(payload.headroomAgent)) {
+        // Headroom can't wrap this agent (e.g. gemini). Wrapping would mislaunch
+        // it as the agentIdToHeadroomKind fallback (Claude), so disable Headroom
+        // and let the agent run natively via its own runtime.
+        log.info(
+          'host-agent',
+          `Headroom unsupported for agent '${payload.headroomAgent}' — running it natively (no wrap)`,
+        );
         persistHeadroomConfig({ enabled: false });
       }
 

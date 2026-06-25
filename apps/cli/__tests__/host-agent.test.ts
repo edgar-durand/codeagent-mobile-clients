@@ -13,6 +13,7 @@ import {
   setupHeadroomForSelfHosted,
   getFreeDiskBytes,
   agentIdToHeadroomKind,
+  isHeadroomSupportedAgent,
   detectPackageManager,
   readHeadroomChildEnv,
   headroomConfigPath,
@@ -1328,6 +1329,24 @@ describe('agentIdToHeadroomKind', () => {
     expect(agentIdToHeadroomKind('')).toBe('claude');
     // Defensive: an undefined slipping through must not crash.
     expect(agentIdToHeadroomKind(undefined as unknown as string)).toBe('claude');
+  });
+});
+
+describe('isHeadroomSupportedAgent', () => {
+  it('returns true for Headroom-wrappable agents', () => {
+    expect(isHeadroomSupportedAgent('claude_code')).toBe(true);
+    expect(isHeadroomSupportedAgent('codex')).toBe(true);
+    expect(isHeadroomSupportedAgent('copilot')).toBe(true);
+    expect(isHeadroomSupportedAgent('cursor')).toBe(true);
+  });
+
+  it('returns false for agents Headroom cannot wrap (must run native, NOT mislaunch as claude)', () => {
+    // Regression: gemini mapped to claude via the kind default → mislaunched.
+    expect(isHeadroomSupportedAgent('gemini')).toBe(false);
+    expect(isHeadroomSupportedAgent('aider')).toBe(false);
+    expect(isHeadroomSupportedAgent('coderabbit')).toBe(false);
+    expect(isHeadroomSupportedAgent('')).toBe(false);
+    expect(isHeadroomSupportedAgent(undefined as unknown as string)).toBe(false);
   });
 });
 
