@@ -150,3 +150,80 @@ describe('provisionAgentCredentials — codex', () => {
     expect(fs.existsSync(authJson)).toBe(false);
   });
 });
+
+describe('provisionAgentCredentials — cursor', () => {
+  it('oauth_token JSON blob: extracts accessToken → CURSOR_API_KEY, no files written', () => {
+    const blob = JSON.stringify({
+      accessToken: 'eyJabc.cursor.token',
+      refreshToken: 'rft-xyz',
+      userId: 'user-123',
+    });
+    const env = provisionAgentCredentials('cursor', { kind: 'oauth_token', value: blob }, tmpHome);
+
+    // Only CURSOR_API_KEY should be returned, set to the accessToken.
+    expect(env).toEqual({ CURSOR_API_KEY: 'eyJabc.cursor.token' });
+
+    // Confirm no credential files were written.
+    expect(fs.readdirSync(tmpHome)).toHaveLength(0);
+  });
+
+  it('oauth_token bare token (no leading {): returned verbatim as CURSOR_API_KEY', () => {
+    const env = provisionAgentCredentials(
+      'cursor',
+      { kind: 'oauth_token', value: 'bare-token-no-json' },
+      tmpHome,
+    );
+
+    expect(env).toEqual({ CURSOR_API_KEY: 'bare-token-no-json' });
+    // No files written.
+    expect(fs.readdirSync(tmpHome)).toHaveLength(0);
+  });
+
+  it('api_key: returns CURSOR_API_KEY with the raw value', () => {
+    const env = provisionAgentCredentials(
+      'cursor',
+      { kind: 'api_key', value: 'curs-api-key-xyz' },
+      tmpHome,
+    );
+
+    expect(env).toEqual({ CURSOR_API_KEY: 'curs-api-key-xyz' });
+    // No files written.
+    expect(fs.readdirSync(tmpHome)).toHaveLength(0);
+  });
+
+  it('oauth_token JSON blob missing accessToken: throws a clear error', () => {
+    const badBlob = JSON.stringify({ refreshToken: 'rft-xyz', userId: 'user-123' });
+    expect(() =>
+      provisionAgentCredentials('cursor', { kind: 'oauth_token', value: badBlob }, tmpHome),
+    ).toThrow('missing a non-empty accessToken');
+  });
+
+  it('oauth_token invalid JSON: throws a clear error', () => {
+    expect(() =>
+      provisionAgentCredentials('cursor', { kind: 'oauth_token', value: '{not-valid-json' }, tmpHome),
+    ).toThrow('not valid JSON');
+  });
+
+  it('token value is NOT present in any log-level output (never logged)', () => {
+    // We verify by patching console.warn / console.error (the only two
+    // levels ESLint allows) and asserting the token string never appears.
+    const secretToken = 'super-secret-cursor-token-9999';
+    const blob = JSON.stringify({ accessToken: secretToken, refreshToken: 'r', userId: 'u' });
+    const logged: string[] = [];
+    const origWarn = console.warn;
+    const origError = console.error;
+    console.warn = (...args: unknown[]) => { logged.push(args.join(' ')); };
+    console.error = (...args: unknown[]) => { logged.push(args.join(' ')); };
+
+    try {
+      provisionAgentCredentials('cursor', { kind: 'oauth_token', value: blob }, tmpHome);
+    } finally {
+      console.warn = origWarn;
+      console.error = origError;
+    }
+
+    for (const line of logged) {
+      expect(line).not.toContain(secretToken);
+    }
+  });
+});
