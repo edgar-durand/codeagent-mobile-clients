@@ -109,6 +109,29 @@ describe('provisionAgentCredentials — mutually-exclusive cleanup (authType cha
   });
 });
 
+describe('provisionAgentCredentials — gemini', () => {
+  it('oauth_token: writes ~/.gemini/oauth_creds.json verbatim + settings.json (oauth-personal), no env', () => {
+    const blob = '{"access_token":"ya29.x","refresh_token":"1//0r","token_type":"Bearer","expiry_date":123}';
+    const env = provisionAgentCredentials('gemini', { kind: 'oauth_token', value: blob }, tmpHome);
+    const creds = path.join(tmpHome, '.gemini', 'oauth_creds.json');
+    const settings = path.join(tmpHome, '.gemini', 'settings.json');
+    expect(fs.readFileSync(creds, 'utf8')).toBe(blob);
+    expect(fs.readFileSync(settings, 'utf8')).toContain('oauth-personal');
+    expect(env).not.toHaveProperty('GEMINI_API_KEY');
+  });
+
+  it('api_key: returns GEMINI_API_KEY + settings.json (gemini-api-key) and removes a stale oauth_creds.json', () => {
+    const creds = path.join(tmpHome, '.gemini', 'oauth_creds.json');
+    fs.mkdirSync(path.dirname(creds), { recursive: true });
+    fs.writeFileSync(creds, '{"refresh_token":"OLD"}');
+    const env = provisionAgentCredentials('gemini', { kind: 'api_key', value: 'AIza-NEW' }, tmpHome);
+    expect(env).toEqual({ GEMINI_API_KEY: 'AIza-NEW' });
+    expect(fs.existsSync(creds)).toBe(false);
+    const settings = path.join(tmpHome, '.gemini', 'settings.json');
+    expect(fs.readFileSync(settings, 'utf8')).toContain('gemini-api-key');
+  });
+});
+
 describe('provisionAgentCredentials — codex', () => {
   it('oauth_token: writes ~/.codex/auth.json verbatim, no env', () => {
     const blob = '{"OPENAI_API_KEY":null,"auth_mode":"chatgpt","tokens":{"access_token":"a","refresh_token":"r","id_token":"i","account_id":"acct"}}';

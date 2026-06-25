@@ -159,9 +159,32 @@ const codexProvisioner: AgentProvisioner = {
   },
 };
 
+const geminiProvisioner: AgentProvisioner = {
+  write(auth, home): Record<string, string> {
+    const settingsJson = path.join(home, '.gemini', 'settings.json');
+    const oauthCreds = path.join(home, '.gemini', 'oauth_creds.json');
+    if (auth.kind === 'api_key') {
+      // Gemini reads GEMINI_API_KEY from the env. Pin settings.json to the
+      // api-key auth type and remove any stale OAuth creds so they can't
+      // shadow the key on a re-provision that changed the authType.
+      rmIfExists(oauthCreds);
+      writeFile0600(settingsJson, '{"security":{"auth":{"selectedType":"gemini-api-key"}}}');
+      return { GEMINI_API_KEY: auth.value };
+    }
+    // oauth_token → the contents of ~/.gemini/oauth_creds.json verbatim (the
+    // google-auth-library Credentials blob captured by the in-app OAuth flow /
+    // `codeam link gemini`). Pin settings.json to the personal-OAuth auth type
+    // so the CLI loads the creds file instead of prompting to log in.
+    writeFile0600(oauthCreds, auth.value);
+    writeFile0600(settingsJson, '{"security":{"auth":{"selectedType":"oauth-personal"}}}');
+    return {};
+  },
+};
+
 const PROVISIONERS: Partial<Record<AgentId, AgentProvisioner>> = {
   claude: claudeProvisioner,
   codex: codexProvisioner,
+  gemini: geminiProvisioner,
 };
 
 /** Raised when a deploy targets an agent we can't provision on the box. */
