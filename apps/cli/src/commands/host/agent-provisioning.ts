@@ -181,10 +181,54 @@ const geminiProvisioner: AgentProvisioner = {
   },
 };
 
+const cursorProvisioner: AgentProvisioner = {
+  write(auth, _home): Record<string, string> {
+    // cursor-agent reads its auth exclusively from CURSOR_API_KEY (= accessToken).
+    // No credential files are written — there is nothing to clean up on a
+    // re-provision, and no stale file can shadow the env var.
+    if (auth.kind === 'api_key') {
+      return { CURSOR_API_KEY: auth.value };
+    }
+    // oauth_token comes in two shapes:
+    //
+    //   1. JSON blob  (value starts with `{`): the vaulted Cursor OAuth blob,
+    //      e.g. `{"accessToken":"...","refreshToken":"...","userId":"..."}`.
+    //      Parse it and extract `accessToken`.
+    //
+    //   2. Bare token (value does NOT start with `{`): e.g. when the link
+    //      flow captured only the raw token string. Use it directly.
+    //
+    // In both cases the result is CURSOR_API_KEY = accessToken.
+    // We never log the token value.
+    const value = auth.value.trim();
+    if (value.startsWith('{')) {
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(value);
+      } catch {
+        throw new Error('cursor oauth_token: credential blob is not valid JSON');
+      }
+      if (
+        typeof parsed !== 'object' ||
+        parsed === null ||
+        typeof (parsed as Record<string, unknown>)['accessToken'] !== 'string' ||
+        !(parsed as Record<string, unknown>)['accessToken']
+      ) {
+        throw new Error('cursor oauth_token: credential blob is missing a non-empty accessToken');
+      }
+      const accessToken = (parsed as Record<string, string>)['accessToken'];
+      return { CURSOR_API_KEY: accessToken };
+    }
+    // Bare token → use verbatim.
+    return { CURSOR_API_KEY: value };
+  },
+};
+
 const PROVISIONERS: Partial<Record<AgentId, AgentProvisioner>> = {
   claude: claudeProvisioner,
   codex: codexProvisioner,
   gemini: geminiProvisioner,
+  cursor: cursorProvisioner,
 };
 
 /** Raised when a deploy targets an agent we can't provision on the box. */
