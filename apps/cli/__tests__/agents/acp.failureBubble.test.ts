@@ -31,7 +31,33 @@ import {
   agentStatusPage,
   replyIsAuthFailure,
   looksLike1mContextCreditsError,
+  startupFailureMessage,
 } from '../../src/agents/acp/runner';
+
+describe('startupFailureMessage — agent-that-never-started surfaces an actionable reason', () => {
+  const GEMINI_STDERR =
+    'Error authenticating: IneligibleTierError: This client is no longer supported for Gemini Code Assist for individuals.';
+
+  it('Gemini ineligible tier → explains the 2026-06-18 deprecation + API key / paid Code Assist', () => {
+    const msg = startupFailureMessage('gemini', 'AGENT_STARTUP_FAILED', GEMINI_STDERR);
+    expect(msg).toMatch(/Gemini/);
+    expect(msg).toMatch(/2026-06-18|no longer|eligible/i);
+    expect(msg).toMatch(/API key/i);
+    expect(msg).toMatch(/Code Assist/i);
+  });
+
+  it('only applies the Gemini copy to gemini — other agents get a generic startup failure', () => {
+    const msg = startupFailureMessage('codex', 'AGENT_STARTUP_TIMEOUT', 'some unrelated crash');
+    expect(msg).toMatch(/codex/);
+    expect(msg).toMatch(/failed to start/i);
+    expect(msg).not.toMatch(/Code Assist/i);
+  });
+
+  it('non-gemini auth failure routes to the standard re-auth message', () => {
+    const msg = startupFailureMessage('claude', 'invalid x-api-key 401 authentication_error', '');
+    expect(msg).toBe(AUTH_FAILURE_MESSAGE);
+  });
+});
 
 describe('failureBubble — every failed start_task ends with a visible terminal frame', () => {
   it('auth failure → the actionable re-auth bubble (regardless of streamed text)', () => {
