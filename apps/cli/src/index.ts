@@ -9,6 +9,7 @@ import { deployList, deployStop } from './commands/deploy-manage';
 import { host } from './commands/host';
 import { hostAgent } from './commands/host-agent';
 import { link } from './commands/link';
+import { invite } from './commands/invite';
 import { doctor } from './commands/doctor';
 import { completion } from './commands/completion';
 import { version } from './commands/version';
@@ -130,6 +131,7 @@ async function main(): Promise<void> {
     'host': () => host(args),
     'sessions': () => sessions(args),
     'status': () => status(),
+    'invite': () => invite(),
     'logout': () => logout(),
     'link': () => link(args),
     'doctor': () => doctor(args),

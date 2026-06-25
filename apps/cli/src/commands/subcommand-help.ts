@@ -56,6 +56,12 @@ const HELPS: Record<string, HelpRenderer> = {
       `     ${pc.cyan('codeam deploy ls | list')}      ${pc.dim('list deployed cloud workspaces')}`,
       `     ${pc.cyan('codeam deploy stop | remove')}  ${pc.dim('pick a workspace and stop its codeam-pair session')}`,
     ]),
+  invite: () =>
+    print([
+      `  ${pc.bold('codeam invite')}  ${pc.dim('— print your referral link to earn PRO for you and your crew')}`,
+      '',
+      `     ${pc.cyan('codeam invite')}   ${pc.dim('fetch and display your personal referral link')}`,
+    ]),
   status: () =>
     print([
       `  ${pc.bold('codeam status')}  ${pc.dim('— show the active session, agent, and connection info')}`,
