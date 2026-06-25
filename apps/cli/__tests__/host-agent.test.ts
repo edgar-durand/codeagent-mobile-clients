@@ -13,6 +13,7 @@ import {
   setupHeadroomForSelfHosted,
   getFreeDiskBytes,
   agentIdToHeadroomKind,
+  isHeadroomSupportedAgent,
   detectPackageManager,
   readHeadroomChildEnv,
   headroomConfigPath,
@@ -31,6 +32,20 @@ import {
   type SealedHostIdentity,
 } from '../src/commands/host/host-client';
 import type { RemoteCommand } from '../src/services/command-relay.service';
+
+// Stub the git-tooling NETWORK ops (gh CLI download + `gh auth login`) so the
+// cloneToken deploy path is deterministic + fast. Without this the cloneToken
+// test does a REAL gh install/auth and times out on slow (windows) CI. Only the
+// two network functions are overridden — codeamBinDir / defaultGitToolingRunner
+// stay real via importActual.
+vi.mock('../src/commands/host/git-tooling', async (importActual) => {
+  const actual = await importActual<typeof import('../src/commands/host/git-tooling')>();
+  return {
+    ...actual,
+    ensureGhCli: vi.fn(async () => 'gh'),
+    ensureGhAuth: vi.fn(async () => undefined),
+  };
+});
 
 // ── HOME isolation so ~/.codeam writes land in a throwaway dir ──────────
 let tmpHome: string;
@@ -1314,11 +1329,38 @@ describe('agentIdToHeadroomKind', () => {
     expect(agentIdToHeadroomKind('copilot-cli')).toBe('copilot');
   });
 
+  it('maps cursor → cursor (regression: must NOT fall through to claude)', () => {
+    // A Cursor deploy that mapped to "claude" made Headroom launch Claude Code
+    // instead of cursor-agent (headroom-config agent=claude). The Headroom kind
+    // IS the launched agent, so this mapping is load-bearing.
+    expect(agentIdToHeadroomKind('cursor')).toBe('cursor');
+    expect(agentIdToHeadroomKind('cursor-agent')).toBe('cursor');
+    expect(agentIdToHeadroomKind('Cursor')).toBe('cursor'); // case-insensitive
+  });
+
   it('defaults unknown / empty ids to claude (safe default)', () => {
     expect(agentIdToHeadroomKind('something_else')).toBe('claude');
     expect(agentIdToHeadroomKind('')).toBe('claude');
     // Defensive: an undefined slipping through must not crash.
     expect(agentIdToHeadroomKind(undefined as unknown as string)).toBe('claude');
+  });
+});
+
+describe('isHeadroomSupportedAgent', () => {
+  it('returns true for Headroom-wrappable agents', () => {
+    expect(isHeadroomSupportedAgent('claude_code')).toBe(true);
+    expect(isHeadroomSupportedAgent('codex')).toBe(true);
+    expect(isHeadroomSupportedAgent('copilot')).toBe(true);
+    expect(isHeadroomSupportedAgent('cursor')).toBe(true);
+  });
+
+  it('returns false for agents Headroom cannot wrap (must run native, NOT mislaunch as claude)', () => {
+    // Regression: gemini mapped to claude via the kind default → mislaunched.
+    expect(isHeadroomSupportedAgent('gemini')).toBe(false);
+    expect(isHeadroomSupportedAgent('aider')).toBe(false);
+    expect(isHeadroomSupportedAgent('coderabbit')).toBe(false);
+    expect(isHeadroomSupportedAgent('')).toBe(false);
+    expect(isHeadroomSupportedAgent(undefined as unknown as string)).toBe(false);
   });
 });
 
