@@ -4,6 +4,12 @@ All notable changes to the CodeAgent-Mobile JetBrains plugin are documented here
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.43.6] — 2026-06-25
+
+### Fixed
+
+- **cli:** ACP newSession no longer hangs forever on a fatal startup error
+
 ## [2.43.5] — 2026-06-25
 
 ### Added
