@@ -815,6 +815,89 @@ export function providerOutageMessage(agent: string): string {
  *   - a failure that DID stream partial text → null: `closeAll` already
  *     published that partial reply as the terminal frame; don't clobber it.
  */
+/** True when a startup failure is Gemini's post-2026-06-18 free-tier death. */
+function isGeminiIneligibleTier(haystack: string): boolean {
+  return /IneligibleTierError|UNSUPPORTED_CLIENT|no longer supported for Gemini Code Assist|not eligible for Gemini Code Assist/i.test(
+    haystack,
+  );
+}
+
+/**
+ * Human-facing chat message for an agent that FAILED TO START (its ACP
+ * `newSession` never produced a session — e.g. Gemini's Code Assist onboarding
+ * rejecting the account). Surfaced so the session shows WHY instead of sitting
+ * on "STILL LOADING SESSION HISTORY / offline" forever.
+ */
+export function startupFailureMessage(agent: string, detail: string, recentStderr: string): string {
+  const haystack = `${detail}\n${recentStderr}`;
+  if (agent === 'gemini' && isGeminiIneligibleTier(haystack)) {
+    return [
+      "⚠️ **Gemini couldn't start — your Google account isn't eligible.**",
+      '',
+      "Google discontinued free **“Login with Google”** access to the Gemini CLI on 2026-06-18. The free / individual tier (and Google AI Pro/Ultra) can no longer authenticate here.",
+      '',
+      'To use Gemini from CodeAgent, re-link it in **Profile › Agents** with either:',
+      '• a **Gemini API key** (AI Studio — free quota available), or',
+      '• a paid **Gemini Code Assist (Standard/Enterprise)** subscription.',
+    ].join('\n');
+  }
+  if (looksLikeAuthFailure(haystack)) return AUTH_FAILURE_MESSAGE;
+  if (looksLikeProviderOutage(haystack)) return providerOutageMessage(agent);
+  const tail = recentStderr.split('\n').filter(Boolean).slice(-3).join('\n');
+  return [
+    `⚠️ The ${agent} agent failed to start.`,
+    '',
+    tail ? `Details:\n${tail}` : detail,
+  ].join('\n');
+}
+
+/**
+ * Bring the plugin ONLINE with a minimal relay and publish a clear message when
+ * the agent failed to START (no session). Without this, pair-auto exited on the
+ * start() throw, the command relay never began, the plugin's heartbeat never
+ * fired, and mobile sat on "STILL LOADING SESSION HISTORY / offline" forever.
+ *
+ * The agent is dead, so the relay only: acks `get_conversation` (resolves the
+ * history-load spinner) and, for any prompt/action, re-publishes the reason and
+ * fails the command. The relay's long-lived SSE keeps the process alive so the
+ * session stays online showing the message until the user re-links / redeploys.
+ */
+async function surfaceStartupFailure(opts: {
+  agent: AgentId;
+  pluginId: string;
+  detail: string;
+  recentStderr: string;
+  publisher: AcpPublisher;
+}): Promise<void> {
+  const msg = startupFailureMessage(opts.agent, opts.detail, opts.recentStderr);
+  const publish = async (): Promise<void> => {
+    try {
+      await opts.publisher.publishOutput({ type: 'new_turn', done: false });
+      await opts.publisher.publishOutput({ type: 'text', content: msg, done: true });
+    } catch {
+      /* best-effort — never throw out of the failure path */
+    }
+  };
+  await publish();
+  const errRelay = new CommandRelayService(
+    opts.pluginId,
+    async (cmd: RemoteCommand) => {
+      if (cmd.type === 'get_conversation') {
+        await errRelay.sendResult(cmd.id, 'completed', {}).catch(() => undefined);
+        return;
+      }
+      await publish();
+      await errRelay
+        .sendResult(cmd.id, 'failed', {
+          error: `${opts.agent} is unavailable — see the message in chat.`,
+        })
+        .catch(() => undefined);
+    },
+    { id: opts.agent, name: opts.agent, displayName: opts.agent } as never,
+  );
+  errRelay.start();
+}
+
 export function failureBubble(opts: {
   detail: string;
   recentStderr: string;
@@ -1174,12 +1257,32 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
   });
 
   showInfo(`Starting ${opts.agent} via ACP adapter (${opts.adapter.requiresAgentBinary})…`);
+  let handshake: Awaited<ReturnType<typeof client.start>>;
+  try {
+    handshake = await client.start();
+  } catch (startErr) {
+    // The agent never created a session (e.g. Gemini's Code Assist onboarding
+    // rejecting the account post-2026-06-18). Without this the session sat on
+    // "STILL LOADING SESSION HISTORY / offline" forever — pair-auto exited and
+    // the plugin never came online. Surface WHY: bring the plugin ONLINE with a
+    // minimal relay and publish a clear, actionable message into the chat.
+    const detail = describeError(startErr);
+    log.warn('acpRunner', `ACP start failed for ${opts.agent}: ${detail}`);
+    await surfaceStartupFailure({
+      agent: opts.agent,
+      pluginId: opts.pluginId,
+      detail,
+      recentStderr: recentStderr.join('\n'),
+      publisher,
+    });
+    return;
+  }
   const {
     sessionId: acpSessionId,
     initialize,
     model: handshakeModel,
     tier: handshakeTier,
-  } = await client.start();
+  } = handshake;
   log.trace(
     'acpRunner',
     `adapter handshake ok protocolVersion=${initialize.protocolVersion} sessionId=${acpSessionId.slice(0, 8)}`,
