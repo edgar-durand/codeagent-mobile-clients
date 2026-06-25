@@ -55,6 +55,7 @@ That's it. Open the [CodeAgent Mobile app](https://codeagent-mobile.com), enter 
 | `codeam sessions switch` | Choose which paired session the next `codeam` invocation will use |
 | `codeam sessions delete <session-id>` | Forget a specific paired session (leaves the others intact) |
 | `codeam status` | Show connection status |
+| `codeam invite` | Print your referral link — share it to earn PRO for you and the devs you bring |
 | `codeam doctor` | run environment, install, and pairing diagnostics (`--json` for machine-readable output) |
 | `codeam logout` | Remove all paired sessions |
 | `codeam deploy` | Provision a cloud workspace (GitHub Codespaces) and pair it to your phone |
@@ -65,6 +66,20 @@ That's it. Open the [CodeAgent Mobile app](https://codeagent-mobile.com), enter 
 | `codeam completion <shell>` | print shell completions for `<shell>` (`bash`, `zsh`, or `fish`) |
 | `codeam --version`, `-v` | Print the installed CLI version |
 | `codeam --help`, `-h` | Show usage and the full command list |
+
+---
+
+## `codeam invite` — share your referral link
+
+Once you're paired, run:
+
+```bash
+codeam invite
+```
+
+The CLI fetches your personal referral link from the backend and prints it. Share it with teammates: every developer who signs up through your link and pairs their first session earns **both of you 14 days of PRO** — at no extra cost.
+
+> Requires an active paired session (`codeam pair` first).
 
 ---
 
