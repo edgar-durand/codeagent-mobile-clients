@@ -2,11 +2,16 @@ import { describe, it, expect, vi, afterEach } from 'vitest';
 import {
   buildOnboardingWelcome,
   maybeSendOnboardingWelcome,
+  resolveRepoName,
   _onboardingSeam,
 } from '../../../src/agents/acp/onboarding';
 
 describe('buildOnboardingWelcome', () => {
+  afterEach(() => vi.restoreAllMocks());
+
   it('is a hardcoded welcome tailored to the repo, with the core features + feedback links', () => {
+    // No git remote at this fake path → basename fallback (`join-the-queue`).
+    vi.spyOn(_onboardingSeam, 'gitRemoteUrl').mockReturnValue(null);
     const w = buildOnboardingWelcome('/workspaces/join-the-queue');
     expect(w).toMatch(/CodeAgent Mobile/);
     expect(w).toMatch(/Beads/i); // native memory / issue tracker pitch
@@ -21,6 +26,35 @@ describe('buildOnboardingWelcome', () => {
 
   it('falls back to a generic project label when cwd has no basename', () => {
     expect(buildOnboardingWelcome('')).toContain('this project');
+  });
+});
+
+describe('resolveRepoName', () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it('prefers the git origin remote — even when the dir is named after a session UUID (codespace/self-hosted clone)', () => {
+    // The bug: the repo is cloned into a UUID-named dir, so basename(cwd) is a
+    // UUID. The git remote carries the real owner/repo.
+    const uuidDir = '/workspaces/a2480d74-aaa4-442d-91cc-2a6c595b3560';
+    vi.spyOn(_onboardingSeam, 'gitRemoteUrl').mockReturnValue(
+      'https://github.com/edgar-durand/join-the-queue.git',
+    );
+    expect(resolveRepoName(uuidDir)).toBe('join-the-queue');
+  });
+
+  it('parses an SSH remote URL too', () => {
+    vi.spyOn(_onboardingSeam, 'gitRemoteUrl').mockReturnValue('git@github.com:acme/widgets.git');
+    expect(resolveRepoName('/anything')).toBe('widgets');
+  });
+
+  it('falls back to the basename when it is a normal name and there is no remote', () => {
+    vi.spyOn(_onboardingSeam, 'gitRemoteUrl').mockReturnValue(null);
+    expect(resolveRepoName('/home/user/my-project')).toBe('my-project');
+  });
+
+  it('never leaks a UUID dir name — falls back to a generic label when there is no remote', () => {
+    vi.spyOn(_onboardingSeam, 'gitRemoteUrl').mockReturnValue(null);
+    expect(resolveRepoName('/workspaces/a2480d74-aaa4-442d-91cc-2a6c595b3560')).toBe('this project');
   });
 });
 

@@ -15,6 +15,7 @@
  * `CODEAM_ONBOARDING_DISABLED`.
  */
 
+import { execFileSync } from 'child_process';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
@@ -64,7 +65,60 @@ export const _onboardingSeam = {
     const v = process.env.CODEAM_ONBOARDING_DISABLED;
     return !!v && v !== '0' && v.toLowerCase() !== 'false';
   },
+  /**
+   * The `origin` remote URL for `cwd`, or null when there's no git repo /
+   * remote. Seam so tests drive `resolveRepoName` without a real checkout.
+   */
+  gitRemoteUrl: (cwd: string): string | null => {
+    try {
+      return execFileSync('git', ['-C', cwd, 'remote', 'get-url', 'origin'], {
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'ignore'],
+        timeout: 2000,
+      }).trim();
+    } catch {
+      return null;
+    }
+  },
 };
+
+/** True for a canonical 8-4-4-4-12 UUID (the codespace clone-dir name). */
+function isUuid(s: string): boolean {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(s);
+}
+
+/** Parse the repo name (no `.git`) out of an SSH or HTTPS git remote URL. */
+function repoNameFromRemoteUrl(url: string): string | null {
+  // git@github.com:owner/repo(.git)  |  https://github.com/owner/repo(.git)
+  const m = url
+    .trim()
+    .replace(/\.git$/, '')
+    .replace(/\/$/, '')
+    .match(/[/:]([^/]+)\/([^/]+)$/);
+  return m ? m[2] : null;
+}
+
+/**
+ * Resolve a human-friendly repo name for the welcome CTA.
+ *
+ * `path.basename(cwd)` is WRONG in a CodeAgent codespace: the repo is cloned
+ * into a directory named after the SESSION UUID, so the basename is a UUID
+ * (e.g. `a2480d74-aaa4-…`) rather than the repo. Prefer the git `origin`
+ * remote — it carries the real `owner/repo`. Fall back to the basename only
+ * when it isn't a UUID, else a generic label.
+ */
+export function resolveRepoName(cwd: string): string {
+  if (cwd) {
+    const url = _onboardingSeam.gitRemoteUrl(cwd);
+    if (url) {
+      const name = repoNameFromRemoteUrl(url);
+      if (name) return name;
+    }
+  }
+  const base = path.basename(cwd || '');
+  if (base && !isUuid(base)) return base;
+  return 'this project';
+}
 
 /**
  * The hardcoded welcome message, published verbatim as the agent's first
@@ -74,7 +128,7 @@ export const _onboardingSeam = {
  * render as tappable links. Lightly tailored with the repo name.
  */
 export function buildOnboardingWelcome(cwd: string): string {
-  const repo = path.basename(cwd || '') || 'this project';
+  const repo = resolveRepoName(cwd);
   return [
     `Welcome to CodeAgent Mobile! 👋 You're now driving this agent from your phone — and it comes fully wired, zero setup:`,
     '',
