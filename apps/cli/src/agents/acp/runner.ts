@@ -908,6 +908,35 @@ export async function handleGetConversation(args: {
   await relay.sendResult(commandId, 'completed', { conversationId: acpSessionId });
 }
 
+/**
+ * Adapter spawn env for an ACP session. Two independent knobs:
+ *
+ *  - `CLAUDE_CODE_DISABLE_1M_CONTEXT=1` — the per-session 1M-context opt-out,
+ *    persisted after the user chooses "Disable 1M context and continue".
+ *  - `INITIAL_AGENT_MODE=agent-full-access` — Codex only, and ONLY in our
+ *    autonomous execution plane (a codespace / self-hosted box, signalled by
+ *    `autoApprovePermissions`). Codex's default `agent` (workspace-write)
+ *    sandbox BLOCKS network — including the loopback socket to the shared
+ *    Beads/Dolt server on 127.0.0.1:3308 — so `bd create` and any other infra
+ *    that talks to localhost/network fail. `agent-full-access` enables network
+ *    (its approval policy is "never", which matches the auto-approve we already
+ *    do in this plane). Interactive runs on a user's own machine — neither
+ *    CODESPACES nor CODEAM_AUTO_APPROVE set — keep Codex's safe default mode.
+ *    The codex-acp adapter reads its starting mode from this env var.
+ */
+export function computeAdapterExtraEnv(params: {
+  agent: AgentId;
+  autoApprovePermissions?: boolean;
+  disable1mContext: boolean;
+}): Record<string, string> {
+  const env: Record<string, string> = {};
+  if (params.disable1mContext) env.CLAUDE_CODE_DISABLE_1M_CONTEXT = '1';
+  if (params.agent === 'codex' && params.autoApprovePermissions) {
+    env.INITIAL_AGENT_MODE = 'agent-full-access';
+  }
+  return env;
+}
+
 export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
   const publisher = new AcpPublisher({
     sessionId: opts.sessionId,
@@ -956,10 +985,15 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
   // and re-applied on every (re)spawn via the adapter env.
   const disable1mContext =
     loadCliConfig().sessions.find((s) => s.pluginId === opts.pluginId)?.disable1mContext === true;
+  const extraEnv = computeAdapterExtraEnv({
+    agent: opts.agent,
+    autoApprovePermissions: opts.autoApprovePermissions,
+    disable1mContext,
+  });
   const clientOptions: AcpClientOptions = {
     adapter: opts.adapter,
     cwd: opts.cwd,
-    extraEnv: disable1mContext ? { CLAUDE_CODE_DISABLE_1M_CONTEXT: '1' } : {},
+    extraEnv,
     onSessionUpdate: (notification) => {
       updateCount += 1;
       const variant = (notification.update as { sessionUpdate?: string })?.sessionUpdate ?? 'unknown';
@@ -1099,7 +1133,10 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
     } catch {
       /* adapter already gone */
     }
-    client = new AcpClient({ ...clientOptions, extraEnv: { CLAUDE_CODE_DISABLE_1M_CONTEXT: '1' } });
+    client = new AcpClient({
+      ...clientOptions,
+      extraEnv: { ...extraEnv, CLAUDE_CODE_DISABLE_1M_CONTEXT: '1' },
+    });
     await client.start();
   };
   // Behavior lives in the DI factory (unit-tested in oneMContextRecovery.test);
