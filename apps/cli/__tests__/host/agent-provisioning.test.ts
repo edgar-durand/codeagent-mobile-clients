@@ -88,3 +88,42 @@ describe('provisionAgentCredentials — claude_code / api_key (unchanged path)',
     expect(fs.existsSync(credentialsJsonPath)).toBe(false);
   });
 });
+
+describe('provisionAgentCredentials — mutually-exclusive cleanup (authType change)', () => {
+  it('claude: switching to a setup-token removes a stale .credentials.json so it cannot shadow the env token', () => {
+    const credPath = path.join(tmpHome, '.claude', '.credentials.json');
+    // Pre-seed a stale OAuth blob from a prior deploy.
+    fs.mkdirSync(path.dirname(credPath), { recursive: true });
+    fs.writeFileSync(credPath, '{"claudeAiOauth":{"accessToken":"OLD"}}');
+    const env = provisionAgentCredentials('claude_code', { kind: 'oauth_token', value: 'sk-ant-oat01-NEW' }, tmpHome);
+    expect(env).toEqual({ CLAUDE_CODE_OAUTH_TOKEN: 'sk-ant-oat01-NEW' });
+    expect(fs.existsSync(credPath)).toBe(false); // stale file gone
+  });
+
+  it('claude: switching to api_key removes a stale .credentials.json', () => {
+    const credPath = path.join(tmpHome, '.claude', '.credentials.json');
+    fs.mkdirSync(path.dirname(credPath), { recursive: true });
+    fs.writeFileSync(credPath, '{"claudeAiOauth":{"accessToken":"OLD"}}');
+    provisionAgentCredentials('claude_code', { kind: 'api_key', value: 'sk-ant-api-NEW' }, tmpHome);
+    expect(fs.existsSync(credPath)).toBe(false);
+  });
+});
+
+describe('provisionAgentCredentials — codex', () => {
+  it('oauth_token: writes ~/.codex/auth.json verbatim, no env', () => {
+    const blob = '{"OPENAI_API_KEY":null,"auth_mode":"chatgpt","tokens":{"access_token":"a","refresh_token":"r","id_token":"i","account_id":"acct"}}';
+    const env = provisionAgentCredentials('codex', { kind: 'oauth_token', value: blob }, tmpHome);
+    const authJson = path.join(tmpHome, '.codex', 'auth.json');
+    expect(fs.readFileSync(authJson, 'utf8')).toBe(blob);
+    expect(env).not.toHaveProperty('OPENAI_API_KEY');
+  });
+
+  it('api_key: returns OPENAI_API_KEY and removes a stale auth.json (so it cannot shadow the key)', () => {
+    const authJson = path.join(tmpHome, '.codex', 'auth.json');
+    fs.mkdirSync(path.dirname(authJson), { recursive: true });
+    fs.writeFileSync(authJson, '{"auth_mode":"chatgpt","tokens":{"access_token":"OLD"}}');
+    const env = provisionAgentCredentials('codex', { kind: 'api_key', value: 'sk-openai-NEW' }, tmpHome);
+    expect(env).toEqual({ OPENAI_API_KEY: 'sk-openai-NEW' });
+    expect(fs.existsSync(authJson)).toBe(false);
+  });
+});
