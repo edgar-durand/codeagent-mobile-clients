@@ -33,6 +33,20 @@ import {
 } from '../src/commands/host/host-client';
 import type { RemoteCommand } from '../src/services/command-relay.service';
 
+// Stub the git-tooling NETWORK ops (gh CLI download + `gh auth login`) so the
+// cloneToken deploy path is deterministic + fast. Without this the cloneToken
+// test does a REAL gh install/auth and times out on slow (windows) CI. Only the
+// two network functions are overridden — codeamBinDir / defaultGitToolingRunner
+// stay real via importActual.
+vi.mock('../src/commands/host/git-tooling', async (importActual) => {
+  const actual = await importActual<typeof import('../src/commands/host/git-tooling')>();
+  return {
+    ...actual,
+    ensureGhCli: vi.fn(async () => 'gh'),
+    ensureGhAuth: vi.fn(async () => undefined),
+  };
+});
+
 // ── HOME isolation so ~/.codeam writes land in a throwaway dir ──────────
 let tmpHome: string;
 let origHome: string | undefined;
