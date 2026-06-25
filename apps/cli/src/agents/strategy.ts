@@ -270,6 +270,17 @@ export interface InteractiveAgentStrategy extends BaseAgentStrategy {
 
   resolveHistoryDir(cwd: string): string | null;
   parseHistoryFile(filePath: string): NormalizedMessage[];
+
+  /**
+   * Resolve the on-disk transcript file for a specific session id, or null
+   * when none exists. Claude's layout is `<historyDir>/<sessionId>.jsonl`, so
+   * its strategy leaves this UNDEFINED and `HistoryService` uses that default.
+   * Agents that name files differently and key the session id INSIDE the file
+   * (Codex rollouts) implement this so resume + transcript upload can locate
+   * the right file. When defined, `HistoryService` parses the returned path
+   * with {@link parseHistoryFile} instead of the Claude JSONL parser.
+   */
+  resolveHistoryFile?(cwd: string, sessionId: string): string | null;
   getCurrentUsage(historyDir: string): { used: number; total: number; percent: number; model?: string } | null;
 
   /**
