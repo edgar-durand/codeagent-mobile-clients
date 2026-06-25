@@ -55,6 +55,28 @@ import { log } from '../../services/logger';
 const PROTOCOL_VERSION = 1;
 
 /**
+ * Adapter stderr patterns that mean "the agent will NEVER produce a usable
+ * session" — auth failures and tier-ineligibility. `gemini --acp` logs these
+ * to stderr but does NOT reject `newSession`, so it would otherwise hang
+ * forever (the "STILL LOADING SESSION HISTORY / offline" report). Matching one
+ * lets us fail `newSession` immediately with the real cause.
+ *
+ * `IneligibleTierError` is Google's post-2026-06-18 deprecation of the free /
+ * consumer Gemini Code Assist tier for the CLI (UNSUPPORTED_CLIENT) — only paid
+ * Code Assist Standard/Enterprise still works.
+ */
+export const FATAL_STARTUP_RE =
+  /IneligibleTierError|UNSUPPORTED_CLIENT|no longer supported for Gemini Code Assist|not eligible for Gemini Code Assist|Error authenticating|ProjectIdRequiredError/i;
+
+/**
+ * Backstop ceiling for `newSession`. Legitimate first-run onboarding (a paid
+ * Code Assist account provisioning a project) can take tens of seconds, so this
+ * is generous — the FATAL_STARTUP_RE fast-path handles the common failures
+ * immediately; this only catches a silent hang with no diagnostic stderr.
+ */
+const NEWSESSION_TIMEOUT_MS = 120_000;
+
+/**
  * IDLE window for a single `session/prompt` round-trip — the max time
  * the adapter may go silent (no `session/update`, no in-flight
  * permission request) before we treat it as wedged and fail the turn.
@@ -140,6 +162,14 @@ export class AcpClient {
    *  (the agent is demonstrably working, just blocked on the tool), and
    *  re-arm only once the last one finishes. Reset per prompt. */
   private pendingToolCalls = new Set<string>();
+  /** Last few adapter stderr lines — so a startup failure surfaces the REAL
+   *  cause (e.g. gemini's `IneligibleTierError`) instead of a bare timeout. */
+  private recentStderr: string[] = [];
+  /** Set while `newSession` is in flight; the stderr watcher calls it to fail
+   *  fast when the adapter prints a fatal startup error. `gemini --acp`
+   *  swallows the Code Assist onboarding error and never rejects `newSession`,
+   *  so without this the session hangs forever ("loading… / offline"). */
+  private startupFailureReject: ((err: Error) => void) | null = null;
 
   constructor(private readonly opts: AcpClientOptions) {}
 
@@ -202,6 +232,16 @@ export class AcpClient {
           // root cause on every smoke test up to v2.27.6.
           log.info('acpAdapter', trimmed);
           this.opts.onStderr?.(trimmed);
+          this.recentStderr.push(trimmed);
+          if (this.recentStderr.length > 12) this.recentStderr.shift();
+          // Fail `newSession` fast when the adapter prints a fatal startup
+          // error (auth / tier ineligibility). gemini --acp logs these to
+          // stderr but never rejects the RPC, so the only other signal is the
+          // timeout backstop — surfacing it here makes the error immediate.
+          if (this.startupFailureReject && FATAL_STARTUP_RE.test(trimmed)) {
+            this.startupFailureReject(new Error(`AGENT_STARTUP_FAILED: ${trimmed}`));
+            this.startupFailureReject = null;
+          }
         }
       }
     });
@@ -265,10 +305,34 @@ export class AcpClient {
     );
 
     log.info('acpClient', 'newSession → sending');
-    const newSession = await this.connection.newSession({
-      cwd,
-      mcpServers: [],
+    // Race the RPC against (a) a fatal stderr line (auth / tier ineligibility),
+    // surfaced fast by the stderr watcher, and (b) a generous timeout backstop.
+    // Without this, `gemini --acp` hangs forever when Code Assist onboarding is
+    // rejected (it swallows the error instead of failing the RPC).
+    let startupTimer: ReturnType<typeof setTimeout> | undefined;
+    const startupFailure = new Promise<never>((_, reject) => {
+      this.startupFailureReject = reject;
+      startupTimer = setTimeout(() => {
+        const tail = this.recentStderr.slice(-4).join(' | ');
+        reject(
+          new Error(
+            `AGENT_STARTUP_TIMEOUT: ${this.opts.adapter.requiresAgentBinary} did not create a session within ${Math.round(
+              NEWSESSION_TIMEOUT_MS / 1000,
+            )}s${tail ? ` — last output: ${tail}` : ''}`,
+          ),
+        );
+      }, NEWSESSION_TIMEOUT_MS);
     });
+    let newSession: Awaited<ReturnType<ClientSideConnection['newSession']>>;
+    try {
+      newSession = await Promise.race([
+        this.connection.newSession({ cwd, mcpServers: [] }),
+        startupFailure,
+      ]);
+    } finally {
+      if (startupTimer) clearTimeout(startupTimer);
+      this.startupFailureReject = null;
+    }
     this.sessionId = newSession.sessionId;
     // Log the adapter-picked model so account-mismatch bugs (e.g.
     // codex-acp defaulting to a model the user's account doesn't
