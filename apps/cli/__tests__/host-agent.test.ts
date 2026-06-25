@@ -1314,6 +1314,15 @@ describe('agentIdToHeadroomKind', () => {
     expect(agentIdToHeadroomKind('copilot-cli')).toBe('copilot');
   });
 
+  it('maps cursor → cursor (regression: must NOT fall through to claude)', () => {
+    // A Cursor deploy that mapped to "claude" made Headroom launch Claude Code
+    // instead of cursor-agent (headroom-config agent=claude). The Headroom kind
+    // IS the launched agent, so this mapping is load-bearing.
+    expect(agentIdToHeadroomKind('cursor')).toBe('cursor');
+    expect(agentIdToHeadroomKind('cursor-agent')).toBe('cursor');
+    expect(agentIdToHeadroomKind('Cursor')).toBe('cursor'); // case-insensitive
+  });
+
   it('defaults unknown / empty ids to claude (safe default)', () => {
     expect(agentIdToHeadroomKind('something_else')).toBe('claude');
     expect(agentIdToHeadroomKind('')).toBe('claude');

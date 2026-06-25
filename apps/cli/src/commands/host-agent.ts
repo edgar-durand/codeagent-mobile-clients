@@ -640,6 +640,7 @@ export function agentIdToHeadroomKind(agentId: string): string {
   if (normalized.startsWith('claude')) return 'claude';
   if (normalized.startsWith('codex')) return 'codex';
   if (normalized.startsWith('copilot')) return 'copilot';
+  if (normalized.startsWith('cursor')) return 'cursor';
   return 'claude';
 }
 
