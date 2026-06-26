@@ -26,7 +26,7 @@ class ShowPairingCodeAction : AnAction() {
             when (result) {
                 is PairingCodeResult.Code -> {
                     SwingUtilities.invokeLater {
-                        PairingCodeDialog(result.code, result.expiresAt, e).show()
+                        PairingCodeDialog(result.code, result.expiresAt).show()
                     }
                 }
                 PairingCodeResult.Blocked -> {
@@ -36,7 +36,7 @@ class ShowPairingCodeAction : AnAction() {
                     val repo = ops.detectRepoSlug()
                     val branch: String? = run {
                         val status = ops.gitStatus()
-                        status.get("branch")?.takeIf { !it.isJsonNull }?.asString
+                        status.get("branch")?.takeIf { !it.isJsonNull }?.asString?.takeIf { it != "(detached)" }
                     }
                     val message = buildCloudFallbackMessage(repo, branch)
                     // Marshal only the UI work to the EDT.
@@ -62,7 +62,6 @@ class ShowPairingCodeAction : AnAction() {
     private class PairingCodeDialog(
         private val code: String,
         private val expiresAt: Long,
-        @Suppress("UNUSED_PARAMETER") event: AnActionEvent,
     ) : DialogWrapper(true) {
 
         init {

@@ -10,7 +10,7 @@ describe('checkApiReachable', () => {
     const port = (server.address() as import('net').AddressInfo).port;
     const { checkApiReachable } = await import('../src/services/connectivity');
     const result = await checkApiReachable(`http://127.0.0.1:${port}`);
-    server.close();
+    await new Promise<void>((r) => server.close(() => r()));
     expect(result).toBe('reachable');
   });
 
@@ -27,7 +27,7 @@ describe('checkApiReachable', () => {
     const port = (server.address() as import('net').AddressInfo).port;
     const { checkApiReachable } = await import('../src/services/connectivity');
     const result = await checkApiReachable(`http://127.0.0.1:${port}`, 300);
-    server.close();
+    await new Promise<void>((r) => server.close(() => r()));
     expect(result).toBe('blocked');
   });
 });

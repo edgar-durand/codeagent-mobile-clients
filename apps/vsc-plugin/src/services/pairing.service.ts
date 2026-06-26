@@ -87,8 +87,12 @@ export class PairingService {
 
       if (result?.data) {
         const data = result.data as Record<string, unknown>;
-        this.startPollingForPairing();
-        return { code: data.code as string, expiresAt: data.expiresAt as number };
+        const code = data.code;
+        const expiresAt = data.expiresAt;
+        if (typeof code === 'string' && typeof expiresAt === 'number') {
+          this.startPollingForPairing();
+          return { code, expiresAt };
+        }
       }
       return null;
     } catch (e) {
