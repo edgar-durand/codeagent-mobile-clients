@@ -383,6 +383,55 @@ export async function provisionBeads(opts: ProvisionOptions = {}): Promise<Provi
     return result;
   }
 
+  // Step 4b — VERIFY the per-prefix DB actually EXISTS on the shared server,
+  // self-healing it if not (the confirmed bug). `bd init --shared-server`
+  // (Step 3) only sets up the LOCAL workspace/config; the server-side database
+  // materializes lazily on first WRITE — but provisioning never writes (it only
+  // starts the server, sets export.auto, runs bd setup), so on a clean/reset
+  // server data dir the DB is NEVER created. Worse, an "already initialized"
+  // LOCAL workspace (the alreadyInit branch in Step 3) was treated as proof the
+  // server DB exists — it is not. The agent's first `bd create` then fails
+  // "table not found: issues" and `issues.jsonl` / refs/dolt/data never appear.
+  //
+  // Probe with `bd ping` (resolves the workspace, opens the shared-server store,
+  // runs a trivial issue-count query → exit 0 only when the DB is reachable). If
+  // it fails, `bd bootstrap` is bd's OWN non-destructive recovery: "if no
+  // database exists: creates a fresh one" — a real WRITE that materializes the
+  // per-prefix DB and lands bd's schema — and is a safe no-op ("validates and
+  // reports status") when the DB is already there. Re-probe to confirm, and let
+  // `result.serverUp` reflect ACTUAL server-side DB presence, not just a local
+  // "already initialized" string. Strictly non-fatal + bounded (one ping, at
+  // most one bootstrap, one re-probe); a throw degrades like the rest of this
+  // function rather than aborting the agent.
+  try {
+    if (!(await projectDbReachable(bd))) {
+      log.info(
+        'beads',
+        `prefix DB '${prefix}' not reachable on shared server — self-healing via bd bootstrap`,
+      );
+      const boot = await bd.run(['bootstrap', '--non-interactive']);
+      if (boot.code !== 0) {
+        log.warn(
+          'beads',
+          `bd bootstrap failed (code=${boot.code}): ${boot.stderr.slice(0, 200)} — prefix DB may be absent`,
+        );
+      }
+      const reachable = await projectDbReachable(bd);
+      result.serverUp = reachable;
+      result.initialized = reachable;
+      if (!reachable) {
+        log.warn(
+          'beads',
+          `prefix DB '${prefix}' still unreachable after bootstrap — beads disabled this run`,
+        );
+        return result;
+      }
+      log.info('beads', `prefix DB '${prefix}' materialized on shared server`);
+    }
+  } catch (err) {
+    log.warn('beads', 'verifying/creating the prefix DB threw (non-fatal)', err);
+  }
+
   // Step 5 — enable the issues.jsonl auto-export change feed (idempotent).
   const exp = await bd.run(['config', 'set', 'export.auto', 'true']);
   result.exportEnabled = exp.code === 0;
@@ -396,6 +445,20 @@ export async function provisionBeads(opts: ProvisionOptions = {}): Promise<Provi
     `provision done dolt=${result.doltAvailable} server=${result.serverUp} prefix=${result.prefix} initialized=${result.initialized} export=${result.exportEnabled} agentsWired=[${result.agentsWired.join(',')}]`,
   );
   return result;
+}
+
+/**
+ * Probe whether the per-prefix database is actually reachable on the shared
+ * server. `bd ping` resolves the cwd workspace, opens the shared-server store,
+ * and runs a trivial issue-count query — exit 0 ONLY when the DB exists and the
+ * `issues` table is queryable (exactly what the agent's first `bd create`
+ * needs). A clean/reset server data dir → the lazily-materialized DB is absent →
+ * non-zero exit. Any thrown adapter is treated as "not reachable" so the caller
+ * self-heals; the caller wraps this so it never aborts provisioning.
+ */
+async function projectDbReachable(bd: BdAdapter): Promise<boolean> {
+  const ping = await bd.run(['ping']);
+  return ping.code === 0;
 }
 
 /**

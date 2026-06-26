@@ -295,6 +295,81 @@ describe('provisionBeads', () => {
     expect(ran(fake, 'config set export.auto true')).toBe(1);
   });
 
+  it('verifies the project DB exists on the server after provisioning and recreates it when missing', async () => {
+    // The shared server is up (ensureSharedServer → up:true) but the per-prefix
+    // DB was NEVER materialized (clean/reset data dir). bd's lazy
+    // "create-on-first-write" never fired during provisioning — the agent's
+    // first `bd create` would then fail "table not found: issues". `bd ping`
+    // probes whether the DB is reachable; here it reports DOWN (exit 1) until
+    // the self-heal `bd bootstrap` materializes it, after which ping flips to up.
+    let dbPresent = false;
+    fake.run = async (args: string[]): Promise<BdRunResult> => {
+      fake.calls.push(args);
+      const joined = args.join(' ');
+      if (args[0] === 'ping') {
+        return dbPresent
+          ? { code: 0, stdout: '', stderr: '' }
+          : { code: 1, stdout: '', stderr: 'database not found' };
+      }
+      if (args[0] === 'bootstrap') {
+        dbPresent = true; // bootstrap materializes the per-prefix DB on the server
+        return { code: 0, stdout: '', stderr: '' };
+      }
+      return { code: 0, stdout: '', stderr: '' };
+    };
+
+    const res = await provisionBeads({ adapter: fake as never, beadsDir: '/tmp/hb' });
+
+    // It must NOT report success with the DB absent: provisioning issued the
+    // self-heal create AND the post-create probe confirmed the DB is now up.
+    expect(fake.calls.some((c) => c[0] === 'bootstrap')).toBe(true);
+    // Probed before (saw missing) and after (saw present) → at least 2 pings.
+    expect(ran(fake, 'ping')).toBeGreaterThanOrEqual(2);
+    expect(res.serverUp).toBe(true);
+    expect(res.initialized).toBe(true);
+  });
+
+  it('already-initialized local workspace does not mask a missing server DB', async () => {
+    // bd init returns "already initialized" (the LOCAL workspace exists) AND the
+    // server lacks the prefix DB (ping fails). The already-init string must NOT
+    // be treated as proof the server DB exists — the self-heal create must still
+    // fire so the agent can actually `bd create`.
+    let dbPresent = false;
+    fake.run = async (args: string[]): Promise<BdRunResult> => {
+      fake.calls.push(args);
+      if (args[0] === 'init') {
+        return { code: 1, stdout: '', stderr: 'This workspace is already initialized.' };
+      }
+      if (args[0] === 'ping') {
+        return dbPresent
+          ? { code: 0, stdout: '', stderr: '' }
+          : { code: 1, stdout: '', stderr: 'database not found' };
+      }
+      if (args[0] === 'bootstrap') {
+        dbPresent = true;
+        return { code: 0, stdout: '', stderr: '' };
+      }
+      return { code: 0, stdout: '', stderr: '' };
+    };
+
+    const res = await provisionBeads({ adapter: fake as never, beadsDir: '/tmp/hb' });
+
+    expect(fake.calls.some((c) => c[0] === 'bootstrap')).toBe(true);
+    expect(res.initialized).toBe(true);
+    expect(res.serverUp).toBe(true);
+  });
+
+  it('does NOT bootstrap when the project DB already exists on the server (idempotent)', async () => {
+    // ping reports up on the FIRST probe → DB already materialized → no
+    // bootstrap, and provisioning continues straight to export.auto.
+    fake.setCode('ping', 0); // present from the start (default is 0 anyway)
+    const res = await provisionBeads({ adapter: fake as never, beadsDir: '/tmp/hb' });
+    expect(fake.calls.some((c) => c[0] === 'bootstrap')).toBe(false);
+    expect(res.serverUp).toBe(true);
+    expect(res.initialized).toBe(true);
+    expect(ran(fake, 'config set export.auto true')).toBe(1);
+  });
+
   it('runs the install-bd fallback when the binary is missing (does NOT just skip)', async () => {
     fake.available = false;
     const install = vi
