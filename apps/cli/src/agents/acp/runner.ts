@@ -727,6 +727,34 @@ const AUTH_FAILURE_MESSAGE =
   'Tap [Re-authenticate this agent](codeam://reauth) to renew your credentials in Profile › Agents, then send your message again.';
 
 /**
+ * True when a cursor-agent reply IS Cursor's own plan paywall — "Upgrade your
+ * plan to continue". The user's CURSOR account has no active plan/credits to
+ * run the agent. This is NOT a credential problem (the login works), so we do
+ * NOT flag the credential invalid or offer re-link; we point the user at their
+ * Cursor account to upgrade. Length-guarded so a reply that merely DISCUSSES
+ * plans isn't misclassified.
+ */
+export function replyIsCursorUpgradeRequired(finalText: string): boolean {
+  const t = finalText.trim().toLowerCase();
+  if (t.length === 0 || t.length > 200) return false;
+  return (
+    t.includes('upgrade your plan to continue') ||
+    (t.includes('upgrade your plan') && t.includes('continue'))
+  );
+}
+
+/**
+ * Actionable bubble when the user's Cursor ACCOUNT needs a paid plan to run the
+ * agent. Links to the user's own Cursor account billing page (a real https URL
+ * the chat renders as tappable) — NOT a re-link/re-auth flow, the credential is
+ * fine. This is Cursor's paywall, not CodeAgent's.
+ */
+const CURSOR_UPGRADE_MESSAGE =
+  '⚡ **Cursor needs a paid plan to run the agent.**\n\n' +
+  'The headless Cursor Agent requires Cursor **Pro** — your Free plan’s included usage does NOT cover Agent runs, even with quota left. This is your Cursor account (not CodeAgent). Upgrade, then send your message again:\n\n' +
+  '[Upgrade to Cursor Pro →](https://cursor.com/dashboard)';
+
+/**
  * Persistent, actionable message for a NON-auth turn failure that produced no
  * assistant text (e.g. the local Headroom proxy not ready on the first prompt,
  * a network/adapter error). Without this the only frame published is the empty
@@ -1589,7 +1617,18 @@ async function handleCommand(
         // instead of staying as plain text (Gemini's typical shape
         // for "¿continuar? 1. sí 2. no").
         const finalText = streaming.getCurrentText();
-        if (replyIsAuthFailure(finalText)) {
+        if (opts.agent === 'cursor' && replyIsCursorUpgradeRequired(finalText)) {
+          // Cursor's OWN plan paywall ("Upgrade your plan to continue"): the
+          // user's Cursor account is on Free, which doesn't include the headless
+          // Agent. NOT a credential problem — swap the bare text for an
+          // actionable bubble linking to the user's Cursor account upgrade page.
+          // Do NOT reportCredentialInvalid (the login is valid).
+          await streaming.closeWithBubble(CURSOR_UPGRADE_MESSAGE);
+          history.appendAgentReply(CURSOR_UPGRADE_MESSAGE);
+          void history.flush();
+          log.info('acpRunner', `start_task ← cursor-plan-upgrade-required id=${cmd.id.slice(0, 8)}`);
+          await relay.sendResult(cmd.id, 'failed', { error: 'cursor plan upgrade required' });
+        } else if (replyIsAuthFailure(finalText)) {
           // The agent COMPLETED the turn but its reply IS an auth-failure
           // notice ("Not logged in · Please run /login") — a missing/expired
           // credential the agent surfaced as plain text instead of throwing.

@@ -30,6 +30,7 @@ import {
   providerOutageMessage,
   agentStatusPage,
   replyIsAuthFailure,
+  replyIsCursorUpgradeRequired,
   looksLike1mContextCreditsError,
   startupFailureMessage,
 } from '../../src/agents/acp/runner';
@@ -248,6 +249,28 @@ describe('replyIsAuthFailure — auth error arriving as a COMPLETED-turn reply',
   });
   it('does NOT flag a normal short reply', () => {
     expect(replyIsAuthFailure('Done — pushed the commit.')).toBe(false);
+  });
+});
+
+describe('replyIsCursorUpgradeRequired — Cursor plan paywall arriving as a reply', () => {
+  // The user's Cursor account is on Free, which doesn't include the headless
+  // Agent — cursor-agent ends the turn with "Upgrade your plan to continue".
+  // Detect it (cursor-only at the call site) so we swap in an upgrade-link bubble.
+  it('flags the Cursor upgrade paywall reply', () => {
+    expect(replyIsCursorUpgradeRequired('Upgrade your plan to continue')).toBe(true);
+    expect(replyIsCursorUpgradeRequired('\n\nUpgrade your plan to continue')).toBe(true);
+    expect(replyIsCursorUpgradeRequired('UPGRADE YOUR PLAN TO CONTINUE')).toBe(true);
+  });
+  it('does NOT flag empty / normal / long replies (length guard)', () => {
+    expect(replyIsCursorUpgradeRequired('')).toBe(false);
+    expect(replyIsCursorUpgradeRequired('Done — pushed the commit.')).toBe(false);
+    const longReply =
+      'You can upgrade your plan to continue getting more usage, but for now I ' +
+      'have finished the refactor you asked for across all the services and the ' +
+      'tests pass. Let me know if you want me to also update the docs and the ' +
+      'changelog before we open the pull request for review by your teammates.';
+    expect(longReply.length).toBeGreaterThan(200);
+    expect(replyIsCursorUpgradeRequired(longReply)).toBe(false);
   });
 });
 
