@@ -1,6 +1,5 @@
 package com.windsurf.controller.actions
 
-import com.intellij.ide.BrowserUtil
 import com.intellij.openapi.actionSystem.AnAction
 import com.intellij.openapi.actionSystem.AnActionEvent
 import com.intellij.openapi.ui.DialogWrapper
@@ -10,9 +9,8 @@ import com.windsurf.controller.services.PairingService
 import com.windsurf.controller.services.PairingService.PairingCodeResult
 import com.windsurf.controller.services.ProjectOpsService
 import com.windsurf.controller.services.buildCloudFallbackMessage
+import com.windsurf.controller.ui.CloudFallbackDialog
 import java.awt.Font
-import java.net.URI
-import javax.swing.JButton
 import javax.swing.JComponent
 import javax.swing.JPanel
 import javax.swing.BoxLayout
@@ -43,7 +41,9 @@ class ShowPairingCodeAction : AnAction() {
                     val message = buildCloudFallbackMessage(repo, branch)
                     // Marshal only the UI work to the EDT.
                     SwingUtilities.invokeLater {
-                        CloudFallbackDialog(message, e).show()
+                        CloudFallbackDialog(message, onRetry = {
+                            ShowPairingCodeAction().actionPerformed(e)
+                        }).show()
                     }
                 }
                 PairingCodeResult.None -> {
@@ -62,7 +62,7 @@ class ShowPairingCodeAction : AnAction() {
     private class PairingCodeDialog(
         private val code: String,
         private val expiresAt: Long,
-        private val event: AnActionEvent,
+        @Suppress("UNUSED_PARAMETER") event: AnActionEvent,
     ) : DialogWrapper(true) {
 
         init {
@@ -100,86 +100,5 @@ class ShowPairingCodeAction : AnAction() {
         }
     }
 
-    /**
-     * Cloud-fallback panel — rendered when the API host is unreachable (VPN/firewall/
-     * allowlist) during a pairing attempt. Shows the title, body, numbered steps, and
-     * optional repo·branch context line, plus:
-     *  • **Retry** — re-invokes [ShowPairingCodeAction] so the user can try again after
-     *    toggling VPN / allowlisting the host, without reopening the IDE menu.
-     *  • **Learn more** — opens [learnMoreUrl] in the system browser via [BrowserUtil].
-     *
-     * Shown ONLY on an explicit pair attempt — never on auto-load.
-     */
-    private class CloudFallbackDialog(
-        private val message: com.windsurf.controller.services.CloudFallbackMessage,
-        private val event: AnActionEvent,
-    ) : DialogWrapper(true) {
-
-        init {
-            title = message.title
-            setOKButtonText("Retry")
-            setCancelButtonText("Close")
-            init()
-        }
-
-        override fun createCenterPanel(): JComponent {
-            val panel = JPanel().apply {
-                layout = BoxLayout(this, BoxLayout.Y_AXIS)
-                border = JBUI.Borders.empty(4, 0, 4, 0)
-            }
-
-            // Body text
-            panel.add(JBLabel("<html><body style='width:340px'>${message.body}</body></html>").apply {
-                alignmentX = JComponent.LEFT_ALIGNMENT
-            })
-
-            panel.add(javax.swing.Box.createVerticalStrut(16))
-
-            // Optional repo · branch line
-            val repoLine = message.repoLine
-            if (repoLine != null) {
-                panel.add(JBLabel(repoLine).apply {
-                    font = Font("Monospaced", Font.BOLD, 12)
-                    foreground = java.awt.Color(108, 92, 231) // electric purple
-                    alignmentX = JComponent.LEFT_ALIGNMENT
-                })
-                panel.add(javax.swing.Box.createVerticalStrut(12))
-            }
-
-            // Numbered steps
-            message.steps.forEachIndexed { index, step ->
-                panel.add(JBLabel("${index + 1}. $step").apply {
-                    alignmentX = JComponent.LEFT_ALIGNMENT
-                    border = JBUI.Borders.empty(2, 0)
-                })
-            }
-
-            panel.add(javax.swing.Box.createVerticalStrut(16))
-
-            // Learn more link
-            val learnMoreBtn = JButton("Learn more").apply {
-                alignmentX = JComponent.LEFT_ALIGNMENT
-                isBorderPainted = false
-                isContentAreaFilled = false
-                foreground = java.awt.Color(88, 166, 255)
-                cursor = java.awt.Cursor.getPredefinedCursor(java.awt.Cursor.HAND_CURSOR)
-                font = font.deriveFont(Font.PLAIN, 12f)
-            }
-            learnMoreBtn.addActionListener {
-                BrowserUtil.browse(URI(message.learnMoreUrl))
-            }
-            panel.add(learnMoreBtn)
-
-            return panel
-        }
-
-        /** OK button → Retry: close this dialog and re-invoke the pairing action. */
-        override fun doOKAction() {
-            super.doOKAction()
-            // Re-invoke on EDT after this dialog closes
-            SwingUtilities.invokeLater {
-                ShowPairingCodeAction().actionPerformed(event)
-            }
-        }
-    }
 }
+

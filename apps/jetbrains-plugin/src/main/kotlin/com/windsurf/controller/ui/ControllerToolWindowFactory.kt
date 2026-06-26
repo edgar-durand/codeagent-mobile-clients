@@ -28,6 +28,7 @@ import com.windsurf.controller.services.McpConfigureRequest
 import com.windsurf.controller.services.McpEntry
 import com.windsurf.controller.services.FileOpsService
 import com.windsurf.controller.services.ProjectOpsService
+import com.windsurf.controller.services.buildCloudFallbackMessage
 import com.windsurf.controller.services.McpServerDef
 import com.windsurf.controller.util.BuildInstallCommand
 import com.windsurf.controller.services.strategies.AgentInvocation
@@ -669,9 +670,9 @@ class ControllerToolWindowFactory : ToolWindowFactory {
             // Network call must run off the EDT; dispatch result back on EDT.
             Thread {
                 val result = PairingService.getInstance().requestPairingCode()
-                SwingUtilities.invokeLater {
-                    when (result) {
-                        is PairingService.PairingCodeResult.Code -> {
+                when (result) {
+                    is PairingService.PairingCodeResult.Code -> {
+                        SwingUtilities.invokeLater {
                             pairButton.text = "Refresh Code"
 
                             val spaced = result.code.take(3) + " " + result.code.drop(3)
@@ -701,18 +702,46 @@ class ControllerToolWindowFactory : ToolWindowFactory {
                                     }
                                 }.apply { isRepeats = false; start() }
                             }
+                            pairButton.isEnabled = true
                         }
-                        PairingService.PairingCodeResult.Blocked -> {
+                    }
+                    PairingService.PairingCodeResult.Blocked -> {
+                        if (!autoMode) {
+                            // Explicit "Generate Code" click — show the cloud-fallback
+                            // panel so the user understands the network block and has a
+                            // clear recovery path (parity with VS Code primary button).
+                            // Git/network exec runs HERE on the background thread — NOT
+                            // inside invokeLater — to keep the EDT free.
+                            val ops = ProjectOpsService.getInstance()
+                            val repo = ops.detectRepoSlug()
+                            val branch: String? = run {
+                                val status = ops.gitStatus()
+                                status.get("branch")?.takeIf { !it.isJsonNull }?.asString
+                            }
+                            val message = buildCloudFallbackMessage(repo, branch)
+                            SwingUtilities.invokeLater {
+                                pairButton.isEnabled = true
+                                showPairingIdle()
+                                CloudFallbackDialog(message, onRetry = {
+                                    generatePairingCode(autoMode = false)
+                                }).show()
+                            }
+                        } else {
                             // API unreachable during auto-pairing loop — do NOT show
                             // the cloud-fallback panel on auto-refresh (only on explicit
-                            // user action). Retry later as we would for a None result.
-                            showPairingIdle()
-                            pairingRefreshTimer?.stop()
-                            pairingRefreshTimer = Timer(10_000) {
-                                if (autoPairingActive) generatePairingCode(autoMode = true)
-                            }.apply { isRepeats = false; start() }
+                            // user action). Retry silently later.
+                            SwingUtilities.invokeLater {
+                                showPairingIdle()
+                                pairingRefreshTimer?.stop()
+                                pairingRefreshTimer = Timer(10_000) {
+                                    if (autoPairingActive) generatePairingCode(autoMode = true)
+                                }.apply { isRepeats = false; start() }
+                                pairButton.isEnabled = true
+                            }
                         }
-                        PairingService.PairingCodeResult.None -> {
+                    }
+                    PairingService.PairingCodeResult.None -> {
+                        SwingUtilities.invokeLater {
                             showPairingIdle()
                             if (!autoMode) {
                                 JOptionPane.showMessageDialog(
@@ -728,9 +757,9 @@ class ControllerToolWindowFactory : ToolWindowFactory {
                                     if (autoPairingActive) generatePairingCode(autoMode = true)
                                 }.apply { isRepeats = false; start() }
                             }
+                            pairButton.isEnabled = true
                         }
                     }
-                    pairButton.isEnabled = true
                 }
             }.apply { isDaemon = true; start() }
         }
