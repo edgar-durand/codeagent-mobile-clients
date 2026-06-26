@@ -6,7 +6,10 @@ import * as crypto from 'crypto';
 import { PROTOCOL_VERSION } from '@codeagent/shared';
 import { SettingsService, type RecentSession } from './settings.service';
 import { CommandRelayService } from './command-relay.service';
+import { checkApiReachable } from './connectivity';
 import { OutputChannel } from 'vscode';
+
+export type PairingCodeResult = { code: string; expiresAt: number } | { blocked: true } | null;
 
 export interface PairedUserInfo {
   name: string;
@@ -49,24 +52,23 @@ export class PairingService {
     this.listeners.push(listener);
   }
 
-  async requestPairingCode(): Promise<{ code: string; expiresAt: number } | null> {
+  async requestPairingCode(): Promise<PairingCodeResult> {
     const settings = SettingsService.getInstance();
     const pluginId = settings.ensurePluginId();
     const relay = CommandRelayService.getInstance();
 
-    // Detect the current git branch up-front so the backend can
-    // populate `PairedSession.branch` on the very first pair — the
-    // mobile / web SessionDetail surfaces it next to the session name
-    // exactly the way the CLI's `detectCurrentBranch` payload does.
+    // Preflight: if the API host is unreachable (VPN/firewall/allowlist),
+    // surface the cloud fallback instead of a cryptic pairing failure.
+    if ((await checkApiReachable(settings.apiBaseUrl)) === 'blocked') {
+      this.log.appendLine('[pairing] API unreachable (preflight) — offering cloud fallback');
+      return { blocked: true };
+    }
+
     let branch: string | null = null;
     try {
       const { ProjectOpsService } = await import('./project-ops.service');
       branch = await ProjectOpsService.detectCurrentBranch();
-    } catch {
-      // Workspace closed mid-handshake / git not on PATH — fall back
-      // to null. The backend treats it as "branch unknown" the same
-      // way it does for legacy clients.
-    }
+    } catch { /* branch unknown */ }
 
     try {
       const result = await relay.postJson(`${settings.apiBaseUrl}/api/pairing/code`, {
@@ -85,16 +87,15 @@ export class PairingService {
 
       if (result?.data) {
         const data = result.data as Record<string, unknown>;
-        const code = data.code as string;
-        const expiresAt = data.expiresAt as number;
-
         this.startPollingForPairing();
-        return { code, expiresAt };
+        return { code: data.code as string, expiresAt: data.expiresAt as number };
       }
       return null;
     } catch (e) {
-      this.log.appendLine(`Error requesting pairing code: ${e}`);
-      return null;
+      // postJson rejects ONLY on transport error/timeout (it resolves on any
+      // HTTP response), so a throw here means no HTTP response = blocked.
+      this.log.appendLine(`[pairing] request failed (transport) — offering cloud fallback: ${e}`);
+      return { blocked: true };
     }
   }
 
