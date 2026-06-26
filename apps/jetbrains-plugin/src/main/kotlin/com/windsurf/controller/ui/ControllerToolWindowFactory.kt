@@ -716,7 +716,7 @@ class ControllerToolWindowFactory : ToolWindowFactory {
                             val repo = ops.detectRepoSlug()
                             val branch: String? = run {
                                 val status = ops.gitStatus()
-                                status.get("branch")?.takeIf { !it.isJsonNull }?.asString
+                                status.get("branch")?.takeIf { !it.isJsonNull }?.asString?.takeIf { it != "(detached)" }
                             }
                             val message = buildCloudFallbackMessage(repo, branch)
                             SwingUtilities.invokeLater {

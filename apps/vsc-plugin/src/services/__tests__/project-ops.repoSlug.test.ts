@@ -16,6 +16,10 @@ describe('ProjectOpsService.detectRepoSlug', () => {
     expect(await withRemote('https://github.com/edgar-durand/personal-driver-landing.git'))
       .toEqual({ owner: 'edgar-durand', repo: 'personal-driver-landing' });
   });
+  it('parses an https GitHub remote without .git suffix', async () => {
+    expect(await withRemote('https://github.com/edgar-durand/personal-driver-landing'))
+      .toEqual({ owner: 'edgar-durand', repo: 'personal-driver-landing' });
+  });
   it('parses an ssh GitHub remote', async () => {
     expect(await withRemote('git@github.com:edgar-durand/my-repo.git'))
       .toEqual({ owner: 'edgar-durand', repo: 'my-repo' });

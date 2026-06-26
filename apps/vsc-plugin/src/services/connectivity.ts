@@ -19,7 +19,7 @@ export async function checkApiReachable(
     const done = (r: Reachability) => { if (!settled) { settled = true; resolve(r); } };
     let url: URL;
     try {
-      url = new URL('/healthz', apiBaseUrl);
+      url = new URL(`${apiBaseUrl.replace(/\/+$/, '')}/healthz`);
     } catch {
       done('blocked');
       return;
