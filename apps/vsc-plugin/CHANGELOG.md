@@ -4,6 +4,21 @@ All notable changes to the CodeAgent Mobile VS Code extension are documented her
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.48.0] — 2026-06-26
+
+### Added
+
+- **shared:** EnvVar wire type for env-config
+- **cli:** Dotenv parse/serialize util for env-config
+- **cli:** Accept env-config vars[] in startCommandSchema
+- **cli:** Env_read handler
+- **cli:** Env_write handler (validate + atomic write)
+- **cli:** Preview_restart handler (kill + re-spawn from stored detection)
+
+### Changed
+
+- **cli:** Store detection on ActivePreview + extract startPreviewFromDetection
+
 ## [2.47.1] — 2026-06-26
 
 ### Chore
