@@ -158,6 +158,18 @@ export const startCommandSchema = z.object({
       notes: z.string().max(4096).nullable().optional(),
     })
     .optional(),
+  // `env_write` carries the full desired set of environment variables
+  // for the project `.env`. Bounded so a malformed payload can't flood
+  // the disk-side serializer. `env_read` / `preview_restart` send no payload.
+  vars: z
+    .array(
+      z.object({
+        key: z.string().min(1).max(256),
+        value: z.string().max(32768),
+      }),
+    )
+    .max(512)
+    .optional(),
 });
 
 export type StartCommandPayload = z.infer<typeof startCommandSchema>;
