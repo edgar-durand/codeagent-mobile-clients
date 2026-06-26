@@ -1,5 +1,10 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
+vi.mock('../../src/services/spawn-and-capture', () => ({
+  spawnAndCapture: vi.fn(async () => '{"framework":"next","port":3000}'),
+}));
 import { CursorRuntimeStrategy } from '../../src/agents/cursor/runtime';
+import { spawnAndCapture } from '../../src/services/spawn-and-capture';
+import type { OsStrategy } from '../../src/os';
 import {
   filterCursorChrome,
   detectCursorSelector,
@@ -65,6 +70,26 @@ describe('CursorRuntimeStrategy contract', () => {
 
   it('fetchWeeklyUsage returns null (no public RPC yet)', async () => {
     await expect(runtime.fetchWeeklyUsage()).resolves.toBeNull();
+  });
+
+  it('generateOneShot runs cursor-agent --print --force --trust <prompt> (powers preview detection)', async () => {
+    const fakeOs = {
+      findInPath: () => '/usr/bin/cursor-agent',
+      buildLaunch: (cmd: string, args: string[] = []) => ({ cmd, args }),
+    } as unknown as OsStrategy;
+    const r = new CursorRuntimeStrategy(fakeOs);
+    const out = await r.generateOneShot!('detect the framework');
+    expect(out).toBe('{"framework":"next","port":3000}');
+    const [cmd, args] = (spawnAndCapture as unknown as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(cmd).toBe('/usr/bin/cursor-agent');
+    // --trust bypasses the headless workspace-trust gate; --force auto-allows tools.
+    expect(args).toEqual(['--print', '--force', '--trust', 'detect the framework']);
+  });
+
+  it('generateOneShot returns null when cursor-agent is not on PATH', async () => {
+    const fakeOs = { findInPath: () => null } as unknown as OsStrategy;
+    const r = new CursorRuntimeStrategy(fakeOs);
+    await expect(r.generateOneShot!('x')).resolves.toBeNull();
   });
 });
 

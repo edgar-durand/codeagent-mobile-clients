@@ -24,6 +24,7 @@ import { cursorCredentialLocator, cursorLoginLauncher } from './link';
 import { detectCursorSelector, filterCursorChrome, parseCursorChrome } from './parsing';
 import type { OsStrategy } from '../../os';
 import type { ChangeModelInstruction, RuntimeStrategy } from '../strategy';
+import { spawnAndCapture } from '../../services/spawn-and-capture';
 
 const CURSOR_CONTEXT_WINDOW = 200_000;
 
@@ -80,6 +81,28 @@ export class CursorRuntimeStrategy implements RuntimeStrategy {
 
   async listModels(): Promise<AgentModel[]> {
     return CURSOR_MODELS;
+  }
+
+  /**
+   * One-shot headless generation — powers preview detection + AI summaries.
+   * `--print` = non-interactive; `--trust` bypasses the workspace-trust gate
+   * (no human at the box to approve, only works with --print); `--force`
+   * auto-allows tool calls. Auth comes from the login state the provisioner
+   * writes (~/.config/cursor/auth.json), NOT CURSOR_API_KEY. Returns null on
+   * spawn failure / timeout / empty output so callers silently skip — same
+   * semantics as Claude / Codex / Gemini.
+   */
+  async generateOneShot(
+    prompt: string,
+    opts?: { cwd?: string; timeoutMs?: number },
+  ): Promise<string | null> {
+    const binary = this.os.findInPath('cursor-agent');
+    if (!binary) return null;
+    const launch = this.os.buildLaunch(binary, ['--print', '--force', '--trust', prompt]);
+    return spawnAndCapture(launch.cmd, launch.args, {
+      cwd: opts?.cwd,
+      timeoutMs: opts?.timeoutMs,
+    });
   }
 
   changeModelInstruction(modelId: string): ChangeModelInstruction {
