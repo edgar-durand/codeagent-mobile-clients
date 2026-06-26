@@ -152,7 +152,9 @@ describe('provisionAgentCredentials — codex', () => {
 });
 
 describe('provisionAgentCredentials — cursor', () => {
-  it('oauth_token JSON blob: extracts accessToken → CURSOR_API_KEY, no files written', () => {
+  const cursorAuthJson = (home: string) => path.join(home, '.config', 'cursor', 'auth.json');
+
+  it('oauth_token JSON blob: writes the login state to ~/.config/cursor/auth.json verbatim, no env', () => {
     const blob = JSON.stringify({
       accessToken: 'eyJabc.cursor.token',
       refreshToken: 'rft-xyz',
@@ -160,26 +162,30 @@ describe('provisionAgentCredentials — cursor', () => {
     });
     const env = provisionAgentCredentials('cursor', { kind: 'oauth_token', value: blob }, tmpHome);
 
-    // Only CURSOR_API_KEY should be returned, set to the accessToken.
-    expect(env).toEqual({ CURSOR_API_KEY: 'eyJabc.cursor.token' });
-
-    // Confirm no credential files were written.
-    expect(fs.readdirSync(tmpHome)).toHaveLength(0);
+    // No env var — the OAuth token is NOT a valid CURSOR_API_KEY. It must go to
+    // the login-state file that `cursor-agent acp` (cursor_login) reads.
+    expect(env).toEqual({});
+    expect(fs.readFileSync(cursorAuthJson(tmpHome), 'utf8')).toBe(blob);
   });
 
-  it('oauth_token bare token (no leading {): returned verbatim as CURSOR_API_KEY', () => {
+  it('oauth_token bare token (no leading {): writes a minimal login state, no env', () => {
     const env = provisionAgentCredentials(
       'cursor',
       { kind: 'oauth_token', value: 'bare-token-no-json' },
       tmpHome,
     );
 
-    expect(env).toEqual({ CURSOR_API_KEY: 'bare-token-no-json' });
-    // No files written.
-    expect(fs.readdirSync(tmpHome)).toHaveLength(0);
+    expect(env).toEqual({});
+    expect(JSON.parse(fs.readFileSync(cursorAuthJson(tmpHome), 'utf8'))).toEqual({
+      accessToken: 'bare-token-no-json',
+    });
   });
 
-  it('api_key: returns CURSOR_API_KEY with the raw value', () => {
+  it('api_key: returns CURSOR_API_KEY env (real dashboard key) + clears any stale login state', () => {
+    // seed a stale login-state file to prove it gets removed
+    fs.mkdirSync(path.dirname(cursorAuthJson(tmpHome)), { recursive: true });
+    fs.writeFileSync(cursorAuthJson(tmpHome), '{"accessToken":"stale"}');
+
     const env = provisionAgentCredentials(
       'cursor',
       { kind: 'api_key', value: 'curs-api-key-xyz' },
@@ -187,8 +193,7 @@ describe('provisionAgentCredentials — cursor', () => {
     );
 
     expect(env).toEqual({ CURSOR_API_KEY: 'curs-api-key-xyz' });
-    // No files written.
-    expect(fs.readdirSync(tmpHome)).toHaveLength(0);
+    expect(fs.existsSync(cursorAuthJson(tmpHome))).toBe(false);
   });
 
   it('oauth_token JSON blob missing accessToken: throws a clear error', () => {
