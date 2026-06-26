@@ -1069,9 +1069,20 @@ const previewStartH: CommandHandler = (ctx, _cmd, parsed) => {
   // actually exists when we test for it. Running it here at the top
   // — when node_modules may not exist yet on a fresh codespace —
   // silently no-ops and we'd spawn through the unreliable npx wrapper.
-  const detection = rawDetection;
-  const pluginAuthToken = ctx.pluginAuthToken;
+  startPreviewFromDetection(ctx, rawDetection, ctx.pluginAuthToken);
+};
 
+/**
+ * Fire-and-forget bring-up of a preview from a detection: runs setup
+ * commands, spawns the dev server, waits for readiness, opens the tunnel,
+ * registers the ActivePreview, and emits the preview_* lifecycle events.
+ * Shared by previewStartH (first start) and previewRestartH (env reload).
+ */
+export function startPreviewFromDetection(
+  ctx: HandlerContext,
+  detection: PreviewDetection,
+  pluginAuthToken: string,
+): void {
   /**
    * Fire-and-forget progress emitter — used by `previewStartH` to ship
    * one realtime milestone per step the dev-server bring-up traverses
@@ -1660,6 +1671,7 @@ const previewStartH: CommandHandler = (ctx, _cmd, parsed) => {
       tunnel,
       url,
       framework: detection.framework,
+      detection,
     });
     log.info('preview', `ready: ${detection.framework} at ${url}`);
     void postPreviewEvent({
@@ -1684,7 +1696,7 @@ const previewStartH: CommandHandler = (ctx, _cmd, parsed) => {
       payload: { stage: 'spawn', message: `Preview failed to start: ${message}` },
     });
   });
-};
+}
 
 const previewStopH: CommandHandler = (ctx) => {
   if (!ctx.pluginAuthToken) {

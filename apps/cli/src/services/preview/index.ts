@@ -1,4 +1,5 @@
 import type { ChildProcess } from 'child_process';
+import type { PreviewDetection } from '@codeagent/shared';
 
 export * from './cloudflared';
 export * from './codespace';
@@ -22,6 +23,9 @@ export interface ActivePreview {
   tunnel: ChildProcess | null;
   url: string;
   framework: string;
+  /** The detection this preview was started from, so a restart can
+   *  re-spawn it without re-reading `.codeam/preview.json`. */
+  detection: PreviewDetection;
 }
 
 export const activePreviews = new Map<string, ActivePreview>();

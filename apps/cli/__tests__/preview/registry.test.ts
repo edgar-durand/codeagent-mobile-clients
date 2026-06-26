@@ -30,6 +30,13 @@ function makePreview(sessionId: string, opts: { withTunnel: boolean }): ActivePr
       : null,
     url: opts.withTunnel ? 'https://x.trycloudflare.com' : '',
     framework: 'Vite',
+    detection: {
+      framework: 'Vite',
+      command: 'npm',
+      args: ['run', 'dev'],
+      port: 5173,
+      ready_pattern: 'ready',
+    },
   };
 }
 
