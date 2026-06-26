@@ -394,15 +394,32 @@ export async function provisionBeads(opts: ProvisionOptions = {}): Promise<Provi
   // "table not found: issues" and `issues.jsonl` / refs/dolt/data never appear.
   //
   // Probe with `bd ping` (resolves the workspace, opens the shared-server store,
-  // runs a trivial issue-count query → exit 0 only when the DB is reachable). If
-  // it fails, `bd bootstrap` is bd's OWN non-destructive recovery: "if no
-  // database exists: creates a fresh one" — a real WRITE that materializes the
-  // per-prefix DB and lands bd's schema — and is a safe no-op ("validates and
-  // reports status") when the DB is already there. Re-probe to confirm, and let
-  // `result.serverUp` reflect ACTUAL server-side DB presence, not just a local
-  // "already initialized" string. Strictly non-fatal + bounded (one ping, at
-  // most one bootstrap, one re-probe); a throw degrades like the rest of this
-  // function rather than aborting the agent.
+  // runs a trivial issue-count query → exit 0 only when the DB is reachable).
+  // When it fails, self-heal with a bootstrap-then-mint fallback:
+  //
+  //   1. `bd bootstrap` — bd's OWN recovery. It auto-detects `sync.remote`
+  //      (derived from git origin) and CLONES the per-prefix DB from it, or
+  //      restores a backup / git-tracked JSONL. CORRECT when the remote HAS
+  //      Dolt data. But for a BRAND-NEW project the git remote has no
+  //      `refs/dolt/data`, so bootstrap FAILS to produce a reachable DB (it
+  //      does NOT fall through to "create fresh" because a remote IS
+  //      configured) — so a bootstrap-only self-heal can never create the DB
+  //      for a new project (the confirmed bug).
+  //   2. Re-probe. If STILL unreachable, MINT a fresh local DB — the PROVEN
+  //      new-project recovery (verified live: "Remote has no Dolt data yet;
+  //      initialized a fresh local database" + `bd ping` → ok):
+  //        bd init -p <prefix> --shared-server --reinit-local --discard-remote
+  //                --destroy-token=DESTROY-<prefix> --non-interactive
+  //      Safe here: the remote has no Dolt data (nothing to discard) and a
+  //      brand-new project has no issues. The destroy-token format is
+  //      `DESTROY-<issue-prefix>`; since WE control `-p <prefix>`, the
+  //      issue-prefix IS that prefix — reuse the same `prefix` var for both.
+  //   3. Re-probe once more and let `result.serverUp` / `result.initialized`
+  //      reflect the FINAL probe — ACTUAL server-side DB presence, not just a
+  //      local "already initialized" string.
+  //
+  // Strictly non-fatal + bounded (one bootstrap, one mint, probes between); a
+  // throw degrades like the rest of this function rather than aborting the agent.
   try {
     if (!(await projectDbReachable(bd))) {
       log.info(
@@ -416,13 +433,39 @@ export async function provisionBeads(opts: ProvisionOptions = {}): Promise<Provi
           `bd bootstrap failed (code=${boot.code}): ${boot.stderr.slice(0, 200)} — prefix DB may be absent`,
         );
       }
+
+      // If bootstrap (clone/restore) didn't make the DB reachable, this is a
+      // new project / empty remote → mint a fresh local DB.
+      if (!(await projectDbReachable(bd))) {
+        log.info(
+          'beads',
+          `prefix DB '${prefix}' still unreachable after bootstrap — minting a fresh local DB`,
+        );
+        const mint = await bd.run([
+          'init',
+          '-p',
+          prefix,
+          '--shared-server',
+          '--reinit-local',
+          '--discard-remote',
+          `--destroy-token=DESTROY-${prefix}`,
+          '--non-interactive',
+        ]);
+        if (mint.code !== 0) {
+          log.warn(
+            'beads',
+            `bd init --reinit-local for '${prefix}' failed (code=${mint.code}): ${mint.stderr.slice(0, 200)} — prefix DB may be absent`,
+          );
+        }
+      }
+
       const reachable = await projectDbReachable(bd);
       result.serverUp = reachable;
       result.initialized = reachable;
       if (!reachable) {
         log.warn(
           'beads',
-          `prefix DB '${prefix}' still unreachable after bootstrap — beads disabled this run`,
+          `prefix DB '${prefix}' still unreachable after bootstrap + mint — beads disabled this run`,
         );
         return result;
       }

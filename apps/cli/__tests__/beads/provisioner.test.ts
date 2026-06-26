@@ -295,17 +295,16 @@ describe('provisionBeads', () => {
     expect(ran(fake, 'config set export.auto true')).toBe(1);
   });
 
-  it('verifies the project DB exists on the server after provisioning and recreates it when missing', async () => {
+  it('uses bootstrap alone when it makes the DB reachable (remote HAS dolt data)', async () => {
     // The shared server is up (ensureSharedServer → up:true) but the per-prefix
-    // DB was NEVER materialized (clean/reset data dir). bd's lazy
-    // "create-on-first-write" never fired during provisioning — the agent's
-    // first `bd create` would then fail "table not found: issues". `bd ping`
-    // probes whether the DB is reachable; here it reports DOWN (exit 1) until
-    // the self-heal `bd bootstrap` materializes it, after which ping flips to up.
+    // DB was NEVER materialized (clean/reset data dir). `bd ping` probes whether
+    // the DB is reachable; here it reports DOWN (exit 1) until the self-heal
+    // `bd bootstrap` materializes it (the remote HAS dolt data / a backup /
+    // git-tracked JSONL — bootstrap clones/restores it), after which ping flips
+    // to up. No fresh-DB mint should be needed.
     let dbPresent = false;
     fake.run = async (args: string[]): Promise<BdRunResult> => {
       fake.calls.push(args);
-      const joined = args.join(' ');
       if (args[0] === 'ping') {
         return dbPresent
           ? { code: 0, stdout: '', stderr: '' }
@@ -321,10 +320,70 @@ describe('provisionBeads', () => {
     const res = await provisionBeads({ adapter: fake as never, beadsDir: '/tmp/hb' });
 
     // It must NOT report success with the DB absent: provisioning issued the
-    // self-heal create AND the post-create probe confirmed the DB is now up.
+    // self-heal bootstrap AND the post-bootstrap probe confirmed the DB is up.
     expect(fake.calls.some((c) => c[0] === 'bootstrap')).toBe(true);
+    // Bootstrap alone fixed it → NO fresh-DB mint (`bd init --reinit-local`).
+    expect(fake.calls.some((c) => c.includes('--reinit-local'))).toBe(false);
     // Probed before (saw missing) and after (saw present) → at least 2 pings.
     expect(ran(fake, 'ping')).toBeGreaterThanOrEqual(2);
+    expect(res.serverUp).toBe(true);
+    expect(res.initialized).toBe(true);
+  });
+
+  it('self-heals a NEW project (empty remote) by minting a fresh DB when bootstrap does not make it reachable', async () => {
+    // The PROVEN new-project recovery: `bd bootstrap` CLONES from the
+    // auto-detected sync.remote, which on a brand-new project has no
+    // refs/dolt/data → bootstrap "succeeds" (exit 0) but the DB is STILL
+    // unreachable. The fallback mints a fresh local DB:
+    //   bd init -p <prefix> --shared-server --reinit-local --discard-remote
+    //           --destroy-token=DESTROY-<prefix> --non-interactive
+    // after which ping flips to up.
+    let dbPresent = false;
+    let minted = false;
+    fake.run = async (args: string[]): Promise<BdRunResult> => {
+      fake.calls.push(args);
+      if (args[0] === 'ping') {
+        return dbPresent
+          ? { code: 0, stdout: '', stderr: '' }
+          : { code: 1, stdout: '', stderr: 'database not found' };
+      }
+      if (args[0] === 'bootstrap') {
+        // Bootstrap clones from an empty remote — does NOT make the DB reachable.
+        return { code: 0, stdout: '', stderr: '' };
+      }
+      if (args[0] === 'init' && args.includes('--reinit-local')) {
+        minted = true;
+        dbPresent = true; // the fresh local DB is now reachable
+        return { code: 0, stdout: '', stderr: '' };
+      }
+      return { code: 0, stdout: '', stderr: '' };
+    };
+
+    const res = await provisionBeads({ adapter: fake as never, beadsDir: '/tmp/hb' });
+
+    // The prefix the provisioner derives (mocked projectKey → stable prefix).
+    const prefix = res.prefix as string;
+    expect(prefix).toMatch(/^codeagent_mobile_[0-9a-f]{8}$/);
+
+    expect(fake.calls.some((c) => c[0] === 'bootstrap')).toBe(true);
+    expect(minted).toBe(true);
+
+    // The mint command was issued with the exact PROVEN argv.
+    const mint = fake.calls.find((c) => c[0] === 'init' && c.includes('--reinit-local'));
+    expect(mint).toBeDefined();
+    expect(mint).toEqual(
+      expect.arrayContaining([
+        'init',
+        '-p',
+        prefix,
+        '--shared-server',
+        '--reinit-local',
+        '--discard-remote',
+        `--destroy-token=DESTROY-${prefix}`,
+        '--non-interactive',
+      ]),
+    );
+
     expect(res.serverUp).toBe(true);
     expect(res.initialized).toBe(true);
   });
@@ -332,12 +391,12 @@ describe('provisionBeads', () => {
   it('already-initialized local workspace does not mask a missing server DB', async () => {
     // bd init returns "already initialized" (the LOCAL workspace exists) AND the
     // server lacks the prefix DB (ping fails). The already-init string must NOT
-    // be treated as proof the server DB exists — the self-heal create must still
-    // fire so the agent can actually `bd create`.
+    // be treated as proof the server DB exists — the self-heal must still fire
+    // (bootstrap, then mint) so the agent can actually `bd create`.
     let dbPresent = false;
     fake.run = async (args: string[]): Promise<BdRunResult> => {
       fake.calls.push(args);
-      if (args[0] === 'init') {
+      if (args[0] === 'init' && !args.includes('--reinit-local')) {
         return { code: 1, stdout: '', stderr: 'This workspace is already initialized.' };
       }
       if (args[0] === 'ping') {
@@ -359,12 +418,36 @@ describe('provisionBeads', () => {
     expect(res.serverUp).toBe(true);
   });
 
-  it('does NOT bootstrap when the project DB already exists on the server (idempotent)', async () => {
+  it('reports not-reachable (serverUp false) if even the mint cannot make the DB reachable', async () => {
+    // Both bootstrap and the fresh-DB mint run, but the final `bd ping` still
+    // fails. Non-fatal: serverUp/initialized are false and provisioning does
+    // NOT throw.
+    fake.run = async (args: string[]): Promise<BdRunResult> => {
+      fake.calls.push(args);
+      if (args[0] === 'ping') {
+        return { code: 1, stdout: '', stderr: 'database not found' }; // never recovers
+      }
+      return { code: 0, stdout: '', stderr: '' };
+    };
+
+    const res = await provisionBeads({ adapter: fake as never, beadsDir: '/tmp/hb' });
+
+    // Both recovery steps were attempted, bounded (one each).
+    expect(ran(fake, 'bootstrap')).toBe(1);
+    expect(fake.calls.filter((c) => c[0] === 'init' && c.includes('--reinit-local'))).toHaveLength(
+      1,
+    );
+    expect(res.serverUp).toBe(false);
+    expect(res.initialized).toBe(false);
+  });
+
+  it('does NOT bootstrap or mint when the project DB already exists on the server (idempotent)', async () => {
     // ping reports up on the FIRST probe → DB already materialized → no
-    // bootstrap, and provisioning continues straight to export.auto.
+    // bootstrap, no mint, and provisioning continues straight to export.auto.
     fake.setCode('ping', 0); // present from the start (default is 0 anyway)
     const res = await provisionBeads({ adapter: fake as never, beadsDir: '/tmp/hb' });
     expect(fake.calls.some((c) => c[0] === 'bootstrap')).toBe(false);
+    expect(fake.calls.some((c) => c.includes('--reinit-local'))).toBe(false);
     expect(res.serverUp).toBe(true);
     expect(res.initialized).toBe(true);
     expect(ran(fake, 'config set export.auto true')).toBe(1);
