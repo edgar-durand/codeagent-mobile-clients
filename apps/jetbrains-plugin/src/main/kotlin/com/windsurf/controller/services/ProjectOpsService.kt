@@ -8,6 +8,13 @@ import com.intellij.openapi.project.ProjectManager
 import java.io.File
 
 /**
+ * GitHub owner + repo parsed from the workspace's `origin` remote.
+ * Used by the cloud-fallback panel so the user can pick the right repo
+ * when starting a Codespace from the app.
+ */
+data class RepoSlug(val owner: String, val repo: String)
+
+/**
  * Project-level helpers for the mini-IDE feature: file-tree listing,
  * git status / diff / log / branch / commit / push / pull, plus
  * conflict-resolution helpers. Git ops shell out via `ProcessBuilder`
@@ -117,6 +124,23 @@ class ProjectOpsService {
         out.add("entries", entries)
         out.addProperty("hasMergeInProgress", hasMerge)
         return out
+    }
+
+    /**
+     * Parse the GitHub `owner/repo` from the workspace's `origin` remote.
+     * Used by the cloud-fallback panel so the user picks the right repo
+     * when starting a Codespace from the app. Returns null for non-GitHub
+     * remotes or no remote (the panel then shows generic steps).
+     * Mirrors VS Code's `ProjectOpsService.detectRepoSlug()`.
+     */
+    fun detectRepoSlug(): RepoSlug? {
+        val r = git(listOf("remote", "get-url", "origin"))
+        if (r.code != 0) return null
+        val url = r.stdout.trim()
+        // https://github.com/OWNER/REPO(.git)  |  git@github.com:OWNER/REPO(.git)
+        val m = Regex("github\\.com[/:]([^/]+)/(.+?)(?:\\.git)?$", RegexOption.IGNORE_CASE).find(url)
+            ?: return null
+        return RepoSlug(owner = m.groupValues[1], repo = m.groupValues[2])
     }
 
     fun gitDiff(file: String?): JsonObject = diffWith(listOf("diff", "--no-color", "--patch"), file)
