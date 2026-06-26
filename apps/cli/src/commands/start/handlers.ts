@@ -48,6 +48,8 @@ import {
   killPreview,
   killProcessTree,
   parseDotenv,
+  serializeDotenv,
+  ENV_KEY_RE,
   parseCloudflaredUrl,
   parseExpoUrl,
   readPreviewConfig,
@@ -413,6 +415,36 @@ const envReadH: CommandHandler = async (ctx, cmd) => {
       await ctx.relay.sendResult(cmd.id, 'completed', { exists: false, vars: [] });
       return;
     }
+    await ctx.relay.sendResult(cmd.id, 'failed', { error: (err as Error).message });
+  }
+};
+
+const envWriteH: CommandHandler = async (ctx, cmd, parsed) => {
+  const vars = parsed.vars;
+  if (!Array.isArray(vars)) {
+    await ctx.relay.sendResult(cmd.id, 'failed', { error: 'Missing vars' });
+    return;
+  }
+  const seen = new Set<string>();
+  for (const v of vars) {
+    if (!ENV_KEY_RE.test(v.key)) {
+      await ctx.relay.sendResult(cmd.id, 'failed', { error: `Invalid key: ${v.key}` });
+      return;
+    }
+    if (seen.has(v.key)) {
+      await ctx.relay.sendResult(cmd.id, 'failed', { error: `Duplicate key: ${v.key}` });
+      return;
+    }
+    seen.add(v.key);
+  }
+  const envPath = path.join(process.cwd(), '.env');
+  const tmpPath = path.join(process.cwd(), '.env.codeam.tmp');
+  try {
+    await fs.promises.writeFile(tmpPath, serializeDotenv(vars), 'utf8');
+    await fs.promises.rename(tmpPath, envPath); // atomic replace
+    await ctx.relay.sendResult(cmd.id, 'completed', { ok: true, count: vars.length });
+  } catch (err) {
+    await fs.promises.rm(tmpPath, { force: true }).catch(() => undefined);
     await ctx.relay.sendResult(cmd.id, 'failed', { error: (err as Error).message });
   }
 };
@@ -1800,6 +1832,7 @@ export const handlers: Record<string, CommandHandler> = {
   preview_stop: previewStopH,
   save_preview_config: savePreviewConfigH,
   env_read: envReadH,
+  env_write: envWriteH,
 };
 
 /**

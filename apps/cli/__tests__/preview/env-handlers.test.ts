@@ -40,3 +40,36 @@ describe('env_read', () => {
     });
   });
 });
+
+describe('env_write', () => {
+  it('rejects an invalid key', async () => {
+    const sendResult = vi.fn();
+    await handlers.env_write(makeCtx(sendResult), { id: 'w1' } as any, {
+      vars: [{ key: '1BAD', value: 'x' }],
+    } as any);
+    expect(sendResult).toHaveBeenCalledWith('w1', 'failed', expect.objectContaining({
+      error: expect.stringContaining('Invalid key'),
+    }));
+  });
+  it('rejects duplicate keys', async () => {
+    const sendResult = vi.fn();
+    await handlers.env_write(makeCtx(sendResult), { id: 'w2' } as any, {
+      vars: [{ key: 'A', value: '1' }, { key: 'A', value: '2' }],
+    } as any);
+    expect(sendResult).toHaveBeenCalledWith('w2', 'failed', expect.objectContaining({
+      error: expect.stringContaining('Duplicate key'),
+    }));
+  });
+  it('writes the .env and reports the count', async () => {
+    const sendResult = vi.fn();
+    await handlers.env_write(makeCtx(sendResult), { id: 'w3' } as any, {
+      vars: [{ key: 'A', value: '1' }, { key: 'B', value: 'hello world' }],
+    } as any);
+    expect(sendResult).toHaveBeenCalledWith('w3', 'completed', { ok: true, count: 2 });
+    const body = await fs.readFile(path.join(dir, '.env'), 'utf8');
+    expect(body).toBe('# Managed by CodeAgent\nA=1\nB="hello world"\n');
+    // no temp file left behind
+    const entries = await fs.readdir(dir);
+    expect(entries.filter((e) => e.includes('.tmp'))).toEqual([]);
+  });
+});
