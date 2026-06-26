@@ -4,6 +4,22 @@ All notable changes to `codeam-cli` are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.47.0] — 2026-06-26
+
+### Added
+
+- **vsc-plugin:** API reachability preflight (checkApiReachable)
+- **vsc-plugin:** DetectRepoSlug from the origin git remote
+- **vsc-plugin:** Cloud-fallback message content builder
+- **vsc-plugin:** Show cloud fallback when the API is unreachable during pairing
+- **jetbrains-plugin:** API reachability + repo slug + cloud-fallback content
+- **jetbrains-plugin:** Show cloud fallback when the API is unreachable during pairing
+
+### Fixed
+
+- **jetbrains-plugin:** Run repo-context git calls off the EDT in the cloud-fallback branch
+- **jetbrains-plugin:** Show cloud-fallback panel on the tool-window Generate button (parity with VS Code)
+
 ## [2.46.6] — 2026-06-26
 
 ### Fixed
