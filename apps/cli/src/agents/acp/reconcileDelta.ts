@@ -26,7 +26,14 @@
  *     `existing === ''` so every string trivially starts with it).
  *   - `existing` starts with `incoming`  → stale / shorter snapshot
  *     (re-send, retransmit) → KEEP `existing`.
- *   - neither is a prefix of the other    → genuine delta → APPEND.
+ *   - incoming SHARES a long common prefix with existing but isn't an exact
+ *     `startsWith` (real-Claude whitespace / segmentation drift on the
+ *     consolidated re-emit) → still a snapshot, NOT a delta: take only the
+ *     net-new suffix past the shared prefix so the reply doesn't double on a
+ *     one-character drift. When the shared prefix covers ALL of existing it's
+ *     a clean REPLACE; otherwise we keep existing + the divergent suffix.
+ *   - neither is a prefix of the other AND the shared prefix is short →
+ *     genuine delta → APPEND.
  *
  * Pure + exported so the snapshot-vs-delta behaviour is unit-tested
  * without spinning up a full ACP session.
@@ -40,6 +47,28 @@ export function reconcileCumulative(existing: string, incoming: string): string 
   // Stale / shorter snapshot of the same prefix — ignore it so a
   // late-arriving earlier frame can't truncate the reply.
   if (existing.startsWith(incoming)) return existing;
-  // Disjoint → the adapter is sending true deltas; append.
+  // Prefix-drift snapshot: incoming re-sends most of existing but diverges
+  // partway (a whitespace/segmentation difference on the consolidated
+  // re-emit, observed on real Claude). Detect it by a shared common prefix
+  // that's a substantial fraction of existing — far longer than a few bytes
+  // a genuine first delta could coincidentally share. Treat as a snapshot:
+  // emit existing's prefix + incoming's divergent tail (the net-new suffix),
+  // so a tiny drift can't double the reply via APPEND.
+  const shared = commonPrefixLength(existing, incoming);
+  if (shared > 0 && shared >= existing.length / 2) {
+    // existing[0..shared) === incoming[0..shared); the canonical text is the
+    // shared prefix followed by whatever the (longer/newer) snapshot carries
+    // past it. Equivalent to a REPLACE when shared === existing.length.
+    return existing.slice(0, shared) + incoming.slice(shared);
+  }
+  // Disjoint (or only a trivial shared prefix) → true delta; append.
   return existing + incoming;
+}
+
+/** Length of the longest common prefix of two strings. */
+function commonPrefixLength(a: string, b: string): number {
+  const max = Math.min(a.length, b.length);
+  let i = 0;
+  while (i < max && a.charCodeAt(i) === b.charCodeAt(i)) i += 1;
+  return i;
 }

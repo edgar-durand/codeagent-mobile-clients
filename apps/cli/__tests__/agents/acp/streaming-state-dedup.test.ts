@@ -66,6 +66,27 @@ describe('reconcileCumulative', () => {
   it('treats the first chunk (empty existing) as a snapshot', () => {
     expect(reconcileCumulative('', 'first chunk')).toBe('first chunk');
   });
+
+  it('does NOT append a prefix-drift snapshot (shared long prefix, divergent tail)', () => {
+    // Real-Claude consolidated re-emit: shares the whole accumulated text but
+    // diverges by a whitespace/segmentation difference near the end. Strict
+    // startsWith misses it; without prefix-drift handling this APPENDed and
+    // doubled the reply. We keep the shared prefix + the snapshot's net-new
+    // tail — one reply, no doubling seam.
+    const existing = 'The user said "Hola". Ill respond.';
+    const incoming = 'The user said "Hola". I will respond.';
+    const out = reconcileCumulative(existing, incoming);
+    expect(out).toBe('The user said "Hola". I will respond.');
+    expect(out).not.toContain('respond.The user'); // no append seam
+  });
+
+  it('still APPENDS a genuine delta that only coincidentally shares a few bytes', () => {
+    // A short shared prefix (well under half of existing) is a real delta, not
+    // a snapshot — must append, not collapse.
+    expect(reconcileCumulative('The quick brown fox', ' jumps')).toBe(
+      'The quick brown fox jumps',
+    );
+  });
 });
 
 describe('StreamingState.append — chat-pipe text reconciliation', () => {

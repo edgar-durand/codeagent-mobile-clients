@@ -180,6 +180,27 @@ export class StreamingState {
   private turnTextChunkId: string | null = null;
 
   /**
+   * Stable chunkId that ALL `thinking` segments of the current turn collapse
+   * onto (set to the first thought chunk's id, reset each {@link beginTurn}) —
+   * the thinking twin of {@link turnTextChunkId}.
+   *
+   * Why: `claude-agent-acp` (≥0.47) re-emits the CONSOLIDATED thought under a
+   * DIFFERENT message id (the same dedupe misfire that doubles text). The
+   * mapper derives the thinking chunkId from that message id
+   * (`<messageId>::thought`), so the consolidated re-emit lands in a SECOND
+   * `::thought` buffer, BOTH get flushed `isFinal:true`, and the mobile
+   * activity card (which coalesces by chunkId) stacks the two copies → the
+   * thinking doubles ("TheThe user said …briefly.The user said …briefly.").
+   * Text was protected by {@link turnTextChunkId}; thinking was not. Collapsing
+   * every thought segment of a turn onto one reconcile buffer makes the re-emit
+   * a `reconcileCumulative` REPLACE (identical snapshot) instead of a second
+   * buffer. tool_use / tool_result keep their own id within the turn (distinct
+   * bubbles; the adapter does NOT re-emit a consolidated tool snapshot under a
+   * fresh id, so they don't share this bug).
+   */
+  private turnThoughtChunkId: string | null = null;
+
+  /**
    * Monotonic turn counter, bumped each {@link beginTurn}. Used to NAMESPACE
    * every streaming-chunk id so an id the ACP adapter REUSES across turns can't
    * collide on the mobile feed. `claude-agent-acp` emits `toolu_01` for the
@@ -300,6 +321,7 @@ export class StreamingState {
     this.text = '';
     this.streamingChunks.clear();
     this.turnTextChunkId = null;
+    this.turnThoughtChunkId = null;
     // New turn → new namespace, so a reused adapter chunkId (e.g. `toolu_01`)
     // never collides with a prior turn's already-finalized chunk on the feed.
     this.turnSeq += 1;
@@ -333,11 +355,18 @@ export class StreamingState {
     // (the first text chunk's), so the adapter re-emitting the full reply
     // under a second message id reconciles in place (REPLACE) instead of
     // landing in a second buffer that recomputeText would concatenate —
-    // the reply-doubling bug (see turnTextChunkId). Non-text kinds keep
-    // their own id within the turn: thinking / tool_use / tool_result are
-    // distinct bubbles.
+    // the reply-doubling bug (see turnTextChunkId). `thinking` collapses the
+    // same way onto turnThoughtChunkId — the adapter re-emits the consolidated
+    // thought under a 2nd message id too, so without this it lands in a 2nd
+    // `::thought` buffer and the activity card doubles it (see
+    // turnThoughtChunkId). tool_use / tool_result keep their own id within the
+    // turn: those are distinct bubbles the adapter never re-emits consolidated.
     const baseId =
-      delta.kind === 'text' ? (this.turnTextChunkId ??= delta.chunkId) : delta.chunkId;
+      delta.kind === 'text'
+        ? (this.turnTextChunkId ??= delta.chunkId)
+        : delta.kind === 'thinking'
+          ? (this.turnThoughtChunkId ??= delta.chunkId)
+          : delta.chunkId;
     // Prefix with the turn counter so an adapter chunkId reused across turns
     // (`toolu_01` every turn) maps to a DISTINCT feed id each turn — otherwise
     // the mobile drops it as the prior turn's already-finalized chunk and the
