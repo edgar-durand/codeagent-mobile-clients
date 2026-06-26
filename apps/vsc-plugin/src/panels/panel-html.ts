@@ -379,6 +379,20 @@ export function renderPanelHtml(
       <h3>Recent Sessions</h3>
       <div id="recent-sessions-list" role="list"></div>
     </div>
+
+    <div id="cloud-fallback-section" class="card hidden" role="region" aria-label="Network blocked — cloud fallback">
+      <h3 id="cloud-fallback-title"></h3>
+      <p id="cloud-fallback-body" class="muted" style="margin-bottom:10px;line-height:1.5;"></p>
+      <ol id="cloud-fallback-steps" style="padding-left:18px; margin-bottom:10px; line-height:1.8;"></ol>
+      <p id="cloud-fallback-repo" class="muted" style="font-size:11px; margin-bottom:8px; display:none;"></p>
+      <a id="cloud-fallback-learn-more" href="" target="_blank" rel="noopener noreferrer"
+         style="display:inline-block; font-size:11px; color:var(--ca-purple); margin-bottom:8px;">
+        Learn more →
+      </a>
+      <button id="btn-retry-pairing" class="btn btn-primary" aria-label="Retry connecting to the CodeAgent API">
+        Retry
+      </button>
+    </div>
   </div>
 
   <div id="connected-view" class="hidden" role="region" aria-label="Connected session">
@@ -546,6 +560,10 @@ export function renderPanelHtml(
       } else {
         dv.classList.remove('hidden');
         cv.classList.add('hidden');
+        // Clear any stale cloud-fallback panel on status change (e.g. user
+        // connected from a different network between retries).
+        const cfSection = document.getElementById('cloud-fallback-section');
+        if (cfSection) cfSection.classList.add('hidden');
       }
       refreshFooter();
     }
@@ -693,6 +711,33 @@ export function renderPanelHtml(
           break;
         case 'error':
           break;
+        case 'cloudFallback': {
+          const payload = msg.payload;
+          const section = document.getElementById('cloud-fallback-section');
+          const titleEl = document.getElementById('cloud-fallback-title');
+          const bodyEl = document.getElementById('cloud-fallback-body');
+          const stepsEl = document.getElementById('cloud-fallback-steps');
+          const repoEl = document.getElementById('cloud-fallback-repo');
+          const learnMoreEl = document.getElementById('cloud-fallback-learn-more');
+          if (!section || !titleEl || !bodyEl || !stepsEl || !repoEl || !learnMoreEl) break;
+          titleEl.textContent = escapeHtml(payload.title || '');
+          bodyEl.textContent = escapeHtml(payload.body || '');
+          stepsEl.innerHTML = (payload.steps || []).map(function(step) {
+            return '<li>' + escapeHtml(step) + '</li>';
+          }).join('');
+          if (payload.repoLine) {
+            repoEl.textContent = escapeHtml(payload.repoLine);
+            repoEl.style.display = '';
+          } else {
+            repoEl.style.display = 'none';
+          }
+          learnMoreEl.setAttribute('href', payload.learnMoreUrl || '');
+          section.classList.remove('hidden');
+          // Hide the pairing section if it was showing
+          const pairingSection = document.getElementById('pairing-section');
+          if (pairingSection) pairingSection.classList.add('hidden');
+          break;
+        }
       }
     });
 
@@ -710,6 +755,15 @@ export function renderPanelHtml(
     document.getElementById('pairing-reveal-btn').addEventListener('click', function() {
       const secret = document.getElementById('pairing-secret');
       if (secret) secret.classList.remove('blurred');
+    });
+
+    // Retry button in the cloud-fallback panel: hide the fallback
+    // section and re-invoke the generate handler so a fresh preflight
+    // runs. If the network is now reachable the normal QR path resumes.
+    document.getElementById('btn-retry-pairing').addEventListener('click', function() {
+      const section = document.getElementById('cloud-fallback-section');
+      if (section) section.classList.add('hidden');
+      vscode.postMessage({ type: 'retryPairing' });
     });
 
     vscode.postMessage({ type: 'getStatus' });

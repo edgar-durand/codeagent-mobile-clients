@@ -115,6 +115,22 @@ export class ProjectOpsService {
     }
   }
 
+  /**
+   * Parse the GitHub `owner/repo` from the workspace's `origin` remote.
+   * Used by the cloud-fallback panel so the user picks the right repo
+   * when starting a Codespace from the app. Returns null for non-GitHub
+   * remotes or no remote (the panel then shows generic steps).
+   */
+  static async detectRepoSlug(): Promise<{ owner: string; repo: string } | null> {
+    const { stdout, code } = await this.git(['remote', 'get-url', 'origin']);
+    if (code !== 0) return null;
+    const url = stdout.trim();
+    // https://github.com/OWNER/REPO(.git)  |  git@github.com:OWNER/REPO(.git)
+    const m = url.match(/github\.com[/:]([^/]+)\/(.+?)(?:\.git)?$/i);
+    if (!m) return null;
+    return { owner: m[1], repo: m[2] };
+  }
+
   static async gitStatus(): Promise<Record<string, unknown>> {
     const r = await this.git(['status', '--porcelain=v2', '--branch']);
     if (r.code !== 0) {

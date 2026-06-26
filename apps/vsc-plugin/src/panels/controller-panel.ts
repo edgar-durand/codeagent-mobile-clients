@@ -228,6 +228,16 @@ export class ControllerPanelProvider implements vscode.WebviewViewProvider, Comm
       );
       return;
     }
+    if ('blocked' in result) {
+      // API is unreachable during auto-pairing loop — don't show the
+      // cloud fallback panel on auto-refresh (only on explicit user
+      // action). Just retry later as we would for a null result.
+      this.autoPairingTimer = setTimeout(
+        () => void this.refreshAutoPairingCode(),
+        10_000,
+      );
+      return;
+    }
     let qrSvg: string;
     try {
       qrSvg = await renderPairingQrSvg(result.code);
@@ -265,6 +275,9 @@ export class ControllerPanelProvider implements vscode.WebviewViewProvider, Comm
       case 'requestPairingCode':
         await this.handleRequestPairingCode();
         break;
+      case 'retryPairing':
+        await this.handleRequestPairingCode();
+        break;
       case 'disconnect':
         await this.handleDisconnect();
         break;
@@ -294,6 +307,19 @@ export class ControllerPanelProvider implements vscode.WebviewViewProvider, Comm
   private async handleRequestPairingCode(): Promise<void> {
     const pairing = PairingService.getInstance();
     const result = await pairing.requestPairingCode();
+    if (result && 'blocked' in result) {
+      const { ProjectOpsService } = await import('../services/project-ops.service');
+      const [repo, branch] = await Promise.all([
+        ProjectOpsService.detectRepoSlug(),
+        ProjectOpsService.detectCurrentBranch(),
+      ]);
+      const { buildCloudFallbackMessage } = await import('../ui/cloud-fallback');
+      this.postMessage({
+        type: 'cloudFallback',
+        payload: buildCloudFallbackMessage({ repo, branch }),
+      });
+      return;
+    }
     if (result) {
       let qrSvg: string;
       try {

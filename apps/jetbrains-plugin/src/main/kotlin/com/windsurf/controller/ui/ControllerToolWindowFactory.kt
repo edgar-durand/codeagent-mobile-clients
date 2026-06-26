@@ -28,6 +28,7 @@ import com.windsurf.controller.services.McpConfigureRequest
 import com.windsurf.controller.services.McpEntry
 import com.windsurf.controller.services.FileOpsService
 import com.windsurf.controller.services.ProjectOpsService
+import com.windsurf.controller.services.buildCloudFallbackMessage
 import com.windsurf.controller.services.McpServerDef
 import com.windsurf.controller.util.BuildInstallCommand
 import com.windsurf.controller.services.strategies.AgentInvocation
@@ -666,57 +667,101 @@ class ControllerToolWindowFactory : ToolWindowFactory {
             // Don't touch visibility yet — let the result handler set
             // it once the code (and reveal button) are populated.
 
-            SwingUtilities.invokeLater {
+            // Network call must run off the EDT; dispatch result back on EDT.
+            Thread {
                 val result = PairingService.getInstance().requestPairingCode()
-                if (result != null) {
-                    pairButton.text = "Refresh Code"
+                when (result) {
+                    is PairingService.PairingCodeResult.Code -> {
+                        SwingUtilities.invokeLater {
+                            pairButton.text = "Refresh Code"
 
-                    val spaced = result.code.take(3) + " " + result.code.drop(3)
-                    codeLabel.text = spaced
+                            val spaced = result.code.take(3) + " " + result.code.drop(3)
+                            codeLabel.text = spaced
 
-                    try {
-                        val qrImage = generateQrImage(result.code, 160)
-                        qrLabel.icon = ImageIcon(qrImage)
-                    } catch (e: Exception) { logger.trace(e) }
+                            try {
+                                val qrImage = generateQrImage(result.code, 160)
+                                qrLabel.icon = ImageIcon(qrImage)
+                            } catch (e: Exception) { logger.trace(e) }
 
-                    if (!autoMode) {
-                        secretRevealed = true
-                    }
-                    applySecretVisibility()
-
-                    // Schedule the next refresh ~30 s before expiry
-                    // while the auto loop is active. Clamp the delay
-                    // so a misconfigured short TTL can't pin us into
-                    // a tight loop.
-                    pairingRefreshTimer?.stop()
-                    if (autoPairingActive) {
-                        val delay = maxOf(15_000L, result.expiresAt - System.currentTimeMillis() - 30_000L)
-                        pairingRefreshTimer = Timer(delay.toInt()) {
-                            if (autoPairingActive) {
-                                secretRevealed = false
-                                generatePairingCode(autoMode = true)
+                            if (!autoMode) {
+                                secretRevealed = true
                             }
-                        }.apply { isRepeats = false; start() }
+                            applySecretVisibility()
+
+                            // Schedule the next refresh ~30 s before expiry
+                            // while the auto loop is active. Clamp the delay
+                            // so a misconfigured short TTL can't pin us into
+                            // a tight loop.
+                            pairingRefreshTimer?.stop()
+                            if (autoPairingActive) {
+                                val delay = maxOf(15_000L, result.expiresAt - System.currentTimeMillis() - 30_000L)
+                                pairingRefreshTimer = Timer(delay.toInt()) {
+                                    if (autoPairingActive) {
+                                        secretRevealed = false
+                                        generatePairingCode(autoMode = true)
+                                    }
+                                }.apply { isRepeats = false; start() }
+                            }
+                            pairButton.isEnabled = true
+                        }
                     }
-                } else {
-                    showPairingIdle()
-                    if (!autoMode) {
-                        JOptionPane.showMessageDialog(
-                            this,
-                            "Failed to generate code. Check API settings.",
-                            "Pairing Error",
-                            JOptionPane.ERROR_MESSAGE
-                        )
-                    } else {
-                        // Auto loop failure — try again in 10 s.
-                        pairingRefreshTimer?.stop()
-                        pairingRefreshTimer = Timer(10_000) {
-                            if (autoPairingActive) generatePairingCode(autoMode = true)
-                        }.apply { isRepeats = false; start() }
+                    PairingService.PairingCodeResult.Blocked -> {
+                        if (!autoMode) {
+                            // Explicit "Generate Code" click — show the cloud-fallback
+                            // panel so the user understands the network block and has a
+                            // clear recovery path (parity with VS Code primary button).
+                            // Git/network exec runs HERE on the background thread — NOT
+                            // inside invokeLater — to keep the EDT free.
+                            val ops = ProjectOpsService.getInstance()
+                            val repo = ops.detectRepoSlug()
+                            val branch: String? = run {
+                                val status = ops.gitStatus()
+                                status.get("branch")?.takeIf { !it.isJsonNull }?.asString
+                            }
+                            val message = buildCloudFallbackMessage(repo, branch)
+                            SwingUtilities.invokeLater {
+                                pairButton.isEnabled = true
+                                showPairingIdle()
+                                CloudFallbackDialog(message, onRetry = {
+                                    generatePairingCode(autoMode = false)
+                                }).show()
+                            }
+                        } else {
+                            // API unreachable during auto-pairing loop — do NOT show
+                            // the cloud-fallback panel on auto-refresh (only on explicit
+                            // user action). Retry silently later.
+                            SwingUtilities.invokeLater {
+                                showPairingIdle()
+                                pairingRefreshTimer?.stop()
+                                pairingRefreshTimer = Timer(10_000) {
+                                    if (autoPairingActive) generatePairingCode(autoMode = true)
+                                }.apply { isRepeats = false; start() }
+                                pairButton.isEnabled = true
+                            }
+                        }
+                    }
+                    PairingService.PairingCodeResult.None -> {
+                        SwingUtilities.invokeLater {
+                            showPairingIdle()
+                            if (!autoMode) {
+                                JOptionPane.showMessageDialog(
+                                    this,
+                                    "Failed to generate code. Check API settings.",
+                                    "Pairing Error",
+                                    JOptionPane.ERROR_MESSAGE
+                                )
+                            } else {
+                                // Auto loop failure — try again in 10 s.
+                                pairingRefreshTimer?.stop()
+                                pairingRefreshTimer = Timer(10_000) {
+                                    if (autoPairingActive) generatePairingCode(autoMode = true)
+                                }.apply { isRepeats = false; start() }
+                            }
+                            pairButton.isEnabled = true
+                        }
                     }
                 }
-                pairButton.isEnabled = true
-            }
+            }.apply { isDaemon = true; start() }
         }
 
         /** Called by `ControllerToolWindowFactory` when the tool

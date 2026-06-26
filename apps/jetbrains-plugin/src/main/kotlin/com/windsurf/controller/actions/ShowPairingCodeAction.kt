@@ -6,31 +6,63 @@ import com.intellij.openapi.ui.DialogWrapper
 import com.intellij.ui.components.JBLabel
 import com.intellij.util.ui.JBUI
 import com.windsurf.controller.services.PairingService
+import com.windsurf.controller.services.PairingService.PairingCodeResult
+import com.windsurf.controller.services.ProjectOpsService
+import com.windsurf.controller.services.buildCloudFallbackMessage
+import com.windsurf.controller.ui.CloudFallbackDialog
 import java.awt.Font
 import javax.swing.JComponent
 import javax.swing.JPanel
 import javax.swing.BoxLayout
 import javax.swing.SwingConstants
+import javax.swing.SwingUtilities
 
 class ShowPairingCodeAction : AnAction() {
 
     override fun actionPerformed(e: AnActionEvent) {
-        val result = PairingService.getInstance().requestPairingCode()
-
-        if (result != null) {
-            PairingCodeDialog(result.code, result.expiresAt).show()
-        } else {
-            com.intellij.openapi.ui.Messages.showErrorDialog(
-                e.project,
-                "Failed to generate pairing code. Check your connection and API settings.",
-                "Pairing Error"
-            )
-        }
+        // Run the network call off the EDT; dispatch the result back on the EDT.
+        Thread {
+            val result = PairingService.getInstance().requestPairingCode()
+            when (result) {
+                is PairingCodeResult.Code -> {
+                    SwingUtilities.invokeLater {
+                        PairingCodeDialog(result.code, result.expiresAt, e).show()
+                    }
+                }
+                PairingCodeResult.Blocked -> {
+                    // Compute git-derived context on the background thread (blocking git
+                    // exec must NOT run on the EDT).
+                    val ops = ProjectOpsService.getInstance()
+                    val repo = ops.detectRepoSlug()
+                    val branch: String? = run {
+                        val status = ops.gitStatus()
+                        status.get("branch")?.takeIf { !it.isJsonNull }?.asString
+                    }
+                    val message = buildCloudFallbackMessage(repo, branch)
+                    // Marshal only the UI work to the EDT.
+                    SwingUtilities.invokeLater {
+                        CloudFallbackDialog(message, onRetry = {
+                            ShowPairingCodeAction().actionPerformed(e)
+                        }).show()
+                    }
+                }
+                PairingCodeResult.None -> {
+                    SwingUtilities.invokeLater {
+                        com.intellij.openapi.ui.Messages.showErrorDialog(
+                            e.project,
+                            "Failed to generate pairing code. Check your connection and API settings.",
+                            "Pairing Error"
+                        )
+                    }
+                }
+            }
+        }.apply { isDaemon = true; start() }
     }
 
     private class PairingCodeDialog(
         private val code: String,
-        private val expiresAt: Long
+        private val expiresAt: Long,
+        @Suppress("UNUSED_PARAMETER") event: AnActionEvent,
     ) : DialogWrapper(true) {
 
         init {
@@ -67,4 +99,6 @@ class ShowPairingCodeAction : AnAction() {
             return panel
         }
     }
+
 }
+
