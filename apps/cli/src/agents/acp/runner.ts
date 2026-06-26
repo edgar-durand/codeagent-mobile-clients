@@ -452,6 +452,17 @@ export class StreamingState {
    */
   async closeWithBubble(bubble: string): Promise<void> {
     this.text = '';
+    // Neutralise any open `text` streaming-chunk buffer so the raw streamed
+    // reply (e.g. the agent's own "…401 Invalid authentication credentials")
+    // is NOT finalised verbatim on the Epic C feed — replace its content with
+    // the bubble so the chunk that flushes `isFinal:true` carries the
+    // actionable message, never the raw error. thinking / tool_use /
+    // tool_result chunks are left untouched (they're genuine prior activity).
+    for (const [chunkId, chunk] of this.streamingChunks) {
+      if (chunk.kind === 'text') {
+        this.streamingChunks.set(chunkId, { kind: 'text', content: bubble });
+      }
+    }
     await Promise.all([
       this.publisher.publishOutput({ type: 'text', content: bubble, done: true }),
       this.flushStreamingChunks(),
@@ -1558,7 +1569,7 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
  * `get_conversation` every ~20 s) retry forever — manifests as the
  * mobile chat sitting empty while the CLI looks like it's hung.
  */
-async function handleCommand(
+export async function handleCommand(
   cmd: RemoteCommand,
   client: AcpClient,
   relay: CommandRelayService,
@@ -1710,12 +1721,21 @@ async function handleCommand(
         // frame is an empty `done:true` (dropped by the mobile snapshot-guard),
         // so we MUST synthesize a visible failure bubble below.
         const hadText = streaming.getCurrentText().trim().length > 0;
-        // Error path uses the safe closeAll (no extraction) — a
-        // torn-off text could match the heuristics spuriously and
-        // strand the runner with an unanswerable pending question.
-        await recoverFromFailedTurn(client, streaming);
         const detail = describeError(err);
         log.warn('acpRunner', `prompt failed: ${detail}`);
+        // CANCEL the adapter's stuck turn now (the `promptQueueing` poison),
+        // but DEFER the chat flush: we don't yet know whether an ACTIONABLE
+        // bubble will REPLACE the streamed text or whether a partial reply must
+        // be preserved. Finalising via `closeAll` first commits the streamed
+        // raw text (e.g. the agent's own "…401 Invalid authentication
+        // credentials") as its OWN terminal `done:true` bubble — and the
+        // replacement frame published afterwards can no longer overwrite a
+        // finalised turn, so it lands as a SECOND bubble and the raw error
+        // stays pinned above the actionable one (the bug this fixes). The flush
+        // happens below, routed by the bubble decision: `closeWithBubble`
+        // (replace) for an actionable bubble, `closeAll` (keep partial) for a
+        // generic streamed-text failure.
+        await cancelStuckTurn(client);
         // GUARANTEE a visible terminal frame: recoverFromFailedTurn's closeAll
         // only published the accumulated ASSISTANT text — empty on a first-turn
         // proxy/network/auth failure, which the mobile snapshot-guard drops,
@@ -1738,6 +1758,9 @@ async function handleCommand(
         // generic-retry bubble — the only recoverable path for a credit-less
         // account is dropping the context-1m beta on a re-spawn.
         if (shouldOfferOneMRecovery({ detail, recentStderr: recentStderr.join('\n'), finalText: '' })) {
+          // Flush the failed turn (closeAll: finalise whatever streamed) before
+          // the recovery offer publishes its own select_prompt frame.
+          await streaming.closeAll();
           await oneMRecovery.offer(cmd.id, blocks);
           return;
         }
@@ -1748,13 +1771,26 @@ async function handleCommand(
           agent: opts.agent,
         });
         if (bubble) {
-          await publisher.publishOutput({ type: 'text', content: bubble, done: true });
+          // REPLACE the streamed text with the actionable bubble as the SINGLE
+          // terminal frame. `closeWithBubble` sets the in-flight text to '' and
+          // publishes one `{type:'text', content:bubble, done:true}`; because the
+          // streamed bubble is still in `streaming` state (we did NOT closeAll
+          // above), mobile's processChunk overwrites it in place instead of
+          // pinning the raw error and appending a second bubble. Also neutralises
+          // the open streaming-chunk buffers so the raw text doesn't linger on
+          // the SessionDetail activity feed.
+          await streaming.closeWithBubble(bubble);
           // Persist it in the DURABLE conversation (the output stream is just a
           // 3-min buffer the next turn's `clear` wipes — and mobile re-fetches
           // `get_conversation` on a loop). Without this the bubble shows live
           // then disappears on the next refresh.
           history.appendAgentReply(bubble);
           void history.flush();
+        } else {
+          // No actionable bubble — a genuine partial reply already streamed and
+          // serves as the terminal frame. Finalise it (closeAll) so the
+          // streamed text flips out of "Thinking…" without being clobbered.
+          await streaming.closeAll();
         }
         if (bubble === AUTH_FAILURE_MESSAGE) {
           // Same durable flag as onUnexpectedExit — covers the case where the
@@ -2201,12 +2237,28 @@ export async function recoverFromFailedTurn(
   client: AcpClient,
   streaming: StreamingState,
 ): Promise<void> {
+  await cancelStuckTurn(client);
+  await streaming.closeAll();
+}
+
+/**
+ * Cancel half of {@link recoverFromFailedTurn} — stop the adapter's
+ * still-running turn (the `promptQueueing` poison) WITHOUT flushing the
+ * chat. Used by the catch path when an ACTIONABLE failure bubble will
+ * REPLACE the streamed text via {@link StreamingState.closeWithBubble}:
+ * the streamed raw text must NOT first be finalised by `closeAll` (that
+ * commits it as its own terminal `done:true` bubble, and the later
+ * replacement frame can no longer overwrite it — it lands as a SECOND
+ * bubble, leaving the raw error pinned above the actionable one). So we
+ * cancel, then `closeWithBubble` emits the SINGLE terminal frame.
+ * Best-effort — a cancel against an already-dead adapter may throw.
+ */
+export async function cancelStuckTurn(client: AcpClient): Promise<void> {
   try {
     await client.cancel();
   } catch (err) {
     log.warn('acpRunner', `post-failure cancel failed: ${describeError(err)}`);
   }
-  await streaming.closeAll();
 }
 
 /**
