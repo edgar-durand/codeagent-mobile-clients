@@ -37,3 +37,13 @@ export interface PreviewStatus {
   detection?: PreviewDetection;
   error?: { stage: PreviewErrorStage; message: string };
 }
+
+/**
+ * One environment variable as edited from the app and written to the
+ * project `.env`. The wire shape for `env_read` (returns EnvVar[]) and
+ * `env_write` (accepts EnvVar[]).
+ */
+export interface EnvVar {
+  key: string;
+  value: string;
+}
