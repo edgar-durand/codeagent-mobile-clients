@@ -25,23 +25,29 @@ class ShowPairingCodeAction : AnAction() {
         // Run the network call off the EDT; dispatch the result back on the EDT.
         Thread {
             val result = PairingService.getInstance().requestPairingCode()
-            SwingUtilities.invokeLater {
-                when (result) {
-                    is PairingCodeResult.Code -> {
+            when (result) {
+                is PairingCodeResult.Code -> {
+                    SwingUtilities.invokeLater {
                         PairingCodeDialog(result.code, result.expiresAt, e).show()
                     }
-                    PairingCodeResult.Blocked -> {
-                        val ops = ProjectOpsService.getInstance()
-                        val repo = ops.detectRepoSlug()
-                        // detectCurrentBranch via gitStatus (already available)
-                        val branch: String? = run {
-                            val status = ops.gitStatus()
-                            status.get("branch")?.takeIf { !it.isJsonNull }?.asString
-                        }
-                        val message = buildCloudFallbackMessage(repo, branch)
+                }
+                PairingCodeResult.Blocked -> {
+                    // Compute git-derived context on the background thread (blocking git
+                    // exec must NOT run on the EDT).
+                    val ops = ProjectOpsService.getInstance()
+                    val repo = ops.detectRepoSlug()
+                    val branch: String? = run {
+                        val status = ops.gitStatus()
+                        status.get("branch")?.takeIf { !it.isJsonNull }?.asString
+                    }
+                    val message = buildCloudFallbackMessage(repo, branch)
+                    // Marshal only the UI work to the EDT.
+                    SwingUtilities.invokeLater {
                         CloudFallbackDialog(message, e).show()
                     }
-                    PairingCodeResult.None -> {
+                }
+                PairingCodeResult.None -> {
+                    SwingUtilities.invokeLater {
                         com.intellij.openapi.ui.Messages.showErrorDialog(
                             e.project,
                             "Failed to generate pairing code. Check your connection and API settings.",
