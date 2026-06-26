@@ -172,6 +172,13 @@ describe('previewStartH — reuse guard', () => {
       tunnel: null,
       url: 'https://already-running.trycloudflare.com',
       framework: 'Next.js',
+      detection: {
+        framework: 'Next.js',
+        port: 3000,
+        command: 'next',
+        args: ['dev'],
+        ready_pattern: 'ready',
+      },
     });
 
     const ctx = makeCtx();
@@ -218,6 +225,13 @@ describe('previewStartH — reuse guard', () => {
       tunnel: null,
       url: 'https://dead.trycloudflare.com',
       framework: 'Next.js',
+      detection: {
+        framework: 'Next.js',
+        port: 3000,
+        command: 'next',
+        args: ['dev'],
+        ready_pattern: 'ready',
+      },
     });
 
     const ctx = makeCtx();

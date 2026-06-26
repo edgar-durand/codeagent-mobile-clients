@@ -39,6 +39,7 @@ import { applyFileReview } from '../../services/apply-file-review.service';
 import { buildLinkContext } from '../link';
 import { postLinkCredential, postAiResult, postPreviewEvent } from '../../services/pairing.service';
 import { AGENT_REGISTRY, isKnownAgentId, PREVIEW_DETECT_PROMPT, type AgentId, type PreviewDetection } from '@codeagent/shared';
+import * as previewSvc from '../../services/preview';
 import {
   activePreviews,
   detectMissingNodeDeps,
@@ -47,6 +48,9 @@ import {
   isPortListening,
   killPreview,
   killProcessTree,
+  parseDotenv,
+  serializeDotenv,
+  ENV_KEY_RE,
   parseCloudflaredUrl,
   parseExpoUrl,
   readPreviewConfig,
@@ -63,6 +67,13 @@ import type { KeepAliveContext } from './keep-alive';
 import { removeSession } from '../../config';
 import { handleBeadsActionCommand, type StartedBeads } from '../../beads';
 import { beadsActionFromPayload } from '../../beads/wiring';
+// Self-namespace import: `previewRestartH` invokes `startPreviewFromDetection`
+// through this object (not the direct local binding) so a unit test can
+// `vi.spyOn(handlersMod, 'startPreviewFromDetection')` and intercept the call —
+// an in-module direct call references the local binding and bypasses the spy
+// under this repo's esbuild/CJS transform, which would let the REAL dev-server
+// bring-up run during the test. The exported signature is unchanged.
+import * as self from './handlers';
 
 /**
  * Shared dependency container for command handlers.
@@ -395,6 +406,55 @@ const writeFile: CommandHandler = async (ctx, cmd, parsed) => {
 const listFiles: CommandHandler = async (ctx, cmd, parsed) => {
   const result = await listProjectFiles({ query: parsed.query });
   await ctx.relay.sendResult(cmd.id, 'completed', result as unknown as Record<string, unknown>);
+};
+
+// ─── Environment config (env vars editor) ───────────────────────
+
+const envReadH: CommandHandler = async (ctx, cmd) => {
+  const envPath = path.join(process.cwd(), '.env');
+  try {
+    const raw = await fs.promises.readFile(envPath, 'utf8');
+    await ctx.relay.sendResult(cmd.id, 'completed', {
+      exists: true,
+      vars: parseDotenv(raw),
+    });
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+      await ctx.relay.sendResult(cmd.id, 'completed', { exists: false, vars: [] });
+      return;
+    }
+    await ctx.relay.sendResult(cmd.id, 'failed', { error: (err as Error).message });
+  }
+};
+
+const envWriteH: CommandHandler = async (ctx, cmd, parsed) => {
+  const vars = parsed.vars;
+  if (!Array.isArray(vars)) {
+    await ctx.relay.sendResult(cmd.id, 'failed', { error: 'Missing vars' });
+    return;
+  }
+  const seen = new Set<string>();
+  for (const v of vars) {
+    if (!ENV_KEY_RE.test(v.key)) {
+      await ctx.relay.sendResult(cmd.id, 'failed', { error: `Invalid key: ${v.key}` });
+      return;
+    }
+    if (seen.has(v.key)) {
+      await ctx.relay.sendResult(cmd.id, 'failed', { error: `Duplicate key: ${v.key}` });
+      return;
+    }
+    seen.add(v.key);
+  }
+  const envPath = path.join(process.cwd(), '.env');
+  const tmpPath = path.join(process.cwd(), '.env.codeam.tmp');
+  try {
+    await fs.promises.writeFile(tmpPath, serializeDotenv(vars), 'utf8');
+    await fs.promises.rename(tmpPath, envPath); // atomic replace
+    await ctx.relay.sendResult(cmd.id, 'completed', { ok: true, count: vars.length });
+  } catch (err) {
+    await fs.promises.rm(tmpPath, { force: true }).catch(() => undefined);
+    await ctx.relay.sendResult(cmd.id, 'failed', { error: (err as Error).message });
+  }
 };
 
 const terminalOpenH: CommandHandler = async (ctx, cmd, parsed) => {
@@ -1069,9 +1129,20 @@ const previewStartH: CommandHandler = (ctx, _cmd, parsed) => {
   // actually exists when we test for it. Running it here at the top
   // — when node_modules may not exist yet on a fresh codespace —
   // silently no-ops and we'd spawn through the unreliable npx wrapper.
-  const detection = rawDetection;
-  const pluginAuthToken = ctx.pluginAuthToken;
+  startPreviewFromDetection(ctx, rawDetection, ctx.pluginAuthToken);
+};
 
+/**
+ * Fire-and-forget bring-up of a preview from a detection: runs setup
+ * commands, spawns the dev server, waits for readiness, opens the tunnel,
+ * registers the ActivePreview, and emits the preview_* lifecycle events.
+ * Shared by previewStartH (first start) and previewRestartH (env reload).
+ */
+export function startPreviewFromDetection(
+  ctx: HandlerContext,
+  detection: PreviewDetection,
+  pluginAuthToken: string,
+): void {
   /**
    * Fire-and-forget progress emitter — used by `previewStartH` to ship
    * one realtime milestone per step the dev-server bring-up traverses
@@ -1660,6 +1731,7 @@ const previewStartH: CommandHandler = (ctx, _cmd, parsed) => {
       tunnel,
       url,
       framework: detection.framework,
+      detection,
     });
     log.info('preview', `ready: ${detection.framework} at ${url}`);
     void postPreviewEvent({
@@ -1684,7 +1756,7 @@ const previewStartH: CommandHandler = (ctx, _cmd, parsed) => {
       payload: { stage: 'spawn', message: `Preview failed to start: ${message}` },
     });
   });
-};
+}
 
 const previewStopH: CommandHandler = (ctx) => {
   if (!ctx.pluginAuthToken) {
@@ -1703,6 +1775,32 @@ const previewStopH: CommandHandler = (ctx) => {
       payload: { reason: 'user' },
     });
   })();
+};
+
+// Mobile/web "Restart preview" — used after an env-var edit so the dev
+// server reloads with the new `.env`. Kills the running preview, waits a
+// beat for the OS to release the port, then re-spawns from the SAME stored
+// detection (no re-detection round-trip). No-ops with `restarted:false` when
+// there's nothing running or the session predates pluginAuthToken.
+//
+// `killPreview` is called through `previewSvc.*` and `startPreviewFromDetection`
+// through `self.*` so both are interceptable by a namespace spy in the unit
+// test — see the `import * as self` note at the top of this file.
+const previewRestartH: CommandHandler = async (ctx, cmd) => {
+  if (!ctx.pluginAuthToken) {
+    await ctx.relay.sendResult(cmd.id, 'completed', { restarted: false });
+    return;
+  }
+  const preview = activePreviews.get(ctx.sessionId);
+  if (!preview) {
+    await ctx.relay.sendResult(cmd.id, 'completed', { restarted: false });
+    return;
+  }
+  await previewSvc.killPreview(ctx.sessionId);
+  // 150 ms so the port is fully released before the fresh spawn binds it.
+  await new Promise((r) => setTimeout(r, 150));
+  self.startPreviewFromDetection(ctx, preview.detection, ctx.pluginAuthToken);
+  await ctx.relay.sendResult(cmd.id, 'completed', { restarted: true });
 };
 
 /**
@@ -1766,7 +1864,10 @@ export const handlers: Record<string, CommandHandler> = {
   request_preview_detect: requestPreviewDetectH,
   preview_start: previewStartH,
   preview_stop: previewStopH,
+  preview_restart: previewRestartH,
   save_preview_config: savePreviewConfigH,
+  env_read: envReadH,
+  env_write: envWriteH,
 };
 
 /**
