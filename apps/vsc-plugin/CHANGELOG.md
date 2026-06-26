@@ -4,6 +4,13 @@ All notable changes to the CodeAgent Mobile VS Code extension are documented her
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.46.5] — 2026-06-26
+
+### Fixed
+
+- **cli:** Collapse thinking onto a per-turn buffer so the activity card doesn't double
+- **cli:** Verify + self-heal the project Dolt DB after provisioning (codeagent-ckq)
+
 ## [2.46.4] — 2026-06-26
 
 ### Fixed
