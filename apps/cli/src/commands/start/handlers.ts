@@ -39,6 +39,7 @@ import { applyFileReview } from '../../services/apply-file-review.service';
 import { buildLinkContext } from '../link';
 import { postLinkCredential, postAiResult, postPreviewEvent } from '../../services/pairing.service';
 import { AGENT_REGISTRY, isKnownAgentId, PREVIEW_DETECT_PROMPT, type AgentId, type PreviewDetection } from '@codeagent/shared';
+import * as previewSvc from '../../services/preview';
 import {
   activePreviews,
   detectMissingNodeDeps,
@@ -66,6 +67,13 @@ import type { KeepAliveContext } from './keep-alive';
 import { removeSession } from '../../config';
 import { handleBeadsActionCommand, type StartedBeads } from '../../beads';
 import { beadsActionFromPayload } from '../../beads/wiring';
+// Self-namespace import: `previewRestartH` invokes `startPreviewFromDetection`
+// through this object (not the direct local binding) so a unit test can
+// `vi.spyOn(handlersMod, 'startPreviewFromDetection')` and intercept the call —
+// an in-module direct call references the local binding and bypasses the spy
+// under this repo's esbuild/CJS transform, which would let the REAL dev-server
+// bring-up run during the test. The exported signature is unchanged.
+import * as self from './handlers';
 
 /**
  * Shared dependency container for command handlers.
@@ -1769,6 +1777,32 @@ const previewStopH: CommandHandler = (ctx) => {
   })();
 };
 
+// Mobile/web "Restart preview" — used after an env-var edit so the dev
+// server reloads with the new `.env`. Kills the running preview, waits a
+// beat for the OS to release the port, then re-spawns from the SAME stored
+// detection (no re-detection round-trip). No-ops with `restarted:false` when
+// there's nothing running or the session predates pluginAuthToken.
+//
+// `killPreview` is called through `previewSvc.*` and `startPreviewFromDetection`
+// through `self.*` so both are interceptable by a namespace spy in the unit
+// test — see the `import * as self` note at the top of this file.
+const previewRestartH: CommandHandler = async (ctx, cmd) => {
+  if (!ctx.pluginAuthToken) {
+    await ctx.relay.sendResult(cmd.id, 'completed', { restarted: false });
+    return;
+  }
+  const preview = activePreviews.get(ctx.sessionId);
+  if (!preview) {
+    await ctx.relay.sendResult(cmd.id, 'completed', { restarted: false });
+    return;
+  }
+  await previewSvc.killPreview(ctx.sessionId);
+  // 150 ms so the port is fully released before the fresh spawn binds it.
+  await new Promise((r) => setTimeout(r, 150));
+  self.startPreviewFromDetection(ctx, preview.detection, ctx.pluginAuthToken);
+  await ctx.relay.sendResult(cmd.id, 'completed', { restarted: true });
+};
+
 /**
  * Save the confirmed detection to `.codeam/preview.json` so the next
  * `request_preview_detect` short-circuits the agent step. Mobile /
@@ -1830,6 +1864,7 @@ export const handlers: Record<string, CommandHandler> = {
   request_preview_detect: requestPreviewDetectH,
   preview_start: previewStartH,
   preview_stop: previewStopH,
+  preview_restart: previewRestartH,
   save_preview_config: savePreviewConfigH,
   env_read: envReadH,
   env_write: envWriteH,

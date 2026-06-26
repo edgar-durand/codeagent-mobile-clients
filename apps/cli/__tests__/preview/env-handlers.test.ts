@@ -2,7 +2,12 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { promises as fs } from 'fs';
 import os from 'os';
 import path from 'path';
+import type { ChildProcess } from 'child_process';
 import { handlers } from '../../src/commands/start/handlers';
+import * as handlersMod from '../../src/commands/start/handlers';
+import * as preview from '../../src/services/preview';
+import { activePreviews, registerPreview } from '../../src/services/preview';
+import type { PreviewDetection } from '@codeagent/shared';
 
 function makeCtx(sendResult = vi.fn()) {
   return {
@@ -71,5 +76,80 @@ describe('env_write', () => {
     // no temp file left behind
     const entries = await fs.readdir(dir);
     expect(entries.filter((e) => e.includes('.tmp'))).toEqual([]);
+  });
+});
+
+describe('preview_restart', () => {
+  const det: PreviewDetection = {
+    framework: 'Vite',
+    command: 'npm',
+    args: ['run', 'dev'],
+    port: 5173,
+    ready_pattern: 'Local:',
+  };
+
+  // A fake ChildProcess is enough — previewRestartH never touches the
+  // devServer itself (killPreview is spied out), it only needs the entry
+  // present in the registry to read `.detection` off it.
+  function fakeProcess(): ChildProcess {
+    return { exitCode: null, kill: vi.fn() } as unknown as ChildProcess;
+  }
+
+  beforeEach(() => {
+    activePreviews.clear();
+  });
+  afterEach(() => {
+    activePreviews.clear();
+    vi.restoreAllMocks();
+    vi.useRealTimers();
+  });
+
+  it('no-ops with restarted:false when no active preview', async () => {
+    const sendResult = vi.fn();
+    // No registry entry for the session.
+    await handlers.preview_restart(makeCtx(sendResult), { id: 'r1' } as any, {} as any);
+    expect(sendResult).toHaveBeenCalledWith('r1', 'completed', { restarted: false });
+  });
+
+  it('no-ops with restarted:false when pluginAuthToken is missing', async () => {
+    registerPreview('sess-1', {
+      sessionId: 'sess-1',
+      devServer: fakeProcess(),
+      tunnel: null,
+      url: 'https://x.trycloudflare.com',
+      framework: 'Vite',
+      detection: det,
+    });
+    const sendResult = vi.fn();
+    const ctx = { ...makeCtx(sendResult), pluginAuthToken: undefined } as any;
+    await handlers.preview_restart(ctx, { id: 'r0' } as any, {} as any);
+    expect(sendResult).toHaveBeenCalledWith('r0', 'completed', { restarted: false });
+  });
+
+  it('kills then re-spawns from the stored detection', async () => {
+    vi.useFakeTimers();
+    registerPreview('sess-1', {
+      sessionId: 'sess-1',
+      devServer: fakeProcess(),
+      tunnel: null,
+      url: 'https://x.trycloudflare.com',
+      framework: 'Vite',
+      detection: det,
+    });
+    const kill = vi.spyOn(preview, 'killPreview').mockResolvedValue(undefined);
+    // Spy on the bring-up so the REAL dev-server spawn never runs in the test.
+    const restart = vi
+      .spyOn(handlersMod, 'startPreviewFromDetection')
+      .mockReturnValue(undefined);
+
+    const sendResult = vi.fn();
+    const p = handlers.preview_restart(makeCtx(sendResult), { id: 'r2' } as any, {} as any);
+    // Drive the ~150 ms port-release wait the handler awaits.
+    await vi.runAllTimersAsync();
+    await p;
+
+    expect(kill).toHaveBeenCalledWith('sess-1');
+    expect(restart).toHaveBeenCalledWith(expect.anything(), det, 'tok');
+    expect(sendResult).toHaveBeenCalledWith('r2', 'completed', { restarted: true });
   });
 });
