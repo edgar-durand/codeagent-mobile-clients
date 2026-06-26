@@ -4,6 +4,12 @@ All notable changes to the CodeAgent Mobile VS Code extension are documented her
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.48.1] — 2026-06-26
+
+### Fixed
+
+- **cli:** Actionable failure bubble replaces streamed raw 401 instead of appending below it
+
 ## [2.48.0] — 2026-06-26
 
 ### Added
