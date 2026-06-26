@@ -47,6 +47,7 @@ import {
   isPortListening,
   killPreview,
   killProcessTree,
+  parseDotenv,
   parseCloudflaredUrl,
   parseExpoUrl,
   readPreviewConfig,
@@ -395,6 +396,25 @@ const writeFile: CommandHandler = async (ctx, cmd, parsed) => {
 const listFiles: CommandHandler = async (ctx, cmd, parsed) => {
   const result = await listProjectFiles({ query: parsed.query });
   await ctx.relay.sendResult(cmd.id, 'completed', result as unknown as Record<string, unknown>);
+};
+
+// ─── Environment config (env vars editor) ───────────────────────
+
+const envReadH: CommandHandler = async (ctx, cmd) => {
+  const envPath = path.join(process.cwd(), '.env');
+  try {
+    const raw = await fs.promises.readFile(envPath, 'utf8');
+    await ctx.relay.sendResult(cmd.id, 'completed', {
+      exists: true,
+      vars: parseDotenv(raw),
+    });
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+      await ctx.relay.sendResult(cmd.id, 'completed', { exists: false, vars: [] });
+      return;
+    }
+    await ctx.relay.sendResult(cmd.id, 'failed', { error: (err as Error).message });
+  }
 };
 
 const terminalOpenH: CommandHandler = async (ctx, cmd, parsed) => {
@@ -1779,6 +1799,7 @@ export const handlers: Record<string, CommandHandler> = {
   preview_start: previewStartH,
   preview_stop: previewStopH,
   save_preview_config: savePreviewConfigH,
+  env_read: envReadH,
 };
 
 /**

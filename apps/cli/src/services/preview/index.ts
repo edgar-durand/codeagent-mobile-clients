@@ -4,6 +4,7 @@ import type { PreviewDetection } from '@codeagent/shared';
 export * from './cloudflared';
 export * from './codespace';
 export * from './config-file';
+export * from './dotenv';
 export * from './parser';
 export * from './port-ready';
 export * from './provision-deps';
