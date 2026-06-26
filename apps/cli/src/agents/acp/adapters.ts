@@ -93,28 +93,22 @@ const REGISTRY: Partial<Record<AgentId, () => AdapterSpec | null>> = {
       requiresAgentBinary: 'codex',
     };
   },
-  // Cursor is intentionally NOT bundled right now. The only published
-  // ACP adapter (`cursor-agent-acp@0.1.1`) still depends on the
-  // deprecated `@zed-industries/agent-client-protocol` SDK; pulling it
-  // back into the install would surface the deprecation warning to
-  // every user of `codeam-cli`. The community forks (`cursor-acp`,
-  // `fzx-cursor-acp`) use the current `@agentclientprotocol/sdk` but
-  // are single-maintainer with no security track record we trust to
-  // auto-bundle.
+  // Cursor speaks ACP NATIVELY via `cursor-agent acp` ("Start the Cursor
+  // Agent as an ACP server") — no npm adapter package needed, just the
+  // user-installed `cursor-agent` binary. Same {@link AdapterSpec} shape as
+  // gemini below. This is why we do NOT bundle the deprecated
+  // `cursor-agent-acp@0.1.1` npm adapter (old `@zed-industries/...` SDK).
   //
-  // Re-add this entry the moment an `@agentclientprotocol/cursor-acp`
-  // ships under the official namespace, or upstream cursor-agent-acp
-  // publishes a release that uses the new SDK:
-  //
-  //   cursor: () => {
-  //     const bin = resolveBin('@agentclientprotocol/cursor-acp', 'cursor-acp');
-  //     if (!bin) return null;
-  //     return { command: process.execPath, args: [bin], requiresAgentBinary: 'cursor-agent' };
-  //   },
-  //
-  // Until then `getAcpAdapter('cursor')` returns null and the dispatch
-  // in start.ts runs cursor over the legacy PTY runtime — same
-  // behaviour cursor users had before ACP was added.
+  // Running cursor over ACP (not the legacy PTY runtime) is REQUIRED: the
+  // ACP client spawns the adapter with `env: { ...process.env, ...extraEnv }`
+  // so the provisioned `CURSOR_API_KEY` actually reaches cursor-agent — the
+  // interactive PTY path left cursor unauthenticated. It also gives the typed
+  // streaming (tool calls / subagents) the other ACP agents emit.
+  cursor: () => ({
+    command: 'cursor-agent',
+    args: ['acp'],
+    requiresAgentBinary: 'cursor-agent',
+  }),
   // Gemini speaks ACP natively via `gemini --acp` — no npm adapter
   // package, just the user-installed `gemini` binary on PATH. Same
   // {@link AdapterSpec} shape; the only difference is `command` is

@@ -640,25 +640,24 @@ export function agentIdToHeadroomKind(agentId: string): string {
   if (normalized.startsWith('claude')) return 'claude';
   if (normalized.startsWith('codex')) return 'codex';
   if (normalized.startsWith('copilot')) return 'copilot';
-  if (normalized.startsWith('cursor')) return 'cursor';
   return 'claude';
 }
 
 /**
  * Whether Headroom can wrap this agent. The Headroom kind IS the agent
  * Headroom launches, so wrapping an UNSUPPORTED agent would mislaunch it as
- * the `agentIdToHeadroomKind` fallback (Claude). For unsupported agents
- * (e.g. gemini) Headroom must be DISABLED so the agent runs natively.
- * Keep this set in lockstep with `agentIdToHeadroomKind`'s explicit branches.
+ * the `agentIdToHeadroomKind` fallback (Claude). For unsupported agents Headroom
+ * must be DISABLED so the agent runs natively.
+ *
+ * Supported = the agents `headroom wrap <kind>` actually LAUNCHES through the
+ * proxy: claude, codex, copilot. NOT cursor — `headroom wrap cursor` is
+ * "manual setup" (it only prints base-URLs for the Cursor IDE; the headless
+ * cursor-agent CLI has no base-URL override, so Headroom can't route it). NOT
+ * gemini. Those run natively (cursor additionally runs over ACP).
  */
 export function isHeadroomSupportedAgent(agentId: string): boolean {
   const n = (agentId ?? '').toLowerCase().replace(/[_-]/g, '');
-  return (
-    n.startsWith('claude') ||
-    n.startsWith('codex') ||
-    n.startsWith('copilot') ||
-    n.startsWith('cursor')
-  );
+  return n.startsWith('claude') || n.startsWith('codex') || n.startsWith('copilot');
 }
 
 /**
