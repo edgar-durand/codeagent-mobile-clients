@@ -182,24 +182,28 @@ const geminiProvisioner: AgentProvisioner = {
 };
 
 const cursorProvisioner: AgentProvisioner = {
-  write(auth, _home): Record<string, string> {
-    // cursor-agent reads its auth exclusively from CURSOR_API_KEY (= accessToken).
-    // No credential files are written — there is nothing to clean up on a
-    // re-provision, and no stale file can shadow the env var.
+  write(auth, home): Record<string, string> {
+    // Cursor login state. cursor-agent (CLI + `cursor-agent acp`) authenticates
+    // by reading ~/.config/cursor/auth.json — verified live via `strace`:
+    // it opens that path; writing the {accessToken,refreshToken,userId} blob
+    // there flips `cursor-agent status` to "Logged in" and makes the ACP
+    // `session/new` succeed. (Path confirmed; `~/.cursor/auth.json` is NOT read.)
+    const authJson = path.join(home, '.config', 'cursor', 'auth.json');
+
     if (auth.kind === 'api_key') {
+      // A real dashboard "User API Key" → cursor-agent reads CURSOR_API_KEY from
+      // the env. Remove any stale login-state file so it can't shadow the key.
+      rmIfExists(authJson);
       return { CURSOR_API_KEY: auth.value };
     }
-    // oauth_token comes in two shapes:
-    //
-    //   1. JSON blob  (value starts with `{`): the vaulted Cursor OAuth blob,
-    //      e.g. `{"accessToken":"...","refreshToken":"...","userId":"..."}`.
-    //      Parse it and extract `accessToken`.
-    //
-    //   2. Bare token (value does NOT start with `{`): e.g. when the link
-    //      flow captured only the raw token string. Use it directly.
-    //
-    // In both cases the result is CURSOR_API_KEY = accessToken.
-    // We never log the token value.
+
+    // oauth_token → the vaulted Cursor OAuth blob
+    // (`{"accessToken":"...","refreshToken":"...","userId":"..."}`), written
+    // VERBATIM to the login-state file. The accessToken must NOT go in
+    // CURSOR_API_KEY: that env var expects a dashboard-generated API key and the
+    // OAuth device-flow token is rejected there ("invalid API key", verified) —
+    // the ACP `cursor_login` auth method reads the login state instead. The
+    // refreshToken in the blob lets cursor-agent renew the token when it expires.
     const value = auth.value.trim();
     if (value.startsWith('{')) {
       let parsed: unknown;
@@ -216,11 +220,12 @@ const cursorProvisioner: AgentProvisioner = {
       ) {
         throw new Error('cursor oauth_token: credential blob is missing a non-empty accessToken');
       }
-      const accessToken = (parsed as Record<string, string>)['accessToken'];
-      return { CURSOR_API_KEY: accessToken };
+      writeFile0600(authJson, value);
+      return {};
     }
-    // Bare token → use verbatim.
-    return { CURSOR_API_KEY: value };
+    // Bare token (no refresh/userId) → minimal login state, best-effort.
+    writeFile0600(authJson, JSON.stringify({ accessToken: value }));
+    return {};
   },
 };
 
