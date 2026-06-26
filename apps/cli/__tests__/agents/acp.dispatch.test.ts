@@ -27,11 +27,20 @@ describe('start dispatch — ACP launch mode', () => {
     expect(requiresAcp('gemini')).toBe(true);
   });
 
-  it('aider and cursor resolve NO adapter → PTY path', () => {
+  it('cursor requires ACP (native `cursor-agent acp` adapter)', () => {
+    // cursor-agent ships a built-in ACP server; routing it over ACP (not the
+    // legacy PTY) is what lets the provisioned CURSOR_API_KEY reach it via the
+    // ACP client's `env: { ...process.env, ...extraEnv }` spawn.
+    expect(requiresAcp('cursor')).toBe(true);
+    const spec = getAcpAdapter('cursor');
+    expect(spec).not.toBeNull();
+    expect(spec?.command).toBe('cursor-agent');
+    expect(spec?.args).toEqual(['acp']);
+  });
+
+  it('aider resolves NO adapter → PTY path', () => {
     expect(requiresAcp('aider')).toBe(false);
-    expect(requiresAcp('cursor')).toBe(false);
     expect(getAcpAdapter('aider')).toBeNull();
-    expect(getAcpAdapter('cursor')).toBeNull();
   });
 
   it('no env flag can disable ACP for adapter-backed agents', () => {

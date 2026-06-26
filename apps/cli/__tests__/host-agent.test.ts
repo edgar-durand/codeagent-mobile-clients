@@ -1329,15 +1329,6 @@ describe('agentIdToHeadroomKind', () => {
     expect(agentIdToHeadroomKind('copilot-cli')).toBe('copilot');
   });
 
-  it('maps cursor → cursor (regression: must NOT fall through to claude)', () => {
-    // A Cursor deploy that mapped to "claude" made Headroom launch Claude Code
-    // instead of cursor-agent (headroom-config agent=claude). The Headroom kind
-    // IS the launched agent, so this mapping is load-bearing.
-    expect(agentIdToHeadroomKind('cursor')).toBe('cursor');
-    expect(agentIdToHeadroomKind('cursor-agent')).toBe('cursor');
-    expect(agentIdToHeadroomKind('Cursor')).toBe('cursor'); // case-insensitive
-  });
-
   it('defaults unknown / empty ids to claude (safe default)', () => {
     expect(agentIdToHeadroomKind('something_else')).toBe('claude');
     expect(agentIdToHeadroomKind('')).toBe('claude');
@@ -1351,11 +1342,13 @@ describe('isHeadroomSupportedAgent', () => {
     expect(isHeadroomSupportedAgent('claude_code')).toBe(true);
     expect(isHeadroomSupportedAgent('codex')).toBe(true);
     expect(isHeadroomSupportedAgent('copilot')).toBe(true);
-    expect(isHeadroomSupportedAgent('cursor')).toBe(true);
   });
 
   it('returns false for agents Headroom cannot wrap (must run native, NOT mislaunch as claude)', () => {
-    // Regression: gemini mapped to claude via the kind default → mislaunched.
+    // Regression: gemini/cursor mapped to claude via the kind default → mislaunched.
+    // cursor: `headroom wrap cursor` is manual/print-only (Cursor IDE settings),
+    // not a launcher for the headless cursor-agent CLI → run native (over ACP).
+    expect(isHeadroomSupportedAgent('cursor')).toBe(false);
     expect(isHeadroomSupportedAgent('gemini')).toBe(false);
     expect(isHeadroomSupportedAgent('aider')).toBe(false);
     expect(isHeadroomSupportedAgent('coderabbit')).toBe(false);

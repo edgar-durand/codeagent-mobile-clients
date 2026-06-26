@@ -39,12 +39,15 @@ describe('ACP adapter registry', () => {
     expect(getAcpAdapter('aider')).toBeNull();
   });
 
-  it('returns null for cursor until upstream adapter migrates off the deprecated SDK', () => {
-    // cursor-agent-acp@0.1.1 still depends on the deprecated
-    // @zed-industries/agent-client-protocol; we dropped the bundle
-    // entry in v2.27.5 to keep `npm i -g codeam-cli` clean. Re-add
-    // the entry + delete this test when @agentclientprotocol/cursor-acp
-    // ships (or upstream publishes a non-deprecated version).
-    expect(getAcpAdapter('cursor')).toBeNull();
+  it('resolves cursor via the NATIVE `cursor-agent acp` adapter (no npm package)', () => {
+    // cursor-agent ships a built-in ACP server (`cursor-agent acp`), so we use
+    // the native binary directly (like `gemini --acp`) — NOT the deprecated
+    // cursor-agent-acp npm package. Routing cursor over ACP (not the legacy
+    // PTY) is what delivers CURSOR_API_KEY to it via the ACP client's env.
+    const spec = getAcpAdapter('cursor');
+    expect(spec).not.toBeNull();
+    expect(spec!.command).toBe('cursor-agent');
+    expect(spec!.args).toEqual(['acp']);
+    expect(spec!.requiresAgentBinary).toBe('cursor-agent');
   });
 });
