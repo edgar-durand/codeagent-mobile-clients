@@ -79,7 +79,10 @@ export const startCommandSchema = z.object({
   // `git restore` from there. `action='approved'` stages the edit,
   // `action='rejected'` discards every worktree change on the file.
   filePath: z.string().min(1).max(4096).optional(),
-  action: z.enum(['approved', 'rejected']).optional(),
+  action: z.enum(['approved', 'rejected', 'enable', 'disable', 'status']).optional(),
+  // `headroom_configure` — savings ingest URL delivered from the session
+  // when enabling Headroom on-demand. Bounded to 2048 chars.
+  savingsIngestUrl: z.string().url().max(2048).optional(),
   // `request_link_credentials` — backend fires this from the
   // heartbeat handler when it notices the user is running an agent
   // they haven't vaulted yet. Also reused by `get_context` /

@@ -37,7 +37,17 @@ import {
 import { showInfo } from '../../ui/banner';
 import { applyFileReview } from '../../services/apply-file-review.service';
 import { buildLinkContext } from '../link';
-import { postLinkCredential, postAiResult, postPreviewEvent } from '../../services/pairing.service';
+import { postLinkCredential, postAiResult, postPreviewEvent, postHeadroomEvent } from '../../services/pairing.service';
+import {
+  agentIdToHeadroomKind,
+  isHeadroomSupportedAgent,
+  persistHeadroomConfig,
+  headroomConfigPath,
+  restoreAgentHeadroomConfig,
+  setupHeadroomForSelfHosted,
+} from '../../commands/host-agent';
+import { configureHeadroom } from '../../services/headroom/configure';
+import { HeadroomStatsReporter, mapStatsToSavings, type StatsShape, type Savings } from '../../services/headroom/stats-reporter';
 import { AGENT_REGISTRY, isKnownAgentId, PREVIEW_DETECT_PROMPT, type AgentId, type PreviewDetection } from '@codeagent/shared';
 import * as previewSvc from '../../services/preview';
 import {
@@ -457,6 +467,107 @@ const envWriteH: CommandHandler = async (ctx, cmd, parsed) => {
   }
 };
 
+// ─── Headroom on-demand configure ────────────────────────────────
+
+/** Per-session stats reporter instance — started on `enable`, stopped on `disable`. */
+let _activeReporter: HeadroomStatsReporter | null = null;
+
+const headroomConfigureH: CommandHandler = async (ctx, cmd, parsed) => {
+  const action = parsed.action;
+  if (action !== 'enable' && action !== 'disable' && action !== 'status') {
+    await ctx.relay.sendResult(cmd.id, 'failed', { error: 'action must be enable|disable|status' });
+    return;
+  }
+
+  const savingsIngestUrl = parsed.savingsIngestUrl;
+
+  // agentId from payload (mobile sends current agent) or fall back to persisted config.
+  let configuredAgent = typeof parsed.agentId === 'string' ? parsed.agentId : '';
+  if (!configuredAgent) {
+    try {
+      const raw = JSON.parse(fs.readFileSync(headroomConfigPath(), 'utf8')) as { agent?: string };
+      configuredAgent = raw.agent ?? '';
+    } catch { /* no config yet */ }
+  }
+
+  const result = await configureHeadroom(action, {
+    agent: configuredAgent,
+    pluginAuthToken: ctx.pluginAuthToken,
+    savingsIngestUrl,
+  }, {
+    setup: setupHeadroomForSelfHosted,
+    probeStats: async (): Promise<Savings | null> => {
+      try {
+        const res = await fetch('http://localhost:8787/stats');
+        if (!res.ok) return null;
+        const raw = await res.json() as StatsShape;
+        return mapStatsToSavings(raw, {
+          rawTokensEst: 0, sentTokensEst: 0, cachedTokens: 0, retrieveHops: 0,
+          cacheReadTokens: 0, cacheSavingsUsd: 0, compressionTokens: 0,
+          compressionSavingsUsd: 0, compressionPct: 0,
+        }).next;
+      } catch {
+        return null;
+      }
+    },
+    persist: persistHeadroomConfig,
+    readEnabled: () => {
+      try {
+        const raw = JSON.parse(fs.readFileSync(headroomConfigPath(), 'utf8')) as { enabled?: boolean };
+        return raw.enabled === true;
+      } catch {
+        return false;
+      }
+    },
+    startReporter: (opts) => {
+      _activeReporter?.stop();
+      const reporter = new HeadroomStatsReporter({
+        fetchStats: async () => {
+          const res = await fetch('http://localhost:8787/stats');
+          return res.json() as Promise<StatsShape>;
+        },
+        postSavings: async (delta: Savings) => {
+          if (!opts.ingestUrl) return;
+          await fetch(opts.ingestUrl, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              ...(opts.pluginAuthToken ? { 'X-Plugin-Auth-Token': opts.pluginAuthToken } : {}),
+            },
+            body: JSON.stringify({ agentId: opts.agent, ...delta }),
+          });
+        },
+      });
+      reporter.start();
+      _activeReporter = reporter;
+    },
+    stopReporter: () => {
+      _activeReporter?.stop();
+      _activeReporter = null;
+    },
+    restoreAgentHeadroomConfig: (kind: string) => restoreAgentHeadroomConfig(kind),
+    stopProxy: () => {
+      try {
+        spawn('pkill', ['-TERM', '-f', 'headroom.*proxy'], { stdio: 'ignore' });
+      } catch { /* no proxy running — best-effort */ }
+    },
+    emit: (event) => {
+      if (!ctx.pluginAuthToken) return;
+      void postHeadroomEvent({
+        sessionId: ctx.sessionId,
+        pluginId: ctx.pluginId,
+        pluginAuthToken: ctx.pluginAuthToken,
+        type: event.type,
+        payload: 'step' in event ? { step: event.step } : { state: event.state },
+      });
+    },
+  });
+
+  await ctx.relay.sendResult(cmd.id, 'completed', result as Record<string, unknown>);
+};
+
+// ─── Terminal ─────────────────────────────────────────────────────
+
 const terminalOpenH: CommandHandler = async (ctx, cmd, parsed) => {
   const r = openTerminal({
     cols: typeof parsed.cols === 'number' ? parsed.cols : undefined,
@@ -571,7 +682,10 @@ const gitResolveH: CommandHandler = async (ctx, cmd, parsed) => {
 // the rejected hunks — drawer surfaces a confirm dialog before
 // firing).
 const applyFileReviewH: CommandHandler = async (ctx, cmd, parsed) => {
-  if (!parsed.filePath || !parsed.action) {
+  const reviewAction = parsed.action === 'approved' || parsed.action === 'rejected'
+    ? parsed.action
+    : undefined;
+  if (!parsed.filePath || !reviewAction) {
     await ctx.relay.sendResult(cmd.id, 'failed', {
       error: 'Missing filePath or action',
     });
@@ -580,7 +694,7 @@ const applyFileReviewH: CommandHandler = async (ctx, cmd, parsed) => {
   const result = await applyFileReview(
     process.cwd(),
     parsed.filePath,
-    parsed.action,
+    reviewAction,
   );
   await ctx.relay.sendResult(
     cmd.id,
@@ -1868,6 +1982,7 @@ export const handlers: Record<string, CommandHandler> = {
   save_preview_config: savePreviewConfigH,
   env_read: envReadH,
   env_write: envWriteH,
+  headroom_configure: headroomConfigureH,
 };
 
 /**
