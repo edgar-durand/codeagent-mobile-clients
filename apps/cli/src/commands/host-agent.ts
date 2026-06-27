@@ -369,8 +369,8 @@ export interface HeadroomRunner {
   run(
     cmd: string,
     args: string[],
-    opts?: { timeoutMs?: number },
-  ): Promise<{ code: number | null; stderr: string }>;
+    opts?: { timeoutMs?: number; env?: NodeJS.ProcessEnv },
+  ): Promise<{ code: number | null; stderr: string; stdout?: string }>;
   /** Returns true when `cmd` is present on PATH, false otherwise. */
   which(cmd: string): boolean;
 }
@@ -409,9 +409,10 @@ const defaultHeadroomRunner: HeadroomRunner = {
       return false;
     }
   },
-  run(cmd, args, opts = {}): Promise<{ code: number | null; stderr: string }> {
+  run(cmd, args, opts = {}): Promise<{ code: number | null; stderr: string; stdout?: string }> {
     return new Promise((resolve) => {
-      const child = spawn(cmd, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+      const spawnEnv = opts.env ?? process.env;
+      const child = spawn(cmd, args, { stdio: ['ignore', 'pipe', 'pipe'], env: spawnEnv });
       let stderrBuf = '';
       let settled = false;
       const done = (code: number | null): void => {
@@ -708,6 +709,74 @@ export function persistHeadroomConfig(config: HeadroomConfig): void {
 }
 
 /**
+ * Progress step identifiers emitted by {@link setupHeadroomForSelfHosted}.
+ * In order: pip install → model pre-download → headroom init → proxy spawn → done.
+ */
+export type HeadroomStep = 'pip' | 'model' | 'init' | 'proxy' | 'ready';
+
+/**
+ * Map a headroom kind (`claude`/`codex`/`copilot`) to the agent settings file
+ * that `headroom init --global` writes and that we back up before init so the
+ * user's prior customisations survive a Headroom upgrade/re-init.
+ */
+function agentSettingsPath(kind: string): string | null {
+  const home = os.homedir();
+  if (kind === 'claude') return path.join(home, '.claude', 'settings.json');
+  if (kind === 'codex') return path.join(home, '.codex', 'auth.json');
+  if (kind === 'copilot') return path.join(home, '.config', 'github-copilot', 'hosts.json');
+  return null;
+}
+
+/**
+ * Copy the agent's settings file to `~/.codeam/headroom-backup-<kind>.json`
+ * before `headroom init` so the user's customisations can be restored later.
+ * Best-effort: a missing source file or write failure is logged and swallowed.
+ */
+export function backupAgentHeadroomConfig(kind: string): void {
+  const src = agentSettingsPath(kind);
+  if (!src) return;
+  try {
+    if (!fs.existsSync(src)) return;
+    const dest = path.join(os.homedir(), '.codeam', `headroom-backup-${kind}.json`);
+    fs.mkdirSync(path.dirname(dest), { recursive: true, mode: 0o700 });
+    fs.copyFileSync(src, dest);
+    fs.chmodSync(dest, 0o600);
+    log.info('host-agent', `headroom config backup: ${src} → ${dest}`);
+  } catch (err) {
+    log.warn(
+      'host-agent',
+      `headroom config backup failed (best-effort): ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+}
+
+/**
+ * Restore the agent's settings file from `~/.codeam/headroom-backup-<kind>.json`.
+ * Returns `true` when the backup existed and was copied back, `false` when no
+ * backup was found (i.e. there was nothing to restore).
+ * Best-effort: a write failure is logged and swallowed.
+ */
+export function restoreAgentHeadroomConfig(kind: string): boolean {
+  const dest = agentSettingsPath(kind);
+  if (!dest) return false;
+  const src = path.join(os.homedir(), '.codeam', `headroom-backup-${kind}.json`);
+  if (!fs.existsSync(src)) return false;
+  try {
+    fs.mkdirSync(path.dirname(dest), { recursive: true, mode: 0o700 });
+    fs.copyFileSync(src, dest);
+    fs.chmodSync(dest, 0o600);
+    log.info('host-agent', `headroom config restored: ${src} → ${dest}`);
+    return true;
+  } catch (err) {
+    log.warn(
+      'host-agent',
+      `headroom config restore failed (best-effort): ${err instanceof Error ? err.message : String(err)}`,
+    );
+    return false;
+  }
+}
+
+/**
  * Read the persisted Headroom config and translate it into the HEADROOM_* env
  * the pair-auto child needs to start its savings reporter. This is invoked at
  * EVERY child spawn (fresh deploy AND resume / restart) so reporting survives
@@ -842,7 +911,10 @@ export async function getFreeDiskBytes(dir: string): Promise<number | null> {
 export async function setupHeadroomForSelfHosted(
   agent: string,
   runner: HeadroomRunner = defaultHeadroomRunner,
+  opts: { extras?: string[]; onProgress?: (step: HeadroomStep) => void } = {},
 ): Promise<boolean> {
+  const extras = opts.extras ?? ['proxy', 'code'];
+  const onProgress = opts.onProgress ?? (() => {});
   // The proxy's HTTP/server deps. The COMPRESSION ENGINES come from the
   // headroom-ai extras below — NOT this list.
   const SERVER_DEPS = ['fastapi', 'uvicorn', 'httpx[http2]', 'websockets', 'zstandard'];
@@ -889,7 +961,8 @@ export async function setupHeadroomForSelfHosted(
   // attribute 'library' — circular import", wedging every prompt at
   // "Thinking…"). ONNX is lighter (~1.5 GB total) and robust. All best-effort +
   // bounded: a box too small falls back to launching the agent direct.
-  const headroomPkg = 'headroom-ai[proxy,code]';
+  onProgress('pip');
+  const headroomPkg = `headroom-ai[${extras.join(',')}]`;
   const installOk = await pipInstall([headroomPkg, ...SERVER_DEPS], [], ENGINE_INSTALL_TIMEOUT_MS);
   if (!installOk) {
     log.warn('host-agent', `headroom engine install failed (${headroomPkg}) — skipping Headroom`);
@@ -897,6 +970,7 @@ export async function setupHeadroomForSelfHosted(
   }
   log.info('host-agent', `headroom + ONNX engines installed (${headroomPkg})`);
 
+  onProgress('model');
   // ── Step 1b: pre-download the Kompress model so the first prompt isn't slow ─
   // The proxy eager-preloads the model at startup with allow_download=False and
   // DEFERS the ~840 MB download to the FIRST prompt on a cache miss — that
@@ -931,6 +1005,10 @@ export async function setupHeadroomForSelfHosted(
   // Map the incoming agent id (e.g. the LinkedAgentId `claude_code`) to the
   // subcommand kind `headroom init` accepts (`claude`/`codex`/`copilot`).
   const initKind = agentIdToHeadroomKind(agent);
+  // Back up the agent's settings file before init overwrites it, so the user's
+  // prior customisations can be restored later via restoreAgentHeadroomConfig.
+  backupAgentHeadroomConfig(initKind);
+  onProgress('init');
   // `headroom init --global claude` HARD-FAILS when no `claude` is on PATH.
   // On a self-hosted box claude is the SDK-bundled binary (never on PATH), so
   // prepend its dir to the init call's PATH. Init-call only — no global mutation.
@@ -944,24 +1022,18 @@ export async function setupHeadroomForSelfHosted(
       log.warn('host-agent', 'headroom init: bundled claude binary not found — init may fail');
     }
   }
-  const initOk = await new Promise<boolean>((resolve) => {
-    execFile(
-      'headroom',
-      ['init', '--global', initKind],
-      { env: initEnv },
-      (initErr, stdout, stderr) => {
-        if (initErr) {
-          const detail = (stderr || initErr.message).replace(/\n+$/g, '');
-          log.warn('host-agent', `headroom init failed (best-effort): ${detail}`);
-          resolve(false);
-        } else {
-          if (stdout.trim()) log.info('host-agent', `headroom init: ${stdout.trim()}`);
-          log.info('host-agent', 'headroom init --global succeeded');
-          resolve(true);
-        }
-      },
-    );
+  const initResult = await runner.run('headroom', ['init', '--global', initKind], {
+    env: initEnv,
   });
+  const initOk = initResult.code === 0;
+  if (!initOk) {
+    const detail = initResult.stderr.replace(/\n+$/g, '');
+    log.warn('host-agent', `headroom init failed (best-effort): ${detail}`);
+  } else {
+    const stdout = initResult.stdout ?? '';
+    if (stdout.trim()) log.info('host-agent', `headroom init: ${stdout.trim()}`);
+    log.info('host-agent', 'headroom init --global succeeded');
+  }
 
   if (!initOk) {
     return false;
@@ -971,11 +1043,21 @@ export async function setupHeadroomForSelfHosted(
   // Pin Kompress to the ONNX CPU backend so it never tries to import torch
   // (absent by design). The proxy eager-preloads the pre-downloaded model from
   // cache at bind time, so the first prompt is compressed without a stall.
+  onProgress('proxy');
   try {
     const proxy = spawn('headroom', ['proxy', '--port', '8787'], {
       stdio: 'ignore',
       detached: true,
       env: { ...process.env, HEADROOM_KOMPRESS_BACKEND: 'onnx_cpu' },
+    });
+    // Consume the error event so Node doesn't throw an uncaught exception when
+    // headroom is not on PATH (e.g. installed to a user-local dir not yet on
+    // the current PATH). The outer try/catch only catches synchronous throws.
+    proxy.once('error', (e) => {
+      log.warn(
+        'host-agent',
+        `headroom proxy warm-start error (best-effort): ${e.message}`,
+      );
     });
     proxy.unref(); // don't keep the supervisor process alive for the proxy
   } catch (e) {
@@ -986,6 +1068,7 @@ export async function setupHeadroomForSelfHosted(
     );
   }
 
+  onProgress('ready');
   return true;
 }
 
