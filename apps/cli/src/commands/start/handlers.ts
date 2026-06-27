@@ -477,6 +477,18 @@ const envWriteH: CommandHandler = async (ctx, cmd, parsed) => {
 /** Per-session stats reporter instance — started on `enable`, stopped on `disable`. */
 let _activeReporter: HeadroomStatsReporter | null = null;
 
+/**
+ * Serializes Headroom SSE event POSTs. `configureHeadroom` emits the
+ * `headroom_progress` steps (pip…ready) and the terminal `headroom_status`
+ * (enabled/disabled/error) back-to-back. If each POST were fired-and-forgotten
+ * concurrently, the backend's per-event `findActiveSessionByPlugin` lookup
+ * (variable latency) could `userEvents.publish` them out of order — a late
+ * `proxy`/`ready` progress landing after `enabled` leaves the mobile UI stuck
+ * on "Starting proxy…". Chaining each POST after the previous one guarantees
+ * the backend receives — and republishes — them in emit order.
+ */
+let _headroomEmitChain: Promise<unknown> = Promise.resolve();
+
 const headroomConfigureH: CommandHandler = async (ctx, cmd, parsed) => {
   const action = parsed.action;
   if (action !== 'enable' && action !== 'disable' && action !== 'status') {
@@ -578,14 +590,21 @@ const headroomConfigureH: CommandHandler = async (ctx, cmd, parsed) => {
       } catch { /* no proxy running — best-effort */ }
     },
     emit: (event) => {
-      if (!ctx.pluginAuthToken) return;
-      void postHeadroomEvent({
-        sessionId: ctx.sessionId,
-        pluginId: ctx.pluginId,
-        pluginAuthToken: ctx.pluginAuthToken,
-        type: event.type,
-        payload: 'step' in event ? { step: event.step } : { state: event.state },
-      });
+      const token = ctx.pluginAuthToken;
+      if (!token) return;
+      // Serialize: chain this POST after the previous one so the backend
+      // receives progress/status events strictly in emit order (see
+      // `_headroomEmitChain`). A failed POST resolves to `ok:false` rather than
+      // rejecting, so the chain never breaks for later events.
+      _headroomEmitChain = _headroomEmitChain.then(() =>
+        postHeadroomEvent({
+          sessionId: ctx.sessionId,
+          pluginId: ctx.pluginId,
+          pluginAuthToken: token,
+          type: event.type,
+          payload: 'step' in event ? { step: event.step } : { state: event.state },
+        }),
+      );
     },
   });
 
