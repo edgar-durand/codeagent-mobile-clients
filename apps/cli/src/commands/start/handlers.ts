@@ -554,7 +554,16 @@ const headroomConfigureH: CommandHandler = async (ctx, cmd, parsed) => {
     restoreAgentHeadroomConfig: (kind: string) => restoreAgentHeadroomConfig(kind),
     stopProxy: () => {
       try {
-        spawn('pkill', ['-TERM', '-f', 'headroom.*proxy'], { detached: true, stdio: 'ignore' }).unref();
+        const p = spawn('pkill', ['-TERM', '-f', 'headroom.*proxy'], {
+          detached: true,
+          stdio: 'ignore',
+        });
+        // `spawn` emits ENOENT (e.g. `pkill`/procps absent on a minimal box)
+        // as an ASYNC 'error' event — the try/catch above only guards the
+        // synchronous call. Without this handler the unhandled 'error'
+        // crashes the process. Disable is best-effort, so swallow it.
+        p.on('error', () => {});
+        p.unref();
       } catch { /* no proxy running — best-effort */ }
     },
     emit: (event) => {

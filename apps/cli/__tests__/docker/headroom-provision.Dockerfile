@@ -26,12 +26,14 @@ FROM python:3.12-slim
 
 # ── System deps ───────────────────────────────────────────────────────────────
 # nodejs / npm 20: install via NodeSource; ca-certificates for TLS + HuggingFace.
-# curl is used by the NodeSource setup script.
+# curl is used by the NodeSource setup script. procps provides `pkill`, which
+# the Headroom disable path uses to stop the proxy — python:3.12-slim omits it,
+# and its absence is exactly the ENOENT the disable path must survive.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
          ca-certificates \
          curl \
-         git \
+         procps \
     && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
     && rm -rf /var/lib/apt/lists/*

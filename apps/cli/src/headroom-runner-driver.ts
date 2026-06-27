@@ -168,10 +168,14 @@ async function runDisable(): Promise<void> {
     restoreAgentHeadroomConfig: (k: string) => restoreAgentHeadroomConfig(k),
     stopProxy: () => {
       try {
-        spawn('pkill', ['-TERM', '-f', 'headroom.*proxy'], {
+        const p = spawn('pkill', ['-TERM', '-f', 'headroom.*proxy'], {
           detached: true,
           stdio: 'ignore',
-        }).unref();
+        });
+        // ENOENT arrives as an async 'error' event, not a sync throw —
+        // without this handler a missing `pkill` crashes the driver.
+        p.on('error', () => {});
+        p.unref();
       } catch { /* best-effort */ }
     },
     emit: () => { /* no-op: no SSE channel in driver */ },
