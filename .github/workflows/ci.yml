@@ -84,6 +84,27 @@ jobs:
           DOCKER_E2E: '1'
         run: npx vitest run host-agent.docker.e2e
 
+      # Headroom on-demand — REAL Docker integration test.
+      # Boots a container (Python 3.12 + Node 20 + the built codeam-cli) and
+      # runs the real Headroom provisioning lifecycle inside it:
+      #   enable  → pip install headroom-ai[proxy,code,image] + model pre-download
+      #             + headroom init --global claude + proxy spawn
+      #   disable → restoreAgentHeadroomConfig + proxy teardown
+      # Unlike the host-agent Docker E2E (which stubs the backend), this test
+      # does NOT stub pip, headroom, or HuggingFace — the provisioning is REAL.
+      # Gated to Linux + Node 20 (one matrix cell) because:
+      #   • GitHub-hosted ubuntu runners ship a working Docker daemon.
+      #   • The model download is slow (~840 MB); one cell avoids 6× the cost.
+      #   • The headroom binary is Linux-first; the macOS/Windows paths differ.
+      # RUN_HEADROOM_INT=1 flips the gate on; on every other cell (and on a
+      # developer's laptop without the env var) the suite self-skips cleanly.
+      - name: CLI Headroom Docker integration test (on-demand enable/disable)
+        if: matrix.os == 'ubuntu-latest' && matrix.node == '20'
+        working-directory: apps/cli
+        env:
+          RUN_HEADROOM_INT: '1'
+        run: npx vitest run headroom-provision
+
       # Smoke from the repo workspace. Confirms the freshly-built
       # binary boots on this OS, the argument parser handles every
       # `<cmd> --help` we ship, and the live backend at

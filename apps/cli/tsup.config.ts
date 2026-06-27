@@ -49,4 +49,25 @@ export default defineConfig([
     target: 'node18',
     banner: { js: '#!/usr/bin/env node' },
   },
+  {
+    // Headroom integration-test driver — invoked INSIDE the Docker container
+    // by `headroom-provision.int.test.ts`. Not part of the published CLI
+    // surface; compiled separately so the test can `node dist/headroom-runner-driver.js`
+    // against the REAL provisioning code without mocking pip / headroom init.
+    entry: ['src/headroom-runner-driver.ts'],
+    format: ['cjs'],
+    target: 'node20',
+    noExternal: ['@clack/prompts', '@clack/core', '@agentclientprotocol/sdk'],
+    external: ['node-pty'],
+    // No banner: this file is invoked via `node dist/headroom-runner-driver.js`,
+    // not as a directly-executable script, so a shebang is not needed and would
+    // duplicate the one tsup adds at build time.
+    define: {
+      __CLI_VERSION__: JSON.stringify(pkg.version),
+      __POSTHOG_API_KEY__: JSON.stringify(process.env.POSTHOG_API_KEY ?? ''),
+      __POSTHOG_HOST__: JSON.stringify(
+        process.env.POSTHOG_HOST ?? 'https://us.i.posthog.com',
+      ),
+    },
+  },
 ]);
