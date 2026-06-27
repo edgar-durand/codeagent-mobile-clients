@@ -84,7 +84,12 @@ if (!RUN_HEADROOM_INT) {
 }
 
 // ── Constants ────────────────────────────────────────────────────────────────
-const IMAGE_TAG = `codeam-headroom-provision-e2e:test-${process.pid}`;
+// If HEADROOM_IMAGE_TAG is set (e.g. by CI after a pre-built image is loaded
+// into the daemon), the test skips its own `docker build` and reuses that tag
+// directly. The local default (unset) retains the original self-build flow so
+// `RUN_HEADROOM_INT=1 npm run test -- headroom-provision` works with no extra setup.
+const PROVIDED_IMAGE_TAG = process.env.HEADROOM_IMAGE_TAG ?? '';
+const IMAGE_TAG = PROVIDED_IMAGE_TAG || `codeam-headroom-provision-e2e:test-${process.pid}`;
 const CONTAINER_NAME = `codeam-headroom-provision-e2e-${process.pid}`;
 const CLI_DIR = path.resolve(__dirname, '../..'); // apps/cli
 const DOCKER_DIR = path.join(CLI_DIR, '__tests__', 'docker');
@@ -264,60 +269,70 @@ let tarballPath = '';
 const suite = dockerReady ? describe : describe.skip;
 
 suite('headroom provision — real Docker integration (on-demand enable/disable)', () => {
-  // Build once and start the persistent container; both phases reuse it.
+  // Build (or reuse a pre-built image) and start the persistent container;
+  // both phases reuse it.
   beforeAll(async () => {
     // Ensure no leftover container from a previous crashed run.
     await removeContainerQuiet();
 
-    // 1) Pack the built CLI.
-    const distIndex = path.join(CLI_DIR, 'dist', 'index.js');
-    const driverDist = path.join(CLI_DIR, 'dist', 'headroom-runner-driver.js');
-    if (!fs.existsSync(distIndex)) {
-      throw new Error(
-        'dist/index.js missing — run `npm run build` in apps/cli before the Headroom Docker integration test.',
+    if (PROVIDED_IMAGE_TAG) {
+      // ── Reuse path (CI pre-built the image and set HEADROOM_IMAGE_TAG) ──────
+      // Skip npm pack + docker build entirely. The image is already loaded into
+      // the daemon by the CI pre-build step, so we just start the container.
+      // eslint-disable-next-line no-console
+      console.log(`[headroom-provision] Reusing pre-built image ${PROVIDED_IMAGE_TAG} (HEADROOM_IMAGE_TAG is set — skipping docker build).`);
+    } else {
+      // ── Self-build path (local developer, no HEADROOM_IMAGE_TAG set) ────────
+      // 1) Pack the built CLI.
+      const distIndex = path.join(CLI_DIR, 'dist', 'index.js');
+      const driverDist = path.join(CLI_DIR, 'dist', 'headroom-runner-driver.js');
+      if (!fs.existsSync(distIndex)) {
+        throw new Error(
+          'dist/index.js missing — run `npm run build` in apps/cli before the Headroom Docker integration test.',
+        );
+      }
+      if (!fs.existsSync(driverDist)) {
+        throw new Error(
+          'dist/headroom-runner-driver.js missing — run `npm run build` in apps/cli before the Headroom Docker integration test.',
+        );
+      }
+
+      const packOut = await execFileP('npm', ['pack', '--silent'], {
+        cwd: CLI_DIR,
+        timeout: 120_000,
+        maxBuffer: 16 * 1024 * 1024,
+      });
+      const tarballName = packOut.stdout.trim().split('\n').pop()?.trim();
+      if (!tarballName) throw new Error('npm pack produced no tarball name');
+      const packedPath = path.join(CLI_DIR, tarballName);
+
+      // Move tarball into the tiny docker build context under a stable name.
+      tarballPath = path.join(DOCKER_DIR, 'codeam-cli.tgz');
+      fs.copyFileSync(packedPath, tarballPath);
+      fs.unlinkSync(packedPath);
+
+      // The driver is excluded from the published tarball (test-only code).
+      // Copy it separately into the docker build context so the Dockerfile can
+      // install it at $(npm root -g)/codeam-cli/dist/ alongside the CLI.
+      fs.copyFileSync(
+        driverDist,
+        path.join(DOCKER_DIR, 'headroom-runner-driver.js'),
       );
+
+      // 2) Build the image. Build context = docker support dir.
+      //    On a cold cache (first build) this includes pip install + the ~840 MB
+      //    HuggingFace model download baked into the image — allow up to 600s.
+      //    On a warm Docker layer cache (subsequent CI runs) it completes in <30s.
+      // eslint-disable-next-line no-console
+      console.log('[headroom-provision] Building Docker image (pip install + model baked in — cold build may take several minutes)…');
+      await docker([
+        'build',
+        '-f', DOCKERFILE,
+        '-t', IMAGE_TAG,
+        '--build-arg', 'CODEAM_TARBALL=codeam-cli.tgz',
+        DOCKER_DIR,
+      ], 600_000);
     }
-    if (!fs.existsSync(driverDist)) {
-      throw new Error(
-        'dist/headroom-runner-driver.js missing — run `npm run build` in apps/cli before the Headroom Docker integration test.',
-      );
-    }
-
-    const packOut = await execFileP('npm', ['pack', '--silent'], {
-      cwd: CLI_DIR,
-      timeout: 120_000,
-      maxBuffer: 16 * 1024 * 1024,
-    });
-    const tarballName = packOut.stdout.trim().split('\n').pop()?.trim();
-    if (!tarballName) throw new Error('npm pack produced no tarball name');
-    const packedPath = path.join(CLI_DIR, tarballName);
-
-    // Move tarball into the tiny docker build context under a stable name.
-    tarballPath = path.join(DOCKER_DIR, 'codeam-cli.tgz');
-    fs.copyFileSync(packedPath, tarballPath);
-    fs.unlinkSync(packedPath);
-
-    // The driver is excluded from the published tarball (test-only code).
-    // Copy it separately into the docker build context so the Dockerfile can
-    // install it at $(npm root -g)/codeam-cli/dist/ alongside the CLI.
-    fs.copyFileSync(
-      driverDist,
-      path.join(DOCKER_DIR, 'headroom-runner-driver.js'),
-    );
-
-    // 2) Build the image. Build context = docker support dir.
-    //    On a cold cache (first build) this includes pip install + the ~840 MB
-    //    HuggingFace model download baked into the image — allow up to 600s.
-    //    On a warm Docker layer cache (subsequent CI runs) it completes in <30s.
-    // eslint-disable-next-line no-console
-    console.log('[headroom-provision] Building Docker image (pip install + model baked in — cold build may take several minutes)…');
-    await docker([
-      'build',
-      '-f', DOCKERFILE,
-      '-t', IMAGE_TAG,
-      '--build-arg', 'CODEAM_TARBALL=codeam-cli.tgz',
-      DOCKER_DIR,
-    ], 600_000);
 
     // 3) Start a PERSISTENT container that lives for the entire test suite.
     //    Both enable and disable run inside it via `docker exec` so that
@@ -336,19 +351,24 @@ suite('headroom provision — real Docker integration (on-demand enable/disable)
   afterAll(async () => {
     // Tear down the container even on failure.
     await removeContainerQuiet();
-    // Remove the test image to avoid polluting the host's Docker image store.
-    try {
-      await docker(['rmi', '-f', IMAGE_TAG], 30_000);
-    } catch { /* best-effort */ }
-    // Remove the tarball and driver copy from the docker support dir.
-    for (const tempFile of [
-      tarballPath,
-      path.join(DOCKER_DIR, 'headroom-runner-driver.js'),
-    ]) {
-      if (tempFile && fs.existsSync(tempFile)) {
-        try {
-          fs.unlinkSync(tempFile);
-        } catch { /* best-effort */ }
+    if (!PROVIDED_IMAGE_TAG) {
+      // Remove the test image to avoid polluting the host's Docker image store.
+      // When using a CI-provided image (PROVIDED_IMAGE_TAG), the caller owns
+      // the image lifecycle — we leave it in place.
+      try {
+        await docker(['rmi', '-f', IMAGE_TAG], 30_000);
+      } catch { /* best-effort */ }
+      // Remove the tarball and driver copy from the docker support dir.
+      // These are only created in the self-build path.
+      for (const tempFile of [
+        tarballPath,
+        path.join(DOCKER_DIR, 'headroom-runner-driver.js'),
+      ]) {
+        if (tempFile && fs.existsSync(tempFile)) {
+          try {
+            fs.unlinkSync(tempFile);
+          } catch { /* best-effort */ }
+        }
       }
     }
   });

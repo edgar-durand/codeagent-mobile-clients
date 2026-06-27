@@ -121,8 +121,9 @@ jobs:
         working-directory: apps/cli
         env:
           RUN_HEADROOM_INT: '1'
-          # Pass the Dockerfile path so the cache key is computed correctly.
-          HEADROOM_DOCKERFILE: ${{ github.workspace }}/apps/cli/__tests__/docker/headroom-provision.Dockerfile
+          # The test reads HEADROOM_IMAGE_TAG and, when set, skips its own
+          # docker build and reuses the pre-built image loaded below.
+          HEADROOM_IMAGE_TAG: codeam-headroom-provision-e2e:ci
         run: |
           # Pre-build the headroom test image with Docker BuildKit layer cache.
           # This separates image-build (cached) from test execution so failures
@@ -130,7 +131,8 @@ jobs:
           DOCKERFILE="$GITHUB_WORKSPACE/apps/cli/__tests__/docker/headroom-provision.Dockerfile"
           DOCKER_DIR="$GITHUB_WORKSPACE/apps/cli/__tests__/docker"
 
-          # npm pack into the docker context dir (stable name expected by Dockerfile).
+          # Copy the built driver + packed tarball into the docker build context.
+          # Must happen BEFORE the buildx build — the Dockerfile COPYs both files.
           cd "$GITHUB_WORKSPACE/apps/cli"
           npm pack --silent
           TARBALL=$(ls codeam-cli-*.tgz | tail -1)
@@ -138,10 +140,11 @@ jobs:
           rm -f "$TARBALL"
           cp dist/headroom-runner-driver.js "$DOCKER_DIR/headroom-runner-driver.js"
 
-          # Build the image with GHA layer cache. The cache-to exports the layers;
-          # cache-from restores them. Mode=max caches intermediate layers too
-          # (important: pip install and model download are two separate RUN steps,
-          # each its own layer — max mode caches both independently).
+          # Build the image with GHA layer cache and LOAD it into the local daemon
+          # so `docker run`/`docker exec` can use it without a second build.
+          # cache-to exports the layers; cache-from restores them on the next run.
+          # Mode=max caches intermediate layers too (pip install and model download
+          # are two separate RUN steps, each its own layer — max mode caches both).
           docker buildx build \
             --cache-from type=gha,scope=headroom-provision \
             --cache-to   type=gha,scope=headroom-provision,mode=max \
@@ -151,11 +154,13 @@ jobs:
             --build-arg CODEAM_TARBALL=codeam-cli.tgz \
             "$DOCKER_DIR"
 
-          # Clean up the context copies (the test re-packs; this avoids double-pack).
+          # Clean up context copies — the test reuses the pre-built image via
+          # HEADROOM_IMAGE_TAG and does NOT run its own docker build, so these
+          # files are no longer needed.
           rm -f "$DOCKER_DIR/codeam-cli.tgz" "$DOCKER_DIR/headroom-runner-driver.js"
 
-          # Run the integration test. The test does its own `npm pack` + `docker build`
-          # but Docker will hit the layer cache for the pip/model layers instantly.
+          # Run the integration test. HEADROOM_IMAGE_TAG tells the test to reuse
+          # the image loaded above instead of doing a redundant second build.
           npx vitest run headroom-provision
 
       # Smoke from the repo workspace. Confirms the freshly-built
