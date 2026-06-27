@@ -4,6 +4,25 @@ All notable changes to the CodeAgent-Mobile JetBrains plugin are documented here
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.49.0] — 2026-06-27
+
+### Added
+
+- **cli:** Parameterize setupHeadroomForSelfHosted (extras + progress + config backup)
+- **cli:** Headroom_configure handler + configure service + postHeadroomEvent
+
+### Fixed
+
+- **cli:** Widen sendResult to unknown (drop unsafe casts) + guard agentId + unref stopProxy
+- **cli:** Persistent-container disable phase + validated casts + exclude test driver
+- **cli:** Headroom stopProxy survives missing pkill + procps in int-test image
+- **cli:** Surface driver errors + bake headroom deps into int-test image
+- **workflow:** Reuse prebuilt headroom image in int test + apt retry (no double build)
+
+### Tests
+
+- **cli:** Real Docker integration test for Headroom on-demand enable/disable
+
 ## [2.48.1] — 2026-06-26
 
 ### Fixed
