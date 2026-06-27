@@ -8,7 +8,9 @@
     "codeam": "dist/index.js"
   },
   "files": [
-    "dist",
+    "dist/index.js",
+    "dist/postinstall.js",
+    "dist/vendor",
     "README.md",
     "CHANGELOG.md",
     "LICENSE"

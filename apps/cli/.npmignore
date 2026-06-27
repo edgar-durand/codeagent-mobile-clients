@@ -1,0 +1,14 @@
+# NOTE: When package.json has a "files" field, npm ignores this .npmignore file
+# entirely (npm-packlist replaces .npmignore with the files allowlist when both
+# exist). The actual exclusion of dist/headroom-runner-driver.js from the
+# published tarball is achieved by listing specific dist entries in "files"
+# rather than the whole "dist" directory:
+#
+#   "files": ["dist/index.js", "dist/postinstall.js", "dist/vendor", ...]
+#
+# This file is kept as documentation of intent: the headroom integration-test
+# driver is NOT part of the public CLI surface and must not be published.
+# If the "files" field is ever reverted to ["dist"], add the exclusion here
+# AND verify with `npm pack --dry-run` that the driver is absent.
+dist/headroom-runner-driver.js
+dist/headroom-runner-driver.js.map
