@@ -2309,7 +2309,7 @@ function buildBannerSubtitle(
  * flood gate now would mask handler-specific PTY assumptions that need
  * audit first.
  */
-function buildLegacyContextForACP(
+export function buildLegacyContextForACP(
   opts: AcpRunnerOptions,
   relay: CommandRelayService,
   runtime: RuntimeStrategy,
@@ -2324,6 +2324,11 @@ function buildLegacyContextForACP(
     keepAliveCtx: null,
     pluginId: opts.pluginId,
     sessionId: opts.sessionId,
+    // The running ACP agent (claude/codex/gemini/cursor). REQUIRED: headroom_configure
+    // resolves the agent from ctx.agentId; without it the enable gate sees '' and
+    // returns {supported:false} for a real Claude session (the `as unknown` cast
+    // below previously hid this missing field from the type checker).
+    agentId: opts.agent,
     pluginAuthToken: opts.pluginAuthToken,
   } as unknown as HandlerContext;
 }
