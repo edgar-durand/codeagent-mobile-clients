@@ -886,6 +886,86 @@ export async function getFreeDiskBytes(dir: string): Promise<number | null> {
 }
 
 /**
+ * Probe candidates for a Python interpreter that meets headroom-ai's minimum
+ * version requirement (≥3.10, the oldest abi3 wheel tag headroom-ai ships).
+ *
+ * On macOS the bare `python3` resolves to Xcode's Python 3.9.6 (pip 21.2.4),
+ * which has no headroom-ai wheel (`Could not find a version that satisfies the
+ * requirement`). The same box may have `/opt/homebrew/bin/python3.13` that
+ * installs fine. We therefore probe version-suffixed binaries FIRST (newest
+ * first) so the newest available modern interpreter wins, then fall back to
+ * bare `python3` ONLY when it is itself ≥3.10.
+ *
+ * Probe order:
+ *   1. Version-suffixed on PATH: python3.13 → python3.12 → python3.11 → python3.10
+ *   2. Common absolute locations (macOS Homebrew arm64 + Intel + Linux):
+ *      /opt/homebrew/bin/<suffix> and /usr/local/bin/<suffix>, same suffix order.
+ *   3. Bare `python3` (accepted only when its reported version is ≥3.10).
+ *
+ * Returns the first qualifying binary string, or null when none is found.
+ * Best-effort: a probe that errors or times out just skips that candidate.
+ * Never throws.
+ */
+export async function resolveHeadroomPython(runner: HeadroomRunner): Promise<string | null> {
+  /** Short probe timeout — we're just asking for a version string. */
+  const PROBE_TIMEOUT_MS = 5_000;
+
+  /** Suffixed variants to try, newest first (highest minor wins). */
+  const SUFFIXES = ['python3.13', 'python3.12', 'python3.11', 'python3.10'] as const;
+
+  /** Absolute prefix directories to check alongside PATH. */
+  const PREFIX_DIRS = ['/opt/homebrew/bin', '/usr/local/bin'] as const;
+
+  /** Probe a single candidate binary. Returns true when it is Python ≥3.10. */
+  const probe = async (candidate: string): Promise<boolean> => {
+    try {
+      const r = await runner.run(
+        candidate,
+        ['-c', 'import sys; print("%d.%d" % sys.version_info[:2])'],
+        { timeoutMs: PROBE_TIMEOUT_MS },
+      );
+      if (r.code !== 0) return false;
+      const parts = (r.stdout ?? '').trim().split('.');
+      const major = parseInt(parts[0] ?? '', 10);
+      const minor = parseInt(parts[1] ?? '', 10);
+      return major === 3 && minor >= 10;
+    } catch {
+      return false;
+    }
+  };
+
+  // 1. Version-suffixed on PATH (PATH-resolved; no absolute prefix).
+  for (const suffix of SUFFIXES) {
+    try {
+      if (await probe(suffix)) return suffix;
+    } catch {
+      /* skip */
+    }
+  }
+
+  // 2. Absolute locations for each suffix (macOS Homebrew arm64 + Intel + Linux).
+  for (const suffix of SUFFIXES) {
+    for (const dir of PREFIX_DIRS) {
+      const candidate = `${dir}/${suffix}`;
+      try {
+        if (await probe(candidate)) return candidate;
+      } catch {
+        /* skip */
+      }
+    }
+  }
+
+  // 3. Bare `python3` — accepted only when it is itself ≥3.10.
+  try {
+    if (await probe('python3')) return 'python3';
+  } catch {
+    /* skip */
+  }
+
+  return null;
+}
+
+/**
  * Set up Headroom on the self-hosted box so the pair-auto child's agent
  * routes through the local compression proxy and savings reach the dashboard.
  *
@@ -894,7 +974,12 @@ export async function getFreeDiskBytes(dir: string): Promise<number | null> {
  *      the box as bare and provision python3 + pip + ca-certificates + curl via
  *      the OS package manager (apt-get/apk/dnf/yum/pacman/zypper). Bounded at
  *      180s. Best-effort: if provisioning fails, returns false.
- *   1. `python3 -m pip install --quiet` headroom-ai + companion packages.
+ *   0b. Resolve a Python interpreter ≥3.10. headroom-ai ships abi3 wheels tagged
+ *      cp310, so Python 3.9 (e.g. macOS Xcode's default) has no matching wheel.
+ *      Version-suffixed binaries (python3.13…python3.10) are probed newest-first;
+ *      bare `python3` is accepted only when it is itself ≥3.10. If none is found,
+ *      skips Headroom and warns (install python3.11+ via brew/apt).
+ *   1. `<py> -m pip install --quiet` headroom-ai + companion packages.
  *      On PEP 668 "externally-managed-environment" error (Ubuntu 24.04+,
  *      Debian 12+), retries with `--break-system-packages`. 120s timeout.
  *   2. `headroom init --global <agent>` to write ~/.claude/settings.json.
@@ -927,19 +1012,41 @@ export async function setupHeadroomForSelfHosted(
     return false;
   }
 
+  // ── Step 0b: Resolve a Python ≥3.10 interpreter ─────────────────────────
+  // headroom-ai ships abi3 wheels tagged cp310. The macOS default `python3` is
+  // Xcode's Python 3.9.6 (pip 21.2.4), which has no matching wheel → pip errors
+  // "Could not find a version that satisfies the requirement headroom-ai[...]
+  // (from versions: none)" → install silently fails → Headroom skipped.
+  // The same box typically has /opt/homebrew/bin/python3.13 where it installs
+  // fine. We probe version-suffixed binaries newest-first so the best available
+  // modern interpreter is used; bare `python3` is a last resort accepted only
+  // when it is itself ≥3.10 (modern Linux distros are).
+  // ensurePip runs BEFORE this resolver so a freshly-provisioned python3 on a
+  // bare Linux box is in scope.
+  const py = await resolveHeadroomPython(runner);
+  if (py === null) {
+    log.warn(
+      'host-agent',
+      'Headroom needs Python ≥3.10; none found on this box (install python3.11+ via brew/apt) — skipping Headroom',
+    );
+    return false;
+  }
+  log.info('host-agent', `Headroom will use interpreter: ${py}`);
+
   // pip install with the PEP 668 "externally-managed-environment" retry
-  // (Ubuntu 24.04+/Debian 12+). `python3 -m pip` resolves against the right
-  // interpreter regardless of shebang ambiguity on multi-python boxes.
+  // (Ubuntu 24.04+/Debian 12+). We use the resolved ≥3.10 interpreter explicitly
+  // rather than bare `python3`, which can be an old system/Xcode 3.9 that has
+  // no headroom-ai wheel. `<py> -m pip` resolves pip against the right interpreter.
   const pipInstall = async (
     pkgs: string[],
     extraArgs: string[],
     timeoutMs: number,
   ): Promise<boolean> => {
     const base = ['-m', 'pip', 'install', '--quiet', ...extraArgs, ...pkgs];
-    const r = await runner.run('python3', base, { timeoutMs });
+    const r = await runner.run(py, base, { timeoutMs });
     if (r.code === 0) return true;
     if (r.stderr.includes(PEP668_MARKER)) {
-      const r2 = await runner.run('python3', [...base, '--break-system-packages'], { timeoutMs });
+      const r2 = await runner.run(py, [...base, '--break-system-packages'], { timeoutMs });
       return r2.code === 0;
     }
     return false;
@@ -985,7 +1092,7 @@ export async function setupHeadroomForSelfHosted(
     'snapshot_download("chopratejas/kompress-v2-base", allow_patterns=["*.json","onnx/*.onnx","kompress-int8-wo.onnx"])',
     'snapshot_download("answerdotai/ModernBERT-base", allow_patterns=["*.json","tokenizer*","*.txt","vocab*","merges*"])',
   ].join('\n');
-  const dl = await runner.run('python3', ['-c', predownloadPy], {
+  const dl = await runner.run(py, ['-c', predownloadPy], {
     timeoutMs: ENGINE_INSTALL_TIMEOUT_MS,
   });
   log.info(

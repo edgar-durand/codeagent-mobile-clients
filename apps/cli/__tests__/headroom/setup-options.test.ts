@@ -8,6 +8,11 @@ function fakeRunner() {
     which: vi.fn().mockReturnValue(true),
     run: vi.fn(async (cmd: string, args: string[]) => {
       calls.push({ cmd, args });
+      // Version probe for resolveHeadroomPython: return 3.11 so the resolver
+      // accepts the first candidate and pip install can proceed.
+      if (args.length === 2 && args[0] === '-c' && args[1]?.includes('sys.version_info')) {
+        return { code: 0, stdout: '3.11', stderr: '' };
+      }
       return { code: 0, stdout: '', stderr: '' };
     }),
   };
