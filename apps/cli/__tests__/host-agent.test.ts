@@ -1685,10 +1685,28 @@ describe('setupHeadroomForSelfHosted — injectable runner (no real subprocess)'
         args: string[],
       ): Promise<{ code: number | null; stderr: string; stdout?: string }> {
         calls.push({ cmd, args });
-        // For python version probes, return a valid ≥3.10 version by default so the
-        // resolver succeeds and existing tests don't need individual probe responses.
+        // Version probe: ONLY bare `python3` reports a ≥3.10 version, so the
+        // resolver settles on `python3` (the interpreter these setup tests model
+        // their pip behavior on) rather than a suffixed candidate. A
+        // `runResponses[cmd]` carrying a `stdout` overrides this (lets a test pin
+        // a specific version), otherwise default 3.11.
         if (args.length === 2 && args[0] === '-c' && args[1]?.includes('sys.version_info')) {
-          return Promise.resolve(runResponses[cmd] ?? { code: 0, stderr: '', stdout: '3.11' });
+          if (runResponses[cmd]?.stdout !== undefined) {
+            return Promise.resolve(runResponses[cmd]);
+          }
+          if (cmd === 'python3') {
+            return Promise.resolve({ code: 0, stderr: '', stdout: '3.11' });
+          }
+          return Promise.resolve({ code: 1, stderr: 'not found', stdout: '' });
+        }
+        // pip-presence probe (`-m pip --version`): pip is available on python3.
+        // PEP 668 affects `pip install`, not `--version`, so this stays code 0.
+        if (args[0] === '-m' && args[1] === 'pip' && args[2] === '--version') {
+          return Promise.resolve({
+            code: cmd === 'python3' ? 0 : 1,
+            stderr: '',
+            stdout: 'pip 24.0',
+          });
         }
         return Promise.resolve(runResponses[cmd] ?? { code: 0, stderr: '' });
       },
@@ -1775,6 +1793,10 @@ describe('setupHeadroomForSelfHosted — injectable runner (no real subprocess)'
         if (args.length === 2 && args[0] === '-c' && args[1]?.includes('sys.version_info')) {
           return Promise.resolve({ code: 0, stderr: '', stdout: '3.11' });
         }
+        // pip-presence probe (resolveHeadroomPython) — pip IS available.
+        if (args[0] === '-m' && args[1] === 'pip' && args[2] === '--version') {
+          return Promise.resolve({ code: 0, stderr: '', stdout: 'pip 24.0' });
+        }
         if (args[0] === '-m') {
           if (args.includes('--break-system-packages')) {
             return Promise.resolve({ code: 0, stderr: '' }); // retry succeeds
@@ -1827,7 +1849,7 @@ describe('setupHeadroomForSelfHosted — injectable runner (no real subprocess)'
 
     // Every pip INSTALL call uses `<py> -m pip install --quiet ...`. (The
     // `-c "...snapshot_download..."` pre-download call is not a pip install.)
-    const installCalls = pipCalls.filter((c) => c.args[0] === '-m');
+    const installCalls = pipCalls.filter((c) => c.args[0] === '-m' && c.args[2] === 'install');
     for (const c of installCalls) {
       expect(c.args.slice(0, 4)).toEqual(['-m', 'pip', 'install', '--quiet']);
     }
@@ -1851,6 +1873,10 @@ describe('setupHeadroomForSelfHosted — injectable runner (no real subprocess)'
         // Version probe → succeed with 3.11 so the resolver passes.
         if (args.length === 2 && args[0] === '-c' && args[1]?.includes('sys.version_info')) {
           return Promise.resolve({ code: 0, stderr: '', stdout: '3.11' });
+        }
+        // pip-presence probe (resolveHeadroomPython) — pip IS available.
+        if (args[0] === '-m' && args[1] === 'pip' && args[2] === '--version') {
+          return Promise.resolve({ code: 0, stderr: '', stdout: 'pip 24.0' });
         }
         // All pip install attempts fail with PEP 668.
         return Promise.resolve({
@@ -2085,6 +2111,40 @@ describe('resolveHeadroomPython', () => {
     };
     const result = await resolveHeadroomPython(runner);
     expect(result).toBe('python3.13');
+  });
+
+  it('skips a newest python that lacks pip and picks the older one that has pip', async () => {
+    // Regression: a box can have a pip-less newest python (e.g. a distro's
+    // `python3.13-minimal` pulled as a transitive dep) alongside a complete
+    // `python3.12` with pip. The resolver must pick the pip-capable one.
+    const runner: HeadroomRunner = {
+      which(): boolean {
+        return false;
+      },
+      run(
+        cmd: string,
+        args: string[],
+      ): Promise<{ code: number | null; stderr: string; stdout?: string }> {
+        const isPipCheck = args[0] === '-m' && args[1] === 'pip' && args[2] === '--version';
+        if (cmd === 'python3.13') {
+          return Promise.resolve(
+            isPipCheck
+              ? { code: 1, stderr: 'No module named pip', stdout: '' } // newest, but pip-less
+              : { code: 0, stderr: '', stdout: '3.13' },
+          );
+        }
+        if (cmd === 'python3.12') {
+          return Promise.resolve(
+            isPipCheck
+              ? { code: 0, stderr: '', stdout: 'pip 24.0' }
+              : { code: 0, stderr: '', stdout: '3.12' },
+          );
+        }
+        return Promise.resolve({ code: 1, stderr: '', stdout: '' });
+      },
+    };
+    const result = await resolveHeadroomPython(runner);
+    expect(result).toBe('python3.12'); // skipped the pip-less 3.13
   });
 });
 

@@ -929,7 +929,13 @@ export async function resolveHeadroomPython(runner: HeadroomRunner): Promise<str
   /** Absolute prefix directories to check alongside PATH. */
   const PREFIX_DIRS = ['/opt/homebrew/bin', '/usr/local/bin'] as const;
 
-  /** Probe a single candidate binary. Returns true when it is Python ≥3.10. */
+  /**
+   * Probe a single candidate binary. Returns true when it is Python ≥3.10
+   * AND has a usable `pip` — both are required to install headroom-ai. The pip
+   * check matters because the NEWEST python on a box can be a pip-less minimal
+   * build (e.g. a distro's `python3.13-minimal` pulled as a transitive apt dep)
+   * while an older-but-complete `python3.12` has pip; we must pick the latter.
+   */
   const probe = async (candidate: string): Promise<boolean> => {
     try {
       const r = await runner.run(
@@ -941,7 +947,12 @@ export async function resolveHeadroomPython(runner: HeadroomRunner): Promise<str
       const parts = (r.stdout ?? '').trim().split('.');
       const major = parseInt(parts[0] ?? '', 10);
       const minor = parseInt(parts[1] ?? '', 10);
-      return major === 3 && minor >= 10;
+      if (!(major === 3 && minor >= 10)) return false;
+      // Require a working pip on THIS interpreter — `<py> -m pip --version`.
+      const pipCheck = await runner.run(candidate, ['-m', 'pip', '--version'], {
+        timeoutMs: PROBE_TIMEOUT_MS,
+      });
+      return pipCheck.code === 0;
     } catch {
       return false;
     }
