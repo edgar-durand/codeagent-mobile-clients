@@ -414,15 +414,20 @@ const defaultHeadroomRunner: HeadroomRunner = {
       const spawnEnv = opts.env ?? process.env;
       const child = spawn(cmd, args, { stdio: ['ignore', 'pipe', 'pipe'], env: spawnEnv });
       let stderrBuf = '';
+      let stdoutBuf = '';
       let settled = false;
       const done = (code: number | null): void => {
         if (settled) return;
         settled = true;
-        resolve({ code, stderr: stderrBuf });
+        // stdout MUST be returned (not just logged) — callers like
+        // resolveHeadroomPython parse it (e.g. the `python --version` probe).
+        resolve({ code, stderr: stderrBuf, stdout: stdoutBuf });
       };
 
       child.stdout?.on('data', (b: Buffer) => {
-        const line = b.toString().replace(/\n+$/, '');
+        const chunk = b.toString();
+        stdoutBuf += chunk;
+        const line = chunk.replace(/\n+$/, '');
         if (line) log.info('host-agent', `headroom[${cmd}]: ${line}`);
       });
       child.stderr?.on('data', (b: Buffer) => {
