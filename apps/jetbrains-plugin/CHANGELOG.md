@@ -4,6 +4,15 @@ All notable changes to the CodeAgent-Mobile JetBrains plugin are documented here
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.49.3] — 2026-06-27
+
+### Fixed
+
+- **cli:** Resolve a Python ≥3.10 for Headroom install (avoid macOS Xcode py3.9)
+- **cli:** Auto-install Python ≥3.10 for Headroom when none present
+- **cli:** Capture stdout in headroom runner so the python ≥3.10 probe works
+- **cli:** Require pip in the headroom python probe (skip pip-less newest python)
+
 ## [2.49.2] — 2026-06-27
 
 ### Fixed
