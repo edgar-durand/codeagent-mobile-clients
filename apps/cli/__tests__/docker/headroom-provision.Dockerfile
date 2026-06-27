@@ -40,12 +40,21 @@ RUN apt-get update \
 # The pre-packed codeam-cli tarball (produced by `npm pack` + copied into the
 # docker build context by the test). Installing it via npm installs the CLI's
 # runtime dependencies (chokidar, ws, zod, …) and makes dist/ available at
-# `$(npm root -g)/codeam-cli/dist/`. The headroom-runner-driver.js lives there.
+# `$(npm root -g)/codeam-cli/dist/`.
+#
+# The headroom-runner-driver.js is NOT part of the published tarball (it is a
+# test-only script intentionally excluded from the npm files allowlist). It is
+# copied separately from the build context into the global dist/ so that
+# `docker exec … node $GLOBAL_ROOT/codeam-cli/dist/headroom-runner-driver.js`
+# works inside the container exactly as if it were installed.
 ARG CODEAM_TARBALL=codeam-cli.tgz
 COPY ${CODEAM_TARBALL} /tmp/codeam-cli.tgz
+COPY headroom-runner-driver.js /tmp/headroom-runner-driver.js
 
 RUN npm install -g --omit=optional /tmp/codeam-cli.tgz \
     && rm -f /tmp/codeam-cli.tgz \
+    && cp /tmp/headroom-runner-driver.js "$(npm root -g)/codeam-cli/dist/headroom-runner-driver.js" \
+    && rm -f /tmp/headroom-runner-driver.js \
     && codeam --version
 
 # ── Non-root user ─────────────────────────────────────────────────────────────

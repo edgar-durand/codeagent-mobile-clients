@@ -59,9 +59,12 @@ export default defineConfig([
     target: 'node20',
     noExternal: ['@clack/prompts', '@clack/core', '@agentclientprotocol/sdk'],
     external: ['node-pty'],
-    // No banner: this file is invoked via `node dist/headroom-runner-driver.js`,
-    // not as a directly-executable script, so a shebang is not needed and would
-    // duplicate the one tsup adds at build time.
+    // No banner: this file is invoked as `node dist/headroom-runner-driver.js`
+    // (not as a directly-executable script), so it intentionally has NO shebang.
+    // Unlike the `index.ts` and `postinstall.ts` entries (which keep their
+    // `#!/usr/bin/env node` banner so the OS can exec them directly), the
+    // driver is never exec'd — a shebang would be dead weight and would
+    // produce a double-shebang if the source file ever grew one.
     define: {
       __CLI_VERSION__: JSON.stringify(pkg.version),
       __POSTHOG_API_KEY__: JSON.stringify(process.env.POSTHOG_API_KEY ?? ''),

@@ -30,6 +30,26 @@ import {
 import { configureHeadroom, type ConfigureCtx, type ConfigureDeps } from './services/headroom/configure';
 import { mapStatsToSavings, type StatsShape, type Savings } from './services/headroom/stats-reporter';
 
+/**
+ * Type guard for the StatsShape returned by GET :8787/stats.
+ *
+ * stats-reporter.ts defines StatsShape as an interface with all-optional
+ * fields and exposes mapStatsToSavings, but it does NOT provide a runtime
+ * guard or zod schema — the production reporter receives the value from a
+ * typed `fetchStats: () => Promise<StatsShape>` dependency injected by the
+ * caller (which itself wraps a fetch + the caller's own type annotation).
+ * There is no established guard/parse helper to reuse, so we define one here
+ * at the only place that calls res.json() in an untyped context (the driver).
+ *
+ * The guard accepts any object (including one with no fields) because
+ * StatsShape is fully optional — the only invariant we can check is that the
+ * value is a non-null object, which is sufficient to pass to mapStatsToSavings
+ * safely (it applies optional chaining + ?? 0 throughout).
+ */
+function isStatsShape(v: unknown): v is StatsShape {
+  return typeof v === 'object' && v !== null && !Array.isArray(v);
+}
+
 /** Structured result written to stdout. */
 interface DriverResult {
   action: string;
@@ -47,7 +67,11 @@ async function probeStats(): Promise<Savings | null> {
   try {
     const res = await fetch('http://127.0.0.1:8787/stats');
     if (!res.ok) return null;
-    const raw = (await res.json()) as StatsShape;
+    // Validate at the JSON.parse boundary — no bare `as` cast (CLAUDE.md typing
+    // rules). isStatsShape accepts any non-null object, which is sufficient to
+    // call mapStatsToSavings safely (it applies optional chaining + ?? 0).
+    const raw: unknown = await res.json();
+    if (!isStatsShape(raw)) return null;
     return mapStatsToSavings(raw, {
       rawTokensEst: 0,
       sentTokensEst: 0,
@@ -132,8 +156,9 @@ async function runDisable(): Promise<void> {
     persist: persistHeadroomConfig,
     readEnabled: () => {
       try {
-        const raw = JSON.parse(fs.readFileSync(headroomConfigPath(), 'utf8')) as { enabled?: boolean };
-        return raw.enabled === true;
+        const raw: unknown = JSON.parse(fs.readFileSync(headroomConfigPath(), 'utf8'));
+        return typeof raw === 'object' && raw !== null && 'enabled' in raw &&
+          (raw as Record<string, unknown>)['enabled'] === true;
       } catch {
         return false;
       }
@@ -176,7 +201,9 @@ async function runDisable(): Promise<void> {
   // Binary + model cache must remain (headroom binary still resolves).
   const binaryStillCached = headroomBinaryAvailable();
 
-  const allOk = proxyDown && binaryStillCached;
+  // Include configRestored in the ok gate so a disable that fails to restore
+  // the agent config is reported as a real failure (not just a vacuous pass).
+  const allOk = proxyDown && configRestored && binaryStillCached;
   report({
     action: 'disable',
     ok: allOk,
