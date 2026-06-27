@@ -11,6 +11,8 @@ import {
   resolveHostIdentity,
   type ChildSpawner,
   setupHeadroomForSelfHosted,
+  resolveHeadroomPython,
+  ensureModernPython,
   getFreeDiskBytes,
   agentIdToHeadroomKind,
   isHeadroomSupportedAgent,
@@ -1669,7 +1671,7 @@ describe('setupHeadroomForSelfHosted — injectable runner (no real subprocess)'
    */
   function makeRunner(
     presentCmds: string[],
-    runResponses: Record<string, { code: number | null; stderr: string }> = {},
+    runResponses: Record<string, { code: number | null; stderr: string; stdout?: string }> = {},
   ): HeadroomRunner & { calls: Array<{ cmd: string; args: string[] }> } {
     const present = new Set(presentCmds);
     const calls: Array<{ cmd: string; args: string[] }> = [];
@@ -1678,8 +1680,34 @@ describe('setupHeadroomForSelfHosted — injectable runner (no real subprocess)'
       which(cmd: string): boolean {
         return present.has(cmd);
       },
-      run(cmd: string, args: string[]): Promise<{ code: number | null; stderr: string }> {
+      run(
+        cmd: string,
+        args: string[],
+      ): Promise<{ code: number | null; stderr: string; stdout?: string }> {
         calls.push({ cmd, args });
+        // Version probe: ONLY bare `python3` reports a ≥3.10 version, so the
+        // resolver settles on `python3` (the interpreter these setup tests model
+        // their pip behavior on) rather than a suffixed candidate. A
+        // `runResponses[cmd]` carrying a `stdout` overrides this (lets a test pin
+        // a specific version), otherwise default 3.11.
+        if (args.length === 2 && args[0] === '-c' && args[1]?.includes('sys.version_info')) {
+          if (runResponses[cmd]?.stdout !== undefined) {
+            return Promise.resolve(runResponses[cmd]);
+          }
+          if (cmd === 'python3') {
+            return Promise.resolve({ code: 0, stderr: '', stdout: '3.11' });
+          }
+          return Promise.resolve({ code: 1, stderr: 'not found', stdout: '' });
+        }
+        // pip-presence probe (`-m pip --version`): pip is available on python3.
+        // PEP 668 affects `pip install`, not `--version`, so this stays code 0.
+        if (args[0] === '-m' && args[1] === 'pip' && args[2] === '--version') {
+          return Promise.resolve({
+            code: cmd === 'python3' ? 0 : 1,
+            stderr: '',
+            stdout: 'pip 24.0',
+          });
+        }
         return Promise.resolve(runResponses[cmd] ?? { code: 0, stderr: '' });
       },
     };
@@ -1730,7 +1758,9 @@ describe('setupHeadroomForSelfHosted — injectable runner (no real subprocess)'
         : c.cmd === 'sudo' && c.args.includes('apt-get') && c.args.includes('install');
 
     const aptUpdateIdx = runner.calls.findIndex(isAptUpdateCall);
-    const pipIdx = runner.calls.findIndex((c) => c.cmd === 'python3');
+    // The pip install uses the resolved ≥3.10 interpreter (may be python3.13,
+    // python3.12, …, or python3 itself on modern Linux). Match any python3* cmd.
+    const pipIdx = runner.calls.findIndex((c) => /^python3/.test(c.cmd));
 
     expect(aptUpdateIdx).toBeGreaterThanOrEqual(0);
     expect(pipIdx).toBeGreaterThanOrEqual(0);
@@ -1753,9 +1783,21 @@ describe('setupHeadroomForSelfHosted — injectable runner (no real subprocess)'
       which(cmd: string): boolean {
         return cmd === 'pip'; // pip found; headroom absent
       },
-      run(cmd: string, args: string[]): Promise<{ code: number | null; stderr: string }> {
+      run(
+        cmd: string,
+        args: string[],
+      ): Promise<{ code: number | null; stderr: string; stdout?: string }> {
         calls.push({ cmd, args });
-        if (cmd === 'python3' && args[0] === '-m') {
+        // Version probe (resolveHeadroomPython): any python binary probed via
+        // `-c "import sys; print(...)"` → report 3.11 so the resolver succeeds.
+        if (args.length === 2 && args[0] === '-c' && args[1]?.includes('sys.version_info')) {
+          return Promise.resolve({ code: 0, stderr: '', stdout: '3.11' });
+        }
+        // pip-presence probe (resolveHeadroomPython) — pip IS available.
+        if (args[0] === '-m' && args[1] === 'pip' && args[2] === '--version') {
+          return Promise.resolve({ code: 0, stderr: '', stdout: 'pip 24.0' });
+        }
+        if (args[0] === '-m') {
           if (args.includes('--break-system-packages')) {
             return Promise.resolve({ code: 0, stderr: '' }); // retry succeeds
           }
@@ -1771,7 +1813,11 @@ describe('setupHeadroomForSelfHosted — injectable runner (no real subprocess)'
 
     const result = await setupHeadroomForSelfHosted('claude', runner);
 
-    const pipCalls = calls.filter((c) => c.cmd === 'python3');
+    // All pip-related calls (install + model download) use the resolved interpreter.
+    // Filter by calls that are pip installs or model predownloads (not version probes).
+    const pipCalls = calls.filter(
+      (c) => c.args[0] === '-m' || (c.args[0] === '-c' && c.args[1]?.includes('snapshot_download')),
+    );
 
     // PEP 668 retry path exercised: at least one call carries the override.
     expect(pipCalls.some((c) => c.args.includes('--break-system-packages'))).toBe(true);
@@ -1801,9 +1847,9 @@ describe('setupHeadroomForSelfHosted — injectable runner (no real subprocess)'
     expect(predownloadCall!.args[1]).toContain('chopratejas/kompress-v2-base');
     expect(predownloadCall!.args[1]).toContain('answerdotai/ModernBERT-base');
 
-    // Every pip INSTALL call is `python3 -m pip install --quiet ...`. (The
+    // Every pip INSTALL call uses `<py> -m pip install --quiet ...`. (The
     // `-c "...snapshot_download..."` pre-download call is not a pip install.)
-    const installCalls = pipCalls.filter((c) => c.args[0] === '-m');
+    const installCalls = pipCalls.filter((c) => c.args[0] === '-m' && c.args[2] === 'install');
     for (const c of installCalls) {
       expect(c.args.slice(0, 4)).toEqual(['-m', 'pip', 'install', '--quiet']);
     }
@@ -1819,15 +1865,24 @@ describe('setupHeadroomForSelfHosted — injectable runner (no real subprocess)'
       which(cmd: string): boolean {
         return cmd === 'pip';
       },
-      run(cmd: string, args: string[]): Promise<{ code: number | null; stderr: string }> {
+      run(
+        cmd: string,
+        args: string[],
+      ): Promise<{ code: number | null; stderr: string; stdout?: string }> {
         calls.push({ cmd, args });
-        if (cmd === 'python3') {
-          return Promise.resolve({
-            code: 1,
-            stderr: 'error: externally-managed-environment',
-          });
+        // Version probe → succeed with 3.11 so the resolver passes.
+        if (args.length === 2 && args[0] === '-c' && args[1]?.includes('sys.version_info')) {
+          return Promise.resolve({ code: 0, stderr: '', stdout: '3.11' });
         }
-        return Promise.resolve({ code: 0, stderr: '' });
+        // pip-presence probe (resolveHeadroomPython) — pip IS available.
+        if (args[0] === '-m' && args[1] === 'pip' && args[2] === '--version') {
+          return Promise.resolve({ code: 0, stderr: '', stdout: 'pip 24.0' });
+        }
+        // All pip install attempts fail with PEP 668.
+        return Promise.resolve({
+          code: 1,
+          stderr: 'error: externally-managed-environment',
+        });
       },
     };
 
@@ -1835,7 +1890,7 @@ describe('setupHeadroomForSelfHosted — injectable runner (no real subprocess)'
 
     expect(result).toBe(false); // every install attempt failed → false (never throws)
     // The PEP 668 override retry was attempted before giving up.
-    const pipCalls = calls.filter((c) => c.cmd === 'python3');
+    const pipCalls = calls.filter((c) => c.args[0] === '-m' && c.args[1] === 'pip');
     expect(pipCalls.some((c) => c.args.includes('--break-system-packages'))).toBe(true);
   });
 
@@ -1919,10 +1974,10 @@ describe('setupHeadroomForSelfHosted — injectable runner (no real subprocess)'
   });
 
   it('fast-path: when pip is present, NO package-manager install runs', async () => {
-    // pip on PATH → ensurePip short-circuits. The runner must only ever see
-    // python3 (the pip install itself) — never apt-get/apk/dnf/yum/pacman/
-    // zypper/sudo. This keeps healthy boxes from eating an apt-update on every
-    // deploy. headroom absent → init skips → overall false, but that's fine.
+    // pip on PATH → ensurePip short-circuits. The runner must never see
+    // apt-get/apk/dnf/yum/pacman/zypper/sudo. This keeps healthy boxes from
+    // eating an apt-update on every deploy. headroom absent → init skips →
+    // overall false, but that's fine.
     const runner = makeRunner(['pip', 'apt-get'], {
       python3: { code: 0, stderr: '' },
     });
@@ -1934,8 +1989,374 @@ describe('setupHeadroomForSelfHosted — injectable runner (no real subprocess)'
       (c) => pmCmds.has(c.cmd) || c.args.some((a) => pmCmds.has(a)),
     );
     expect(pmCalls).toHaveLength(0);
-    // The only run() calls should be the python3 -m pip install attempt(s).
-    expect(runner.calls.every((c) => c.cmd === 'python3')).toBe(true);
+    // All non-probe run() calls must be python (pip install / model download).
+    // The resolver adds version-probe calls (python3.13, python3.12, … python3) —
+    // filter those out when asserting that only python commands ran.
+    const nonProbeCalls = runner.calls.filter(
+      (c) => !(c.args.length === 2 && c.args[0] === '-c' && c.args[1]?.includes('sys.version_info')),
+    );
+    expect(nonProbeCalls.every((c) => /^python3/.test(c.cmd))).toBe(true);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// resolveHeadroomPython — picks the newest Python ≥3.10, skips 3.9
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('resolveHeadroomPython', () => {
+  /**
+   * Build a fake runner whose `run` dispatches based on the `cmd` argument.
+   * `versionMap` maps a candidate binary (e.g. 'python3.13', 'python3') to the
+   * version string the probe should report (e.g. '3.13'). Candidates missing
+   * from the map fail the probe (simulate "not found / errors").
+   */
+  function makePyRunner(
+    versionMap: Record<string, string>,
+  ): HeadroomRunner & { runCalls: string[] } {
+    const runCalls: string[] = [];
+    return {
+      runCalls,
+      which(): boolean {
+        return false; // which() is not used by resolveHeadroomPython
+      },
+      run(
+        cmd: string,
+        _args: string[],
+      ): Promise<{ code: number | null; stderr: string; stdout?: string }> {
+        runCalls.push(cmd);
+        if (cmd in versionMap) {
+          return Promise.resolve({ code: 0, stderr: '', stdout: versionMap[cmd] });
+        }
+        // Not in map → simulate "not found" (non-zero exit).
+        return Promise.resolve({ code: 1, stderr: 'No such file', stdout: '' });
+      },
+    };
+  }
+
+  it('returns python3.13 (not python3) when bare python3=3.9 and python3.13=3.13', async () => {
+    const runner = makePyRunner({ python3: '3.9', python3_13: '3.13' });
+    // Version-suffixed candidates use the exact suffix name, e.g. 'python3.13'.
+    // Override the map key to match what the resolver actually passes to `run`.
+    const r2 = makePyRunner({ python3: '3.9' });
+    // Re-use makePyRunner with the correct key format.
+    const runner2 = {
+      runCalls: [] as string[],
+      which(): boolean {
+        return false;
+      },
+      run(
+        cmd: string,
+        _args: string[],
+      ): Promise<{ code: number | null; stderr: string; stdout?: string }> {
+        runner2.runCalls.push(cmd);
+        if (cmd === 'python3.13') return Promise.resolve({ code: 0, stderr: '', stdout: '3.13' });
+        if (cmd === 'python3') return Promise.resolve({ code: 0, stderr: '', stdout: '3.9' });
+        return Promise.resolve({ code: 1, stderr: '', stdout: '' });
+      },
+    };
+    const result = await resolveHeadroomPython(runner2);
+    expect(result).toBe('python3.13'); // suffix wins over bare python3
+    // Bare python3 must NOT have been returned despite being reachable.
+    expect(result).not.toBe('python3');
+  });
+
+  it('returns null when only bare python3=3.9 and no suffixed interpreter exists', async () => {
+    const runner: HeadroomRunner = {
+      which(): boolean {
+        return false;
+      },
+      run(
+        cmd: string,
+        _args: string[],
+      ): Promise<{ code: number | null; stderr: string; stdout?: string }> {
+        if (cmd === 'python3') return Promise.resolve({ code: 0, stderr: '', stdout: '3.9' });
+        return Promise.resolve({ code: 1, stderr: '', stdout: '' });
+      },
+    };
+    const result = await resolveHeadroomPython(runner);
+    expect(result).toBeNull();
+  });
+
+  it('returns python3 when bare python3=3.11 and no suffixed interpreter exists', async () => {
+    const runner: HeadroomRunner = {
+      which(): boolean {
+        return false;
+      },
+      run(
+        cmd: string,
+        _args: string[],
+      ): Promise<{ code: number | null; stderr: string; stdout?: string }> {
+        if (cmd === 'python3') return Promise.resolve({ code: 0, stderr: '', stdout: '3.11' });
+        return Promise.resolve({ code: 1, stderr: '', stdout: '' });
+      },
+    };
+    const result = await resolveHeadroomPython(runner);
+    expect(result).toBe('python3');
+  });
+
+  it('prefers python3.13 over python3.11 when both qualify (newest-first ordering)', async () => {
+    const runner: HeadroomRunner = {
+      which(): boolean {
+        return false;
+      },
+      run(
+        cmd: string,
+        _args: string[],
+      ): Promise<{ code: number | null; stderr: string; stdout?: string }> {
+        if (cmd === 'python3.13') return Promise.resolve({ code: 0, stderr: '', stdout: '3.13' });
+        if (cmd === 'python3.11') return Promise.resolve({ code: 0, stderr: '', stdout: '3.11' });
+        if (cmd === 'python3') return Promise.resolve({ code: 0, stderr: '', stdout: '3.11' });
+        return Promise.resolve({ code: 1, stderr: '', stdout: '' });
+      },
+    };
+    const result = await resolveHeadroomPython(runner);
+    expect(result).toBe('python3.13');
+  });
+
+  it('skips a newest python that lacks pip and picks the older one that has pip', async () => {
+    // Regression: a box can have a pip-less newest python (e.g. a distro's
+    // `python3.13-minimal` pulled as a transitive dep) alongside a complete
+    // `python3.12` with pip. The resolver must pick the pip-capable one.
+    const runner: HeadroomRunner = {
+      which(): boolean {
+        return false;
+      },
+      run(
+        cmd: string,
+        args: string[],
+      ): Promise<{ code: number | null; stderr: string; stdout?: string }> {
+        const isPipCheck = args[0] === '-m' && args[1] === 'pip' && args[2] === '--version';
+        if (cmd === 'python3.13') {
+          return Promise.resolve(
+            isPipCheck
+              ? { code: 1, stderr: 'No module named pip', stdout: '' } // newest, but pip-less
+              : { code: 0, stderr: '', stdout: '3.13' },
+          );
+        }
+        if (cmd === 'python3.12') {
+          return Promise.resolve(
+            isPipCheck
+              ? { code: 0, stderr: '', stdout: 'pip 24.0' }
+              : { code: 0, stderr: '', stdout: '3.12' },
+          );
+        }
+        return Promise.resolve({ code: 1, stderr: '', stdout: '' });
+      },
+    };
+    const result = await resolveHeadroomPython(runner);
+    expect(result).toBe('python3.12'); // skipped the pip-less 3.13
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ensureModernPython — auto-installs a ≥3.10 Python when none is present
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('ensureModernPython — auto-install when no Python ≥3.10', () => {
+  const origPlatform = process.platform;
+
+  function setPlatform(p: NodeJS.Platform): void {
+    Object.defineProperty(process, 'platform', { value: p, configurable: true });
+  }
+
+  afterEach(() => {
+    Object.defineProperty(process, 'platform', { value: origPlatform, configurable: true });
+  });
+
+  /**
+   * Runner with a mutable per-binary version map so an install can "appear" to
+   * make a new interpreter resolvable: the install command flips a binary's
+   * reported version. `whichSet` controls which() (e.g. 'brew', 'apt-get').
+   * `onInstall` runs when a recognised install command is seen, letting a test
+   * mutate `versions` to simulate the interpreter landing on PATH.
+   */
+  function makeRunner(
+    whichSet: string[],
+    versions: Record<string, string>,
+    onInstall?: (cmd: string, args: string[]) => void,
+  ): HeadroomRunner & { calls: Array<{ cmd: string; args: string[] }> } {
+    const present = new Set(whichSet);
+    const calls: Array<{ cmd: string; args: string[] }> = [];
+    return {
+      calls,
+      which: (cmd: string): boolean => present.has(cmd),
+      run(
+        cmd: string,
+        args: string[],
+      ): Promise<{ code: number | null; stderr: string; stdout?: string }> {
+        calls.push({ cmd, args });
+        // Version probe: `<py> -c "import sys; ..."`.
+        if (args.length === 2 && args[0] === '-c' && args[1]?.includes('sys.version_info')) {
+          if (cmd in versions) {
+            return Promise.resolve({ code: 0, stderr: '', stdout: versions[cmd] });
+          }
+          return Promise.resolve({ code: 1, stderr: 'not found', stdout: '' });
+        }
+        // Install command (brew / apt-get / etc.) → let the test mutate state.
+        onInstall?.(cmd, args);
+        return Promise.resolve({ code: 0, stderr: '', stdout: '' });
+      },
+    };
+  }
+
+  it('darwin + brew: installs python@3.12 then re-resolves to the new interpreter', async () => {
+    setPlatform('darwin');
+    // Initially only Xcode python3=3.9. brew install makes python3.12 appear.
+    const versions: Record<string, string> = { python3: '3.9' };
+    const runner = makeRunner(['brew'], versions, (cmd, args) => {
+      if (cmd === 'brew' && args[0] === 'install') {
+        versions['python3.12'] = '3.12';
+      }
+    });
+
+    const result = await ensureModernPython(runner);
+    expect(result).toBe('python3.12');
+
+    const brewInstall = runner.calls.find(
+      (c) => c.cmd === 'brew' && c.args[0] === 'install' && c.args[1] === 'python@3.12',
+    );
+    expect(brewInstall).toBeDefined();
+  });
+
+  it('linux + apt: installs a versioned python package then re-resolves', async () => {
+    setPlatform('linux');
+    const versions: Record<string, string> = { python3: '3.9' };
+    const runner = makeRunner(['apt-get'], versions, (cmd, args) => {
+      // First apt-get install (python3.12) "lands" a ≥3.10 interpreter.
+      if ((cmd === 'apt-get' || cmd === 'sudo') && args.includes('python3.12')) {
+        versions['python3.12'] = '3.12';
+      }
+    });
+
+    const result = await ensureModernPython(runner);
+    expect(result).toBe('python3.12');
+
+    const aptInstall = runner.calls.find(
+      (c) =>
+        (c.cmd === 'apt-get' || c.cmd === 'sudo') &&
+        c.args.includes('install') &&
+        c.args.includes('python3.12'),
+    );
+    expect(aptInstall).toBeDefined();
+  });
+
+  it('darwin without brew: no install attempted, returns null', async () => {
+    setPlatform('darwin');
+    const runner = makeRunner([], { python3: '3.9' });
+
+    const result = await ensureModernPython(runner);
+    expect(result).toBeNull();
+
+    // No brew install command should have been issued.
+    const brewInstall = runner.calls.find((c) => c.cmd === 'brew');
+    expect(brewInstall).toBeUndefined();
+  });
+
+  it('happy path: a ≥3.10 interpreter already present → no install command', async () => {
+    setPlatform('darwin');
+    const runner = makeRunner(['brew', 'apt-get'], { 'python3.13': '3.13', python3: '3.9' });
+
+    const result = await ensureModernPython(runner);
+    expect(result).toBe('python3.13');
+
+    // Neither brew nor any package-manager install should run.
+    const installs = runner.calls.filter(
+      (c) =>
+        c.cmd === 'brew' ||
+        c.cmd === 'apt-get' ||
+        (c.cmd === 'sudo' && c.args[0] === 'apt-get'),
+    );
+    expect(installs).toHaveLength(0);
+  });
+
+  it('install fails to yield ≥3.10 → returns null (caller skips Headroom)', async () => {
+    setPlatform('darwin');
+    // brew is present and is invoked, but the interpreter never appears.
+    const runner = makeRunner(['brew'], { python3: '3.9' });
+
+    const result = await ensureModernPython(runner);
+    expect(result).toBeNull();
+
+    // The install WAS attempted (best-effort), it just didn't help.
+    const brewInstall = runner.calls.find((c) => c.cmd === 'brew' && c.args[0] === 'install');
+    expect(brewInstall).toBeDefined();
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// setupHeadroomForSelfHosted — uses resolved python, skips on no ≥3.10 python
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('setupHeadroomForSelfHosted — python resolver integration', () => {
+  /**
+   * Build a runner where:
+   *   - `whichSet`: commands that which() returns true for
+   *   - `pythonVersions`: cmd → version string for probe calls (if absent → code 1)
+   *   - all other run() calls (pip install, model download, headroom init) succeed
+   */
+  function makeFullRunner(
+    whichSet: string[],
+    pythonVersions: Record<string, string>,
+  ): HeadroomRunner & { calls: Array<{ cmd: string; args: string[] }> } {
+    const present = new Set(whichSet);
+    const calls: Array<{ cmd: string; args: string[] }> = [];
+    return {
+      calls,
+      which(cmd: string): boolean {
+        return present.has(cmd);
+      },
+      run(
+        cmd: string,
+        args: string[],
+      ): Promise<{ code: number | null; stderr: string; stdout?: string }> {
+        calls.push({ cmd, args });
+        // Version probe: single -c arg containing sys.version_info
+        if (args.length === 2 && args[0] === '-c' && args[1]?.includes('sys.version_info')) {
+          if (cmd in pythonVersions) {
+            return Promise.resolve({ code: 0, stderr: '', stdout: pythonVersions[cmd] });
+          }
+          return Promise.resolve({ code: 1, stderr: '', stdout: '' });
+        }
+        return Promise.resolve({ code: 0, stderr: '', stdout: '' });
+      },
+    };
+  }
+
+  it('uses python3.13 (not python3) for pip install when python3.13=3.13 and python3=3.9', async () => {
+    const runner = makeFullRunner(
+      ['pip', 'headroom'],
+      { python3: '3.9', 'python3.13': '3.13' },
+    );
+
+    const result = await setupHeadroomForSelfHosted('claude', runner);
+    // Setup should succeed (headroom on PATH, all commands return code 0).
+    expect(result).toBe(true);
+
+    // All pip install calls and model predownload must use python3.13, not python3.
+    const pipAndModelCalls = runner.calls.filter(
+      (c) =>
+        (c.args[0] === '-m' && c.args[1] === 'pip') ||
+        (c.args[0] === '-c' && c.args[1]?.includes('snapshot_download')),
+    );
+    expect(pipAndModelCalls.length).toBeGreaterThan(0);
+    for (const c of pipAndModelCalls) {
+      expect(c.cmd).toBe('python3.13');
+      expect(c.cmd).not.toBe('python3');
+    }
+  });
+
+  it('returns false and skips install when no Python ≥3.10 is available', async () => {
+    // pip is present (ensurePip passes), but every python binary returns 3.9.
+    const runner = makeFullRunner(['pip', 'headroom'], { python3: '3.9' });
+
+    const result = await setupHeadroomForSelfHosted('claude', runner);
+    expect(result).toBe(false);
+
+    // No pip install or model download should have been attempted.
+    const installCalls = runner.calls.filter(
+      (c) => c.args[0] === '-m' && c.args[1] === 'pip' && c.args[2] === 'install',
+    );
+    expect(installCalls).toHaveLength(0);
   });
 });
 
