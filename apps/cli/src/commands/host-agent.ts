@@ -551,6 +551,16 @@ export function detectPackageManager(runner: Pick<HeadroomRunner, 'which'>): Pac
 }
 
 /**
+ * Prefix a command + args with `sudo` only when NOT running as root. Shared by
+ * the bare-box provision (`ensurePip`) and the modern-Python auto-install
+ * (`ensureModernPython`) so the sudo policy lives in exactly one place.
+ */
+function escalateCommand(argv: string[]): { cmd: string; args: string[] } {
+  const isRoot = process.getuid?.() === 0;
+  return isRoot ? { cmd: argv[0], args: argv.slice(1) } : { cmd: 'sudo', args: argv };
+}
+
+/**
  * Ensure pip is available. Fast path: if `pip` or `pip3` already resolves on
  * PATH, return true immediately — a box that has pip almost certainly already
  * has python3, ca-certificates, and curl too, so we do NOT run any
@@ -578,9 +588,7 @@ async function ensurePip(runner: HeadroomRunner): Promise<boolean> {
   }
 
   // Prefix each command with sudo only when NOT running as root.
-  const isRoot = process.getuid?.() === 0;
-  const escalate = (argv: string[]): { cmd: string; args: string[] } =>
-    isRoot ? { cmd: argv[0], args: argv.slice(1) } : { cmd: 'sudo', args: argv };
+  const escalate = escalateCommand;
 
   const recipe = PROVISION_RECIPES[pm];
   log.info(
@@ -965,6 +973,127 @@ export async function resolveHeadroomPython(runner: HeadroomRunner): Promise<str
   return null;
 }
 
+/** Generous bound for an OS package-manager / brew Python install (cold mirror
+ *  + a fat python3.12 package can take a while). Matches the bare-box budget. */
+const PY_INSTALL_TIMEOUT_MS = 600_000;
+
+/**
+ * Per-package-manager modern-Python install recipes, in attempt order. The
+ * detection itself is reused from {@link detectPackageManager} — we only map a
+ * manager to the package name(s) to try here. A version-suffixed package is
+ * preferred where the manager ships one (apt's `python3.12`, dnf's `python3.12`)
+ * so a box stuck on an old system python3 still gets a ≥3.10 interpreter; we
+ * fall back to the unversioned package when no suffixed one exists. Each entry
+ * is a list of `install` argv (without sudo); they are tried in order until one
+ * exits 0. Best-effort: a failed install is non-fatal (we re-resolve after).
+ */
+const MODERN_PYTHON_RECIPES: Record<PackageManager, string[][]> = {
+  'apt-get': [
+    ['apt-get', 'install', '-y', 'python3.12'],
+    ['apt-get', 'install', '-y', 'python3.11'],
+    ['apt-get', 'install', '-y', 'python3'],
+  ],
+  dnf: [
+    ['dnf', 'install', '-y', 'python3.12'],
+    ['dnf', 'install', '-y', 'python3'],
+  ],
+  yum: [
+    ['yum', 'install', '-y', 'python3.12'],
+    ['yum', 'install', '-y', 'python3'],
+  ],
+  apk: [['apk', 'add', '--no-cache', 'python3']],
+  pacman: [['pacman', '-Sy', '--noconfirm', 'python']],
+  zypper: [
+    ['zypper', '--non-interactive', 'install', 'python311'],
+    ['zypper', '--non-interactive', 'install', 'python3'],
+  ],
+};
+
+/**
+ * Resolve a Python ≥3.10 interpreter for Headroom, AUTO-INSTALLING a modern
+ * Python when none is present rather than skipping. Wraps
+ * {@link resolveHeadroomPython}:
+ *
+ *   1. If a ≥3.10 interpreter already exists, return it immediately (no install).
+ *   2. Otherwise attempt a best-effort, bounded install of a modern Python:
+ *      • macOS: `brew install python@3.12` when `brew` is on PATH (Homebrew
+ *        drops it at /opt/homebrew/bin or /usr/local/bin — both already probed
+ *        by resolveHeadroomPython). No brew → no safe auto-install, fall through.
+ *      • Linux: reuse {@link detectPackageManager} + {@link escalateCommand}
+ *        (the same PM detection + sudo policy as `ensurePip`) and run the
+ *        per-manager modern-Python recipe (versioned package preferred).
+ *      • Any other platform: no install.
+ *   3. Re-run resolveHeadroomPython and return its result (the freshly-installed
+ *      interpreter, or null when the install didn't yield a ≥3.10 Python).
+ *
+ * Best-effort throughout — never throws. Returns the interpreter string or null.
+ */
+export async function ensureModernPython(runner: HeadroomRunner): Promise<string | null> {
+  // 1. Already have a qualifying interpreter — no install needed.
+  let py = await resolveHeadroomPython(runner);
+  if (py !== null) return py;
+
+  // 2. No ≥3.10 Python found → attempt a best-effort install.
+  try {
+    if (process.platform === 'darwin') {
+      if (runner.which('brew')) {
+        log.info('host-agent', 'no Python ≥3.10 found — installing python@3.12 via Homebrew');
+        const r = await runner.run('brew', ['install', 'python@3.12'], {
+          timeoutMs: PY_INSTALL_TIMEOUT_MS,
+        });
+        if (r.code !== 0) {
+          log.warn(
+            'host-agent',
+            `brew install python@3.12 exited ${String(r.code)} — will re-probe anyway`,
+          );
+        }
+      } else {
+        log.warn(
+          'host-agent',
+          'no Python ≥3.10 and Homebrew is absent — cannot auto-install Python on macOS',
+        );
+      }
+    } else if (process.platform === 'linux') {
+      const pm = detectPackageManager(runner);
+      if (!pm) {
+        log.warn(
+          'host-agent',
+          'no Python ≥3.10 and no known package manager (apt-get/apk/dnf/yum/pacman/zypper) — cannot auto-install Python',
+        );
+      } else {
+        log.info('host-agent', `no Python ≥3.10 found — installing a modern Python via ${pm}`);
+        for (const argv of MODERN_PYTHON_RECIPES[pm]) {
+          const { cmd, args } = escalateCommand(argv);
+          const r = await runner.run(cmd, args, { timeoutMs: PY_INSTALL_TIMEOUT_MS });
+          if (r.code === 0) {
+            log.info('host-agent', `installed Python package via ${pm}: ${argv.join(' ')}`);
+            break;
+          }
+          log.warn(
+            'host-agent',
+            `${pm} install '${argv.join(' ')}' exited ${String(r.code)} — trying next`,
+          );
+        }
+      }
+    } else {
+      log.warn(
+        'host-agent',
+        `no Python ≥3.10 and platform '${process.platform}' has no auto-install path`,
+      );
+    }
+  } catch (e) {
+    // The runner contract never rejects, but guard anyway — best-effort.
+    log.warn(
+      'host-agent',
+      `Python auto-install threw unexpectedly (best-effort): ${e instanceof Error ? e.message : String(e)}`,
+    );
+  }
+
+  // 3. Re-resolve after the install attempt — newly-installed interpreter or null.
+  py = await resolveHeadroomPython(runner);
+  return py;
+}
+
 /**
  * Set up Headroom on the self-hosted box so the pair-auto child's agent
  * routes through the local compression proxy and savings reach the dashboard.
@@ -1022,12 +1151,15 @@ export async function setupHeadroomForSelfHosted(
   // modern interpreter is used; bare `python3` is a last resort accepted only
   // when it is itself ≥3.10 (modern Linux distros are).
   // ensurePip runs BEFORE this resolver so a freshly-provisioned python3 on a
-  // bare Linux box is in scope.
-  const py = await resolveHeadroomPython(runner);
+  // bare Linux box is in scope. When no ≥3.10 interpreter exists,
+  // ensureModernPython AUTO-INSTALLS one (brew on macOS, the OS package manager
+  // on Linux) and re-probes — we only skip when the install also fails to yield
+  // a qualifying interpreter.
+  const py = await ensureModernPython(runner);
   if (py === null) {
     log.warn(
       'host-agent',
-      'Headroom needs Python ≥3.10; none found on this box (install python3.11+ via brew/apt) — skipping Headroom',
+      'Headroom needs Python ≥3.10 and auto-install failed (no brew on macOS / package manager couldn’t provide it) — skipping Headroom',
     );
     return false;
   }

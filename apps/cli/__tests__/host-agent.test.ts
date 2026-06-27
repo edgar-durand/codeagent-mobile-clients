@@ -12,6 +12,7 @@ import {
   type ChildSpawner,
   setupHeadroomForSelfHosted,
   resolveHeadroomPython,
+  ensureModernPython,
   getFreeDiskBytes,
   agentIdToHeadroomKind,
   isHeadroomSupportedAgent,
@@ -2084,6 +2085,141 @@ describe('resolveHeadroomPython', () => {
     };
     const result = await resolveHeadroomPython(runner);
     expect(result).toBe('python3.13');
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ensureModernPython — auto-installs a ≥3.10 Python when none is present
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('ensureModernPython — auto-install when no Python ≥3.10', () => {
+  const origPlatform = process.platform;
+
+  function setPlatform(p: NodeJS.Platform): void {
+    Object.defineProperty(process, 'platform', { value: p, configurable: true });
+  }
+
+  afterEach(() => {
+    Object.defineProperty(process, 'platform', { value: origPlatform, configurable: true });
+  });
+
+  /**
+   * Runner with a mutable per-binary version map so an install can "appear" to
+   * make a new interpreter resolvable: the install command flips a binary's
+   * reported version. `whichSet` controls which() (e.g. 'brew', 'apt-get').
+   * `onInstall` runs when a recognised install command is seen, letting a test
+   * mutate `versions` to simulate the interpreter landing on PATH.
+   */
+  function makeRunner(
+    whichSet: string[],
+    versions: Record<string, string>,
+    onInstall?: (cmd: string, args: string[]) => void,
+  ): HeadroomRunner & { calls: Array<{ cmd: string; args: string[] }> } {
+    const present = new Set(whichSet);
+    const calls: Array<{ cmd: string; args: string[] }> = [];
+    return {
+      calls,
+      which: (cmd: string): boolean => present.has(cmd),
+      run(
+        cmd: string,
+        args: string[],
+      ): Promise<{ code: number | null; stderr: string; stdout?: string }> {
+        calls.push({ cmd, args });
+        // Version probe: `<py> -c "import sys; ..."`.
+        if (args.length === 2 && args[0] === '-c' && args[1]?.includes('sys.version_info')) {
+          if (cmd in versions) {
+            return Promise.resolve({ code: 0, stderr: '', stdout: versions[cmd] });
+          }
+          return Promise.resolve({ code: 1, stderr: 'not found', stdout: '' });
+        }
+        // Install command (brew / apt-get / etc.) → let the test mutate state.
+        onInstall?.(cmd, args);
+        return Promise.resolve({ code: 0, stderr: '', stdout: '' });
+      },
+    };
+  }
+
+  it('darwin + brew: installs python@3.12 then re-resolves to the new interpreter', async () => {
+    setPlatform('darwin');
+    // Initially only Xcode python3=3.9. brew install makes python3.12 appear.
+    const versions: Record<string, string> = { python3: '3.9' };
+    const runner = makeRunner(['brew'], versions, (cmd, args) => {
+      if (cmd === 'brew' && args[0] === 'install') {
+        versions['python3.12'] = '3.12';
+      }
+    });
+
+    const result = await ensureModernPython(runner);
+    expect(result).toBe('python3.12');
+
+    const brewInstall = runner.calls.find(
+      (c) => c.cmd === 'brew' && c.args[0] === 'install' && c.args[1] === 'python@3.12',
+    );
+    expect(brewInstall).toBeDefined();
+  });
+
+  it('linux + apt: installs a versioned python package then re-resolves', async () => {
+    setPlatform('linux');
+    const versions: Record<string, string> = { python3: '3.9' };
+    const runner = makeRunner(['apt-get'], versions, (cmd, args) => {
+      // First apt-get install (python3.12) "lands" a ≥3.10 interpreter.
+      if ((cmd === 'apt-get' || cmd === 'sudo') && args.includes('python3.12')) {
+        versions['python3.12'] = '3.12';
+      }
+    });
+
+    const result = await ensureModernPython(runner);
+    expect(result).toBe('python3.12');
+
+    const aptInstall = runner.calls.find(
+      (c) =>
+        (c.cmd === 'apt-get' || c.cmd === 'sudo') &&
+        c.args.includes('install') &&
+        c.args.includes('python3.12'),
+    );
+    expect(aptInstall).toBeDefined();
+  });
+
+  it('darwin without brew: no install attempted, returns null', async () => {
+    setPlatform('darwin');
+    const runner = makeRunner([], { python3: '3.9' });
+
+    const result = await ensureModernPython(runner);
+    expect(result).toBeNull();
+
+    // No brew install command should have been issued.
+    const brewInstall = runner.calls.find((c) => c.cmd === 'brew');
+    expect(brewInstall).toBeUndefined();
+  });
+
+  it('happy path: a ≥3.10 interpreter already present → no install command', async () => {
+    setPlatform('darwin');
+    const runner = makeRunner(['brew', 'apt-get'], { 'python3.13': '3.13', python3: '3.9' });
+
+    const result = await ensureModernPython(runner);
+    expect(result).toBe('python3.13');
+
+    // Neither brew nor any package-manager install should run.
+    const installs = runner.calls.filter(
+      (c) =>
+        c.cmd === 'brew' ||
+        c.cmd === 'apt-get' ||
+        (c.cmd === 'sudo' && c.args[0] === 'apt-get'),
+    );
+    expect(installs).toHaveLength(0);
+  });
+
+  it('install fails to yield ≥3.10 → returns null (caller skips Headroom)', async () => {
+    setPlatform('darwin');
+    // brew is present and is invoked, but the interpreter never appears.
+    const runner = makeRunner(['brew'], { python3: '3.9' });
+
+    const result = await ensureModernPython(runner);
+    expect(result).toBeNull();
+
+    // The install WAS attempted (best-effort), it just didn't help.
+    const brewInstall = runner.calls.find((c) => c.cmd === 'brew' && c.args[0] === 'install');
+    expect(brewInstall).toBeDefined();
   });
 });
 
