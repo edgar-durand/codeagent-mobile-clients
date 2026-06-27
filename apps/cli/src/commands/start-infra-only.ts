@@ -171,6 +171,9 @@ export async function startInfraOnly(agentId: AgentId): Promise<void> {
     keepAliveCtx,
     pluginId,
     sessionId: session.id,
+    // No-agent mode — there's no running agent to report. Headroom/agent
+    // commands are filtered out by INFRA_ONLY_COMMAND_TYPES before dispatch.
+    agentId: '',
     pluginAuthToken: session.pluginAuthToken ?? undefined,
   };
 

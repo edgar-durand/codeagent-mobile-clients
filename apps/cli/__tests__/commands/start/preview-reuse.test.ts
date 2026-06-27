@@ -90,6 +90,7 @@ function makeFakeProcess(exitCode: number | null): ChildProcess {
 
 function makeCtx(sessionId = 'sess-preview-reuse'): HandlerContext {
   return {
+    agentId: 'claude',
     outputSvc: { dispose: vi.fn() } as unknown as HandlerContext['outputSvc'],
     agent: { sendRawPtyInput: vi.fn(), kill: vi.fn() } as unknown as AgentService,
     historySvc: {} as HandlerContext['historySvc'],

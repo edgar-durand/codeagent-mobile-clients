@@ -472,6 +472,7 @@ export async function start(requestedAgent?: AgentId): Promise<void> {
     keepAliveCtx,
     pluginId,
     sessionId: session.id,
+    agentId: session.agent,
     pluginAuthToken: session.pluginAuthToken ?? undefined,
   };
 
