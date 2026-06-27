@@ -482,7 +482,13 @@ const headroomConfigureH: CommandHandler = async (ctx, cmd, parsed) => {
   const savingsIngestUrl = parsed.savingsIngestUrl;
 
   // agentId from payload (mobile sends current agent) or fall back to persisted config.
-  let configuredAgent = typeof parsed.agentId === 'string' ? parsed.agentId : '';
+  // Normalize the common public-id alias: mobile sends `claude_code` but the
+  // Headroom helpers expect the internal id form. `agentIdToHeadroomKind` also
+  // strips underscores so the enable path would work either way, but normalising
+  // here makes the value consistent with what `requestLinkCredentialsH` writes.
+  let rawAgentId = typeof parsed.agentId === 'string' ? parsed.agentId : '';
+  if (rawAgentId === 'claude_code') rawAgentId = 'claude';
+  let configuredAgent = rawAgentId;
   if (!configuredAgent) {
     try {
       const raw = JSON.parse(fs.readFileSync(headroomConfigPath(), 'utf8')) as { agent?: string };
@@ -548,7 +554,7 @@ const headroomConfigureH: CommandHandler = async (ctx, cmd, parsed) => {
     restoreAgentHeadroomConfig: (kind: string) => restoreAgentHeadroomConfig(kind),
     stopProxy: () => {
       try {
-        spawn('pkill', ['-TERM', '-f', 'headroom.*proxy'], { stdio: 'ignore' });
+        spawn('pkill', ['-TERM', '-f', 'headroom.*proxy'], { detached: true, stdio: 'ignore' }).unref();
       } catch { /* no proxy running — best-effort */ }
     },
     emit: (event) => {
@@ -563,7 +569,7 @@ const headroomConfigureH: CommandHandler = async (ctx, cmd, parsed) => {
     },
   });
 
-  await ctx.relay.sendResult(cmd.id, 'completed', result as Record<string, unknown>);
+  await ctx.relay.sendResult(cmd.id, 'completed', result);
 };
 
 // ─── Terminal ─────────────────────────────────────────────────────
@@ -672,7 +678,7 @@ const gitResolveH: CommandHandler = async (ctx, cmd, parsed) => {
     return;
   }
   const result = await gitResolve(parsed.path, parsed.side);
-  await ctx.relay.sendResult(cmd.id, 'completed', result as Record<string, unknown>);
+  await ctx.relay.sendResult(cmd.id, 'completed', result);
 };
 
 // Epic B follow-up — backend pushes this when the user clicks

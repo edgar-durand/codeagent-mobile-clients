@@ -170,7 +170,7 @@ export class CommandRelayService {
   async sendResult(
     commandId: string,
     status: string,
-    result: Record<string, unknown>,
+    result: unknown,
   ): Promise<void> {
     await _postJson(`${API_BASE}/api/commands/result`, { commandId, status, result });
   }
