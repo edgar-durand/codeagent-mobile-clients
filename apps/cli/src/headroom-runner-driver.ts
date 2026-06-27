@@ -56,6 +56,8 @@ interface DriverResult {
   ok: boolean;
   checks: Record<string, boolean | string>;
   error?: string;
+  /** The provisioning stage that was active when the error occurred. */
+  stage?: string;
 }
 
 function report(result: DriverResult): never {
@@ -99,25 +101,55 @@ function headroomBinaryAvailable(): boolean {
 
 async function runEnable(): Promise<void> {
   const steps: string[] = [];
-  const ok = await setupHeadroomForSelfHosted('claude', undefined, {
-    extras: ['proxy', 'code', 'image'],
-    onProgress: (step) => steps.push(step),
-  });
+  let currentStage = 'start';
+  let setupResult: boolean | undefined;
+  try {
+    setupResult = await setupHeadroomForSelfHosted('claude', undefined, {
+      extras: ['proxy', 'code', 'image'],
+      onProgress: (step) => {
+        currentStage = step;
+        steps.push(step);
+        // Flush progress so CI logs show which stage is active (visible in
+        // docker exec output even when the container is slow).
+        process.stdout.write(`{"progress":"${step}"}\n`);
+      },
+    });
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    report({
+      action: 'enable',
+      ok: false,
+      checks: { steps: steps.join(',') },
+      error: `setupHeadroomForSelfHosted threw at stage '${currentStage}': ${detail}`,
+      stage: currentStage,
+    });
+  }
 
-  if (!ok) {
+  if (!setupResult) {
     report({
       action: 'enable',
       ok: false,
       checks: { setupReturned: false, steps: steps.join(',') },
-      error: 'setupHeadroomForSelfHosted returned false',
+      error: `setupHeadroomForSelfHosted returned false at stage '${currentStage}'`,
+      stage: currentStage,
     });
   }
 
-  // Give the proxy a moment to bind (it's spawned detached).
-  await new Promise((r) => setTimeout(r, 5000));
-
-  // Probe :8787/stats.
-  const stats = await probeStats();
+  // Poll :8787/stats until the proxy is ready (up to 60s).
+  // The proxy loads the ONNX model at startup — this can take 10–30s on the
+  // first run inside a container, even with a warm HF cache.
+  let stats = await probeStats();
+  let proxyWaitMs = 0;
+  const PROXY_POLL_INTERVAL_MS = 2000;
+  const PROXY_TIMEOUT_MS = 60_000;
+  while (stats === null && proxyWaitMs < PROXY_TIMEOUT_MS) {
+    await new Promise((r) => setTimeout(r, PROXY_POLL_INTERVAL_MS));
+    proxyWaitMs += PROXY_POLL_INTERVAL_MS;
+    stats = await probeStats();
+    if (stats === null) {
+      process.stdout.write(`{"proxyWait":${proxyWaitMs}}\n`);
+    }
+  }
   const proxyAnswers = stats !== null;
 
   // Check agent settings.json mentions 8787.

@@ -5,8 +5,8 @@
  * end-to-end INSIDE a real Docker container (Python 3.12 + Node 20):
  *
  *   enable: setupHeadroomForSelfHosted('claude', undefined, {extras:['proxy','code','image']})
- *           → real pip install of headroom-ai[proxy,code,image]
- *           → real model pre-download (~840 MB, from HuggingFace)
+ *           → pip install is a no-op ("already satisfied" — baked into the image)
+ *           → model download is a no-op (warm HF cache — baked into the image)
  *           → real `headroom init --global claude` (rewrites ~/.claude/settings.json)
  *           → real detached `headroom proxy --port 8787`
  *           → driver asserts :8787/stats answers + settings.json mentions 8787
@@ -35,12 +35,12 @@
  *
  *   RUN_HEADROOM_INT=1 npx vitest run headroom-provision
  *
- * ── Why the timeout is so long ──────────────────────────────────────────────
- * The container's `enable` phase does a REAL pip install of headroom-ai
- * (including the ONNX runtime, transformers, tree-sitter) and pre-downloads
- * the ~840 MB Kompress model from HuggingFace. On a cold cache this can take
- * 5–8 minutes on a typical CI runner. The 600 s per-test limit matches the
- * spec brief and the precedent set by the codespace provisioning timeout.
+ * ── Why the timeout covers both phases ──────────────────────────────────────
+ * The expensive pip install + ~840 MB HuggingFace model download are baked into
+ * the Docker IMAGE BUILD layer (not test runtime). Test-time `enable` runs only
+ * `headroom init --global claude` + proxy spawn, which takes ~10–30s on the
+ * warm-cache image. The 600 s per-test limit is kept as a generous safety net;
+ * the beforeAll image-build step has its own 600 s budget for cold builds.
  */
 
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
@@ -114,6 +114,28 @@ const DriverOutputSchema = z.object({
 
 type DriverOutput = z.infer<typeof DriverOutputSchema>;
 
+/**
+ * Surface the stdout + stderr from an `execFileP` rejection.
+ *
+ * `execFileP` rejects with a `ChildProcess` error that carries `.stdout` and
+ * `.stderr` as `Buffer | string | null`. We surface both so CI logs always show
+ * the driver's output rather than the opaque "Command failed: docker exec …"
+ * message that was the root cause of blind failures.
+ */
+function dockerExecError(action: string, err: unknown, fallbackStdout = ''): Error {
+  // execFileP errors from child_process carry `.stdout` / `.stderr` buffers.
+  // We access them via index access (no `as`): the fields may be Buffer or
+  // string; toString() handles both.
+  const errObj = err as { stdout?: Buffer | string | null; stderr?: Buffer | string | null; message?: string };
+  const stdout = errObj.stdout != null ? String(errObj.stdout) : fallbackStdout;
+  const stderr = errObj.stderr != null ? String(errObj.stderr) : '';
+  const base = errObj.message ?? String(err);
+  const parts = [`enable driver docker exec failed: ${base}`];
+  if (stdout) parts.push(`--- stdout (last 4000 chars) ---\n${stdout.slice(-4000)}`);
+  if (stderr) parts.push(`--- stderr (last 4000 chars) ---\n${stderr.slice(-4000)}`);
+  return new Error(`[headroom-provision] ${action} docker exec failed:\n${parts.join('\n')}`);
+}
+
 /** `docker` shell-out with a generous timeout. */
 async function docker(args: string[], timeoutMs = 600_000): Promise<string> {
   const { stdout, stderr } = await execFileP('docker', args, {
@@ -156,26 +178,84 @@ async function runDriver(
     ].join(' && '),
   ];
 
-  const { stdout } = await execFileP(
-    'docker',
-    ['exec', CONTAINER_NAME, ...containerCmd],
-    {
-      timeout: timeoutMs,
-      maxBuffer: 64 * 1024 * 1024,
-    },
-  );
+  let stdout: string;
+  let stderr: string;
+  try {
+    const result = await execFileP(
+      'docker',
+      ['exec', CONTAINER_NAME, ...containerCmd],
+      {
+        timeout: timeoutMs,
+        maxBuffer: 64 * 1024 * 1024,
+      },
+    );
+    stdout = result.stdout;
+    stderr = result.stderr ?? '';
+  } catch (err) {
+    // Surface the driver's full stdout + stderr so CI logs show the real failure
+    // cause rather than the opaque "Command failed: docker exec …".
+    throw dockerExecError(action, err);
+  }
 
-  // The driver writes one JSON object to stdout; there may be pip/hf log noise
-  // before it, so find the last complete JSON object.
-  const jsonMatch = stdout.match(/(\{[\s\S]*\})\s*$/);
-  if (!jsonMatch) {
+  // Log stderr for visibility even on success (pip/hf warnings go there).
+  if (stderr) {
+    // eslint-disable-next-line no-console
+    console.log(`[headroom-provision] ${action} driver stderr:\n${stderr.slice(-2000)}`);
+  }
+
+  // The driver writes multiple single-line JSON objects (progress markers) and
+  // ends with one multi-line JSON result object. Find the last JSON object
+  // by splitting on newlines and trying each line from the end.
+  // We look for lines that start with '{' and are individually valid JSON.
+  const lines = stdout.split('\n').filter((l) => l.trim().startsWith('{'));
+  // Try to parse from the end; the result object may span multiple lines
+  // (the driver uses JSON.stringify with indent-2), so we also try to join
+  // a suffix of lines and parse as one block.
+  let parsed: DriverOutput | undefined;
+
+  // First attempt: try joining all remaining lines from the last complete-looking block.
+  // The final output block starts at the last occurrence of a line whose content
+  // is `{` (or `{\n`) — the pretty-printed JSON.stringify output.
+  const lastBlockIdx = (() => {
+    const rawLines = stdout.split('\n');
+    for (let i = rawLines.length - 1; i >= 0; i--) {
+      if (rawLines[i].trimEnd() === '{') return i;
+    }
+    return -1;
+  })();
+
+  if (lastBlockIdx >= 0) {
+    const candidate = stdout.split('\n').slice(lastBlockIdx).join('\n').trim();
+    try {
+      parsed = DriverOutputSchema.parse(JSON.parse(candidate));
+    } catch {
+      /* fallthrough to line-by-line search */
+    }
+  }
+
+  // Fallback: each line from the end might be a complete single-line JSON object.
+  if (!parsed) {
+    for (let i = lines.length - 1; i >= 0; i--) {
+      try {
+        const candidate = DriverOutputSchema.parse(JSON.parse(lines[i]));
+        // Only accept if it has an 'action' field (the final result, not a progress marker).
+        if (typeof candidate.ok === 'boolean') {
+          parsed = candidate;
+          break;
+        }
+      } catch {
+        /* not valid JSON or not the right shape — continue */
+      }
+    }
+  }
+
+  if (!parsed) {
     throw new Error(
-      `Driver (${action}) produced no JSON. stdout:\n${stdout.slice(-2000)}`,
+      `Driver (${action}) produced no parseable result JSON.\nstdout (last 3000):\n${stdout.slice(-3000)}\nstderr (last 2000):\n${stderr.slice(-2000)}`,
     );
   }
 
-  // Validate at the JSON.parse boundary (no bare `as` cast).
-  return DriverOutputSchema.parse(JSON.parse(jsonMatch[1]));
+  return parsed;
 }
 
 // ── Shared image + tarball + container state ──────────────────────────────────
@@ -226,13 +306,18 @@ suite('headroom provision — real Docker integration (on-demand enable/disable)
     );
 
     // 2) Build the image. Build context = docker support dir.
+    //    On a cold cache (first build) this includes pip install + the ~840 MB
+    //    HuggingFace model download baked into the image — allow up to 600s.
+    //    On a warm Docker layer cache (subsequent CI runs) it completes in <30s.
+    // eslint-disable-next-line no-console
+    console.log('[headroom-provision] Building Docker image (pip install + model baked in — cold build may take several minutes)…');
     await docker([
       'build',
       '-f', DOCKERFILE,
       '-t', IMAGE_TAG,
       '--build-arg', 'CODEAM_TARBALL=codeam-cli.tgz',
       DOCKER_DIR,
-    ], 300_000);
+    ], 600_000);
 
     // 3) Start a PERSISTENT container that lives for the entire test suite.
     //    Both enable and disable run inside it via `docker exec` so that
@@ -246,7 +331,7 @@ suite('headroom provision — real Docker integration (on-demand enable/disable)
       IMAGE_TAG,
       'sleep', 'infinity',
     ], 30_000);
-  }, 330_000); // image build (300s) + pack/start overhead
+  }, 660_000); // image build (600s cold / fast on warm cache) + pack/start overhead
 
   afterAll(async () => {
     // Tear down the container even on failure.
@@ -336,8 +421,10 @@ suite('headroom provision — real Docker integration (on-demand enable/disable)
         binaryStillCached: true,
       });
     },
-    // 600 s covers: pip install (~3 min on cold cache) + model download (~5 min
-    // on cold cache) + proxy warm-start + disable/restore.
+    // 600 s covers: headroom init (~10s) + proxy warm-start (model already baked
+    // into the image) + /stats probe + disable/restore. The heavy pip install and
+    // model download now happen at image BUILD time (baked into Dockerfile layers),
+    // so test-time enable is fast and deterministic.
     600_000,
   );
 });
