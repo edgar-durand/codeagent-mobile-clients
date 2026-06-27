@@ -106,6 +106,11 @@ export interface HandlerContext {
    *  handlers should no-op gracefully. */
   pluginId: string;
   sessionId: string;
+  /** The agent id this session is actually running (e.g. `claude`, `codex`).
+   *  The authoritative source for "what agent am I?" — set by start.ts from
+   *  `session.agent`. Handlers (e.g. headroom_configure) must prefer this over
+   *  any client-supplied agent hint, which can be absent or stale. */
+  agentId: string;
   pluginAuthToken?: string;
   /** Live Beads session (watcher + adapter) when beads provisioned for
    *  this run; null when beads is off (kill-switch, no bd, provisioning
@@ -481,12 +486,18 @@ const headroomConfigureH: CommandHandler = async (ctx, cmd, parsed) => {
 
   const savingsIngestUrl = parsed.savingsIngestUrl;
 
-  // agentId from payload (mobile sends current agent) or fall back to persisted config.
-  // Normalize the common public-id alias: mobile sends `claude_code` but the
-  // Headroom helpers expect the internal id form. `agentIdToHeadroomKind` also
-  // strips underscores so the enable path would work either way, but normalising
-  // here makes the value consistent with what `requestLinkCredentialsH` writes.
-  let rawAgentId = typeof parsed.agentId === 'string' ? parsed.agentId : '';
+  // Resolve which agent this is for. The running session's OWN agent
+  // (`ctx.agentId`, set by start.ts from `session.agent`) is authoritative — the
+  // CLI launched it, so it always knows the truth. A client-supplied hint
+  // (`parsed.agentId`) is only a fallback, and the persisted config is last.
+  //
+  // ⚠️ Previously this read ONLY `parsed.agentId`, but the mobile cost-saving
+  // flow sends `{action:'enable'}` with NO agentId → `rawAgentId === ''` →
+  // `isHeadroomSupportedAgent('')` is false → a real Claude session got a
+  // spurious `{supported:false}`. Preferring `ctx.agentId` fixes that.
+  // Normalize the common public-id alias (`claude_code` → `claude`) so the value
+  // is consistent with what `requestLinkCredentialsH` writes.
+  let rawAgentId = ctx.agentId || (typeof parsed.agentId === 'string' ? parsed.agentId : '');
   if (rawAgentId === 'claude_code') rawAgentId = 'claude';
   let configuredAgent = rawAgentId;
   if (!configuredAgent) {

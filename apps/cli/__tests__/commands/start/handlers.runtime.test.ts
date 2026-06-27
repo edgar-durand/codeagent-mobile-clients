@@ -66,6 +66,7 @@ function makeCtx(overrides: Partial<HandlerContext> = {}): HandlerContext {
     keepAliveCtx: { inCodespace: false, codespaceName: undefined },
     pluginId: 'test-plugin',
     sessionId: 'test-session',
+    agentId: 'claude',
     pluginAuthToken: 'test-token',
     ...overrides,
   };
