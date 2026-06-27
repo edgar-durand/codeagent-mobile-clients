@@ -22,6 +22,7 @@ vi.mock('../../../src/services/headroom/configure', () => ({
 }));
 
 import { handlers } from '../../../src/commands/start/handlers';
+import { buildLegacyContextForACP } from '../../../src/agents/acp/runner';
 import { configureHeadroom } from '../../../src/services/headroom/configure';
 
 const configureHeadroomMock = vi.mocked(configureHeadroom);
@@ -92,6 +93,46 @@ describe('headroom_configure — agent resolution', () => {
     expect(configureHeadroomMock).toHaveBeenCalledWith(
       'enable',
       expect.objectContaining({ agent: 'codex' }),
+      expect.anything(),
+    );
+  });
+});
+
+/**
+ * Integration regression for the LIVE bug: claude runs over ACP, whose
+ * HandlerContext is built by `buildLegacyContextForACP` — NOT the start.ts PTY
+ * path. That builder omitted `agentId` (hidden by an `as unknown as
+ * HandlerContext` cast), so a real Claude session reached the gate with
+ * agent='' → `{supported:false}`. This exercises the REAL ACP context builder
+ * feeding the REAL headroom handler — the exact seam that was broken.
+ */
+describe('headroom_configure — ACP context carries the running agent (regression)', () => {
+  type AcpOpts = Parameters<typeof buildLegacyContextForACP>[0];
+  type Relay = Parameters<typeof buildLegacyContextForACP>[1];
+  type Runtime = Parameters<typeof buildLegacyContextForACP>[2];
+
+  function acpCtx(agent: string) {
+    const relay = { sendResult: vi.fn().mockResolvedValue(undefined) } as unknown as Relay;
+    const opts = {
+      pluginId: 'p1',
+      sessionId: 'sess-1',
+      pluginAuthToken: '',
+      agent,
+    } as unknown as AcpOpts;
+    return buildLegacyContextForACP(opts, relay, {} as unknown as Runtime);
+  }
+
+  it('the ACP-built context sets agentId from the running agent', () => {
+    // Before the fix this was `undefined` (the cast hid the missing field).
+    expect(acpCtx('claude').agentId).toBe('claude');
+  });
+
+  it('a claude ACP session enables (does NOT spuriously report supported:false)', async () => {
+    const ctx = acpCtx('claude');
+    await handlers.headroom_configure(ctx, cmd, payload({ action: 'enable' }));
+    expect(configureHeadroomMock).toHaveBeenCalledWith(
+      'enable',
+      expect.objectContaining({ agent: 'claude' }),
       expect.anything(),
     );
   });
