@@ -3,6 +3,7 @@ import { startBeads, type StartedBeads } from './index';
 import { deriveProjectIdentity } from './project-key';
 import { postBeadsProvisioning } from '../services/pairing.service';
 import { log } from '../services/logger';
+import { readBeadsEnabled } from './config-store';
 
 /**
  * Composition-root entry for Beads (SRP decision D10). Invoked by the CLI's
@@ -11,9 +12,9 @@ import { log } from '../services/logger';
  * strictly NON-FATAL concern alongside the agent. The agent runners
  * (`runAcpSession`) carry zero beads code.
  *
- * Beads is permanently ON. The only switch is the LOCAL kill-switch
- * `CODEAM_BEADS_DISABLED` (truthy → full no-op; the provisioner is never even
- * touched).
+ * Beads is ON by default. Two switches disable it: the LOCAL env kill-switch
+ * `CODEAM_BEADS_DISABLED` (truthy → full no-op) and the persisted user preference
+ * `readBeadsEnabled() === false` (written by `persistBeadsConfig({enabled:false})`).
  *
  * Everything here is strictly NON-FATAL to the CLI core: a provisioner throw /
  * missing token / unavailable bd logs a warning and returns null. It must never
@@ -56,6 +57,14 @@ export async function provisionBeadsForStart(
 ): Promise<StartedBeads | null> {
   if (beadsKilled()) {
     log.trace('beads', 'CODEAM_BEADS_DISABLED set — beads off this run');
+    return null;
+  }
+
+  // Persisted user preference: `persistBeadsConfig({enabled:false})` wrote
+  // `~/.codeam/beads-config.json`. Honor it before touching env or provisioning,
+  // so a disabled run is a true no-op (same contract as the kill-switch above).
+  if (readBeadsEnabled() === false) {
+    log.trace('beads', 'beads disabled by persisted config — beads off this run');
     return null;
   }
 
