@@ -52,6 +52,7 @@ import {
 } from '../../services/terminal-ops.service';
 import { mapSessionUpdate, mapPermissionRequest } from './mappers';
 import { extractSelectPrompt } from './selectPromptExtractor';
+import { deriveInputSuggestion } from './inputSuggestion';
 import {
   handlers as legacyHandlers,
   dispatchCommand as legacyDispatchCommand,
@@ -512,7 +513,7 @@ export class StreamingState {
    * When NOT detected, behaves identically to {@link closeAll} (one
    * text done:true chunk with the full cumulative).
    */
-  async closeTurnWithInteractiveDetection(): Promise<void> {
+  async closeTurnWithInteractiveDetection(): Promise<boolean> {
     const finalText = this.text;
     this.text = '';
     // Streaming-chunk feed always flushes regardless of interactive
@@ -525,7 +526,7 @@ export class StreamingState {
         this.publisher.publishOutput({ type: 'text', content: finalText, done: true }),
         flushSc,
       ]);
-      return;
+      return false;
     }
     log.info(
       'acpRunner',
@@ -556,6 +557,7 @@ export class StreamingState {
     // Wait for the streaming-chunk feed flush we started above so
     // the turn ends with all bubbles finalised across both pipes.
     await flushSc;
+    return true;
   }
 }
 
@@ -1314,7 +1316,7 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
     flushHistory: () => void history.flush(),
     beginTurn: () => streaming.beginTurn(),
     getCurrentText: () => streaming.getCurrentText(),
-    closeTurn: () => streaming.closeTurnWithInteractiveDetection(),
+    closeTurn: async () => { await streaming.closeTurnWithInteractiveDetection(); },
     recoverFromFailedTurn: () => recoverFromFailedTurn(client, streaming),
     reconnectWith1mDisabled,
     promptAgent: (blocks) => client.prompt(blocks),
@@ -1696,13 +1698,19 @@ export async function handleCommand(
           // action instead of leaking the raw API error.
           await oneMRecovery.offer(cmd.id, blocks);
         } else {
-          await streaming.closeTurnWithInteractiveDetection();
+          const emittedSelectPrompt = await streaming.closeTurnWithInteractiveDetection();
           const replyLine = formatAgentReplyLine(finalText);
           if (replyLine.length > 0) {
             showInfo(replyLine);
           }
           history.appendAgentReply(finalText);
           void history.flush();
+          if (!emittedSelectPrompt) {
+            const suggestion = deriveInputSuggestion(finalText);
+            if (suggestion !== null) {
+              void publisher.publishOutput({ type: 'input_suggestion', content: suggestion, done: true });
+            }
+          }
           // End-of-turn file changeset — agent likely edited files
           // during the turn (tool_call write_file / bash). The
           // aggregator runs git diff once and batch-posts the hunks
