@@ -4,6 +4,26 @@ All notable changes to the CodeAgent Mobile VS Code extension are documented her
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.50.0] — 2026-06-28
+
+### Added
+
+- **cli:** Persisted beads-config.json (default-on disable flag)
+- **cli:** Honor persisted beads disable flag in provisionBeadsForStart
+- **cli:** ConfigureBeads enable/disable/status service
+- **cli:** Beads_configure command handler + event emitter
+- **cli:** Emit input_suggestion chip on ACP agent path after closing question
+
+### Fixed
+
+- **cli:** Status honors persisted disable flag; drop beads handler cast
+- **cli:** Make beads_configure status probe read-only (no provisioning)
+
+### Tests
+
+- **cli:** Gated beads_configure integration smoke
+- **cli:** Import vitest globals in beads test files (fix typecheck)
+
 ## [2.49.5] — 2026-06-28
 
 ### Fixed
