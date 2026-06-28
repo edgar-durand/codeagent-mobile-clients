@@ -18,6 +18,10 @@ export interface ConfigureBeadsDeps {
   probe: () => Promise<{ bdAvailable: boolean; doltAvailable: boolean; serverUp: boolean; prefix: string | null }>;
   revertAgentHook: (agent: string) => Promise<void>;
   persist: (cfg: { enabled: boolean }) => void;
+  /** Returns the persisted enabled flag. Used by `status` to short-circuit
+   *  when the user has explicitly disabled Beads — the dolt server stays up
+   *  after disable (soft-disable) so a raw probe would falsely report enabled. */
+  readEnabled: () => boolean;
   emit: (event: {
     type: 'beads_status';
     state: 'enabled' | 'disabled' | 'error' | 'provisioning';
@@ -31,6 +35,14 @@ export async function configureBeads(
   deps: ConfigureBeadsDeps,
 ): Promise<BeadsConfigureResult> {
   if (action === 'status') {
+    // Honor the persisted disable flag FIRST. The dolt server stays running
+    // after a soft-disable (no process kill), so probing would falsely report
+    // enabled and even re-provision. Short-circuit to disabled without calling
+    // probe() when the user has explicitly disabled Beads.
+    if (deps.readEnabled() === false) {
+      deps.emit({ type: 'beads_status', state: 'disabled', running: false });
+      return { enabled: false, running: false };
+    }
     const p = await deps.probe();
     const running = p.serverUp && p.bdAvailable;
     deps.emit({ type: 'beads_status', state: running ? 'enabled' : 'disabled', running, ...p });

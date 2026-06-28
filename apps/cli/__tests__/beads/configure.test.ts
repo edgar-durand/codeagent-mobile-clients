@@ -9,6 +9,7 @@ function makeDeps(over = {}) {
     probe: vi.fn().mockResolvedValue(baseProbe),
     revertAgentHook: vi.fn().mockResolvedValue(undefined),
     persist: vi.fn(),
+    readEnabled: vi.fn().mockReturnValue(true),
     emit: vi.fn(),
     ...over,
   };
@@ -16,12 +17,24 @@ function makeDeps(over = {}) {
 const ctx = { agent: 'claude', cwd: '/repo', pluginAuthToken: 't' };
 
 describe('configureBeads', () => {
-  it('status derives from probe without mutating', async () => {
-    const d = makeDeps();
+  it('status derives from probe without mutating (readEnabled=true)', async () => {
+    const d = makeDeps({ readEnabled: vi.fn().mockReturnValue(true) });
     const r = await configureBeads('status', ctx, d);
     expect(d.provision).not.toHaveBeenCalled();
+    expect(d.probe).toHaveBeenCalled();
     expect(r).toMatchObject({ running: true, serverUp: true });
     expect(d.emit).toHaveBeenCalledWith(expect.objectContaining({ type: 'beads_status' }));
+  });
+
+  it('status returns disabled immediately when readEnabled=false — does NOT call probe', async () => {
+    const d = makeDeps({ readEnabled: vi.fn().mockReturnValue(false) });
+    const r = await configureBeads('status', ctx, d);
+    expect(d.probe).not.toHaveBeenCalled();
+    expect(d.provision).not.toHaveBeenCalled();
+    expect(r).toEqual({ enabled: false, running: false });
+    expect(d.emit).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'beads_status', state: 'disabled', running: false }),
+    );
   });
 
   it('enable provisions, persists enabled, starts watcher, emits enabled', async () => {

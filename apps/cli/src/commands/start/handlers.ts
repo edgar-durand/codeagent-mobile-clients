@@ -78,7 +78,7 @@ import { removeSession } from '../../config';
 import { handleBeadsActionCommand, type StartedBeads, startBeads } from '../../beads';
 import { beadsActionFromPayload } from '../../beads/wiring';
 import { configureBeads, type ConfigureBeadsDeps } from '../../beads/configure';
-import { persistBeadsConfig } from '../../beads/config-store';
+import { persistBeadsConfig, readBeadsEnabled } from '../../beads/config-store';
 import { provisionBeads } from '../../beads/provisioner';
 import type { BeadsConfigureAction } from '@codeagent/shared';
 // Self-namespace import: `previewRestartH` invokes `startPreviewFromDetection`
@@ -687,6 +687,7 @@ const beadsConfigureH: CommandHandler = async (ctx, cmd, parsed) => {
       log.info('beads', `revertAgentHook: bd has no --remove flag — leaving ${agent} hook in place (no-op disable path)`);
     },
     persist: (cfg) => persistBeadsConfig(cfg),
+    readEnabled: () => readBeadsEnabled(),
     emit: (event) => {
       const token = ctx.pluginAuthToken;
       if (!token) return;
@@ -707,7 +708,7 @@ const beadsConfigureH: CommandHandler = async (ctx, cmd, parsed) => {
   };
 
   const result = await configureBeads(action, { agent: rawAgentId, cwd: process.cwd(), pluginAuthToken: ctx.pluginAuthToken }, deps);
-  await ctx.relay.sendResult(cmd.id, 'completed', result as unknown as Record<string, unknown>);
+  await ctx.relay.sendResult(cmd.id, 'completed', result);
 };
 
 // ─── Terminal ─────────────────────────────────────────────────────
