@@ -563,7 +563,19 @@ const headroomConfigureH: CommandHandler = async (ctx, cmd, parsed) => {
               'Content-Type': 'application/json',
               ...(opts.pluginAuthToken ? { 'X-Plugin-Auth-Token': opts.pluginAuthToken } : {}),
             },
-            body: JSON.stringify({ agentId: opts.agent, ...delta }),
+            // Body MUST match HeadroomSavingsDto + PluginAuthGuard, which read
+            // `sessionId` + `pluginId` from the body and 401 if either is
+            // missing. Mirror the self-hosted reporter in host-agent.ts exactly.
+            // Previously this sent `{ agentId, ...delta }` (no sessionId/pluginId,
+            // delta spread flat instead of nested under `savings`) → every POST
+            // was rejected 401 at the guard and silently swallowed (fetch status
+            // unchecked), so local on-demand savings never reached the backend.
+            body: JSON.stringify({
+              sessionId: ctx.sessionId,
+              pluginId: ctx.pluginId,
+              agentId: opts.agent,
+              savings: delta,
+            }),
           });
         },
       });

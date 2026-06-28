@@ -20,6 +20,7 @@ import {
   readHeadroomChildEnv,
   headroomConfigPath,
   persistHeadroomConfig,
+  maybeResumeLocalHeadroomReporter,
   type HeadroomRunner,
   type SelfUpdateResult,
 } from '../src/commands/host-agent';
@@ -2799,5 +2800,43 @@ describe('HostAgentSupervisor — resume/restart spawn re-injects persisted head
     expect(calls[0].env.CODEAM_AUTO_TOKEN).toBe('auto-xyz');
 
     fs.rmSync(cwdTarget, { recursive: true, force: true });
+  });
+});
+
+describe('maybeResumeLocalHeadroomReporter — on-demand local resume (additive)', () => {
+  const ctx = { sessionId: 'sess-1', pluginId: 'plug-1', pluginAuthToken: 'tok-1' };
+  let savedEnabled: string | undefined;
+
+  beforeEach(() => {
+    savedEnabled = process.env.HEADROOM_ENABLED;
+  });
+  afterEach(() => {
+    if (savedEnabled === undefined) delete process.env.HEADROOM_ENABLED;
+    else process.env.HEADROOM_ENABLED = savedEnabled;
+  });
+
+  it('returns null when HEADROOM_ENABLED=1 (codespace path owns it — never overlaps)', () => {
+    process.env.HEADROOM_ENABLED = '1';
+    persistHeadroomConfig({ enabled: true, agent: 'claude' });
+    expect(maybeResumeLocalHeadroomReporter(ctx)).toBeNull();
+  });
+
+  it('returns null when no config file exists', () => {
+    delete process.env.HEADROOM_ENABLED;
+    expect(maybeResumeLocalHeadroomReporter(ctx)).toBeNull();
+  });
+
+  it('returns null when the persisted config says enabled:false', () => {
+    delete process.env.HEADROOM_ENABLED;
+    persistHeadroomConfig({ enabled: false, agent: 'claude' });
+    expect(maybeResumeLocalHeadroomReporter(ctx)).toBeNull();
+  });
+
+  it('starts a reporter when config says enabled:true and it is not a codespace', () => {
+    delete process.env.HEADROOM_ENABLED;
+    persistHeadroomConfig({ enabled: true, agent: 'claude' });
+    const reporter = maybeResumeLocalHeadroomReporter(ctx);
+    expect(reporter).not.toBeNull();
+    reporter?.stop();
   });
 });
