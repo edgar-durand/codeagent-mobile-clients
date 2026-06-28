@@ -114,3 +114,9 @@ export interface BeadsActionPayload {
   /** Project the action targets (so the right `bd` working context applies). */
   projectKey?: string;
 }
+
+/** Action verb for `configureBeads` (enable / disable / status). */
+export type BeadsConfigureAction = 'enable' | 'disable' | 'status';
+
+/** Lifecycle state emitted by `configureBeads` on the per-session SSE bus. */
+export type BeadsStatusState = 'enabled' | 'disabled' | 'error' | 'provisioning';

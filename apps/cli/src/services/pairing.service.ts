@@ -416,6 +416,41 @@ export async function postHeadroomEvent(input: {
 }
 
 /**
+ * Post a Beads lifecycle event (enable / disable / status) to the backend.
+ * Mirrors `postHeadroomEvent` — fire-and-forget, non-fatal. The backend
+ * republishes these on the per-user SSE bus so the mobile UI can track
+ * beads_configure progress in real time.
+ */
+export async function postBeadsEvent(input: {
+  sessionId: string;
+  pluginId: string;
+  pluginAuthToken: string;
+  type: 'beads_status';
+  payload?: Record<string, unknown>;
+}): Promise<{ ok: true } | { ok: false; status: number; message: string }> {
+  try {
+    await _transport.postJsonAuthed(
+      `${API_BASE}/api/beads/events`,
+      {
+        sessionId: input.sessionId,
+        pluginId: input.pluginId,
+        type: input.type,
+        payload: input.payload ?? {},
+      },
+      input.pluginAuthToken,
+    );
+    return { ok: true };
+  } catch (err) {
+    const e = err as Error & { statusCode?: number };
+    return {
+      ok: false,
+      status: typeof e.statusCode === 'number' ? e.statusCode : 0,
+      message: e.message || 'unknown',
+    };
+  }
+}
+
+/**
  * Signal Beads provisioning status so the backend can emit a
  * `beads_provisioning` UserEvent (D13). The backend side is built in parallel;
  * this matches its contract: `POST /api/beads/provisioning` with plugin auth,
