@@ -165,7 +165,7 @@ export function maybeStartHeadroomReporter(ctx: HeadroomReporterCtx): HeadroomSt
         // res.json() returns unknown; cast at this validated boundary.
         return res.json() as Promise<StatsShape>;
       },
-      postSavings: async (delta: Savings) => {
+      postSavings: async (delta, budget) => {
         await fetch(ingestUrl, {
           method: 'POST',
           headers: {
@@ -177,6 +177,11 @@ export function maybeStartHeadroomReporter(ctx: HeadroomReporterCtx): HeadroomSt
             pluginId: ctx.pluginId,
             agentId: process.env['HEADROOM_AGENT'] ?? 'claude',
             savings: delta,
+            ...(budget ? {
+              periodSpendUsd: budget.periodSpendUsd,
+              budgetUsd: budget.budgetUsd,
+              budgetPeriod: budget.budgetPeriod,
+            } : {}),
           }),
         });
       },
@@ -236,7 +241,7 @@ export function maybeResumeLocalHeadroomReporter(ctx: {
       // Body MUST match HeadroomSavingsDto + PluginAuthGuard (sessionId +
       // pluginId in the body) — same shape as the codespace reporter above and
       // the on-demand `startReporter` in handlers.ts.
-      postSavings: async (delta: Savings) => {
+      postSavings: async (delta, budget) => {
         await fetch(ingestUrl, {
           method: 'POST',
           headers: {
@@ -248,6 +253,11 @@ export function maybeResumeLocalHeadroomReporter(ctx: {
             pluginId: ctx.pluginId,
             agentId: agent,
             savings: delta,
+            ...(budget ? {
+              periodSpendUsd: budget.periodSpendUsd,
+              budgetUsd: budget.budgetUsd,
+              budgetPeriod: budget.budgetPeriod,
+            } : {}),
           }),
         });
       },

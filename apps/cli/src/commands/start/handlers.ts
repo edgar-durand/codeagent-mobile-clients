@@ -560,7 +560,7 @@ const headroomConfigureH: CommandHandler = async (ctx, cmd, parsed) => {
           const res = await fetch('http://localhost:8787/stats');
           return res.json() as Promise<StatsShape>;
         },
-        postSavings: async (delta: Savings) => {
+        postSavings: async (delta, budget) => {
           if (!opts.ingestUrl) return;
           await fetch(opts.ingestUrl, {
             method: 'POST',
@@ -580,6 +580,11 @@ const headroomConfigureH: CommandHandler = async (ctx, cmd, parsed) => {
               pluginId: ctx.pluginId,
               agentId: opts.agent,
               savings: delta,
+              ...(budget ? {
+                periodSpendUsd: budget.periodSpendUsd,
+                budgetUsd: budget.budgetUsd,
+                budgetPeriod: budget.budgetPeriod,
+              } : {}),
             }),
           });
         },
