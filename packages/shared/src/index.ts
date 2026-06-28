@@ -8,4 +8,5 @@ export * from './types/streaming';
 export * from './api-url';
 export * from './types/preview';
 export * from './types/beads';
+export * from './types/headroom';
 export * from './preview-prompts';
