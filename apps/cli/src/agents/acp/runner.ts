@@ -43,6 +43,7 @@ import type { AdapterSpec } from './adapters';
 import { AcpPublisher } from './publisher';
 import { buildAcpPromptBlocks, type PromptBlock } from './buildAcpPromptBlocks';
 import { shouldOfferOneMRecovery, createOneMRecovery, type OneMRecovery } from './oneMContextRecovery';
+import { looksLikeBudgetExceeded, extractBudgetPeriod, createBudgetRecovery, type BudgetRecovery } from './budgetRecovery';
 import { reconcileCumulative } from './reconcileDelta';
 import { maybeSendOnboardingWelcome } from './onboarding';
 import { formatPromptEchoLine, formatAgentReplyLine } from './promptEcho';
@@ -831,6 +832,7 @@ export function looksLikeProviderOutage(text: string): boolean {
 // real-spawn integration tests). Re-exported so `acp.failureBubble.test` can
 // still import it from runner alongside the other classifiers.
 export { looksLike1mContextCreditsError } from './oneMContextRecovery';
+export { looksLikeBudgetExceeded } from './budgetRecovery';
 
 /**
  * Public status page for an agent's upstream provider, resolved by substring
@@ -968,6 +970,18 @@ async function surfaceStartupFailure(opts: {
   errRelay.start();
 }
 
+/**
+ * Build the budget-exceeded bubble. The `period` is extracted from the 429
+ * detail string (e.g. "daily"). Exported so tests can compare it verbatim.
+ */
+export function budgetBubbleMessage(agent: string, period: string): string {
+  return (
+    `💸 **Headroom budget reached for the ${period} period.**\n\n` +
+    `The local Headroom proxy rejected the ${agent} request because the configured spending cap was hit. ` +
+    'Choose an option below to continue.'
+  );
+}
+
 export function failureBubble(opts: {
   detail: string;
   recentStderr: string;
@@ -976,6 +990,13 @@ export function failureBubble(opts: {
 }): string | null {
   if (looksLikeAuthFailure(opts.detail) || looksLikeAuthFailure(opts.recentStderr)) {
     return AUTH_FAILURE_MESSAGE;
+  }
+  // Budget-exceeded 429 from the local Headroom proxy — checked BEFORE the
+  // provider-outage branch so a budget 429 is never mis-classified as a
+  // provider outage. The proxy is local; the agent provider is healthy.
+  const budgetHaystack = `${opts.detail}\n${opts.recentStderr}`;
+  if (looksLikeBudgetExceeded(budgetHaystack)) {
+    return budgetBubbleMessage(opts.agent, extractBudgetPeriod(budgetHaystack));
   }
   if (looksLikeProviderOutage(opts.detail) || looksLikeProviderOutage(opts.recentStderr)) {
     return providerOutageMessage(opts.agent);
@@ -1026,6 +1047,46 @@ export async function reportCredentialInvalid(
     }
   } catch {
     // Best-effort — credential recovery must never break the runner.
+  }
+}
+
+/**
+ * Fire-once best-effort POST to `POST /api/sessions/:sessionId/headroom-budget-reached`
+ * when the local Headroom proxy 429s a turn due to budget exhaustion.
+ *
+ * Mirrors the `reportCredentialInvalid` pattern: injectable `fetchImpl` for
+ * testing, never throws into the caller (the budget 429 must still surface a
+ * recovery bubble regardless of whether this POST succeeds). Idempotency is the
+ * backend's responsibility; the CLI fires it once per detected budget-exceeded
+ * turn (de-duplication via `_budgetReachedPosted` in the runner closure).
+ */
+export async function postBudgetReached(
+  opts: {
+    sessionId: string;
+    pluginId: string;
+    pluginAuthToken: string;
+    agent: string;
+    period: string;
+  },
+  fetchImpl: typeof fetch = fetch,
+): Promise<void> {
+  const url = `${resolveApiBaseUrl()}/api/sessions/${encodeURIComponent(opts.sessionId)}/headroom-budget-reached`;
+  try {
+    await fetchImpl(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Plugin-Auth-Token': opts.pluginAuthToken,
+      },
+      body: JSON.stringify({
+        sessionId: opts.sessionId,
+        pluginId: opts.pluginId,
+        agent: opts.agent,
+        period: opts.period,
+      }),
+    });
+  } catch {
+    // Best-effort — a budget notification failure must never break the runner.
   }
 }
 
@@ -1326,6 +1387,76 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
     log: (msg) => log.info('acpRunner', msg),
   });
 
+  // ─── On-demand Headroom budget-exceeded recovery ──────────────────────────
+  // When the local Headroom proxy 429s due to budget exhaustion, offer two
+  // tappable options: "Pause budget this session" (relaunch proxy w/o --budget)
+  // or "Raise budget" (deep-link to app settings). Fire-once POST to the
+  // backend's budget-reached endpoint so the app can reflect the state.
+  //
+  // Fire-once guard: we POST the backend notification at most once per session
+  // (not once per turn) so a repeated budget-exceeded series doesn't spam the
+  // backend endpoint. Subsequent occurrences still surface the recovery bubble.
+  let _budgetReachedPosted = false;
+
+  const relaunchProxyWithoutBudget = async (): Promise<void> => {
+    const { spawn } = await import('node:child_process');
+    // Kill the budget-capped proxy.
+    try {
+      const killer = spawn('pkill', ['-TERM', '-f', 'headroom.*proxy'], {
+        detached: true,
+        stdio: 'ignore',
+      });
+      killer.once('error', () => { /* pkill absent on minimal box — best-effort */ });
+      killer.unref();
+    } catch {
+      /* best-effort — proxy may already be dead */
+    }
+    // Brief settle so the port frees before relaunch.
+    await new Promise<void>((r) => setTimeout(r, 500));
+    // Re-spawn without budget args.
+    const proxyEnv = { ...process.env, HEADROOM_KOMPRESS_BACKEND: 'onnx_cpu' };
+    try {
+      const proxy = spawn(
+        'headroom',
+        ['proxy', '--port', '8787'],
+        { stdio: 'ignore', detached: true, env: proxyEnv as NodeJS.ProcessEnv },
+      );
+      proxy.once('error', (e: Error) => {
+        log.warn('acpRunner', `budget recovery proxy relaunch error (best-effort): ${e.message}`);
+      });
+      proxy.unref();
+    } catch (e) {
+      log.warn(
+        'acpRunner',
+        `budget recovery proxy relaunch failed (best-effort): ${e instanceof Error ? e.message : String(e)}`,
+      );
+    }
+    // Settle: give the proxy ~3 s to start accepting connections.
+    await new Promise<void>((r) => setTimeout(r, 3_000));
+  };
+
+  const budgetRecovery = createBudgetRecovery<PromptBlock>({
+    publishText: (text) => publisher.publishOutput({ type: 'text', content: text, done: true }),
+    publishSelectPrompt: (question, options) =>
+      publisher.publishOutput({
+        type: 'select_prompt',
+        content: question,
+        options,
+        optionDescriptions: options.map(() => ''),
+        currentIndex: 0,
+        done: true,
+      }),
+    publishAwaitingAnswer: (prompt, options) =>
+      publisher.publishAwaitingAnswer({ questionId: randomUUID(), prompt, options }),
+    publishRawChunk: (chunk) => publisher.publishOutput(chunk),
+    sendResult: (commandId, status, result) => relay.sendResult(commandId, status, result),
+    appendAgentReply: (text) => history.appendAgentReply(text),
+    flushHistory: () => void history.flush(),
+    relaunchProxyWithoutBudget,
+    agentId: opts.agent,
+    log: (msg) => log.info('acpRunner', msg),
+  });
+
   showInfo(`Starting ${opts.agent} via ACP adapter (${opts.adapter.requiresAgentBinary})…`);
   let handshake: Awaited<ReturnType<typeof client.start>>;
   try {
@@ -1524,6 +1655,8 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
         publisher,
         recentStderr,
         oneMRecovery,
+        budgetRecovery,
+        { get: () => _budgetReachedPosted, set: (v: boolean) => { _budgetReachedPosted = v; } },
       );
     },
     { id: opts.agent, name: opts.agent, displayName: opts.agent } as never,
@@ -1590,6 +1723,10 @@ export async function handleCommand(
    *  re-spawn/re-run on tap). Built by runAcpSession so it can mutate the
    *  live `client`. */
   oneMRecovery: OneMRecovery<PromptBlock>,
+  /** On-demand Headroom budget-exceeded recovery (offer pause/raise options). */
+  budgetRecovery: BudgetRecovery<PromptBlock>,
+  /** Fire-once guard for the budget-reached backend POST. */
+  budgetReachedFlag: { get: () => boolean; set: (v: boolean) => void },
 ): Promise<void> {
   switch (cmd.type) {
     case 'beads_action': {
@@ -1761,6 +1898,26 @@ export async function handleCommand(
         // is a false "service disruption" wall. The error text is the only
         // trustworthy signal that the provider actually rejected the call.
         //
+        // Headroom budget-exceeded 429 — checked BEFORE the 1M gate because
+        // both are 429s and the discriminator is the proxy's exact body.
+        // The proxy is local; the agent provider is healthy. Fire the backend
+        // notification once per session (idempotency is the backend's job);
+        // then offer the two-option tappable recovery.
+        if (looksLikeBudgetExceeded(`${detail}\n${recentStderr.join('\n')}`)) {
+          await streaming.closeAll();
+          if (!budgetReachedFlag.get()) {
+            budgetReachedFlag.set(true);
+            void postBudgetReached({
+              sessionId: opts.sessionId,
+              pluginId: opts.pluginId,
+              pluginAuthToken: opts.pluginAuthToken,
+              agent: opts.agent,
+              period: extractBudgetPeriod(`${detail}\n${recentStderr.join('\n')}`),
+            });
+          }
+          await budgetRecovery.offer(cmd.id, blocks, detail);
+          return;
+        }
         // 1M-context usage-credits gate (Rafael 2026-06-24): offer the
         // on-demand "Disable 1M context and continue" action instead of a dead
         // generic-retry bubble — the only recoverable path for a credit-less
@@ -1922,6 +2079,10 @@ export async function handleCommand(
       const index = typeof payload?.index === 'number' ? payload.index : 0;
       const offset = typeof payload?.from === 'number' ? payload.from : 0;
       const absoluteIndex = index + offset;
+      // On-demand Headroom budget-exceeded recovery: if THIS select is a
+      // "Pause budget this session" or "Raise budget" action we offered
+      // after a budget 429, handle it locally — never route into resolveSelection.
+      if (await budgetRecovery.tryRecover(cmd.id, absoluteIndex)) return;
       const result = streaming.resolveSelection(absoluteIndex);
       switch (result.kind) {
         case 'resolved':

@@ -114,6 +114,8 @@ function makeHarness() {
       publisher,
       [],
       oneMRecovery as never,
+      { offer: vi.fn(async () => undefined), tryRecover: vi.fn(async () => false) } as never,
+      { get: () => false, set: vi.fn() },
     );
 
   return { run, client, sendResult, terminalTextFrames, publishOutput };
@@ -231,6 +233,8 @@ describe('ACP start_task — generic failure with partial text keeps the partial
       publisher,
       [],
       { offer: vi.fn(async () => undefined), tryRecover: vi.fn(async () => false) } as never,
+      { offer: vi.fn(async () => undefined), tryRecover: vi.fn(async () => false) } as never,
+      { get: () => false, set: vi.fn() },
     );
 
     const finals = publishOutput.mock.calls
