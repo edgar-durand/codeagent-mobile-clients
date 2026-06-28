@@ -192,6 +192,78 @@ export function maybeStartHeadroomReporter(ctx: HeadroomReporterCtx): HeadroomSt
 }
 
 /**
+ * Resume the ON-DEMAND LOCAL Headroom savings reporter at boot from the
+ * persisted `~/.codeam/headroom-config.json`.
+ *
+ * The codespace / self-hosted path uses {@link maybeStartHeadroomReporter},
+ * gated on `HEADROOM_ENABLED === '1'` (env injected by the backend bootstrap).
+ * A local on-demand session NEVER sets that env — only the JSON config records
+ * `enabled:true` — so without this resume a CLI restart would silently stop
+ * reporting savings until the user re-toggled Cost-saving from the app.
+ *
+ * Strictly additive to the codespace path: this returns `null` immediately when
+ * `HEADROOM_ENABLED === '1'`, so the two paths can never both run and the
+ * codespace reporter is completely untouched. Posts to the CURRENT session's
+ * ingest endpoint (built from `ctx.sessionId`), NOT the URL baked into the
+ * config at enable time — so a fresh session after restart credits the right
+ * session. Best-effort; never throws into the launch path.
+ */
+export function maybeResumeLocalHeadroomReporter(ctx: {
+  sessionId: string;
+  pluginId: string;
+  pluginAuthToken: string;
+}): HeadroomStatsReporter | null {
+  // Never overlap the codespace/self-hosted env-gated path.
+  if (process.env['HEADROOM_ENABLED'] === '1') return null;
+  try {
+    const file = headroomConfigPath();
+    if (!fs.existsSync(file)) return null;
+    const cfg = JSON.parse(fs.readFileSync(file, 'utf8')) as HeadroomConfig;
+    if (!cfg?.enabled) return null;
+
+    const agent = cfg.agent ?? 'claude';
+    // Build from the CURRENT session — the config's stored ingestUrl bakes the
+    // session id from enable time and is stale for any later session.
+    const ingestUrl = `${resolveApiBaseUrl()}/api/sessions/${ctx.sessionId}/headroom-savings`;
+
+    const reporter = new HeadroomStatsReporter({
+      inputPricePerMillionUsd: resolveInputPricePerMillion(agent),
+      fetchStats: async () => {
+        const res = await fetch('http://localhost:8787/stats');
+        return res.json() as Promise<StatsShape>;
+      },
+      // Body MUST match HeadroomSavingsDto + PluginAuthGuard (sessionId +
+      // pluginId in the body) — same shape as the codespace reporter above and
+      // the on-demand `startReporter` in handlers.ts.
+      postSavings: async (delta: Savings) => {
+        await fetch(ingestUrl, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Plugin-Auth-Token': ctx.pluginAuthToken,
+          },
+          body: JSON.stringify({
+            sessionId: ctx.sessionId,
+            pluginId: ctx.pluginId,
+            agentId: agent,
+            savings: delta,
+          }),
+        });
+      },
+    });
+    reporter.start();
+    log.info('headroom', 'resumed on-demand local savings reporter from config');
+    return reporter;
+  } catch (err) {
+    log.warn(
+      'headroom',
+      `failed to resume local Headroom reporter (best-effort): ${err instanceof Error ? err.message : String(err)}`,
+    );
+    return null;
+  }
+}
+
+/**
  * The managed "CodeAgent Cloud" house-agent proxy block (mirrors the
  * backend `SelfHostedHouseProxy`). When present, the child runs the
  * underlying agent pointed at our managed proxy with NO user

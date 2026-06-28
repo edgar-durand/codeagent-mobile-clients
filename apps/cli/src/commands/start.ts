@@ -2,7 +2,7 @@ import pc from 'picocolors';
 import { AGENT_REGISTRY, type AgentId } from '@codeagent/shared';
 import { addSession, getActiveSession, getActiveSessionForAgent, ensurePluginId, loadCliConfig } from '../config';
 import { acquireDaemonLock } from './pair-auto';
-import { maybeStartHeadroomReporter } from './host-agent';
+import { maybeStartHeadroomReporter, maybeResumeLocalHeadroomReporter } from './host-agent';
 import { showIntro, showInfo, showError } from '../ui/banner';
 import { CommandRelayService } from '../services/command-relay.service';
 import { AgentService } from '../services/agent.service';
@@ -162,6 +162,22 @@ export async function start(requestedAgent?: AgentId): Promise<void> {
     : null;
   process.once('exit', () => {
     headroomReporter?.stop();
+  });
+
+  // On-demand LOCAL Headroom resume — additive to the codespace path above and
+  // a strict no-op when HEADROOM_ENABLED==='1' (codespace/self-hosted). Local
+  // on-demand never sets that env, so without this a CLI restart would stop
+  // crediting savings until the user re-toggled Cost-saving. Reads the persisted
+  // ~/.codeam/headroom-config.json and posts to the CURRENT session's endpoint.
+  const localHeadroomReporter = session.pluginAuthToken
+    ? maybeResumeLocalHeadroomReporter({
+        sessionId: session.id,
+        pluginId,
+        pluginAuthToken: session.pluginAuthToken,
+      })
+    : null;
+  process.once('exit', () => {
+    localHeadroomReporter?.stop();
   });
 
   // Codespace: pre-complete Claude's first-run onboarding BEFORE anything
