@@ -83,6 +83,7 @@ import {
   type Savings,
   type StatsShape,
 } from '../services/headroom/stats-reporter';
+import { buildBudgetProxyArgs } from '../services/headroom/budget-args';
 import { compareSemver } from '../lib/updateNotifier';
 
 /** Liveness heartbeat cadence. State liveness only — NOT command polling. */
@@ -887,11 +888,18 @@ export function readHeadroomChildEnv(): Record<string, string> {
       typeof o.ingestUrl === 'string' &&
       o.ingestUrl.length > 0
     ) {
-      return {
+      const env: Record<string, string> = {
         HEADROOM_ENABLED: '1',
         HEADROOM_AGENT: o.agent,
         HEADROOM_SAVINGS_INGEST_URL: o.ingestUrl,
       };
+      // Forward budget constraints so the proxy launch and savings reporter
+      // pick them up on every child spawn / supervisor restart.
+      if (process.env['HEADROOM_BUDGET']) {
+        env['HEADROOM_BUDGET'] = process.env['HEADROOM_BUDGET'];
+        env['HEADROOM_BUDGET_PERIOD'] = process.env['HEADROOM_BUDGET_PERIOD'] ?? 'daily';
+      }
+      return env;
     }
     return {};
   } catch {
@@ -1372,11 +1380,16 @@ export async function setupHeadroomForSelfHosted(
   // cache at bind time, so the first prompt is compressed without a stall.
   onProgress('proxy');
   try {
-    const proxy = spawn('headroom', ['proxy', '--port', '8787'], {
-      stdio: 'ignore',
-      detached: true,
-      env: { ...process.env, HEADROOM_KOMPRESS_BACKEND: 'onnx_cpu' },
-    });
+    const proxyEnv = { ...process.env, HEADROOM_KOMPRESS_BACKEND: 'onnx_cpu' };
+    const proxy = spawn(
+      'headroom',
+      ['proxy', '--port', '8787', ...buildBudgetProxyArgs(proxyEnv)],
+      {
+        stdio: 'ignore',
+        detached: true,
+        env: proxyEnv,
+      },
+    );
     // Consume the error event so Node doesn't throw an uncaught exception when
     // headroom is not on PATH (e.g. installed to a user-local dir not yet on
     // the current PATH). The outer try/catch only catches synchronous throws.
