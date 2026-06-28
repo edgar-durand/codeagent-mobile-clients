@@ -21,6 +21,12 @@ import type { StartCommandPayload } from '../../../src/lib/payload';
 
 vi.mock('../../../src/beads/configure', () => ({
   configureBeads: vi.fn().mockResolvedValue({ enabled: true, running: true }),
+  probeBeadsStatus: vi.fn().mockResolvedValue({
+    bdAvailable: true,
+    doltAvailable: true,
+    serverUp: true,
+    prefix: 'test-proj',
+  }),
 }));
 
 vi.mock('../../../src/beads/config-store', () => ({
@@ -83,9 +89,11 @@ vi.mock('../../../src/services/headroom/stats-reporter', () => ({
 import { handlers } from '../../../src/commands/start/handlers';
 import { configureBeads } from '../../../src/beads/configure';
 import { postBeadsEvent } from '../../../src/services/pairing.service';
+import { provisionBeads } from '../../../src/beads/provisioner';
 
 const configureBeadsMock = vi.mocked(configureBeads);
 const postBeadsEventMock = vi.mocked(postBeadsEvent);
+const provisionBeadsMock = vi.mocked(provisionBeads);
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -159,6 +167,31 @@ describe('beads_configure handler — valid actions', () => {
       expect(ctx.relay.sendResult).toHaveBeenCalledWith(cmd.id, 'completed', expect.any(Object));
     });
   }
+});
+
+describe('beads_configure handler — status uses read-only probe (no provision)', () => {
+  it('status action does NOT call provisionBeads', async () => {
+    const ctx = makeCtx('claude');
+    // configureBeads is fully mocked — we check that the deps.probe the handler
+    // builds does NOT delegate to provisionBeads. We capture the deps arg.
+    configureBeadsMock.mockImplementation(async (_action, _ctx, deps) => {
+      // Invoke the probe dep to confirm it resolves without calling provisionBeads
+      await deps.probe();
+      return { enabled: true };
+    });
+    await handlers.beads_configure!(ctx, cmd, payload({ action: 'status' }));
+    expect(provisionBeadsMock).not.toHaveBeenCalled();
+  });
+
+  it('enable action DOES call provisionBeads (provision dep is unchanged)', async () => {
+    const ctx = makeCtx('claude');
+    configureBeadsMock.mockImplementation(async (_action, _ctx, deps) => {
+      await deps.provision();
+      return { enabled: true };
+    });
+    await handlers.beads_configure!(ctx, cmd, payload({ action: 'enable' }));
+    expect(provisionBeadsMock).toHaveBeenCalled();
+  });
 });
 
 describe('beads_configure handler — agent resolution', () => {

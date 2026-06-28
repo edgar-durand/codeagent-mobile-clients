@@ -1,5 +1,5 @@
-import { describe, it, expect, vi } from 'vitest';
-import { configureBeads } from '../../src/beads/configure';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { configureBeads, probeBeadsStatus, _probeSeam } from '../../src/beads/configure';
 
 const baseProbe = { bdAvailable: true, doltAvailable: true, serverUp: true, prefix: 'proj_abc' };
 function makeDeps(over = {}) {
@@ -63,5 +63,107 @@ describe('configureBeads', () => {
     expect(d.revertAgentHook).toHaveBeenCalledWith('claude');
     expect(d.emit).toHaveBeenCalledWith(expect.objectContaining({ state: 'disabled' }));
     expect(r.enabled).toBe(false);
+  });
+});
+
+// ── probeBeadsStatus ───────────────────────────────────────────────────────────
+
+describe('probeBeadsStatus', () => {
+  let origResolveBd: typeof _probeSeam.resolveBd;
+  let origDoltOnPath: typeof _probeSeam.doltOnPath;
+  let origPing: typeof _probeSeam.ping;
+  let origDerivePrefix: typeof _probeSeam.derivePrefix;
+
+  beforeEach(() => {
+    origResolveBd = _probeSeam.resolveBd;
+    origDoltOnPath = _probeSeam.doltOnPath;
+    origPing = _probeSeam.ping;
+    origDerivePrefix = _probeSeam.derivePrefix;
+  });
+
+  afterEach(() => {
+    _probeSeam.resolveBd = origResolveBd;
+    _probeSeam.doltOnPath = origDoltOnPath;
+    _probeSeam.ping = origPing;
+    _probeSeam.derivePrefix = origDerivePrefix;
+  });
+
+  it('returns all-true when bd, dolt, and server are available', async () => {
+    _probeSeam.resolveBd = vi.fn().mockReturnValue(true);
+    _probeSeam.doltOnPath = vi.fn().mockReturnValue(true);
+    _probeSeam.ping = vi.fn().mockResolvedValue(true);
+    _probeSeam.derivePrefix = vi.fn().mockReturnValue('proj_abc12345');
+
+    const result = await probeBeadsStatus('/some/cwd');
+    expect(result).toEqual({ bdAvailable: true, doltAvailable: true, serverUp: true, prefix: 'proj_abc12345' });
+  });
+
+  it('returns serverUp=false when bd is not available (no install attempted)', async () => {
+    _probeSeam.resolveBd = vi.fn().mockReturnValue(false);
+    _probeSeam.doltOnPath = vi.fn().mockReturnValue(true);
+    _probeSeam.ping = vi.fn().mockResolvedValue(true);
+    _probeSeam.derivePrefix = vi.fn().mockReturnValue('proj_abc12345');
+
+    const result = await probeBeadsStatus('/some/cwd');
+    expect(result.bdAvailable).toBe(false);
+    expect(result.serverUp).toBe(false);
+    // ping must NOT be called when bd is not available
+    expect(_probeSeam.ping).not.toHaveBeenCalled();
+  });
+
+  it('returns serverUp=false when dolt is not available (no install attempted)', async () => {
+    _probeSeam.resolveBd = vi.fn().mockReturnValue(true);
+    _probeSeam.doltOnPath = vi.fn().mockReturnValue(false);
+    _probeSeam.ping = vi.fn().mockResolvedValue(true);
+    _probeSeam.derivePrefix = vi.fn().mockReturnValue('proj_abc12345');
+
+    const result = await probeBeadsStatus('/some/cwd');
+    expect(result.doltAvailable).toBe(false);
+    expect(result.serverUp).toBe(false);
+    // ping must NOT be called when dolt is not available
+    expect(_probeSeam.ping).not.toHaveBeenCalled();
+  });
+
+  it('returns serverUp=false when ping fails (server not running)', async () => {
+    _probeSeam.resolveBd = vi.fn().mockReturnValue(true);
+    _probeSeam.doltOnPath = vi.fn().mockReturnValue(true);
+    _probeSeam.ping = vi.fn().mockResolvedValue(false);
+    _probeSeam.derivePrefix = vi.fn().mockReturnValue('proj_abc12345');
+
+    const result = await probeBeadsStatus('/some/cwd');
+    expect(result.bdAvailable).toBe(true);
+    expect(result.doltAvailable).toBe(true);
+    expect(result.serverUp).toBe(false);
+  });
+
+  it('returns prefix=null when prefix derivation fails', async () => {
+    _probeSeam.resolveBd = vi.fn().mockReturnValue(true);
+    _probeSeam.doltOnPath = vi.fn().mockReturnValue(true);
+    _probeSeam.ping = vi.fn().mockResolvedValue(true);
+    _probeSeam.derivePrefix = vi.fn().mockReturnValue(null);
+
+    const result = await probeBeadsStatus('/some/cwd');
+    expect(result.prefix).toBeNull();
+  });
+
+  it('never calls provision/install side-effects — only read-only seam methods', async () => {
+    // This test documents the contract: probeBeadsStatus touches ONLY the three
+    // read-only seam methods; it must NOT trigger any install or server-start.
+    const resolveBd = vi.fn().mockReturnValue(false);
+    const doltOnPath = vi.fn().mockReturnValue(false);
+    const ping = vi.fn().mockResolvedValue(false);
+    const derivePrefix = vi.fn().mockReturnValue(null);
+    _probeSeam.resolveBd = resolveBd;
+    _probeSeam.doltOnPath = doltOnPath;
+    _probeSeam.ping = ping;
+    _probeSeam.derivePrefix = derivePrefix;
+
+    await probeBeadsStatus('/cold/box');
+
+    // Only these four are called — no provisioner, no dolt install, no server start
+    expect(resolveBd).toHaveBeenCalledWith('/cold/box');
+    expect(doltOnPath).toHaveBeenCalled();
+    expect(ping).not.toHaveBeenCalled(); // skipped when bd unavailable
+    expect(derivePrefix).toHaveBeenCalledWith('/cold/box');
   });
 });

@@ -77,7 +77,7 @@ import type { KeepAliveContext } from './keep-alive';
 import { removeSession } from '../../config';
 import { handleBeadsActionCommand, type StartedBeads, startBeads } from '../../beads';
 import { beadsActionFromPayload } from '../../beads/wiring';
-import { configureBeads, type ConfigureBeadsDeps } from '../../beads/configure';
+import { configureBeads, probeBeadsStatus, type ConfigureBeadsDeps } from '../../beads/configure';
 import { persistBeadsConfig, readBeadsEnabled } from '../../beads/config-store';
 import { provisionBeads } from '../../beads/provisioner';
 import type { BeadsConfigureAction } from '@codeagent/shared';
@@ -655,10 +655,7 @@ const beadsConfigureH: CommandHandler = async (ctx, cmd, parsed) => {
       const r = await provisionBeads({ cwd: process.cwd(), agents: agentIds });
       return { bdAvailable: r.bdAvailable, doltAvailable: r.doltAvailable, serverUp: r.serverUp, prefix: r.prefix };
     },
-    probe: async () => {
-      const r = await provisionBeads({ cwd: process.cwd() });
-      return { bdAvailable: r.bdAvailable, doltAvailable: r.doltAvailable, serverUp: r.serverUp, prefix: r.prefix };
-    },
+    probe: async () => probeBeadsStatus(process.cwd()),
     startWatcher: async () => {
       if (!ctx.pluginAuthToken) return;
       const started = await startBeads({

@@ -1,4 +1,59 @@
 import type { BeadsConfigureAction } from '@codeagent/shared';
+import { BdAdapter } from './bd-adapter';
+import { ensureDoltResolvable } from './install-dolt';
+import { deriveProjectIdentity } from './project-key';
+import { prefixForProjectKey } from './project-prefix';
+
+/**
+ * A lightweight, read-only status probe — no install, no server start, no
+ * provisioning. Used by the `status` action of `beads_configure` so a
+ * cold/un-provisioned box never hangs the SSE while checking state.
+ *
+ * Shape matches the `probe` dep signature on `ConfigureBeadsDeps` so the
+ * handler can wire it directly.
+ */
+export interface BeadsStatusProbe {
+  bdAvailable: boolean;
+  doltAvailable: boolean;
+  serverUp: boolean;
+  prefix: string | null;
+}
+
+/**
+ * Seams so tests can stub the three read-only checks without touching the real
+ * filesystem, PATH, or spawning `bd ping`.
+ */
+export const _probeSeam = {
+  resolveBd: (cwd: string): boolean => new BdAdapter({ cwd }).isAvailable(),
+  doltOnPath: (): boolean => ensureDoltResolvable(),
+  ping: async (cwd: string): Promise<boolean> => {
+    const adapter = new BdAdapter({ cwd });
+    if (!adapter.isAvailable()) return false;
+    const r = await adapter.run(['ping']);
+    return r.code === 0;
+  },
+  derivePrefix: (cwd: string): string | null => {
+    try {
+      const { projectKey } = deriveProjectIdentity(cwd);
+      return prefixForProjectKey(projectKey);
+    } catch {
+      return null;
+    }
+  },
+};
+
+/**
+ * Read-only status probe: checks bd availability, dolt on PATH, server
+ * reachability (via `bd ping`), and the project prefix — all without
+ * installing, starting, or mutating anything.
+ */
+export async function probeBeadsStatus(cwd: string = process.cwd()): Promise<BeadsStatusProbe> {
+  const bdAvailable = _probeSeam.resolveBd(cwd);
+  const doltAvailable = _probeSeam.doltOnPath();
+  const serverUp = bdAvailable && doltAvailable ? await _probeSeam.ping(cwd) : false;
+  const prefix = _probeSeam.derivePrefix(cwd);
+  return { bdAvailable, doltAvailable, serverUp, prefix };
+}
 
 export type BeadsConfigureResult = {
   enabled: boolean;
