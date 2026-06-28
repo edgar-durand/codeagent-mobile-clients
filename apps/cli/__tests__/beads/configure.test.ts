@@ -1,3 +1,4 @@
+import { describe, it, expect, vi } from 'vitest';
 import { configureBeads } from '../../src/beads/configure';
 
 const baseProbe = { bdAvailable: true, doltAvailable: true, serverUp: true, prefix: 'proj_abc' };

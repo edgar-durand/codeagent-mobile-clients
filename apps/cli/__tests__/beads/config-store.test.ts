@@ -1,3 +1,4 @@
+import { describe, it, expect, afterEach } from 'vitest';
 import os from 'node:os';
 import fs from 'node:fs';
 import path from 'node:path';
