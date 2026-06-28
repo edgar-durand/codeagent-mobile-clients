@@ -696,14 +696,44 @@ const headroomBudgetH: CommandHandler = async (ctx, cmd) => {
     return;
   }
 
-  // ── 5. Persist budget into process.env. ─────────────────────────────────
-  // `readHeadroomChildEnv` reads `process.env['HEADROOM_BUDGET']` at child
-  // spawn time, so setting it here ensures every future child spawn carries
-  // the budget. The proxy relaunch below also reads process.env.
+  // ── 5. Persist budget into ~/.codeam/headroom-config.json AND process.env. ──
+  // Persisting to the config file means self-hosted supervisor restarts and
+  // reboots pick up the budget via `readHeadroomChildEnv` without needing the
+  // parent process env (which is ephemeral across restarts).
+  // We also mirror to process.env so the proxy relaunch below picks them up
+  // immediately for the current process's `buildBudgetProxyArgs` call.
+  let existingConfig: {
+    enabled?: boolean;
+    agent?: string;
+    ingestUrl?: string;
+    budgetEnabled?: boolean;
+    budgetUsd?: number;
+    budgetPeriod?: string;
+  } = { enabled: true };
+  try {
+    existingConfig = JSON.parse(fs.readFileSync(headroomConfigPath(), 'utf8')) as typeof existingConfig;
+  } catch {
+    /* use defaults */
+  }
+
   if (payload.budgetEnabled && payload.budgetUsd != null) {
+    persistHeadroomConfig({
+      ...existingConfig,
+      enabled: existingConfig.enabled ?? true,
+      budgetEnabled: true,
+      budgetUsd: payload.budgetUsd,
+      budgetPeriod: (payload.budgetPeriod as 'hourly' | 'daily' | 'monthly' | undefined) ?? 'daily',
+    });
     process.env['HEADROOM_BUDGET'] = String(payload.budgetUsd);
     process.env['HEADROOM_BUDGET_PERIOD'] = payload.budgetPeriod ?? 'daily';
   } else {
+    persistHeadroomConfig({
+      ...existingConfig,
+      enabled: existingConfig.enabled ?? true,
+      budgetEnabled: false,
+      budgetUsd: undefined,
+      budgetPeriod: undefined,
+    });
     delete process.env['HEADROOM_BUDGET'];
     delete process.env['HEADROOM_BUDGET_PERIOD'];
   }

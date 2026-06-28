@@ -192,6 +192,41 @@ describe('headroom_budget handler — applies + relaunches when headroom active 
     expect(ctx.relay.sendResult).toHaveBeenCalledWith(cmd.id, 'completed', { applied: true });
   });
 
+  it('persists budget fields into headroom-config.json when budget is enabled', async () => {
+    mockHeadroomEnabled('claude');
+    const ctx = makeCtx('claude');
+    const cmd = makeCmd({ budgetEnabled: true, budgetUsd: 10, budgetPeriod: 'daily', agentId: 'claude' });
+
+    await handlers.headroom_budget!(ctx, cmd, p(cmd.payload as Record<string, unknown>));
+
+    // persistHeadroomConfig must have been called with budget fields.
+    expect(persistHeadroomConfigMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        budgetEnabled: true,
+        budgetUsd: 10,
+        budgetPeriod: 'daily',
+      }),
+    );
+  });
+
+  it('persists budgetEnabled:false into headroom-config.json when budget is cleared', async () => {
+    process.env['HEADROOM_BUDGET'] = '5';
+    process.env['HEADROOM_BUDGET_PERIOD'] = 'monthly';
+
+    mockHeadroomEnabled('claude');
+    const ctx = makeCtx('claude');
+    const cmd = makeCmd({ budgetEnabled: false, agentId: 'claude' });
+
+    await handlers.headroom_budget!(ctx, cmd, p(cmd.payload as Record<string, unknown>));
+
+    // persistHeadroomConfig must have been called with budgetEnabled: false.
+    expect(persistHeadroomConfigMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        budgetEnabled: false,
+      }),
+    );
+  });
+
   it('clears budget env vars and respawns proxy (no budget args) when budgetEnabled is false', async () => {
     // Pre-set budget vars that should be cleared.
     process.env['HEADROOM_BUDGET'] = '5';

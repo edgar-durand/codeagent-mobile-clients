@@ -768,6 +768,12 @@ interface HeadroomConfig {
   agent?: string;
   /** Full savings ingest URL (POST target). */
   ingestUrl?: string;
+  /** Whether a spend budget is active. Persisted so self-hosted restarts re-inject it. */
+  budgetEnabled?: boolean;
+  /** Budget ceiling in USD (e.g. `10`). Present only when `budgetEnabled` is true. */
+  budgetUsd?: number;
+  /** Budget reset period — mirrors `headroom proxy --budget-period`. */
+  budgetPeriod?: 'hourly' | 'daily' | 'monthly';
 }
 
 /**
@@ -895,9 +901,15 @@ export function readHeadroomChildEnv(): Record<string, string> {
       };
       // Forward budget constraints so the proxy launch and savings reporter
       // pick them up on every child spawn / supervisor restart.
-      if (process.env['HEADROOM_BUDGET']) {
-        env['HEADROOM_BUDGET'] = process.env['HEADROOM_BUDGET'];
-        env['HEADROOM_BUDGET_PERIOD'] = process.env['HEADROOM_BUDGET_PERIOD'] ?? 'daily';
+      // Read from the persisted config (not process.env) so self-hosted
+      // supervisor restarts and reboots survive without the parent process env.
+      if (
+        o.budgetEnabled === true &&
+        typeof o.budgetUsd === 'number'
+      ) {
+        env['HEADROOM_BUDGET'] = String(o.budgetUsd);
+        env['HEADROOM_BUDGET_PERIOD'] =
+          typeof o.budgetPeriod === 'string' ? o.budgetPeriod : 'daily';
       }
       return env;
     }
