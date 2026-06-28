@@ -37,7 +37,7 @@ import {
 import { showInfo } from '../../ui/banner';
 import { applyFileReview } from '../../services/apply-file-review.service';
 import { buildLinkContext } from '../link';
-import { postLinkCredential, postAiResult, postPreviewEvent, postHeadroomEvent } from '../../services/pairing.service';
+import { postLinkCredential, postAiResult, postPreviewEvent, postHeadroomEvent, postBeadsEvent } from '../../services/pairing.service';
 import {
   agentIdToHeadroomKind,
   isHeadroomSupportedAgent,
@@ -75,8 +75,12 @@ import {
 import { log } from '../../services/logger';
 import type { KeepAliveContext } from './keep-alive';
 import { removeSession } from '../../config';
-import { handleBeadsActionCommand, type StartedBeads } from '../../beads';
+import { handleBeadsActionCommand, type StartedBeads, startBeads } from '../../beads';
 import { beadsActionFromPayload } from '../../beads/wiring';
+import { configureBeads, type ConfigureBeadsDeps } from '../../beads/configure';
+import { persistBeadsConfig } from '../../beads/config-store';
+import { provisionBeads } from '../../beads/provisioner';
+import type { BeadsConfigureAction } from '@codeagent/shared';
 // Self-namespace import: `previewRestartH` invokes `startPreviewFromDetection`
 // through this object (not the direct local binding) so a unit test can
 // `vi.spyOn(handlersMod, 'startPreviewFromDetection')` and intercept the call —
@@ -621,6 +625,89 @@ const headroomConfigureH: CommandHandler = async (ctx, cmd, parsed) => {
   });
 
   await ctx.relay.sendResult(cmd.id, 'completed', result);
+};
+
+// ─── Beads configure ─────────────────────────────────────────────
+
+/**
+ * Serializes Beads SSE event POSTs. Mirrors `_headroomEmitChain` to guarantee
+ * the backend receives — and republishes — `beads_status` events strictly in
+ * emit order. A failed POST resolves to `ok:false` rather than rejecting, so
+ * the chain never breaks for later events.
+ */
+let _beadsEmitChain: Promise<unknown> = Promise.resolve();
+
+const beadsConfigureH: CommandHandler = async (ctx, cmd, parsed) => {
+  const action = parsed.action as BeadsConfigureAction | undefined;
+  if (action !== 'enable' && action !== 'disable' && action !== 'status') {
+    await ctx.relay.sendResult(cmd.id, 'failed', { error: 'action must be enable|disable|status' });
+    return;
+  }
+
+  // Use the session's own running agent — same resolution as headroom_configure.
+  let rawAgentId = ctx.agentId || (typeof parsed.agentId === 'string' ? parsed.agentId : '');
+  if (rawAgentId === 'claude_code') rawAgentId = 'claude';
+
+  const agentIds = rawAgentId && isKnownAgentId(rawAgentId) ? [rawAgentId] : [];
+
+  const deps: ConfigureBeadsDeps = {
+    provision: async () => {
+      const r = await provisionBeads({ cwd: process.cwd(), agents: agentIds });
+      return { bdAvailable: r.bdAvailable, doltAvailable: r.doltAvailable, serverUp: r.serverUp, prefix: r.prefix };
+    },
+    probe: async () => {
+      const r = await provisionBeads({ cwd: process.cwd() });
+      return { bdAvailable: r.bdAvailable, doltAvailable: r.doltAvailable, serverUp: r.serverUp, prefix: r.prefix };
+    },
+    startWatcher: async () => {
+      if (!ctx.pluginAuthToken) return;
+      const started = await startBeads({
+        sessionId: ctx.sessionId,
+        pluginId: ctx.pluginId,
+        pluginAuthToken: ctx.pluginAuthToken,
+        cwd: process.cwd(),
+        agents: agentIds,
+      });
+      if (started) {
+        ctx.beads = started;
+      }
+    },
+    stopWatcher: async () => {
+      if (ctx.beads) {
+        await ctx.beads.watcher.stop();
+        ctx.beads = null;
+      }
+    },
+    revertAgentHook: async (agent: string) => {
+      // `bd setup <recipe> --global --remove` does not exist in the bd CLI
+      // (verified: bd ships no un-setup/remove flag). The disable contract is:
+      // persist enabled:false + stop the watcher. The agent hook (CLAUDE.md
+      // SessionStart `bd prime`) is left in place — it runs at zero cost when
+      // Beads is off (bd prime fast-paths to empty). No-op + log is intentional.
+      log.info('beads', `revertAgentHook: bd has no --remove flag — leaving ${agent} hook in place (no-op disable path)`);
+    },
+    persist: (cfg) => persistBeadsConfig(cfg),
+    emit: (event) => {
+      const token = ctx.pluginAuthToken;
+      if (!token) return;
+      // Serialize: chain this POST after the previous one so the backend
+      // receives status events strictly in emit order (see `_beadsEmitChain`).
+      _beadsEmitChain = _beadsEmitChain.then(() =>
+        postBeadsEvent({
+          sessionId: ctx.sessionId,
+          pluginId: ctx.pluginId,
+          pluginAuthToken: token,
+          type: 'beads_status',
+          payload: Object.fromEntries(
+            Object.entries(event).filter(([k]) => k !== 'type'),
+          ),
+        }),
+      );
+    },
+  };
+
+  const result = await configureBeads(action, { agent: rawAgentId, cwd: process.cwd(), pluginAuthToken: ctx.pluginAuthToken }, deps);
+  await ctx.relay.sendResult(cmd.id, 'completed', result as unknown as Record<string, unknown>);
 };
 
 // ─── Terminal ─────────────────────────────────────────────────────
@@ -2040,6 +2127,7 @@ export const handlers: Record<string, CommandHandler> = {
   env_read: envReadH,
   env_write: envWriteH,
   headroom_configure: headroomConfigureH,
+  beads_configure: beadsConfigureH,
 };
 
 /**
