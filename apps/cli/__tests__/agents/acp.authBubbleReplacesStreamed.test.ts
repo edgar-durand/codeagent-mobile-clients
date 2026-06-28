@@ -245,3 +245,164 @@ describe('ACP start_task — generic failure with partial text keeps the partial
     expect(finals[0].content).toBe(PARTIAL);
   });
 });
+
+/**
+ * M-3 — fire-once guard: `_budgetReachedPosted` must prevent the
+ * `POST /api/sessions/:id/headroom-budget-reached` from firing more than
+ * once per session, even when the budget-exceeded 429 fires on two
+ * consecutive turns.
+ *
+ * Also validates I-1: when the budget signal arrives ONLY in `recentStderr`
+ * (detail is a generic connection error) the period is still correctly
+ * extracted and the offer() receives the combined haystack — so
+ * `extractBudgetPeriod` yields "hourly", not "current".
+ */
+describe('ACP handleCommand — budget-reached POST fires exactly once (fire-once guard)', () => {
+  let fetchSpy: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    fetchSpy = vi.fn(async () => ({ ok: true, status: 200 }) as Response);
+    vi.stubGlobal('fetch', fetchSpy);
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it('POSTs headroom-budget-reached ONCE when the budget 429 hits on two consecutive turns', async () => {
+    // The budget signal is ONLY in stderr (detail is a generic proxy error).
+    // This exercises the I-1 fix: offer() must receive the combined haystack
+    // so extractBudgetPeriod finds "hourly" from stderr, not "current".
+    const STDERR_BUDGET = 'Budget exceeded for hourly period';
+    const DETAIL_GENERIC = 'connect ECONNREFUSED 127.0.0.1:8787';
+
+    const publisher = new AcpPublisher({
+      sessionId: 'sess-budget-once',
+      pluginId: 'plugin-budget-1',
+      pluginAuthToken: 'tok-budget-1',
+      apiBaseUrl: 'https://api.example.test',
+    });
+    vi.spyOn(publisher, 'publishOutput').mockResolvedValue(undefined);
+    vi.spyOn(publisher, 'publishStreamingChunk').mockResolvedValue(undefined);
+    vi.spyOn(publisher, 'pushConversation').mockResolvedValue(undefined);
+    vi.spyOn(publisher, 'pushSessionList').mockResolvedValue(undefined);
+
+    // client.prompt throws with the generic detail; the budget signal lives
+    // in recentStderr — passed in as an array to handleCommand.
+    const client = {
+      prompt: vi.fn(async () => {
+        throw new Error(DETAIL_GENERIC);
+      }),
+      cancel: vi.fn(async () => undefined),
+    };
+
+    const sendResult = vi.fn(async () => undefined);
+    const relay = { sendResult };
+
+    // Shared fire-once flag — persists across both handleCommand calls,
+    // exactly as runAcpSession manages it in the real runner closure.
+    let budgetReachedPosted = false;
+    const budgetReachedFlag = {
+      get: () => budgetReachedPosted,
+      set: (v: boolean) => {
+        budgetReachedPosted = v;
+      },
+    };
+
+    // budgetRecovery spy: offer() just resolves (we only care about the POST).
+    // Typed as (commandId, blocks, haystack) → Promise<void> so the haystack
+    // arg is accessible via mock.calls[n][2] without a cast.
+    const budgetRecovery = {
+      offer: vi.fn(async (_cmdId: string, _blocks: unknown[], _haystack: string) => undefined),
+      tryRecover: vi.fn(async () => false),
+    };
+
+    const sharedOpts = {
+      agent: 'claude',
+      sessionId: 'sess-budget-once',
+      pluginId: 'plugin-budget-1',
+      pluginAuthToken: 'tok-budget-1',
+      adapter: { command: 'noop', args: [] },
+      cwd: '/tmp',
+    } as never;
+
+    const sharedHistory = {
+      appendUserPrompt: vi.fn(),
+      appendAgentReply: vi.fn(),
+      flush: vi.fn(async () => undefined),
+    } as never;
+
+    const sharedJsonl = { uploadConversationIfChanged: vi.fn(async () => undefined) } as never;
+    const sharedTurnFiles = { flushTurn: vi.fn(async () => undefined) } as never;
+
+    // recentStderr contains the budget signal — same array re-used (it's
+    // mutated in-place by the runner; we seed it for both turns here).
+    const recentStderr = [STDERR_BUDGET];
+
+    // ── Turn 1 ──────────────────────────────────────────────────────────────
+    const streaming1 = new StreamingState(publisher);
+    await handleCommand(
+      { id: 'cmd-budget-1', type: 'start_task', payload: { prompt: 'first' } } as never,
+      client as never,
+      relay as never,
+      'acp-sess-budget',
+      [],
+      streaming1,
+      sharedOpts,
+      sharedHistory,
+      sharedJsonl,
+      undefined,
+      sharedTurnFiles,
+      () => null,
+      publisher,
+      recentStderr,
+      { offer: vi.fn(async () => undefined), tryRecover: vi.fn(async () => false) } as never,
+      budgetRecovery as never,
+      budgetReachedFlag,
+    );
+
+    // After turn 1: budget-reached POST must have fired once.
+    const budgetPostsAfterTurn1 = fetchSpy.mock.calls.filter((c) =>
+      String(c[0]).includes('headroom-budget-reached'),
+    );
+    expect(budgetPostsAfterTurn1).toHaveLength(1);
+
+    // I-1 check: offer() must receive the combined haystack; the period
+    // captured in the offer call must be "hourly" (from stderr), not "current".
+    expect(budgetRecovery.offer).toHaveBeenCalledTimes(1);
+    const offerHaystack = budgetRecovery.offer.mock.calls[0][2];
+    expect(offerHaystack).toContain(STDERR_BUDGET);
+
+    // ── Turn 2 ──────────────────────────────────────────────────────────────
+    const streaming2 = new StreamingState(publisher);
+    await handleCommand(
+      { id: 'cmd-budget-2', type: 'start_task', payload: { prompt: 'second' } } as never,
+      client as never,
+      relay as never,
+      'acp-sess-budget',
+      [],
+      streaming2,
+      sharedOpts,
+      sharedHistory,
+      sharedJsonl,
+      undefined,
+      sharedTurnFiles,
+      () => null,
+      publisher,
+      recentStderr,
+      { offer: vi.fn(async () => undefined), tryRecover: vi.fn(async () => false) } as never,
+      budgetRecovery as never,
+      budgetReachedFlag,
+    );
+
+    // After turn 2: the fire-once guard must have blocked the second POST —
+    // total budget-reached POSTs must still be exactly 1.
+    const budgetPostsAfterTurn2 = fetchSpy.mock.calls.filter((c) =>
+      String(c[0]).includes('headroom-budget-reached'),
+    );
+    expect(budgetPostsAfterTurn2).toHaveLength(1);
+
+    // offer() must have been called on turn 2 as well (recovery is still offered).
+    expect(budgetRecovery.offer).toHaveBeenCalledTimes(2);
+  });
+});

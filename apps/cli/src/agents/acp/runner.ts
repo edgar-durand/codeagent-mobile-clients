@@ -1915,7 +1915,7 @@ export async function handleCommand(
               period: extractBudgetPeriod(`${detail}\n${recentStderr.join('\n')}`),
             });
           }
-          await budgetRecovery.offer(cmd.id, blocks, detail);
+          await budgetRecovery.offer(cmd.id, blocks, `${detail}\n${recentStderr.join('\n')}`);
           return;
         }
         // 1M-context usage-credits gate (Rafael 2026-06-24): offer the
