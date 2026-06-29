@@ -7,22 +7,26 @@ import { execFileSync } from 'node:child_process';
  *
  * POSIX: chmod 0o600.
  * Windows: icacls — remove inheritance, grant only the current user Full access.
- *           Best-effort: an icacls failure is caught and never propagates.
+ *
+ * Best-effort on BOTH platforms: any failure (icacls non-zero, a chmod on a
+ * read-only FS, or a race where the file vanished after rename) is caught and
+ * never propagates — restricting permissions must NEVER break the file write
+ * it follows.
  */
 export function restrictToOwner(filePath: string): void {
-  if (process.platform === 'win32') {
-    try {
+  try {
+    if (process.platform === 'win32') {
       const username = os.userInfo().username;
       execFileSync(
         'icacls',
         [filePath, '/inheritance:r', '/grant:r', `${username}:F`],
         { stdio: 'ignore' },
       );
-    } catch {
-      // best-effort — never break the caller
+    } else {
+      fs.chmodSync(filePath, 0o600);
     }
-  } else {
-    fs.chmodSync(filePath, 0o600);
+  } catch {
+    // best-effort on both platforms — never break the caller
   }
 }
 
