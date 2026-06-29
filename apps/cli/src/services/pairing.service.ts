@@ -156,7 +156,17 @@ export async function fetchCurrentPluginAuthToken(
   try {
     const result = await _transport.postJson(
       `${API_BASE}/api/pairing/reconnect`,
-      { sessionId, pluginId },
+      {
+        sessionId,
+        pluginId,
+        // Send the running CLI version so the backend keeps
+        // PairedSession.ideVersion current across restarts. This fixes the
+        // stale "CLI update available" banner that showed an outdated version
+        // after the CLI restarted on a new release and took the reconnect
+        // path (which previously never updated ideVersion). Backends older
+        // than the matching fix ignore the unknown field (backward-compat).
+        ideVersion: pkg.version,
+      },
       // SEC: prove possession so the gated /reconnect returns the token.
       // Omitted for legacy sessions (no secret) → backend legacy path.
       pollSecret ? { 'X-Plugin-Poll-Secret': pollSecret } : undefined,
