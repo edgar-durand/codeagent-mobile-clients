@@ -4,6 +4,26 @@ All notable changes to `codeam-cli` are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.51.0] — 2026-06-29
+
+### Added
+
+- **shared:** Add Headroom budget types and command interface
+- **cli:** Add Headroom proxy --budget arg builder + wire into spawn sites
+- **cli:** Headroom_budget relay handler (relaunch proxy with budget)
+- **cli:** Report period spend/budget from headroom /stats
+- **cli:** Detect Headroom budget-exceeded 429, offer pause/raise recovery
+
+### Fixed
+
+- **cli:** Persist headroom budget fields in headroom-config.json for self-hosted durability
+- **cli:** Offer() receives combined haystack + fire-once budget POST test
+- **cli:** Clear HEADROOM_BUDGET env from relaunch proxy env (pause clears budget cap)
+
+### Tests
+
+- **cli:** Gated real headroom budget integration
+
 ## [2.50.0] — 2026-06-28
 
 ### Added
