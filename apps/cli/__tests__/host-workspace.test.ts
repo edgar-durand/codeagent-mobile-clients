@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { isOwnerOnly } from '../src/util/restrict-to-owner';
 
 // Capture the args/options every `git clone` is invoked with. `execFile` is
 // promisified inside workspace.ts, so the mock must follow the
@@ -146,12 +147,7 @@ describe('prepareWorkspace — clone auth + no-hang env', () => {
     expect(fs.readFileSync(credFile, 'utf8')).toContain(
       'https://x-access-token:ghs_TOKEN@github.com',
     );
-    // Unix file modes don't exist on Windows (NTFS uses ACLs; chmod 0o600 is a
-    // no-op there), so the 0o600 assertion is unix-only — mirrors the guard in
-    // host-workspace-credentials.test.ts.
-    if (process.platform !== 'win32') {
-      expect(fs.statSync(credFile).mode & 0o777).toBe(0o600);
-    }
+    expect(isOwnerOnly(credFile)).toBe(true);
   });
 
   it('still sets the non-interactive env when no cloneToken is supplied (and configures NO helper)', async () => {

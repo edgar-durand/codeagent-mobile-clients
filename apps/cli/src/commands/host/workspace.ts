@@ -28,6 +28,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { restrictToOwner } from '../../util/restrict-to-owner';
 
 const execFileP = promisify(execFile);
 
@@ -148,11 +149,7 @@ export async function configureGitCredentials(
   const credFile = path.join(dest, '.git', 'codeam-credentials');
   // 0600 credentials file holding the token, inside .git (never committed/pushed).
   fs.writeFileSync(credFile, `https://x-access-token:${cloneToken}@github.com\n`, { mode: 0o600 });
-  try {
-    fs.chmodSync(credFile, 0o600); // belt-and-suspenders if a prior umask widened it
-  } catch {
-    /* best-effort */
-  }
+  restrictToOwner(credFile);
 
   const env = nonInteractiveGitEnv();
   const git = (args: string[]): Promise<unknown> =>

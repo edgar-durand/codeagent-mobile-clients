@@ -30,6 +30,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import type { AgentAuth, AgentId } from '@codeagent/shared';
+import { restrictToOwner } from '../../util/restrict-to-owner';
 
 /**
  * Map the public LinkedAgent id the deploy command carries
@@ -78,7 +79,8 @@ function writeFile0600(filePath: string, contents: string): void {
   fs.writeFileSync(filePath, contents, { encoding: 'utf8', mode: 0o600 });
   // mkdir/writeFile honour the umask, so re-assert the mode explicitly —
   // the credential file must be 0600 regardless of the process umask.
-  fs.chmodSync(filePath, 0o600);
+  // On Windows, restrictToOwner applies icacls ACLs instead of chmod.
+  restrictToOwner(filePath);
 }
 
 /** Remove a stale credential file if present (best-effort, never throws). */
