@@ -48,6 +48,7 @@ import {
 } from '../../commands/host-agent';
 import { buildBudgetProxyArgs } from '../../services/headroom/budget-args';
 import { configureHeadroom } from '../../services/headroom/configure';
+import { applyBudgetToHeadroom, makeRealApplyBudgetDeps, type BudgetSpec } from '../../services/headroom/budget-relaunch';
 import { HeadroomStatsReporter, mapStatsToSavings, type StatsShape, type Savings } from '../../services/headroom/stats-reporter';
 import { AGENT_REGISTRY, isKnownAgentId, PREVIEW_DETECT_PROMPT, type AgentId, type PreviewDetection, type HeadroomBudgetCommand } from '@codeagent/shared';
 import * as previewSvc from '../../services/preview';
@@ -743,42 +744,20 @@ const headroomBudgetH: CommandHandler = async (ctx, cmd) => {
     delete process.env['HEADROOM_BUDGET_PERIOD'];
   }
 
-  // ── 6. Kill the running proxy. ───────────────────────────────────────────
-  try {
-    const killer = spawn('pkill', ['-TERM', '-f', 'headroom.*proxy'], {
-      detached: true,
-      stdio: 'ignore',
-    });
-    killer.once('error', () => { /* pkill absent on minimal box — ignore */ });
-    killer.unref();
-  } catch {
-    /* best-effort — proxy may already be dead */
-  }
+  // ── 6+7. Kill+respawn OR amend supervised deployment manifest ───────────────
+  // When `headroom install` manages the proxy, direct kill+respawn loses the
+  // port race — the supervisor instantly respawns without --budget.
+  // applyBudgetToHeadroom detects supervised deployments (port===8787 manifests
+  // at ~/.headroom/deploy/*/manifest.json) and routes accordingly.
+  const budgetSpec: BudgetSpec | null =
+    payload.budgetEnabled && payload.budgetUsd != null
+      ? {
+          budgetUsd: payload.budgetUsd,
+          budgetPeriod: (payload.budgetPeriod as 'hourly' | 'daily' | 'monthly' | undefined) ?? 'daily',
+        }
+      : null;
 
-  // ── 7. Relaunch proxy with new budget args. ──────────────────────────────
-  // Mirrors the proxy spawn in setupHeadroomForSelfHosted: detached, unref'd,
-  // HEADROOM_KOMPRESS_BACKEND=onnx_cpu pinned. No pip/init/model — just re-spawn.
-  try {
-    const proxyEnv = { ...process.env, HEADROOM_KOMPRESS_BACKEND: 'onnx_cpu' };
-    const proxy = spawn(
-      'headroom',
-      ['proxy', '--port', '8787', ...buildBudgetProxyArgs(proxyEnv)],
-      {
-        stdio: 'ignore',
-        detached: true,
-        env: proxyEnv,
-      },
-    );
-    proxy.once('error', (e: Error) => {
-      log.warn('headroom-budget', `proxy relaunch error (best-effort): ${e.message}`);
-    });
-    proxy.unref();
-  } catch (e) {
-    log.warn(
-      'headroom-budget',
-      `proxy relaunch failed (best-effort): ${e instanceof Error ? e.message : String(e)}`,
-    );
-  }
+  await applyBudgetToHeadroom(budgetSpec, makeRealApplyBudgetDeps());
 
   await ctx.relay.sendResult(cmd.id, 'completed', { applied: true });
 };
