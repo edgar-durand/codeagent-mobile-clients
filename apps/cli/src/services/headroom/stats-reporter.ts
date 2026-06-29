@@ -69,6 +69,36 @@ export interface StatsShape {
       cache_read_tokens?: number;
     };
   };
+  /**
+   * Top-level cost block (NOT under summary) — verified live on headroom v0.27.0
+   * when the proxy is started with `--budget <USD> --budget-period <period>`.
+   *
+   * `cost_with_headroom_usd` is the actual amount paid by the user this period
+   * (after Headroom savings are applied). `budget_limit_usd` and `budget_period`
+   * are only present when the proxy was started with `--budget`.
+   */
+  cost?: {
+    /** Actual spend this period (USD) — what the user was billed after savings. */
+    cost_with_headroom_usd?: number;
+    /** The configured per-period budget cap (USD). Only present when --budget used. */
+    budget_limit_usd?: number;
+    /** Budget reset cadence ("hourly"|"daily"|"monthly"). Only present with --budget. */
+    budget_period?: string;
+  };
+}
+
+/**
+ * Budget context derived from /stats + configured env for a single reporter tick.
+ * Forwarded as the second argument to `postSavings`; undefined when no budget is
+ * configured (additive — callers that don't need it are unaffected).
+ */
+export interface BudgetContext {
+  /** Spend so far this period (USD) — `cost.cost_with_headroom_usd` from /stats. */
+  periodSpendUsd: number;
+  /** The user-configured per-period budget cap (USD) — from HEADROOM_BUDGET env. */
+  budgetUsd: number;
+  /** Budget reset cadence — from HEADROOM_BUDGET_PERIOD env (default "daily"). */
+  budgetPeriod: string;
 }
 
 const ZERO: Savings = {
@@ -161,11 +191,28 @@ export function mapStatsToSavings(
 
 export interface ReporterDeps {
   fetchStats: () => Promise<StatsShape>;            // GET localhost:8787/stats
-  postSavings: (delta: Savings) => Promise<void>;   // POST to the backend ingest endpoint
+  /** Called when savings advanced. `budget` is undefined when no budget is configured. */
+  postSavings: (delta: Savings, budget?: BudgetContext) => Promise<void>;
   intervalMs?: number;                              // default from HEADROOM_STATS_POLL_INTERVAL_MS or 30_000
   /** Input $/M for the running agent's model — values the compressed-away
    *  tokens. Defaults to Claude Sonnet ($3/M) when the caller can't resolve it. */
   inputPricePerMillionUsd?: number;
+  /**
+   * Returns the configured budget from the environment, or `null` when no budget
+   * is set. Defaults to reading `HEADROOM_BUDGET` / `HEADROOM_BUDGET_PERIOD` from
+   * `process.env` — injectable for testing without mutating process.env.
+   */
+  getBudgetEnv?: () => { budgetUsd: number; budgetPeriod: string } | null;
+}
+
+/** Default getBudgetEnv: reads HEADROOM_BUDGET / HEADROOM_BUDGET_PERIOD from process.env. */
+function defaultGetBudgetEnv(): { budgetUsd: number; budgetPeriod: string } | null {
+  const raw = process.env['HEADROOM_BUDGET'];
+  if (!raw) return null;
+  const budgetUsd = Number(raw);
+  if (!isFinite(budgetUsd) || budgetUsd <= 0) return null;
+  const budgetPeriod = process.env['HEADROOM_BUDGET_PERIOD'] ?? 'daily';
+  return { budgetUsd, budgetPeriod };
 }
 
 /**
@@ -185,8 +232,9 @@ export class HeadroomStatsReporter {
   }
   async tick(): Promise<void> {
     try {
+      const stats = await this.deps.fetchStats();
       const { next, delta } = mapStatsToSavings(
-        await this.deps.fetchStats(),
+        stats,
         this.prev,
         this.deps.inputPricePerMillionUsd ?? DEFAULT_INPUT_PRICE_PER_MILLION,
       );
@@ -202,7 +250,17 @@ export class HeadroomStatsReporter {
         delta.cacheReadTokens > 0 ||
         delta.cacheSavingsUsd > 0
       ) {
-        await this.deps.postSavings(delta);
+        // Build optional budget context — additive: undefined when no budget set.
+        const getBudgetEnv = this.deps.getBudgetEnv ?? defaultGetBudgetEnv;
+        const budgetEnv = getBudgetEnv();
+        const budget: BudgetContext | undefined = budgetEnv
+          ? {
+              periodSpendUsd: stats.cost?.cost_with_headroom_usd ?? 0,
+              budgetUsd: budgetEnv.budgetUsd,
+              budgetPeriod: budgetEnv.budgetPeriod,
+            }
+          : undefined;
+        await this.deps.postSavings(delta, budget);
       }
     } catch {
       /* best-effort observability — never throw from the reporter */

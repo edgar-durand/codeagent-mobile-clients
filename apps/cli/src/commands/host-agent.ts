@@ -83,6 +83,7 @@ import {
   type Savings,
   type StatsShape,
 } from '../services/headroom/stats-reporter';
+import { buildBudgetProxyArgs } from '../services/headroom/budget-args';
 import { compareSemver } from '../lib/updateNotifier';
 
 /** Liveness heartbeat cadence. State liveness only — NOT command polling. */
@@ -164,7 +165,7 @@ export function maybeStartHeadroomReporter(ctx: HeadroomReporterCtx): HeadroomSt
         // res.json() returns unknown; cast at this validated boundary.
         return res.json() as Promise<StatsShape>;
       },
-      postSavings: async (delta: Savings) => {
+      postSavings: async (delta, budget) => {
         await fetch(ingestUrl, {
           method: 'POST',
           headers: {
@@ -176,6 +177,11 @@ export function maybeStartHeadroomReporter(ctx: HeadroomReporterCtx): HeadroomSt
             pluginId: ctx.pluginId,
             agentId: process.env['HEADROOM_AGENT'] ?? 'claude',
             savings: delta,
+            ...(budget ? {
+              periodSpendUsd: budget.periodSpendUsd,
+              budgetUsd: budget.budgetUsd,
+              budgetPeriod: budget.budgetPeriod,
+            } : {}),
           }),
         });
       },
@@ -235,7 +241,7 @@ export function maybeResumeLocalHeadroomReporter(ctx: {
       // Body MUST match HeadroomSavingsDto + PluginAuthGuard (sessionId +
       // pluginId in the body) — same shape as the codespace reporter above and
       // the on-demand `startReporter` in handlers.ts.
-      postSavings: async (delta: Savings) => {
+      postSavings: async (delta, budget) => {
         await fetch(ingestUrl, {
           method: 'POST',
           headers: {
@@ -247,6 +253,11 @@ export function maybeResumeLocalHeadroomReporter(ctx: {
             pluginId: ctx.pluginId,
             agentId: agent,
             savings: delta,
+            ...(budget ? {
+              periodSpendUsd: budget.periodSpendUsd,
+              budgetUsd: budget.budgetUsd,
+              budgetPeriod: budget.budgetPeriod,
+            } : {}),
           }),
         });
       },
@@ -767,6 +778,12 @@ interface HeadroomConfig {
   agent?: string;
   /** Full savings ingest URL (POST target). */
   ingestUrl?: string;
+  /** Whether a spend budget is active. Persisted so self-hosted restarts re-inject it. */
+  budgetEnabled?: boolean;
+  /** Budget ceiling in USD (e.g. `10`). Present only when `budgetEnabled` is true. */
+  budgetUsd?: number;
+  /** Budget reset period — mirrors `headroom proxy --budget-period`. */
+  budgetPeriod?: 'hourly' | 'daily' | 'monthly';
 }
 
 /**
@@ -887,11 +904,24 @@ export function readHeadroomChildEnv(): Record<string, string> {
       typeof o.ingestUrl === 'string' &&
       o.ingestUrl.length > 0
     ) {
-      return {
+      const env: Record<string, string> = {
         HEADROOM_ENABLED: '1',
         HEADROOM_AGENT: o.agent,
         HEADROOM_SAVINGS_INGEST_URL: o.ingestUrl,
       };
+      // Forward budget constraints so the proxy launch and savings reporter
+      // pick them up on every child spawn / supervisor restart.
+      // Read from the persisted config (not process.env) so self-hosted
+      // supervisor restarts and reboots survive without the parent process env.
+      if (
+        o.budgetEnabled === true &&
+        typeof o.budgetUsd === 'number'
+      ) {
+        env['HEADROOM_BUDGET'] = String(o.budgetUsd);
+        env['HEADROOM_BUDGET_PERIOD'] =
+          typeof o.budgetPeriod === 'string' ? o.budgetPeriod : 'daily';
+      }
+      return env;
     }
     return {};
   } catch {
@@ -1372,11 +1402,16 @@ export async function setupHeadroomForSelfHosted(
   // cache at bind time, so the first prompt is compressed without a stall.
   onProgress('proxy');
   try {
-    const proxy = spawn('headroom', ['proxy', '--port', '8787'], {
-      stdio: 'ignore',
-      detached: true,
-      env: { ...process.env, HEADROOM_KOMPRESS_BACKEND: 'onnx_cpu' },
-    });
+    const proxyEnv = { ...process.env, HEADROOM_KOMPRESS_BACKEND: 'onnx_cpu' };
+    const proxy = spawn(
+      'headroom',
+      ['proxy', '--port', '8787', ...buildBudgetProxyArgs(proxyEnv)],
+      {
+        stdio: 'ignore',
+        detached: true,
+        env: proxyEnv,
+      },
+    );
     // Consume the error event so Node doesn't throw an uncaught exception when
     // headroom is not on PATH (e.g. installed to a user-local dir not yet on
     // the current PATH). The outer try/catch only catches synchronous throws.

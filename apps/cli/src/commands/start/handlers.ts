@@ -46,9 +46,10 @@ import {
   restoreAgentHeadroomConfig,
   setupHeadroomForSelfHosted,
 } from '../../commands/host-agent';
+import { buildBudgetProxyArgs } from '../../services/headroom/budget-args';
 import { configureHeadroom } from '../../services/headroom/configure';
 import { HeadroomStatsReporter, mapStatsToSavings, type StatsShape, type Savings } from '../../services/headroom/stats-reporter';
-import { AGENT_REGISTRY, isKnownAgentId, PREVIEW_DETECT_PROMPT, type AgentId, type PreviewDetection } from '@codeagent/shared';
+import { AGENT_REGISTRY, isKnownAgentId, PREVIEW_DETECT_PROMPT, type AgentId, type PreviewDetection, type HeadroomBudgetCommand } from '@codeagent/shared';
 import * as previewSvc from '../../services/preview';
 import {
   activePreviews,
@@ -559,7 +560,7 @@ const headroomConfigureH: CommandHandler = async (ctx, cmd, parsed) => {
           const res = await fetch('http://localhost:8787/stats');
           return res.json() as Promise<StatsShape>;
         },
-        postSavings: async (delta: Savings) => {
+        postSavings: async (delta, budget) => {
           if (!opts.ingestUrl) return;
           await fetch(opts.ingestUrl, {
             method: 'POST',
@@ -579,6 +580,11 @@ const headroomConfigureH: CommandHandler = async (ctx, cmd, parsed) => {
               pluginId: ctx.pluginId,
               agentId: opts.agent,
               savings: delta,
+              ...(budget ? {
+                periodSpendUsd: budget.periodSpendUsd,
+                budgetUsd: budget.budgetUsd,
+                budgetPeriod: budget.budgetPeriod,
+              } : {}),
             }),
           });
         },
@@ -625,6 +631,156 @@ const headroomConfigureH: CommandHandler = async (ctx, cmd, parsed) => {
   });
 
   await ctx.relay.sendResult(cmd.id, 'completed', result);
+};
+
+// ─── Headroom budget ───────────────────────────────────────────────────────
+
+/**
+ * `headroom_budget` relay handler.
+ *
+ * The backend fans this command to ALL active relay sessions for the user
+ * (PairedSession has no agentId on the server). This handler therefore guards
+ * on three conditions before touching anything:
+ *   1. Headroom is ACTIVE (enabled) in THIS session's persisted config.
+ *   2. This session's agent matches the command's `payload.agentId` (the
+ *      backend carrier field that lets the CLI discriminate per-agent).
+ *   3. `isHeadroomSupportedAgent(agent)` — cursor/gemini/aider are never
+ *      Headroom-wrappable; skip silently so their sessions are unaffected.
+ *
+ * When all three pass:
+ *   - Set/clear `HEADROOM_BUDGET` / `HEADROOM_BUDGET_PERIOD` on `process.env`
+ *     so `readHeadroomChildEnv` picks them up on any future child spawn.
+ *   - Kill the running proxy (pkill -TERM -f 'headroom.*proxy').
+ *   - Relaunch the proxy detached with `buildBudgetProxyArgs` so it enforces
+ *     the new budget immediately (no pip/init/model steps — just re-spawn).
+ *   - Return `relay.sendResult(cmd.id, 'completed', { applied: true })`.
+ *
+ * Otherwise: no-op → `{ applied: false }` (no proxy restart, no env mutation).
+ */
+const headroomBudgetH: CommandHandler = async (ctx, cmd) => {
+  const payload = cmd.payload as unknown as HeadroomBudgetCommand;
+
+  // ── 1. Resolve this session's agent (same pattern as headroom_configure). ──
+  // ctx.agentId (set by start.ts from session.agent) is authoritative.
+  // payload.agentId is the backend-supplied carrier for the guard — used to
+  // identify WHICH agent's budget is being set; we compare it against ctx.agentId.
+  let rawAgentId = ctx.agentId || (typeof payload.agentId === 'string' ? payload.agentId : '');
+  if (rawAgentId === 'claude_code') rawAgentId = 'claude';
+
+  // Normalise the payload carrier too, for comparison.
+  let payloadAgentId = typeof payload.agentId === 'string' ? payload.agentId : '';
+  if (payloadAgentId === 'claude_code') payloadAgentId = 'claude';
+
+  // ── 2. Guard: must be a supported agent. ────────────────────────────────
+  if (!rawAgentId || !isHeadroomSupportedAgent(rawAgentId)) {
+    await ctx.relay.sendResult(cmd.id, 'completed', { applied: false });
+    return;
+  }
+
+  // ── 3. Guard: payload.agentId must target THIS session's agent. ─────────
+  // The backend sends the same command to every open session. Only the session
+  // whose agent matches the budget target should apply it.
+  if (!payloadAgentId || payloadAgentId !== rawAgentId) {
+    await ctx.relay.sendResult(cmd.id, 'completed', { applied: false });
+    return;
+  }
+
+  // ── 4. Guard: Headroom must be ACTIVE in this session. ─────────────────
+  let headroomActive = false;
+  try {
+    const raw = JSON.parse(fs.readFileSync(headroomConfigPath(), 'utf8')) as {
+      enabled?: boolean;
+      agent?: string;
+    };
+    headroomActive = raw.enabled === true;
+  } catch {
+    /* no config file or bad JSON — treat as inactive */
+  }
+  if (!headroomActive) {
+    await ctx.relay.sendResult(cmd.id, 'completed', { applied: false });
+    return;
+  }
+
+  // ── 5. Persist budget into ~/.codeam/headroom-config.json AND process.env. ──
+  // Persisting to the config file means self-hosted supervisor restarts and
+  // reboots pick up the budget via `readHeadroomChildEnv` without needing the
+  // parent process env (which is ephemeral across restarts).
+  // We also mirror to process.env so the proxy relaunch below picks them up
+  // immediately for the current process's `buildBudgetProxyArgs` call.
+  let existingConfig: {
+    enabled?: boolean;
+    agent?: string;
+    ingestUrl?: string;
+    budgetEnabled?: boolean;
+    budgetUsd?: number;
+    budgetPeriod?: string;
+  } = { enabled: true };
+  try {
+    existingConfig = JSON.parse(fs.readFileSync(headroomConfigPath(), 'utf8')) as typeof existingConfig;
+  } catch {
+    /* use defaults */
+  }
+
+  if (payload.budgetEnabled && payload.budgetUsd != null) {
+    persistHeadroomConfig({
+      ...existingConfig,
+      enabled: existingConfig.enabled ?? true,
+      budgetEnabled: true,
+      budgetUsd: payload.budgetUsd,
+      budgetPeriod: (payload.budgetPeriod as 'hourly' | 'daily' | 'monthly' | undefined) ?? 'daily',
+    });
+    process.env['HEADROOM_BUDGET'] = String(payload.budgetUsd);
+    process.env['HEADROOM_BUDGET_PERIOD'] = payload.budgetPeriod ?? 'daily';
+  } else {
+    persistHeadroomConfig({
+      ...existingConfig,
+      enabled: existingConfig.enabled ?? true,
+      budgetEnabled: false,
+      budgetUsd: undefined,
+      budgetPeriod: undefined,
+    });
+    delete process.env['HEADROOM_BUDGET'];
+    delete process.env['HEADROOM_BUDGET_PERIOD'];
+  }
+
+  // ── 6. Kill the running proxy. ───────────────────────────────────────────
+  try {
+    const killer = spawn('pkill', ['-TERM', '-f', 'headroom.*proxy'], {
+      detached: true,
+      stdio: 'ignore',
+    });
+    killer.once('error', () => { /* pkill absent on minimal box — ignore */ });
+    killer.unref();
+  } catch {
+    /* best-effort — proxy may already be dead */
+  }
+
+  // ── 7. Relaunch proxy with new budget args. ──────────────────────────────
+  // Mirrors the proxy spawn in setupHeadroomForSelfHosted: detached, unref'd,
+  // HEADROOM_KOMPRESS_BACKEND=onnx_cpu pinned. No pip/init/model — just re-spawn.
+  try {
+    const proxyEnv = { ...process.env, HEADROOM_KOMPRESS_BACKEND: 'onnx_cpu' };
+    const proxy = spawn(
+      'headroom',
+      ['proxy', '--port', '8787', ...buildBudgetProxyArgs(proxyEnv)],
+      {
+        stdio: 'ignore',
+        detached: true,
+        env: proxyEnv,
+      },
+    );
+    proxy.once('error', (e: Error) => {
+      log.warn('headroom-budget', `proxy relaunch error (best-effort): ${e.message}`);
+    });
+    proxy.unref();
+  } catch (e) {
+    log.warn(
+      'headroom-budget',
+      `proxy relaunch failed (best-effort): ${e instanceof Error ? e.message : String(e)}`,
+    );
+  }
+
+  await ctx.relay.sendResult(cmd.id, 'completed', { applied: true });
 };
 
 // ─── Beads configure ─────────────────────────────────────────────
@@ -2125,6 +2281,7 @@ export const handlers: Record<string, CommandHandler> = {
   env_read: envReadH,
   env_write: envWriteH,
   headroom_configure: headroomConfigureH,
+  headroom_budget: headroomBudgetH,
   beads_configure: beadsConfigureH,
 };
 

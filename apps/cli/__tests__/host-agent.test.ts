@@ -2643,6 +2643,79 @@ describe('readHeadroomChildEnv — persisted config → child env', () => {
     expect(leftovers).toEqual([]);
     expect(readHeadroomChildEnv().HEADROOM_AGENT).toBe('codex');
   });
+
+  it('returns HEADROOM_BUDGET + HEADROOM_BUDGET_PERIOD when persisted config has budget', () => {
+    persistHeadroomConfig({
+      enabled: true,
+      agent: 'claude',
+      ingestUrl: 'https://ingest.test/savings',
+      budgetEnabled: true,
+      budgetUsd: 10,
+      budgetPeriod: 'daily',
+    });
+
+    expect(readHeadroomChildEnv()).toEqual({
+      HEADROOM_ENABLED: '1',
+      HEADROOM_AGENT: 'claude',
+      HEADROOM_SAVINGS_INGEST_URL: 'https://ingest.test/savings',
+      HEADROOM_BUDGET: '10',
+      HEADROOM_BUDGET_PERIOD: 'daily',
+    });
+  });
+
+  it('returns HEADROOM_BUDGET with default period "daily" when budgetPeriod is absent', () => {
+    persistHeadroomConfig({
+      enabled: true,
+      agent: 'codex',
+      ingestUrl: 'https://ingest.test/savings',
+      budgetEnabled: true,
+      budgetUsd: 5,
+    });
+
+    const env = readHeadroomChildEnv();
+    expect(env['HEADROOM_BUDGET']).toBe('5');
+    expect(env['HEADROOM_BUDGET_PERIOD']).toBe('daily');
+  });
+
+  it('omits HEADROOM_BUDGET when budgetEnabled is false in persisted config', () => {
+    persistHeadroomConfig({
+      enabled: true,
+      agent: 'claude',
+      ingestUrl: 'https://ingest.test/savings',
+      budgetEnabled: false,
+    });
+
+    const env = readHeadroomChildEnv();
+    expect(env['HEADROOM_BUDGET']).toBeUndefined();
+    expect(env['HEADROOM_BUDGET_PERIOD']).toBeUndefined();
+  });
+
+  it('omits HEADROOM_BUDGET when budgetEnabled is true but budgetUsd is absent', () => {
+    persistHeadroomConfig({
+      enabled: true,
+      agent: 'claude',
+      ingestUrl: 'https://ingest.test/savings',
+      budgetEnabled: true,
+      // budgetUsd deliberately omitted
+    });
+
+    const env = readHeadroomChildEnv();
+    expect(env['HEADROOM_BUDGET']).toBeUndefined();
+    expect(env['HEADROOM_BUDGET_PERIOD']).toBeUndefined();
+  });
+
+  it('omits HEADROOM_BUDGET when config has no budget fields (backward compat with old configs)', () => {
+    // Old config without budget fields — must NOT inject budget vars.
+    persistHeadroomConfig({
+      enabled: true,
+      agent: 'claude',
+      ingestUrl: 'https://ingest.test/savings',
+    });
+
+    const env = readHeadroomChildEnv();
+    expect(env['HEADROOM_BUDGET']).toBeUndefined();
+    expect(env['HEADROOM_BUDGET_PERIOD']).toBeUndefined();
+  });
 });
 
 describe('HostAgentSupervisor — deploy persists headroom config', () => {
