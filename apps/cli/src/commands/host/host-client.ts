@@ -193,6 +193,9 @@ export function saveHostIdentity(identity: SealedHostIdentity): void {
   fs.chmodSync(file, 0o600);
 }
 
+/** Machine-readable error codes the backend returns for terminal enroll failures. */
+const TERMINAL_ENROLL_CODES = new Set(['ENROLL_TOKEN_EXPIRED', 'ENROLL_TOKEN_INVALID'] as const);
+
 /**
  * A backend rejection that carries the HTTP status, so callers can tell a
  * genuine auth-rejection (the host was deleted / its token revoked) apart
@@ -205,6 +208,12 @@ export class HostHttpError extends Error {
     message: string,
     /** The HTTP status the backend returned (0 for a non-HTTP failure). */
     readonly status: number,
+    /**
+     * The machine-readable error code from the backend response body
+     * (e.g. `ENROLL_TOKEN_EXPIRED`, `ENROLL_TOKEN_INVALID`). Present only
+     * when the backend returned a structured `{ error: { code } }` body.
+     */
+    readonly code?: string,
   ) {
     super(message);
     this.name = 'HostHttpError';
@@ -218,6 +227,19 @@ export class HostHttpError extends Error {
   get isAuthRejection(): boolean {
     return this.status === 401 || this.status === 403 || this.status === 404;
   }
+
+  /**
+   * True iff the enroll token is permanently unusable: the backend returned
+   * a terminal 4xx (410 Gone for expired/replayed, 400 Bad Request for
+   * malformed/invalid) with a stable `ENROLL_TOKEN_*` error code.
+   *
+   * These failures must NOT be retried — the token will never become valid
+   * again. The host-agent must surface a clear message and exit so the user
+   * knows to generate a new token in the app.
+   */
+  get isTerminalEnrollError(): boolean {
+    return typeof this.code === 'string' && TERMINAL_ENROLL_CODES.has(this.code as never);
+  }
 }
 
 /**
@@ -228,6 +250,16 @@ export class HostHttpError extends Error {
  */
 export function isHostAuthRejection(err: unknown): boolean {
   return err instanceof HostHttpError && err.isAuthRejection;
+}
+
+/**
+ * True iff the error is a terminal enroll-token failure — the token is
+ * permanently unusable (expired, replayed, or structurally invalid). The
+ * host-agent must NOT retry on these; it must surface a clear message and
+ * stop so the user generates a fresh token in the app.
+ */
+export function isTerminalEnrollError(err: unknown): boolean {
+  return err instanceof HostHttpError && err.isTerminalEnrollError;
 }
 
 /**
@@ -255,10 +287,11 @@ async function postJson<T>(pathname: string, body: Record<string, unknown>): Pro
     | { success: true; data: T }
     | { success: false; error?: { code?: string; message?: string } };
   if (!res.ok || !json.success) {
-    const err = !json.success ? json.error : undefined;
+    const errBody = !json.success ? json.error : undefined;
     throw new HostHttpError(
-      `${pathname} failed (${err?.code ?? `HTTP_${res.status}`}): ${err?.message ?? res.statusText}`,
+      `${pathname} failed (${errBody?.code ?? `HTTP_${res.status}`}): ${errBody?.message ?? res.statusText}`,
       res.status,
+      errBody?.code,
     );
   }
   return json.data;

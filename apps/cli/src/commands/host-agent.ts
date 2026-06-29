@@ -57,6 +57,7 @@ import { restrictToOwner } from '../util/restrict-to-owner';
 import {
   deleteHostIdentity,
   isHostAuthRejection,
+  isTerminalEnrollError,
   loadHostIdentity,
   MetricsCollector,
   redeemEnrollToken,
@@ -2544,9 +2545,23 @@ export async function resolveHostIdentity(
       );
       return identity;
     } catch (err) {
-      // Redeem failed — almost always because the token was already
-      // consumed (a plain restart with the same unit env). Fall back to the
-      // sealed identity if we have one; otherwise the failure is real.
+      // Terminal 4xx from the backend: the enroll token is permanently
+      // unusable (expired, replayed, malformed, or bad signature). Do NOT
+      // fall back to the sealed identity — the user explicitly ran the
+      // installer to re-enroll, so a silent fall-back would leave them on
+      // a stale/deleted host. Surface a clear message instead so they know
+      // to generate a fresh token in the app.
+      if (isTerminalEnrollError(err)) {
+        throw new Error(
+          'Enrollment token expired or invalid — generate a new one in the app ' +
+            '(Settings › Servers › Add server). Tokens expire after 15 minutes and ' +
+            'are single-use.',
+          { cause: err },
+        );
+      }
+      // Redeem failed for a transient reason (5xx, network blip, or a
+      // plain service restart where the same token was already consumed).
+      // Fall back to the sealed identity if we have one.
       if (existing) {
         log.trace(
           'host-agent',

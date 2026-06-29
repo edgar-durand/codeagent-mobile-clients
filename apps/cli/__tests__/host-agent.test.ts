@@ -28,6 +28,8 @@ import {
 import { hostEnroll } from '../src/commands/host';
 import {
   hostIdentityPath,
+  HostHttpError,
+  isTerminalEnrollError,
   loadHostIdentity,
   MetricsCollector,
   reportProgress,
@@ -307,25 +309,168 @@ describe('resolveHostIdentity — redeem-first', () => {
     expect(loadHostIdentity()).toEqual(IDENTITY);
   });
 
-  it('rethrows when redeem fails AND there is no sealed identity to fall back to', async () => {
+  it('rethrows (transient) when redeem fails with 5xx AND there is no sealed identity', async () => {
     const fetchMock = vi.fn().mockImplementation(async (url: string) => {
       if (String(url).includes('/api/self-hosted/redeem')) {
         return {
           ok: false,
-          status: 410,
-          statusText: 'Gone',
-          json: async () => ({ success: false, error: { code: 'TOKEN_EXPIRED' } }),
+          status: 500,
+          statusText: 'Internal Server Error',
+          json: async () => ({ success: false, error: { code: 'INTERNAL_ERROR' } }),
         };
       }
       return { ok: true, status: 200, json: async () => ({ success: true }) };
     });
     vi.stubGlobal('fetch', fetchMock);
 
-    await expect(resolveHostIdentity('EXPIRED-TOKEN')).rejects.toThrow(/redeem failed/);
+    await expect(resolveHostIdentity('SOME-TOKEN')).rejects.toThrow();
   });
 
   it('returns null when neither identity nor token is available', async () => {
     expect(await resolveHostIdentity(undefined)).toBeNull();
+  });
+});
+
+/**
+ * Terminal enroll error detection — the host-agent must stop retrying when
+ * the backend returns a terminal 4xx (410 ENROLL_TOKEN_EXPIRED / 400
+ * ENROLL_TOKEN_INVALID) instead of looping forever against a permanently
+ * invalid token.
+ */
+describe('resolveHostIdentity — terminal enroll errors stop retrying', () => {
+  it('throws a clear user-facing message on ENROLL_TOKEN_EXPIRED (410) — no fallback', async () => {
+    const fetchMock = vi.fn().mockImplementation(async (url: string) => {
+      if (String(url).includes('/api/self-hosted/redeem')) {
+        return {
+          ok: false,
+          status: 410,
+          statusText: 'Gone',
+          json: async () => ({
+            success: false,
+            error: { code: 'ENROLL_TOKEN_EXPIRED', message: 'Enrollment token has expired.' },
+          }),
+        };
+      }
+      return { ok: true, status: 200, json: async () => ({ success: true }) };
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    // No sealed identity on disk — pure terminal failure.
+    await expect(resolveHostIdentity('EXPIRED-TOKEN')).rejects.toThrow(
+      /Enrollment token expired or invalid/,
+    );
+  });
+
+  it('throws a clear user-facing message on ENROLL_TOKEN_EXPIRED even when a sealed identity exists', async () => {
+    const fetchMock = vi.fn().mockImplementation(async (url: string) => {
+      if (String(url).includes('/api/self-hosted/redeem')) {
+        return {
+          ok: false,
+          status: 410,
+          statusText: 'Gone',
+          json: async () => ({
+            success: false,
+            error: { code: 'ENROLL_TOKEN_EXPIRED', message: 'Enrollment token has expired.' },
+          }),
+        };
+      }
+      return { ok: true, status: 200, json: async () => ({ success: true }) };
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    // Sealed identity exists on disk — terminal errors must NOT fall back to it.
+    fs.mkdirSync(path.dirname(hostIdentityPath()), { recursive: true });
+    fs.writeFileSync(hostIdentityPath(), JSON.stringify(IDENTITY));
+
+    await expect(resolveHostIdentity('EXPIRED-TOKEN')).rejects.toThrow(
+      /Enrollment token expired or invalid/,
+    );
+  });
+
+  it('throws a clear user-facing message on ENROLL_TOKEN_INVALID (400)', async () => {
+    const fetchMock = vi.fn().mockImplementation(async (url: string) => {
+      if (String(url).includes('/api/self-hosted/redeem')) {
+        return {
+          ok: false,
+          status: 400,
+          statusText: 'Bad Request',
+          json: async () => ({
+            success: false,
+            error: { code: 'ENROLL_TOKEN_INVALID', message: 'Enrollment token is invalid.' },
+          }),
+        };
+      }
+      return { ok: true, status: 200, json: async () => ({ success: true }) };
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(resolveHostIdentity('GARBAGE-TOKEN')).rejects.toThrow(
+      /Enrollment token expired or invalid/,
+    );
+  });
+
+  it('falls back to sealed identity on a transient 5xx (not terminal)', async () => {
+    const fetchMock = vi.fn().mockImplementation(async (url: string) => {
+      if (String(url).includes('/api/self-hosted/redeem')) {
+        return {
+          ok: false,
+          status: 503,
+          statusText: 'Service Unavailable',
+          json: async () => ({ success: false, error: { code: 'INTERNAL_ERROR' } }),
+        };
+      }
+      return { ok: true, status: 200, json: async () => ({ success: true }) };
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    fs.mkdirSync(path.dirname(hostIdentityPath()), { recursive: true });
+    fs.writeFileSync(hostIdentityPath(), JSON.stringify(IDENTITY));
+
+    // 5xx → transient → fall back to sealed identity
+    const resolved = await resolveHostIdentity('TOKEN-DURING-OUTAGE');
+    expect(resolved).toEqual(IDENTITY);
+  });
+});
+
+describe('HostHttpError — terminal enroll error detection', () => {
+  it('isTerminalEnrollError is true for ENROLL_TOKEN_EXPIRED', () => {
+    const err = new HostHttpError('redeem failed', 410, 'ENROLL_TOKEN_EXPIRED');
+    expect(err.isTerminalEnrollError).toBe(true);
+    expect(isTerminalEnrollError(err)).toBe(true);
+  });
+
+  it('isTerminalEnrollError is true for ENROLL_TOKEN_INVALID', () => {
+    const err = new HostHttpError('redeem failed', 400, 'ENROLL_TOKEN_INVALID');
+    expect(err.isTerminalEnrollError).toBe(true);
+    expect(isTerminalEnrollError(err)).toBe(true);
+  });
+
+  it('isTerminalEnrollError is false for a 5xx INTERNAL_ERROR (transient)', () => {
+    const err = new HostHttpError('server error', 500, 'INTERNAL_ERROR');
+    expect(err.isTerminalEnrollError).toBe(false);
+    expect(isTerminalEnrollError(err)).toBe(false);
+  });
+
+  it('isTerminalEnrollError is false when no error code is set', () => {
+    const err = new HostHttpError('network error', 0);
+    expect(err.isTerminalEnrollError).toBe(false);
+    expect(isTerminalEnrollError(err)).toBe(false);
+  });
+
+  it('isTerminalEnrollError is false for non-HostHttpError values', () => {
+    expect(isTerminalEnrollError(new Error('plain error'))).toBe(false);
+    expect(isTerminalEnrollError(null)).toBe(false);
+    expect(isTerminalEnrollError('string')).toBe(false);
+  });
+
+  it('isAuthRejection and isTerminalEnrollError are orthogonal (4xx auth vs enroll)', () => {
+    const authErr = new HostHttpError('host deleted', 404, undefined);
+    expect(authErr.isAuthRejection).toBe(true);
+    expect(authErr.isTerminalEnrollError).toBe(false);
+
+    const enrollErr = new HostHttpError('token expired', 410, 'ENROLL_TOKEN_EXPIRED');
+    expect(enrollErr.isAuthRejection).toBe(false);
+    expect(enrollErr.isTerminalEnrollError).toBe(true);
   });
 });
 
