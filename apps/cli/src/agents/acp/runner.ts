@@ -982,6 +982,24 @@ export function budgetBubbleMessage(agent: string, period: string): string {
   );
 }
 
+/**
+ * Build the env object for relaunching the Headroom proxy WITHOUT any budget cap.
+ *
+ * Spreads `baseEnv` (normally `process.env`), sets `HEADROOM_KOMPRESS_BACKEND`
+ * to lock the ONNX backend, then **deletes** both budget env keys so the
+ * relaunched proxy starts with NO cap even when the headroom_budget handler
+ * had previously written those keys into `process.env` on the same process.
+ *
+ * Pure + exported so the "pause clears budget env" invariant is
+ * unit-tested without spawning a full ACP runner or a real proxy.
+ */
+export function buildRelaunchProxyEnv(baseEnv: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const env: Record<string, string | undefined> = { ...baseEnv, HEADROOM_KOMPRESS_BACKEND: 'onnx_cpu' };
+  delete env['HEADROOM_BUDGET'];
+  delete env['HEADROOM_BUDGET_PERIOD'];
+  return env as NodeJS.ProcessEnv;
+}
+
 export function failureBubble(opts: {
   detail: string;
   recentStderr: string;
@@ -1414,7 +1432,10 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
     // Brief settle so the port frees before relaunch.
     await new Promise<void>((r) => setTimeout(r, 500));
     // Re-spawn without budget args.
-    const proxyEnv = { ...process.env, HEADROOM_KOMPRESS_BACKEND: 'onnx_cpu' };
+    // buildRelaunchProxyEnv clears both budget env keys so the "paused" proxy
+    // inherits NO budget cap — neither flag nor env — even when the
+    // headroom_budget handler had previously written them into process.env.
+    const proxyEnv = buildRelaunchProxyEnv(process.env);
     try {
       const proxy = spawn(
         'headroom',
