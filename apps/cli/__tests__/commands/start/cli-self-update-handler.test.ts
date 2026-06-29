@@ -21,7 +21,7 @@ vi.mock('../../../src/services/pairing.service', () => ({
   _transport: { postJson: vi.fn(), getJson: vi.fn(), postJsonAuthed: vi.fn() },
 }));
 
-import { cliSelfUpdateH } from '../../../src/commands/start/handlers';
+import { cliSelfUpdateH, defaultCliUpdateDeps } from '../../../src/commands/start/handlers';
 import { postCliUpdateEvent } from '../../../src/services/pairing.service';
 
 const postCliUpdateEventMock = vi.mocked(postCliUpdateEvent);
@@ -206,5 +206,33 @@ describe('cliSelfUpdateH — supervised vs local decision', () => {
 
     expect(deps.relaunch).toHaveBeenCalledWith(['start', '--session', 'abc']);
     process.argv = origArgv;
+  });
+});
+
+describe('defaultCliUpdateDeps.isSupervised — DO-NOT-self-relaunch gate', () => {
+  const orig = { auto: process.env['CODEAM_AUTO_APPROVE'], cs: process.env['CODESPACES'] };
+  afterEach(() => {
+    if (orig.auto === undefined) delete process.env['CODEAM_AUTO_APPROVE'];
+    else process.env['CODEAM_AUTO_APPROVE'] = orig.auto;
+    if (orig.cs === undefined) delete process.env['CODESPACES'];
+    else process.env['CODESPACES'] = orig.cs;
+  });
+
+  it('TRUE for self-hosted (CODEAM_AUTO_APPROVE=1) — supervisor restart, no self-kill', () => {
+    process.env['CODEAM_AUTO_APPROVE'] = '1';
+    delete process.env['CODESPACES'];
+    expect(defaultCliUpdateDeps.isSupervised()).toBe(true);
+  });
+
+  it('TRUE for codespace (CODESPACES=true) — re-exec would risk orphaning the daemon/relay', () => {
+    delete process.env['CODEAM_AUTO_APPROVE'];
+    process.env['CODESPACES'] = 'true';
+    expect(defaultCliUpdateDeps.isSupervised()).toBe(true);
+  });
+
+  it('FALSE for a truly local `codeam start` (neither marker) — safe in-place re-exec', () => {
+    delete process.env['CODEAM_AUTO_APPROVE'];
+    delete process.env['CODESPACES'];
+    expect(defaultCliUpdateDeps.isSupervised()).toBe(false);
   });
 });

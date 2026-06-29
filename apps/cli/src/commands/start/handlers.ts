@@ -876,7 +876,18 @@ export interface CliUpdateDeps {
 
 export const defaultCliUpdateDeps: CliUpdateDeps = {
   install: () => runNpmInstallLatest(),
-  isSupervised: () => process.env['CODEAM_AUTO_APPROVE'] === '1',
+  // "Don't self-relaunch" gate — leave this process running and let the
+  // on-disk update apply on the next natural restart, instead of killing it:
+  //   - self-hosted (CODEAM_AUTO_APPROVE=1): the HostAgentSupervisor does NOT
+  //     auto-restart children on exit, so exiting would orphan the session.
+  //   - codespace (CODESPACES=true): the pair-auto daemon owns a daemon lock +
+  //     the relay connection; a naive detached re-exec does NOT replicate the
+  //     careful setsid/lock-aware restart the install flow uses, so a failed
+  //     respawn would leave the mobile session permanently OFFLINE. Codespaces
+  //     sleep/resume often, so the update lands on next wake — safe + non-fatal.
+  // Only a truly local `codeam start` (neither marker) re-execs in place below.
+  isSupervised: () =>
+    process.env['CODEAM_AUTO_APPROVE'] === '1' || process.env['CODESPACES'] === 'true',
   relaunch: (args: string[]) => {
     const entry = process.argv[1];
     const child = spawn(process.execPath, [entry, ...args], {
