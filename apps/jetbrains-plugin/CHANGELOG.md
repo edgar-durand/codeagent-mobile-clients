@@ -4,6 +4,17 @@ All notable changes to the CodeAgent-Mobile JetBrains plugin are documented here
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.51.1] — 2026-06-29
+
+### Fixed
+
+- **cli:** Cross-platform owner-only file protection (Windows icacls)
+- **cli:** Make restrictToOwner best-effort on POSIX too
+
+### Tests
+
+- **cli:** Guard 0600 mode assertion in beads config-store for Windows
+
 ## [2.51.0] — 2026-06-29
 
 ### Added
