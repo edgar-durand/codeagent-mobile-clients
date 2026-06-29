@@ -4,6 +4,12 @@ All notable changes to the CodeAgent-Mobile JetBrains plugin are documented here
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.51.2] — 2026-06-29
+
+### Fixed
+
+- **headroom:** Route budget relaunch through supervisor when headroom install is active
+
 ## [2.51.1] — 2026-06-29
 
 ### Fixed
