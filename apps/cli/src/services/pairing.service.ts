@@ -451,6 +451,47 @@ export async function postBeadsEvent(input: {
 }
 
 /**
+ * Post a CLI self-update progress event to the backend so the mobile UI can
+ * track the update in real time. Mirrors `postHeadroomEvent` — fire-and-forget,
+ * non-fatal. The backend republishes on the per-user SSE bus.
+ *
+ * Phases:
+ *   - `updating`    — npm install started
+ *   - `relaunching` — install succeeded, process re-launching
+ *   - `failed`      — npm install failed (includes a short error string)
+ */
+export async function postCliUpdateEvent(input: {
+  sessionId: string;
+  pluginId: string;
+  pluginAuthToken: string;
+  phase: 'updating' | 'relaunching' | 'failed';
+  error?: string;
+}): Promise<{ ok: true } | { ok: false; status: number; message: string }> {
+  try {
+    const payload: Record<string, unknown> = { phase: input.phase };
+    if (input.error) payload.error = input.error;
+    await _transport.postJsonAuthed(
+      `${API_BASE}/api/agents/cli-update/events`,
+      {
+        sessionId: input.sessionId,
+        pluginId: input.pluginId,
+        phase: input.phase,
+        ...(input.error ? { error: input.error } : {}),
+      },
+      input.pluginAuthToken,
+    );
+    return { ok: true };
+  } catch (err) {
+    const e = err as Error & { statusCode?: number };
+    return {
+      ok: false,
+      status: typeof e.statusCode === 'number' ? e.statusCode : 0,
+      message: e.message || 'unknown',
+    };
+  }
+}
+
+/**
  * Signal Beads provisioning status so the backend can emit a
  * `beads_provisioning` UserEvent (D13). The backend side is built in parallel;
  * this matches its contract: `POST /api/beads/provisioning` with plugin auth,

@@ -2,7 +2,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { randomUUID } from 'crypto';
-import { spawn } from 'child_process';
+import { spawn, execFile } from 'child_process';
 import which from 'which';
 import type { AgentService } from '../../services/agent.service';
 import type { CommandRelayService, RemoteCommand } from '../../services/command-relay.service';
@@ -37,7 +37,7 @@ import {
 import { showInfo } from '../../ui/banner';
 import { applyFileReview } from '../../services/apply-file-review.service';
 import { buildLinkContext } from '../link';
-import { postLinkCredential, postAiResult, postPreviewEvent, postHeadroomEvent, postBeadsEvent } from '../../services/pairing.service';
+import { postLinkCredential, postAiResult, postPreviewEvent, postHeadroomEvent, postBeadsEvent, postCliUpdateEvent } from '../../services/pairing.service';
 import {
   agentIdToHeadroomKind,
   isHeadroomSupportedAgent,
@@ -842,6 +842,148 @@ const beadsConfigureH: CommandHandler = async (ctx, cmd, parsed) => {
   const result = await configureBeads(action, { agent: rawAgentId, cwd: process.cwd(), pluginAuthToken: ctx.pluginAuthToken }, deps);
   await ctx.relay.sendResult(cmd.id, 'completed', result);
 };
+
+// ─── CLI self-update ─────────────────────────────────────────────
+
+/**
+ * Injectable re-launch seam — replaced by tests so `process.exit` / `spawn`
+ * never run inside the test runner. The real implementation chooses the path
+ * based on the execution context at call time:
+ *
+ *   - **Supervised** (`CODEAM_AUTO_APPROVE === '1'`): the HostAgentSupervisor
+ *     does NOT auto-restart children on exit (confirmed from the `proc.once('exit')`
+ *     handler in host-agent.ts ~line 2335: it only removes the child from the map
+ *     and fires a one-shot `reportSessionEvent`). Therefore we do NOT exit —
+ *     instead we leave the process running. The update is still installed on
+ *     disk; it applies on the NEXT natural restart (systemd or a fresh deploy).
+ *     We document this via a log line and report `relaunching` (indicating the
+ *     update is ready, not that a live re-exec happened).
+ *
+ *   - **Local `codeam start`** (no supervised markers): spawn a fresh process
+ *     from `process.argv[1]` (the CLI entry script) with the original args,
+ *     detached + stdio:'inherit', then `process.exit(0)`. The OS relaunches
+ *     the now-updated global binary.
+ */
+export interface CliUpdateDeps {
+  /** Run the npm install — injectable so tests don't spawn npm. */
+  install: () => Promise<{ ok: boolean; error?: string }>;
+  /** Detect whether this process is a supervised pair-auto child. */
+  isSupervised: () => boolean;
+  /** Perform the actual exit / re-exec — injected so tests can assert the
+   *  decision without killing the test runner. */
+  relaunch: (args: string[]) => void;
+}
+
+export const defaultCliUpdateDeps: CliUpdateDeps = {
+  install: () => runNpmInstallLatest(),
+  isSupervised: () => process.env['CODEAM_AUTO_APPROVE'] === '1',
+  relaunch: (args: string[]) => {
+    const entry = process.argv[1];
+    const child = spawn(process.execPath, [entry, ...args], {
+      detached: true,
+      stdio: 'inherit',
+    });
+    child.unref();
+    process.exit(0);
+  },
+};
+
+/** Timeout for the `npm install -g codeam-cli@latest` install. */
+const CLI_UPDATE_INSTALL_TIMEOUT_MS = 180_000;
+/** Retry attempts for the npm install (covers transient registry blips). */
+const CLI_UPDATE_MAX_ATTEMPTS = 3;
+
+/**
+ * Run `npm install -g codeam-cli@latest`, retrying up to {@link CLI_UPDATE_MAX_ATTEMPTS}
+ * times with exponential back-off. Resolves `{ ok, error? }` — never rejects.
+ */
+export async function runNpmInstallLatest(): Promise<{ ok: boolean; error?: string }> {
+  let lastError = '';
+  for (let attempt = 1; attempt <= CLI_UPDATE_MAX_ATTEMPTS; attempt++) {
+    const result = await new Promise<{ ok: boolean; error?: string }>((resolve) => {
+      execFile(
+        'npm',
+        ['install', '-g', 'codeam-cli@latest'],
+        { timeout: CLI_UPDATE_INSTALL_TIMEOUT_MS },
+        (err, _stdout, stderr) => {
+          if (!err) {
+            resolve({ ok: true });
+          } else {
+            resolve({ ok: false, error: (stderr || err.message).slice(0, 300) });
+          }
+        },
+      );
+    });
+    if (result.ok) return { ok: true };
+    lastError = result.error ?? 'unknown';
+    if (attempt < CLI_UPDATE_MAX_ATTEMPTS) {
+      await new Promise((r) => setTimeout(r, 1_000 * attempt));
+    }
+  }
+  return { ok: false, error: lastError };
+}
+
+/**
+ * `cli_self_update` relay handler.
+ *
+ * The backend pushes this command to outdated CLI sessions. The handler:
+ *   1. Reports `phase:'updating'` to the backend (best-effort).
+ *   2. Runs `npm install -g codeam-cli@latest` (with retry).
+ *   3a. On failure → reports `phase:'failed'` + sendResult `{updated:false}`.
+ *   3b. On success → reports `phase:'relaunching'` + sendResult `{updated:true}`
+ *       + delegates to the injected `relaunch` seam (supervised: no-op exit;
+ *       local: detached re-exec + process.exit(0)).
+ *
+ * The relaunch seam is injected via `deps` so tests can assert the DECISION
+ * without actually killing the test process.
+ */
+export const cliSelfUpdateH = (
+  deps: CliUpdateDeps = defaultCliUpdateDeps,
+): CommandHandler =>
+  async (ctx, cmd) => {
+    // Best-effort progress report — never let a POST failure block the update.
+    const report = async (phase: 'updating' | 'relaunching' | 'failed', error?: string) => {
+      if (!ctx.pluginAuthToken) return;
+      try {
+        await postCliUpdateEvent({
+          sessionId: ctx.sessionId,
+          pluginId: ctx.pluginId,
+          pluginAuthToken: ctx.pluginAuthToken,
+          phase,
+          error,
+        });
+      } catch { /* best-effort */ }
+    };
+
+    await report('updating');
+
+    const result = await deps.install();
+
+    if (!result.ok) {
+      await report('failed', result.error?.slice(0, 200));
+      await ctx.relay.sendResult(cmd.id, 'completed', { updated: false });
+      return;
+    }
+
+    await report('relaunching');
+    await ctx.relay.sendResult(cmd.id, 'completed', { updated: true });
+
+    if (deps.isSupervised()) {
+      // The HostAgentSupervisor does NOT auto-restart children on exit (confirmed:
+      // proc.once('exit') in host-agent.ts only removes the map entry + fires
+      // reportSessionEvent — no respawn). Exiting here would orphan the session.
+      // The updated binary is on disk; it applies on the next natural restart.
+      log.info('cli-update', 'supervised context — update installed, applies on next restart');
+      return;
+    }
+
+    // Local codeam start: re-exec a fresh process from the updated global binary.
+    // process.argv[1] is the CLI entry script (e.g. /usr/local/lib/node_modules/codeam-cli/dist/index.js).
+    // We pass the original args (process.argv.slice(2)) so the session restarts with the same flags.
+    const origArgs = process.argv.slice(2);
+    log.info('cli-update', `re-execing ${process.argv[1]} with args: ${origArgs.join(' ')}`);
+    deps.relaunch(origArgs);
+  };
 
 // ─── Terminal ─────────────────────────────────────────────────────
 
@@ -2262,6 +2404,7 @@ export const handlers: Record<string, CommandHandler> = {
   headroom_configure: headroomConfigureH,
   headroom_budget: headroomBudgetH,
   beads_configure: beadsConfigureH,
+  cli_self_update: cliSelfUpdateH(),
 };
 
 /**
