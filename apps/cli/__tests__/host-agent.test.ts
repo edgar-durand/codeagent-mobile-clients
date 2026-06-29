@@ -5,6 +5,7 @@ import * as path from 'node:path';
 import { EventEmitter } from 'node:events';
 import type { ChildProcess } from 'node:child_process';
 import type { AgentAuth, AgentMetadata } from '@codeagent/shared';
+import { isOwnerOnly } from '../src/util/restrict-to-owner';
 
 import {
   HostAgentSupervisor,
@@ -156,11 +157,7 @@ describe('host enroll — redeem flow', () => {
     // 2) Sealed to ~/.codeam/host-agent.json at mode 0600.
     const file = hostIdentityPath();
     expect(fs.existsSync(file)).toBe(true);
-    // POSIX file modes don't apply on Windows (the host-agent is a Linux/systemd
-    // feature); skip the 0600 assertion there.
-    if (process.platform !== 'win32') {
-      expect(fs.statSync(file).mode & 0o777).toBe(0o600);
-    }
+    expect(isOwnerOnly(file)).toBe(true);
     expect(loadHostIdentity()).toEqual({
       hostId: 'h1',
       hostToken: 'long-lived',
@@ -416,9 +413,7 @@ describe('HostAgentSupervisor — command routing', () => {
     // Credential was written the codespace way: ~/.claude/.credentials.json (0600).
     const credFile = path.join(tmpHome, '.claude', '.credentials.json');
     expect(fs.existsSync(credFile)).toBe(true);
-    if (process.platform !== 'win32') {
-      expect(fs.statSync(credFile).mode & 0o777).toBe(0o600);
-    }
+    expect(isOwnerOnly(credFile)).toBe(true);
 
     fs.rmSync(cwdTarget, { recursive: true, force: true });
   });
@@ -2633,9 +2628,7 @@ describe('readHeadroomChildEnv — persisted config → child env', () => {
     });
     const file = headroomConfigPath();
     expect(fs.existsSync(file)).toBe(true);
-    if (process.platform !== 'win32') {
-      expect(fs.statSync(file).mode & 0o777).toBe(0o600);
-    }
+    expect(isOwnerOnly(file)).toBe(true);
     // No leftover temp file from the atomic write.
     const leftovers = fs
       .readdirSync(path.dirname(file))

@@ -3,6 +3,7 @@ import os from 'node:os';
 import fs from 'node:fs';
 import path from 'node:path';
 import { beadsConfigPath, readBeadsEnabled, persistBeadsConfig } from '../../src/beads/config-store';
+import { isOwnerOnly } from '../../src/util/restrict-to-owner';
 
 describe('beads config-store', () => {
   const p = beadsConfigPath();
@@ -16,11 +17,7 @@ describe('beads config-store', () => {
   it('round-trips a disabled flag and writes mode 0600', () => {
     persistBeadsConfig({ enabled: false });
     expect(readBeadsEnabled()).toBe(false);
-    // Unix file modes don't apply on Windows (NTFS uses ACLs; fs.writeFileSync
-    // with { mode: 0o600 } is a no-op there), so skip the permission check.
-    if (process.platform !== 'win32') {
-      expect(fs.statSync(p).mode & 0o777).toBe(0o600);
-    }
+    expect(isOwnerOnly(p)).toBe(true);
     persistBeadsConfig({ enabled: true });
     expect(readBeadsEnabled()).toBe(true);
   });

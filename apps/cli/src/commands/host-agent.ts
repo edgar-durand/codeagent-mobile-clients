@@ -53,6 +53,7 @@ function resolveInputPricePerMillion(agentId: string): number {
   return getPricing(model).input;
 }
 import { log } from '../services/logger';
+import { restrictToOwner } from '../util/restrict-to-owner';
 import {
   deleteHostIdentity,
   isHostAuthRejection,
@@ -802,6 +803,7 @@ export function persistHeadroomConfig(config: HeadroomConfig): void {
     const tmp = `${file}.tmp-${process.pid}`;
     fs.writeFileSync(tmp, JSON.stringify(config, null, 2), { encoding: 'utf8', mode: 0o600 });
     fs.renameSync(tmp, file);
+    restrictToOwner(file);
   } catch (err) {
     log.warn(
       'host-agent',

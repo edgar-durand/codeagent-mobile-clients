@@ -21,6 +21,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { configureGitCredentials } from '../src/commands/host/workspace';
+import { isOwnerOnly } from '../src/util/restrict-to-owner';
 
 let repo: string;
 
@@ -70,9 +71,7 @@ describe('configureGitCredentials — real git (push/pull auth persists)', () =>
     expect(fs.readFileSync(credFile, 'utf8')).toContain(
       'https://x-access-token:ghs_SHORTLIVED@github.com',
     );
-    if (process.platform !== 'win32') {
-      expect(fs.statSync(credFile).mode & 0o777).toBe(0o600);
-    }
+    expect(isOwnerOnly(credFile)).toBe(true);
 
     // 4) git's credential machinery resolves OUR token from the helper for a
     //    github.com URL — i.e. a subsequent fetch/push is authenticated.
