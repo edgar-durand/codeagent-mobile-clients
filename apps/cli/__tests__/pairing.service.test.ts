@@ -3,6 +3,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 // Use the real module but mock internal http calls with vi.spyOn after import
 import * as pairing from '../src/services/pairing.service';
 import * as gitBranch from '../src/lib/git-branch';
+import pkg from '../package.json';
 
 describe('requestCode', () => {
   afterEach(() => { vi.restoreAllMocks(); });
@@ -69,6 +70,54 @@ describe('requestCode', () => {
 
     const [, body] = postSpy.mock.calls[0];
     expect(body).toMatchObject({ branch: null });
+  });
+});
+
+describe('fetchCurrentPluginAuthToken', () => {
+  afterEach(() => { vi.restoreAllMocks(); });
+
+  it('includes ideVersion equal to the running package version in the reconnect body', async () => {
+    const postSpy = vi
+      .spyOn(pairing._transport, 'postJson')
+      .mockResolvedValue({
+        data: { paired: true, pluginAuthToken: 'v1.fake-token' },
+      } as never);
+
+    await pairing.fetchCurrentPluginAuthToken('sess-1', 'plugin-1');
+
+    expect(postSpy).toHaveBeenCalledTimes(1);
+    const [url, body] = postSpy.mock.calls[0];
+    expect(url).toMatch(/\/api\/pairing\/reconnect$/);
+    expect(body).toMatchObject({
+      sessionId: 'sess-1',
+      pluginId: 'plugin-1',
+      ideVersion: pkg.version,
+    });
+  });
+
+  it('returns the pluginAuthToken from a successful reconnect response', async () => {
+    vi.spyOn(pairing._transport, 'postJson').mockResolvedValue({
+      data: { paired: true, pluginAuthToken: 'v1.the-real-token' },
+    } as never);
+
+    const token = await pairing.fetchCurrentPluginAuthToken('sess-1', 'plugin-1');
+    expect(token).toBe('v1.the-real-token');
+  });
+
+  it('returns null when paired is false in the response', async () => {
+    vi.spyOn(pairing._transport, 'postJson').mockResolvedValue({
+      data: { paired: false },
+    } as never);
+
+    const token = await pairing.fetchCurrentPluginAuthToken('sess-1', 'plugin-1');
+    expect(token).toBeNull();
+  });
+
+  it('returns null on network error', async () => {
+    vi.spyOn(pairing._transport, 'postJson').mockRejectedValue(new Error('ECONNREFUSED'));
+
+    const token = await pairing.fetchCurrentPluginAuthToken('sess-1', 'plugin-1');
+    expect(token).toBeNull();
   });
 });
 
