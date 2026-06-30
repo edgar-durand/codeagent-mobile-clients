@@ -72,6 +72,27 @@ export interface AwaitingAnswerEvent {
 }
 
 /**
+ * Wire shape for the `input_suggestion` output chunk emitted by CLI agents
+ * after a turn ends.
+ *
+ * PTY agents (claude, codex, copilot, aider) emit `content: string` —
+ * the detected ghost-text from the agent's input area (backward-compat,
+ * one chip on mobile).
+ *
+ * ACP agents emit `content: string[]` — a static set of chip labels such
+ * as `['Continue', 'Yes, go ahead', 'Explain']` (multiple chips on mobile).
+ *
+ * Consumers MUST normalise:
+ *   `Array.isArray(content) ? content : [content]`
+ */
+export interface InputSuggestionChunk {
+  type: 'input_suggestion';
+  /** Single string (PTY, backward-compat) or array of chip labels (ACP). */
+  content: string | string[];
+  done: true;
+}
+
+/**
  * Payload published on the Redis `session:${sessionId}:answers`
  * channel — and also the shape returned by the polling fallback
  * `GET /api/sessions/:id/pending-answer` (wrapped in `{ data: … }` by

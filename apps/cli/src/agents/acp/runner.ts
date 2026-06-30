@@ -810,6 +810,19 @@ export const TURN_FAILURE_MESSAGE =
 export { AUTH_FAILURE_MESSAGE };
 
 /**
+ * Static quick-reply chips emitted after every normal ACP turn end.
+ *
+ * PTY agents surface an agent-specific ghost-text suggestion from the
+ * terminal's input area (via `OutputService.tick()`). ACP agents have no
+ * idle-prompt detector, so we emit a fixed, broadly-useful set instead.
+ *
+ * These labels are intentionally generic -- they work across agent types
+ * (Claude, Codex, Cursor, Gemini) and prompt styles. Tapping one fills
+ * the mobile composer and the user presses Send.
+ */
+export const ACP_QUICK_REPLIES: string[] = ['Continue', 'Yes, go ahead', 'Explain'];
+
+/**
  * Detects a turn failure caused by the AGENT PROVIDER being down / overloaded
  * (Anthropic, OpenAI, …) rather than the user's session or credential — e.g.
  * Anthropic's HTTP 529 `overloaded_error`, or an upstream 5xx / "service
@@ -1862,13 +1875,19 @@ export async function handleCommand(
           }
           history.appendAgentReply(finalText);
           void history.flush();
-          // NOTE: no `input_suggestion` chip is synthesised from the reply. ACP
-          // has no "recommended next prompt" field; the prior heuristic (the
-          // reply's last line ending in `?`) surfaced the AGENT'S OWN closing
-          // question as a tappable user-prompt — tapping it just sent the
-          // agent's question back to itself. A wrong chip is worse than none,
-          // so it's removed until ACP exposes a real next-step signal (or we
-          // generate genuine suggestions separately).
+          // Emit static quick-reply chips so the mobile UI has
+          // one-tap continuation prompts after every ACP turn.
+          // PTY agents emit a single-string `input_suggestion` via
+          // OutputService.tick(); ACP has no idle-prompt detector so
+          // we emit a fixed array instead. The mobile store normalises
+          // both shapes to string[] before rendering.
+          // Only emitted on a normal (non-select-prompt) turn end --
+          // select_prompt is handled by closeTurnWithInteractiveDetection.
+          void publisher.publishOutput({
+            type: 'input_suggestion',
+            content: ACP_QUICK_REPLIES,
+            done: true,
+          });
           // End-of-turn file changeset — agent likely edited files
           // during the turn (tool_call write_file / bash). The
           // aggregator runs git diff once and batch-posts the hunks
