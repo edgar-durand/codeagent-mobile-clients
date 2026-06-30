@@ -4,6 +4,12 @@ All notable changes to the CodeAgent Mobile VS Code extension are documented her
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.52.2] — 2026-06-30
+
+### Fixed
+
+- **acp:** Stop synthesising input_suggestion from the reply (echoed agent msg)
+
 ## [2.52.1] — 2026-06-29
 
 ### Fixed
