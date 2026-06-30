@@ -53,7 +53,6 @@ import {
 } from '../../services/terminal-ops.service';
 import { mapSessionUpdate, mapPermissionRequest } from './mappers';
 import { extractSelectPrompt } from './selectPromptExtractor';
-import { deriveInputSuggestion } from './inputSuggestion';
 import {
   handlers as legacyHandlers,
   dispatchCommand as legacyDispatchCommand,
@@ -1856,19 +1855,20 @@ export async function handleCommand(
           // action instead of leaking the raw API error.
           await oneMRecovery.offer(cmd.id, blocks);
         } else {
-          const emittedSelectPrompt = await streaming.closeTurnWithInteractiveDetection();
+          await streaming.closeTurnWithInteractiveDetection();
           const replyLine = formatAgentReplyLine(finalText);
           if (replyLine.length > 0) {
             showInfo(replyLine);
           }
           history.appendAgentReply(finalText);
           void history.flush();
-          if (!emittedSelectPrompt) {
-            const suggestion = deriveInputSuggestion(finalText);
-            if (suggestion !== null) {
-              void publisher.publishOutput({ type: 'input_suggestion', content: suggestion, done: true });
-            }
-          }
+          // NOTE: no `input_suggestion` chip is synthesised from the reply. ACP
+          // has no "recommended next prompt" field; the prior heuristic (the
+          // reply's last line ending in `?`) surfaced the AGENT'S OWN closing
+          // question as a tappable user-prompt — tapping it just sent the
+          // agent's question back to itself. A wrong chip is worse than none,
+          // so it's removed until ACP exposes a real next-step signal (or we
+          // generate genuine suggestions separately).
           // End-of-turn file changeset — agent likely edited files
           // during the turn (tool_call write_file / bash). The
           // aggregator runs git diff once and batch-posts the hunks
