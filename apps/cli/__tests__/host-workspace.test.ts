@@ -10,7 +10,12 @@ import { isOwnerOnly } from '../src/util/restrict-to-owner';
 const execFileCalls: Array<{ file: string; args: string[]; options: Record<string, unknown> }> = [];
 let execFileBehavior: 'ok' | 'fail' = 'ok';
 
-vi.mock('node:child_process', () => ({
+// Only `execFile` (git) is faked; `execFileSync` passes through to the real
+// module so restrictToOwner/isOwnerOnly can run the real `icacls` on Windows
+// — a mock module without it leaves execFileSync undefined, which turns
+// every owner-only check into a silent `false` on win32.
+vi.mock('node:child_process', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('node:child_process')>()),
   execFile: (
     file: string,
     args: string[],

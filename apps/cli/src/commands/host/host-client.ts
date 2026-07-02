@@ -27,6 +27,7 @@ import * as path from 'node:path';
 import { resolveApiBaseUrl } from '@codeagent/shared';
 import type { AgentAuth } from '@codeagent/shared';
 import { vercelBypassHeader } from '../../lib/backend-headers';
+import { restrictToOwner } from '../../util/restrict-to-owner';
 
 /** Diagnostics reported at redeem (mirrors the backend `HostOsInfo`). */
 export interface HostOsInfo {
@@ -182,7 +183,9 @@ export function loadHostIdentity(): SealedHostIdentity | null {
   }
 }
 
-/** Seal the host identity to `~/.codeam/host-agent.json` at mode 0600. */
+/** Seal the host identity to `~/.codeam/host-agent.json` owner-only
+ *  (0600 on POSIX, icacls ACL on Windows — a bare chmod is an ACL no-op
+ *  there). */
 export function saveHostIdentity(identity: SealedHostIdentity): void {
   const file = hostIdentityPath();
   fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
@@ -190,7 +193,7 @@ export function saveHostIdentity(identity: SealedHostIdentity): void {
     encoding: 'utf8',
     mode: 0o600,
   });
-  fs.chmodSync(file, 0o600);
+  restrictToOwner(file);
 }
 
 /** Machine-readable error codes the backend returns for terminal enroll failures. */
