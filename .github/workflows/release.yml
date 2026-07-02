@@ -259,6 +259,18 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
+      # The Gradle build + IntelliJ Platform SDK + the verifier's IDE
+      # distributions (several GB each) no longer fit next to the
+      # runner's preinstalled toolchains — v2.52.4 died twice with
+      # "No space left on device", which kills the WORKER itself (so
+      # verifyPlugin's continue-on-error can't save the job). Drop the
+      # big toolchains we never use here (~25 GB freed).
+      - name: Free runner disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          sudo docker image prune --all --force > /dev/null 2>&1 || true
+          df -h /
+
       - name: Setup Java
         uses: actions/setup-java@v5
         with:
