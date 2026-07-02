@@ -1182,6 +1182,13 @@ const requestLinkCredentialsH: CommandHandler = (ctx, _cmd, parsed) => {
       pluginAuthToken,
       method: token.method,
       credential: token.credential,
+      // This handler ALWAYS rides the user's real paired session (the
+      // backend pushed the request onto it), never a `codeam link`
+      // throwaway. Omitting the flag made the backend delete the
+      // session the user had just paired (2026-07-02 incident) — the
+      // backend now also guards via its own auto-link Redis flag, but
+      // the CLI must state the truth for older backends too.
+      preserveSession: true,
     });
     if (result.ok) {
       log.trace('auto-link', `vaulted ${publicId} from ${token.source}`);
