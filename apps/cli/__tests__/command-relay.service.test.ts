@@ -133,3 +133,73 @@ describe('CommandRelayService', () => {
     );
   });
 });
+
+describe('CommandRelayService pairing-invalid (401/403 fatal on /api/commands/result)', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.clearAllMocks();
+    vi.restoreAllMocks();
+  });
+
+  const httpError = (statusCode: number): Error & { statusCode: number } =>
+    Object.assign(new Error(`HTTP ${statusCode}`), { statusCode });
+
+  const resultCalls = (): number =>
+    vi
+      .mocked(pairing._postJson)
+      .mock.calls.filter((c) => String(c[0]).includes('/api/commands/result')).length;
+
+  it('a 401 marks the pairing invalid: swallowed, actionable message, relay stopped, no further result posts', async () => {
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    const relay = new CommandRelayService('plugin-1', vi.fn(), META);
+    relay.start();
+    await vi.advanceTimersByTimeAsync(10);
+
+    vi.mocked(pairing._postJson).mockRejectedValueOnce(httpError(401));
+    // Fatal is swallowed — callers must not take their catch-and-repost path.
+    await expect(relay.sendResult('cmd1', 'completed', {})).resolves.toBeUndefined();
+    expect(stderrSpy.mock.calls.map((c) => String(c[0])).join('')).toContain('codeam pair');
+
+    const after = resultCalls();
+    await relay.sendResult('cmd2', 'completed', {});
+    await relay.sendResult('cmd3', 'failed', {});
+    expect(resultCalls()).toBe(after); // latched — no 401 spam
+
+    // relay stopped — no further heartbeats after the fatal.
+    const heartbeats = (): number =>
+      vi
+        .mocked(pairing._postJson)
+        .mock.calls.filter((c) => String(c[0]).includes('/api/plugin/heartbeat')).length;
+    const beatsAtFatal = heartbeats();
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(heartbeats()).toBe(beatsAtFatal);
+  });
+
+  it('a 403 is fatal too', async () => {
+    vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    const relay = new CommandRelayService('plugin-1', vi.fn(), META);
+    vi.mocked(pairing._postJson).mockRejectedValueOnce(httpError(403));
+    await expect(relay.sendResult('cmd1', 'completed', {})).resolves.toBeUndefined();
+
+    const after = resultCalls();
+    await relay.sendResult('cmd2', 'completed', {});
+    expect(resultCalls()).toBe(after);
+  });
+
+  it('non-auth errors keep rejecting and do NOT latch (transient path unchanged)', async () => {
+    vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    const relay = new CommandRelayService('plugin-1', vi.fn(), META);
+
+    vi.mocked(pairing._postJson).mockRejectedValueOnce(httpError(500));
+    await expect(relay.sendResult('cmd1', 'completed', {})).rejects.toThrow('HTTP 500');
+
+    // next result still posts — not latched.
+    const before = resultCalls();
+    await relay.sendResult('cmd2', 'completed', {});
+    expect(resultCalls()).toBe(before + 1);
+  });
+});

@@ -44,11 +44,21 @@ export interface AcpPublisherOptions {
    * paired), in which case the POST is NOT retried.
    */
   refreshAuthToken?: () => Promise<string | null>;
+  /**
+   * Fired ONCE when the pairing is detected as invalid (401/403 that
+   * survives the refresh path) — the publisher latches and stops
+   * posting; the owner can tear down the pump / surface UI.
+   */
+  onPairingInvalid?: () => void;
 }
 
 export class AcpPublisher {
   private readonly apiBase: string;
   private token: string;
+  /** Latched on an unrecoverable 401/403 — every surface stops posting
+   *  (2026-06-28 incident: a dead-token publisher spammed 401 ×34 while
+   *  the agent's replies silently never reached the phone). */
+  private pairingInvalid = false;
 
   constructor(private readonly opts: AcpPublisherOptions) {
     this.apiBase = opts.apiBaseUrl ?? resolveApiBaseUrl();
@@ -74,14 +84,44 @@ export class AcpPublisher {
     url: string,
     payload: string,
   ): Promise<{ statusCode: number; body: string }> {
+    if (this.pairingInvalid) {
+      // Latched — no network. Callers treat this like any non-2xx.
+      return { statusCode: 401, body: 'PAIRING_INVALID' };
+    }
     const first = await _transport.post(url, this.authHeaders(), payload);
     if (first.statusCode !== 401 && first.statusCode !== 403) return first;
-    if (!this.opts.refreshAuthToken) return first;
-    const fresh = await this.opts.refreshAuthToken();
-    if (!fresh) return first;
-    this.token = fresh;
-    log.info('acpPublisher', `plugin-auth token refreshed after ${first.statusCode}; retrying POST`);
-    return _transport.post(url, this.authHeaders(), payload);
+    if (this.opts.refreshAuthToken) {
+      const fresh = await this.opts.refreshAuthToken();
+      if (fresh) {
+        this.token = fresh;
+        log.info('acpPublisher', `plugin-auth token refreshed after ${first.statusCode}; retrying POST`);
+        const second = await _transport.post(url, this.authHeaders(), payload);
+        if (second.statusCode !== 401 && second.statusCode !== 403) return second;
+        // A FRESH token still rejected — the pairing itself is gone.
+        this.markPairingInvalid(second.statusCode);
+        return second;
+      }
+    }
+    // 401/403 with no fresh token to be had — unrecoverable.
+    this.markPairingInvalid(first.statusCode);
+    return first;
+  }
+
+  private markPairingInvalid(statusCode: number): void {
+    if (this.pairingInvalid) return;
+    this.pairingInvalid = true;
+    process.stderr.write(
+      '[codeam] This pairing is no longer valid — run `codeam pair` again to reconnect this session.\n',
+    );
+    log.warn(
+      'acpPublisher',
+      `pairing invalid (status=${statusCode}) — publisher latched, no further posts`,
+    );
+    try {
+      this.opts.onPairingInvalid?.();
+    } catch {
+      // The observer must never break the latch.
+    }
   }
 
   /**

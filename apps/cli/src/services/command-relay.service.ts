@@ -8,6 +8,16 @@ import { vercelBypassHeader } from '../lib/backend-headers';
 import { computePollDelay } from '../lib/poll-delay';
 import { detectCurrentBranch, detectCurrentBranchAsync } from '../lib/git-branch';
 import { log } from './logger';
+
+/** Narrow an unknown thrown value to its numeric HTTP status, when the
+ *  transport attached one (pairing.service errors carry `statusCode`). */
+function httpStatusOf(err: unknown): number | null {
+  if (typeof err === 'object' && err !== null && 'statusCode' in err) {
+    const status = (err as { statusCode: unknown }).statusCode;
+    if (typeof status === 'number') return status;
+  }
+  return null;
+}
 import { capture } from './telemetry.service';
 
 const API_BASE = resolveApiBaseUrl();
@@ -39,6 +49,7 @@ export interface RemoteCommand {
  */
 export class CommandRelayService {
   private _running = false;
+  private pairingInvalid = false;
   private heartbeatTimer: NodeJS.Timeout | null = null;
   private agentsTimer: NodeJS.Timeout | null = null;
   /** True once `/api/plugin/agents` has accepted at least one report. */
@@ -172,7 +183,28 @@ export class CommandRelayService {
     status: string,
     result: unknown,
   ): Promise<void> {
-    await _postJson(`${API_BASE}/api/commands/result`, { commandId, status, result });
+    // Latched after an unrecoverable auth failure — see below.
+    if (this.pairingInvalid) return;
+    try {
+      await _postJson(`${API_BASE}/api/commands/result`, { commandId, status, result });
+    } catch (err) {
+      const statusCode = httpStatusOf(err);
+      if (statusCode === 401 || statusCode === 403) {
+        // The pairing is gone server-side (2026-06-28 incident: results
+        // for an invalidated session were retried forever with a dead
+        // token). Latch + stop the relay so heartbeats/polling die too,
+        // and SWALLOW the error — callers must not take their
+        // catch-and-repost path against a dead pairing.
+        this.pairingInvalid = true;
+        process.stderr.write(
+          '[codeam] This pairing is no longer valid — run `codeam pair` again to reconnect this session.\n',
+        );
+        log.warn('relay', `pairing invalid (status=${statusCode}) — relay stopped`);
+        this.stop();
+        return;
+      }
+      throw err;
+    }
   }
 
   // ─── SSE pull (primary) ──────────────────────────────────────────

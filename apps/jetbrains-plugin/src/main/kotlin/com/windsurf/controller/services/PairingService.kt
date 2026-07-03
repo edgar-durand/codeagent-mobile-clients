@@ -194,8 +194,11 @@ class PairingService {
                     if (!rawToken.isNullOrEmpty()) {
                         SettingsService.getInstance().setPluginAuthToken(rawToken)
                         // The new token clears any prior 401 — re-arm the
-                        // "session expired" notification gate for the next failure.
+                        // "session expired" notification gate for the next failure,
+                        // and un-latch the output publisher (a fresh pairing
+                        // supersedes the dead one it latched on).
                         CommandRelayService.getInstance().resetAuthFailureGate()
+                        AgentOutputPublisher.resetPairingLatch()
                     }
                     currentSessionId = sessionId
                     logger.info("Pairing detected! Session: $sessionId, user: ${pairedUser?.email}")

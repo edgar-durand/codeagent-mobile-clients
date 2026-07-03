@@ -19,10 +19,15 @@ const API_BASE = resolveApiBaseUrl();
  * backend can mint a fresh token from the same (sessionId,
  * pluginId) tuple it minted the previous one from.
  */
+type RefreshOutcome =
+  | { kind: 'fresh'; token: string }
+  | { kind: 'gone' }
+  | { kind: 'transient' };
+
 async function refreshAuthToken(
   sessionId: string,
   pluginId: string,
-): Promise<string | null> {
+): Promise<RefreshOutcome> {
   try {
     const { statusCode, body } = await _transport.post(
       `${API_BASE}/api/pairing/reconnect`,
@@ -33,24 +38,28 @@ async function refreshAuthToken(
       },
       JSON.stringify({ sessionId, pluginId }),
     );
-    if (statusCode === 404) {
-      log.warn('chunkEmitter', '[auth] reconnect 404 — session gone server-side');
-      return null;
+    // 404/401/403 = the pairing itself is GONE server-side — no amount
+    // of retrying mints a token for a deleted session. Anything else
+    // (5xx, network, malformed body) is transient: keep the session
+    // alive and let the next emit try again.
+    if (statusCode === 404 || statusCode === 401 || statusCode === 403) {
+      log.warn('chunkEmitter', `[auth] reconnect ${statusCode} — session gone server-side`);
+      return { kind: 'gone' };
     }
     if (statusCode >= 400) {
       log.warn('chunkEmitter', `[auth] reconnect failed status=${statusCode}`);
-      return null;
+      return { kind: 'transient' };
     }
     const parsed = JSON.parse(body) as { data?: { pluginAuthToken?: unknown } };
     const fresh = parsed.data?.pluginAuthToken;
     if (typeof fresh !== 'string' || fresh.length === 0) {
       log.warn('chunkEmitter', '[auth] reconnect response missing pluginAuthToken');
-      return null;
+      return { kind: 'transient' };
     }
-    return fresh;
+    return { kind: 'fresh', token: fresh };
   } catch (err) {
     log.warn('chunkEmitter', `[auth] reconnect threw: ${String(err)}`);
-    return null;
+    return { kind: 'transient' };
   }
 }
 
@@ -80,6 +89,11 @@ export interface SendOutcome {
 export class ChunkEmitter {
   private readonly url = `${API_BASE}/api/commands/output`;
   private readonly headers: Record<string, string>;
+  /** Latched when the pairing is unrecoverable (401/403 whose refresh
+   *  says the session is gone, or a fresh token still rejected) —
+   *  every later send short-circuits (2026-06-28 incident: 401 ×34
+   *  with a dead token while the user saw nothing). */
+  private pairingInvalid = false;
 
   constructor(private readonly opts: ChunkEmitterOptions) {
     this.headers = {
@@ -119,7 +133,17 @@ export class ChunkEmitter {
       `send type=${(body.type as string) ?? '(clear)'} bytes=${payload.length} done=${body.done === true}`,
     );
 
+    if (this.pairingInvalid) {
+      // Latched — the pairing is gone; don't spam the API with a dead
+      // token. `dead: true` tells the upstream pump to stop too.
+      return Promise.resolve({ dead: true });
+    }
+
     return new Promise((resolve) => {
+      // At most ONE post-refresh retry per send — a fresh token that is
+      // STILL rejected means the pairing itself is invalid, not the
+      // token, and looping refresh→retry would 401-spam forever.
+      let refreshedOnce = false;
       const attempt = (attemptsLeft: number) => {
         _transport.post(this.url, this.headers, payload)
           .then(({ statusCode, body: resBody }) => {
@@ -133,23 +157,33 @@ export class ChunkEmitter {
               resolve({ dead: true });
               return;
             }
-            if (statusCode === 401) {
-              // Silent token refresh — keep the session running. If
-              // the refresh works we swap the header in place and
-              // retry the same chunk; otherwise fall through to the
-              // generic api-error path so the next emit re-tries.
-              log.warn('chunkEmitter', `auth 401 took=${tookMs}ms — attempting silent refresh`);
+            if (statusCode === 401 || statusCode === 403) {
+              // Silent token refresh first — workflow continuity says we
+              // never interrupt a RECOVERABLE session. Fatal only when
+              // the refresh reports the pairing gone, or a fresh token
+              // is still rejected.
+              if (refreshedOnce) {
+                this.markPairingInvalid(statusCode, tookMs);
+                resolve({ dead: true });
+                return;
+              }
+              log.warn('chunkEmitter', `auth ${statusCode} took=${tookMs}ms — attempting silent refresh`);
               void (async () => {
-                const fresh = await refreshAuthToken(this.opts.sessionId, this.opts.pluginId);
-                if (fresh) {
-                  this.headers['X-Plugin-Auth-Token'] = fresh;
-                  this.opts.pluginAuthToken = fresh;
+                const refresh = await refreshAuthToken(this.opts.sessionId, this.opts.pluginId);
+                if (refresh.kind === 'fresh') {
+                  this.headers['X-Plugin-Auth-Token'] = refresh.token;
+                  this.opts.pluginAuthToken = refresh.token;
+                  refreshedOnce = true;
                   log.info('chunkEmitter', 'auth refreshed silently');
-                  if (attemptsLeft > 0 || opts.critical) {
-                    attempt(Math.max(attemptsLeft, 1));
-                    return;
-                  }
+                  attempt(Math.max(attemptsLeft, 1));
+                  return;
                 }
+                if (refresh.kind === 'gone') {
+                  this.markPairingInvalid(statusCode, tookMs);
+                  resolve({ dead: true });
+                  return;
+                }
+                // Transient refresh failure — stay alive, next emit re-tries.
                 resolve({ dead: false });
               })();
               return;
@@ -178,6 +212,18 @@ export class ChunkEmitter {
       };
       attempt(maxRetries);
     });
+  }
+
+  private markPairingInvalid(statusCode: number, tookMs: number): void {
+    if (this.pairingInvalid) return;
+    this.pairingInvalid = true;
+    process.stderr.write(
+      '[codeam] This pairing is no longer valid — run `codeam pair` again to reconnect this session.\n',
+    );
+    log.warn(
+      'chunkEmitter',
+      `pairing invalid (status=${statusCode}) took=${tookMs}ms — emitter latched, no further posts`,
+    );
   }
 }
 
