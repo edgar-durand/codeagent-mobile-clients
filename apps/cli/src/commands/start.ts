@@ -8,7 +8,6 @@ import { CommandRelayService } from '../services/command-relay.service';
 import { AgentService } from '../services/agent.service';
 import { createRuntimeStrategy } from '../agents/registry';
 import { getAcpAdapter, requiresAcp } from '../agents/acp/adapters';
-import { waitForClaudeNativeBinary } from '../agents/acp/claude-binary';
 import { runAcpSession } from '../agents/acp/runner';
 import { OutputService } from '../services/output.service';
 import { HistoryService } from '../services/history.service';
@@ -237,22 +236,24 @@ export async function start(requestedAgent?: AgentId): Promise<void> {
   // start` keeps the original fire-and-forget.
   if (process.env.CODESPACES === 'true') {
     const GATE_TIMEOUT_MS = 240_000;
-    // Claude's ~250 MB native binary ships as an OPTIONAL platform dep and
-    // can still be downloading (`npm install -g codeam-cli`) when this gate
-    // would otherwise release — spawning the ACP adapter then dies with
-    // "Claude native binary not found for linux-x64" (2026-07-03 incident:
-    // binary landed 25 s after the agent tried to start). Fold the binary
-    // wait into the gate for claude so the agent never spawns before it's
-    // on disk. Resolves instantly when present (one existsSync); bounded so
-    // a stuck download can't wedge the session (agent spawns anyway, and
-    // the SDK then emits its own actionable reinstall error).
-    const claudeBinaryReady: Promise<unknown> =
-      session.agent === 'claude'
-        ? waitForClaudeNativeBinary({ timeoutMs: GATE_TIMEOUT_MS }).catch(() => null)
-        : Promise.resolve();
+    // An agent's launch binary can still be installing when this gate
+    // would otherwise release: on a fresh codespace the CLI, each agent's
+    // binary (claude's ~250 MB SDK optional dep, `npm i -g @openai/codex`,
+    // the cursor/gemini installers) all land concurrently. Spawning the
+    // ACP adapter before its binary exists dies with a "binary not found"
+    // error (2026-07-03 incident: claude's binary landed 25 s after the
+    // agent tried to start). Each ACP adapter owns its own readiness
+    // check (`waitForBinary`) — the gate just calls it. Resolves instantly
+    // on the happy path (binary present); bounded by the gate timeout so a
+    // stuck install can't wedge the session (agent spawns anyway and the
+    // agent then emits its own actionable install error).
+    const agentBinaryReady: Promise<unknown> =
+      getAcpAdapter(session.agent)
+        ?.waitForBinary({ timeoutMs: GATE_TIMEOUT_MS })
+        .catch(() => false) ?? Promise.resolve(true);
     let gateTimer: ReturnType<typeof setTimeout> | undefined;
     await Promise.race([
-      Promise.all([beadsReady.catch(() => null), depsReady, claudeBinaryReady]),
+      Promise.all([beadsReady.catch(() => null), depsReady, agentBinaryReady]),
       new Promise<void>((resolve) => {
         gateTimer = setTimeout(resolve, GATE_TIMEOUT_MS);
       }),

@@ -1,9 +1,25 @@
 import fs from 'fs';
 import path from 'path';
+import { spawnSync } from 'child_process';
 
 /**
- * The Claude Agent SDK ships its ~250 MB native `claude` binary as a
- * PLATFORM-SPECIFIC OPTIONAL dependency
+ * Agent launch-binary readiness.
+ *
+ * On a fresh codespace the CLI and every agent's binary are installed
+ * concurrently (`npm install -g codeam-cli`, `npm install -g
+ * @openai/codex`, the cursor/gemini installers, the SDK's optional
+ * native binary…). The agent-spawn gate can release before a given
+ * agent's binary finishes landing, so the spawn then dies with a
+ * "binary not found" error. Each ACP adapter declares how to wait for
+ * ITS binary (see adapters.ts `waitForBinary`) and the gate just calls
+ * that — so this is fixed uniformly for claude / codex / cursor /
+ * gemini, not just the one that happened to be reported.
+ *
+ * Two delivery shapes:
+ *   - PATH binaries (codex, cursor-agent, gemini) → wait for the
+ *     command to resolve on PATH ({@link waitForCommandOnPath}).
+ *   - The Claude Agent SDK's ~250 MB native `claude` binary, a
+ *     PLATFORM-SPECIFIC OPTIONAL dependency
  * (`@anthropic-ai/claude-agent-sdk-<platform>-<arch>/claude`). On a fresh
  * codespace the CLI is installed with `npm install -g codeam-cli`, and
  * that huge optional binary can still be downloading when the
@@ -107,4 +123,61 @@ export async function waitForClaudeNativeBinary(
     if (found) return found;
   }
   return resolveClaudeNativeBinary(deps);
+}
+
+// ─────────────────────────── PATH binaries ───────────────────────────
+// codex (`npm install -g @openai/codex`), cursor-agent, and gemini are
+// launched by bare command name resolved from PATH — their readiness is
+// simply "does the command resolve on PATH yet".
+
+/** True if `cmd` resolves on the current PATH. Injectable for tests. */
+export function isCommandOnPath(
+  cmd: string,
+  probe: (cmd: string) => boolean = defaultWhich,
+): boolean {
+  return probe(cmd);
+}
+
+function defaultWhich(cmd: string): boolean {
+  const finder = process.platform === 'win32' ? 'where' : 'which';
+  try {
+    const res = spawnSync(finder, [cmd], { stdio: 'ignore' });
+    return res.status === 0;
+  } catch {
+    return false;
+  }
+}
+
+export interface WaitForCommandOptions {
+  timeoutMs?: number;
+  pollMs?: number;
+  now?: () => number;
+  sleep?: (ms: number) => Promise<void>;
+  /** Injectable PATH probe for tests. */
+  probe?: (cmd: string) => boolean;
+}
+
+/**
+ * Poll until `cmd` resolves on PATH (its installer — npm -g / vendor
+ * script — is still running) or the timeout elapses. Returns true if it
+ * showed up in time. Fast path: resolves immediately when already
+ * present (zero delay on the happy path).
+ */
+export async function waitForCommandOnPath(
+  cmd: string,
+  opts: WaitForCommandOptions = {},
+): Promise<boolean> {
+  const timeoutMs = opts.timeoutMs ?? 180_000;
+  const pollMs = opts.pollMs ?? 500;
+  const now = opts.now ?? Date.now;
+  const sleep = opts.sleep ?? realSleep;
+  const probe = opts.probe;
+  const check = (): boolean => isCommandOnPath(cmd, probe);
+  const deadline = now() + timeoutMs;
+  if (check()) return true;
+  while (now() < deadline) {
+    await sleep(pollMs);
+    if (check()) return true;
+  }
+  return check();
 }

@@ -32,6 +32,26 @@ describe('ACP adapter registry', () => {
     },
   );
 
+  // Regression guard for the 2026-07-03 codespace incident, generalized
+  // to ALL agents: every ACP adapter MUST expose a `waitForBinary` so the
+  // agent-spawn gate can wait for its launch binary to finish installing
+  // (claude's SDK native binary, `npm i -g @openai/codex`, cursor/gemini
+  // installers) instead of spawning too early and dying "binary not
+  // found". A new adapter that forgets this fails here.
+  it.each(listAcpAdapterIdsForTests())('exposes a waitForBinary readiness check for %s', (agentId) => {
+    const spec = getAcpAdapter(agentId);
+    expect(spec, `missing adapter spec for ${agentId}`).not.toBeNull();
+    expect(typeof spec!.waitForBinary, `${agentId} must declare waitForBinary`).toBe('function');
+  });
+
+  it('waitForBinary resolves quickly for a PATH agent already installed (cursor)', async () => {
+    const spec = getAcpAdapter('cursor');
+    // A 0 ms timeout means: check once, don't block. Returns a boolean
+    // either way (true if cursor-agent happens to be on PATH here, false
+    // otherwise) — the point is it's callable and non-throwing.
+    await expect(spec!.waitForBinary({ timeoutMs: 0 })).resolves.toBeTypeOf('boolean');
+  });
+
   it('returns null for an agent without an ACP adapter', () => {
     // `aider` is a registered agent but has no ACP adapter — used
     // here as a deliberate negative case so a future addition of

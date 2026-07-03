@@ -19,7 +19,8 @@ import path from 'path';
 import {
   resolveClaudeNativeBinary,
   waitForClaudeNativeBinary,
-} from '../../../src/agents/acp/claude-binary';
+  waitForCommandOnPath,
+} from '../../../src/agents/acp/agent-binary';
 
 const PLATFORM = 'linux-x64';
 
@@ -101,5 +102,44 @@ describe('waitForClaudeNativeBinary (real fs + real timers)', () => {
       pollMs: 30,
     });
     expect(found).toBeNull();
+  });
+});
+
+// PATH-based agents (codex `npm i -g @openai/codex`, cursor-agent,
+// gemini) hit the SAME race — their binary/installer is still running
+// when the gate releases. The readiness check polls PATH.
+describe('waitForCommandOnPath (codex / cursor / gemini)', () => {
+  it('resolves immediately when the command is already on PATH', async () => {
+    const started = Date.now();
+    const ok = await waitForCommandOnPath('codex', {
+      probe: () => true,
+      timeoutMs: 2_000,
+      pollMs: 50,
+    });
+    expect(ok).toBe(true);
+    expect(Date.now() - started).toBeLessThan(200);
+  });
+
+  it('THE REGRESSION (all agents): waits and resolves when the binary appears mid-install', async () => {
+    // `npm i -g @openai/codex` finishes ~200 ms in → PATH probe flips true.
+    let installed = false;
+    setTimeout(() => {
+      installed = true;
+    }, 200);
+    const ok = await waitForCommandOnPath('codex', {
+      probe: () => installed,
+      timeoutMs: 3_000,
+      pollMs: 40,
+    });
+    expect(ok).toBe(true);
+  });
+
+  it('gives up (false) if the command never lands within the timeout', async () => {
+    const ok = await waitForCommandOnPath('gemini', {
+      probe: () => false,
+      timeoutMs: 150,
+      pollMs: 30,
+    });
+    expect(ok).toBe(false);
   });
 });

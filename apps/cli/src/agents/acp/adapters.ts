@@ -24,6 +24,11 @@
 
 import * as path from 'node:path';
 import type { AgentId } from '@codeagent/shared';
+import {
+  waitForClaudeNativeBinary,
+  waitForCommandOnPath,
+  type WaitForClaudeBinaryOptions,
+} from './agent-binary';
 
 // CommonJS module — `require` is already in scope. Aliased so we
 // keep a single grep target if we ever migrate the CLI to ESM.
@@ -45,6 +50,20 @@ export interface AdapterSpec {
    *  so the user sees "Install `claude` CLI" instead of a cryptic
    *  spawn failure from inside the adapter. */
   requiresAgentBinary: string;
+  /**
+   * Wait (bounded) until THIS agent's launch binary is installed, so the
+   * spawn gate never launches the adapter before its binary has landed
+   * on a freshly-provisioned codespace (the install races the gate).
+   * Resolves `true` when ready, `false` on timeout. Each agent owns its
+   * own check — the gate just calls this. Resolves instantly on the
+   * happy path (binary already present → zero delay).
+   */
+  waitForBinary(opts?: { timeoutMs?: number }): Promise<boolean>;
+}
+
+/** Claude's native binary is the SDK's bundled optional platform pkg. */
+function claudeBinaryWaiter(opts: WaitForClaudeBinaryOptions = {}): Promise<boolean> {
+  return waitForClaudeNativeBinary(opts).then((p) => p !== null);
 }
 
 /**
@@ -82,6 +101,7 @@ const REGISTRY: Partial<Record<AgentId, () => AdapterSpec | null>> = {
       command: process.execPath,
       args: [bin],
       requiresAgentBinary: 'claude',
+      waitForBinary: claudeBinaryWaiter,
     };
   },
   codex: () => {
@@ -91,6 +111,8 @@ const REGISTRY: Partial<Record<AgentId, () => AdapterSpec | null>> = {
       command: process.execPath,
       args: [bin],
       requiresAgentBinary: 'codex',
+      // codex ships via `npm install -g @openai/codex` → PATH binary.
+      waitForBinary: (o) => waitForCommandOnPath('codex', o),
     };
   },
   // Cursor speaks ACP NATIVELY via `cursor-agent acp` ("Start the Cursor
@@ -108,6 +130,7 @@ const REGISTRY: Partial<Record<AgentId, () => AdapterSpec | null>> = {
     command: 'cursor-agent',
     args: ['acp'],
     requiresAgentBinary: 'cursor-agent',
+    waitForBinary: (o) => waitForCommandOnPath('cursor-agent', o),
   }),
   // Gemini speaks ACP natively via `gemini --acp` — no npm adapter
   // package, just the user-installed `gemini` binary on PATH. Same
@@ -125,6 +148,7 @@ const REGISTRY: Partial<Record<AgentId, () => AdapterSpec | null>> = {
     // codeam was launched from.
     args: ['--skip-trust', '--acp'],
     requiresAgentBinary: 'gemini',
+    waitForBinary: (o) => waitForCommandOnPath('gemini', o),
   }),
 };
 
