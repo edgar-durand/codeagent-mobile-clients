@@ -4,6 +4,12 @@ All notable changes to the CodeAgent Mobile VS Code extension are documented her
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.52.7] — 2026-07-03
+
+### Fixed
+
+- **cli:** Wait for Claude native binary before spawning the agent in codespaces
+
 ## [2.52.6] — 2026-07-03
 
 ### Fixed
