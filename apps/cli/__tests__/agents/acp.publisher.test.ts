@@ -173,3 +173,113 @@ describe('AcpPublisher reauth-on-401', () => {
     expect(postSpy).toHaveBeenCalledTimes(1);
   });
 });
+
+describe('AcpPublisher pairing-invalid (401/403 fatal)', () => {
+  let postSpy: ReturnType<typeof vi.spyOn>;
+  let stderrSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    postSpy = vi.spyOn(transport._transport, 'post');
+    stderrSpy = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  const stderrText = (): string => stderrSpy.mock.calls.map((c: unknown[]) => String(c[0])).join('');
+
+  function makePublisher(overrides: {
+    refreshAuthToken?: () => Promise<string | null>;
+    onPairingInvalid?: () => void;
+  }): AcpPublisher {
+    return new AcpPublisher({
+      sessionId: 's1',
+      pluginId: 'p1',
+      pluginAuthToken: 'stale',
+      apiBaseUrl: 'https://api.test',
+      ...overrides,
+    });
+  }
+
+  it('401 + refresh yields no token → latches: actionable message, no further posts', async () => {
+    postSpy.mockResolvedValue({ statusCode: 401, body: 'INVALID_PLUGIN_TOKEN' });
+    const refreshAuthToken = vi.fn().mockResolvedValue(null);
+    const pub = makePublisher({ refreshAuthToken });
+
+    await pub.publishOutput({ type: 'text', content: 'a', done: false });
+    expect(postSpy).toHaveBeenCalledTimes(1);
+    expect(stderrText()).toContain('codeam pair');
+
+    // latched — none of the publisher surfaces post any more.
+    await pub.publishOutput({ type: 'text', content: 'b', done: true });
+    await pub.publishStreamingChunk({
+      chunkId: 'c1',
+      kind: 'text',
+      content: 'x',
+      isFinal: true,
+    });
+    await pub.publishAwaitingAnswer({ questionId: 'q', prompt: 'p', options: [] });
+    expect(postSpy).toHaveBeenCalledTimes(1);
+    expect(refreshAuthToken).toHaveBeenCalledTimes(1);
+  });
+
+  it('401 persisting after a successful refresh → latches (fresh token still rejected)', async () => {
+    postSpy.mockResolvedValue({ statusCode: 401, body: 'INVALID_PLUGIN_TOKEN' });
+    const refreshAuthToken = vi.fn().mockResolvedValue('fresh-token');
+    const pub = makePublisher({ refreshAuthToken });
+
+    await pub.publishOutput({ type: 'text', content: 'a', done: false });
+    expect(postSpy).toHaveBeenCalledTimes(2); // original + one retry
+
+    await pub.publishOutput({ type: 'text', content: 'b', done: true });
+    expect(postSpy).toHaveBeenCalledTimes(2); // no more spam
+  });
+
+  it('the re-pair message is written ONCE across surfaces', async () => {
+    postSpy.mockResolvedValue({ statusCode: 403, body: 'FORBIDDEN' });
+    const pub = makePublisher({ refreshAuthToken: vi.fn().mockResolvedValue(null) });
+
+    await pub.publishOutput({ type: 'text', content: 'a', done: false });
+    await pub.publishOutput({ type: 'text', content: 'b', done: false });
+    await pub.pushSessionList({ agentId: 'claude', sessions: [] });
+
+    const mentions = stderrText().split('codeam pair').length - 1;
+    expect(mentions).toBe(1);
+  });
+
+  it('fires onPairingInvalid exactly once', async () => {
+    postSpy.mockResolvedValue({ statusCode: 401, body: 'INVALID_PLUGIN_TOKEN' });
+    const onPairingInvalid = vi.fn();
+    const pub = makePublisher({
+      refreshAuthToken: vi.fn().mockResolvedValue(null),
+      onPairingInvalid,
+    });
+
+    await pub.publishOutput({ type: 'text', content: 'a', done: false });
+    await pub.publishOutput({ type: 'text', content: 'b', done: false });
+    expect(onPairingInvalid).toHaveBeenCalledTimes(1);
+  });
+
+  it('successful refresh + 2xx retry does NOT latch (regression guard)', async () => {
+    postSpy
+      .mockResolvedValueOnce({ statusCode: 401, body: 'INVALID_PLUGIN_TOKEN' })
+      .mockResolvedValue({ statusCode: 200, body: 'ok' });
+    const pub = makePublisher({ refreshAuthToken: vi.fn().mockResolvedValue('fresh') });
+
+    await pub.publishOutput({ type: 'text', content: 'a', done: false });
+    await pub.publishOutput({ type: 'text', content: 'b', done: true });
+    expect(postSpy).toHaveBeenCalledTimes(3); // 401 + retry + next post
+    expect(stderrText()).not.toContain('codeam pair');
+  });
+
+  it('5xx / transient errors do NOT latch', async () => {
+    postSpy.mockResolvedValue({ statusCode: 503, body: 'unavailable' });
+    const pub = makePublisher({ refreshAuthToken: vi.fn().mockResolvedValue(null) });
+
+    await pub.publishOutput({ type: 'text', content: 'a', done: false });
+    await pub.publishOutput({ type: 'text', content: 'b', done: false });
+    expect(postSpy).toHaveBeenCalledTimes(2);
+    expect(stderrText()).not.toContain('codeam pair');
+  });
+});
