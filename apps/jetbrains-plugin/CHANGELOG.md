@@ -4,6 +4,12 @@ All notable changes to the CodeAgent-Mobile JetBrains plugin are documented here
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.52.11] — 2026-07-04
+
+### Fixed
+
+- **cli:** Don't report a Windows Ctrl+C / console-close as an adapter crash
+
 ## [2.52.10] — 2026-07-04
 
 ### Fixed
