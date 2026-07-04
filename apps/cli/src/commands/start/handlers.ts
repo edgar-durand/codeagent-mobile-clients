@@ -905,16 +905,59 @@ const CLI_UPDATE_INSTALL_TIMEOUT_MS = 180_000;
 const CLI_UPDATE_MAX_ATTEMPTS = 3;
 
 /**
- * Run `npm install -g codeam-cli@latest`, retrying up to {@link CLI_UPDATE_MAX_ATTEMPTS}
- * times with exponential back-off. Resolves `{ ok, error? }` — never rejects.
+ * Compute the npm invocation for the self-update so it lands in the SAME
+ * prefix the running CLI executes from. A bare `npm install -g` resolves
+ * npm from the daemon's PATH and installs into the SYSTEM prefix — on a
+ * codespace the daemon runs from the bootstrap prefix
+ * `/tmp/codeam-node20/...`, so the update landed elsewhere, the re-exec
+ * relaunched the OLD binary, and the session reconnected still-outdated
+ * (the "Some sessions may need a manual update" 90 s fallback,
+ * 2026-07-04). DI'd for tests.
+ */
+export function buildNpmInstallInvocation(opts?: {
+  entryScript?: string;
+  execPath?: string;
+  existsSync?: (p: string) => boolean;
+}): { command: string; args: string[] } {
+  const entryScript = opts?.entryScript ?? process.argv[1] ?? '';
+  const execPath = opts?.execPath ?? process.execPath;
+  const exists = opts?.existsSync ?? fs.existsSync;
+
+  // Global npm layout: <prefix>/lib/node_modules/codeam-cli/... → target
+  // that prefix explicitly so the running install is replaced in place.
+  const normalized = entryScript.split(path.sep).join('/');
+  const marker = '/lib/node_modules/codeam-cli/';
+  const markerIdx = normalized.indexOf(marker);
+  const prefix = markerIdx > 0 ? entryScript.slice(0, markerIdx) : null;
+
+  // Prefer the npm sibling of the running node — the detached daemon may
+  // have no npm on PATH at all (codespace: /tmp/codeam-node20/bin/npm).
+  const siblingNpm = path.join(
+    path.dirname(execPath),
+    process.platform === 'win32' ? 'npm.cmd' : 'npm',
+  );
+  const command = exists(siblingNpm) ? siblingNpm : 'npm';
+
+  const args = prefix
+    ? ['install', '-g', '--prefix', prefix, 'codeam-cli@latest']
+    : ['install', '-g', 'codeam-cli@latest'];
+  return { command, args };
+}
+
+/**
+ * Run `npm install -g codeam-cli@latest` (targeted at the running
+ * install's prefix — see {@link buildNpmInstallInvocation}), retrying up
+ * to {@link CLI_UPDATE_MAX_ATTEMPTS} times with exponential back-off.
+ * Resolves `{ ok, error? }` — never rejects.
  */
 export async function runNpmInstallLatest(): Promise<{ ok: boolean; error?: string }> {
   let lastError = '';
+  const invocation = buildNpmInstallInvocation();
   for (let attempt = 1; attempt <= CLI_UPDATE_MAX_ATTEMPTS; attempt++) {
     const result = await new Promise<{ ok: boolean; error?: string }>((resolve) => {
       execFile(
-        'npm',
-        ['install', '-g', 'codeam-cli@latest'],
+        invocation.command,
+        invocation.args,
         { timeout: CLI_UPDATE_INSTALL_TIMEOUT_MS },
         (err, _stdout, stderr) => {
           if (!err) {
