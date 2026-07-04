@@ -16,8 +16,10 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
+import { createRequire } from 'module';
 import {
   resolveClaudeNativeBinary,
+  resolveSdkDirViaRequire,
   waitForClaudeNativeBinary,
   waitForCommandOnPath,
 } from '../../../src/agents/acp/agent-binary';
@@ -47,6 +49,80 @@ function writeBinary(): void {
   fs.mkdirSync(path.dirname(binPath), { recursive: true });
   fs.writeFileSync(binPath, 'ELF');
 }
+
+// ─── SDK dir resolution vs the SDK's exports map (v2.52.8 regression) ──
+//
+// The Claude SDK's package.json declares an `exports` map that does NOT
+// expose `./package.json`, so require.resolve('<sdk>/package.json') throws
+// ERR_PACKAGE_PATH_NOT_EXPORTED on the REAL installed package. v2.52.8's
+// defaultSdkDir() did exactly that → null → the binary wait NEVER resolved
+// → the codespace agent-spawn gate ate its full 240 s timeout on EVERY
+// start (confirmed live 2026-07-04 01:18:59→01:22:59). This suite builds a
+// real on-disk package with the same restrictive exports map and drives
+// REAL Node resolution through it (createRequire — no mocks), so the
+// exports-map behaviour itself is what's under test.
+describe('resolveSdkDirViaRequire vs exports-map (REAL node resolution)', () => {
+  let layout: string;
+  let sdkPkgDir: string;
+  let req: ReturnType<typeof createRequire>;
+
+  beforeEach(() => {
+    // realpath: require.resolve returns resolved paths (/private/var on macOS).
+    layout = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'sdk-exports-')));
+    sdkPkgDir = path.join(layout, 'node_modules', '@anthropic-ai', 'claude-agent-sdk');
+    fs.mkdirSync(sdkPkgDir, { recursive: true });
+    // Same shape as the real SDK: an exports map WITHOUT "./package.json".
+    fs.writeFileSync(
+      path.join(sdkPkgDir, 'package.json'),
+      JSON.stringify({
+        name: '@anthropic-ai/claude-agent-sdk',
+        version: '0.0.0-test',
+        type: 'module',
+        exports: { '.': './sdk.mjs' },
+      }),
+    );
+    fs.writeFileSync(path.join(sdkPkgDir, 'sdk.mjs'), 'export const ok = 1;\n');
+    // Resolver anchored INSIDE the layout — real Node resolution rules.
+    req = createRequire(path.join(layout, 'probe.js'));
+  });
+
+  afterEach(() => {
+    fs.rmSync(layout, { recursive: true, force: true });
+  });
+
+  it('CAPTURES THE ISSUE: resolving <sdk>/package.json throws ERR_PACKAGE_PATH_NOT_EXPORTED', () => {
+    // The exact call v2.52.8 relied on — proven broken against a real
+    // exports-mapped package. If the SDK ever starts exporting
+    // ./package.json this assertion flags that the workaround can go.
+    let code: string | undefined;
+    try {
+      req.resolve('@anthropic-ai/claude-agent-sdk/package.json');
+    } catch (err) {
+      code = (err as NodeJS.ErrnoException).code;
+    }
+    expect(code).toBe('ERR_PACKAGE_PATH_NOT_EXPORTED');
+  });
+
+  it('THE FIX: resolveSdkDirViaRequire finds the package dir via the exported main', () => {
+    expect(resolveSdkDirViaRequire(req)).toBe(sdkPkgDir);
+  });
+
+  it('end-to-end: the binary resolves using the require-based sdkDir (no explicit sdkDir)', () => {
+    const binDir = path.join(layout, 'node_modules', '@anthropic-ai', `claude-agent-sdk-${PLATFORM}`);
+    fs.mkdirSync(binDir, { recursive: true });
+    fs.writeFileSync(path.join(binDir, 'claude'), 'ELF');
+    const found = resolveClaudeNativeBinary({
+      sdkDir: resolveSdkDirViaRequire(req),
+      platformKey: PLATFORM,
+    });
+    expect(found).toBe(path.join(binDir, 'claude'));
+  });
+
+  it('returns null (not a throw) when the SDK is not installed at all', () => {
+    const emptyReq = createRequire(path.join(os.tmpdir(), 'nowhere', 'probe.js'));
+    expect(resolveSdkDirViaRequire(emptyReq)).toBeNull();
+  });
+});
 
 describe('resolveClaudeNativeBinary (real fs)', () => {
   it('returns null while only the JS SDK is installed (binary still downloading)', () => {

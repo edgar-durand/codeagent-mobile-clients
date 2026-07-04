@@ -54,13 +54,45 @@ export function currentPlatformKey(): string {
   return `${process.platform}-${process.arch}`;
 }
 
-function defaultSdkDir(): string | null {
+const SDK_PKG = '@anthropic-ai/claude-agent-sdk';
+
+/**
+ * Locate the installed SDK's package directory through a require
+ * resolver. The SDK's package.json declares an `exports` map that does
+ * NOT expose `./package.json`, so `require.resolve('<sdk>/package.json')`
+ * throws ERR_PACKAGE_PATH_NOT_EXPORTED on the real installed package —
+ * the v2.52.8 bug that made the binary wait never resolve and burn the
+ * codespace spawn gate's full 240 s on every start. Resolve the exported
+ * MAIN instead and walk up to the package directory. Injectable resolver
+ * so tests can drive REAL Node resolution against a temp layout.
+ */
+export function resolveSdkDirViaRequire(
+  req: Pick<NodeJS.Require, 'resolve'> = require,
+): string | null {
+  // Preferred (works iff the SDK ever exports ./package.json).
   try {
-    const manifest = require.resolve('@anthropic-ai/claude-agent-sdk/package.json');
-    return path.dirname(manifest);
+    return path.dirname(req.resolve(`${SDK_PKG}/package.json`));
+  } catch {
+    /* exports map blocks it — fall through to the main-based walk */
+  }
+  try {
+    let dir = path.dirname(req.resolve(SDK_PKG));
+    // The main usually sits at the package root, but walk up defensively
+    // (dist/ layouts) until the directory is the package itself.
+    for (let i = 0; i < 5; i++) {
+      if (path.basename(dir) === 'claude-agent-sdk') return dir;
+      const parent = path.dirname(dir);
+      if (parent === dir) break;
+      dir = parent;
+    }
+    return null;
   } catch {
     return null;
   }
+}
+
+function defaultSdkDir(): string | null {
+  return resolveSdkDirViaRequire();
 }
 
 /**
