@@ -1036,6 +1036,46 @@ export function failureBubble(opts: {
 }
 
 /**
+ * Windows `STATUS_CONTROL_C_EXIT` (0xC000013A). The agent adapter process
+ * was terminated by a Ctrl+C / console-close event — the user ending the
+ * session, NOT a crash. It exits with this NTSTATUS on Windows when the
+ * terminal window is closed or Ctrl+C is pressed.
+ */
+export const WINDOWS_CONTROL_C_EXIT = 3221225786; // 0xC000013A
+
+/**
+ * Message to publish when the ACP adapter dies OUTSIDE an intentional
+ * `client.stop()`, or `null` to suppress the bubble entirely because the
+ * exit was a benign user-initiated shutdown (not a crash).
+ *
+ * Why the benign cases matter: a Windows user who just closes their
+ * terminal exits the adapter with 0xC000013A. Classifying that as
+ * "Agent adapter exited unexpectedly (code=3221225786 …)" surfaced a
+ * cryptic fake crash to the user AND recorded it as a failed session in
+ * the daily email digest (2026-07-04, a win32 CLI user). SIGINT is the
+ * POSIX equivalent (Ctrl+C). Both are the user ending the session.
+ *
+ * Pure + exported so the classification is unit-tested without spawning a
+ * real adapter.
+ */
+export function adapterExitMessage(opts: {
+  code: number | null;
+  signal: string | null;
+  authFail: boolean;
+  outageFail: boolean;
+  agent: string;
+}): string | null {
+  // Benign, user-initiated shutdowns — never a crash bubble, never a
+  // digest error.
+  if (opts.code === WINDOWS_CONTROL_C_EXIT) return null;
+  if (opts.signal === 'SIGINT') return null;
+  // Real failures keep their actionable classification.
+  if (opts.authFail) return AUTH_FAILURE_MESSAGE;
+  if (opts.outageFail) return providerOutageMessage(opts.agent);
+  return `Agent adapter exited unexpectedly (code=${opts.code ?? 'null'} signal=${opts.signal ?? 'null'}).`;
+}
+
+/**
  * Best-effort durable flag: tell the backend this LinkedAgent credential is
  * invalid so Profile › Agents shows EXPIRED + the re-auth CTA (instead of
  * CONNECTED from a dead-but-present refresh token). Never throws — credential
@@ -1332,6 +1372,12 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
       // too — surface the transparent "provider is down + status link" bubble
       // instead of a cryptic exit-code message.
       const outageFail = !authFail && looksLikeProviderOutage(recentStderr.join('\n'));
+      // Classify the exit. `null` = benign user-initiated shutdown
+      // (Windows Ctrl+C / console-close 0xC000013A, or POSIX SIGINT) —
+      // NOT a crash, so we flush but publish NO error bubble (it was
+      // landing in the daily digest as a fake failed session).
+      const message = adapterExitMessage({ code, signal, authFail, outageFail, agent: opts.agent });
+      const benign = message === null;
       if (authFail) {
         // Durably flag the LinkedAgent credential invalid so Profile › Agents
         // shows EXPIRED + the re-auth CTA (instead of CONNECTED from a
@@ -1348,19 +1394,18 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
         await withTimeout(
           (async () => {
             await streaming.closeAll();
-            await publisher.publishOutput({
-              type: 'text',
-              content: authFail
-                ? AUTH_FAILURE_MESSAGE
-                : outageFail
-                  ? providerOutageMessage(opts.agent)
-                  : `Agent adapter exited unexpectedly (code=${code ?? 'null'} signal=${signal ?? 'null'}).`,
-              done: true,
-            });
+            // Only publish a terminal bubble for a REAL failure. On a
+            // benign shutdown closeAll() already flushed any partial reply
+            // with done:true, so mobile leaves "Thinking…" without a
+            // spurious crash message.
+            if (message !== null) {
+              await publisher.publishOutput({ type: 'text', content: message, done: true });
+            }
           })(),
           5_000,
         );
-        process.exit(1);
+        // Clean exit for a user-initiated shutdown; failure code otherwise.
+        process.exit(benign ? 0 : 1);
       })();
     },
   };
