@@ -8,6 +8,14 @@ import { vercelBypassHeader } from '../lib/backend-headers';
 import { computePollDelay } from '../lib/poll-delay';
 import { detectCurrentBranch, detectCurrentBranchAsync } from '../lib/git-branch';
 import { log } from './logger';
+import {
+  ensureHeadroomProxy,
+  makeRealProxySupervisorDeps,
+  type ProxySupervisorDeps,
+} from './headroom/proxy-supervisor';
+
+/** tsup-injected build constant (see index.ts); absent in ts-node/tests. */
+declare const __CLI_VERSION__: string;
 
 /** Narrow an unknown thrown value to its numeric HTTP status, when the
  *  transport attached one (pairing.service errors carry `statusCode`). */
@@ -52,6 +60,9 @@ export class CommandRelayService {
   private pairingInvalid = false;
   private heartbeatTimer: NodeJS.Timeout | null = null;
   private agentsTimer: NodeJS.Timeout | null = null;
+  private headroomSupervisorTimer: NodeJS.Timeout | null = null;
+  /** Injectable for tests; defaults to real fs/fetch/spawn wiring. */
+  private headroomSupervisorDeps: ProxySupervisorDeps = makeRealProxySupervisorDeps();
   /** True once `/api/plugin/agents` has accepted at least one report. */
   private agentsRegistered = false;
   /** SSE connection (null when on the polling fallback or stopped). */
@@ -156,6 +167,16 @@ export class CommandRelayService {
       if (this._running && !this.agentsRegistered) this.reportAgents();
     }, 5_000);
     this.reportAgents();
+
+    // Keep the Headroom proxy (:8787) alive for the session. The agent is
+    // wired to ANTHROPIC_BASE_URL=127.0.0.1:8787; if the proxy dies while
+    // the box stays up (codespace resume, crash), every turn hangs 90s. A
+    // no-op on non-Headroom boxes. Fire-and-forget so it never delays the
+    // beat; the check itself is async + off the hot path.
+    void ensureHeadroomProxy(this.headroomSupervisorDeps).catch(() => undefined);
+    this.headroomSupervisorTimer = setInterval(() => {
+      void ensureHeadroomProxy(this.headroomSupervisorDeps).catch(() => undefined);
+    }, 30_000);
 
     // Try SSE pull first. If the connection fails twice in a row we
     // assume the endpoint isn't available and switch to polling.
@@ -478,6 +499,13 @@ export class CommandRelayService {
       online,
       agentId: this.agentMeta.id,
       branch: this.cachedBranch,
+      // Report our own version so the backend can keep PairedSession.ideVersion
+      // fresh + clear the "CLI update available" banner after a self-update
+      // (a codespace that reinstalls @latest reconnects via heartbeat, not
+      // pair/reconnect). Older backends ignore the extra field.
+      ...(typeof __CLI_VERSION__ !== 'undefined' && __CLI_VERSION__
+        ? { ideVersion: __CLI_VERSION__ }
+        : {}),
     })
       .then(() => log.trace('relay', `heartbeat ok online=${online}`))
       .catch((err: unknown) => log.trace('relay', `heartbeat failed online=${online}`, err));
@@ -526,6 +554,7 @@ export class CommandRelayService {
     if (this.pollTimer) { clearTimeout(this.pollTimer); this.pollTimer = null; }
     if (this.heartbeatTimer) { clearInterval(this.heartbeatTimer); this.heartbeatTimer = null; }
     if (this.agentsTimer) { clearInterval(this.agentsTimer); this.agentsTimer = null; }
+    if (this.headroomSupervisorTimer) { clearInterval(this.headroomSupervisorTimer); this.headroomSupervisorTimer = null; }
     if (this.sseReconnectTimer) { clearTimeout(this.sseReconnectTimer); this.sseReconnectTimer = null; }
     this.disarmSseWatchdog();
     if (this.sseRequest) {
