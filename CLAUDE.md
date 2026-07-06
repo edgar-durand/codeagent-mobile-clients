@@ -134,17 +134,20 @@ If you find yourself reaching for `setTimeout` to "check again later", you're po
 
 ### Shared package (`@codeagent/shared`)
 
-`packages/shared/src/` owns the *protocol* code — anything the CLI and the VS Code extension must agree on byte-for-byte:
+`packages/shared/src/` owns the *protocol contract* — the shapes, constants, and pure renderers the CLI and the VS Code extension must agree on byte-for-byte:
 
-- `protocol/parseChrome.ts` — detects TUI chrome lines (spinners, bullets, tree connectors, status lines) and converts them into `ChromeStep` chunks.
+- `protocol/chrome-types.ts` — the protocol-level *shapes* (`ChromeToolType`, `ChromeStep`, `SelectPrompt`) for TUI chrome steps and interactive selectors. Types only — the parsers moved out (see below).
 - `protocol/renderToLines.ts` — virtual terminal that turns raw PTY / shell-integration bytes into a clean array of screen lines. Handles CSI cursor moves, erase, alternate-screen, CR/LF quirks. Feeds every downstream parser.
-- `protocol/selector.ts` — `detectSelector` (numbered `❯ 1.` style) and `detectListSelector` (`  ❯ label` list style) for Claude's interactive prompts. Both operate on the output of `renderToLines`.
-- `protocol/filterChrome.ts` — strips TUI chrome (spinners, status bars, thinking frames, user-echo lines) so only Claude's conversation text reaches the mobile/web client.
+- `protocol/constants.ts` — wire constants both clients embed (`PROTOCOL_VERSION`, `SSE_SOCKET_TIMEOUT_MS`, `OBSERVER_BRIDGE_PORT`, `HEARTBEAT_INTERVAL_MS_DEFAULT`).
+- `protocol/remote-command.ts` — the `RemoteCommand` envelope (SSE `commands` frames + `/api/commands/pending` polling) with its zod schema and `toRemoteCommand(raw): RemoteCommand | null` validator. The VS Code relay uses it; the CLI's parse path is a follow-up.
 - `models/pricing.ts` — Anthropic `MODEL_PRICING` and `MODEL_CONTEXT_WINDOW` tables plus `getPricing()` / `getContextWindow()` lookup helpers.
+- `types/` — cross-repo wire types (`preview`, `beads`, `headroom`, `streaming`, `file-change`) plus `types/events.ts`: the `USER_EVENTS` constant map of every per-user SSE event name (canonical here; mirrored at `codeagent-mobile/packages/shared/src/types/events.ts`). New event-producing/consuming code references `USER_EVENTS.*`, never a hand-typed string.
+
+⚠️ **The TUI chrome/selector *parsers* do NOT live in shared anymore** (old `protocol/parseChrome.ts` / `selector.ts` / `filterChrome.ts` are gone). Glyphs and conventions vary per agent, so each PTY agent owns its own fixture-driven parsers next to its runtime strategy: `apps/cli/src/agents/<agent>/parsing.ts` (e.g. `cursor/parsing.ts`, `aider/parsing.ts` — `parse<Agent>Chrome` / `filter<Agent>Chrome` / `detect<Agent>Selector`), consumed via the runtime strategy and `streaming-emitter.service.ts`. ACP agents (claude/codex/gemini) get typed streaming and need no chrome parsing. `apps/cli/src/services/parseChrome.ts` is a vestigial one-line re-export of `@codeagent/shared` with no remaining importers — don't add logic there.
 
 Tests live next to the modules in `packages/shared/__tests__/` and run via `(cd packages/shared && npm run test)` or are picked up by the CI job automatically.
 
-**Critical rule:** when you touch parsing logic, pricing, or anything shared, change it *only* in `packages/shared`. Both consumers import through `@codeagent/shared`. tsup (CLI) and esbuild (VS Code) inline the imports at build time so runtime consumers don't have a separate dependency.
+**Critical rule:** when you touch the protocol contract (shapes, `renderToLines`, constants, `RemoteCommand`), pricing, or anything shared, change it *only* in `packages/shared`. Both consumers import through `@codeagent/shared`. tsup (CLI) and esbuild (VS Code) inline the imports at build time so runtime consumers don't have a separate dependency. Per-agent parsing changes, by contrast, belong in that agent's `apps/cli/src/agents/<agent>/parsing.ts`.
 
 JetBrains plugin is Kotlin and does **not** consume the shared package — if the same logic ever needs to exist there, port it deliberately and annotate the port.
 

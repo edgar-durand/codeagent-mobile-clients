@@ -182,9 +182,10 @@ export class BeadsWatcher {
       projectLabel,
       fullSnapshot: true,
       issues,
-      // The backend DTO requires `dependencies` (not `deps`). We don't track
-      // edges in the P0 snapshot yet, so always send an empty array rather than
-      // omitting the field (an omitted/conditional field 400s the ingest).
+      // We don't track edges in the P0 snapshot yet, so send an empty array.
+      // (The backend DTO marks `dependencies` optional and tolerates absence,
+      // but the wire contract in @codeagent/shared says "always sent" — keep
+      // the payload deterministic.)
       dependencies: [],
       memories: [],
       // Always send a summary — a null `bd status` yields a zeroed block rather

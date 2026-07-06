@@ -1,8 +1,12 @@
 /**
- * Mirror of `@windsurf/shared`'s PreviewDetection / PreviewStatus.
- * Kept byte-for-byte in sync with the canonical source in the private
- * repo's `packages/shared/src/types/preview.ts` so the CLI can consume
- * the same shapes the backend + mobile + landing speak.
+ * Preview wire types (PreviewDetection / PreviewStatus / EnvVar).
+ *
+ * CANONICAL WIRE OWNER: this file (`@codeagent/shared`) owns the wire
+ * protocol, per the cross-repo rule. The backend repo keeps hand-synced
+ * MIRRORS (`codeagent-mobile/packages/shared/src/types/preview.ts` for
+ * mobile/landing, `codeagent-mobile/apps/api-v2/src/common/types/preview.ts`
+ * for the backend); a drift-check script at
+ * `codeagent-mobile/scripts/check-shared-drift` compares them.
  */
 export interface PreviewDetection {
   framework: string;

@@ -7,7 +7,7 @@ export type AgentId =
   | 'aider'
   | 'gemini';
 
-export type AgentAuthKind = 'oauth_token' | 'api_key';
+export type AgentAuthKind = 'oauth_token' | 'api_key' | 'setup_token';
 
 export interface AgentAuth {
   kind: AgentAuthKind;

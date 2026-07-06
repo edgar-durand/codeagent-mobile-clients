@@ -51,7 +51,7 @@ import { configureHeadroom } from '../../services/headroom/configure';
 import { applyBudgetToHeadroom, makeRealApplyBudgetDeps, type BudgetSpec } from '../../services/headroom/budget-relaunch';
 import { fetchWithTimeout, HeadroomStatsReporter, mapStatsToSavings, type StatsShape, type Savings } from '../../services/headroom/stats-reporter';
 import { killHeadroomProxy } from '../../services/headroom/proxy-pid';
-import { AGENT_REGISTRY, isKnownAgentId, PREVIEW_DETECT_PROMPT, type AgentId, type PreviewDetection, type HeadroomBudgetCommand } from '@codeagent/shared';
+import { AGENT_REGISTRY, isKnownAgentId, PREVIEW_DETECT_PROMPT, USER_EVENTS, type AgentId, type PreviewDetection, type HeadroomBudgetCommand } from '@codeagent/shared';
 import * as previewSvc from '../../services/preview';
 import {
   activePreviews,
@@ -827,7 +827,7 @@ const beadsConfigureH: CommandHandler = async (ctx, cmd, parsed) => {
           sessionId: ctx.sessionId,
           pluginId: ctx.pluginId,
           pluginAuthToken: token,
-          type: 'beads_status',
+          type: USER_EVENTS.BEADS_STATUS,
           payload: Object.fromEntries(
             Object.entries(event).filter(([k]) => k !== 'type'),
           ),
@@ -1396,7 +1396,7 @@ const requestPreviewDetectH: CommandHandler = (ctx) => {
       sessionId: ctx.sessionId,
       pluginId: ctx.pluginId,
       pluginAuthToken: ctx.pluginAuthToken,
-      type: 'preview_error',
+      type: USER_EVENTS.PREVIEW_ERROR,
       payload: {
         stage: 'detection',
         message: `Preview detection isn't available on ${ctx.runtime.id} sessions yet — link a Claude or Codex agent.`,
@@ -1417,7 +1417,7 @@ const requestPreviewDetectH: CommandHandler = (ctx) => {
         sessionId: ctx.sessionId,
         pluginId: ctx.pluginId,
         pluginAuthToken,
-        type: 'preview_detection_ready',
+        type: USER_EVENTS.PREVIEW_DETECTION_READY,
         payload: { detection: fromFile },
       });
       return;
@@ -1427,7 +1427,7 @@ const requestPreviewDetectH: CommandHandler = (ctx) => {
       sessionId: ctx.sessionId,
       pluginId: ctx.pluginId,
       pluginAuthToken,
-      type: 'preview_detection_pending',
+      type: USER_EVENTS.PREVIEW_DETECTION_PENDING,
     });
     log.info('preview', 'detect: invoking generateOneShot');
     const startedAt = Date.now();
@@ -1443,7 +1443,7 @@ const requestPreviewDetectH: CommandHandler = (ctx) => {
         sessionId: ctx.sessionId,
         pluginId: ctx.pluginId,
         pluginAuthToken,
-        type: 'preview_error',
+        type: USER_EVENTS.PREVIEW_ERROR,
         payload: {
           stage: 'detection',
           message:
@@ -1458,7 +1458,7 @@ const requestPreviewDetectH: CommandHandler = (ctx) => {
         sessionId: ctx.sessionId,
         pluginId: ctx.pluginId,
         pluginAuthToken,
-        type: 'preview_error',
+        type: USER_EVENTS.PREVIEW_ERROR,
         payload: {
           stage: 'unsupported',
           message: detection.notes ?? 'No dev server applies to this project.',
@@ -1478,7 +1478,7 @@ const requestPreviewDetectH: CommandHandler = (ctx) => {
       sessionId: ctx.sessionId,
       pluginId: ctx.pluginId,
       pluginAuthToken,
-      type: 'preview_detection_ready',
+      type: USER_EVENTS.PREVIEW_DETECTION_READY,
       payload: { detection },
     });
   })();
@@ -1752,7 +1752,7 @@ export function startPreviewFromDetection(
       sessionId: ctx.sessionId,
       pluginId: ctx.pluginId,
       pluginAuthToken,
-      type: 'preview_progress',
+      type: USER_EVENTS.PREVIEW_PROGRESS,
       payload: { step, message, timestamp: Date.now() },
     });
   };
@@ -1772,7 +1772,7 @@ export function startPreviewFromDetection(
         sessionId: ctx.sessionId,
         pluginId: ctx.pluginId,
         pluginAuthToken,
-        type: 'preview_ready',
+        type: USER_EVENTS.PREVIEW_READY,
         payload: { url: existing.url, framework: existing.framework, port: detection.port },
       });
       return;
@@ -1782,7 +1782,7 @@ export function startPreviewFromDetection(
       sessionId: ctx.sessionId,
       pluginId: ctx.pluginId,
       pluginAuthToken,
-      type: 'preview_starting',
+      type: USER_EVENTS.PREVIEW_STARTING,
       payload: { framework: detection.framework, port: detection.port },
     });
     emitProgress('ENV_DETECTED', `${detection.framework}`);
@@ -1823,7 +1823,7 @@ export function startPreviewFromDetection(
             sessionId: ctx.sessionId,
             pluginId: ctx.pluginId,
             pluginAuthToken,
-            type: 'preview_error',
+            type: USER_EVENTS.PREVIEW_ERROR,
             payload: {
               stage: 'spawn',
               message: `This project uses yarn but yarn isn't installed, and installing it automatically failed (npm install -g yarn, exit ${ensured.code}). Install yarn in this environment and try the preview again.`,
@@ -1852,7 +1852,7 @@ export function startPreviewFromDetection(
           sessionId: ctx.sessionId,
           pluginId: ctx.pluginId,
           pluginAuthToken,
-          type: 'preview_error',
+          type: USER_EVENTS.PREVIEW_ERROR,
           payload: {
             stage: 'ready_timeout',
             message: `Dependency install (${missingDeps.cmd} ${missingDeps.args.join(' ')}) didn't finish within ${Math.round(INSTALL_TIMEOUT_MS / 1000)}s and was stopped. Run it manually in this project, then try the preview again.`,
@@ -1865,7 +1865,7 @@ export function startPreviewFromDetection(
           sessionId: ctx.sessionId,
           pluginId: ctx.pluginId,
           pluginAuthToken,
-          type: 'preview_error',
+          type: USER_EVENTS.PREVIEW_ERROR,
           payload: {
             stage: 'spawn',
             message: `Dependency install failed (${missingDeps.cmd} ${missingDeps.args.join(' ')}, exit ${result.code}). Run it manually in this project and try again.`,
@@ -1933,7 +1933,7 @@ export function startPreviewFromDetection(
           sessionId: ctx.sessionId,
           pluginId: ctx.pluginId,
           pluginAuthToken,
-          type: 'preview_error',
+          type: USER_EVENTS.PREVIEW_ERROR,
           payload: {
             stage: 'ready_timeout',
             message: `Setup step (${setup.cmd} ${setup.args.join(' ')}) didn't finish within ${Math.round(timeoutMs / 1000)}s and was stopped.`,
@@ -1946,7 +1946,7 @@ export function startPreviewFromDetection(
           sessionId: ctx.sessionId,
           pluginId: ctx.pluginId,
           pluginAuthToken,
-          type: 'preview_error',
+          type: USER_EVENTS.PREVIEW_ERROR,
           payload: {
             stage: 'spawn',
             message: `Setup failed (${setup.cmd} ${setup.args.join(' ')}, exit ${result.code}).`,
@@ -1989,7 +1989,7 @@ export function startPreviewFromDetection(
           sessionId: ctx.sessionId,
           pluginId: ctx.pluginId,
           pluginAuthToken,
-          type: 'preview_ready',
+          type: USER_EVENTS.PREVIEW_READY,
           payload: { url: raceExisting.url, framework: raceExisting.framework, port: detection.port },
         });
         return;
@@ -2018,7 +2018,7 @@ export function startPreviewFromDetection(
             sessionId: ctx.sessionId,
             pluginId: ctx.pluginId,
             pluginAuthToken,
-            type: 'preview_error',
+            type: USER_EVENTS.PREVIEW_ERROR,
             payload: {
               stage: 'spawn',
               message: `Port ${detection.port} is still in use after stopping the previous preview. Wait a moment and try again.`,
@@ -2034,7 +2034,7 @@ export function startPreviewFromDetection(
           sessionId: ctx.sessionId,
           pluginId: ctx.pluginId,
           pluginAuthToken,
-          type: 'preview_error',
+          type: USER_EVENTS.PREVIEW_ERROR,
           payload: {
             stage: 'spawn',
             message: `Port ${detection.port} is already in use by another process, so the dev server can't start there. Stop whatever is listening on port ${detection.port} and try the preview again.`,
@@ -2105,7 +2105,7 @@ export function startPreviewFromDetection(
         sessionId: ctx.sessionId,
         pluginId: ctx.pluginId,
         pluginAuthToken,
-        type: 'preview_error',
+        type: USER_EVENTS.PREVIEW_ERROR,
         payload: {
           stage: 'spawn',
           message: `The dev server exited (code ${outcome.code}) before it was ready. It may need a database or other services.`,
@@ -2120,7 +2120,7 @@ export function startPreviewFromDetection(
         sessionId: ctx.sessionId,
         pluginId: ctx.pluginId,
         pluginAuthToken,
-        type: 'preview_error',
+        type: USER_EVENTS.PREVIEW_ERROR,
         payload: {
           stage: 'ready_timeout',
           message: "The dev server didn't become ready in time. It may be stuck waiting on a database or other service.",
@@ -2156,7 +2156,7 @@ export function startPreviewFromDetection(
           sessionId: ctx.sessionId,
           pluginId: ctx.pluginId,
           pluginAuthToken,
-          type: 'preview_error',
+          type: USER_EVENTS.PREVIEW_ERROR,
           payload: { stage: 'tunnel', message: 'Expo did not report a tunnel URL.' },
         });
         return;
@@ -2177,7 +2177,7 @@ export function startPreviewFromDetection(
           sessionId: ctx.sessionId,
           pluginId: ctx.pluginId,
           pluginAuthToken,
-          type: 'preview_error',
+          type: USER_EVENTS.PREVIEW_ERROR,
           payload: { stage: 'tunnel', message: (e as Error).message },
         });
         return;
@@ -2303,7 +2303,7 @@ export function startPreviewFromDetection(
           sessionId: ctx.sessionId,
           pluginId: ctx.pluginId,
           pluginAuthToken,
-          type: 'preview_error',
+          type: USER_EVENTS.PREVIEW_ERROR,
           payload: {
             stage: 'tunnel',
             message: `Tunnel did not become reachable after ${MAX_TUNNEL_ATTEMPTS} attempts (${lastTunnelErr}). Cloudflare Quick Tunnels occasionally fail to register — please retry.`,
@@ -2329,7 +2329,7 @@ export function startPreviewFromDetection(
       sessionId: ctx.sessionId,
       pluginId: ctx.pluginId,
       pluginAuthToken,
-      type: 'preview_ready',
+      type: USER_EVENTS.PREVIEW_READY,
       payload: { url, framework: detection.framework, port: detection.port },
     });
   })().catch((err) => {
@@ -2343,7 +2343,7 @@ export function startPreviewFromDetection(
       sessionId: ctx.sessionId,
       pluginId: ctx.pluginId,
       pluginAuthToken,
-      type: 'preview_error',
+      type: USER_EVENTS.PREVIEW_ERROR,
       payload: { stage: 'spawn', message: `Preview failed to start: ${message}` },
     });
   });
@@ -2362,7 +2362,7 @@ const previewStopH: CommandHandler = (ctx) => {
       sessionId: ctx.sessionId,
       pluginId: ctx.pluginId,
       pluginAuthToken,
-      type: 'preview_stopped',
+      type: USER_EVENTS.PREVIEW_STOPPED,
       payload: { reason: 'user' },
     });
   })();

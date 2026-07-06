@@ -358,12 +358,15 @@ function coerceIssue(row: unknown, projectKey: string): BeadsIssueDto | null {
     owner: typeof r.owner === 'string' && r.owner.length > 0 ? r.owner : null,
     created_at: typeof r.created_at === 'string' ? r.created_at : '',
     updated_at: typeof r.updated_at === 'string' ? r.updated_at : '',
+    // The backend ingest DTO validates the counts as REQUIRED ints — an
+    // omitted count would 400 the whole snapshot. Default to 0 when a bd
+    // version omits one instead of dropping the field.
     dependency_count:
-      typeof r.dependency_count === 'number' ? r.dependency_count : undefined,
+      typeof r.dependency_count === 'number' ? r.dependency_count : 0,
     dependent_count:
-      typeof r.dependent_count === 'number' ? r.dependent_count : undefined,
+      typeof r.dependent_count === 'number' ? r.dependent_count : 0,
     comment_count:
-      typeof r.comment_count === 'number' ? r.comment_count : undefined,
+      typeof r.comment_count === 'number' ? r.comment_count : 0,
     projectKey,
   };
 }

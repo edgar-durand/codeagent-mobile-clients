@@ -53,6 +53,9 @@ describe('beads wire types', () => {
       owner: null,
       created_at: '2026-06-09T10:00:00Z',
       updated_at: '2026-06-09T10:00:00Z',
+      dependency_count: 0,
+      dependent_count: 0,
+      comment_count: 0,
       projectKey: 'path:deadbeef',
     };
     expect(issue.priority).toBeNull();

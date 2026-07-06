@@ -1,0 +1,82 @@
+/**
+ * Canonical names of the per-user SSE bus events (`/api/users/me/stream`).
+ *
+ * The authoritative list is the `UserEvent` discriminated union in the
+ * backend repo: codeagent-mobile/apps/api-v2/src/user-events/user-events.types.ts.
+ * Every `type:` literal of that union appears here exactly once — when a new
+ * variant lands on the union, add its name here (and in the backend mirror of
+ * this file at codeagent-mobile/packages/shared/src/types/events.ts).
+ *
+ * Producers (CLI event posts, backend `userEvents.publish` calls) and
+ * consumers (the `useUserEventsSSE` hooks' switch cases) should reference
+ * `USER_EVENTS.*` instead of re-typing the string, so a typo becomes a
+ * compile error instead of a silently dropped event.
+ */
+export const USER_EVENTS = {
+  PAIRED_SESSION_STATUS: 'paired_session_status',
+  PAIRED_SESSION_ADDED: 'paired_session_added',
+  PAIRED_SESSION_REMOVED: 'paired_session_removed',
+  PAIRED_SESSION_BRANCH_CHANGED: 'paired_session_branch_changed',
+  SHARED_WITH_ME_ADDED: 'shared_with_me_added',
+  SHARED_WITH_ME_REVOKED: 'shared_with_me_revoked',
+  USAGE_CHANGED: 'usage_changed',
+  TASK_DONE: 'task_done',
+  HUNK_PENDING_REVIEW_ADDED: 'hunk_pending_review_added',
+  HUNK_REVIEW_RESOLVED: 'hunk_review_resolved',
+  FILE_CHANGED: 'file_changed',
+  FILES_BATCH_CHANGED: 'files_batch_changed',
+  AGENT_STREAMING_CHUNK: 'agent_streaming_chunk',
+  AGENT_AWAITING_ANSWER: 'agent_awaiting_answer',
+  AWAITING_INPUT_ADDED: 'awaiting_input_added',
+  AGENT_ANSWER_RESOLVED: 'agent_answer_resolved',
+  TEMPLATE_ADDED: 'template_added',
+  TEMPLATE_REMOVED: 'template_removed',
+  TEMPLATE_UPDATED: 'template_updated',
+  AGENT_TASK_DISPATCHED: 'agent_task_dispatched',
+  AGENT_TASK_COMPLETED: 'agent_task_completed',
+  LINKED_AGENT_ADDED: 'linked_agent_added',
+  QUOTA_REACHED: 'quota_reached',
+  LINKED_AGENT_LINK_FAILED: 'linked_agent_link_failed',
+  CODESPACE_AGENT_INSTALLED: 'codespace_agent_installed',
+  AGENT_CREDENTIALS_REFRESHED: 'agent_credentials_refreshed',
+  CREDENTIAL_INVALID: 'credential_invalid',
+  CODESPACE_WAKING: 'codespace_waking',
+  CODESPACE_BILLING_BLOCKED: 'codespace_billing_blocked',
+  COST_SAVING_UPDATED: 'cost_saving_updated',
+  COMMAND_COMPLETED: 'command_completed',
+  AI_SUMMARY_PENDING: 'ai_summary_pending',
+  AI_SUMMARY_READY: 'ai_summary_ready',
+  AI_INSIGHT_PENDING: 'ai_insight_pending',
+  AI_INSIGHT_READY: 'ai_insight_ready',
+  PUSH_TOKEN_INVALIDATED: 'push_token_invalidated',
+  PREVIEW_DETECTION_PENDING: 'preview_detection_pending',
+  PREVIEW_DETECTION_READY: 'preview_detection_ready',
+  PREVIEW_STARTING: 'preview_starting',
+  PREVIEW_READY: 'preview_ready',
+  PREVIEW_STOPPED: 'preview_stopped',
+  PREVIEW_ERROR: 'preview_error',
+  PREVIEW_PROGRESS: 'preview_progress',
+  BEADS_STATE_CHANGED: 'beads_state_changed',
+  BEADS_PROVISIONING: 'beads_provisioning',
+  BEADS_TEAM_MEMORY_CHANGED: 'beads_team_memory_changed',
+  AUDIT_EVENT_ADDED: 'audit_event_added',
+  SELF_HOSTED_HOST_ADDED: 'self_hosted_host_added',
+  SELF_HOSTED_HOST_STATUS: 'self_hosted_host_status',
+  SELF_HOSTED_HOST_REMOVED: 'self_hosted_host_removed',
+  SELF_HOSTED_HOST_TELEMETRY: 'self_hosted_host_telemetry',
+  SELF_HOSTED_HOST_METRICS: 'self_hosted_host_metrics',
+  SELF_HOSTED_HOST_SESSIONS: 'self_hosted_host_sessions',
+  SELF_HOSTED_DEPLOY_PROGRESS: 'self_hosted_deploy_progress',
+  REFERRAL_REWARD_EARNED: 'referral_reward_earned',
+  HEADROOM_PROGRESS: 'headroom_progress',
+  HEADROOM_STATUS: 'headroom_status',
+  BEADS_STATUS: 'beads_status',
+  LINKED_AGENT_HEADROOM_BUDGET_UPDATED: 'linked_agent_headroom_budget_updated',
+  CLI_UPDATE_AVAILABLE: 'cli_update_available',
+  AGENT_INSTALL_PROGRESS: 'agent_install_progress',
+  AGENT_INSTALL_FAILED: 'agent_install_failed',
+  CLI_UPDATE_PROGRESS: 'cli_update_progress',
+  CLI_UPDATE_FAILED: 'cli_update_failed',
+} as const;
+
+export type UserEventName = (typeof USER_EVENTS)[keyof typeof USER_EVENTS];

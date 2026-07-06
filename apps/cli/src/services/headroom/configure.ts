@@ -4,7 +4,7 @@ import {
   isHeadroomSupportedAgent,
   type HeadroomStep,
 } from '../../commands/host-agent';
-import type { HeadroomStatus } from '@codeagent/shared';
+import { USER_EVENTS, type HeadroomStatus } from '@codeagent/shared';
 import type { Savings } from './stats-reporter';
 
 export interface ConfigureCtx {
@@ -32,8 +32,8 @@ export interface ConfigureDeps {
 }
 
 type HeadroomEvent =
-  | { type: 'headroom_progress'; step: HeadroomStep }
-  | { type: 'headroom_status'; state: HeadroomStatus['state'] };
+  | { type: typeof USER_EVENTS.HEADROOM_PROGRESS; step: HeadroomStep }
+  | { type: typeof USER_EVENTS.HEADROOM_STATUS; state: HeadroomStatus['state'] };
 
 export type HeadroomResult =
   | { enabled: boolean; running?: boolean; savings?: Savings }
@@ -55,10 +55,10 @@ export async function configureHeadroom(
     if (!isHeadroomSupportedAgent(ctx.agent)) return { supported: false };
     const ok = await deps.setup(ctx.agent, undefined, {
       extras: ['proxy', 'code', 'image'],
-      onProgress: (step) => deps.emit({ type: 'headroom_progress', step }),
+      onProgress: (step) => deps.emit({ type: USER_EVENTS.HEADROOM_PROGRESS, step }),
     });
     if (!ok) {
-      deps.emit({ type: 'headroom_status', state: 'error' });
+      deps.emit({ type: USER_EVENTS.HEADROOM_STATUS, state: 'error' });
       return { enabled: false };
     }
     deps.persist({ enabled: true, agent: kind, ingestUrl: ctx.savingsIngestUrl });
@@ -74,7 +74,7 @@ export async function configureHeadroom(
         pluginAuthToken: ctx.pluginAuthToken,
       });
     }
-    deps.emit({ type: 'headroom_status', state: 'enabled' });
+    deps.emit({ type: USER_EVENTS.HEADROOM_STATUS, state: 'enabled' });
     return { enabled: true };
   }
 
@@ -84,6 +84,6 @@ export async function configureHeadroom(
   deps.stopProxy();
   deps.persist({ enabled: false });
   deps.stopReporter();
-  deps.emit({ type: 'headroom_status', state: 'disabled' });
+  deps.emit({ type: USER_EVENTS.HEADROOM_STATUS, state: 'disabled' });
   return { enabled: false };
 }

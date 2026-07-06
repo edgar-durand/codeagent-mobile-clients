@@ -6,8 +6,12 @@ export const AGENT_REGISTRY: Record<AgentId, AgentMetadata> = {
     displayName: 'Claude Code',
     binaryName: 'claude',
     enabled: true,
-    supportedAuthKinds: ['oauth_token', 'api_key'],
-    preferredAuthKind: 'oauth_token',
+    // Mirrors the backend registry (codeagent-mobile
+    // apps/api-v2/src/codespaces/agent.ts — authoritative for auth
+    // capabilities). `setup_token` is the bare `sk-ant-oat01-…` from
+    // `claude setup-token` → delivered via CLAUDE_CODE_OAUTH_TOKEN.
+    supportedAuthKinds: ['setup_token', 'oauth_token', 'api_key'],
+    preferredAuthKind: 'setup_token',
   },
   codex: {
     id: 'codex',
@@ -30,15 +34,22 @@ export const AGENT_REGISTRY: Record<AgentId, AgentMetadata> = {
     displayName: 'CodeRabbit',
     binaryName: 'coderabbit',
     enabled: true,
-    supportedAuthKinds: ['oauth_token', 'api_key'],
-    preferredAuthKind: 'oauth_token',
+    // Backend registry is authoritative: CodeRabbit links via a real
+    // API key only (no OAuth flow exists in api-v2).
+    supportedAuthKinds: ['api_key'],
+    preferredAuthKind: 'api_key',
   },
   cursor: {
     id: 'cursor',
     displayName: 'Cursor Agent',
     binaryName: 'cursor-agent',
     enabled: true,
-    supportedAuthKinds: ['oauth_token', 'api_key'],
+    // Backend registry is authoritative: since the Cursor OAuth
+    // device-flow shipped, new links are oauth_token only (the login
+    // blob written to ~/.config/cursor/auth.json). Legacy vaulted
+    // api_key rows may still exist server-side, but the link surface
+    // no longer offers api_key.
+    supportedAuthKinds: ['oauth_token'],
     preferredAuthKind: 'oauth_token',
   },
   aider: {
@@ -77,13 +88,5 @@ export function getAgent(id: AgentId): AgentMetadata {
 }
 
 export function isKnownAgentId(id: string): id is AgentId {
-  return (
-    id === 'claude' ||
-    id === 'codex' ||
-    id === 'copilot' ||
-    id === 'coderabbit' ||
-    id === 'cursor' ||
-    id === 'aider' ||
-    id === 'gemini'
-  );
+  return id in AGENT_REGISTRY;
 }

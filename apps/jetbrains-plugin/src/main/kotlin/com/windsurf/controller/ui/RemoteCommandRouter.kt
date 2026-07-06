@@ -12,6 +12,8 @@ import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.diagnostic.Logger
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.wm.ToolWindowManager
+import com.windsurf.controller.protocol.CLI_FALLBACK_DEFAULT_MODEL_ID
+import com.windsurf.controller.protocol.CLI_FALLBACK_MODELS
 import com.windsurf.controller.services.AgentOutputMonitor
 import com.windsurf.controller.services.CommandRelayService
 import com.windsurf.controller.services.FileOpsService
@@ -52,7 +54,46 @@ class RemoteCommandRouter(private val project: Project) {
 
     private val logger = Logger.getInstance(RemoteCommandRouter::class.java)
 
-fun dispatch(command: CommandRelayService.RemoteCommand) {
+    /**
+     * Thrown inside a [respondWith] block to fail the command with a
+     * specific error message. When the legacy wire shape sent a richer
+     * object than `{error}` on failure (e.g. terminal_write's
+     * `{ok:false,…}`), carry it via [payload] so the mobile client
+     * keeps seeing the exact same body.
+     */
+    private class CommandFailed(
+        message: String,
+        val payload: JsonObject? = null,
+    ) : Exception(message)
+
+    /**
+     * Runs a command arm's work and guarantees EXACTLY ONE sendResult:
+     * "completed" with the produced payload on success, "failed" with
+     * `{error: message}` (or the payload carried by [CommandFailed])
+     * when the block throws. Kotlin twin of the VS Code router's
+     * `respondWith` (apps/vsc-plugin/src/panels/remote-command-router.ts).
+     * Before this, an arm that threw before its own sendResult left the
+     * command without a terminal result — the mobile side hung until
+     * its timeout.
+     */
+    private fun respondWith(
+        command: CommandRelayService.RemoteCommand,
+        relay: CommandRelayService,
+        produce: () -> JsonObject,
+    ) {
+        val payload = try {
+            produce()
+        } catch (e: Exception) {
+            logger.warn("[${command.type}] handler failed: ${e.message}")
+            val failure = (e as? CommandFailed)?.payload
+                ?: JsonObject().apply { addProperty("error", e.message ?: e.toString()) }
+            relay.sendResult(command.id, "failed", failure)
+            return
+        }
+        relay.sendResult(command.id, "completed", payload)
+    }
+
+    fun dispatch(command: CommandRelayService.RemoteCommand) {
         SwingUtilities.invokeLater {
             val relay = CommandRelayService.getInstance()
             val ide = IdeIntegrationService.getInstance()
@@ -63,7 +104,7 @@ fun dispatch(command: CommandRelayService.RemoteCommand) {
                 // mobile-side senders that use either name dispatch
                 // identically. The handler body falls through to the
                 // start_task arm via type munging.
-                "send_prompt", "start_task" -> {
+                "send_prompt", "start_task" -> respondWith(command, relay) {
                     var prompt = command.payload.get("prompt")?.asString ?: ""
                     val agentId = command.payload.get("agentId")?.asString
 
@@ -92,16 +133,11 @@ fun dispatch(command: CommandRelayService.RemoteCommand) {
                         // `/model claude-sonnet-4-6` still reaches
                         // Claude Code's slash-command handler.
                         if (CopilotChatMetadataBridge.selectModel(project, modelId)) {
-                            relay.sendResult(
-                                command.id,
-                                "completed",
-                                com.google.gson.JsonObject().apply {
-                                    addProperty("message", "Switched Copilot model to $modelId")
-                                    addProperty("modelId", modelId)
-                                    addProperty("applied", true)
-                                },
-                            )
-                            return@invokeLater
+                            return@respondWith com.google.gson.JsonObject().apply {
+                                addProperty("message", "Switched Copilot model to $modelId")
+                                addProperty("modelId", modelId)
+                                addProperty("applied", true)
+                            }
                         }
                     }
 
@@ -141,10 +177,7 @@ fun dispatch(command: CommandRelayService.RemoteCommand) {
                         }
                         if (oversized != null) {
                             writtenPaths.forEach { runCatching { it.delete() } }
-                            relay.sendResult(command.id, "failed", com.google.gson.JsonObject().apply {
-                                addProperty("error", "Attachment too large: $oversized")
-                            })
-                            return@invokeLater
+                            throw CommandFailed("Attachment too large: $oversized")
                         }
                         if (refs.isNotEmpty()) {
                             prompt = "${refs.joinToString(" ")} $prompt".trim()
@@ -158,10 +191,7 @@ fun dispatch(command: CommandRelayService.RemoteCommand) {
                     // user sees a clear hint instead of a silent observer
                     // no-op.
                     if (agentId != null && agentId.startsWith("__terminal__:")) {
-                        relay.sendResult(command.id, "failed", com.google.gson.JsonObject().apply {
-                            addProperty("error", "Terminal agents are run by codeam-cli. Install it (npm i -g codeam-cli) and run `codeam pair`.")
-                        })
-                        return@invokeLater
+                        throw CommandFailed("Terminal agents are run by codeam-cli. Install it (npm i -g codeam-cli) and run `codeam pair`.")
                     }
                     // Resolve the target agent up front so we can hand a
                     // typed `AgentInvocation` to the strategy registry.
@@ -184,16 +214,16 @@ fun dispatch(command: CommandRelayService.RemoteCommand) {
                             sessionId = command.sessionId,
                         )
                     )
-                    relay.sendResult(command.id, "completed", com.google.gson.JsonObject().apply {
+                    com.google.gson.JsonObject().apply {
                         addProperty("message", if (sent) "Task started: $prompt" else "Could not deliver prompt — copied to clipboard")
-                    })
+                    }
                 }
-                "stop_task" -> {
+                "stop_task" -> respondWith(command, relay) {
                     AgentStrategyRegistry.getInstance().stop()
                     logger.info("Command: stop_task")
-                    relay.sendResult(command.id, "completed", com.google.gson.JsonObject().apply {
+                    com.google.gson.JsonObject().apply {
                         addProperty("message", "Task stopped")
-                    })
+                    }
                 }
                 "approve_action" -> {
                     logger.info("Command: approve_action")
@@ -207,13 +237,13 @@ fun dispatch(command: CommandRelayService.RemoteCommand) {
                         addProperty("message", "Action rejected")
                     })
                 }
-                "provide_input" -> {
+                "provide_input" -> respondWith(command, relay) {
                     val input = command.payload.get("input")?.asString ?: ""
                     logger.info("Command: provide_input (${input.take(50)}…)")
                     ide.sendPromptToIde(input)
-                    relay.sendResult(command.id, "completed", com.google.gson.JsonObject().apply {
+                    com.google.gson.JsonObject().apply {
                         addProperty("message", "Input provided")
-                    })
+                    }
                 }
                 "mcp_configure" -> {
                     handleMcpConfigure(command, relay)
@@ -221,152 +251,106 @@ fun dispatch(command: CommandRelayService.RemoteCommand) {
                 "mcp_status" -> {
                     handleMcpStatus(command, relay)
                 }
-                "read_file" -> {
+                "read_file" -> respondWith(command, relay) {
                     val filePath = command.payload.get("path")?.asString
-                    if (filePath.isNullOrEmpty()) {
-                        relay.sendResult(command.id, "failed", com.google.gson.JsonObject().apply {
-                            addProperty("error", "Missing path")
-                        })
-                    } else {
-                        val res = FileOpsService.getInstance().readFile(filePath)
-                        relay.sendResult(command.id, "completed", res)
-                    }
+                    if (filePath.isNullOrEmpty()) throw CommandFailed("Missing path")
+                    FileOpsService.getInstance().readFile(filePath)
                 }
-                "write_file" -> {
+                "write_file" -> respondWith(command, relay) {
                     val filePath = command.payload.get("path")?.asString
                     val contentEl = command.payload.get("content")
                     if (filePath.isNullOrEmpty() || contentEl == null || contentEl.isJsonNull) {
-                        relay.sendResult(command.id, "failed", com.google.gson.JsonObject().apply {
-                            addProperty("error", "Missing path or content")
-                        })
-                    } else {
-                        val res = FileOpsService.getInstance().writeFile(filePath, contentEl.asString)
-                        relay.sendResult(command.id, "completed", res)
+                        throw CommandFailed("Missing path or content")
                     }
+                    FileOpsService.getInstance().writeFile(filePath, contentEl.asString)
                 }
-                "list_files" -> {
+                "list_files" -> respondWith(command, relay) {
                     val q = command.payload.get("query")?.asString
-                    relay.sendResult(command.id, "completed", ProjectOpsService.getInstance().listFiles(q))
+                    ProjectOpsService.getInstance().listFiles(q)
                 }
-                "search_files" -> {
+                "search_files" -> respondWith(command, relay) {
                     val query = command.payload.get("query")?.asString
-                    if (query.isNullOrBlank()) {
-                        relay.sendResult(command.id, "failed", com.google.gson.JsonObject().apply {
-                            addProperty("error", "Missing query")
-                        })
-                    } else {
-                        val include = command.payload.getAsJsonArray("include")?.mapNotNull { it.asString }
-                        val exclude = command.payload.getAsJsonArray("exclude")?.mapNotNull { it.asString }
-                        val maxResults = command.payload.get("maxResults")?.asInt ?: 500
-                        relay.sendResult(
-                            command.id,
-                            "completed",
-                            ProjectOpsService.getInstance().searchFiles(
-                                query,
-                                command.payload.get("caseSensitive")?.asBoolean ?: false,
-                                command.payload.get("wholeWord")?.asBoolean ?: false,
-                                command.payload.get("regex")?.asBoolean ?: false,
-                                include,
-                                exclude,
-                                maxResults,
-                            ),
-                        )
-                    }
+                    if (query.isNullOrBlank()) throw CommandFailed("Missing query")
+                    val include = command.payload.getAsJsonArray("include")?.mapNotNull { it.asString }
+                    val exclude = command.payload.getAsJsonArray("exclude")?.mapNotNull { it.asString }
+                    val maxResults = command.payload.get("maxResults")?.asInt ?: 500
+                    ProjectOpsService.getInstance().searchFiles(
+                        query,
+                        command.payload.get("caseSensitive")?.asBoolean ?: false,
+                        command.payload.get("wholeWord")?.asBoolean ?: false,
+                        command.payload.get("regex")?.asBoolean ?: false,
+                        include,
+                        exclude,
+                        maxResults,
+                    )
                 }
-                "terminal_open" -> {
+                "terminal_open" -> respondWith(command, relay) {
                     val cols = command.payload.get("cols")?.asInt ?: 80
                     val rows = command.payload.get("rows")?.asInt ?: 24
                     val cwd = command.payload.get("cwd")?.asString
-                    relay.sendResult(
-                        command.id,
-                        "completed",
-                        TerminalOpsService.getInstance().open(command.sessionId, cols, rows, cwd),
-                    )
+                    TerminalOpsService.getInstance().open(command.sessionId, cols, rows, cwd)
                 }
-                "terminal_write" -> {
+                "terminal_write" -> respondWith(command, relay) {
                     val ts = command.payload.get("sessionId")?.asString
                     val data = command.payload.get("data")?.asString
-                    if (ts.isNullOrBlank() || data == null) {
-                        relay.sendResult(command.id, "failed", com.google.gson.JsonObject().apply {
-                            addProperty("error", "Missing sessionId or data")
-                        })
-                    } else {
-                        val r = TerminalOpsService.getInstance().write(ts, data)
-                        val status = if (r.get("ok")?.asBoolean == true) "completed" else "failed"
-                        relay.sendResult(command.id, status, r)
+                    if (ts.isNullOrBlank() || data == null) throw CommandFailed("Missing sessionId or data")
+                    val r = TerminalOpsService.getInstance().write(ts, data)
+                    if (r.get("ok")?.asBoolean != true) {
+                        throw CommandFailed(r.get("error")?.asString ?: "terminal_write failed", r)
                     }
+                    r
                 }
-                "terminal_resize" -> {
+                "terminal_resize" -> respondWith(command, relay) {
                     val ts = command.payload.get("sessionId")?.asString
                     val cols = command.payload.get("cols")?.asInt
                     val rows = command.payload.get("rows")?.asInt
                     if (ts.isNullOrBlank() || cols == null || rows == null) {
-                        relay.sendResult(command.id, "failed", com.google.gson.JsonObject().apply {
-                            addProperty("error", "Missing sessionId / cols / rows")
-                        })
-                    } else {
-                        val r = TerminalOpsService.getInstance().resize(ts, cols, rows)
-                        val status = if (r.get("ok")?.asBoolean == true) "completed" else "failed"
-                        relay.sendResult(command.id, status, r)
+                        throw CommandFailed("Missing sessionId / cols / rows")
                     }
+                    val r = TerminalOpsService.getInstance().resize(ts, cols, rows)
+                    if (r.get("ok")?.asBoolean != true) {
+                        throw CommandFailed(r.get("error")?.asString ?: "terminal_resize failed", r)
+                    }
+                    r
                 }
-                "terminal_close" -> {
+                "terminal_close" -> respondWith(command, relay) {
                     val ts = command.payload.get("sessionId")?.asString
-                    if (ts.isNullOrBlank()) {
-                        relay.sendResult(command.id, "failed", com.google.gson.JsonObject().apply {
-                            addProperty("error", "Missing sessionId")
-                        })
-                    } else {
-                        relay.sendResult(
-                            command.id,
-                            "completed",
-                            TerminalOpsService.getInstance().close(ts),
-                        )
-                    }
+                    if (ts.isNullOrBlank()) throw CommandFailed("Missing sessionId")
+                    TerminalOpsService.getInstance().close(ts)
                 }
-                "git_status" -> {
-                    relay.sendResult(command.id, "completed", ProjectOpsService.getInstance().gitStatus())
+                "git_status" -> respondWith(command, relay) {
+                    ProjectOpsService.getInstance().gitStatus()
                 }
-                "git_diff" -> {
+                "git_diff" -> respondWith(command, relay) {
                     val p = command.payload.get("path")?.asString
-                    relay.sendResult(command.id, "completed", ProjectOpsService.getInstance().gitDiff(p))
+                    ProjectOpsService.getInstance().gitDiff(p)
                 }
-                "git_diff_staged" -> {
+                "git_diff_staged" -> respondWith(command, relay) {
                     val p = command.payload.get("path")?.asString
-                    relay.sendResult(command.id, "completed", ProjectOpsService.getInstance().gitDiffStaged(p))
+                    ProjectOpsService.getInstance().gitDiffStaged(p)
                 }
-                "git_log" -> {
+                "git_log" -> respondWith(command, relay) {
                     val limit = command.payload.get("limit")?.asInt ?: 30
-                    relay.sendResult(command.id, "completed", ProjectOpsService.getInstance().gitLog(limit))
+                    ProjectOpsService.getInstance().gitLog(limit)
                 }
-                "git_commit" -> {
+                "git_commit" -> respondWith(command, relay) {
                     val message = command.payload.get("message")?.asString
-                    if (message.isNullOrBlank()) {
-                        relay.sendResult(command.id, "failed", com.google.gson.JsonObject().apply {
-                            addProperty("error", "Missing message")
-                        })
-                    } else {
-                        val pathsEl = command.payload.getAsJsonArray("paths")
-                        val paths = pathsEl?.mapNotNull { it.asString }
-                        relay.sendResult(command.id, "completed", ProjectOpsService.getInstance().gitCommit(message, paths))
-                    }
+                    if (message.isNullOrBlank()) throw CommandFailed("Missing message")
+                    val pathsEl = command.payload.getAsJsonArray("paths")
+                    val paths = pathsEl?.mapNotNull { it.asString }
+                    ProjectOpsService.getInstance().gitCommit(message, paths)
                 }
-                "git_push" -> {
-                    relay.sendResult(command.id, "completed", ProjectOpsService.getInstance().gitPush())
+                "git_push" -> respondWith(command, relay) {
+                    ProjectOpsService.getInstance().gitPush()
                 }
-                "git_pull" -> {
-                    relay.sendResult(command.id, "completed", ProjectOpsService.getInstance().gitPull())
+                "git_pull" -> respondWith(command, relay) {
+                    ProjectOpsService.getInstance().gitPull()
                 }
-                "git_resolve" -> {
+                "git_resolve" -> respondWith(command, relay) {
                     val p = command.payload.get("path")?.asString
                     val side = command.payload.get("side")?.asString
-                    if (p.isNullOrEmpty() || side.isNullOrEmpty()) {
-                        relay.sendResult(command.id, "failed", com.google.gson.JsonObject().apply {
-                            addProperty("error", "Missing path or side")
-                        })
-                    } else {
-                        relay.sendResult(command.id, "completed", ProjectOpsService.getInstance().gitResolve(p, side))
-                    }
+                    if (p.isNullOrEmpty() || side.isNullOrEmpty()) throw CommandFailed("Missing path or side")
+                    ProjectOpsService.getInstance().gitResolve(p, side)
                 }
                 "cancel_task" -> {
                     logger.info("Command: cancel_task")
@@ -381,22 +365,28 @@ fun dispatch(command: CommandRelayService.RemoteCommand) {
                     // the user installed Copilot or signed in mid-session.
                     // detectInstalledAgents() runs runBlocking inside; pin
                     // to a background thread so we don't park the dispatch.
+                    // respondWith runs INSIDE the pooled thread: before
+                    // this, a throw from detectInstalledAgents() left the
+                    // command with no terminal result at all (the bare
+                    // async-callback hang).
                     ApplicationManager.getApplication().executeOnPooledThread {
-                        ide.clearCache()
-                        val agents = ide.detectInstalledAgents()
-                        relay.reportAgents()
-                        val payload = com.google.gson.JsonObject()
-                        val arr = com.google.gson.JsonArray()
-                        for (a in agents) {
-                            arr.add(com.google.gson.JsonObject().apply {
-                                addProperty("id", a.id)
-                                addProperty("name", a.name)
-                                addProperty("icon", a.icon)
-                                addProperty("installed", a.installed)
-                            })
+                        respondWith(command, relay) {
+                            ide.clearCache()
+                            val agents = ide.detectInstalledAgents()
+                            relay.reportAgents()
+                            val payload = com.google.gson.JsonObject()
+                            val arr = com.google.gson.JsonArray()
+                            for (a in agents) {
+                                arr.add(com.google.gson.JsonObject().apply {
+                                    addProperty("id", a.id)
+                                    addProperty("name", a.name)
+                                    addProperty("icon", a.icon)
+                                    addProperty("installed", a.installed)
+                                })
+                            }
+                            payload.add("agents", arr)
+                            payload
                         }
-                        payload.add("agents", arr)
-                        relay.sendResult(command.id, "completed", payload)
                     }
                 }
                 "list_sessions" -> {
@@ -426,7 +416,7 @@ fun dispatch(command: CommandRelayService.RemoteCommand) {
                         })
                     }
                 }
-                "get_context" -> {
+                "get_context" -> respondWith(command, relay) {
                     // Try Copilot's internal context-window API first.
                     // Returns the same shape the CLI's `ContextUsage`
                     // produces (used/total/percent/model) plus an
@@ -466,7 +456,7 @@ fun dispatch(command: CommandRelayService.RemoteCommand) {
                         payload.addProperty("monthlyCost", 0)
                         payload.addProperty("error", "Token usage not available (send a prompt first or Copilot not active)")
                     }
-                    relay.sendResult(command.id, "completed", payload)
+                    payload
                 }
                 "get_conversation" -> {
                     // No JSONL parsing on the JB side — the per-turn
@@ -479,7 +469,7 @@ fun dispatch(command: CommandRelayService.RemoteCommand) {
                         add("conversationId", null)
                     })
                 }
-                "list_models" -> {
+                "list_models" -> respondWith(command, relay) {
                     // Try Copilot's real model catalog first (Anthropic
                     // Sonnet, OpenAI GPT, Google Gemini, etc. — owned by
                     // GitHub's backend, drifts independently of our
@@ -500,28 +490,27 @@ fun dispatch(command: CommandRelayService.RemoteCommand) {
                             })
                         }
                     } else {
-                        // CLI fallback catalog. Keep in sync with
-                        // apps/cli/src/commands/start/handlers.ts.
-                        listOf(
-                            Triple("claude-opus-4-7", "Claude Opus 4.7", "Most capable"),
-                            Triple("claude-opus-4-6", "Claude Opus 4.6", "Top tier"),
-                            Triple("claude-sonnet-4-6", "Claude Sonnet 4.6", "Balanced"),
-                            Triple("claude-haiku-4-5-20251001", "Claude Haiku 4.5", "Fastest"),
-                        ).forEach { (id, label, description) ->
+                        // CLI fallback catalog — mirrors the Claude
+                        // runtime's hardcoded list in
+                        // apps/cli/src/agents/claude/runtime.ts
+                        // (listModels; NOT start/handlers.ts, which only
+                        // delegates to the runtime). Drift is guarded by
+                        // CliModelCatalogDriftTest.
+                        CLI_FALLBACK_MODELS.forEach { m ->
                             models.add(com.google.gson.JsonObject().apply {
-                                addProperty("id", id)
-                                addProperty("label", label)
-                                addProperty("description", description)
+                                addProperty("id", m.id)
+                                addProperty("label", m.label)
+                                addProperty("description", m.description)
                                 addProperty("family", "claude")
                                 addProperty("vendor", "anthropic")
-                                addProperty("isDefault", id == "claude-sonnet-4-6")
+                                addProperty("isDefault", m.id == CLI_FALLBACK_DEFAULT_MODEL_ID)
                             })
                         }
                     }
-                    relay.sendResult(command.id, "completed", com.google.gson.JsonObject().apply {
+                    com.google.gson.JsonObject().apply {
                         add("models", models)
                         if (copilotModels?.active != null) addProperty("active", copilotModels.active)
-                    })
+                    }
                 }
                 "set_model" -> {
                     // Switch the active Copilot Chat model from the
@@ -535,15 +524,16 @@ fun dispatch(command: CommandRelayService.RemoteCommand) {
                     val applied = if (modelId.isNotBlank())
                         CopilotChatMetadataBridge.selectModel(project, modelId)
                     else false
-                    relay.sendResult(
-                        command.id,
-                        if (applied) "completed" else "failed",
-                        com.google.gson.JsonObject().apply {
-                            addProperty("modelId", modelId)
-                            addProperty("applied", applied)
-                            if (!applied) addProperty("error", "Could not switch model (Copilot not active or modelId not in catalog)")
-                        },
-                    )
+                    val payload = com.google.gson.JsonObject().apply {
+                        addProperty("modelId", modelId)
+                        addProperty("applied", applied)
+                    }
+                    if (!applied) {
+                        val msg = "Could not switch model (Copilot not active or modelId not in catalog)"
+                        payload.addProperty("error", msg)
+                        throw CommandFailed(msg, payload)
+                    }
+                    payload
                 }
                 "set_keep_alive" -> {
                     // "Avoid suspend codespace on inactivity" toggle. The
@@ -682,16 +672,14 @@ fun dispatch(command: CommandRelayService.RemoteCommand) {
                     }
                 }
 
-                "show_install_command" -> {
+                "show_install_command" -> respondWith(command, relay) {
                     // Backend pushes the self-hosted install one-liner
                     // the user copies onto their own box. DISPLAY-ONLY —
                     // we surface a balloon with a "Copy command" action
                     // and never execute it.
                     val installCommand = command.payload.get("command")?.asString
                     if (installCommand.isNullOrBlank()) {
-                        relay.sendResult(command.id, "failed", com.google.gson.JsonObject().apply {
-                            addProperty("error", "Missing command")
-                        })
+                        throw CommandFailed("Missing command")
                     } else {
                         val notification = NotificationGroupManager.getInstance()
                             .getNotificationGroup("CodeAgent-Mobile")
@@ -715,9 +703,9 @@ fun dispatch(command: CommandRelayService.RemoteCommand) {
                             }
                         })
                         Notifications.Bus.notify(notification, project)
-                        relay.sendResult(command.id, "completed", com.google.gson.JsonObject().apply {
+                        com.google.gson.JsonObject().apply {
                             addProperty("message", "Displayed self-hosted install command")
-                        })
+                        }
                     }
                 }
 

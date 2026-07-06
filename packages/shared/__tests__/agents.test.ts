@@ -47,7 +47,14 @@ describe('AGENT_REGISTRY', () => {
 
   it('getEnabledAgents returns only enabled ones', () => {
     const enabled = getEnabledAgents();
-    expect(enabled.map(a => a.id).sort()).toEqual(['aider', 'claude', 'coderabbit', 'codex', 'cursor']);
+    expect(enabled.map(a => a.id).sort()).toEqual([
+      'aider',
+      'claude',
+      'coderabbit',
+      'codex',
+      'cursor',
+      'gemini',
+    ]);
   });
 
   it('getAgent throws on unknown id', () => {

@@ -1,22 +1,23 @@
 import * as https from 'https';
 import * as http from 'http';
 import * as vscode from 'vscode';
-import { PROTOCOL_VERSION, SSE_SOCKET_TIMEOUT_MS } from '@codeagent/shared';
+import {
+  PROTOCOL_VERSION,
+  SSE_SOCKET_TIMEOUT_MS,
+  toRemoteCommand,
+  type RemoteCommand,
+} from '@codeagent/shared';
 import { SettingsService } from './settings.service';
 import { PairingService } from './pairing.service';
 import { OutputChannel } from 'vscode';
 import { capture } from './telemetry.service';
 import { Messages } from '../ui/messages';
 
-export interface RemoteCommand {
-  id: string;
-  sessionId: string;
-  pluginId: string;
-  type: string;
-  payload: Record<string, unknown>;
-  status: string;
-  createdAt: number;
-}
+// The command-envelope shape now lives in @codeagent/shared
+// (protocol/remote-command.ts) next to its zod schema; re-export it so
+// existing `import { RemoteCommand } from './command-relay.service'`
+// call sites keep working.
+export type { RemoteCommand };
 
 export interface CommandListener {
   onCommandReceived(command: RemoteCommand): void;
@@ -249,19 +250,15 @@ export class CommandRelayService {
     }
     if (event !== 'commands' || !data) return;
     try {
-      const parsed = JSON.parse(data) as { commands?: Array<Record<string, unknown>> };
+      const parsed = JSON.parse(data) as { commands?: unknown[] };
       const raw = parsed.commands ?? [];
       if (raw.length === 0) return;
       for (const obj of raw) {
-        const cmd: RemoteCommand = {
-          id: obj.id as string,
-          sessionId: obj.sessionId as string,
-          pluginId: obj.pluginId as string,
-          type: obj.type as string,
-          payload: (obj.payload as Record<string, unknown>) || {},
-          status: obj.status as string,
-          createdAt: obj.createdAt as number,
-        };
+        const cmd = toRemoteCommand(obj);
+        if (!cmd) {
+          this.log.appendLine('Skipping malformed command in SSE frame');
+          continue;
+        }
         if (!this.markDispatched(cmd.id)) continue;
         this.listeners.forEach((l) => l.onCommandReceived(cmd));
       }
@@ -309,7 +306,7 @@ export class CommandRelayService {
     const pluginId = settings.ensurePluginId();
     try {
       const data = await this.getJson(`${settings.apiBaseUrl}/api/commands/pending?pluginId=${pluginId}`);
-      const commands = data?.data as Array<Record<string, unknown>> | undefined;
+      const commands = data?.data as unknown[] | undefined;
       this.pollFailures = 0;
       // Reaching this point means at least the HTTP call landed —
       // the plugin IS connected to the backend, just over the slower
@@ -327,15 +324,11 @@ export class CommandRelayService {
       }
       this.pollEmptyStreak = 0;
       for (const obj of commands) {
-        const cmd: RemoteCommand = {
-          id: obj.id as string,
-          sessionId: obj.sessionId as string,
-          pluginId: obj.pluginId as string,
-          type: obj.type as string,
-          payload: (obj.payload as Record<string, unknown>) || {},
-          status: obj.status as string,
-          createdAt: obj.createdAt as number,
-        };
+        const cmd = toRemoteCommand(obj);
+        if (!cmd) {
+          this.log.appendLine('Skipping malformed command in polling response');
+          continue;
+        }
         if (!this.markDispatched(cmd.id)) {
           this.log.appendLine(`Skipping duplicate command: ${cmd.type} (${cmd.id})`);
           continue;

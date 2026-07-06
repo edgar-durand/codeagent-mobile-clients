@@ -1,11 +1,15 @@
 /**
  * Beads wire protocol — the bytes the codeam-cli pushes to the backend's
  * `POST /api/beads/ingest` and that the backend mirrors + fans out over the
- * per-user SSE bus. These types MUST match the backend's `BeadsIngestPayload`
- * byte-for-byte (the backend contract is already live behind the `beads`
- * feature flag). Keep this file the single source of truth for the shape;
- * both the CLI (bundled via tsup) and the VS Code extension (esbuild) inline
- * it at build time.
+ * per-user SSE bus.
+ *
+ * CANONICAL WIRE OWNER: this file (`@codeagent/shared`) owns the wire
+ * protocol, per the cross-repo rule. The backend repo keeps hand-synced
+ * MIRRORS of these shapes (`codeagent-mobile/packages/shared/src/types/beads.ts`
+ * for mobile/landing, `codeagent-mobile/apps/api-v2/src/beads/beads.types.ts`
+ * for the backend service); a drift-check script at
+ * `codeagent-mobile/scripts/check-shared-drift` compares them. Both the CLI
+ * (tsup) and the VS Code extension (esbuild) inline this file at build time.
  *
  * Shape rationale: `BeadsIssueDto` mirrors `bd ready --json` / `bd list --json`
  * output (verified against `@beads/bd@1.0.5`) plus the backend-required
@@ -19,9 +23,10 @@ export type BeadsIssueStatus = 'open' | 'in_progress' | 'blocked' | 'closed';
 
 /**
  * Single issue as emitted by `bd ready --json` / `bd list --json`, plus the
- * backend scoping field. Optional counts are present on `list`/`ready` output
- * but we keep them optional so a future bd version that drops one doesn't
- * fail validation.
+ * backend scoping field. The counts are REQUIRED on the wire — the backend's
+ * ingest DTO validates them as required ints, so the producer (`bd-adapter`'s
+ * `parseIssues`) defaults any count bd omits to 0 rather than dropping the
+ * field.
  */
 export interface BeadsIssueDto {
   id: string;
@@ -35,9 +40,9 @@ export interface BeadsIssueDto {
   owner: string | null;
   created_at: string;
   updated_at: string;
-  dependency_count?: number;
-  dependent_count?: number;
-  comment_count?: number;
+  dependency_count: number;
+  dependent_count: number;
+  comment_count: number;
   /** D7 scoping — normalized git origin (or path-hash fallback). */
   projectKey: string;
 }
@@ -45,6 +50,11 @@ export interface BeadsIssueDto {
 /** bd dependency kind. */
 export type BeadsDependencyKind = 'blocks' | 'related' | 'parent-child' | 'discovered-from';
 
+/**
+ * One dependency edge. Rows carry NO per-row `projectKey` — the ingest
+ * payload is per-project, so edges are scoped by the payload-level
+ * `projectKey` on the backend.
+ */
 export interface BeadsDependencyDto {
   /** stable id — `${fromId}:${kind}:${toId}` when bd doesn't supply one. */
   id: string;
@@ -86,9 +96,10 @@ export interface BeadsIngestPayload {
   /** When true, the backend prunes mirror rows not present in `issues`. */
   fullSnapshot?: boolean;
   issues: BeadsIssueDto[];
-  /** Dependency edges between issues. Always sent (possibly empty) so the
-   *  backend DTO can require it. Field name matches the backend (`dependencies`,
-   *  not `deps`). */
+  /** Dependency edges between issues. The current watcher ALWAYS sends this
+   *  (an empty array today — edges aren't computed in the P0 snapshot); the
+   *  backend DTO nevertheless marks it optional to tolerate older producers.
+   *  Field name matches the backend (`dependencies`, not `deps`). */
   dependencies: BeadsDependencyDto[];
   memories: BeadsMemoryDto[];
   summary?: BeadsStatusSummary;
@@ -98,10 +109,20 @@ export interface BeadsIngestPayload {
  * A mobile-originated action relayed to the CLI as a pending command
  * (`type: 'beads_action'`). The CLI replays it as a native `bd` command
  * (Task 9) then pushes the resulting state back through ingest.
+ *
+ * NOTE — this is the backend→CLI COMMAND hop, NOT the mobile→backend
+ * request hop. The mobile client POSTs a `BeadsActionRequest`
+ * (discriminator `action`, create-title in `title`) to
+ * `POST /api/beads/actions`; the backend translates it in
+ * `codeagent-mobile/apps/api-v2/src/beads/beads.controller.ts` (+
+ * `bd-action.util.ts`) and pushes a `beads_action` command whose payload
+ * the CLI decodes in `apps/cli/src/beads/wiring.ts`
+ * (`beadsActionFromPayload`) into THIS shape (discriminator `kind`,
+ * title/body in `text`, plus `owner`).
  */
 export type BeadsActionKind = 'claim' | 'close' | 'create' | 'remember';
 
-export interface BeadsActionPayload {
+export interface BeadsActionCommand {
   kind: BeadsActionKind;
   /** Target issue id — required for `claim` / `close`. */
   issueId?: string;
@@ -114,6 +135,10 @@ export interface BeadsActionPayload {
   /** Project the action targets (so the right `bd` working context applies). */
   projectKey?: string;
 }
+
+/** @deprecated Renamed to `BeadsActionCommand` — the old name collided with
+ *  the backend repo's mobile→backend request type (now `BeadsActionRequest`). */
+export type BeadsActionPayload = BeadsActionCommand;
 
 /** Action verb for `configureBeads` (enable / disable / status). */
 export type BeadsConfigureAction = 'enable' | 'disable' | 'status';

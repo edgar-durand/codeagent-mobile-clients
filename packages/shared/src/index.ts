@@ -1,6 +1,7 @@
 export * from './protocol/chrome-types';
 export * from './protocol/constants';
 export * from './protocol/renderToLines';
+export * from './protocol/remote-command';
 export * from './models/pricing';
 export * from './agents';
 export * from './types/file-change';
@@ -9,4 +10,5 @@ export * from './api-url';
 export * from './types/preview';
 export * from './types/beads';
 export * from './types/headroom';
+export * from './types/events';
 export * from './preview-prompts';

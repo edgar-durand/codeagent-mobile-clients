@@ -2,6 +2,13 @@
  * Headroom budget configuration and command types.
  * Used by the CLI to enable/disable cost-saving Headroom token compression
  * and track spending against configured budgets.
+ *
+ * CANONICAL WIRE OWNER: this file (`@codeagent/shared`) owns the wire
+ * protocol, per the cross-repo rule. The backend repo keeps hand-synced
+ * MIRRORS (`codeagent-mobile/packages/shared/src/types/headroom.ts` for
+ * mobile/landing, `codeagent-mobile/apps/api-v2/src/common/types/headroom.ts`
+ * for the backend); a drift-check script at
+ * `codeagent-mobile/scripts/check-shared-drift` compares them.
  */
 
 export type HeadroomBudgetPeriod = 'hourly' | 'daily' | 'monthly';
