@@ -140,7 +140,7 @@
     "test:e2e": "npm run build && npm run build:test && node ./dist-test/test/runTest.js"
   },
   "devDependencies": {
-    "@codeagent/shared": "*",
+    "@codeam/shared": "*",
     "@types/glob": "^9.0.0",
     "@types/mocha": "^10.0.10",
     "@types/node": "^20.11.0",

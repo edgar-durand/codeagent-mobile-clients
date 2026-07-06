@@ -1,5 +1,5 @@
 import * as p from '@clack/prompts';
-import { AGENT_REGISTRY, getEnabledAgents, isKnownAgentId, type AgentId } from '@codeagent/shared';
+import { AGENT_REGISTRY, getEnabledAgents, isKnownAgentId, type AgentId } from '@codeam/shared';
 
 /**
  * Parse `--agent=<id>` from CLI args. Returns `null` when the flag is absent.

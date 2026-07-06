@@ -2,7 +2,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import * as p from '@clack/prompts';
-import type { AgentId } from '@codeagent/shared';
+import type { AgentId } from '@codeam/shared';
 import type { CloudProvider } from '../../services/providers/types';
 import type { DeployStrategy, LocalCredentialSource } from '../strategy';
 import {

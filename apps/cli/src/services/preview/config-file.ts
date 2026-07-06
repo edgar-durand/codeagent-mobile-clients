@@ -1,6 +1,6 @@
 import fs from 'fs/promises';
 import path from 'path';
-import type { PreviewDetection } from '@codeagent/shared';
+import type { PreviewDetection } from '@codeam/shared';
 
 /**
  * Repo-local override for the agent-driven detection step. When a

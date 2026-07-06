@@ -1,4 +1,4 @@
-import { AGENT_REGISTRY, type AgentId } from '@codeagent/shared';
+import { AGENT_REGISTRY, type AgentId } from '@codeam/shared';
 import { createOsStrategy, type OsStrategy } from '../os';
 import { ClaudeRuntimeStrategy } from './claude/runtime';
 import { ClaudeDeployStrategy } from './claude/deploy';

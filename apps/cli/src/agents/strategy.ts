@@ -1,5 +1,5 @@
 import type { ChildProcess } from 'node:child_process';
-import type { AgentId, AgentMetadata, AgentModel, ChromeStep, NormalizedMessage, SelectPrompt } from '@codeagent/shared';
+import type { AgentId, AgentMetadata, AgentModel, ChromeStep, NormalizedMessage, SelectPrompt } from '@codeam/shared';
 import type { OsStrategy } from '../os';
 import type { CloudProvider } from '../services/providers/types';
 

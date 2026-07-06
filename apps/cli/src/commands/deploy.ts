@@ -1,6 +1,6 @@
 import * as p from '@clack/prompts';
 import pc from 'picocolors';
-import { AGENT_REGISTRY } from '@codeagent/shared';
+import { AGENT_REGISTRY } from '@codeam/shared';
 import { PROVIDERS } from '../services/providers';
 import type { CloudProvider, DeployableProject, ExistingWorkspace, Workspace } from '../services/providers';
 import { parseAgentFlag, promptForAgent } from '../utils/agent-prompt';

@@ -1,7 +1,7 @@
 import * as https from 'https';
 import * as http from 'http';
 import * as os from 'os';
-import { resolveApiBaseUrl } from '@codeagent/shared';
+import { resolveApiBaseUrl } from '@codeam/shared';
 import pkg from '../../package.json';
 import { vercelBypassHeader } from '../lib/backend-headers';
 import { detectCurrentBranch } from '../lib/git-branch';

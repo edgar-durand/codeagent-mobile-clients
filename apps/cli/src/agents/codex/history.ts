@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import type { NormalizedMessage } from '@codeagent/shared';
+import type { NormalizedMessage } from '@codeam/shared';
 
 /**
  * Codex stores rich session transcripts as JSONL "rollouts" under

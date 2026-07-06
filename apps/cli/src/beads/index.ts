@@ -1,4 +1,4 @@
-import type { AgentId, BeadsActionCommand } from '@codeagent/shared';
+import type { AgentId, BeadsActionCommand } from '@codeam/shared';
 import { BdAdapter } from './bd-adapter';
 import { provisionBeads } from './provisioner';
 import { BeadsWatcher } from './watcher';

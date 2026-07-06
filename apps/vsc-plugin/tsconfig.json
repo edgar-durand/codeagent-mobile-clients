@@ -1,6 +1,16 @@
 {
   "compilerOptions": {
     "module": "commonjs",
+    // `@codeam/shared` type-checks against its workspace SOURCE (via the
+    // root node_modules workspace symlink, which keeps TS treating it as an
+    // external library — a bare ../../packages path would pull it under
+    // this project's `rootDir` and fail TS6059), not the
+    // built `dist/` its publishable manifest points at — typecheck must
+    // not depend on `packages/shared` having been built. Mirrors the
+    // esbuild alias in esbuild.js and the vitest `resolve.alias`.
+    "paths": {
+      "@codeam/shared": ["../../node_modules/@codeam/shared/src/index.ts"]
+    },
     "ignoreDeprecations": "6.0",
     "target": "ES2021",
     "lib": ["ES2021"],

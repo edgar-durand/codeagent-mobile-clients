@@ -51,7 +51,7 @@ import { configureHeadroom } from '../../services/headroom/configure';
 import { applyBudgetToHeadroom, makeRealApplyBudgetDeps, type BudgetSpec } from '../../services/headroom/budget-relaunch';
 import { fetchWithTimeout, HeadroomStatsReporter, mapStatsToSavings, type StatsShape, type Savings } from '../../services/headroom/stats-reporter';
 import { killHeadroomProxy } from '../../services/headroom/proxy-pid';
-import { AGENT_REGISTRY, isKnownAgentId, PREVIEW_DETECT_PROMPT, USER_EVENTS, type AgentId, type PreviewDetection, type HeadroomBudgetCommand } from '@codeagent/shared';
+import { AGENT_REGISTRY, isKnownAgentId, PREVIEW_DETECT_PROMPT, USER_EVENTS, type AgentId, type PreviewDetection, type HeadroomBudgetCommand } from '@codeam/shared';
 import * as previewSvc from '../../services/preview';
 import {
   activePreviews,
@@ -83,7 +83,7 @@ import { beadsActionFromPayload } from '../../beads/wiring';
 import { configureBeads, probeBeadsStatus, type ConfigureBeadsDeps } from '../../beads/configure';
 import { persistBeadsConfig, readBeadsEnabled } from '../../beads/config-store';
 import { provisionBeads } from '../../beads/provisioner';
-import type { BeadsConfigureAction } from '@codeagent/shared';
+import type { BeadsConfigureAction } from '@codeam/shared';
 // Self-namespace import: `previewRestartH` invokes `startPreviewFromDetection`
 // through this object (not the direct local binding) so a unit test can
 // `vi.spyOn(handlersMod, 'startPreviewFromDetection')` and intercept the call —

@@ -1,4 +1,4 @@
-import type { PreviewDetection } from '@codeagent/shared';
+import type { PreviewDetection } from '@codeam/shared';
 
 const REQUIRED_FIELDS: Array<keyof PreviewDetection> = [
   'framework',

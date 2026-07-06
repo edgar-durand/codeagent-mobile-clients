@@ -1,4 +1,4 @@
-import type { BeadsActionCommand } from '@codeagent/shared';
+import type { BeadsActionCommand } from '@codeam/shared';
 import { BdAdapter } from './bd-adapter';
 import { log } from '../services/logger';
 

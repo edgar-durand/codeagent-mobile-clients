@@ -1,4 +1,4 @@
-import type { AgentId, BeadsActionKind, BeadsActionCommand } from '@codeagent/shared';
+import type { AgentId, BeadsActionKind, BeadsActionCommand } from '@codeam/shared';
 import { startBeads, type StartedBeads } from './index';
 import { deriveProjectIdentity } from './project-key';
 import { postBeadsProvisioning } from '../services/pairing.service';

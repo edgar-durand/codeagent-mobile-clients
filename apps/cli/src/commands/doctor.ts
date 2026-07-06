@@ -27,7 +27,7 @@ import {
   resolveApiBaseUrl,
   AGENT_REGISTRY,
   getEnabledAgents,
-} from '@codeagent/shared';
+} from '@codeam/shared';
 import { createOsStrategy } from '../os';
 import { loadCliConfig } from '../config';
 import { log } from '../services/logger';

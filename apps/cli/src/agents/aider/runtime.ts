@@ -27,7 +27,7 @@ import {
   type AgentModel,
   type ChromeStep,
   type SelectPrompt,
-} from '@codeagent/shared';
+} from '@codeam/shared';
 import * as history from './history';
 import { aiderCredentialLocator, aiderLoginLauncher } from './link';
 import { detectAiderSelector, filterAiderChrome, parseAiderChrome } from './parsing';

@@ -4,7 +4,7 @@ import {
   isHeadroomSupportedAgent,
   type HeadroomStep,
 } from '../../commands/host-agent';
-import { USER_EVENTS, type HeadroomStatus } from '@codeagent/shared';
+import { USER_EVENTS, type HeadroomStatus } from '@codeam/shared';
 import type { Savings } from './stats-reporter';
 
 export interface ConfigureCtx {

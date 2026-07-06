@@ -68,7 +68,7 @@ codeagent-mobile-clients/
 │   ├── vsc-plugin/          # VS Code extension (TypeScript · esbuild)
 │   └── jetbrains-plugin/    # IntelliJ plugin (Kotlin · Gradle · JDK 17)
 ├── packages/
-│   └── shared/              # @codeagent/shared — chrome parser +
+│   └── shared/              # @codeam/shared — chrome parser +
 │                            # model pricing tables, bundled into CLI
 │                            # and the VS Code extension at build time
 ├── package.json             # npm workspaces + root scripts

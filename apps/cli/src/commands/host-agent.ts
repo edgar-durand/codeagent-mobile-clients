@@ -40,8 +40,8 @@ import * as os from 'node:os';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { CommandRelayService, type RemoteCommand } from '../services/command-relay.service';
-import type { AgentMetadata } from '@codeagent/shared';
-import { resolveApiBaseUrl, getPricing } from '@codeagent/shared';
+import type { AgentMetadata } from '@codeam/shared';
+import { resolveApiBaseUrl, getPricing } from '@codeam/shared';
 
 /** Input $/M for the running agent's representative model — values the
  *  compressed-away tokens for the savings reporter. Claude agents → Sonnet

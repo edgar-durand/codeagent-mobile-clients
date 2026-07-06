@@ -1,6 +1,6 @@
 import { spawn, spawnSync } from 'node:child_process';
 import * as path from 'node:path';
-import { getAgent, type AgentId, type AgentMetadata, type AgentModel, type SelectPrompt } from '@codeagent/shared';
+import { getAgent, type AgentId, type AgentMetadata, type AgentModel, type SelectPrompt } from '@codeam/shared';
 import type { OsStrategy } from '../../os';
 import * as history from './history';
 import { codexCredentialLocator, codexLoginLauncher } from './link';

@@ -16,7 +16,7 @@
  */
 
 import { spawn } from 'node:child_process';
-import { getAgent, type AgentId, type AgentMetadata } from '@codeagent/shared';
+import { getAgent, type AgentId, type AgentMetadata } from '@codeam/shared';
 import { ensureCoderabbitInstalled } from './installer';
 import { coderabbitCredentialLocator, coderabbitLoginLauncher } from './link';
 import { parseReview } from './parsing';

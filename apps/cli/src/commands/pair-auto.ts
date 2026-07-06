@@ -2,7 +2,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { randomUUID, randomBytes, createHash } from 'crypto';
-import { resolveApiBaseUrl, isKnownAgentId } from '@codeagent/shared';
+import { resolveApiBaseUrl, isKnownAgentId } from '@codeam/shared';
 import { addSession, loadCliConfig } from '../config';
 import { capture, identifyUser } from '../services/telemetry.service';
 import { vercelBypassHeader } from '../lib/backend-headers';

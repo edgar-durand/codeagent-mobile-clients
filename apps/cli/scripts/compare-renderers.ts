@@ -1,5 +1,5 @@
 import * as fs from 'node:fs';
-import { renderToLines } from '@codeagent/shared';
+import { renderToLines } from '@codeam/shared';
 import { renderCodexBuffer } from '../src/agents/codex/renderer';
 import { filterCodexChrome } from '../src/agents/codex/parsing';
 

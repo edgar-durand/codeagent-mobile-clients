@@ -3,7 +3,7 @@ import * as os from 'os';
 import * as http from 'http';
 import * as https from 'https';
 import * as crypto from 'crypto';
-import { PROTOCOL_VERSION } from '@codeagent/shared';
+import { PROTOCOL_VERSION } from '@codeam/shared';
 import { SettingsService, type RecentSession } from './settings.service';
 import { CommandRelayService } from './command-relay.service';
 import { checkApiReachable } from './connectivity';

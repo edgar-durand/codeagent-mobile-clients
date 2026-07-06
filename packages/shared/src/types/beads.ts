@@ -3,7 +3,7 @@
  * `POST /api/beads/ingest` and that the backend mirrors + fans out over the
  * per-user SSE bus.
  *
- * CANONICAL WIRE OWNER: this file (`@codeagent/shared`) owns the wire
+ * CANONICAL WIRE OWNER: this file (`@codeam/shared`) owns the wire
  * protocol, per the cross-repo rule. The backend repo keeps hand-synced
  * MIRRORS of these shapes (`codeagent-mobile/packages/shared/src/types/beads.ts`
  * for mobile/landing, `codeagent-mobile/apps/api-v2/src/beads/beads.types.ts`

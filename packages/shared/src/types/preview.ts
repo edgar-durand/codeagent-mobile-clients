@@ -1,7 +1,7 @@
 /**
  * Preview wire types (PreviewDetection / PreviewStatus / EnvVar).
  *
- * CANONICAL WIRE OWNER: this file (`@codeagent/shared`) owns the wire
+ * CANONICAL WIRE OWNER: this file (`@codeam/shared`) owns the wire
  * protocol, per the cross-repo rule. The backend repo keeps hand-synced
  * MIRRORS (`codeagent-mobile/packages/shared/src/types/preview.ts` for
  * mobile/landing, `codeagent-mobile/apps/api-v2/src/common/types/preview.ts`

@@ -2,12 +2,12 @@
 
 > **Canonical agent instructions for this repo live in [`CLAUDE.md`](./CLAUDE.md).** Read it first — this file is a cross-tool entry point that points there and surfaces the highest-signal rules inline.
 
-This is the **client-side** repo: `codeam-cli` (npm), the VS Code / Cursor / Windsurf extension, the JetBrains plugin, and `@codeagent/shared` (the wire protocol). The backend lives in the sibling [`codeagent-mobile`](https://github.com/edgar-durand/codeagent-mobile) repo.
+This is the **client-side** repo: `codeam-cli` (npm), the VS Code / Cursor / Windsurf extension, the JetBrains plugin, and `@codeam/shared` (the wire protocol). The backend lives in the sibling [`codeagent-mobile`](https://github.com/edgar-durand/codeagent-mobile) repo.
 
 ## Non-negotiables (full detail in CLAUDE.md)
 
 - **Releases are tag-triggered:** all three clients ship under ONE version line. `git tag vX.Y.Z && git push origin vX.Y.Z` publishes npm + VS Code Marketplace + Open VSX + JetBrains. Commits to `main` run CI but do NOT release.
-- **Protocol code is shared:** parsing / pricing / chunk shapes change ONLY in `packages/shared` (`@codeagent/shared`); both CLI and VS Code import through it.
+- **Protocol code is shared:** parsing / pricing / chunk shapes change ONLY in `packages/shared` (`@codeam/shared`); both CLI and VS Code import through it.
 - **No polling for realtime:** react inside the PTY/SSE event (`OutputService.push`), don't add `setTimeout` "check again" loops. The HTTP-polling fallback in `command-relay.service.ts` is the one documented exception.
 - **Typing:** no `as unknown as` / `any` to silence TS — fix the source.
 

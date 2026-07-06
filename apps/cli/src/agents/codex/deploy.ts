@@ -1,4 +1,4 @@
-import type { AgentId } from '@codeagent/shared';
+import type { AgentId } from '@codeam/shared';
 import type { CloudProvider } from '../../services/providers/types';
 import type { DeployStrategy, LocalCredentialSource } from '../strategy';
 import {

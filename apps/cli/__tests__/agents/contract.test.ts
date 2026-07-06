@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { AGENT_REGISTRY, type AgentId } from '@codeagent/shared';
+import { AGENT_REGISTRY, type AgentId } from '@codeam/shared';
 import {
   createAgentStrategyForTests,
   listRegisteredAgentIdsForTests,

@@ -26,8 +26,8 @@
  */
 
 import { _transport } from '../../services/streaming/transport';
-import { resolveApiBaseUrl } from '@codeagent/shared';
-import type { AwaitingAnswerEvent, StreamingChunkEvent } from '@codeagent/shared';
+import { resolveApiBaseUrl } from '@codeam/shared';
+import type { AwaitingAnswerEvent, StreamingChunkEvent } from '@codeam/shared';
 import { log } from '../../services/logger';
 
 export interface AcpPublisherOptions {

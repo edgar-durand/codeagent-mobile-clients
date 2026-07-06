@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import { applyBeadsAction, buildBdArgs } from '../../src/beads/apply-actions';
 import type { BdAdapter, BdRunResult } from '../../src/beads/bd-adapter';
-import type { BeadsActionPayload } from '@codeagent/shared';
+import type { BeadsActionPayload } from '@codeam/shared';
 
 function fakeAdapter(result: BdRunResult, available = true): BdAdapter {
   return {

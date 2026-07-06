@@ -5,7 +5,7 @@
  * agent runs locally with the user's auth, has read access to the
  * project, and returns a tiny JSON blob the CLI parses.
  *
- * Kept here (in `@codeagent/shared`) so the CLI build inlines the
+ * Kept here (in `@codeam/shared`) so the CLI build inlines the
  * exact string at compile time without runtime fetch from the backend.
  */
 export const PREVIEW_DETECT_PROMPT = `

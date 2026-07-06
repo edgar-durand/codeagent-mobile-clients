@@ -16,7 +16,7 @@ import { version } from './commands/version';
 import { help } from './commands/help';
 import { tryShowSubcommandHelp } from './commands/subcommand-help';
 import { checkForUpdates, autoUpgradeBeforeCriticalCommand } from './lib/updateNotifier';
-import { isKnownAgentId } from '@codeagent/shared';
+import { isKnownAgentId } from '@codeam/shared';
 import {
   initTelemetry,
   maybePrintFirstRunBanner,

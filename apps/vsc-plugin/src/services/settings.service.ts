@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
 import * as crypto from 'crypto';
-import { resolveApiBaseUrl } from '@codeagent/shared';
+import { resolveApiBaseUrl } from '@codeam/shared';
 
 export interface RecentSession {
   sessionId: string;

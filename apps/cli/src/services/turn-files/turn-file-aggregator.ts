@@ -1,5 +1,5 @@
 import { randomUUID } from 'crypto';
-import { resolveApiBaseUrl, PROTOCOL_VERSION } from '@codeagent/shared';
+import { resolveApiBaseUrl, PROTOCOL_VERSION } from '@codeam/shared';
 import { _transport } from '../file-watcher/transport';
 import { log } from '../logger';
 import {

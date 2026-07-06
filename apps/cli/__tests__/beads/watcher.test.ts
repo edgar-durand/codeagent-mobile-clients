@@ -4,7 +4,7 @@ import { BeadsWatcher, _chokidarSeam } from '../../src/beads/watcher';
 import { _transport } from '../../src/services/file-watcher/transport';
 import * as projectKey from '../../src/beads/project-key';
 import type { BdAdapter } from '../../src/beads/bd-adapter';
-import type { BeadsIssueDto, BeadsStatusSummary } from '@codeagent/shared';
+import type { BeadsIssueDto, BeadsStatusSummary } from '@codeam/shared';
 
 function makeIssue(id: string, status: BeadsIssueDto['status']): BeadsIssueDto {
   return {

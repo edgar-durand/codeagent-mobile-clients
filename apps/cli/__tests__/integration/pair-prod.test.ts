@@ -45,7 +45,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { DEFAULT_API_BASE_URL } from '@codeagent/shared';
+import { DEFAULT_API_BASE_URL } from '@codeam/shared';
 
 const RUN = process.env.CODEAM_RUN_INTEGRATION_TESTS === '1';
 // Use the shared constant — if the canonical prod URL ever drifts from this

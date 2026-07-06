@@ -55,6 +55,68 @@ jobs:
           fi
           echo "Publishing version: $VERSION"
 
+  # Publishes @codeam/shared to npm. Runs in PARALLEL with publish-cli —
+  # publish-cli deliberately does NOT depend on this job, because the CLI
+  # and the IDE plugins bundle the shared package's SOURCE at build time
+  # and never resolve the published artifact. A failure here must never
+  # block a client release.
+  #
+  # ⚠️ If this job fails on `npm publish`, the most likely cause is that
+  # the NPM_TOKEN repo secret lacks publish rights on the @codeam npm
+  # scope (historically it only published the unscoped `codeam-cli`).
+  # Fix: mint an Automation token with publish access to the @codeam
+  # scope (it already owns @codeam/ide-*), update the NPM_TOKEN secret,
+  # and re-run this job — the version guard makes retries idempotent.
+  publish-shared:
+    name: Publish @codeam/shared to npm
+    needs: setup
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 20
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Patch shared version
+        working-directory: packages/shared
+        run: npm version "${{ needs.setup.outputs.version }}" --no-git-tag-version --allow-same-version
+
+      - name: Install workspace dependencies
+        run: npm ci
+
+      - name: Shared typecheck
+        working-directory: packages/shared
+        run: npm run typecheck
+
+      - name: Shared tests
+        working-directory: packages/shared
+        run: npm run test
+
+      - name: Build shared
+        working-directory: packages/shared
+        run: npm run build
+
+      - name: Publish @codeam/shared to npm
+        working-directory: packages/shared
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          VERSION: ${{ needs.setup.outputs.version }}
+        run: |
+          # Idempotent publish — same guard as the CLI job: skip when this
+          # exact version already exists on the registry so retries
+          # (re-tagged release, hotfix re-push) stay green.
+          if npm view "@codeam/shared@$VERSION" version >/dev/null 2>&1; then
+            echo "::notice::@codeam/shared@$VERSION already published — skipping npm publish"
+            exit 0
+          fi
+          npm publish --access public
+
   publish-cli:
     name: Publish CLI to npm
     needs: setup

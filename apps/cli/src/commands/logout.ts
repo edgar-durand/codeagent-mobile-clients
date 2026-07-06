@@ -1,5 +1,5 @@
 import pc from 'picocolors';
-import { resolveApiBaseUrl } from '@codeagent/shared';
+import { resolveApiBaseUrl } from '@codeam/shared';
 import { clearAll, loadCliConfig } from '../config';
 import { showIntro } from '../ui/banner';
 import { confirmAction } from '../ui/prompts';

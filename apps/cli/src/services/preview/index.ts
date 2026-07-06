@@ -1,5 +1,5 @@
 import type { ChildProcess } from 'child_process';
-import type { PreviewDetection } from '@codeagent/shared';
+import type { PreviewDetection } from '@codeam/shared';
 
 export * from './cloudflared';
 export * from './codespace';

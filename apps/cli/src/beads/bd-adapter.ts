@@ -6,7 +6,7 @@ import type {
   BeadsIssueDto,
   BeadsStatusSummary,
   BeadsIssueStatus,
-} from '@codeagent/shared';
+} from '@codeam/shared';
 import { log } from '../services/logger';
 
 /**

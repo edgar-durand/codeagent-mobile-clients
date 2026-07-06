@@ -1,4 +1,4 @@
-import { AGENT_REGISTRY, type AgentId } from '@codeagent/shared';
+import { AGENT_REGISTRY, type AgentId } from '@codeam/shared';
 import { CommandRelayService, type RemoteCommand } from '../services/command-relay.service';
 import { FileWatcherService } from '../services/file-watcher.service';
 import { ChunkEmitter } from '../services/output/chunk-emitter';

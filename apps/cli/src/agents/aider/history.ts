@@ -11,7 +11,7 @@
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import type { NormalizedMessage } from '@codeagent/shared';
+import type { NormalizedMessage } from '@codeam/shared';
 
 const AIDER_HISTORY_FILE = '.aider.chat.history.md';
 

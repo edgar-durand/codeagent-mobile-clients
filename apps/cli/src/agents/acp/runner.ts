@@ -30,11 +30,11 @@
 import { randomUUID } from 'node:crypto';
 import { CommandRelayService, type RemoteCommand } from '../../services/command-relay.service';
 import { _postJsonAuthed, fetchCurrentPluginAuthToken } from '../../services/pairing.service';
-import { resolveApiBaseUrl } from '@codeagent/shared';
+import { resolveApiBaseUrl } from '@codeam/shared';
 import { log } from '../../services/logger';
 import { HistoryService } from '../../services/history.service';
 import { showInfo, showSuccess, showRelayNotice } from '../../ui/banner';
-import { AGENT_REGISTRY, type AgentId, type AgentModel, type StreamingChunkKind } from '@codeagent/shared';
+import { AGENT_REGISTRY, type AgentId, type AgentModel, type StreamingChunkKind } from '@codeam/shared';
 import type { RequestPermissionResponse } from '@agentclientprotocol/sdk';
 import { createOsStrategy } from '../../os';
 import { createInteractiveAgentStrategy } from '../registry';

@@ -46,7 +46,7 @@ vi.mock('../../src/services/pairing.service', () => ({
   },
 }));
 
-vi.mock('@codeagent/shared', () => ({
+vi.mock('@codeam/shared', () => ({
   resolveApiBaseUrl: () => 'https://api.test.example.com',
 }));
 

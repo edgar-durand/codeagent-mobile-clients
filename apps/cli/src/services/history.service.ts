@@ -9,7 +9,7 @@ import {
   getContextWindow,
   getPricing,
   type NormalizedMessage,
-} from '@codeagent/shared';
+} from '@codeam/shared';
 import { vercelBypassHeader } from '../lib/backend-headers';
 import { log } from './logger';
 import { encodeCwd } from '../agents/claude/history';

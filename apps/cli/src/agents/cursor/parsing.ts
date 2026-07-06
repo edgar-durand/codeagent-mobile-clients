@@ -13,7 +13,7 @@
  * better than dropping legitimate agent replies.
  */
 
-import type { ChromeStep, SelectPrompt } from '@codeagent/shared';
+import type { ChromeStep, SelectPrompt } from '@codeam/shared';
 
 const ANSI_CSI = /\x1B\[[^@-~]*[@-~]/g;
 const SPINNER_GLYPHS = /[⠁⠂⠄⠈⠐⠠⡀⢀⠃⠉⠘⠰⢠⡠⢄⡈⠆⠌⠴⢤⡁⢁⠅⠊⠒⠦⡂]/;

@@ -1,4 +1,4 @@
-import { AGENT_REGISTRY, isKnownAgentId, type AgentId } from '@codeagent/shared';
+import { AGENT_REGISTRY, isKnownAgentId, type AgentId } from '@codeam/shared';
 
 const CLI_AGENT_ALIASES: Record<string, AgentId> = {
   claude_code: 'claude',

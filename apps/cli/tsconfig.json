@@ -10,6 +10,16 @@
     // but failed at typecheck. tsup does its own bundling
     // resolution, so this is purely a type-checking concern.
     "moduleResolution": "bundler",
+    // `@codeam/shared` type-checks against its workspace SOURCE (via the
+    // root node_modules workspace symlink, which keeps TS treating it as an
+    // external library — a bare ../../packages path would pull it under
+    // this project's `rootDir` and fail TS6059), not the
+    // built `dist/` its publishable manifest points at — typecheck must
+    // not depend on `packages/shared` having been built. Mirrors the
+    // bundler alias in tsup.config.ts and the vitest `resolve.alias`.
+    "paths": {
+      "@codeam/shared": ["../../node_modules/@codeam/shared/src/index.ts"]
+    },
     "ignoreDeprecations": "6.0",
     "strict": true,
     "resolveJsonModule": true,

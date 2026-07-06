@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import { PROTOCOL_VERSION } from '@codeagent/shared';
+import { PROTOCOL_VERSION } from '@codeam/shared';
 import { CommandRelayService } from '../services/command-relay.service';
 import { PairingService } from '../services/pairing.service';
 

@@ -2,7 +2,7 @@ import { execFileSync } from 'child_process';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import type { AgentId } from '@codeagent/shared';
+import type { AgentId } from '@codeam/shared';
 import { BdAdapter, defaultBeadsHomeDir } from './bd-adapter';
 import { installBd } from './install-bd';
 import { installDolt, installDoltToDir, ensureDoltResolvable } from './install-dolt';

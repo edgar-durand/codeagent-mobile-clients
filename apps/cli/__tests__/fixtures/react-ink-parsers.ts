@@ -4,7 +4,7 @@
 // StreamingEmitterService (which still serves the PTY agents aider/cursor).
 // Not production code — do not import from src/.
 
-import type { ChromeStep, SelectPrompt } from '@codeagent/shared';
+import type { ChromeStep, SelectPrompt } from '@codeam/shared';
 import type { StartupBanner } from '../../src/agents/strategy';
 
 // ─── filterChrome ──────────────────────────────────────────────────

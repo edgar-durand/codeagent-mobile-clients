@@ -24,8 +24,8 @@
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { resolveApiBaseUrl } from '@codeagent/shared';
-import type { AgentAuth } from '@codeagent/shared';
+import { resolveApiBaseUrl } from '@codeam/shared';
+import type { AgentAuth } from '@codeam/shared';
 import { vercelBypassHeader } from '../../lib/backend-headers';
 import { restrictToOwner } from '../../util/restrict-to-owner';
 

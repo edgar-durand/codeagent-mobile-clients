@@ -19,7 +19,7 @@ import { execFileSync } from 'child_process';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import type { StreamingChunkKind } from '@codeagent/shared';
+import type { StreamingChunkKind } from '@codeam/shared';
 import { log } from '../../services/logger';
 
 /**

@@ -40,7 +40,7 @@
 #
 #   fix(vsc-plugin): prevent duplicate terminal after auto-update
 #
-#   refactor(shared): collapse MODEL_PRICING tables into @codeagent/shared
+#   refactor(shared): collapse MODEL_PRICING tables into @codeam/shared
 #
 #   feat(cli)!: drop Node 18 support
 #

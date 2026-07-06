@@ -1,5 +1,20 @@
 import { defineConfig } from 'tsup';
+import path from 'node:path';
+import type { BuildOptions } from 'esbuild';
 import pkg from './package.json';
+
+// `@codeam/shared` is bundled from its workspace SOURCE, exactly as it
+// was when the package's `main` pointed at `src/index.ts`. Since the
+// package became publishable its manifest (`exports`/`main`) points at
+// `dist/`, which esbuild would otherwise resolve — silently switching the
+// CLI bundle to whatever stale `dist/` happens to be on disk and adding a
+// build-order dependency. This alias pins resolution to the source entry.
+// Mirrors: apps/vsc-plugin/esbuild.js (alias), each app's tsconfig
+// (`paths`) and vitest config (`resolve.alias`).
+const SHARED_SRC = path.join(__dirname, '..', '..', 'packages', 'shared', 'src', 'index.ts');
+const aliasSharedToSource = (options: BuildOptions) => {
+  options.alias = { ...options.alias, '@codeam/shared': SHARED_SRC };
+};
 
 // Single source of truth for the version: package.json. tsup's
 // `define` substitutes the `__CLI_VERSION__` literal in our source
@@ -28,6 +43,7 @@ export default defineConfig([
     // `dist/vendor/node-pty/`, so the dlopen only happens when an
     // IDE terminal panel actually opens.
     external: ['node-pty'],
+    esbuildOptions: aliasSharedToSource,
     banner: { js: '#!/usr/bin/env node' },
     define: {
       __CLI_VERSION__: JSON.stringify(pkg.version),
@@ -47,6 +63,7 @@ export default defineConfig([
     entry: ['src/postinstall.ts'],
     format: ['cjs'],
     target: 'node18',
+    esbuildOptions: aliasSharedToSource,
     banner: { js: '#!/usr/bin/env node' },
   },
   {
@@ -59,6 +76,7 @@ export default defineConfig([
     target: 'node20',
     noExternal: ['@clack/prompts', '@clack/core', '@agentclientprotocol/sdk'],
     external: ['node-pty'],
+    esbuildOptions: aliasSharedToSource,
     // No banner: this file is invoked as `node dist/headroom-runner-driver.js`
     // (not as a directly-executable script), so it intentionally has NO shebang.
     // Unlike the `index.ts` and `postinstall.ts` entries (which keep their

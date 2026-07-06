@@ -1,4 +1,4 @@
-import type { ChromeStep } from '@codeagent/shared';
+import type { ChromeStep } from '@codeam/shared';
 
 /**
  * Per-turn cumulative + delta tracker for chrome_steps.

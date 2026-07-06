@@ -1,7 +1,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
-import { getContextWindow, type NormalizedMessage } from '@codeagent/shared';
+import { getContextWindow, type NormalizedMessage } from '@codeam/shared';
 
 /**
  * Encode a cwd path to the matching Claude project directory name.

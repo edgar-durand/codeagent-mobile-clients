@@ -11,7 +11,7 @@ vi.mock('vscode', () => ({
   commands: { executeCommand: vi.fn().mockResolvedValue(undefined) },
 }));
 
-// settings.service imports @codeagent/shared and vscode workspace —
+// settings.service imports @codeam/shared and vscode workspace —
 // avoid the whole stack by giving CommandRelayService a stub that
 // returns predictable values for the auth-failure path.
 vi.mock('../src/services/settings.service', () => ({

@@ -36,7 +36,7 @@ export const DEV_API_BASE_URL = 'https://dev-api.codeagent-mobile.com' as const;
 export function resolveApiBaseUrl(): string {
   // Guard against non-Node runtimes (browser bundles import this
   // module). `process` is undefined there; treat as prod default.
-  // `@codeagent/shared` deliberately avoids depending on `@types/node`
+  // `@codeam/shared` deliberately avoids depending on `@types/node`
   // so its types stay consumable from the mobile RN bundle too, so we
   // reach for the env via a structural cast rather than NodeJS.ProcessEnv.
   const env = (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env;

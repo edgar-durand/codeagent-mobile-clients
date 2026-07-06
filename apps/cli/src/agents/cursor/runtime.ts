@@ -18,7 +18,7 @@ import {
   type AgentModel,
   type ChromeStep,
   type SelectPrompt,
-} from '@codeagent/shared';
+} from '@codeam/shared';
 import * as history from './history';
 import { cursorCredentialLocator, cursorLoginLauncher } from './link';
 import { detectCursorSelector, filterCursorChrome, parseCursorChrome } from './parsing';

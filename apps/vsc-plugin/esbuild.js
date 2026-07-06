@@ -91,6 +91,16 @@ async function main() {
     platform: 'node',
     outfile: 'dist/extension.js',
     external: ['vscode'],
+    // `@codeam/shared` is bundled from its workspace SOURCE, exactly as it
+    // was when the package's `main` pointed at `src/index.ts`. Since the
+    // package became publishable its manifest (`exports`/`main`) points at
+    // `dist/`, which esbuild would otherwise resolve — adding a build-order
+    // dependency and a stale-dist hazard. This alias pins the source entry.
+    // Mirrors: apps/cli/tsup.config.ts, each app's tsconfig `paths` and
+    // vitest `resolve.alias`.
+    alias: {
+      '@codeam/shared': path.join(__dirname, '..', '..', 'packages', 'shared', 'src', 'index.ts'),
+    },
     logLevel: 'info',
     mainFields: ['module', 'main'],
     define,

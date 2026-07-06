@@ -4,7 +4,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { EventEmitter } from 'node:events';
 import type { ChildProcess } from 'node:child_process';
-import type { AgentAuth, AgentMetadata } from '@codeagent/shared';
+import type { AgentAuth, AgentMetadata } from '@codeam/shared';
 import { isOwnerOnly } from '../src/util/restrict-to-owner';
 
 import {

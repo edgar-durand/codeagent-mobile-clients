@@ -123,7 +123,7 @@ export const startCommandSchema = z.object({
     .optional(),
   // `preview_start` carries the agent-detected `PreviewDetection`
   // shape from the mobile / web confirmation sheet. Mirrors
-  // `@codeagent/shared`'s `PreviewDetection` byte-for-byte. Kept
+  // `@codeam/shared`'s `PreviewDetection` byte-for-byte. Kept
   // loose (`unknown` for env / setup_commands) so a CLI version
   // running against a newer backend that adds optional fields still
   // accepts the payload; the handler validates the shape it needs

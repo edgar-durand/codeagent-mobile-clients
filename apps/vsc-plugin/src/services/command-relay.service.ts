@@ -6,14 +6,14 @@ import {
   SSE_SOCKET_TIMEOUT_MS,
   toRemoteCommand,
   type RemoteCommand,
-} from '@codeagent/shared';
+} from '@codeam/shared';
 import { SettingsService } from './settings.service';
 import { PairingService } from './pairing.service';
 import { OutputChannel } from 'vscode';
 import { capture } from './telemetry.service';
 import { Messages } from '../ui/messages';
 
-// The command-envelope shape now lives in @codeagent/shared
+// The command-envelope shape now lives in @codeam/shared
 // (protocol/remote-command.ts) next to its zod schema; re-export it so
 // existing `import { RemoteCommand } from './command-relay.service'`
 // call sites keep working.

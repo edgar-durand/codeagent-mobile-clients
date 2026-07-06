@@ -7,7 +7,7 @@ package com.windsurf.controller.services.filewatcher
 
 // File-change status as emitted to the backend's /api/files/changed +
 // /api/review/hunks endpoints. Mirrors the TS FileChangeStatus union in
-// @codeagent/shared.
+// @codeam/shared.
 enum class FileChangeStatus(val wire: String) {
     MODIFIED("modified"),
     ADDED("added"),

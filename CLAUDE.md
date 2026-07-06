@@ -9,7 +9,7 @@ This repo holds the **client-side pieces** of [CodeAgent Mobile](https://www.cod
 - `apps/cli` — `codeam-cli`, the Node.js CLI that spawns Claude Code under a PTY and relays mobile prompts. Published to npm.
 - `apps/vsc-plugin` — The VS Code / Cursor / Windsurf extension. Published to VS Code Marketplace and Open VSX.
 - `apps/jetbrains-plugin` — The IntelliJ-family plugin (IntelliJ IDEA, WebStorm, PyCharm, Rider, GoLand, …). Published to JetBrains Marketplace (stable channel) by the tag-triggered release workflow.
-- `packages/shared` — `@codeagent/shared`, pure-TypeScript modules (chunk-protocol parser, Anthropic pricing tables) bundled into the CLI and the VS Code extension at build time.
+- `packages/shared` — `@codeam/shared`, pure-TypeScript modules (chunk-protocol parser, Anthropic pricing tables) bundled into the CLI and the VS Code extension at build time.
 
 The backend, mobile app, and web dashboard are maintained elsewhere and are not in scope here.
 
@@ -22,7 +22,7 @@ codeagent-mobile-clients/
 │   ├── vsc-plugin/           # TypeScript · esbuild · VS Code API
 │   └── jetbrains-plugin/     # Kotlin · Gradle · JDK 17 · IntelliJ Platform
 ├── packages/
-│   └── shared/               # @codeagent/shared — pure TS, bundled at build time
+│   └── shared/               # @codeam/shared — pure TS, bundled at build time
 ├── .github/
 │   ├── workflows/
 │   │   ├── ci.yml            # commitlint + build + test on PR / push to main
@@ -132,7 +132,7 @@ Active examples to mirror:
 
 If you find yourself reaching for `setTimeout` to "check again later", you're polling — stop and route the detection off the existing event instead.
 
-### Shared package (`@codeagent/shared`)
+### Shared package (`@codeam/shared`)
 
 `packages/shared/src/` owns the *protocol contract* — the shapes, constants, and pure renderers the CLI and the VS Code extension must agree on byte-for-byte:
 
@@ -143,11 +143,11 @@ If you find yourself reaching for `setTimeout` to "check again later", you're po
 - `models/pricing.ts` — Anthropic `MODEL_PRICING` and `MODEL_CONTEXT_WINDOW` tables plus `getPricing()` / `getContextWindow()` lookup helpers.
 - `types/` — cross-repo wire types (`preview`, `beads`, `headroom`, `streaming`, `file-change`) plus `types/events.ts`: the `USER_EVENTS` constant map of every per-user SSE event name (canonical here; mirrored at `codeagent-mobile/packages/shared/src/types/events.ts`). New event-producing/consuming code references `USER_EVENTS.*`, never a hand-typed string.
 
-⚠️ **The TUI chrome/selector *parsers* do NOT live in shared anymore** (old `protocol/parseChrome.ts` / `selector.ts` / `filterChrome.ts` are gone). Glyphs and conventions vary per agent, so each PTY agent owns its own fixture-driven parsers next to its runtime strategy: `apps/cli/src/agents/<agent>/parsing.ts` (e.g. `cursor/parsing.ts`, `aider/parsing.ts` — `parse<Agent>Chrome` / `filter<Agent>Chrome` / `detect<Agent>Selector`), consumed via the runtime strategy and `streaming-emitter.service.ts`. ACP agents (claude/codex/gemini) get typed streaming and need no chrome parsing. `apps/cli/src/services/parseChrome.ts` is a vestigial one-line re-export of `@codeagent/shared` with no remaining importers — don't add logic there.
+⚠️ **The TUI chrome/selector *parsers* do NOT live in shared anymore** (old `protocol/parseChrome.ts` / `selector.ts` / `filterChrome.ts` are gone). Glyphs and conventions vary per agent, so each PTY agent owns its own fixture-driven parsers next to its runtime strategy: `apps/cli/src/agents/<agent>/parsing.ts` (e.g. `cursor/parsing.ts`, `aider/parsing.ts` — `parse<Agent>Chrome` / `filter<Agent>Chrome` / `detect<Agent>Selector`), consumed via the runtime strategy and `streaming-emitter.service.ts`. ACP agents (claude/codex/gemini) get typed streaming and need no chrome parsing. `apps/cli/src/services/parseChrome.ts` is a vestigial one-line re-export of `@codeam/shared` with no remaining importers — don't add logic there.
 
 Tests live next to the modules in `packages/shared/__tests__/` and run via `(cd packages/shared && npm run test)` or are picked up by the CI job automatically.
 
-**Critical rule:** when you touch the protocol contract (shapes, `renderToLines`, constants, `RemoteCommand`), pricing, or anything shared, change it *only* in `packages/shared`. Both consumers import through `@codeagent/shared`. tsup (CLI) and esbuild (VS Code) inline the imports at build time so runtime consumers don't have a separate dependency. Per-agent parsing changes, by contrast, belong in that agent's `apps/cli/src/agents/<agent>/parsing.ts`.
+**Critical rule:** when you touch the protocol contract (shapes, `renderToLines`, constants, `RemoteCommand`), pricing, or anything shared, change it *only* in `packages/shared`. Both consumers import through `@codeam/shared`. tsup (CLI) and esbuild (VS Code) inline the imports at build time so runtime consumers don't have a separate dependency. Per-agent parsing changes, by contrast, belong in that agent's `apps/cli/src/agents/<agent>/parsing.ts`.
 
 JetBrains plugin is Kotlin and does **not** consume the shared package — if the same logic ever needs to exist there, port it deliberately and annotate the port.
 
@@ -267,7 +267,7 @@ and `.github/workflows/release.yml` does the rest:
 
 **Required secrets** (configured in GitHub → Settings → Secrets and variables → Actions):
 
-- `NPM_TOKEN` — an npmjs.com *Automation* access token with publish scope on `codeam-cli`
+- `NPM_TOKEN` — an npmjs.com *Automation* access token with publish scope on `codeam-cli` **and the `@codeam` npm scope** (the tag pipeline also publishes `@codeam/shared`; the `publish-shared` job fails — without blocking client publishes — if the token lacks scope rights)
 - `VSCE_PAT` — Azure DevOps personal access token for the VS Code Marketplace
 - `OVSX_TOKEN` — Open VSX token for the Cursor/Windsurf store
 - `JETBRAINS_MARKETPLACE_TOKEN` — JetBrains Hub permanent token (https://plugins.jetbrains.com/author/me/tokens). Auto-injected as `PUBLISH_TOKEN` env var that the Gradle plugin reads.
@@ -322,11 +322,11 @@ Adding tests for the VS Code plugin is an open invitation — it has zero covera
 - **npm `files` allowlist** — `apps/cli/package.json` uses `"files": ["dist", "README.md", "CHANGELOG.md", "LICENSE"]`. Anything outside that list (including `src/`) does not ship in the npm tarball. Verify with `npm pack --dry-run` before tagging.
 - **VS Code `.vscodeignore`** — controls the `.vsix` contents. `CHANGELOG.md` is auto-included by `vsce` unless excluded; the current ignore file correctly lets it through.
 - **JetBrains `changeNotes`** — `build.gradle.kts` applies the `org.jetbrains.changelog` Gradle plugin, which reads `apps/jetbrains-plugin/CHANGELOG.md` at build time and injects the latest entry into `plugin.xml` as `<change-notes>`. The marketplace renders that on the plugin's "What's New" page.
-- **Workspace resolution** — `@codeagent/shared` is a workspace dep. In the CLI and VS Code plugin it is listed under `devDependencies` so tsup / esbuild bundle it inline; it must **never** be a runtime dependency.
+- **Workspace resolution** — `@codeam/shared` is a workspace dep. In the CLI and VS Code plugin it is listed under `devDependencies` so tsup / esbuild bundle it inline; it must **never** be a runtime dependency. Since the package became publishable its manifest (`exports`/`main`/`types`) points at `dist/`, so each consumer pins resolution back to the workspace **source** explicitly: an esbuild `alias` in `apps/cli/tsup.config.ts` + `apps/vsc-plugin/esbuild.js`, a tsconfig `paths` entry in each app, and a vitest `resolve.alias` in each app. If you add a new build/test entry point that imports `@codeam/shared`, add the same alias — otherwise it silently bundles whatever stale `dist/` is on disk (or fails when it's absent). The `dist/` build (`npm run build` in `packages/shared`, tsup dual CJS+ESM+d.ts) exists only for the published npm artifact.
 
 ## When in doubt
 
 - Start by reading the relevant `apps/*/src/` tree — services there are small, focused, and well named.
-- For protocol / parser / pricing changes, modify `packages/shared` and read callers through `@codeagent/shared`.
+- For protocol / parser / pricing changes, modify `packages/shared` and read callers through `@codeam/shared`.
 - For behavioral changes visible to the mobile app, also smoke-test with a real phone paired through the backend.
 - If you're about to touch `apps/cli/__tests__/config.test.ts`, note that it guards session activation semantics — the `addSession` test is specifically there because the behavior has flipped between versions (now: always promote the newest paired session to active).

@@ -1,7 +1,7 @@
 import * as crypto from 'crypto';
 import * as path from 'path';
-import { resolveApiBaseUrl } from '@codeagent/shared';
-import type { BeadsIngestPayload, BeadsStatusSummary } from '@codeagent/shared';
+import { resolveApiBaseUrl } from '@codeam/shared';
+import type { BeadsIngestPayload, BeadsStatusSummary } from '@codeam/shared';
 import { BdAdapter } from './bd-adapter';
 import { deriveProjectIdentity } from './project-key';
 import { _transport } from '../services/file-watcher/transport';
@@ -184,7 +184,7 @@ export class BeadsWatcher {
       issues,
       // We don't track edges in the P0 snapshot yet, so send an empty array.
       // (The backend DTO marks `dependencies` optional and tolerates absence,
-      // but the wire contract in @codeagent/shared says "always sent" — keep
+      // but the wire contract in @codeam/shared says "always sent" — keep
       // the payload deterministic.)
       dependencies: [],
       memories: [],

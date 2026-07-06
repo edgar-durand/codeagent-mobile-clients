@@ -8,7 +8,7 @@ vi.mock('../src/services/pairing.service', () => ({
 
 import { CommandRelayService } from '../src/services/command-relay.service';
 import * as gitBranch from '../src/lib/git-branch';
-import { AGENT_REGISTRY } from '@codeagent/shared';
+import { AGENT_REGISTRY } from '@codeam/shared';
 
 // Tests historically constructed CommandRelayService with 2 args; as
 // of #56 the agentMeta is required. Reuse the canonical Claude entry

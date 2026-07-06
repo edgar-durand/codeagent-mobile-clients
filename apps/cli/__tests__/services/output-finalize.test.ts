@@ -3,7 +3,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { OutputService, _transport } from '../../src/services/output.service';
 import type { RuntimeStrategy } from '../../src/agents/strategy';
 import { LinuxOsStrategy } from '../../src/os';
-import type { ChromeStep, SelectPrompt } from '@codeagent/shared';
+import type { ChromeStep, SelectPrompt } from '@codeam/shared';
 
 /**
  * Regression tests for the canonical-refresh-never-fires bug.

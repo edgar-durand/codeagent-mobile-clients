@@ -1,6 +1,6 @@
 import * as https from 'https';
 import * as http from 'http';
-import { resolveApiBaseUrl, PROTOCOL_VERSION } from '@codeagent/shared';
+import { resolveApiBaseUrl, PROTOCOL_VERSION } from '@codeam/shared';
 import { vercelBypassHeader } from '../../lib/backend-headers';
 import { log } from '../logger';
 

@@ -7,7 +7,7 @@ import { handlers } from '../../src/commands/start/handlers';
 import * as handlersMod from '../../src/commands/start/handlers';
 import * as preview from '../../src/services/preview';
 import { activePreviews, registerPreview } from '../../src/services/preview';
-import type { PreviewDetection } from '@codeagent/shared';
+import type { PreviewDetection } from '@codeam/shared';
 
 function makeCtx(sendResult = vi.fn()) {
   return {

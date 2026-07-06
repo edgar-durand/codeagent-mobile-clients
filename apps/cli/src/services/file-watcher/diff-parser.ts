@@ -1,7 +1,7 @@
 import type {
   FileChangeStatus,
   PendingReviewHunkLine,
-} from '@codeagent/shared';
+} from '@codeam/shared';
 
 /**
  * One parsed unified-diff hunk. Mirrors the shape the backend's

@@ -1,4 +1,4 @@
-import type { BeadsConfigureAction } from '@codeagent/shared';
+import type { BeadsConfigureAction } from '@codeam/shared';
 import { BdAdapter } from './bd-adapter';
 import { ensureDoltResolvable } from './install-dolt';
 import { deriveProjectIdentity } from './project-key';

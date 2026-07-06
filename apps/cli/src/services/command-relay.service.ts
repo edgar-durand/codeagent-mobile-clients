@@ -1,7 +1,7 @@
 import * as https from 'https';
 import * as http from 'http';
-import { resolveApiBaseUrl } from '@codeagent/shared';
-import type { AgentMetadata } from '@codeagent/shared';
+import { resolveApiBaseUrl } from '@codeam/shared';
+import type { AgentMetadata } from '@codeam/shared';
 import { _postJson, _getJson } from './pairing.service';
 import { loadCliConfig } from '../config';
 import { vercelBypassHeader } from '../lib/backend-headers';

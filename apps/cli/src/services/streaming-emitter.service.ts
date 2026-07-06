@@ -6,8 +6,8 @@ import type {
   StreamingChunkKind,
   SelectPrompt,
   ChromeStep,
-} from '@codeagent/shared';
-import { resolveApiBaseUrl, renderToLines } from '@codeagent/shared';
+} from '@codeam/shared';
+import { resolveApiBaseUrl, renderToLines } from '@codeam/shared';
 import { log } from './logger';
 import { _transport } from './streaming/transport';
 import type { RuntimeStrategy } from '../agents/strategy';

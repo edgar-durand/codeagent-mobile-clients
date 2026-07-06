@@ -9,7 +9,7 @@ import {
   type FileChangedEvent,
   type FileChangeStatus,
   type PendingReviewHunkEvent,
-} from '@codeagent/shared';
+} from '@codeam/shared';
 import { parseUnifiedDiff } from './file-watcher/diff-parser';
 import { AgentStrategyRegistry } from './strategies/AgentStrategyRegistry';
 

@@ -12,7 +12,7 @@
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import type { NormalizedMessage } from '@codeagent/shared';
+import type { NormalizedMessage } from '@codeam/shared';
 
 const HISTORY_ROOT = path.join(os.homedir(), '.cursor', 'projects');
 

@@ -30,7 +30,7 @@ import {
   type AgentModel,
   type NormalizedMessage,
   type SelectPrompt,
-} from '@codeagent/shared';
+} from '@codeam/shared';
 import { geminiCredentialLocator, geminiLoginLauncher } from './link';
 import { spawnAndCapture } from '../../services/spawn-and-capture';
 import type { OsStrategy } from '../../os';

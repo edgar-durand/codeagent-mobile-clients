@@ -1,5 +1,5 @@
 import pc from 'picocolors';
-import { AGENT_REGISTRY, type AgentId } from '@codeagent/shared';
+import { AGENT_REGISTRY, type AgentId } from '@codeam/shared';
 import { addSession, getActiveSession, getActiveSessionForAgent, ensurePluginId, loadCliConfig } from '../config';
 import { acquireDaemonLock } from './pair-auto';
 import { maybeStartHeadroomReporter, maybeResumeLocalHeadroomReporter } from './host-agent';

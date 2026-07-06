@@ -43,7 +43,7 @@ import type {
 import type {
   AwaitingAnswerEvent,
   StreamingChunkKind,
-} from '@codeagent/shared';
+} from '@codeam/shared';
 
 /**
  * Map one ACP `session/update` notification to the chunk *delta(s)*

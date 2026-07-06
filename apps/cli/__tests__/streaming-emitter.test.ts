@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import type { ChromeStep, SelectPrompt } from '@codeagent/shared';
+import type { ChromeStep, SelectPrompt } from '@codeam/shared';
 
 import {
   StreamingEmitterService,

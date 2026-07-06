@@ -1,4 +1,4 @@
-import type { EnvVar } from '@codeagent/shared';
+import type { EnvVar } from '@codeam/shared';
 
 export const ENV_KEY_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 

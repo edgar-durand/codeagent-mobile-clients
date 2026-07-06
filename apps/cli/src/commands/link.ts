@@ -53,7 +53,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import chokidar from 'chokidar';
 import pc from 'picocolors';
-import { AGENT_REGISTRY, isKnownAgentId, type AgentId } from '@codeagent/shared';
+import { AGENT_REGISTRY, isKnownAgentId, type AgentId } from '@codeam/shared';
 import { p } from '../ui/prompts';
 import {
   showIntro,

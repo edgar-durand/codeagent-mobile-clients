@@ -27,7 +27,7 @@
  */
 import * as https from 'node:https';
 import * as http from 'node:http';
-import { resolveApiBaseUrl } from '@codeagent/shared';
+import { resolveApiBaseUrl } from '@codeam/shared';
 import { log } from './logger';
 import { vercelBypassHeader } from '../lib/backend-headers';
 import type { PairedUserInfo } from './pairing.service';

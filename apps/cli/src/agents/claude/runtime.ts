@@ -4,7 +4,7 @@ import {
   type AgentMetadata,
   type AgentModel,
   type SelectPrompt,
-} from '@codeagent/shared';
+} from '@codeam/shared';
 import { randomUUID } from 'node:crypto';
 import { buildClaudeLaunch } from './resolver';
 import { ensureClaudeInstalled } from './installer';

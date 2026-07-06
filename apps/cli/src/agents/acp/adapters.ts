@@ -23,7 +23,7 @@
  */
 
 import * as path from 'node:path';
-import type { AgentId } from '@codeagent/shared';
+import type { AgentId } from '@codeam/shared';
 import {
   waitForClaudeNativeBinary,
   waitForCommandOnPath,

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { PreviewDetection } from '@codeagent/shared';
+import type { PreviewDetection } from '@codeam/shared';
 import { normalizeDetectionForSpawn } from '../../src/commands/start/handlers';
 
 /**

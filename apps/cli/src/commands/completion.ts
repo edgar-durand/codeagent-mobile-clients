@@ -15,7 +15,7 @@
  *   fish: `codeam completion fish > ~/.config/fish/completions/codeam.fish`
  */
 
-import { AGENT_REGISTRY, type AgentMetadata } from '@codeagent/shared';
+import { AGENT_REGISTRY, type AgentMetadata } from '@codeam/shared';
 
 const COMMANDS = [
   'pair',

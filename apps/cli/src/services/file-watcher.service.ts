@@ -3,7 +3,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import ignore, { type Ignore } from 'ignore';
-import { resolveApiBaseUrl } from '@codeagent/shared';
+import { resolveApiBaseUrl } from '@codeam/shared';
 import type {
   BlameLineWire,
   CommitEntryWire,
@@ -12,7 +12,7 @@ import type {
   FileChangeStatus,
   FileHistoryEvent,
   PendingReviewHunkEvent,
-} from '@codeagent/shared';
+} from '@codeam/shared';
 import { log } from './logger';
 import { parseUnifiedDiff } from './file-watcher/diff-parser';
 import { isIgnoredFilePath } from './file-watcher/ignored-paths';

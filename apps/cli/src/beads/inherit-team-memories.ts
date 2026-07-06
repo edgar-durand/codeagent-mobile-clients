@@ -1,4 +1,4 @@
-import { resolveApiBaseUrl } from '@codeagent/shared';
+import { resolveApiBaseUrl } from '@codeam/shared';
 import { _transport } from '../services/file-watcher/transport';
 import { log } from '../services/logger';
 import type { BdAdapter } from './bd-adapter';
