@@ -44,6 +44,7 @@ import { AcpPublisher } from './publisher';
 import { buildAcpPromptBlocks, type PromptBlock } from './buildAcpPromptBlocks';
 import { shouldOfferOneMRecovery, createOneMRecovery, type OneMRecovery } from './oneMContextRecovery';
 import { looksLikeBudgetExceeded, extractBudgetPeriod, createBudgetRecovery, type BudgetRecovery } from './budgetRecovery';
+import { createWakeCredentialProbe, localCredentialExpiryStatus } from './wakeCredentialProbe';
 import { reconcileCumulative } from './reconcileDelta';
 import { maybeSendOnboardingWelcome } from './onboarding';
 import { formatPromptEchoLine, formatAgentReplyLine } from './promptEcho';
@@ -1744,6 +1745,23 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
   // StreamingState. Non-fatal internally, so this never rejects.
   await onboardingWelcomeDone;
   relay.start();
+
+  // Proactive credential check on wake: if the agent's LOCAL token is
+  // unrecoverably expired (e.g. it lapsed while the codespace slept), surface
+  // the re-auth bubble now — before the user spends a turn discovering it
+  // (the 2026-07-05 "two wasted turns then 401" incident). Network-free local
+  // expiry only; a healthy/refreshable/API-key credential is a silent no-op.
+  void createWakeCredentialProbe({
+    getStatus: () => localCredentialExpiryStatus(opts.agent),
+    emitReauthBubble: async () => {
+      await publisher.publishOutput({ type: 'new_turn', done: false });
+      await publisher.publishOutput({ type: 'text', content: AUTH_FAILURE_MESSAGE, done: true });
+      history.appendAgentInitiatedReply(AUTH_FAILURE_MESSAGE);
+      await history.flush();
+    },
+    reportCredentialInvalid: () => reportCredentialInvalid(opts),
+    log: (msg) => showInfo(msg),
+  }).run();
 
   // Pre-warm project-type detection so the user's first "Start Preview" is
   // instant (skips the ~50 s detect step). Fired ~20 s after the session is
