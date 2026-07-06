@@ -139,6 +139,56 @@ describe('resolveClaudeNativeBinary (real fs)', () => {
   });
 });
 
+// The exe suffix belongs to the PLATFORM PACKAGE, not the host process:
+// @anthropic-ai/claude-agent-sdk-win32-* ships `claude.exe`, all other
+// platform packages ship `claude` (see src/os/strategy.ts). These cases
+// are platform-PARAMETERIZED via platformKey, so the win32 layout is
+// exercised on POSIX CI runners and the linux layout on windows-latest —
+// the regression this guards: deriving the name from ambient
+// process.platform made every linux-x64 fixture look for claude.exe on
+// Windows CI → null.
+describe('resolveClaudeNativeBinary — platform-package exe suffix (real fs)', () => {
+  const WIN = 'win32-x64';
+
+  function writeWinBinary(name: string): string {
+    const p = path.join(root, '@anthropic-ai', `claude-agent-sdk-${WIN}`, name);
+    fs.mkdirSync(path.dirname(p), { recursive: true });
+    fs.writeFileSync(p, 'MZ');
+    return p;
+  }
+
+  it('win32-* platform package: resolves claude.exe (on any host OS)', () => {
+    const exe = writeWinBinary('claude.exe');
+    expect(resolveClaudeNativeBinary({ sdkDir, platformKey: WIN })).toBe(exe);
+  });
+
+  it('win32-* platform package: a POSIX-named `claude` does NOT satisfy it', () => {
+    writeWinBinary('claude');
+    expect(resolveClaudeNativeBinary({ sdkDir, platformKey: WIN })).toBeNull();
+  });
+
+  it('non-win32 platform package: `claude.exe` does NOT satisfy it', () => {
+    fs.mkdirSync(path.dirname(binPath), { recursive: true });
+    fs.writeFileSync(`${binPath}.exe`, 'MZ');
+    expect(resolveClaudeNativeBinary({ sdkDir, platformKey: PLATFORM })).toBeNull();
+  });
+
+  it('waitForClaudeNativeBinary resolves the .exe when it lands mid-wait (win32 layout on any host)', async () => {
+    const timer = setTimeout(() => writeWinBinary('claude.exe'), 200);
+    try {
+      const found = await waitForClaudeNativeBinary({
+        sdkDir,
+        platformKey: WIN,
+        timeoutMs: 3_000,
+        pollMs: 40,
+      });
+      expect(found).toBe(path.join(root, '@anthropic-ai', `claude-agent-sdk-${WIN}`, 'claude.exe'));
+    } finally {
+      clearTimeout(timer);
+    }
+  });
+});
+
 describe('waitForClaudeNativeBinary (real fs + real timers)', () => {
   it('resolves immediately when the binary is already present', async () => {
     writeBinary();

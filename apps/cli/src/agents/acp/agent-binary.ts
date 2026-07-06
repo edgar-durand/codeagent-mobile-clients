@@ -107,7 +107,15 @@ export function resolveClaudeNativeBinary(deps: ClaudeBinaryDeps = {}): string |
   if (!sdkDir) return null;
   // sdkDir = .../@anthropic-ai/claude-agent-sdk → sibling scope dir is its parent.
   const scopeDir = path.dirname(sdkDir);
-  const binName = process.platform === 'win32' ? 'claude.exe' : 'claude';
+  // The exe suffix belongs to the PLATFORM PACKAGE, not to the host process:
+  // @anthropic-ai/claude-agent-sdk-win32-* ships `claude.exe`, every other
+  // platform package ships `claude`. Derive it from the (injectable)
+  // platformKey — with the default key (`${process.platform}-${process.arch}`)
+  // this is byte-identical to checking process.platform, but it keeps the DI
+  // seam coherent so tests can exercise any platform's layout on any OS
+  // (deriving from ambient process.platform made every linux-x64 fixture
+  // look for claude.exe on the Windows CI runners → null).
+  const binName = platformKey.startsWith('win32-') ? 'claude.exe' : 'claude';
   const candidate = path.join(scopeDir, `claude-agent-sdk-${platformKey}`, binName);
   return existsSync(candidate) ? candidate : null;
 }
