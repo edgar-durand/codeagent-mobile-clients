@@ -4,6 +4,18 @@ All notable changes to the CodeAgent Mobile VS Code extension are documented her
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.54.0] — 2026-07-06
+
+### Added
+
+- **shared:** Rename to @codeam/shared and make it publishable to npm (Phase 2 PR-0)
+- **shared:** Agent capability flags + identity module + headroom manifest + beads superset (Phase 2 PR-1)
+
+### Fixed
+
+- **cli:** Windows CI green — derive claude exe suffix from platformKey; win32-native install-target expectations
+- **cli:** Self-update can actually spawn npm on Windows — shell for the .cmd shim
+
 ## [2.53.4] — 2026-07-06
 
 ### Fixed
