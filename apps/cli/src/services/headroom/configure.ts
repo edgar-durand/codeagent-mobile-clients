@@ -61,7 +61,18 @@ export async function configureHeadroom(
       return { enabled: false };
     }
     deps.persist({ enabled: true, agent: kind, ingestUrl: ctx.savingsIngestUrl });
-    deps.startReporter({ agent: kind, ingestUrl: ctx.savingsIngestUrl, pluginAuthToken: ctx.pluginAuthToken });
+    // Only start the savings/stats reporter when we have a plugin-auth token:
+    // every POST to the savings ingest is PluginAuthGuard-gated and 401s
+    // without it, so an unauthenticated reporter would just poll :8787 and fire
+    // rejected requests forever. Headroom (the proxy) still runs and compresses
+    // locally; only the backend savings reporting is skipped.
+    if (ctx.pluginAuthToken) {
+      deps.startReporter({
+        agent: kind,
+        ingestUrl: ctx.savingsIngestUrl,
+        pluginAuthToken: ctx.pluginAuthToken,
+      });
+    }
     deps.emit({ type: 'headroom_status', state: 'enabled' });
     return { enabled: true };
   }

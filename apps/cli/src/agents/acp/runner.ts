@@ -42,7 +42,12 @@ import { AcpClient, type AcpClientOptions } from './client';
 import type { AdapterSpec } from './adapters';
 import { AcpPublisher } from './publisher';
 import { buildAcpPromptBlocks, type PromptBlock } from './buildAcpPromptBlocks';
-import { shouldOfferOneMRecovery, createOneMRecovery, type OneMRecovery } from './oneMContextRecovery';
+import {
+  shouldOfferOneMRecovery,
+  looksLike1mContextCreditsError,
+  createOneMRecovery,
+  type OneMRecovery,
+} from './oneMContextRecovery';
 import { looksLikeBudgetExceeded, extractBudgetPeriod, createBudgetRecovery, type BudgetRecovery } from './budgetRecovery';
 import { createWakeCredentialProbe, localCredentialExpiryStatus } from './wakeCredentialProbe';
 import { reconcileCumulative } from './reconcileDelta';
@@ -798,6 +803,20 @@ const CURSOR_UPGRADE_MESSAGE =
   '[Upgrade to Cursor Pro →](https://cursor.com/dashboard)';
 
 /**
+ * Persistent, actionable message when the agent's reply IS Anthropic's "Usage
+ * credits required for 1M context" 429. Shipped v2.43.0 offered "Disable 1M
+ * context and continue", but that does NOT fix a credential-type credits gate
+ * (2026-06-24 incident) — the account's credential simply lacks the entitlement.
+ * The real recovery is reconnecting the Claude subscription via the in-app
+ * OAuth (Profile › Agents), so we surface the same `codeam://reauth` re-link CTA
+ * as the auth-failure path.
+ */
+const ONE_M_CREDITS_MESSAGE =
+  '🔄 **Reconnect your Claude subscription to continue.**\n\n' +
+  'Claude requested 1M-context but your account doesn’t have the usage credits for it on this credential. Reconnecting refreshes your subscription so the agent can keep going — disabling 1M context won’t fix a credits gate.\n\n' +
+  'Tap [Reconnect this agent](codeam://reauth) to reconnect your Claude subscription in Profile › Agents, then send your message again.';
+
+/**
  * Persistent, actionable message for a NON-auth turn failure that produced no
  * assistant text (e.g. the local Headroom proxy not ready on the first prompt,
  * a network/adapter error). Without this the only frame published is the empty
@@ -808,7 +827,7 @@ const CURSOR_UPGRADE_MESSAGE =
 export const TURN_FAILURE_MESSAGE =
   '⚠️ **The agent hit an error and couldn’t finish this turn.** Please send your message again.';
 
-export { AUTH_FAILURE_MESSAGE };
+export { AUTH_FAILURE_MESSAGE, ONE_M_CREDITS_MESSAGE };
 
 /**
  * Static quick-reply chips emitted after every normal ACP turn end.
@@ -1021,6 +1040,15 @@ export function failureBubble(opts: {
 }): string | null {
   if (looksLikeAuthFailure(opts.detail) || looksLikeAuthFailure(opts.recentStderr)) {
     return AUTH_FAILURE_MESSAGE;
+  }
+  // Anthropic "Usage credits required for 1M context" 429 — a credential-type
+  // credits gate. Disabling 1M doesn't fix it; the recovery is reconnecting the
+  // Claude subscription (in-app OAuth), so surface the reconnect bubble.
+  if (
+    looksLike1mContextCreditsError(opts.detail) ||
+    looksLike1mContextCreditsError(opts.recentStderr)
+  ) {
+    return ONE_M_CREDITS_MESSAGE;
   }
   // Budget-exceeded 429 from the local Headroom proxy — checked BEFORE the
   // provider-outage branch so a budget 429 is never mis-classified as a
@@ -1927,9 +1955,22 @@ export async function handleCommand(
           shouldOfferOneMRecovery({ detail: '', recentStderr: recentStderr.join('\n'), finalText })
         ) {
           // The turn COMPLETED but the reply IS Anthropic's "Usage credits
-          // required for 1M context" 429 body. Offer the on-demand disable
-          // action instead of leaking the raw API error.
-          await oneMRecovery.offer(cmd.id, blocks);
+          // required for 1M context" 429 body. Disabling 1M context does NOT
+          // fix a credential-type credits gate (2026-06-24 incident) — the real
+          // recovery is reconnecting the Claude subscription via the in-app
+          // OAuth. Surface the reconnect bubble + flag the credential so
+          // Profile › Agents shows the reconnect CTA, mirroring the auth path.
+          await streaming.closeWithBubble(ONE_M_CREDITS_MESSAGE);
+          history.appendAgentReply(ONE_M_CREDITS_MESSAGE);
+          void history.flush();
+          turnFiles.flushTurn().catch((err) => {
+            log.warn('acpRunner', `turnFiles.flushTurn failed: ${describeError(err)}`);
+          });
+          void reportCredentialInvalid(opts);
+          log.info('acpRunner', `start_task ← 1m-credits-reconnect id=${cmd.id.slice(0, 8)}`);
+          await relay.sendResult(cmd.id, 'failed', {
+            error: 'agent reply reported 1M-context usage-credits gate',
+          });
         } else {
           await streaming.closeTurnWithInteractiveDetection();
           const replyLine = formatAgentReplyLine(finalText);
@@ -2021,17 +2062,10 @@ export async function handleCommand(
           await budgetRecovery.offer(cmd.id, blocks, `${detail}\n${recentStderr.join('\n')}`);
           return;
         }
-        // 1M-context usage-credits gate (Rafael 2026-06-24): offer the
-        // on-demand "Disable 1M context and continue" action instead of a dead
-        // generic-retry bubble — the only recoverable path for a credit-less
-        // account is dropping the context-1m beta on a re-spawn.
-        if (shouldOfferOneMRecovery({ detail, recentStderr: recentStderr.join('\n'), finalText: '' })) {
-          // Flush the failed turn (closeAll: finalise whatever streamed) before
-          // the recovery offer publishes its own select_prompt frame.
-          await streaming.closeAll();
-          await oneMRecovery.offer(cmd.id, blocks);
-          return;
-        }
+        // 1M-context usage-credits gate (Rafael 2026-06-24) is classified by
+        // failureBubble → ONE_M_CREDITS_MESSAGE (reconnect the Claude
+        // subscription). Disabling 1M doesn't fix a credential-type credits
+        // gate, so we no longer offer the disable action.
         const bubble = failureBubble({
           detail,
           recentStderr: recentStderr.join('\n'),
@@ -2060,11 +2094,12 @@ export async function handleCommand(
           // streamed text flips out of "Thinking…" without being clobbered.
           await streaming.closeAll();
         }
-        if (bubble === AUTH_FAILURE_MESSAGE) {
+        if (bubble === AUTH_FAILURE_MESSAGE || bubble === ONE_M_CREDITS_MESSAGE) {
           // Same durable flag as onUnexpectedExit — covers the case where the
           // adapter 401s mid-turn (stalls → idle timeout) instead of exiting,
-          // so Profile › Agents still surfaces the re-auth CTA rather than
-          // leaving the user stuck on a CONNECTED-but-dead credential.
+          // so Profile › Agents still surfaces the re-auth/reconnect CTA rather
+          // than leaving the user stuck on a CONNECTED-but-dead credential. The
+          // 1M-credits gate reuses this to drive the subscription-reconnect CTA.
           void reportCredentialInvalid(opts);
         }
         await relay.sendResult(cmd.id, 'failed', { error: detail });

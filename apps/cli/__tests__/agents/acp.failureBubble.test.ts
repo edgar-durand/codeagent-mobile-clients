@@ -25,6 +25,7 @@ import { describe, expect, it } from 'vitest';
 import {
   failureBubble,
   AUTH_FAILURE_MESSAGE,
+  ONE_M_CREDITS_MESSAGE,
   TURN_FAILURE_MESSAGE,
   looksLikeProviderOutage,
   providerOutageMessage,
@@ -81,6 +82,29 @@ describe('failureBubble — every failed start_task ends with a visible terminal
         agent: 'claude',
       }),
     ).toBe(AUTH_FAILURE_MESSAGE);
+  });
+
+  it('1M-context usage-credits 429 → the reconnect-subscription bubble (not disable-1M)', () => {
+    // Anthropic surfaces the credits gate as this error body; the recovery is
+    // reconnecting the Claude subscription, so failureBubble must classify it
+    // as ONE_M_CREDITS_MESSAGE rather than a generic retry.
+    expect(
+      failureBubble({
+        detail: 'API Error: 429 Usage credits required for 1M context',
+        recentStderr: '',
+        hadText: false,
+        agent: 'claude',
+      }),
+    ).toBe(ONE_M_CREDITS_MESSAGE);
+    // Also when it arrives on stderr.
+    expect(
+      failureBubble({
+        detail: 'boom',
+        recentStderr: 'usage credits required for 1m context',
+        hadText: false,
+        agent: 'claude',
+      }),
+    ).toBe(ONE_M_CREDITS_MESSAGE);
   });
 
   it('NON-auth failure with NO streamed text → generic retry bubble (the silent first-message bug)', () => {

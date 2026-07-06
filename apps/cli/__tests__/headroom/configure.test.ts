@@ -90,6 +90,20 @@ describe('configureHeadroom – enable', () => {
     expect(result).toEqual({ enabled: true });
   });
 
+  it('does NOT start the reporter when pluginAuthToken is missing (savings POST would 401), but still enables', async () => {
+    const ctx = makeCtx({ agent: 'claude', pluginAuthToken: undefined });
+    const deps = makeDeps({ setup: vi.fn().mockResolvedValue(true) });
+    const result = await configureHeadroom('enable', ctx, deps);
+
+    // Headroom (the proxy) is still enabled + persisted…
+    expect(deps.persist).toHaveBeenCalledWith(expect.objectContaining({ enabled: true }));
+    expect(deps.emit).toHaveBeenCalledWith({ type: 'headroom_status', state: 'enabled' });
+    expect(result).toEqual({ enabled: true });
+    // …but the savings/stats reporter is skipped (no token → every ingest POST
+    // is PluginAuthGuard-rejected, so starting it just burns polls).
+    expect(deps.startReporter).not.toHaveBeenCalled();
+  });
+
   it('emits error status and returns {enabled:false} when setup returns false', async () => {
     const ctx = makeCtx({ agent: 'claude' });
     const deps = makeDeps({ setup: vi.fn().mockResolvedValue(false) });
