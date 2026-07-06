@@ -951,12 +951,25 @@ export function buildNpmInstallInvocation(opts?: {
 export async function runNpmInstallLatest(): Promise<{ ok: boolean; error?: string }> {
   let lastError = '';
   const invocation = buildNpmInstallInvocation();
+  // Windows: npm resolves to a .cmd shim (npm.cmd), and patched Node
+  // (CVE-2024-27980, >=18.20.2/20.12.2) refuses to spawn .cmd/.bat without
+  // a shell — execFile throws EINVAL and self-update never runs. A shell is
+  // safe here: the args are fixed tokens and Windows layouts never get a
+  // --prefix (buildNpmInstallInvocation's /lib/node_modules marker cannot
+  // match a win32 path — pinned by cli-update-install-target tests). The
+  // command path itself may contain spaces (C:\Program Files\nodejs\npm.cmd)
+  // so it must be quoted for cmd.exe.
+  const useShell = process.platform === 'win32';
+  const command =
+    useShell && invocation.command.includes(' ')
+      ? `"${invocation.command}"`
+      : invocation.command;
   for (let attempt = 1; attempt <= CLI_UPDATE_MAX_ATTEMPTS; attempt++) {
     const result = await new Promise<{ ok: boolean; error?: string }>((resolve) => {
       execFile(
-        invocation.command,
+        command,
         invocation.args,
-        { timeout: CLI_UPDATE_INSTALL_TIMEOUT_MS },
+        { timeout: CLI_UPDATE_INSTALL_TIMEOUT_MS, shell: useShell },
         (err, _stdout, stderr) => {
           if (!err) {
             resolve({ ok: true });
