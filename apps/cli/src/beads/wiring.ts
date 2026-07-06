@@ -1,4 +1,4 @@
-import type { AgentId, BeadsActionKind, BeadsActionPayload } from '@codeagent/shared';
+import type { AgentId, BeadsActionKind, BeadsActionCommand } from '@codeagent/shared';
 import { startBeads, type StartedBeads } from './index';
 import { deriveProjectIdentity } from './project-key';
 import { postBeadsProvisioning } from '../services/pairing.service';
@@ -148,14 +148,14 @@ function strOrUndefined(v: unknown): string | undefined {
 
 /**
  * Translate a backend-relayed `beads_action` command payload (`{action, args}`)
- * into the internal `BeadsActionPayload` (`{kind, …}`) the apply path consumes.
+ * into the `BeadsActionCommand` (`{kind, …}`) the apply path consumes.
  * Returns null for an unknown / missing action so the dispatcher drops it
  * without spawning bd. (Field-level validation — e.g. claim requires an
  * issueId — is `buildBdArgs`' job downstream.)
  */
 export function beadsActionFromPayload(
   payload: Record<string, unknown>,
-): BeadsActionPayload | null {
+): BeadsActionCommand | null {
   const { action, args } = payload as RawBeadsActionPayload;
   if (!isBeadsActionKind(action)) return null;
   const a = (args && typeof args === 'object' ? args : {}) as Record<string, unknown>;

@@ -5,6 +5,7 @@ import {
   beadsActionFromPayload,
   type BeadsSessionContext,
 } from '../../src/beads/wiring';
+import { buildBdArgs } from '../../src/beads/apply-actions';
 import type { StartedBeads } from '../../src/beads';
 import * as pairing from '../../src/services/pairing.service';
 
@@ -155,5 +156,62 @@ describe('beadsActionFromPayload — {action,args} → BeadsActionPayload', () =
 
   it('returns null when action is missing', () => {
     expect(beadsActionFromPayload({ args: { issueId: 'x' } })).toBeNull();
+  });
+});
+
+/**
+ * CONTRACT FIXTURES — these payloads are byte-for-byte what the backend's
+ * `buildBeadsActionCommand` (codeagent-mobile repo,
+ * `apps/api-v2/src/beads/bd-action.util.ts`) pushes as the `beads_action`
+ * command payload. If that util changes shape, update BOTH sides in the
+ * same coordinated change. Regression guard for bd codeagent-0rh: the
+ * backend used to relay `args` as a bd argv ARRAY, which decoded to
+ * all-undefined fields here and every mobile Beads action was silently
+ * dropped.
+ */
+describe('beadsActionFromPayload — backend contract fixtures (codeagent-0rh)', () => {
+  it('decodes the exact backend claim payload into runnable bd argv', () => {
+    const backendPayload = { action: 'claim', args: { kind: 'claim', issueId: 'bd-a1b2' } };
+    const action = beadsActionFromPayload(backendPayload);
+    expect(action).not.toBeNull();
+    expect(buildBdArgs(action!)).toEqual(['update', 'bd-a1b2', '--claim']);
+  });
+
+  it('decodes the exact backend close payload (with reason)', () => {
+    const backendPayload = {
+      action: 'close',
+      args: { kind: 'close', issueId: 'bd-c3d4', reason: 'duplicate' },
+    };
+    const action = beadsActionFromPayload(backendPayload);
+    expect(buildBdArgs(action!)).toEqual(['close', 'bd-c3d4', '--reason', 'duplicate']);
+  });
+
+  it('decodes the exact backend create payload (title travels in text)', () => {
+    const backendPayload = {
+      action: 'create',
+      args: { kind: 'create', text: 'Fix the thing', projectKey: 'github.com/acme/web' },
+    };
+    const action = beadsActionFromPayload(backendPayload);
+    expect(buildBdArgs(action!)).toEqual(['create', 'Fix the thing']);
+    expect(action!.projectKey).toBe('github.com/acme/web');
+  });
+
+  it('decodes the exact backend remember payload', () => {
+    const backendPayload = {
+      action: 'remember',
+      args: { kind: 'remember', text: 'We use Prisma for the mirror' },
+    };
+    const action = beadsActionFromPayload(backendPayload);
+    expect(buildBdArgs(action!)).toEqual(['remember', 'We use Prisma for the mirror']);
+  });
+
+  it('still drops the pre-fix argv-array shape instead of running a mangled command', () => {
+    const legacyArgvPayload = {
+      action: 'claim',
+      args: ['update', 'bd-a1b2', '--status', 'in_progress'],
+    };
+    const action = beadsActionFromPayload(legacyArgvPayload);
+    expect(action).toEqual({ kind: 'claim' }); // fields undefined stripped by decode
+    expect(buildBdArgs(action!)).toBeNull(); // apply path rejects it as malformed
   });
 });

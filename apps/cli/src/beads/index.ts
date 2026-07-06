@@ -1,4 +1,4 @@
-import type { AgentId, BeadsActionPayload } from '@codeagent/shared';
+import type { AgentId, BeadsActionCommand } from '@codeagent/shared';
 import { BdAdapter } from './bd-adapter';
 import { provisionBeads } from './provisioner';
 import { BeadsWatcher } from './watcher';
@@ -91,7 +91,7 @@ export async function startBeads(opts: StartBeadsOptions): Promise<StartedBeads 
  * from the composition-root-owned provisioner, threaded through the relay.
  */
 export async function handleBeadsActionCommand(
-  action: BeadsActionPayload,
+  action: BeadsActionCommand,
   started: StartedBeads,
 ): Promise<void> {
   await applyBeadsAction(action, {

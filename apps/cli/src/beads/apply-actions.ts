@@ -1,4 +1,4 @@
-import type { BeadsActionPayload } from '@codeagent/shared';
+import type { BeadsActionCommand } from '@codeagent/shared';
 import { BdAdapter } from './bd-adapter';
 import { log } from '../services/logger';
 
@@ -30,7 +30,7 @@ export interface ApplyActionDeps {
 export interface ApplyActionResult {
   ok: boolean;
   /** Stable command name for logs / telemetry. */
-  action: BeadsActionPayload['kind'];
+  action: BeadsActionCommand['kind'];
   /** bd exit code (or -1 when the command couldn't be built / spawned). */
   code: number;
   /** Reason when ok=false. */
@@ -42,7 +42,7 @@ export interface ApplyActionResult {
  * (missing the field its kind requires) so the caller can reject it without
  * spawning bd.
  */
-export function buildBdArgs(action: BeadsActionPayload): string[] | null {
+export function buildBdArgs(action: BeadsActionCommand): string[] | null {
   switch (action.kind) {
     case 'claim': {
       if (!action.issueId) return null;
@@ -72,7 +72,7 @@ export function buildBdArgs(action: BeadsActionPayload): string[] | null {
 }
 
 export async function applyBeadsAction(
-  action: BeadsActionPayload,
+  action: BeadsActionCommand,
   deps: ApplyActionDeps,
 ): Promise<ApplyActionResult> {
   const args = buildBdArgs(action);
