@@ -8,6 +8,7 @@ import { CommandRelayService } from '../services/command-relay.service';
 import { AgentService } from '../services/agent.service';
 import { createRuntimeStrategy } from '../agents/registry';
 import { getAcpAdapter, requiresAcp } from '../agents/acp/adapters';
+import { waitForAdapterModuleGraph } from '../agents/acp/agent-binary';
 import { runAcpSession } from '../agents/acp/runner';
 import { OutputService } from '../services/output.service';
 import { HistoryService } from '../services/history.service';
@@ -247,10 +248,25 @@ export async function start(requestedAgent?: AgentId): Promise<void> {
     // on the happy path (binary present); bounded by the gate timeout so a
     // stuck install can't wedge the session (agent spawns anyway and the
     // agent then emits its own actionable install error).
-    const agentBinaryReady: Promise<unknown> =
-      getAcpAdapter(session.agent)
-        ?.waitForBinary({ timeoutMs: GATE_TIMEOUT_MS })
-        .catch(() => false) ?? Promise.resolve(true);
+    // Two independent readiness checks for the ACP adapter, both bounded by the
+    // gate: (1) its LAUNCH BINARY is on disk (claude's SDK native dep, codex,
+    // …), and (2) the adapter's OWN bundled JS module graph resolves — on a
+    // fresh codespace the adapter's nested node_modules (e.g. `zod`) can still
+    // be mid-install when the gate would otherwise release, so `node <adapter>`
+    // crashes at import with ERR_MODULE_NOT_FOUND / a truncated-file SyntaxError
+    // → "Agent adapter exited unexpectedly (code=1)" (2026-07-06 incident).
+    // waitForAdapterModuleGraph probes the graph by actually loading the adapter
+    // and only releases once it resolves; both resolve instantly on the happy
+    // path (already installed).
+    const acpAdapterForGate = getAcpAdapter(session.agent);
+    const agentBinaryReady: Promise<unknown> = acpAdapterForGate
+      ? Promise.all([
+          acpAdapterForGate.waitForBinary({ timeoutMs: GATE_TIMEOUT_MS }).catch(() => false),
+          waitForAdapterModuleGraph(acpAdapterForGate.command, acpAdapterForGate.args, {
+            timeoutMs: GATE_TIMEOUT_MS,
+          }).catch(() => false),
+        ])
+      : Promise.resolve(true);
     let gateTimer: ReturnType<typeof setTimeout> | undefined;
     await Promise.race([
       Promise.all([beadsReady.catch(() => null), depsReady, agentBinaryReady]),

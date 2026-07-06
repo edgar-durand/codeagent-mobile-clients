@@ -1,6 +1,6 @@
 import fs from 'fs';
 import path from 'path';
-import { spawnSync } from 'child_process';
+import { spawn, spawnSync, type ChildProcess } from 'child_process';
 
 /**
  * Agent launch-binary readiness.
@@ -212,4 +212,122 @@ export async function waitForCommandOnPath(
     if (check()) return true;
   }
   return check();
+}
+
+// ─────────────────── ACP adapter module-graph readiness ───────────────────
+//
+// The `waitForBinary` gate above covers the agent's LAUNCH BINARY (claude's
+// native SDK dep, `codex`, …). It does NOT cover the ACP adapter's OWN bundled
+// JavaScript dependency graph. On a fresh codespace the CLI + all agent deps
+// install concurrently, and the adapter (`node <@agentclientprotocol/*-acp>`)
+// can be spawned while its nested node_modules are still being written — a
+// half-installed `zod` then makes `node <adapter>` crash at import with
+// `ERR_MODULE_NOT_FOUND` / a truncated-file `SyntaxError`, surfacing to the
+// user as "Agent adapter exited unexpectedly (code=1)" (2026-07-06 incident).
+//
+// This gate probes the adapter's module graph by actually loading it in a
+// throwaway child and only releases the spawn once it resolves — so the code=1
+// crash can never reach a real session.
+
+/** Import/parse errors that mean the adapter's node_modules is still settling
+ *  (a fresh/partial install), NOT a genuine, permanent failure. */
+const ADAPTER_MODULE_LOAD_ERROR_RE =
+  /ERR_MODULE_NOT_FOUND|Cannot find module|ERR_REQUIRE_ESM|ERR_UNKNOWN_BUILTIN_MODULE|SyntaxError|Unexpected (token|end|identifier)|missing \) after argument list/i;
+
+export type AdapterProbeResult = 'ok' | 'transient';
+
+export interface ProbeAdapterOptions {
+  /** How long the adapter must stay alive to be judged "modules loaded".
+   *  A healthy adapter loads its graph then blocks reading the ACP handshake
+   *  off stdin, so surviving this window means the graph resolved. Default 400ms. */
+  livenessMs?: number;
+  /** Injectable spawn (tests). Defaults to child_process.spawn. */
+  spawnFn?: typeof spawn;
+}
+
+/**
+ * Load the adapter's module graph in a throwaway child and classify the result:
+ * - `transient` — it exited non-zero with an import/parse error (install still
+ *   settling → worth retrying).
+ * - `ok` — it survived the liveness window (graph loaded, now blocked on stdin),
+ *   OR it exited for a NON-module reason (auth/tier/etc. — not our concern here;
+ *   don't loop on those). We never block the spawn on non-install failures.
+ */
+export function probeAdapterModuleGraph(
+  command: string,
+  args: readonly string[],
+  opts: ProbeAdapterOptions = {},
+): Promise<AdapterProbeResult> {
+  const livenessMs = opts.livenessMs ?? 400;
+  const spawnFn = opts.spawnFn ?? spawn;
+  return new Promise<AdapterProbeResult>((resolve) => {
+    let settled = false;
+    let stderr = '';
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let child: ChildProcess | undefined;
+    const finish = (r: AdapterProbeResult): void => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      try {
+        child?.kill('SIGKILL');
+      } catch {
+        /* already gone */
+      }
+      resolve(r);
+    };
+    try {
+      child = spawnFn(command, [...args], { stdio: ['pipe', 'ignore', 'pipe'] });
+    } catch {
+      // Couldn't even spawn — not a module-graph issue; the real spawn path
+      // surfaces its own actionable error. Don't loop.
+      resolve('ok');
+      return;
+    }
+    child.stderr?.on('data', (d: Buffer) => {
+      stderr += d.toString();
+      if (stderr.length > 8192) stderr = stderr.slice(-8192);
+    });
+    child.on('error', () => finish('ok'));
+    child.on('exit', (code) => {
+      if (code !== 0 && code !== null && ADAPTER_MODULE_LOAD_ERROR_RE.test(stderr)) {
+        finish('transient');
+      } else {
+        finish('ok');
+      }
+    });
+    timer = setTimeout(() => finish('ok'), livenessMs);
+  });
+}
+
+export interface WaitForAdapterOptions extends ProbeAdapterOptions {
+  timeoutMs?: number;
+  pollMs?: number;
+  now?: () => number;
+  sleep?: (ms: number) => Promise<void>;
+}
+
+/**
+ * Poll {@link probeAdapterModuleGraph} until the adapter's module graph loads
+ * cleanly (returns `true`) or the timeout elapses (`false`, caller spawns anyway
+ * — no worse than today, but the crash window is almost always short). Bounded
+ * like the binary gate so a genuinely broken install can't wedge the session.
+ */
+export async function waitForAdapterModuleGraph(
+  command: string,
+  args: readonly string[],
+  opts: WaitForAdapterOptions = {},
+): Promise<boolean> {
+  const timeoutMs = opts.timeoutMs ?? 180_000;
+  const pollMs = opts.pollMs ?? 500;
+  const now = opts.now ?? Date.now;
+  const sleep = opts.sleep ?? realSleep;
+  const probeOpts: ProbeAdapterOptions = { livenessMs: opts.livenessMs, spawnFn: opts.spawnFn };
+  const deadline = now() + timeoutMs;
+  if ((await probeAdapterModuleGraph(command, args, probeOpts)) === 'ok') return true;
+  while (now() < deadline) {
+    await sleep(pollMs);
+    if ((await probeAdapterModuleGraph(command, args, probeOpts)) === 'ok') return true;
+  }
+  return false;
 }
