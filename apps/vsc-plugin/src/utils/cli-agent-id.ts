@@ -1,32 +1,18 @@
-import { AGENT_REGISTRY, isKnownAgentId, type AgentId } from '@codeam/shared';
+import { AGENT_REGISTRY, normalizeAgentId, type AgentId } from '@codeam/shared';
 
-const CLI_AGENT_ALIASES: Record<string, AgentId> = {
-  claude_code: 'claude',
-  'claude-code': 'claude',
-  'anthropic.claude-code': 'claude',
-  'anthropics.claude': 'claude',
-  'anthropic.claude-ce': 'claude',
-  'anthropic.claude': 'claude',
-  'com.anthropic.claudecode': 'claude',
-  'com.anthropic.claude': 'claude',
-  'openai.chatgpt': 'codex',
-  'coderabbitai.coderabbit-vscode': 'coderabbit',
-};
-
+/**
+ * Normalize whatever agent id the wire delivered (registry id, public
+ * `claude_code` form, marketplace extension id, `__terminal__:`-prefixed
+ * plugin id) onto a CLI-launchable {@link AgentId}.
+ *
+ * Thin wrapper over the shared `normalizeAgentId` (`@codeam/shared`
+ * `agents/identity.ts` — the ONE alias normalizer): this layer only adds
+ * the non-string guard and the plugin's availability gate (a known but
+ * DISABLED agent, e.g. copilot today, is not launchable → null).
+ */
 export function normalizeCliAgentId(raw: unknown): AgentId | null {
   if (typeof raw !== 'string') return null;
-  const value = raw.trim().toLowerCase();
-  if (!value) return null;
-
-  if (isKnownAgentId(value) && AGENT_REGISTRY[value].enabled) return value;
-
-  const terminalPrefix = '__terminal__:';
-  const unprefixed = value.startsWith(terminalPrefix)
-    ? value.slice(terminalPrefix.length)
-    : value;
-
-  if (isKnownAgentId(unprefixed) && AGENT_REGISTRY[unprefixed].enabled) {
-    return unprefixed;
-  }
-  return CLI_AGENT_ALIASES[unprefixed] ?? null;
+  const id = normalizeAgentId(raw);
+  if (!id || !AGENT_REGISTRY[id].enabled) return null;
+  return id;
 }

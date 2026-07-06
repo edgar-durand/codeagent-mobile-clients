@@ -51,7 +51,7 @@ import { configureHeadroom } from '../../services/headroom/configure';
 import { applyBudgetToHeadroom, makeRealApplyBudgetDeps, type BudgetSpec } from '../../services/headroom/budget-relaunch';
 import { fetchWithTimeout, HeadroomStatsReporter, mapStatsToSavings, type StatsShape, type Savings } from '../../services/headroom/stats-reporter';
 import { killHeadroomProxy } from '../../services/headroom/proxy-pid';
-import { AGENT_REGISTRY, isKnownAgentId, PREVIEW_DETECT_PROMPT, USER_EVENTS, type AgentId, type PreviewDetection, type HeadroomBudgetCommand } from '@codeam/shared';
+import { AGENT_REGISTRY, isKnownAgentId, normalizeAgentId, PREVIEW_DETECT_PROMPT, USER_EVENTS, type PreviewDetection, type HeadroomBudgetCommand } from '@codeam/shared';
 import * as previewSvc from '../../services/preview';
 import {
   activePreviews,
@@ -514,10 +514,11 @@ const headroomConfigureH: CommandHandler = async (ctx, cmd, parsed) => {
   // flow sends `{action:'enable'}` with NO agentId → `rawAgentId === ''` →
   // `isHeadroomSupportedAgent('')` is false → a real Claude session got a
   // spurious `{supported:false}`. Preferring `ctx.agentId` fixes that.
-  // Normalize the common public-id alias (`claude_code` → `claude`) so the value
-  // is consistent with what `requestLinkCredentialsH` writes.
+  // Normalize public-id aliases (`claude_code` → `claude`, …) via the shared
+  // normalizer so the value is consistent with what `requestLinkCredentialsH`
+  // writes; unknown ids pass through untouched for the downstream gate.
   let rawAgentId = ctx.agentId || (typeof parsed.agentId === 'string' ? parsed.agentId : '');
-  if (rawAgentId === 'claude_code') rawAgentId = 'claude';
+  rawAgentId = normalizeAgentId(rawAgentId) ?? rawAgentId;
   let configuredAgent = rawAgentId;
   if (!configuredAgent) {
     try {
@@ -663,11 +664,11 @@ const headroomBudgetH: CommandHandler = async (ctx, cmd) => {
   // payload.agentId is the backend-supplied carrier for the guard — used to
   // identify WHICH agent's budget is being set; we compare it against ctx.agentId.
   let rawAgentId = ctx.agentId || (typeof payload.agentId === 'string' ? payload.agentId : '');
-  if (rawAgentId === 'claude_code') rawAgentId = 'claude';
+  rawAgentId = normalizeAgentId(rawAgentId) ?? rawAgentId;
 
   // Normalise the payload carrier too, for comparison.
   let payloadAgentId = typeof payload.agentId === 'string' ? payload.agentId : '';
-  if (payloadAgentId === 'claude_code') payloadAgentId = 'claude';
+  payloadAgentId = normalizeAgentId(payloadAgentId) ?? payloadAgentId;
 
   // ── 2. Guard: must be a supported agent. ────────────────────────────────
   if (!rawAgentId || !isHeadroomSupportedAgent(rawAgentId)) {
@@ -778,7 +779,7 @@ const beadsConfigureH: CommandHandler = async (ctx, cmd, parsed) => {
 
   // Use the session's own running agent — same resolution as headroom_configure.
   let rawAgentId = ctx.agentId || (typeof parsed.agentId === 'string' ? parsed.agentId : '');
-  if (rawAgentId === 'claude_code') rawAgentId = 'claude';
+  rawAgentId = normalizeAgentId(rawAgentId) ?? rawAgentId;
 
   const agentIds = rawAgentId && isKnownAgentId(rawAgentId) ? [rawAgentId] : [];
 
@@ -1188,10 +1189,11 @@ const requestLinkCredentialsH: CommandHandler = (ctx, _cmd, parsed) => {
     return;
   }
   // Public id → internal id (LinkedAgent uses `claude_code`, runtime
-  // factory takes `claude`). Other ids are identical across both.
-  const internalId: AgentId = publicId === 'claude_code' ? 'claude' : (publicId as AgentId);
-  if (!isKnownAgentId(internalId) || !AGENT_REGISTRY[internalId].enabled) {
-    log.trace('auto-link', `unknown / disabled agent: ${internalId}`);
+  // factory takes `claude`) via the shared normalizer. Other ids are
+  // identical across both; unknown ids come back null.
+  const internalId = normalizeAgentId(publicId);
+  if (!internalId || !AGENT_REGISTRY[internalId].enabled) {
+    log.trace('auto-link', `unknown / disabled agent: ${publicId}`);
     return;
   }
   const pluginAuthToken = ctx.pluginAuthToken;

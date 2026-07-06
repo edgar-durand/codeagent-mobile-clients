@@ -1,4 +1,4 @@
-import type { BeadsConfigureAction } from '@codeam/shared';
+import type { BeadsConfigureAction, BeadsStatus } from '@codeam/shared';
 import { BdAdapter } from './bd-adapter';
 import { ensureDoltResolvable } from './install-dolt';
 import { deriveProjectIdentity } from './project-key';
@@ -77,11 +77,9 @@ export interface ConfigureBeadsDeps {
    *  when the user has explicitly disabled Beads — the dolt server stays up
    *  after disable (soft-disable) so a raw probe would falsely report enabled. */
   readEnabled: () => boolean;
-  emit: (event: {
-    type: 'beads_status';
-    state: 'enabled' | 'disabled' | 'error' | 'provisioning';
-    running?: boolean; bdAvailable?: boolean; doltAvailable?: boolean; serverUp?: boolean; error?: string;
-  }) => void;
+  /** Emits the shared `BeadsStatus` wire shape on the `beads_status` event
+   *  (the CLI is the producer of this hop — see `@codeam/shared` beads.ts). */
+  emit: (event: { type: 'beads_status' } & BeadsStatus) => void;
 }
 
 export async function configureBeads(

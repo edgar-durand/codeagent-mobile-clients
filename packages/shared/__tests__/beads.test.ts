@@ -6,6 +6,13 @@ import type {
   BeadsDependencyDto,
   BeadsMemoryDto,
   BeadsActionPayload,
+  BeadsProvisioningPayload,
+  BeadsProvisioningStatus,
+  BeadsStatus,
+  BeadsSnapshotDto,
+  BeadsProjectDto,
+  BeadsActionRequest,
+  BeadsActionType,
 } from '../src/types/beads';
 
 /**
@@ -113,5 +120,85 @@ describe('beads wire types', () => {
     };
     expect(action.kind).toBe('close');
     expect(action.issueId).toBe('bd-a1b2');
+  });
+});
+
+/**
+ * PR-1 additions — decls that were previously typed only A-side even though
+ * the CLI produces (provisioning / status) or the app consumes (snapshot /
+ * action-request) the bytes. Compile-time usage guards: a shape change that
+ * breaks a producer/consumer trips here first.
+ */
+describe('beads wire types — PR-1 superset decls', () => {
+  it('models the CLI→backend provisioning hop (POST /api/beads/provisioning)', () => {
+    const statuses: BeadsProvisioningStatus[] = ['provisioning', 'ready', 'failed'];
+    expect(statuses).toHaveLength(3);
+
+    const payload: BeadsProvisioningPayload = {
+      sessionId: 'sess-1',
+      pluginId: 'plug-1',
+      status: 'ready',
+      projectKey: 'github.com/edgar-durand/codeagent-mobile-clients',
+    };
+    expect(payload.status).toBe('ready');
+    // detail is optional — a failed frame can carry the reason verbatim.
+    const failed: BeadsProvisioningPayload = {
+      sessionId: 'sess-1',
+      pluginId: 'plug-1',
+      status: 'failed',
+      detail: 'bd install failed',
+    };
+    expect(failed.detail).toBe('bd install failed');
+  });
+
+  it('models the beads_status add-on snapshot (CLI → backend → app)', () => {
+    const status: BeadsStatus = {
+      state: 'enabled',
+      running: true,
+      bdAvailable: true,
+      doltAvailable: true,
+      serverUp: true,
+      prefix: 'codeagent_mobile_3f9a1c02',
+    };
+    expect(status.state).toBe('enabled');
+    const disabled: BeadsStatus = { state: 'disabled', running: false, prefix: null };
+    expect(disabled.prefix).toBeNull();
+  });
+
+  it('models the backend→app snapshot hop (GET /api/beads/me)', () => {
+    const project: BeadsProjectDto = {
+      projectKey: 'github.com/edgar-durand/codeagent-mobile-clients',
+      label: 'codeagent-mobile-clients',
+      lastSyncedAt: '2026-07-06T00:00:00Z',
+    };
+    const snapshot: BeadsSnapshotDto = {
+      projects: [project],
+      issuesByProject: { [project.projectKey]: [] },
+      memories: [],
+      summary: {
+        open_issues: 1,
+        ready_issues: 1,
+        blocked_issues: 0,
+        in_progress_issues: 0,
+        closed_issues: 0,
+        total_issues: 1,
+      },
+    };
+    expect(snapshot.projects[0].label).toBe('codeagent-mobile-clients');
+    expect(snapshot.issuesByProject[project.projectKey]).toEqual([]);
+  });
+
+  it('models the app→backend action-request hop (POST /api/beads/actions)', () => {
+    const types: BeadsActionType[] = ['claim', 'close', 'create', 'remember'];
+    expect(types).toHaveLength(4);
+
+    const create: BeadsActionRequest = {
+      action: 'create',
+      title: 'wire the watcher into the pair path',
+      projectKey: 'github.com/edgar-durand/codeagent-mobile-clients',
+    };
+    expect(create.title).toBeDefined();
+    const remember: BeadsActionRequest = { action: 'remember', text: 'station wins' };
+    expect(remember.text).toBe('station wins');
   });
 });

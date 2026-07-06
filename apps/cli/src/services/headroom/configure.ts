@@ -4,7 +4,7 @@ import {
   isHeadroomSupportedAgent,
   type HeadroomStep,
 } from '../../commands/host-agent';
-import { USER_EVENTS, type HeadroomStatus } from '@codeam/shared';
+import { USER_EVENTS, HEADROOM_EXTRAS_BY_SURFACE, type HeadroomStatus } from '@codeam/shared';
 import type { Savings } from './stats-reporter';
 
 export interface ConfigureCtx {
@@ -54,7 +54,9 @@ export async function configureHeadroom(
   if (action === 'enable') {
     if (!isHeadroomSupportedAgent(ctx.agent)) return { supported: false };
     const ok = await deps.setup(ctx.agent, undefined, {
-      extras: ['proxy', 'code', 'image'],
+      // On-demand surface ships the extra `image` compression support — see
+      // the shared Headroom manifest (`HEADROOM_EXTRAS_BY_SURFACE`).
+      extras: [...HEADROOM_EXTRAS_BY_SURFACE.onDemand],
       onProgress: (step) => deps.emit({ type: USER_EVENTS.HEADROOM_PROGRESS, step }),
     });
     if (!ok) {

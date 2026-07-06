@@ -1,7 +1,11 @@
 import * as https from 'https';
 import * as http from 'http';
 import * as os from 'os';
-import { resolveApiBaseUrl } from '@codeam/shared';
+import {
+  resolveApiBaseUrl,
+  type BeadsProvisioningPayload,
+  type BeadsProvisioningStatus,
+} from '@codeam/shared';
 import pkg from '../../package.json';
 import { vercelBypassHeader } from '../lib/backend-headers';
 import { detectCurrentBranch } from '../lib/git-branch';
@@ -512,18 +516,20 @@ export async function postBeadsProvisioning(input: {
   sessionId: string;
   pluginId: string;
   pluginAuthToken: string;
-  status: 'ready' | 'failed';
+  status: BeadsProvisioningStatus;
   projectKey?: string;
 }): Promise<{ ok: true } | { ok: false; status: number; message: string }> {
   try {
     await _transport.postJsonAuthed(
       `${API_BASE}/api/beads/provisioning`,
+      // The CLI is the producer of this hop — the body is the shared wire
+      // shape (`@codeam/shared` `BeadsProvisioningPayload`), validated here.
       {
         sessionId: input.sessionId,
         pluginId: input.pluginId,
         status: input.status,
         ...(input.projectKey ? { projectKey: input.projectKey } : {}),
-      },
+      } satisfies BeadsProvisioningPayload,
       input.pluginAuthToken,
     );
     return { ok: true };

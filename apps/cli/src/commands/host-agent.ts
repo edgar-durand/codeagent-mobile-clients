@@ -41,7 +41,15 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { CommandRelayService, type RemoteCommand } from '../services/command-relay.service';
 import type { AgentMetadata } from '@codeam/shared';
-import { resolveApiBaseUrl, getPricing } from '@codeam/shared';
+import {
+  resolveApiBaseUrl,
+  getPricing,
+  headroomKindFor,
+  HEADROOM_EXTRAS_BY_SURFACE,
+  HEADROOM_PIP_COMPANIONS,
+  headroomPipPackage,
+  headroomModelPredownloadScript,
+} from '@codeam/shared';
 
 /** Input $/M for the running agent's representative model — values the
  *  compressed-away tokens for the savings reporter. Claude agents → Sonnet
@@ -425,6 +433,9 @@ const CONTROL_AGENT_META: AgentMetadata = {
   enabled: true,
   supportedAuthKinds: ['oauth_token'],
   preferredAuthKind: 'oauth_token',
+  // Synthetic control channel — capability flags are moot (no agent runs).
+  headroomWrappable: false,
+  acp: false,
 };
 
 /**
@@ -743,13 +754,15 @@ async function ensurePip(runner: HeadroomRunner): Promise<boolean> {
  * Match is case-insensitive and tolerant of `_`/`-` separators. Anything we
  * don't recognise (including empty/undefined) defaults to `claude` — the most
  * common path, and a safe default since a bad subcommand is worse than a guess.
+ *
+ * Thin wrapper over the shared registry-derived {@link headroomKindFor}
+ * (`@codeam/shared`). The `claude` default lives HERE only: this function
+ * picks the `headroom init` subcommand AFTER {@link isHeadroomSupportedAgent}
+ * has gated the agent — the shared helper itself never falls back (a claude
+ * fallback pre-gate is how the 2026-06 Cursor mislaunch happened).
  */
 export function agentIdToHeadroomKind(agentId: string): string {
-  const normalized = (agentId ?? '').toLowerCase().replace(/[_-]/g, '');
-  if (normalized.startsWith('claude')) return 'claude';
-  if (normalized.startsWith('codex')) return 'codex';
-  if (normalized.startsWith('copilot')) return 'copilot';
-  return 'claude';
+  return headroomKindFor(agentId) ?? 'claude';
 }
 
 /**
@@ -763,10 +776,12 @@ export function agentIdToHeadroomKind(agentId: string): string {
  * "manual setup" (it only prints base-URLs for the Cursor IDE; the headless
  * cursor-agent CLI has no base-URL override, so Headroom can't route it). NOT
  * gemini. Those run natively (cursor additionally runs over ACP).
+ *
+ * Thin wrapper over the shared registry flags — supported ⇔ the registry
+ * entry carries a `headroomKind` (see `@codeam/shared` `headroomKindFor`).
  */
 export function isHeadroomSupportedAgent(agentId: string): boolean {
-  const n = (agentId ?? '').toLowerCase().replace(/[_-]/g, '');
-  return n.startsWith('claude') || n.startsWith('codex') || n.startsWith('copilot');
+  return headroomKindFor(agentId) !== null;
 }
 
 /**
@@ -1258,11 +1273,11 @@ export async function setupHeadroomForSelfHosted(
   runner: HeadroomRunner = defaultHeadroomRunner,
   opts: { extras?: string[]; onProgress?: (step: HeadroomStep) => void } = {},
 ): Promise<boolean> {
-  const extras = opts.extras ?? ['proxy', 'code'];
+  const extras = opts.extras ?? [...HEADROOM_EXTRAS_BY_SURFACE.selfHosted];
   const onProgress = opts.onProgress ?? (() => {});
-  // The proxy's HTTP/server deps. The COMPRESSION ENGINES come from the
-  // headroom-ai extras below — NOT this list.
-  const SERVER_DEPS = ['fastapi', 'uvicorn', 'httpx[http2]', 'websockets', 'zstandard'];
+  // The proxy's HTTP/server deps (shared Headroom manifest). The COMPRESSION
+  // ENGINES come from the headroom-ai extras below — NOT this list.
+  const SERVER_DEPS = HEADROOM_PIP_COMPANIONS;
 
   // ── Step 0: Ensure pip is available ──────────────────────────────────────
   // Disk preflight lives in the deploy caller (it owns the app-feedback
@@ -1332,7 +1347,7 @@ export async function setupHeadroomForSelfHosted(
   // "Thinking…"). ONNX is lighter (~1.5 GB total) and robust. All best-effort +
   // bounded: a box too small falls back to launching the agent direct.
   onProgress('pip');
-  const headroomPkg = `headroom-ai[${extras.join(',')}]`;
+  const headroomPkg = headroomPipPackage(extras);
   const installOk = await pipInstall([headroomPkg, ...SERVER_DEPS], [], ENGINE_INSTALL_TIMEOUT_MS);
   if (!installOk) {
     log.warn('host-agent', `headroom engine install failed (${headroomPkg}) — skipping Headroom`);
@@ -1349,12 +1364,10 @@ export async function setupHeadroomForSelfHosted(
   // separate HF repos are required: kompress-v2-base (the ONNX model; skip its
   // .pt/.safetensors torch artifacts) and ModernBERT-base (TOKENIZER ONLY —
   // Kompress loads its tokenizer from there; skip its model weights). Best-
-  // effort: a download failure leaves Kompress to lazy-load later.
-  const predownloadPy = [
-    'from huggingface_hub import snapshot_download',
-    'snapshot_download("chopratejas/kompress-v2-base", allow_patterns=["*.json","onnx/*.onnx","kompress-int8-wo.onnx"])',
-    'snapshot_download("answerdotai/ModernBERT-base", allow_patterns=["*.json","tokenizer*","*.txt","vocab*","merges*"])',
-  ].join('\n');
+  // effort: a download failure leaves Kompress to lazy-load later. Repos +
+  // allow_patterns come from the shared Headroom manifest (byte-identical to
+  // the previous inline literal — guarded by the manifest test).
+  const predownloadPy = headroomModelPredownloadScript();
   const dl = await runner.run(py, ['-c', predownloadPy], {
     timeoutMs: ENGINE_INSTALL_TIMEOUT_MS,
   });

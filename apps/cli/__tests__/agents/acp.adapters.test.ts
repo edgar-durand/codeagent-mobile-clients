@@ -8,6 +8,7 @@
 
 import * as fs from 'node:fs';
 import { describe, expect, it } from 'vitest';
+import { AGENT_REGISTRY } from '@codeam/shared';
 import { getAcpAdapter, listAcpAdapterIdsForTests } from '../../src/agents/acp/adapters';
 
 describe('ACP adapter registry', () => {
@@ -69,5 +70,18 @@ describe('ACP adapter registry', () => {
     expect(spec!.command).toBe('cursor-agent');
     expect(spec!.args).toEqual(['acp']);
     expect(spec!.requiresAgentBinary).toBe('cursor-agent');
+  });
+
+  it('shared registry `acp` capability flags mirror this adapter registry exactly', () => {
+    // The declarative flag in @codeam/shared (`AGENT_REGISTRY[id].acp`,
+    // PR-1 of the single-source plan) must stay in lockstep with the
+    // adapter REGISTRY here — the flag is what other surfaces render from.
+    const adapterIds = new Set<string>(listAcpAdapterIdsForTests());
+    for (const meta of Object.values(AGENT_REGISTRY)) {
+      expect(
+        meta.acp,
+        `AGENT_REGISTRY.${meta.id}.acp disagrees with the ACP adapter registry`,
+      ).toBe(adapterIds.has(meta.id));
+    }
   });
 });
