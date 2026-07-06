@@ -7,6 +7,7 @@ import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.diagnostic.Logger
 import com.intellij.openapi.ide.CopyPasteManager
 import com.intellij.openapi.wm.ToolWindow
+import com.intellij.util.concurrency.AppExecutorUtil
 import com.windsurf.controller.services.AgentOutputMonitor
 import com.windsurf.controller.services.DetectedAgent
 import com.windsurf.controller.services.IdeIntegrationService
@@ -15,6 +16,7 @@ import java.awt.Component
 import java.awt.Container
 import java.awt.datatransfer.StringSelection
 import java.awt.event.KeyEvent
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 import javax.swing.AbstractButton
@@ -126,10 +128,12 @@ class JetBrainsAIAssistantStrategy : AgentStrategy {
         } catch (e: Exception) { logger.trace(e) }
 
         CopyPasteManager.getInstance().setContents(StringSelection(invocation.prompt))
-        app.invokeLater {
-            Thread.sleep(800)
-            ide.simulatePasteAndSubmit()
-        }
+        // Delay off-EDT, then hop back — a Thread.sleep inside
+        // invokeLater would block the Swing EDT (painting + input)
+        // for the whole 800 ms.
+        AppExecutorUtil.getAppScheduledExecutorService().schedule({
+            app.invokeLater { ide.simulatePasteAndSubmit() }
+        }, 800, TimeUnit.MILLISECONDS)
         ide.showNotification("Prompt sent to AI Assistant", invocation.prompt)
         return true
     }

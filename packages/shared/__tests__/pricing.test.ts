@@ -2,9 +2,20 @@ import { describe, it, expect } from 'vitest';
 import {
   getContextWindow,
   getPricing,
+  isKnownModel,
   MODEL_CONTEXT_WINDOW,
   MODEL_PRICING,
 } from '../src';
+
+// Model ids actually emitted by the shipped catalogs. Keep in sync with:
+// - apps/cli/src/agents/claude/runtime.ts (listModels)
+// - apps/jetbrains-plugin/.../ui/RemoteCommandRouter.kt (CLI fallback catalog)
+const SHIPPED_CLAUDE_MODEL_IDS = [
+  'claude-opus-4-7',
+  'claude-opus-4-6',
+  'claude-sonnet-4-6',
+  'claude-haiku-4-5-20251001',
+];
 
 describe('getPricing', () => {
   it('returns the exact entry for a known model family', () => {
@@ -17,9 +28,34 @@ describe('getPricing', () => {
     expect(getPricing('claude-3-5-sonnet-any-suffix')).toEqual(MODEL_PRICING['claude-3-5-sonnet']);
   });
 
-  it('falls back to claude-sonnet-4 pricing for unknown models', () => {
-    expect(getPricing('claude-future-model-v9')).toEqual(MODEL_PRICING['claude-sonnet-4']);
-    expect(getPricing('unknown')).toEqual(MODEL_PRICING['claude-sonnet-4']);
+  it('longest prefix wins regardless of table insertion order', () => {
+    // 'claude-opus-4-7' must hit its own row, not the shorter 'claude-opus-4'.
+    // toBe (reference equality) so identical price values can't mask a
+    // wrong-row match.
+    expect(getPricing('claude-opus-4-7')).toBe(MODEL_PRICING['claude-opus-4-7']);
+    expect(getPricing('claude-opus-4-20250514')).toBe(MODEL_PRICING['claude-opus-4']);
+    // 'gpt-5.4' is inserted BEFORE 'gpt-5.4-mini' — insertion-order matching
+    // would shadow the mini row.
+    expect(getPricing('gpt-5.4-mini-2026-01')).toBe(MODEL_PRICING['gpt-5.4-mini']);
+  });
+
+  it('every shipped catalog model id resolves to a real row, not the fallback', () => {
+    for (const id of SHIPPED_CLAUDE_MODEL_IDS) {
+      expect(isKnownModel(id), `${id} hit the unknown-model fallback`).toBe(true);
+    }
+    // The dated haiku id previously matched NO row and was silently billed at
+    // sonnet rates via the fallback — it must resolve to the haiku-tier row.
+    expect(getPricing('claude-haiku-4-5-20251001')).toBe(MODEL_PRICING['claude-haiku-4-5']);
+    expect(getPricing('claude-opus-4-6')).toBe(MODEL_PRICING['claude-opus-4-6']);
+    expect(getPricing('claude-sonnet-4-6')).toBe(MODEL_PRICING['claude-sonnet-4-6']);
+  });
+
+  it('falls back to claude-sonnet-4 pricing for unknown models, and isKnownModel exposes it', () => {
+    expect(getPricing('claude-future-model-v9')).toBe(MODEL_PRICING['claude-sonnet-4']);
+    expect(getPricing('unknown')).toBe(MODEL_PRICING['claude-sonnet-4']);
+    expect(isKnownModel('claude-future-model-v9')).toBe(false);
+    expect(isKnownModel('unknown')).toBe(false);
+    expect(isKnownModel('claude-sonnet-4-20250514')).toBe(true);
   });
 
   it('exposes positive numbers for every non-placeholder pricing field', () => {

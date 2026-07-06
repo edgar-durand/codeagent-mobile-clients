@@ -67,6 +67,15 @@ export class ControllerPanelProvider implements vscode.WebviewViewProvider, Comm
    */
   private autoPairingTimer: NodeJS.Timeout | null = null;
   private autoPairingActive = false;
+  /**
+   * True once the provider-lifetime service listeners (command relay,
+   * connection state, pairing) have been registered.
+   * resolveWebviewView re-runs on EVERY panel reopen (the view has no
+   * retainContextWhenHidden), and none of those services dedup
+   * listeners — without this guard each reopen stacked another
+   * registration and every RemoteCommand dispatched N times.
+   */
+  private serviceListenersRegistered = false;
 
   constructor(
     private readonly extensionUri: vscode.Uri,
@@ -91,9 +100,59 @@ export class ControllerPanelProvider implements vscode.WebviewViewProvider, Comm
     this.nonce = generateNonce();
     webviewView.webview.html = this.getHtmlContent(webviewView.webview, this.nonce);
 
-    webviewView.webview.onDidReceiveMessage((msg) => {
-      this.handleWebviewMessage(msg);
+    // Per-view Disposables — torn down via onDidDispose below so a
+    // reopened panel doesn't leave the previous view's handlers alive.
+    const viewDisposables: vscode.Disposable[] = [];
+
+    viewDisposables.push(
+      webviewView.webview.onDidReceiveMessage((msg) => {
+        this.handleWebviewMessage(msg);
+      }),
+    );
+
+    // Auto-show pairing code while the panel is visible + not
+    // paired — eliminates the "click Generate Pairing Code" friction
+    // step. Code is blurred client-side until the user clicks to
+    // reveal so an idle panel doesn't leak a scannable QR onto the
+    // screen during pair-programming / screen shares.
+    viewDisposables.push(
+      webviewView.onDidChangeVisibility(() => {
+        if (webviewView.visible) {
+          this.maybeStartAutoPairing();
+        } else {
+          this.stopAutoPairing();
+        }
+      }),
+    );
+
+    webviewView.onDidDispose(() => {
+      viewDisposables.forEach((d) => d.dispose());
+      this.stopAutoPairing();
+      if (this.view === webviewView) {
+        this.view = undefined;
+      }
     });
+
+    this.registerServiceListenersOnce();
+
+    this.updateStatus();
+    // Fire the auto-pair loop on first mount too if the panel is
+    // already visible (typical case: user opened the side bar at
+    // startup) — `onDidChangeVisibility` only fires on transitions.
+    if (webviewView.visible) {
+      this.maybeStartAutoPairing();
+    }
+  }
+
+  /**
+   * Register the provider-lifetime listeners exactly once. These
+   * outlive any single webview (they reference `this`, which always
+   * posts to the CURRENT view), so they must not be re-added on each
+   * resolveWebviewView — see `serviceListenersRegistered`.
+   */
+  private registerServiceListenersOnce(): void {
+    if (this.serviceListenersRegistered) return;
+    this.serviceListenersRegistered = true;
 
     CommandRelayService.getInstance().addListener(this);
     // Push a fresh status to the webview whenever the relay's
@@ -101,19 +160,6 @@ export class ControllerPanelProvider implements vscode.WebviewViewProvider, Comm
     // "Reconnecting" dot from this signal.
     CommandRelayService.getInstance().onConnectionChange(() => {
       this.updateStatus();
-    });
-
-    // Auto-show pairing code while the panel is visible + not
-    // paired — eliminates the "click Generate Pairing Code" friction
-    // step. Code is blurred client-side until the user clicks to
-    // reveal so an idle panel doesn't leak a scannable QR onto the
-    // screen during pair-programming / screen shares.
-    webviewView.onDidChangeVisibility(() => {
-      if (webviewView.visible) {
-        this.maybeStartAutoPairing();
-      } else {
-        this.stopAutoPairing();
-      }
     });
 
     PairingService.getInstance().addListener({
@@ -184,14 +230,6 @@ export class ControllerPanelProvider implements vscode.WebviewViewProvider, Comm
         });
       },
     });
-
-    this.updateStatus();
-    // Fire the auto-pair loop on first mount too if the panel is
-    // already visible (typical case: user opened the side bar at
-    // startup) — `onDidChangeVisibility` only fires on transitions.
-    if (webviewView.visible) {
-      this.maybeStartAutoPairing();
-    }
   }
 
   onCommandReceived(command: RemoteCommand): void {

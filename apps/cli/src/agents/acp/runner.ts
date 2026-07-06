@@ -38,6 +38,7 @@ import { AGENT_REGISTRY, type AgentId, type AgentModel, type StreamingChunkKind 
 import type { RequestPermissionResponse } from '@agentclientprotocol/sdk';
 import { createOsStrategy } from '../../os';
 import { createInteractiveAgentStrategy } from '../registry';
+import { killHeadroomProxy, writeHeadroomProxyPidfile } from '../../services/headroom/proxy-pid';
 import { AcpClient, type AcpClientOptions } from './client';
 import type { AdapterSpec } from './adapters';
 import { AcpPublisher } from './publisher';
@@ -1504,17 +1505,9 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
 
   const relaunchProxyWithoutBudget = async (): Promise<void> => {
     const { spawn } = await import('node:child_process');
-    // Kill the budget-capped proxy.
-    try {
-      const killer = spawn('pkill', ['-TERM', '-f', 'headroom.*proxy'], {
-        detached: true,
-        stdio: 'ignore',
-      });
-      killer.once('error', () => { /* pkill absent on minimal box — best-effort */ });
-      killer.unref();
-    } catch {
-      /* best-effort — proxy may already be dead */
-    }
+    // Kill the budget-capped proxy — targeted pidfile kill, falling back to
+    // the legacy pkill pattern when no live recorded pid exists.
+    killHeadroomProxy();
     // Brief settle so the port frees before relaunch.
     await new Promise<void>((r) => setTimeout(r, 500));
     // Re-spawn without budget args.
@@ -1532,6 +1525,7 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
         log.warn('acpRunner', `budget recovery proxy relaunch error (best-effort): ${e.message}`);
       });
       proxy.unref();
+      writeHeadroomProxyPidfile(proxy.pid);
     } catch (e) {
       log.warn(
         'acpRunner',

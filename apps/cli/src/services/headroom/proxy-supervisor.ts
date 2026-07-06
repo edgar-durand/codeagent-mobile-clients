@@ -19,6 +19,7 @@ import * as os from 'os';
 import * as path from 'path';
 import { log } from '../logger';
 import { buildBudgetProxyArgs } from './budget-args';
+import { writeHeadroomProxyPidfile } from './proxy-pid';
 
 export interface ProxySupervisorDeps {
   /** True when this box routes the agent through the Headroom proxy and
@@ -108,6 +109,7 @@ export function spawnProxyReal(): void {
       log.warn('headroom-supervisor', `respawn error (best-effort): ${e.message}`);
     });
     proxy.unref();
+    writeHeadroomProxyPidfile(proxy.pid);
   } catch (e) {
     log.warn(
       'headroom-supervisor',

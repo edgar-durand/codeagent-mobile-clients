@@ -21,6 +21,7 @@ import * as path from 'path';
 import { spawn } from 'child_process';
 import { log } from '../logger';
 import { buildBudgetProxyArgs } from './budget-args';
+import { killHeadroomProxy, writeHeadroomProxyPidfile } from './proxy-pid';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -206,16 +207,9 @@ function restartDeploymentReal(profile: string): void {
 }
 
 function killProxyReal(): void {
-  try {
-    const killer = spawn('pkill', ['-TERM', '-f', 'headroom.*proxy'], {
-      detached: true,
-      stdio: 'ignore',
-    });
-    killer.once('error', () => { /* pkill absent on minimal box — ignore */ });
-    killer.unref();
-  } catch {
-    /* best-effort — proxy may already be dead */
-  }
+  // Targeted pid kill via the pidfile; falls back to the legacy pkill pattern
+  // only when no live recorded pid exists. Best-effort — never throws.
+  killHeadroomProxy();
 }
 
 function spawnProxyReal(budget: BudgetSpec | null): void {
@@ -239,6 +233,7 @@ function spawnProxyReal(budget: BudgetSpec | null): void {
       log.warn('headroom-budget', `proxy relaunch error (best-effort): ${e.message}`);
     });
     proxy.unref();
+    writeHeadroomProxyPidfile(proxy.pid);
   } catch (e) {
     log.warn(
       'headroom-budget',

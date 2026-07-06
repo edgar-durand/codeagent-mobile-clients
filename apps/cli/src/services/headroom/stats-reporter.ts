@@ -33,6 +33,33 @@ export interface Savings {
 const DEFAULT_INPUT_PRICE_PER_MILLION = 3;
 
 /**
+ * Timeout for the reporter's HTTP calls (the :8787 stats probe AND the
+ * backend savings-ingest POST). Both used to be bare `fetch` with no signal,
+ * so a wedged proxy or an unreachable ingest endpoint could park a reporter
+ * tick forever. 10 s is generous for a localhost GET and a single small POST.
+ */
+export const HEADROOM_FETCH_TIMEOUT_MS = 10_000;
+
+/**
+ * `fetch` with an AbortController timeout — same pattern as pair-auto's
+ * claim fetch and proxy-supervisor's `/livez` probe. Rethrows the AbortError
+ * so callers keep their existing best-effort catch semantics.
+ */
+export async function fetchWithTimeout(
+  url: string,
+  init?: RequestInit,
+  timeoutMs: number = HEADROOM_FETCH_TIMEOUT_MS,
+): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...init, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
  * Real shape returned by headroom-ai 0.26.0 GET /stats.
  * All fields are optional — read() applies optional chaining + ?? 0 throughout.
  */
@@ -99,6 +126,8 @@ export interface BudgetContext {
   budgetUsd: number;
   /** Budget reset cadence — from HEADROOM_BUDGET_PERIOD env (default "daily"). */
   budgetPeriod: string;
+  /** True iff this turn pushed periodSpendUsd to or past budgetUsd. */
+  budgetReached?: boolean;
 }
 
 const ZERO: Savings = {
@@ -223,6 +252,9 @@ function defaultGetBudgetEnv(): { budgetUsd: number; budgetPeriod: string } | nu
 export class HeadroomStatsReporter {
   private timer: ReturnType<typeof setInterval> | null = null;
   private prev: Savings = ZERO;
+  /** Period spend observed on the previous budgeted post — lets `budgetReached`
+   *  fire once per crossing instead of on every post while over the cap. */
+  private prevPeriodSpendUsd: number | null = null;
   constructor(private readonly deps: ReporterDeps) {}
 
   start(): void {
@@ -253,13 +285,24 @@ export class HeadroomStatsReporter {
         // Build optional budget context — additive: undefined when no budget set.
         const getBudgetEnv = this.deps.getBudgetEnv ?? defaultGetBudgetEnv;
         const budgetEnv = getBudgetEnv();
-        const budget: BudgetContext | undefined = budgetEnv
-          ? {
-              periodSpendUsd: stats.cost?.cost_with_headroom_usd ?? 0,
-              budgetUsd: budgetEnv.budgetUsd,
-              budgetPeriod: budgetEnv.budgetPeriod,
-            }
-          : undefined;
+        let budget: BudgetContext | undefined;
+        if (budgetEnv) {
+          const periodSpendUsd = stats.cost?.cost_with_headroom_usd ?? 0;
+          // budgetReached fires once per crossing: only when THIS post moved
+          // the spend to/past the cap (previous observation was still below
+          // it, or this is the first budgeted observation). A period reset
+          // drops the spend below the cap, re-arming the flag naturally.
+          const crossed =
+            periodSpendUsd >= budgetEnv.budgetUsd &&
+            (this.prevPeriodSpendUsd === null || this.prevPeriodSpendUsd < budgetEnv.budgetUsd);
+          this.prevPeriodSpendUsd = periodSpendUsd;
+          budget = {
+            periodSpendUsd,
+            budgetUsd: budgetEnv.budgetUsd,
+            budgetPeriod: budgetEnv.budgetPeriod,
+            ...(crossed ? { budgetReached: true } : {}),
+          };
+        }
         await this.deps.postSavings(delta, budget);
       }
     } catch {

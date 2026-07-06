@@ -49,7 +49,8 @@ import {
 import { buildBudgetProxyArgs } from '../../services/headroom/budget-args';
 import { configureHeadroom } from '../../services/headroom/configure';
 import { applyBudgetToHeadroom, makeRealApplyBudgetDeps, type BudgetSpec } from '../../services/headroom/budget-relaunch';
-import { HeadroomStatsReporter, mapStatsToSavings, type StatsShape, type Savings } from '../../services/headroom/stats-reporter';
+import { fetchWithTimeout, HeadroomStatsReporter, mapStatsToSavings, type StatsShape, type Savings } from '../../services/headroom/stats-reporter';
+import { killHeadroomProxy } from '../../services/headroom/proxy-pid';
 import { AGENT_REGISTRY, isKnownAgentId, PREVIEW_DETECT_PROMPT, type AgentId, type PreviewDetection, type HeadroomBudgetCommand } from '@codeagent/shared';
 import * as previewSvc from '../../services/preview';
 import {
@@ -533,7 +534,7 @@ const headroomConfigureH: CommandHandler = async (ctx, cmd, parsed) => {
     setup: setupHeadroomForSelfHosted,
     probeStats: async (): Promise<Savings | null> => {
       try {
-        const res = await fetch('http://localhost:8787/stats');
+        const res = await fetchWithTimeout('http://localhost:8787/stats');
         if (!res.ok) return null;
         const raw = await res.json() as StatsShape;
         return mapStatsToSavings(raw, {
@@ -558,12 +559,12 @@ const headroomConfigureH: CommandHandler = async (ctx, cmd, parsed) => {
       _activeReporter?.stop();
       const reporter = new HeadroomStatsReporter({
         fetchStats: async () => {
-          const res = await fetch('http://localhost:8787/stats');
+          const res = await fetchWithTimeout('http://localhost:8787/stats');
           return res.json() as Promise<StatsShape>;
         },
         postSavings: async (delta, budget) => {
           if (!opts.ingestUrl) return;
-          await fetch(opts.ingestUrl, {
+          const res = await fetchWithTimeout(opts.ingestUrl, {
             method: 'POST',
             headers: {
               'Content-Type': 'application/json',
@@ -585,9 +586,16 @@ const headroomConfigureH: CommandHandler = async (ctx, cmd, parsed) => {
                 periodSpendUsd: budget.periodSpendUsd,
                 budgetUsd: budget.budgetUsd,
                 budgetPeriod: budget.budgetPeriod,
+                budgetReached: budget.budgetReached,
               } : {}),
             }),
           });
+          // A rejected POST (401 guard, 403 plan gate, 5xx) means the delta
+          // was NOT credited — surface it instead of silently swallowing (the
+          // exact failure mode of the incident recounted above).
+          if (!res.ok) {
+            log.warn('headroom', `savings POST rejected ${res.status} — delta not credited`);
+          }
         },
       });
       reporter.start();
@@ -598,20 +606,9 @@ const headroomConfigureH: CommandHandler = async (ctx, cmd, parsed) => {
       _activeReporter = null;
     },
     restoreAgentHeadroomConfig: (kind: string) => restoreAgentHeadroomConfig(kind),
-    stopProxy: () => {
-      try {
-        const p = spawn('pkill', ['-TERM', '-f', 'headroom.*proxy'], {
-          detached: true,
-          stdio: 'ignore',
-        });
-        // `spawn` emits ENOENT (e.g. `pkill`/procps absent on a minimal box)
-        // as an ASYNC 'error' event — the try/catch above only guards the
-        // synchronous call. Without this handler the unhandled 'error'
-        // crashes the process. Disable is best-effort, so swallow it.
-        p.on('error', () => {});
-        p.unref();
-      } catch { /* no proxy running — best-effort */ }
-    },
+    // Targeted pidfile kill; falls back to the legacy pkill pattern only when
+    // no live recorded pid exists. Best-effort — never throws.
+    stopProxy: () => killHeadroomProxy(),
     emit: (event) => {
       const token = ctx.pluginAuthToken;
       if (!token) return;

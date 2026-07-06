@@ -245,3 +245,67 @@ describe('HeadroomStatsReporter.tick() — budget context forwarding', () => {
     expect(callCount).toBe(1);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Tests: HeadroomStatsReporter — budgetReached crossing semantics
+// ---------------------------------------------------------------------------
+
+describe('HeadroomStatsReporter.tick() — budgetReached crossing', () => {
+  /** Stats snapshot at a given cumulative token count + period spend. */
+  const statsAt = (beforeTokens: number, spendUsd: number): StatsShape => ({
+    agent_usage: { totals: { before_tokens: beforeTokens, after_tokens: beforeTokens - 100 } },
+    cost: { cost_with_headroom_usd: spendUsd, budget_limit_usd: 10, budget_period: 'daily' },
+  });
+
+  const makeReporter = (getStats: () => StatsShape, budgets: Array<BudgetContext | undefined>) =>
+    new HeadroomStatsReporter({
+      fetchStats: async () => getStats(),
+      postSavings: async (_delta, budget) => { budgets.push(budget); },
+      intervalMs: 999_999,
+      getBudgetEnv: () => ({ budgetUsd: 10, budgetPeriod: 'daily' }),
+    });
+
+  it('fires budgetReached=true only on the tick that crosses the cap', async () => {
+    const budgets: Array<BudgetContext | undefined> = [];
+    let stats = statsAt(1_000, 3);
+    const reporter = makeReporter(() => stats, budgets);
+
+    await reporter.tick(); // below the cap
+    stats = statsAt(2_000, 10.5);
+    await reporter.tick(); // crosses the cap
+    stats = statsAt(3_000, 11);
+    await reporter.tick(); // still over — must NOT re-fire
+
+    expect(budgets).toHaveLength(3);
+    expect(budgets[0]?.budgetReached).toBeUndefined();
+    expect(budgets[1]?.budgetReached).toBe(true);
+    expect(budgets[2]?.budgetReached).toBeUndefined();
+  });
+
+  it('fires on the first budgeted observation when already at/past the cap', async () => {
+    const budgets: Array<BudgetContext | undefined> = [];
+    const reporter = makeReporter(() => statsAt(1_000, 12), budgets);
+
+    await reporter.tick();
+
+    expect(budgets).toHaveLength(1);
+    expect(budgets[0]?.budgetReached).toBe(true);
+  });
+
+  it('re-arms after a period reset drops the spend below the cap', async () => {
+    const budgets: Array<BudgetContext | undefined> = [];
+    let stats = statsAt(2_000, 10.5);
+    const reporter = makeReporter(() => stats, budgets);
+
+    await reporter.tick(); // crossing #1
+    stats = statsAt(500, 0.5); // period reset: counters + spend drop
+    await reporter.tick(); // below the cap again
+    stats = statsAt(1_500, 10.2);
+    await reporter.tick(); // crossing #2
+
+    expect(budgets).toHaveLength(3);
+    expect(budgets[0]?.budgetReached).toBe(true);
+    expect(budgets[1]?.budgetReached).toBeUndefined();
+    expect(budgets[2]?.budgetReached).toBe(true);
+  });
+});

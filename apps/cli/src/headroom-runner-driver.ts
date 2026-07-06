@@ -19,7 +19,7 @@
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { execFileSync, spawn } from 'node:child_process';
+import { execFileSync } from 'node:child_process';
 import {
   setupHeadroomForSelfHosted,
   restoreAgentHeadroomConfig,
@@ -28,6 +28,7 @@ import {
   agentIdToHeadroomKind,
 } from './commands/host-agent';
 import { configureHeadroom, type ConfigureCtx, type ConfigureDeps } from './services/headroom/configure';
+import { killHeadroomProxy } from './services/headroom/proxy-pid';
 import { mapStatsToSavings, type StatsShape, type Savings } from './services/headroom/stats-reporter';
 
 /**
@@ -198,18 +199,9 @@ async function runDisable(): Promise<void> {
     startReporter: () => { /* no-op: driver doesn't start a reporter */ },
     stopReporter: () => { /* no-op */ },
     restoreAgentHeadroomConfig: (k: string) => restoreAgentHeadroomConfig(k),
-    stopProxy: () => {
-      try {
-        const p = spawn('pkill', ['-TERM', '-f', 'headroom.*proxy'], {
-          detached: true,
-          stdio: 'ignore',
-        });
-        // ENOENT arrives as an async 'error' event, not a sync throw —
-        // without this handler a missing `pkill` crashes the driver.
-        p.on('error', () => {});
-        p.unref();
-      } catch { /* best-effort */ }
-    },
+    // Targeted pidfile kill; falls back to the legacy pkill pattern only when
+    // no live recorded pid exists. Best-effort — never throws.
+    stopProxy: () => killHeadroomProxy(),
     emit: () => { /* no-op: no SSE channel in driver */ },
   };
 

@@ -194,10 +194,11 @@ export class RemoteCommandRouter {
 
       case 'list_agents': {
         ide.clearCache();
-        ide.detectInstalledAgents().then((agents) => {
-          relay.sendResult(command.id, 'completed', {
+        this.respondWith(command, relay, async () => {
+          const agents = await ide.detectInstalledAgents();
+          return {
             agents: agents.map((a) => ({ id: a.id, name: a.name, icon: a.icon, installed: a.installed })),
-          });
+          };
         });
         break;
       }
@@ -343,9 +344,7 @@ export class RemoteCommandRouter {
           relay.sendResult(command.id, 'failed', { error: 'Missing path' });
           break;
         }
-        FileOpsService.readFile(filePath).then((res: Record<string, unknown>) => {
-          relay.sendResult(command.id, 'completed', res);
-        });
+        this.respondWith(command, relay, () => FileOpsService.readFile(filePath));
         break;
       }
 
@@ -357,17 +356,13 @@ export class RemoteCommandRouter {
           relay.sendResult(command.id, 'failed', { error: 'Missing path or content' });
           break;
         }
-        FileOpsService.writeFile(filePath, content).then((res: Record<string, unknown>) => {
-          relay.sendResult(command.id, 'completed', res);
-        });
+        this.respondWith(command, relay, () => FileOpsService.writeFile(filePath, content));
         break;
       }
 
       case 'list_files': {
         const query = (command.payload as Record<string, unknown>)?.query as string | undefined;
-        ProjectOpsService.listFiles(query).then((res) => {
-          relay.sendResult(command.id, 'completed', res);
-        });
+        this.respondWith(command, relay, () => ProjectOpsService.listFiles(query));
         break;
       }
       case 'search_files': {
@@ -377,7 +372,7 @@ export class RemoteCommandRouter {
           relay.sendResult(command.id, 'failed', { error: 'Missing query' });
           break;
         }
-        ProjectOpsService.searchFiles({
+        this.respondWith(command, relay, () => ProjectOpsService.searchFiles({
           query,
           caseSensitive: p.caseSensitive === true,
           wholeWord: p.wholeWord === true,
@@ -385,9 +380,7 @@ export class RemoteCommandRouter {
           include: Array.isArray(p.include) ? (p.include as string[]) : undefined,
           exclude: Array.isArray(p.exclude) ? (p.exclude as string[]) : undefined,
           maxResults: typeof p.maxResults === 'number' ? (p.maxResults as number) : undefined,
-        }).then((res) => {
-          relay.sendResult(command.id, 'completed', res);
-        });
+        }));
         break;
       }
       case 'terminal_open': {
@@ -440,30 +433,22 @@ export class RemoteCommandRouter {
         break;
       }
       case 'git_status': {
-        ProjectOpsService.gitStatus().then((res) => {
-          relay.sendResult(command.id, 'completed', res);
-        });
+        this.respondWith(command, relay, () => ProjectOpsService.gitStatus());
         break;
       }
       case 'git_diff': {
         const p = (command.payload as Record<string, unknown>)?.path as string | undefined;
-        ProjectOpsService.gitDiff(p ?? null).then((res) => {
-          relay.sendResult(command.id, 'completed', res as Record<string, unknown>);
-        });
+        this.respondWith(command, relay, () => ProjectOpsService.gitDiff(p ?? null));
         break;
       }
       case 'git_diff_staged': {
         const p = (command.payload as Record<string, unknown>)?.path as string | undefined;
-        ProjectOpsService.gitDiffStaged(p ?? null).then((res) => {
-          relay.sendResult(command.id, 'completed', res as Record<string, unknown>);
-        });
+        this.respondWith(command, relay, () => ProjectOpsService.gitDiffStaged(p ?? null));
         break;
       }
       case 'git_log': {
         const limit = (command.payload as Record<string, unknown>)?.limit as number | undefined;
-        ProjectOpsService.gitLog(limit ?? 30).then((res) => {
-          relay.sendResult(command.id, 'completed', res);
-        });
+        this.respondWith(command, relay, () => ProjectOpsService.gitLog(limit ?? 30));
         break;
       }
       case 'git_commit': {
@@ -474,21 +459,15 @@ export class RemoteCommandRouter {
           relay.sendResult(command.id, 'failed', { error: 'Missing message' });
           break;
         }
-        ProjectOpsService.gitCommit(message, paths).then((res) => {
-          relay.sendResult(command.id, 'completed', res as Record<string, unknown>);
-        });
+        this.respondWith(command, relay, () => ProjectOpsService.gitCommit(message, paths));
         break;
       }
       case 'git_push': {
-        ProjectOpsService.gitPush().then((res) => {
-          relay.sendResult(command.id, 'completed', res as Record<string, unknown>);
-        });
+        this.respondWith(command, relay, () => ProjectOpsService.gitPush());
         break;
       }
       case 'git_pull': {
-        ProjectOpsService.gitPull().then((res) => {
-          relay.sendResult(command.id, 'completed', res as Record<string, unknown>);
-        });
+        this.respondWith(command, relay, () => ProjectOpsService.gitPull());
         break;
       }
       case 'git_resolve': {
@@ -499,9 +478,7 @@ export class RemoteCommandRouter {
           relay.sendResult(command.id, 'failed', { error: 'Missing path or side' });
           break;
         }
-        ProjectOpsService.gitResolve(filePath, side).then((res) => {
-          relay.sendResult(command.id, 'completed', res as Record<string, unknown>);
-        });
+        this.respondWith(command, relay, () => ProjectOpsService.gitResolve(filePath, side));
         break;
       }
 
@@ -553,9 +530,18 @@ export class RemoteCommandRouter {
         // + upload — without the user touching anything beyond the
         // browser tab the agent's `<binary> login` opens.
         //
-        // Payload: { agent: 'claude' | 'codex' } (defaults to 'claude').
-        const linkAgent = (command.payload?.agent as string | undefined) ?? 'claude';
-        const safeAgent = linkAgent === 'codex' ? 'codex' : 'claude';
+        // Payload: { agent: <registry agent id> } (defaults to 'claude').
+        // Normalized through the same registry-driven mapper as
+        // install_cli_and_pair — an unknown id fails explicitly instead
+        // of being silently rewritten to `codeam link claude`.
+        const linkAgentRaw = command.payload?.agent ?? 'claude';
+        const safeAgent = normalizeCliAgentId(linkAgentRaw);
+        if (!safeAgent) {
+          relay.sendResult(command.id, 'failed', {
+            error: `Unknown agent id for codeam link: ${String(linkAgentRaw)}`,
+          });
+          break;
+        }
         const folder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
         const terminal = vscode.window.createTerminal({
           name: `codeam link ${safeAgent}`,
@@ -605,6 +591,29 @@ export class RemoteCommandRouter {
         });
       }
     }
+  }
+
+  /**
+   * Run an async producer and guarantee EXACTLY one sendResult for the
+   * command: 'completed' with the resolved payload, or 'failed' with
+   * the rejection message. Several arms used to end in a bare
+   * `.then(...)` with no rejection handler — a rejected promise meant
+   * no result was ever posted and the mobile waited out its timeout.
+   */
+  private respondWith(
+    command: RemoteCommand,
+    relay: CommandRelayService,
+    produce: () => Promise<object>,
+  ): void {
+    produce().then(
+      (res) => relay.sendResult(command.id, 'completed', res),
+      (err) => {
+        this.log.appendLine(`[${command.type}] handler failed: ${err}`);
+        relay.sendResult(command.id, 'failed', {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      },
+    );
   }
 
   private handleMcpConfigure(command: RemoteCommand, relay: CommandRelayService): void {

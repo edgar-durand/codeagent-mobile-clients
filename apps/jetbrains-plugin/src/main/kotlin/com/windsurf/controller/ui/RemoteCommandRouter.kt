@@ -28,6 +28,7 @@ import com.windsurf.controller.services.strategies.AgentInvocation
 import com.windsurf.controller.services.strategies.AgentStrategyRegistry
 import com.windsurf.controller.services.strategies.CopilotChatMetadataBridge
 import com.windsurf.controller.util.BuildInstallCommand
+import com.windsurf.controller.util.CliAgentId
 import org.jetbrains.plugins.terminal.TerminalToolWindowManager
 import java.awt.Toolkit
 import java.awt.datatransfer.StringSelection
@@ -576,19 +577,24 @@ fun dispatch(command: CommandRelayService.RemoteCommand) {
                     // PowerShell (cmd.exe also accepts `;` as a
                     // command separator).
                     //
-                    // Optional payload: { agent: "claude" | "codex" }.
+                    // Optional payload: { agent: "claude" | "codex" | … }.
                     // When the mobile/web surface knows which agent
                     // the user wanted (tapped Claude Code on the
                     // session screen), it forwards the id so the
                     // pairing CLI skips its own interactive picker.
-                    // Sanitised so an unexpected agent string can't
-                    // be shell-spliced into the command line.
+                    // Normalised via the registry-driven whitelist
+                    // (CliAgentId) so an unexpected agent string can't
+                    // be shell-spliced into the command line — and an
+                    // unknown agent fails loudly instead of silently
+                    // dropping the user's choice.
                     try {
                         val rawAgent = command.payload.get("agent")?.asString
-                        val pairAgent = when (rawAgent) {
-                            "claude" -> "claude"
-                            "codex" -> "codex"
-                            else -> null
+                        val pairAgent = CliAgentId.normalizeCliAgentId(rawAgent)
+                        if (rawAgent != null && pairAgent == null) {
+                            relay.sendResult(command.id, "failed", com.google.gson.JsonObject().apply {
+                                addProperty("error", "Unknown or unsupported agent: $rawAgent")
+                            })
+                            return@invokeLater
                         }
                         val subcommand = if (pairAgent != null) "pair --agent=$pairAgent" else "pair"
                         val terminalName = if (pairAgent != null) "codeam pair $pairAgent" else "codeam pair"
@@ -635,13 +641,25 @@ fun dispatch(command: CommandRelayService.RemoteCommand) {
                     // `codeam link <agent>` takes over (pair +
                     // capture + upload).
                     //
-                    // Payload: { agent: "claude" | "codex" }
-                    // (defaults to "claude"). Sanitised so an
-                    // unexpected agent string can't be shell-spliced
-                    // into the command line.
+                    // Payload: { agent: "claude" | "codex" | … }
+                    // (defaults to "claude" when absent). Normalised
+                    // via the registry-driven whitelist (CliAgentId)
+                    // so an unexpected agent string can't be
+                    // shell-spliced into the command line — and an
+                    // unknown agent fails loudly instead of silently
+                    // substituting claude.
                     try {
                         val rawAgent = command.payload.get("agent")?.asString
-                        val safeAgent = if (rawAgent == "codex") "codex" else "claude"
+                        val safeAgent = if (rawAgent == null) {
+                            "claude"
+                        } else {
+                            CliAgentId.normalizeCliAgentId(rawAgent) ?: run {
+                                relay.sendResult(command.id, "failed", com.google.gson.JsonObject().apply {
+                                    addProperty("error", "Unknown or unsupported agent: $rawAgent")
+                                })
+                                return@invokeLater
+                            }
+                        }
                         val terminalView = org.jetbrains.plugins.terminal.TerminalToolWindowManager
                             .getInstance(project)
                         val widget = terminalView.createLocalShellWidget(

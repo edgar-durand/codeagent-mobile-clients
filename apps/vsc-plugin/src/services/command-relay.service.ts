@@ -65,6 +65,11 @@ export class CommandRelayService {
   // 60s with no successful transport call → degrade ONLINE/RECONNECTING
   // to OFFLINE so the panel doesn't lie about reachability.
   private lastSuccessAt = 0;
+  // True once the apiBaseUrl-changed listener has been registered.
+  // SettingsService does NOT dedup listeners, and startPolling() is
+  // re-run on every silent 401 refresh, so an unguarded registration
+  // there stacks duplicate reconnect callbacks.
+  private apiBaseUrlListenerRegistered = false;
 
   private constructor(log: OutputChannel) {
     this.log = log;
@@ -95,16 +100,21 @@ export class CommandRelayService {
     this._running = true;
     // Subscribe to mid-session apiBaseUrl changes so a settings
     // change tears down + reconnects the SSE against the new host
-    // immediately. Idempotent — addListener guards against repeats
-    // via the SettingsService keeping a single listener registry.
-    SettingsService.getInstance().onApiBaseUrlChanged((prev, next) => {
-      if (!this._running) return;
-      this.log.appendLine(`apiBaseUrl changed (${prev} → ${next}); reconnecting SSE`);
-      this.stopPolling();
-      this._running = true;
-      this.connectSSE();
-      this.startHeartbeat();
-    });
+    // immediately. Registered exactly once per service instance —
+    // SettingsService just pushes every listener onto an array, so
+    // guarding here is what keeps the silent-401 stop/start cycle
+    // from stacking duplicate reconnect callbacks.
+    if (!this.apiBaseUrlListenerRegistered) {
+      this.apiBaseUrlListenerRegistered = true;
+      SettingsService.getInstance().onApiBaseUrlChanged((prev, next) => {
+        if (!this._running) return;
+        this.log.appendLine(`apiBaseUrl changed (${prev} → ${next}); reconnecting SSE`);
+        this.stopPolling();
+        this._running = true;
+        this.connectSSE();
+        this.startHeartbeat();
+      });
+    }
     // Try SSE first; fall back to short polling only if SSE fails
     // twice (counted inside connectSSE / scheduleSseReconnect).
     this.connectSSE();

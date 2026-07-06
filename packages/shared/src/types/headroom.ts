@@ -26,4 +26,19 @@ export interface HeadroomBudgetUsage {
   periodSpendUsd?: number;
   budgetUsd?: number;
   budgetPeriod?: HeadroomBudgetPeriod;
+  /** True iff this turn pushed periodSpendUsd to or past budgetUsd. */
+  budgetReached?: boolean;
+}
+
+/**
+ * Headroom cost-saving state for a session — carried on the `headroom_status`
+ * SSE event and snapshotted by the backend into Redis `headroom:<sessionId>`.
+ * Mirrored byte-for-byte in `apps/api-v2/src/common/types/headroom.ts`.
+ */
+export interface HeadroomStatus {
+  state: 'enabled' | 'disabled' | 'error' | 'provisioning';
+  running?: boolean;
+  agent?: string;
+  savings?: number;
+  error?: string;
 }

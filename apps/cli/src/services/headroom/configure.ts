@@ -4,6 +4,7 @@ import {
   isHeadroomSupportedAgent,
   type HeadroomStep,
 } from '../../commands/host-agent';
+import type { HeadroomStatus } from '@codeagent/shared';
 import type { Savings } from './stats-reporter';
 
 export interface ConfigureCtx {
@@ -32,7 +33,7 @@ export interface ConfigureDeps {
 
 type HeadroomEvent =
   | { type: 'headroom_progress'; step: HeadroomStep }
-  | { type: 'headroom_status'; state: 'enabled' | 'disabled' | 'error' };
+  | { type: 'headroom_status'; state: HeadroomStatus['state'] };
 
 export type HeadroomResult =
   | { enabled: boolean; running?: boolean; savings?: Savings }

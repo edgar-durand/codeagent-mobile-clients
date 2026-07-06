@@ -81,11 +81,13 @@ import {
   codeamBinDir,
 } from './host/git-tooling';
 import {
+  fetchWithTimeout,
   HeadroomStatsReporter,
   type Savings,
   type StatsShape,
 } from '../services/headroom/stats-reporter';
 import { buildBudgetProxyArgs } from '../services/headroom/budget-args';
+import { killHeadroomProxy, writeHeadroomProxyPidfile } from '../services/headroom/proxy-pid';
 import { compareSemver } from '../lib/updateNotifier';
 
 /** Liveness heartbeat cadence. State liveness only — NOT command polling. */
@@ -163,12 +165,12 @@ export function maybeStartHeadroomReporter(ctx: HeadroomReporterCtx): HeadroomSt
         process.env['HEADROOM_AGENT'] ?? 'claude',
       ),
       fetchStats: async () => {
-        const res = await fetch('http://localhost:8787/stats');
+        const res = await fetchWithTimeout('http://localhost:8787/stats');
         // res.json() returns unknown; cast at this validated boundary.
         return res.json() as Promise<StatsShape>;
       },
       postSavings: async (delta, budget) => {
-        await fetch(ingestUrl, {
+        const res = await fetchWithTimeout(ingestUrl, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
@@ -183,9 +185,13 @@ export function maybeStartHeadroomReporter(ctx: HeadroomReporterCtx): HeadroomSt
               periodSpendUsd: budget.periodSpendUsd,
               budgetUsd: budget.budgetUsd,
               budgetPeriod: budget.budgetPeriod,
+              budgetReached: budget.budgetReached,
             } : {}),
           }),
         });
+        if (!res.ok) {
+          log.warn('headroom', `savings POST rejected ${res.status} — delta not credited`);
+        }
       },
     });
     reporter.start();
@@ -237,14 +243,14 @@ export function maybeResumeLocalHeadroomReporter(ctx: {
     const reporter = new HeadroomStatsReporter({
       inputPricePerMillionUsd: resolveInputPricePerMillion(agent),
       fetchStats: async () => {
-        const res = await fetch('http://localhost:8787/stats');
+        const res = await fetchWithTimeout('http://localhost:8787/stats');
         return res.json() as Promise<StatsShape>;
       },
       // Body MUST match HeadroomSavingsDto + PluginAuthGuard (sessionId +
       // pluginId in the body) — same shape as the codespace reporter above and
       // the on-demand `startReporter` in handlers.ts.
       postSavings: async (delta, budget) => {
-        await fetch(ingestUrl, {
+        const res = await fetchWithTimeout(ingestUrl, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
@@ -259,9 +265,13 @@ export function maybeResumeLocalHeadroomReporter(ctx: {
               periodSpendUsd: budget.periodSpendUsd,
               budgetUsd: budget.budgetUsd,
               budgetPeriod: budget.budgetPeriod,
+              budgetReached: budget.budgetReached,
             } : {}),
           }),
         });
+        if (!res.ok) {
+          log.warn('headroom', `savings POST rejected ${res.status} — delta not credited`);
+        }
       },
     });
     reporter.start();
@@ -1425,6 +1435,7 @@ export async function setupHeadroomForSelfHosted(
       );
     });
     proxy.unref(); // don't keep the supervisor process alive for the proxy
+    writeHeadroomProxyPidfile(proxy.pid);
   } catch (e) {
     // Non-fatal — the SessionStart hook in settings.json also ensures the proxy.
     log.warn(
@@ -1662,13 +1673,10 @@ const defaultTeardownHeadroom = (): void => {
     /* no config / headroom absent / unwrap unsupported — best-effort */
   }
   // 2. Stop the running proxy (no handle was kept). SIGTERM lets uvicorn flush
-  //    its savings ledger and reap its own workers; pkill skips its own pid and
-  //    matches both `headroom proxy …` and `python -m headroom.cli proxy …`.
-  try {
-    execFileSync('pkill', ['-TERM', '-f', 'headroom.*proxy'], { stdio: 'ignore' });
-  } catch {
-    /* pkill absent (non-Linux) or nothing matched — best-effort */
-  }
+  //    its savings ledger and reap its own workers. Targeted pidfile kill,
+  //    falling back to `pkill -TERM -f 'headroom.*proxy'` when no live
+  //    recorded pid exists (proxy launched by an older CLI).
+  killHeadroomProxy();
   // 3. Mark the persisted config disabled so any stray resume can't point a
   //    child at the now-dead proxy.
   persistHeadroomConfig({ enabled: false });
