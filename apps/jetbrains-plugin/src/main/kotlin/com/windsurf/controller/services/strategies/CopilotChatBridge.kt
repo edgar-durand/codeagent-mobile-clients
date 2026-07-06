@@ -1,11 +1,11 @@
 package com.windsurf.controller.services.strategies
 
-import com.intellij.ide.plugins.PluginManagerCore
 import com.intellij.openapi.actionSystem.DataContext
 import com.intellij.openapi.components.ComponentManager
 import com.intellij.openapi.diagnostic.Logger
 import com.intellij.openapi.extensions.PluginId
 import com.intellij.openapi.project.Project
+import com.windsurf.controller.services.PluginDescriptors
 import java.lang.reflect.InvocationHandler
 import java.lang.reflect.Proxy
 
@@ -118,7 +118,7 @@ internal object CopilotChatBridge {
         onError: (String) -> Unit = {},
         onCancel: () -> Unit = {},
     ): Boolean {
-        val plugin = PluginManagerCore.getPlugin(COPILOT_PLUGIN_ID)
+        val plugin = PluginDescriptors.findById(COPILOT_PLUGIN_ID)
         if (plugin == null) {
             log.info("CopilotChatBridge: com.github.copilot plugin not installed")
             return false

@@ -1,11 +1,11 @@
 package com.windsurf.controller.services.strategies
 
-import com.intellij.ide.plugins.PluginManagerCore
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.components.ComponentManager
 import com.intellij.openapi.diagnostic.Logger
 import com.intellij.openapi.extensions.PluginId
 import com.intellij.openapi.project.Project
+import com.windsurf.controller.services.PluginDescriptors
 
 /** Context-window snapshot mirrored from Copilot's `ContextSizeInfo`. */
 data class CopilotContextWindow(
@@ -50,7 +50,7 @@ internal object CopilotChatMetadataBridge {
     private val COPILOT_PLUGIN_ID = PluginId.getId("com.github.copilot")
 
     private fun copilotClassLoader(): ClassLoader? {
-        val plugin = PluginManagerCore.getPlugin(COPILOT_PLUGIN_ID) ?: return null
+        val plugin = PluginDescriptors.findById(COPILOT_PLUGIN_ID) ?: return null
         if (!plugin.isEnabled) return null
         return plugin.pluginClassLoader
     }

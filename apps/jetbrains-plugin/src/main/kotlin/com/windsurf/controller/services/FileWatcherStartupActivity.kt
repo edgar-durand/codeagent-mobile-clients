@@ -3,11 +3,10 @@ package com.windsurf.controller.services
 // NOTE on doc comments: Kotlin block comments NEST. Single-line '//'
 // comments only, per project memory.
 
-import com.intellij.ide.plugins.PluginManagerCore
 import com.intellij.openapi.diagnostic.Logger
-import com.intellij.openapi.extensions.PluginId
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.startup.ProjectActivity
+import com.windsurf.controller.GeneratedBuildConfig
 
 // Wires the FileWatcherService into the per-project lifecycle.
 //
@@ -47,12 +46,14 @@ class FileWatcherStartupActivity : ProjectActivity {
             // Marketplace update advisory - one-shot per IDE session
             // (the service self-guards), background-threaded, balloon
             // notification on stale install. Mirrors the CLI + VS
-            // Code plugin update banners.
+            // Code plugin update banners. The installed version comes
+            // from GeneratedBuildConfig (baked from project.version at
+            // build time, same value the release workflow patches into
+            // plugin.xml) - PluginManagerCore.getPlugin is flagged
+            // @ApiStatus.Internal by the 2026.2 verifier.
             runCatching {
-                val pluginId = PluginId.getId("com.codeagent.mobile")
-                val installedVersion =
-                    PluginManagerCore.getPlugin(pluginId)?.version.orEmpty()
-                UpdateNotifierService.getInstance().checkForUpdatesNow(installedVersion)
+                UpdateNotifierService.getInstance()
+                    .checkForUpdatesNow(GeneratedBuildConfig.PLUGIN_VERSION)
             }.onFailure { logger.debug("update-notifier wiring failed: ${it.message}") }
 
             // Drive #1 - existing pairing already on disk. We have a

@@ -1,7 +1,6 @@
 package com.windsurf.controller.services.strategies
 
 import com.intellij.ide.DataManager
-import com.intellij.ide.plugins.PluginManagerCore
 import com.intellij.openapi.actionSystem.ActionManager
 import com.intellij.openapi.actionSystem.ex.ActionUtil
 import com.intellij.openapi.application.ApplicationManager
@@ -13,6 +12,7 @@ import com.intellij.openapi.extensions.PluginId
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.wm.ToolWindow
 import com.intellij.openapi.wm.ToolWindowManager
+import com.windsurf.controller.services.PluginDescriptors
 import java.awt.Component
 import java.awt.Container
 
@@ -42,7 +42,7 @@ internal object AIAssistantBridge {
     private val PLUGIN_ID = PluginId.getId("com.intellij.ml.llm")
 
     private fun pluginClassLoader(): ClassLoader? {
-        val plugin = PluginManagerCore.getPlugin(PLUGIN_ID) ?: return null
+        val plugin = PluginDescriptors.findById(PLUGIN_ID) ?: return null
         if (!plugin.isEnabled) return null
         return plugin.pluginClassLoader
     }

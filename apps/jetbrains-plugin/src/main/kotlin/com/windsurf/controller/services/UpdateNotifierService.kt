@@ -4,7 +4,6 @@ package com.windsurf.controller.services
 // nested_comments. Single-line '//' comments only inside this file.
 
 import com.intellij.ide.BrowserUtil
-import com.intellij.ide.plugins.PluginManagerConfigurable
 import com.intellij.ide.util.PropertiesComponent
 import com.intellij.notification.Notification
 import com.intellij.notification.NotificationAction
@@ -14,6 +13,8 @@ import com.intellij.openapi.actionSystem.AnActionEvent
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.components.Service
 import com.intellij.openapi.diagnostic.Logger
+import com.intellij.openapi.options.Configurable
+import com.intellij.openapi.options.SearchableConfigurable
 import com.intellij.openapi.options.ShowSettingsUtil
 import java.net.HttpURLConnection
 import java.net.URL
@@ -107,9 +108,14 @@ class UpdateNotifierService {
 
         notification.addAction(object : NotificationAction("Update now") {
             override fun actionPerformed(e: AnActionEvent, n: Notification) {
+                // Select the Plugins page by its searchable-configurable
+                // id instead of referencing PluginManagerConfigurable
+                // directly - that class is @ApiStatus.Internal per the
+                // 2026.2 plugin verifier. Same page opens either way.
                 ShowSettingsUtil.getInstance().showSettingsDialog(
                     e.project,
-                    PluginManagerConfigurable::class.java,
+                    { c: Configurable -> (c as? SearchableConfigurable)?.id == PLUGINS_CONFIGURABLE_ID },
+                    null,
                 )
                 n.expire()
             }
@@ -139,6 +145,9 @@ class UpdateNotifierService {
 
     companion object {
         private const val PLUGIN_XML_ID = "com.codeagent.mobile"
+        // Searchable-configurable id of the IDE's Plugins settings page
+        // (PluginManagerConfigurable.ID - stable since 2019).
+        private const val PLUGINS_CONFIGURABLE_ID = "preferences.pluginManager"
         private const val MARKETPLACE_BASE = "https://plugins.jetbrains.com"
         private const val NOTIFICATION_GROUP = "CodeAgent-Mobile"
         private const val PROP_CACHE_TS = "codeam.updateNotifier.cache.ts"

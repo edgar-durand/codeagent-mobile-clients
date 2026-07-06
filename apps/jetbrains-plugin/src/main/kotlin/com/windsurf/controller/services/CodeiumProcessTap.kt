@@ -5,7 +5,6 @@ import com.google.gson.JsonObject
 import com.intellij.execution.process.ProcessEvent
 import com.intellij.execution.process.ProcessHandler
 import com.intellij.execution.process.ProcessListener
-import com.intellij.ide.plugins.PluginManagerCore
 import com.intellij.openapi.diagnostic.Logger
 import com.intellij.openapi.extensions.PluginId
 import com.intellij.openapi.util.Key
@@ -25,7 +24,7 @@ import java.util.concurrent.atomic.AtomicReference
  *
  * Lifecycle:
  *   - `attach()` — best-effort, looks for the Codeium plugin via
- *     PluginManagerCore + reflects into LanguageServerProcessHandler
+ *     PluginDescriptors + reflects into LanguageServerProcessHandler
  *     for a static field of the ProcessHandler type. No-op when
  *     Codeium isn't installed or the field shape has drifted.
  *   - `readBuffer()` — drains + returns whatever response text was
@@ -48,7 +47,7 @@ internal class CodeiumProcessTap {
         if (attached) return
         try {
             val codeiumId = PluginId.getId("com.codeium.intellij")
-            val descriptor = PluginManagerCore.getPlugin(codeiumId)
+            val descriptor = PluginDescriptors.findById(codeiumId)
             if (descriptor == null) {
                 logger.info("Process intercept: Codeium plugin not found")
                 return

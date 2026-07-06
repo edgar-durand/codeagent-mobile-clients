@@ -1,7 +1,7 @@
 package com.windsurf.controller.services.detection.detectors
 
-import com.intellij.ide.plugins.PluginManager
 import com.intellij.ide.plugins.PluginManagerCore
+import com.windsurf.controller.services.PluginDescriptors
 import com.windsurf.controller.services.detection.AgentDetector
 import com.windsurf.controller.services.detection.DetectionContext
 import com.windsurf.controller.services.detection.DetectionResult
@@ -26,8 +26,8 @@ class DynamicPluginDetector(
 
     override suspend fun detect(ctx: DetectionContext): List<DetectionResult> {
         val results = mutableListOf<DetectionResult>()
-        for (descriptor in PluginManager.getPlugins()) {
-            val pluginId = descriptor.pluginId ?: continue
+        for (descriptor in PluginDescriptors.all()) {
+            val pluginId = descriptor.pluginId
             val pid = pluginId.idString
             if (pid in excludedPluginIds) continue
             if (pid in ctx.alreadyDetectedIds) continue

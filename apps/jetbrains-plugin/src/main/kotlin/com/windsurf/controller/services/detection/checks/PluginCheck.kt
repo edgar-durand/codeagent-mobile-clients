@@ -2,6 +2,7 @@ package com.windsurf.controller.services.detection.checks
 
 import com.intellij.ide.plugins.PluginManagerCore
 import com.intellij.openapi.extensions.PluginId
+import com.windsurf.controller.services.PluginDescriptors
 
 data class PluginRef(val id: String, val minVersion: String? = null)
 
@@ -12,7 +13,7 @@ data class PluginRef(val id: String, val minVersion: String? = null)
 fun findInstalledPlugin(candidates: List<PluginRef>): PluginRef? {
     for (ref in candidates) {
         val pid = PluginId.getId(ref.id)
-        val plugin = PluginManagerCore.getPlugin(pid) ?: continue
+        val plugin = PluginDescriptors.findById(pid) ?: continue
         if (PluginManagerCore.isDisabled(pid)) continue
         if (ref.minVersion == null) return ref
         val installed = plugin.version ?: continue
