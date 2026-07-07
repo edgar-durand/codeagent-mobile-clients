@@ -10,6 +10,7 @@ export * from './port-ready';
 export * from './provision-deps';
 export * from './run-setup';
 export * from './setup-deps';
+export * from './tunnel-bringup';
 
 /**
  * One running preview slot, keyed by sessionId. The plugin process is
