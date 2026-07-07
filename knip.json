@@ -1,0 +1,38 @@
+{
+  "$schema": "https://unpkg.com/knip@6/schema.json",
+  "workspaces": {
+    "apps/cli": {
+      "entry": ["scripts/*.{ts,mjs,js}", "__tests__/**/*.{test,spec}.ts"],
+      "project": ["src/**/*.ts"]
+    },
+    "apps/vsc-plugin": {
+      "entry": ["src/extension.ts", "src/test/**/*.ts"],
+      "project": ["src/**/*.ts"]
+    },
+    "packages/shared": {
+      "entry": ["__tests__/**/*.test.ts", "src/**/*.test.ts"],
+      "project": ["src/**/*.ts"]
+    }
+  },
+  "ignore": ["**/.claude/**", "apps/cli/src/services/parseChrome.ts"],
+  "ignoreWorkspaces": ["apps/jetbrains-plugin"],
+  "ignoreDependencies": [
+    "@agentclientprotocol/claude-agent-acp",
+    "@agentclientprotocol/codex-acp"
+  ],
+  "ignoreExportsUsedInFile": true,
+  "rules": {
+    "files": "error",
+    "exports": "warn",
+    "types": "off",
+    "nsExports": "off",
+    "nsTypes": "off",
+    "enumMembers": "off",
+    "duplicates": "off",
+    "dependencies": "warn",
+    "devDependencies": "warn",
+    "unlisted": "off",
+    "unresolved": "off",
+    "binaries": "off"
+  }
+}

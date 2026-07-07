@@ -35,24 +35,12 @@ export function geminiCredentialsPaths(): string[] {
   return [geminiCredentialsPath()];
 }
 
-export function geminiCredentialsMtime(): number | null {
-  try {
-    return fs.statSync(geminiCredentialsPath()).mtimeMs;
-  } catch {
-    return null;
-  }
-}
-
 export async function extractLocalGeminiToken(): Promise<LocalAgentToken | null> {
   const file = geminiCredentialsPath();
   if (!fs.existsSync(file)) return null;
   const credential = fs.readFileSync(file, 'utf8').trim();
   if (credential.length === 0) return null;
   return { method: 'oauth', credential, source: 'flat-file' };
-}
-
-export async function hasLocalGeminiAuth(): Promise<boolean> {
-  return (await extractLocalGeminiToken()) !== null;
 }
 
 /**

@@ -124,19 +124,6 @@ export function capture(event: string, properties: TelemetryProperties = {}): vo
   client.capture({ distinctId, event, properties: safe });
 }
 
-/**
- * Capture a generic error with stack. Use for caught exceptions in
- * fire-and-forget paths where logging is the only signal today —
- * 401-recovery, SSE drop, observer-bridge failures. Stack frames
- * outside `apps/vsc-plugin/` are trimmed to keep PostHog row sizes
- * bounded.
- */
-export function captureError(event: string, error: unknown, extra: TelemetryProperties = {}): void {
-  const err = error instanceof Error ? error : new Error(String(error));
-  const stack = (err.stack ?? '').split('\n').slice(0, 12).join('\n');
-  capture(event, { ...extra, errorMessage: err.message, errorStack: stack });
-}
-
 export async function shutdownTelemetry(): Promise<void> {
   if (!client) return;
   try {

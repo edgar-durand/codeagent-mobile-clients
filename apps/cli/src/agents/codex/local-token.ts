@@ -48,14 +48,6 @@ export function codexCredentialsMtime(): number | null {
   }
 }
 
-/**
- * Convenience yes/no around `extractLocalCodexToken`. Used by
- * `codeam link codex` to short-circuit straight to upload when the
- * user already has a token from a prior `codex login`.
- */
-export async function hasLocalCodexAuth(): Promise<boolean> {
-  return (await extractLocalCodexToken()) !== null;
-}
 
 /**
  * Lightweight CLI-side mirror of the server's

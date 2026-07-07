@@ -28,6 +28,31 @@ jobs:
         with:
           configFile: commitlint.config.mjs
 
+  # Dead-code gate (knip). BLOCKING: the baseline is clean for the
+  # `files` rule (no orphaned modules), so a new unreferenced file fails
+  # the PR. `exports` and `dependencies` run at `warn` severity in
+  # knip.json (surfaced in the log, non-failing) — a deliberate ratchet:
+  # the pre-existing backlog of intentionally-exported test/DI seams and
+  # a couple of unused deps is triaged over time, then bumped to `error`.
+  # One cheap Linux/Node-20 job — no matrix (dead-code analysis is
+  # platform-independent).
+  knip:
+    name: Dead-code check (knip)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '20'
+          cache: npm
+
+      - name: Install workspaces
+        run: npm ci
+
+      - name: knip
+        run: npm run knip
+
   cli:
     name: CLI (${{ matrix.os }} · node ${{ matrix.node }})
     runs-on: ${{ matrix.os }}

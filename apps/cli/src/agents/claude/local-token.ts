@@ -144,12 +144,3 @@ export function claudeCredentialsMtime(): number | null {
   }
   return null;
 }
-
-/**
- * Returns `true` if any of the probed credential locations currently
- * resolves to a non-empty string. Convenience around
- * `extractLocalClaudeToken` for use sites that only need a yes/no.
- */
-export async function hasLocalClaudeAuth(): Promise<boolean> {
-  return (await extractLocalClaudeToken()) !== null;
-}
