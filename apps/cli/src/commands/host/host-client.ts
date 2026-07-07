@@ -27,7 +27,7 @@ import * as path from 'node:path';
 import { resolveApiBaseUrl } from '@codeam/shared';
 import type { AgentAuth } from '@codeam/shared';
 import { vercelBypassHeader } from '../../lib/backend-headers';
-import { restrictToOwner } from '../../util/restrict-to-owner';
+import { restrictToOwner } from '../../lib/restrict-to-owner';
 
 /** Diagnostics reported at redeem (mirrors the backend `HostOsInfo`). */
 export interface HostOsInfo {

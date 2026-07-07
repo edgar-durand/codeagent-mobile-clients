@@ -12,7 +12,7 @@ import { requestCode, postLinkCredential } from '../services/pairing.service';
 import { subscribeToPairCompletion } from '../services/pair-completion-subscriber';
 import { addSession, loadCliConfig, saveCliConfig } from '../config';
 import { start } from './start';
-import { parseAgentFlag, promptForAgent } from '../utils/agent-prompt';
+import { parseAgentFlag, promptForAgent } from '../lib/agent-prompt';
 import { capture, identifyUser } from '../services/telemetry.service';
 import { createAgentStrategy } from '../agents/registry';
 

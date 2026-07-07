@@ -53,6 +53,7 @@ function resolveInputPricePerMillion(agentId: string): number {
   return getPricing(model).input;
 }
 import { log } from '../services/logger';
+import { killQuiet } from '../lib/quiet';
 import {
   deleteHostIdentity,
   isHostAuthRejection,
@@ -705,11 +706,7 @@ export class HostAgentSupervisor {
     }
     this.relay?.stop();
     for (const child of this.children.values()) {
-      try {
-        child.proc.kill('SIGTERM');
-      } catch {
-        /* already gone */
-      }
+      killQuiet(child.proc);
     }
     this.children.clear();
   }

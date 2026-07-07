@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { parseAgentFlag } from '../../src/utils/agent-prompt';
+import { parseAgentFlag } from '../../src/lib/agent-prompt';
 
 describe('parseAgentFlag', () => {
   it('returns claude for --agent=claude', () => {

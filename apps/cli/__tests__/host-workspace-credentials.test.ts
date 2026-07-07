@@ -21,7 +21,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { configureGitCredentials } from '../src/commands/host/workspace';
-import { isOwnerOnly } from '../src/util/restrict-to-owner';
+import { isOwnerOnly } from '../src/lib/restrict-to-owner';
 
 let repo: string;
 

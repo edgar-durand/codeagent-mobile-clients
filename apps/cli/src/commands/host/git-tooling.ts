@@ -21,6 +21,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { log } from '../../services/logger';
+import { killQuiet } from '../../lib/quiet';
 
 /**
  * Minimal injectable subprocess runner (same shape as host-agent's
@@ -236,11 +237,7 @@ export const defaultGitToolingRunner: GitToolingRunner = {
       let timer: ReturnType<typeof setTimeout> | undefined;
       if (opts.timeoutMs !== undefined) {
         timer = setTimeout(() => {
-          try {
-            child.kill('SIGTERM');
-          } catch {
-            /* already dead */
-          }
+          killQuiet(child);
           done(null);
         }, opts.timeoutMs);
       }

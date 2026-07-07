@@ -46,6 +46,7 @@ import type { AdapterSpec } from './adapters';
 import type { PromptBlock } from './buildAcpPromptBlocks';
 import { createIdleTimeout, type IdleTimeout } from './idleTimeout';
 import { log } from '../../services/logger';
+import { killQuiet } from '../../lib/quiet';
 
 /**
  * Protocol version we advertise during `initialize`. ACP v1 is the
@@ -537,7 +538,7 @@ export class AcpClient {
       child.kill('SIGTERM');
       const grace = new Promise<void>((resolve) => {
         const t = setTimeout(() => {
-          try { child.kill('SIGKILL'); } catch { /* already gone */ }
+          killQuiet(child, 'SIGKILL');
           resolve();
         }, 2000);
         child.once('exit', () => {

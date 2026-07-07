@@ -3,7 +3,7 @@ import os from 'node:os';
 import fs from 'node:fs';
 import path from 'node:path';
 import { beadsConfigPath, readBeadsEnabled, persistBeadsConfig } from '../../src/beads/config-store';
-import { isOwnerOnly } from '../../src/util/restrict-to-owner';
+import { isOwnerOnly } from '../../src/lib/restrict-to-owner';
 
 describe('beads config-store', () => {
   const p = beadsConfigPath();

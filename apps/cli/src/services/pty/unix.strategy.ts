@@ -3,6 +3,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { IPtyStrategy, PtyStrategyOptions, findInPath } from './types';
+import { rmIfExistsQuiet } from '../../lib/quiet';
 
 /**
  * Python 3 PTY helper — written to a temp file at runtime.
@@ -255,7 +256,7 @@ export class UnixPtyStrategy implements IPtyStrategy {
 
   private removeTempFile(): void {
     if (this.helperPath) {
-      try { fs.unlinkSync(this.helperPath); } catch { /* ignore */ }
+      rmIfExistsQuiet(this.helperPath);
       this.helperPath = null;
     }
   }

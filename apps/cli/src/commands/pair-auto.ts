@@ -6,6 +6,7 @@ import { resolveApiBaseUrl, isKnownAgentId } from '@codeam/shared';
 import { addSession, loadCliConfig } from '../config';
 import { capture, identifyUser } from '../services/telemetry.service';
 import { vercelBypassHeader } from '../lib/backend-headers';
+import { rmIfExistsQuiet } from '../lib/quiet';
 import { detectCurrentBranch } from '../lib/git-branch';
 import { start } from './start';
 import { startInfraOnly } from './start-infra-only';
@@ -61,7 +62,7 @@ function readTokenFromArgs(args: string[]): string {
       // shell EXIT, but we delete proactively too — the token is
       // single-use and we don't want it lingering on disk if `start()`
       // crashes before the EXIT trap fires.
-      try { fs.unlinkSync(path); } catch { /* best-effort */ }
+      rmIfExistsQuiet(path);
       return content;
     } catch (err) {
       fail(`Could not read --token-file: ${(err as Error).message}`);

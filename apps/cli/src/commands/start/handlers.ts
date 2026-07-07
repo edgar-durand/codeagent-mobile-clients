@@ -67,6 +67,7 @@ import {
 import { log } from '../../services/logger';
 import type { KeepAliveContext } from './keep-alive';
 import { removeSession } from '../../config';
+import { quiet, rmIfExistsQuiet } from '../../lib/quiet';
 import { handleBeadsActionCommand, type StartedBeads, startBeads } from '../../beads';
 import { beadsActionFromPayload } from '../../beads/wiring';
 import { configureBeads, probeBeadsStatus, type ConfigureBeadsDeps } from '../../beads/configure';
@@ -167,7 +168,7 @@ const pendingAttachmentFiles = new Set<string>();
  *  signal handlers + the agent onExit path so /tmp doesn't leak. */
 export function cleanupAttachmentTempFiles(): void {
   for (const p of pendingAttachmentFiles) {
-    try { fs.unlinkSync(p); } catch { /* already gone */ }
+    rmIfExistsQuiet(p);
   }
   pendingAttachmentFiles.clear();
 }
@@ -208,7 +209,7 @@ const startTask: CommandHandler = (ctx, _cmd, parsed) => {
     ctx.agent.sendCommand(`${atRefs} ${effectivePrompt}`.trim());
     setTimeout(() => {
       for (const p of paths) {
-        try { fs.unlinkSync(p); } catch { /* ignore */ }
+        rmIfExistsQuiet(p);
         pendingAttachmentFiles.delete(p);
       }
     }, 120_000);
@@ -357,7 +358,7 @@ const sessionTerminated: CommandHandler = async (ctx, cmd) => {
   showInfo('Session was deleted from the app — exiting.');
   try { await ctx.relay.sendResult(cmd.id, 'success', { ok: true }); } catch { /* best-effort */ }
   try { removeSession(ctx.sessionId); } catch { /* best-effort */ }
-  try { ctx.agent.kill(); } catch { /* best-effort */ }
+  quiet(() => ctx.agent.kill());
   try {
     const proc = spawn('bash', ['-lc', 'pm2 delete codeam-pair >/dev/null 2>&1 || true'], {
       detached: true,
@@ -376,7 +377,7 @@ const shutdownSession: CommandHandler = async (ctx, cmd) => {
   // the workspace itself suspends and the user stops paying for
   // compute hours.
   try { await ctx.relay.sendResult(cmd.id, 'success', { ok: true }); } catch { /* best-effort */ }
-  try { ctx.agent.kill(); } catch { /* best-effort */ }
+  quiet(() => ctx.agent.kill());
   if (ctx.keepAliveCtx.inCodespace && ctx.keepAliveCtx.codespaceName) {
     try {
       const stopProc = spawn(

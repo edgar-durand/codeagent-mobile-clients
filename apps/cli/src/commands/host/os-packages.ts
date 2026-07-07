@@ -8,6 +8,7 @@
 // import/export wiring changed. host-agent.ts re-exports the public surface.
 import { execFileSync, spawn } from 'node:child_process';
 import { log } from '../../services/logger';
+import { killQuiet } from '../../lib/quiet';
 
 /**
  * Subprocess runner injectable for `setupHeadroomForSelfHosted`.
@@ -87,11 +88,7 @@ export const defaultHeadroomRunner: HeadroomRunner = {
             'host-agent',
             `headroom[${cmd}] timed out after ${timeoutMs / 1000}s — aborting`,
           );
-          try {
-            child.kill('SIGTERM');
-          } catch {
-            /* already dead */
-          }
+          killQuiet(child);
           done(null);
         }, timeoutMs);
       }

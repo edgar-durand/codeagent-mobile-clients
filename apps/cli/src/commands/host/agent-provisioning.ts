@@ -30,7 +30,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import type { AgentAuth, AgentId } from '@codeam/shared';
-import { restrictToOwner } from '../../util/restrict-to-owner';
+import { restrictToOwner } from '../../lib/restrict-to-owner';
 
 /**
  * Map the public LinkedAgent id the deploy command carries

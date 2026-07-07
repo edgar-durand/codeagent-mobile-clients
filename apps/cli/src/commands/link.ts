@@ -55,6 +55,7 @@ import chokidar from 'chokidar';
 import pc from 'picocolors';
 import { AGENT_REGISTRY, isKnownAgentId, type AgentId } from '@codeam/shared';
 import { p } from '../ui/prompts';
+import { killQuiet } from '../lib/quiet';
 import {
   showIntro,
   showSuccess,
@@ -471,7 +472,7 @@ async function captureFreshCredentials(ctx: LinkContext): Promise<LocalAgentToke
       // SIGTERM first; the agent's REPL traps it and exits clean.
       // If it ignores, the user can Ctrl+C out — the process group
       // exit is enough either way.
-      try { child.kill('SIGTERM'); } catch { /* already gone */ }
+      killQuiet(child, 'SIGTERM');
     }
   };
 

@@ -9,7 +9,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { log } from '../../services/logger';
-import { restrictToOwner } from '../../util/restrict-to-owner';
+import { restrictToOwner } from '../../lib/restrict-to-owner';
 
 /**
  * Persisted Headroom config the supervisor writes on a successful deploy and

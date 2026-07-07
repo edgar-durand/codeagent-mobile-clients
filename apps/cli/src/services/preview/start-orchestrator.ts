@@ -22,6 +22,7 @@ import * as path from 'path';
 import which from 'which';
 import { USER_EVENTS, type PreviewDetection } from '@codeam/shared';
 import { log } from '../logger';
+import { killQuiet } from '../../lib/quiet';
 import * as previewSvc from './index';
 
 /**
@@ -744,7 +745,7 @@ async function establishTunnel(ctx: StageCtx, dev: DevServerUp): Promise<TunnelU
           'preview',
           'named tunnel did not register within 45s — falling back to quick tunnel',
         );
-        try { candidate.kill('SIGTERM'); } catch { /* already dead */ }
+        killQuiet(candidate);
       }
     } catch (e) {
       log.info(
@@ -786,7 +787,7 @@ async function establishTunnel(ctx: StageCtx, dev: DevServerUp): Promise<TunnelU
       lastTunnelErr = outcome.sawUrl
         ? 'cloudflared did not register a tunnel connection within 45s'
         : 'cloudflared did not emit a URL within 45s';
-      try { candidate.kill('SIGTERM'); } catch { /* already dead */ }
+      killQuiet(candidate);
     }
   }
   if (!parsedUrl) {

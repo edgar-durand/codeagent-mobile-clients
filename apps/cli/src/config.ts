@@ -3,6 +3,7 @@ import * as os from 'os';
 import * as path from 'path';
 import * as crypto from 'crypto';
 import type { AgentId } from '@codeam/shared';
+import { rmIfExistsQuiet } from './lib/quiet';
 
 export interface SavedSession {
   id: string;
@@ -103,7 +104,7 @@ export function makeConfig(baseDir?: string) {
       // remove it (rare — usually means EACCES on the dir), leave it;
       // a subsequent successful save() will overwrite-via-rename and
       // the next clearAll() / boot picks it up.
-      try { fs.unlinkSync(tmp); } catch { /* already gone */ }
+      rmIfExistsQuiet(tmp);
       throw err;
     }
   }

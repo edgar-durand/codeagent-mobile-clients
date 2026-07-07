@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { isOwnerOnly } from '../src/util/restrict-to-owner';
+import { isOwnerOnly } from '../src/lib/restrict-to-owner';
 
 // Capture the args/options every `git clone` is invoked with. `execFile` is
 // promisified inside workspace.ts, so the mock must follow the

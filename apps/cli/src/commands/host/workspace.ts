@@ -28,7 +28,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { restrictToOwner } from '../../util/restrict-to-owner';
+import { restrictToOwner } from '../../lib/restrict-to-owner';
 
 const execFileP = promisify(execFile);
 

@@ -1,5 +1,7 @@
 import { spawn, type ChildProcess } from 'child_process';
 
+import { killQuiet } from '../lib/quiet';
+
 /**
  * Module-level registry of every in-flight child started by
  * `spawnAndCapture`. The shutdown helper in start.ts walks this set
@@ -14,21 +16,13 @@ const activeChildren = new Set<ChildProcess>();
 
 export function killActiveSpawnAndCaptureChildren(): void {
   for (const child of activeChildren) {
-    try {
-      child.kill('SIGTERM');
-    } catch {
-      // child already exited — fine
-    }
+    killQuiet(child);
   }
   // Escalate to SIGKILL after a short grace so we don't block process
   // shutdown on a polite SIGTERM the agent ignores.
   setTimeout(() => {
     for (const child of activeChildren) {
-      try {
-        child.kill('SIGKILL');
-      } catch {
-        // already dead
-      }
+      killQuiet(child, 'SIGKILL');
     }
   }, 250).unref?.();
 }
@@ -93,11 +87,7 @@ export async function spawnAndCapture(
     });
 
     const timer = setTimeout(() => {
-      try {
-        child.kill('SIGKILL');
-      } catch {
-        // swallow — child may have already exited
-      }
+      killQuiet(child, 'SIGKILL');
       settle(null);
     }, timeoutMs);
     timer.unref();

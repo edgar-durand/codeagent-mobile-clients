@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { restrictToOwner } from '../util/restrict-to-owner';
+import { restrictToOwner } from '../lib/restrict-to-owner';
 
 export function beadsConfigPath(): string {
   return path.join(os.homedir(), '.codeam', 'beads-config.json');
