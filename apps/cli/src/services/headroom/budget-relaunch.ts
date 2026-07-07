@@ -20,8 +20,8 @@ import * as os from 'os';
 import * as path from 'path';
 import { spawn } from 'child_process';
 import { log } from '../logger';
-import { buildBudgetProxyArgs } from './budget-args';
-import { killHeadroomProxy, writeHeadroomProxyPidfile } from './proxy-pid';
+import { killHeadroomProxy } from './proxy-pid';
+import { spawnHeadroomProxy } from './proxy-process';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -212,34 +212,15 @@ function killProxyReal(): void {
   killHeadroomProxy();
 }
 
-function spawnProxyReal(budget: BudgetSpec | null): void {
-  try {
-    const proxyEnv: Record<string, string> = {
-      ...process.env as Record<string, string>,
-      HEADROOM_KOMPRESS_BACKEND: 'onnx_cpu',
-    };
-    // budget env vars have already been set/cleared on process.env by the handler
-    // before calling applyBudgetToHeadroom — buildBudgetProxyArgs reads them.
-    const proxy = spawn(
-      'headroom',
-      ['proxy', '--port', '8787', ...buildBudgetProxyArgs(proxyEnv)],
-      {
-        stdio: 'ignore',
-        detached: true,
-        env: proxyEnv,
-      },
-    );
-    proxy.once('error', (e: Error) => {
-      log.warn('headroom-budget', `proxy relaunch error (best-effort): ${e.message}`);
-    });
-    proxy.unref();
-    writeHeadroomProxyPidfile(proxy.pid);
-  } catch (e) {
-    log.warn(
-      'headroom-budget',
-      `proxy relaunch failed (best-effort): ${e instanceof Error ? e.message : String(e)}`,
-    );
-  }
+function spawnProxyReal(_budget: BudgetSpec | null): void {
+  // budget env vars have already been set/cleared on process.env by the handler
+  // before calling applyBudgetToHeadroom — buildBudgetProxyArgs (inside the
+  // shared spawnHeadroomProxy) reads them.
+  spawnHeadroomProxy({
+    tag: 'headroom-budget',
+    spawnErrorMsg: (detail) => `proxy relaunch error (best-effort): ${detail}`,
+    failureMsg: (detail) => `proxy relaunch failed (best-effort): ${detail}`,
+  });
 }
 
 /** Real deps wired to actual fs + child_process. */

@@ -13,13 +13,11 @@
 // heartbeat cadence respawns the proxy when it's gone. This is supervisor
 // health-checking (the proxy's death has no event stream to react to), not
 // the forbidden UI-state polling.
-import { spawn } from 'child_process';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { log } from '../logger';
-import { buildBudgetProxyArgs } from './budget-args';
-import { writeHeadroomProxyPidfile } from './proxy-pid';
+import { spawnHeadroomProxy } from './proxy-process';
 
 export interface ProxySupervisorDeps {
   /** True when this box routes the agent through the Headroom proxy and
@@ -91,31 +89,15 @@ export async function probeProxyAliveReal(): Promise<boolean> {
   }
 }
 
-/** Detached respawn — mirrors budget-relaunch's spawnProxyReal (setsid-like
- *  via detached+unref), re-deriving budget flags from the env so a capped
+/** Detached respawn — the shared spawnHeadroomProxy (setsid-like via
+ *  detached+unref), re-deriving budget flags from the env so a capped
  *  user stays capped after a respawn. */
 export function spawnProxyReal(): void {
-  try {
-    const proxyEnv: Record<string, string> = {
-      ...(process.env as Record<string, string>),
-      HEADROOM_KOMPRESS_BACKEND: 'onnx_cpu',
-    };
-    const proxy = spawn(
-      'headroom',
-      ['proxy', '--port', '8787', ...buildBudgetProxyArgs(proxyEnv)],
-      { stdio: 'ignore', detached: true, env: proxyEnv },
-    );
-    proxy.once('error', (e: Error) => {
-      log.warn('headroom-supervisor', `respawn error (best-effort): ${e.message}`);
-    });
-    proxy.unref();
-    writeHeadroomProxyPidfile(proxy.pid);
-  } catch (e) {
-    log.warn(
-      'headroom-supervisor',
-      `respawn failed (best-effort): ${e instanceof Error ? e.message : String(e)}`,
-    );
-  }
+  spawnHeadroomProxy({
+    tag: 'headroom-supervisor',
+    spawnErrorMsg: (detail) => `respawn error (best-effort): ${detail}`,
+    failureMsg: (detail) => `respawn failed (best-effort): ${detail}`,
+  });
 }
 
 export function makeRealProxySupervisorDeps(): ProxySupervisorDeps {
