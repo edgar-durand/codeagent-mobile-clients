@@ -4,6 +4,14 @@ All notable changes to `codeam-cli` are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.56.0] — 2026-07-07
+
+### Changed
+
+- **cli:** Runner.ts dispatch table — AcpCommandContext replaces the 19-param handleCommand (Phase 3)
+- **cli:** Split host-agent.ts into commands/host/ modules + one spawnHeadroomProxy (Phase 3)
+- **cli:** Decompose previewStartH into stages + event-driven tunnel wait (Phase 3 wave 2)
+
 ## [2.55.1] — 2026-07-07
 
 ## [2.54.0] — 2026-07-06
