@@ -97,7 +97,7 @@ export interface BudgetRecovery<B> {
 
 /**
  * DI factory — create a `BudgetRecovery` instance wired to the provided
- * deps. Mirrors `createOneMRecovery` so the runner can wire it the same way.
+ * deps. The runner wires it to the live publisher / relay / streaming.
  */
 export function createBudgetRecovery<B>(deps: BudgetRecoveryDeps<B>): BudgetRecovery<B> {
   // Pending state: stash the failed blocks + captured period for the question.

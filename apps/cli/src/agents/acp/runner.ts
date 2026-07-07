@@ -42,7 +42,6 @@ import { AcpClient, type AcpClientOptions } from './client';
 import type { AdapterSpec } from './adapters';
 import { AcpPublisher } from './publisher';
 import type { PromptBlock } from './buildAcpPromptBlocks';
-import { createOneMRecovery, type OneMRecovery } from './oneMContextRecovery';
 import { createBudgetRecovery, type BudgetRecovery } from './budgetRecovery';
 import { createWakeCredentialProbe, localCredentialExpiryStatus } from './wakeCredentialProbe';
 import { reconcileCumulative } from './reconcileDelta';
@@ -54,7 +53,7 @@ import {
 import { mapSessionUpdate, mapPermissionRequest } from './mappers';
 import { extractSelectPrompt } from './selectPromptExtractor';
 import { prewarmPreviewDetection } from '../../commands/start/handlers';
-import { loadCliConfig, setDisable1mContext } from '../../config';
+import { loadCliConfig } from '../../config';
 import { FileWatcherService } from '../../services/file-watcher.service';
 import { TurnFileAggregator } from '../../services/turn-files/turn-file-aggregator';
 import type { StartedBeads } from '../../beads';
@@ -63,12 +62,12 @@ import {
   AUTH_FAILURE_MESSAGE,
   adapterExitMessage,
   describeError,
-  failureBubble,
   looksLikeAuthFailure,
   looksLikeProviderOutage,
   startupFailureMessage,
 } from './failure-messages';
 import { reportCredentialInvalid } from './backend-reports';
+import { agentHooks } from './agent-hooks';
 import { dispatchAcpCommand, recoverFromFailedTurn } from './command-handlers';
 
 // ─── Re-exports (Phase 3 extraction, bd codeagent-2sa) ────────────────────
@@ -858,10 +857,18 @@ export function computeAdapterExtraEnv(params: {
   disable1mContext: boolean;
 }): Record<string, string> {
   const env: Record<string, string> = {};
+  // Agent-agnostic knob — the per-session 1M-context opt-out applies to any
+  // agent (only Claude reads it, but setting it elsewhere is harmless).
   if (params.disable1mContext) env.CLAUDE_CODE_DISABLE_1M_CONTEXT = '1';
-  if (params.agent === 'codex' && params.autoApprovePermissions) {
-    env.INITIAL_AGENT_MODE = 'agent-full-access';
-  }
+  // Per-agent spawn env comes from the agent-hooks registry (Codex's
+  // INITIAL_AGENT_MODE=agent-full-access in the autonomous plane). Adding a new
+  // agent's spawn quirk means adding a `startupExtraEnv` hook, not a branch here.
+  Object.assign(
+    env,
+    agentHooks(params.agent)?.startupExtraEnv?.({
+      autoApprovePermissions: params.autoApprovePermissions,
+    }) ?? {},
+  );
   return env;
 }
 
@@ -1053,58 +1060,10 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
       })();
     },
   };
-  let client = new AcpClient(clientOptions);
-
-  // ─── On-demand 1M-context recovery ───────────────────────────────
-  // Re-spawn the adapter/claude with 1M context disabled, persisting the choice
-  // for this session. claude reads CLAUDE_CODE_DISABLE_1M_CONTEXT only at
-  // process start, so the only way to apply it on demand is a fresh spawn.
-  const reconnectWith1mDisabled = async (): Promise<void> => {
-    setDisable1mContext(opts.pluginId, true);
-    try {
-      await client.stop();
-    } catch {
-      /* adapter already gone */
-    }
-    client = new AcpClient({
-      ...clientOptions,
-      extraEnv: { ...extraEnv, CLAUDE_CODE_DISABLE_1M_CONTEXT: '1' },
-    });
-    await client.start();
-  };
-  // Behavior lives in the DI factory (unit-tested in oneMContextRecovery.test);
-  // here we just wire it to the live publisher/relay/streaming + the mutable
-  // `client` (promptAgent/recover read the post-reconnect instance).
-  const oneMRecovery = createOneMRecovery<PromptBlock>({
-    publishText: (text) => publisher.publishOutput({ type: 'text', content: text, done: true }),
-    publishSelectPrompt: (question, options) =>
-      publisher.publishOutput({
-        type: 'select_prompt',
-        content: question,
-        options,
-        optionDescriptions: options.map(() => ''),
-        currentIndex: 0,
-        done: true,
-      }),
-    // The button driver — mobile renders the tappable option from this
-    // awaiting-answer event; the user's tap returns as a `select_option`
-    // command, caught at the top of the select_option case by tryRecover.
-    publishAwaitingAnswer: (prompt, options) =>
-      publisher.publishAwaitingAnswer({ questionId: randomUUID(), prompt, options }),
-    sendResult: (commandId, status, result) => relay.sendResult(commandId, status, result),
-    appendAgentReply: (text) => history.appendAgentReply(text),
-    flushHistory: () => void history.flush(),
-    beginTurn: () => streaming.beginTurn(),
-    getCurrentText: () => streaming.getCurrentText(),
-    closeTurn: async () => { await streaming.closeTurnWithInteractiveDetection(); },
-    recoverFromFailedTurn: () => recoverFromFailedTurn(client, streaming),
-    reconnectWith1mDisabled,
-    promptAgent: (blocks) => client.prompt(blocks),
-    failureBubbleFor: (detail) =>
-      failureBubble({ detail, recentStderr: recentStderr.join('\n'), hadText: false, agent: opts.agent }),
-    describeError,
-    log: (msg) => log.info('acpRunner', msg),
-  });
+  // `client` is never re-spawned in-session: the old on-demand 1M-context
+  // disable/re-spawn recovery was removed (the fix for a 1M-credits gate is to
+  // RECONNECT the subscription, not disable 1M — see failure-messages.ts).
+  const client = new AcpClient(clientOptions);
 
   // ─── On-demand Headroom budget-exceeded recovery ──────────────────────────
   // When the local Headroom proxy 429s due to budget exhaustion, offer two
@@ -1369,7 +1328,6 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
         getBeads,
         publisher,
         recentStderr,
-        oneMRecovery,
         budgetRecovery,
         { get: () => _budgetReachedPosted, set: (v: boolean) => { _budgetReachedPosted = v; } },
       );
@@ -1457,10 +1415,6 @@ export async function handleCommand(
   getBeads: () => StartedBeads | null,
   publisher: AcpPublisher,
   recentStderr: string[],
-  /** On-demand 1M-context-credits recovery (offer the disable action +
-   *  re-spawn/re-run on tap). Built by runAcpSession so it can mutate the
-   *  live `client`. */
-  oneMRecovery: OneMRecovery<PromptBlock>,
   /** On-demand Headroom budget-exceeded recovery (offer pause/raise options). */
   budgetRecovery: BudgetRecovery<PromptBlock>,
   /** Fire-once guard for the budget-reached backend POST. */
@@ -1481,7 +1435,6 @@ export async function handleCommand(
     getBeads,
     publisher,
     recentStderr,
-    oneMRecovery,
     budgetRecovery,
     budgetReachedFlag,
   });

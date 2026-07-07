@@ -129,7 +129,14 @@ describe('headroom_configure — ACP context carries the running agent (regressi
 
   it('a claude ACP session enables (does NOT spuriously report supported:false)', async () => {
     const ctx = acpCtx('claude');
-    await handlers.headroom_configure(ctx, cmd, payload({ action: 'enable' }));
+    // `acpCtx` returns a BaseHandlerContext (no PTY machinery). Widen it to the
+    // handler's param exactly as `dispatchCommand` does at its invocation
+    // boundary — headroom_configure reads only Base fields, so this is sound.
+    await handlers.headroom_configure(
+      ctx as Parameters<typeof handlers.headroom_configure>[0],
+      cmd,
+      payload({ action: 'enable' }),
+    );
     expect(configureHeadroomMock).toHaveBeenCalledWith(
       'enable',
       expect.objectContaining({ agent: 'claude' }),

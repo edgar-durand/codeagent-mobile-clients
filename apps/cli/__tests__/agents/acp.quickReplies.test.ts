@@ -74,10 +74,6 @@ function makeHarness(opts: {
   const sendResult = vi.fn(async () => undefined);
   const relay = { sendResult };
   const turnFiles = { flushTurn: vi.fn(async () => undefined) };
-  const oneMRecovery = {
-    offer: vi.fn(async () => undefined),
-    tryRecover: vi.fn(async () => false),
-  };
 
   const runOpts = {
     agent: 'claude' as const,
@@ -113,7 +109,6 @@ function makeHarness(opts: {
       () => null,
       publisher,
       [],
-      oneMRecovery as never,
       { offer: vi.fn(async () => undefined), tryRecover: vi.fn(async () => false) } as never,
       { get: () => false, set: vi.fn() },
     );

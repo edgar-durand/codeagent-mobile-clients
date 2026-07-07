@@ -88,14 +88,16 @@ import * as self from './handlers';
  * handler so each one stays free of module-level singletons +
  * gets a unit-testable surface (replace any field with a fake).
  */
-export interface HandlerContext {
-  outputSvc: OutputService;
-  agent: AgentService;
-  historySvc: HistoryService;
+/**
+ * Fields every command handler can rely on — agent-AGNOSTIC. The preview / file
+ * / git / terminal / link handlers (the ones an ACP session or the no-agent
+ * infra-only path reuse) read ONLY these, so a caller that has no PTY pipeline
+ * (the ACP `buildLegacyContextForACP`) can construct one HONESTLY, with no
+ * `as unknown as` cast fabricating the PTY machinery it doesn't own.
+ */
+export interface BaseHandlerContext {
   relay: CommandRelayService;
   runtime: RuntimeStrategy;
-  setKeepAlive: (enabled: boolean) => void;
-  keepAliveCtx: KeepAliveContext;
   /** Paired-session credentials needed by handlers that talk to the
    *  /api/plugin/* endpoints (e.g. auto-link). Older paired sessions
    *  from before pluginAuthToken existed leave it undefined — those
@@ -115,6 +117,27 @@ export interface HandlerContext {
    *  while this is null. */
   beads?: StartedBeads | null;
 }
+
+/**
+ * The FULL context for a PTY-backed session — adds the machinery the chat
+ * pipeline handlers (start_task, provide_input, summarize, resume_session, …)
+ * dereference. Only the PTY `start()` composition root supplies these.
+ */
+export interface PtyHandlerContext extends BaseHandlerContext {
+  outputSvc: OutputService;
+  agent: AgentService;
+  historySvc: HistoryService;
+  setKeepAlive: (enabled: boolean) => void;
+  keepAliveCtx: KeepAliveContext;
+}
+
+/**
+ * The context most handlers + `dispatchCommand`'s registry are typed against.
+ * Kept as an alias of {@link PtyHandlerContext} so the ~60 existing references
+ * (and every PTY handler that reads `outputSvc`/`agent`/…) are unchanged; the
+ * agent-agnostic subset is {@link BaseHandlerContext}.
+ */
+export type HandlerContext = PtyHandlerContext;
 
 /**
  * Each entry handles ONE remote command type. Returns a Promise
@@ -1724,7 +1747,7 @@ export const handlers: Record<string, CommandHandler> = {
  * so a misbehaving server can't crash the CLI.
  */
 export async function dispatchCommand(
-  ctx: HandlerContext,
+  ctx: BaseHandlerContext,
   cmd: RemoteCommand,
 ): Promise<void> {
   // Beads actions carry a `{action, args}` shape that intentionally
@@ -1758,5 +1781,13 @@ export async function dispatchCommand(
   }
   const handler = handlers[cmd.type];
   if (!handler) return;
-  await handler(ctx, cmd, parsed);
+  // Widen Base → full PTY context at this single boundary. The registry is
+  // typed against the full HandlerContext because SOME handlers (start_task,
+  // provide_input, …) dereference the PTY fields — but those are only ever
+  // dispatched from the PTY `start()` path, which always passes a full context.
+  // Callers with only a Base context (the ACP session runner, the no-agent
+  // infra-only path) reach exclusively agent-agnostic handlers that read only
+  // Base fields, so the widening is sound. This replaces the `as unknown as`
+  // casts the ACP/infra-only builders previously used to fabricate PTY fields.
+  await handler(ctx as HandlerContext, cmd, parsed);
 }

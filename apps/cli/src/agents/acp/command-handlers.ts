@@ -32,12 +32,12 @@ import { handleBeadsActionCommand, type StartedBeads } from '../../beads';
 import {
   handlers as legacyHandlers,
   dispatchCommand as legacyDispatchCommand,
-  type HandlerContext,
+  type BaseHandlerContext,
 } from '../../commands/start/handlers';
 import type { AcpClient } from './client';
 import type { AcpPublisher } from './publisher';
 import { buildAcpPromptBlocks, type PromptBlock } from './buildAcpPromptBlocks';
-import { shouldOfferOneMRecovery, type OneMRecovery } from './oneMContextRecovery';
+import { shouldOfferOneMRecovery } from './oneMContextRecovery';
 import {
   looksLikeBudgetExceeded,
   extractBudgetPeriod,
@@ -51,8 +51,8 @@ import {
   describeError,
   failureBubble,
   replyIsAuthFailure,
-  replyIsCursorUpgradeRequired,
 } from './failure-messages';
+import { agentHooks } from './agent-hooks';
 import { postBudgetReached, reportCredentialInvalid } from './backend-reports';
 import type { AcpHistory, AcpRunnerOptions, StreamingState } from './runner';
 
@@ -77,10 +77,6 @@ export interface AcpCommandContext {
   getBeads: () => StartedBeads | null;
   publisher: AcpPublisher;
   recentStderr: string[];
-  /** On-demand 1M-context-credits recovery (offer the disable action +
-   *  re-spawn/re-run on tap). Built by runAcpSession so it can mutate the
-   *  live `client`. */
-  oneMRecovery: OneMRecovery<PromptBlock>;
   /** On-demand Headroom budget-exceeded recovery (offer pause/raise options). */
   budgetRecovery: BudgetRecovery<PromptBlock>;
   /** Fire-once guard for the budget-reached backend POST. */
@@ -185,13 +181,12 @@ export async function handleGetConversation(args: {
  * outputSvc, agent (PTY wrapper), historySvc. Most of those handlers
  * NEED that machinery; some don't.
  *
- * For ACP we want to reuse the agent-agnostic ones (preview flow, file
- * ops, git ops, terminal ops, etc.) without re-implementing them. This
- * builds a partial context that carries ONLY the fields those handlers
- * actually read; PTY-dependent fields are `null` (cast through unknown
- * to satisfy the strict typedef) and any handler that tries to dereference
- * them throws — caught by the runner's per-command try/catch and acked
- * as `failed` to the relay.
+ * For ACP we reuse the agent-AGNOSTIC ones (preview flow, file ops, git ops,
+ * terminal ops, etc.) without re-implementing them. Those handlers read only
+ * {@link BaseHandlerContext} fields, so this returns exactly that — no PTY
+ * machinery, no `as unknown as` cast fabricating fields we don't own. The full
+ * `HandlerContext` narrowing happens once, at `dispatchCommand`'s handler-
+ * invocation boundary (which documents why it's sound for base-only callers).
  *
  * Used today only for the preview pipeline (request_preview_detect /
  * preview_start / preview_stop / save_preview_config). Wider delegation
@@ -203,24 +198,18 @@ export function buildLegacyContextForACP(
   opts: AcpRunnerOptions,
   relay: CommandRelayService,
   runtime: RuntimeStrategy,
-): HandlerContext {
+): BaseHandlerContext {
   return {
-    outputSvc: null,
-    agent: null,
-    historySvc: null,
     runtime,
     relay,
-    setKeepAlive: null,
-    keepAliveCtx: null,
     pluginId: opts.pluginId,
     sessionId: opts.sessionId,
     // The running ACP agent (claude/codex/gemini/cursor). REQUIRED: headroom_configure
     // resolves the agent from ctx.agentId; without it the enable gate sees '' and
-    // returns {supported:false} for a real Claude session (the `as unknown` cast
-    // below previously hid this missing field from the type checker).
+    // returns {supported:false} for a real Claude session.
     agentId: opts.agent,
     pluginAuthToken: opts.pluginAuthToken,
-  } as unknown as HandlerContext;
+  };
 }
 
 // ─── Per-command handlers (bodies verbatim from the runner.ts switch) ───────
@@ -307,7 +296,7 @@ async function startTaskH(ctx: AcpCommandContext): Promise<void> {
     // instead of staying as plain text (Gemini's typical shape
     // for "¿continuar? 1. sí 2. no").
     const finalText = streaming.getCurrentText();
-    if (opts.agent === 'cursor' && replyIsCursorUpgradeRequired(finalText)) {
+    if (agentHooks(opts.agent)?.classifyCompletedReply?.(finalText) === 'upgrade_required') {
       // Cursor's OWN plan paywall ("Upgrade your plan to continue"): the
       // user's Cursor account is on Free, which doesn't include the headless
       // Agent. NOT a credential problem — swap the bare text for an
@@ -598,12 +587,7 @@ async function ackEmptyH(ctx: AcpCommandContext): Promise<void> {
 }
 
 async function selectOptionH(ctx: AcpCommandContext): Promise<void> {
-  const { cmd, client, relay, streaming, history, oneMRecovery, budgetRecovery } = ctx;
-  // On-demand 1M-context recovery: if THIS select is the
-  // "Disable 1M context and continue" action we offered after a 1M-credits
-  // 429, handle it locally (disable + re-spawn + re-run the failed prompt)
-  // — never route it into the agent's resolveSelection.
-  if (await oneMRecovery.tryRecover(cmd.id)) return;
+  const { cmd, client, relay, streaming, history, budgetRecovery } = ctx;
   // Event-driven answer arrival — the user tapped an option on
   // mobile's awaiting-answer sheet or select_prompt block, and
   // the backend pushed the command via the CLI's SSE relay.

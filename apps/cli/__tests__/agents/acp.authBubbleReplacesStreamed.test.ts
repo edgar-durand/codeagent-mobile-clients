@@ -73,7 +73,6 @@ function makeHarness() {
   const relay = { sendResult };
 
   const turnFiles = { flushTurn: vi.fn(async () => undefined) };
-  const oneMRecovery = { offer: vi.fn(async () => undefined), tryRecover: vi.fn(async () => false) };
 
   const opts = {
     agent: 'claude' as const,
@@ -113,7 +112,6 @@ function makeHarness() {
       () => null,
       publisher,
       [],
-      oneMRecovery as never,
       { offer: vi.fn(async () => undefined), tryRecover: vi.fn(async () => false) } as never,
       { get: () => false, set: vi.fn() },
     );
@@ -232,7 +230,6 @@ describe('ACP start_task — generic failure with partial text keeps the partial
       () => null,
       publisher,
       [],
-      { offer: vi.fn(async () => undefined), tryRecover: vi.fn(async () => false) } as never,
       { offer: vi.fn(async () => undefined), tryRecover: vi.fn(async () => false) } as never,
       { get: () => false, set: vi.fn() },
     );
@@ -356,7 +353,6 @@ describe('ACP handleCommand — budget-reached POST fires exactly once (fire-onc
       () => null,
       publisher,
       recentStderr,
-      { offer: vi.fn(async () => undefined), tryRecover: vi.fn(async () => false) } as never,
       budgetRecovery as never,
       budgetReachedFlag,
     );
@@ -390,7 +386,6 @@ describe('ACP handleCommand — budget-reached POST fires exactly once (fire-onc
       () => null,
       publisher,
       recentStderr,
-      { offer: vi.fn(async () => undefined), tryRecover: vi.fn(async () => false) } as never,
       budgetRecovery as never,
       budgetReachedFlag,
     );

@@ -13,8 +13,15 @@
  * CLAUDE.md "Agent-failure messaging" section.
  */
 
+import type { AgentId } from '@codeam/shared';
 import { looksLike1mContextCreditsError } from './oneMContextRecovery';
 import { looksLikeBudgetExceeded, extractBudgetPeriod } from './budgetRecovery';
+import { agentHooks } from './agent-hooks';
+
+// The per-agent classifier predicates live in `agent-hooks.ts` (the pure
+// per-agent registry). Re-exported here from their original home so the
+// runner's re-export chain and existing importers keep resolving them unchanged.
+export { replyIsCursorUpgradeRequired } from './agent-hooks';
 
 export function describeError(err: unknown): string {
   if (err instanceof Error) return err.message;
@@ -63,23 +70,6 @@ export const AUTH_FAILURE_MESSAGE =
   // On any surface that can't handle the scheme it just renders as a tappable
   // label, so the instruction still reads correctly.
   'Tap [Re-authenticate this agent](codeam://reauth) to renew your credentials in Profile › Agents, then send your message again.';
-
-/**
- * True when a cursor-agent reply IS Cursor's own plan paywall — "Upgrade your
- * plan to continue". The user's CURSOR account has no active plan/credits to
- * run the agent. This is NOT a credential problem (the login works), so we do
- * NOT flag the credential invalid or offer re-link; we point the user at their
- * Cursor account to upgrade. Length-guarded so a reply that merely DISCUSSES
- * plans isn't misclassified.
- */
-export function replyIsCursorUpgradeRequired(finalText: string): boolean {
-  const t = finalText.trim().toLowerCase();
-  if (t.length === 0 || t.length > 200) return false;
-  return (
-    t.includes('upgrade your plan to continue') ||
-    (t.includes('upgrade your plan') && t.includes('continue'))
-  );
-}
 
 /**
  * Actionable bubble when the user's Cursor ACCOUNT needs a paid plan to run the
@@ -142,18 +132,23 @@ export function looksLikeProviderOutage(text: string): boolean {
 export function agentStatusPage(
   agent: string,
 ): { vendor: string; url: string } | null {
+  // Normalise vendor aliases + the public id (`claude_code`) onto the runtime
+  // AgentId, preserving the substring robustness callers rely on, then read the
+  // per-vendor `{ vendor, url }` DATA from the per-agent hooks registry.
   const a = (agent ?? '').toLowerCase();
-  if (a.includes('claude') || a.includes('anthropic'))
-    return { vendor: 'Anthropic', url: 'https://status.anthropic.com' };
-  if (a.includes('codex') || a.includes('openai'))
-    return { vendor: 'OpenAI', url: 'https://status.openai.com' };
-  if (a.includes('gemini') || a.includes('google'))
-    return { vendor: 'Google', url: 'https://status.cloud.google.com' };
-  if (a.includes('copilot'))
-    return { vendor: 'GitHub', url: 'https://www.githubstatus.com' };
-  if (a.includes('cursor'))
-    return { vendor: 'Cursor', url: 'https://status.cursor.com' };
-  return null;
+  const id: AgentId | null =
+    a.includes('claude') || a.includes('anthropic')
+      ? 'claude'
+      : a.includes('codex') || a.includes('openai')
+        ? 'codex'
+        : a.includes('gemini') || a.includes('google')
+          ? 'gemini'
+          : a.includes('copilot')
+            ? 'copilot'
+            : a.includes('cursor')
+              ? 'cursor'
+              : null;
+  return id ? (agentHooks(id)?.statusPage ?? null) : null;
 }
 
 /**
@@ -173,13 +168,6 @@ export function providerOutageMessage(agent: string): string {
   );
 }
 
-/** True when a startup failure is Gemini's post-2026-06-18 free-tier death. */
-function isGeminiIneligibleTier(haystack: string): boolean {
-  return /IneligibleTierError|UNSUPPORTED_CLIENT|no longer supported for Gemini Code Assist|not eligible for Gemini Code Assist/i.test(
-    haystack,
-  );
-}
-
 /**
  * Human-facing chat message for an agent that FAILED TO START (its ACP
  * `newSession` never produced a session — e.g. Gemini's Code Assist onboarding
@@ -188,7 +176,7 @@ function isGeminiIneligibleTier(haystack: string): boolean {
  */
 export function startupFailureMessage(agent: string, detail: string, recentStderr: string): string {
   const haystack = `${detail}\n${recentStderr}`;
-  if (agent === 'gemini' && isGeminiIneligibleTier(haystack)) {
+  if (agentHooks(agent)?.classifyStartupFailure?.(haystack) === 'ineligible_tier') {
     return [
       "⚠️ **Gemini couldn't start — your Google account isn't eligible.**",
       '',

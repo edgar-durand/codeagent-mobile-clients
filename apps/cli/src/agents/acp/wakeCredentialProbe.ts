@@ -11,7 +11,7 @@
  *
  * Kept out of the heavy runner graph (no import back into runner.ts) and shaped
  * as a DI factory so it unit-tests with fakes — same pattern as
- * `createOneMRecovery`. The runner wires the injected callbacks to the live
+ * `createBudgetRecovery`. The runner wires the injected callbacks to the live
  * publisher / history / reportCredentialInvalid.
  */
 import { extractLocalClaudeToken } from '../claude/local-token';
