@@ -4,6 +4,38 @@ All notable changes to the CodeAgent Mobile VS Code extension are documented her
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.60.0] — 2026-07-08
+
+### Added
+
+- **cli:** Baton local-session gate + feature flag
+- **cli:** BatonController turn-safe single-driver state machine
+- **cli:** TranscriptMirror emits JSONL deltas for the read-only view
+- **cli:** NativeTuiDriver over AgentService with idle turn-boundary
+- **cli:** AcpDriver over AcpClient (spawn + loadSession resume)
+- **cli:** PostBatonEvent publisher driver-state
+- **cli:** Take_control/handback relay handlers
+- **cli:** Wire local baton branch before the ACP fork (flag-gated)
+- **cli:** Make the session baton drivable after a hand-off
+- **cli:** Enable the session baton by default for local sessions (CODEAM_BATON=0 kill switch)
+- **shared:** Add baton_state to USER_EVENTS (session baton wire type)
+
+### Changed
+
+- **cli:** Extract shared ACP command-context assembler + proxy-relaunch helper
+
+### Fixed
+
+- **cli:** Mark SessionDriver.kind readonly (contract)
+- **cli:** Baton switch-failure recovery + ack-on-failure; test cleanups
+- **cli:** EncodeCwd underscore-collapse + ClaudeRuntimeStrategy.resolveHistoryFile (baton mirror)
+- **cli:** AcpClient.start cleans up on handshake failure (baton take-control recovery)
+
+### Tests
+
+- **cli:** Prove noteOutput resets the idle window + cover throw/undefined branches
+- **cli:** Gated cross-mode-resume integration test (real claude)
+
 ## [2.59.0] — 2026-07-08
 
 ### Added
