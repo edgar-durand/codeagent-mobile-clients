@@ -4,6 +4,16 @@ All notable changes to the CodeAgent-Mobile JetBrains plugin are documented here
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.60.1] — 2026-07-08
+
+### Chore
+
+- **cli:** Remove CODEAM_BATON flag — baton unconditional for local sessions
+
+### Fixed
+
+- **cli:** Baton LOCAL_DRIVE mirror publishes turns live via the output stream
+
 ## [2.60.0] — 2026-07-08
 
 ### Added
