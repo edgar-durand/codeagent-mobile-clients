@@ -37,8 +37,8 @@ import { AGENT_REGISTRY, type AgentId, type AgentModel, type StreamingChunkKind 
 import type { RequestPermissionResponse } from '@agentclientprotocol/sdk';
 import { createOsStrategy } from '../../os';
 import { createInteractiveAgentStrategy } from '../registry';
-import { killHeadroomProxy, writeHeadroomProxyPidfile } from '../../services/headroom/proxy-pid';
 import { AcpClient, type AcpClientOptions } from './client';
+import { relaunchProxyWithoutBudget } from './headroom-budget-proxy';
 import type { AdapterSpec } from './adapters';
 import { AcpPublisher } from './publisher';
 import type { PromptBlock } from './buildAcpPromptBlocks';
@@ -68,7 +68,12 @@ import {
 } from './failure-messages';
 import { reportCredentialInvalid } from './backend-reports';
 import { agentHooks } from './agent-hooks';
-import { dispatchAcpCommand, recoverFromFailedTurn } from './command-handlers';
+import {
+  assembleAcpCommandContext,
+  dispatchAcpCommand,
+  recoverFromFailedTurn,
+  type AcpSessionContext,
+} from './command-handlers';
 
 // ─── Re-exports (Phase 3 extraction, bd codeagent-2sa) ────────────────────
 // The failure-messaging contract, the best-effort backend report POSTs, and
@@ -95,6 +100,7 @@ export {
 export { postBudgetReached, reportCredentialInvalid } from './backend-reports';
 export {
   ACP_QUICK_REPLIES,
+  assembleAcpCommandContext,
   buildLegacyContextForACP,
   cancelStuckTurn,
   dispatchAcpCommand,
@@ -102,6 +108,7 @@ export {
   recoverFromFailedTurn,
   type AcpCommandContext,
   type AcpCommandHandler,
+  type AcpSessionContext,
 } from './command-handlers';
 
 /**
@@ -817,23 +824,11 @@ async function surfaceStartupFailure(opts: {
   errRelay.start();
 }
 
-/**
- * Build the env object for relaunching the Headroom proxy WITHOUT any budget cap.
- *
- * Spreads `baseEnv` (normally `process.env`), sets `HEADROOM_KOMPRESS_BACKEND`
- * to lock the ONNX backend, then **deletes** both budget env keys so the
- * relaunched proxy starts with NO cap even when the headroom_budget handler
- * had previously written those keys into `process.env` on the same process.
- *
- * Pure + exported so the "pause clears budget env" invariant is
- * unit-tested without spawning a full ACP runner or a real proxy.
- */
-export function buildRelaunchProxyEnv(baseEnv: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
-  const env: Record<string, string | undefined> = { ...baseEnv, HEADROOM_KOMPRESS_BACKEND: 'onnx_cpu' };
-  delete env['HEADROOM_BUDGET'];
-  delete env['HEADROOM_BUDGET_PERIOD'];
-  return env as NodeJS.ProcessEnv;
-}
+// `buildRelaunchProxyEnv` + `relaunchProxyWithoutBudget` moved to
+// `./headroom-budget-proxy` so the baton AcpDriver can build its own
+// budget-recovery without importing this heavy runner graph. Re-exported here
+// verbatim so the existing `relaunchProxyEnv.test` importer keeps working.
+export { buildRelaunchProxyEnv } from './headroom-budget-proxy';
 
 /**
  * Adapter spawn env for an ACP session. Two independent knobs:
@@ -1075,39 +1070,6 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
   // (not once per turn) so a repeated budget-exceeded series doesn't spam the
   // backend endpoint. Subsequent occurrences still surface the recovery bubble.
   let _budgetReachedPosted = false;
-
-  const relaunchProxyWithoutBudget = async (): Promise<void> => {
-    const { spawn } = await import('node:child_process');
-    // Kill the budget-capped proxy — targeted pidfile kill, falling back to
-    // the legacy pkill pattern when no live recorded pid exists.
-    killHeadroomProxy();
-    // Brief settle so the port frees before relaunch.
-    await new Promise<void>((r) => setTimeout(r, 500));
-    // Re-spawn without budget args.
-    // buildRelaunchProxyEnv clears both budget env keys so the "paused" proxy
-    // inherits NO budget cap — neither flag nor env — even when the
-    // headroom_budget handler had previously written them into process.env.
-    const proxyEnv = buildRelaunchProxyEnv(process.env);
-    try {
-      const proxy = spawn(
-        'headroom',
-        ['proxy', '--port', '8787'],
-        { stdio: 'ignore', detached: true, env: proxyEnv as NodeJS.ProcessEnv },
-      );
-      proxy.once('error', (e: Error) => {
-        log.warn('acpRunner', `budget recovery proxy relaunch error (best-effort): ${e.message}`);
-      });
-      proxy.unref();
-      writeHeadroomProxyPidfile(proxy.pid);
-    } catch (e) {
-      log.warn(
-        'acpRunner',
-        `budget recovery proxy relaunch failed (best-effort): ${e instanceof Error ? e.message : String(e)}`,
-      );
-    }
-    // Settle: give the proxy ~3 s to start accepting connections.
-    await new Promise<void>((r) => setTimeout(r, 3_000));
-  };
 
   const budgetRecovery = createBudgetRecovery<PromptBlock>({
     publishText: (text) => publisher.publishOutput({ type: 'text', content: text, done: true }),
@@ -1420,8 +1382,7 @@ export async function handleCommand(
   /** Fire-once guard for the budget-reached backend POST. */
   budgetReachedFlag: { get: () => boolean; set: (v: boolean) => void },
 ): Promise<void> {
-  await dispatchAcpCommand({
-    cmd,
+  const session: AcpSessionContext = {
     client,
     relay,
     acpSessionId,
@@ -1437,7 +1398,8 @@ export async function handleCommand(
     recentStderr,
     budgetRecovery,
     budgetReachedFlag,
-  });
+  };
+  await dispatchAcpCommand(assembleAcpCommandContext(session, cmd));
 }
 
 /**
