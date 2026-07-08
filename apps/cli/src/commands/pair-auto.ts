@@ -46,7 +46,7 @@ function fail(msg: string): never {
   process.exit(1);
 }
 
-function readTokenFromArgs(args: string[]): string {
+function resolveTokenValue(args: string[]): string {
   const inline = args.find((a) => a.startsWith('--token='));
   if (inline) {
     const value = inline.slice('--token='.length).trim();
@@ -70,6 +70,31 @@ function readTokenFromArgs(args: string[]): string {
   }
   if (process.env.CODEAM_AUTO_TOKEN) return process.env.CODEAM_AUTO_TOKEN;
   fail('codeam pair-auto requires --token-file=<path>, --token=<value>, or CODEAM_AUTO_TOKEN env');
+}
+
+/**
+ * Resolve the pair-auto token AND publish the auto/headless-plane marker.
+ *
+ * `pair-auto` is the AUTOMATED, headless daemon (codespace bootstrap /
+ * self-hosted host-agent) — never an interactive local session. Resolving its
+ * token is the exact moment we KNOW this is the auto plane, so we set
+ * `CODEAM_AUTO_TOKEN` here. That trips `isLocalSession()` (baton/gate.ts) to
+ * FALSE so the session-baton never engages the interactive native TUI in a
+ * headless daemon — INDEPENDENT of whether the caller set `CODESPACES` /
+ * `CODEAM_AUTO_APPROVE`. Without this, a `pair-auto --token-file=…` launched
+ * with no other env markers wrongly took the baton branch (native TUI) instead
+ * of `runAcpSession`, so the synthesized `agent_banner` chunk never reached the
+ * app. In prod, codespaces set `CODESPACES=true` and host-agent sets this same
+ * var, so this only tightens a latent gap; real local `codeam pair` (which
+ * never runs pair-auto) is untouched and keeps the baton.
+ *
+ * Exported so the invariant "pair-auto is never a local/baton session" is
+ * unit-tested without the network claim in {@link pairAuto}.
+ */
+export function readTokenFromArgs(args: string[]): string {
+  const token = resolveTokenValue(args);
+  process.env.CODEAM_AUTO_TOKEN = token;
+  return token;
 }
 
 /**
