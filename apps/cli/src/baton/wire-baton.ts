@@ -98,8 +98,8 @@ export interface BatonSessionOptions {
 }
 
 /**
- * Composition root for a LOCAL session baton (flag-gated, local-only — the
- * caller in `start.ts` guards on `isLocalSession() && batonEnabled()`).
+ * Composition root for a LOCAL session baton (local-only — the caller in
+ * `start.ts` guards on `isLocalSession()`).
  *
  * Assembles the real pieces and blocks forever (mirroring `runAcpSession`):
  *   - a {@link NativeTuiDriver} over the existing {@link AgentService} PTY —

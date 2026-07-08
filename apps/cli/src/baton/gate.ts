@@ -10,11 +10,3 @@ export function isLocalSession(env: NodeJS.ProcessEnv = process.env): boolean {
     !env.CODEAM_ENROLL_TOKEN
   );
 }
-
-/** Baton is ON by default for local sessions. `CODEAM_BATON=0` (or `false`)
- *  is the kill switch to opt back into the legacy headless-only local path. */
-export function batonEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
-  const v = env.CODEAM_BATON;
-  if (v === undefined || v === '') return true;
-  return v !== '0' && v.toLowerCase() !== 'false';
-}

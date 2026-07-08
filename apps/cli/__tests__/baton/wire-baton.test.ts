@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import { buildBaton, makeOnCommand } from '../../src/baton/wire-baton';
 import type { RemoteCommand } from '../../src/services/command-relay.service';
-import { isLocalSession, batonEnabled } from '../../src/baton/gate';
+import { isLocalSession } from '../../src/baton/gate';
 
 describe('buildBaton composition', () => {
   it('routes take_control to the controller and other commands to the active driver dispatcher', async () => {
@@ -102,11 +102,7 @@ describe('buildBaton composition', () => {
 
 describe('cloud/self-hosted regression (gate)', () => {
   it('cloud/self-hosted never enter the baton (gate is false)', () => {
-    expect(isLocalSession({ CODESPACES: 'true' }) && batonEnabled({ CODEAM_BATON: '1' })).toBe(
-      false,
-    );
-    expect(
-      isLocalSession({ CODEAM_AUTO_APPROVE: '1' }) && batonEnabled({ CODEAM_BATON: '1' }),
-    ).toBe(false);
+    expect(isLocalSession({ CODESPACES: 'true' })).toBe(false);
+    expect(isLocalSession({ CODEAM_AUTO_APPROVE: '1' })).toBe(false);
   });
 });
