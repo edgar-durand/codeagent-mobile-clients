@@ -25,8 +25,10 @@
 import * as path from 'node:path';
 import type { AgentId } from '@codeam/shared';
 import {
+  resolveCursorAgentBinary,
   waitForClaudeNativeBinary,
   waitForCommandOnPath,
+  waitForCursorAgent,
   type WaitForClaudeBinaryOptions,
 } from './agent-binary';
 
@@ -126,11 +128,19 @@ const REGISTRY: Partial<Record<AgentId, () => AdapterSpec | null>> = {
   // so the provisioned `CURSOR_API_KEY` actually reaches cursor-agent — the
   // interactive PTY path left cursor unauthenticated. It also gives the typed
   // streaming (tool calls / subagents) the other ACP agents emit.
+  //
+  // ⚠️ Windows stale-PATH: Cursor's installer drops `cursor-agent.exe` in
+  // `%LOCALAPPDATA%\cursor-agent\` and adds that dir to the *User* PATH,
+  // which a process already running (our CLI host, spawned at pairing)
+  // never inherits — so a bare `cursor-agent` spawn ENOENTs even though
+  // it's installed. `resolveCursorAgentBinary()` returns the absolute path
+  // when present (sidestepping PATH), falling back to the bare name on
+  // macOS/Linux and when it isn't in the known location yet.
   cursor: () => ({
-    command: 'cursor-agent',
+    command: resolveCursorAgentBinary() ?? 'cursor-agent',
     args: ['acp'],
     requiresAgentBinary: 'cursor-agent',
-    waitForBinary: (o) => waitForCommandOnPath('cursor-agent', o),
+    waitForBinary: (o) => waitForCursorAgent(o),
   }),
   // Gemini speaks ACP natively via `gemini --acp` — no npm adapter
   // package, just the user-installed `gemini` binary on PATH. Same

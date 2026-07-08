@@ -7,6 +7,7 @@
  */
 
 import * as fs from 'node:fs';
+import * as path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { AGENT_REGISTRY } from '@codeam/shared';
 import { getAcpAdapter, listAcpAdapterIdsForTests } from '../../src/agents/acp/adapters';
@@ -26,7 +27,14 @@ describe('ACP adapter registry', () => {
       const isNpmAdapter = spec!.command === process.execPath;
       if (isNpmAdapter) {
         expect(fs.existsSync(spec!.args[0]), `bin not found at ${spec!.args[0]}`).toBe(true);
+      } else if (path.isAbsolute(spec!.command)) {
+        // Native-ACP with up-front install-location resolution
+        // (cursor-agent on Windows/Unix): `command` is an absolute path
+        // to the launcher on disk.
+        expect(fs.existsSync(spec!.command), `bin not found at ${spec!.command}`).toBe(true);
       } else {
+        // Native-ACP shape: `command` is the agent binary NAME,
+        // PATH-resolved at spawn time.
         expect(spec!.command).toMatch(/^[a-z][a-z0-9-]+$/);
       }
       expect(spec!.requiresAgentBinary).toMatch(/^[a-z][a-z0-9-]+$/);
@@ -67,7 +75,14 @@ describe('ACP adapter registry', () => {
     // PTY) is what delivers CURSOR_API_KEY to it via the ACP client's env.
     const spec = getAcpAdapter('cursor');
     expect(spec).not.toBeNull();
-    expect(spec!.command).toBe('cursor-agent');
+    // Native launcher: the bare `cursor-agent` name (PATH-resolved at
+    // spawn) OR an absolute path to the resolved install binary
+    // (cursor-agent[.exe]) — never the npm-adapter `process.execPath` shape.
+    expect(spec!.command).not.toBe(process.execPath);
+    expect(
+      spec!.command === 'cursor-agent' || /[\\/]cursor-agent(\.exe)?$/.test(spec!.command),
+      `expected native cursor-agent launcher, got ${spec!.command}`,
+    ).toBe(true);
     expect(spec!.args).toEqual(['acp']);
     expect(spec!.requiresAgentBinary).toBe('cursor-agent');
   });

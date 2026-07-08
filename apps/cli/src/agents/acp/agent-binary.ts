@@ -1,4 +1,5 @@
 import fs from 'fs';
+import os from 'os';
 import path from 'path';
 import { spawn, spawnSync, type ChildProcess } from 'child_process';
 
@@ -213,6 +214,86 @@ export async function waitForCommandOnPath(
   const sleep = opts.sleep ?? realSleep;
   const probe = opts.probe;
   const check = (): boolean => isCommandOnPath(cmd, probe);
+  const deadline = now() + timeoutMs;
+  if (check()) return true;
+  while (now() < deadline) {
+    await sleep(pollMs);
+    if (check()) return true;
+  }
+  return check();
+}
+
+// ─────────────────────────── cursor-agent ────────────────────────────
+// cursor-agent is the odd one out: unlike codex/gemini (which land on the
+// PATH we inherit), Cursor's installer updates PATH in a way a
+// long-running process never sees — so we resolve it by absolute path.
+
+/** Injectable deps for {@link resolveCursorAgentBinary} (test seams). */
+export interface CursorAgentResolveDeps {
+  existsSync?: (p: string) => boolean;
+  platform?: NodeJS.Platform;
+  env?: NodeJS.ProcessEnv;
+  homedir?: string;
+}
+
+/**
+ * Absolute path to the user-installed `cursor-agent` launch binary when
+ * it can be found in its deterministic install location, else `null`
+ * (caller falls back to bare-name PATH resolution).
+ *
+ * WHY this exists — the Windows stale-PATH trap:
+ * Cursor's Windows installer (`cursor.com/install?win32=true`) unpacks the
+ * binaries into `%LOCALAPPDATA%\cursor-agent\` and appends that dir to the
+ * *User* PATH via `SetEnvironmentVariable(..., "User")`. That update never
+ * reaches a process that is ALREADY running — and our CLI host is spawned
+ * at pairing, before the user installs cursor-agent. So `cursor-agent` is
+ * on disk but absent from the PATH we inherited, and a bare
+ * `spawn('cursor-agent')` dies with `ENOENT` ("not found on PATH") even
+ * though it is installed (Georgy, Win 11, 2026-07). Resolving the absolute
+ * path sidesteps PATH entirely for the spawn.
+ *
+ * On macOS/Linux the installer drops it at `~/.local/bin/cursor-agent`
+ * (normally already on PATH); we probe it too as a cheap fallback for the
+ * same stale-env class, and return `null` when absent so the prior
+ * PATH-resolution behavior still applies.
+ */
+export function resolveCursorAgentBinary(deps: CursorAgentResolveDeps = {}): string | null {
+  const existsSync = deps.existsSync ?? fs.existsSync;
+  const platform = deps.platform ?? process.platform;
+  const env = deps.env ?? process.env;
+  // Build paths with the separator of the RESOLVED platform (not the host
+  // running this code), so injecting `platform` is meaningful in tests and
+  // production stays correct (`path.win32` on Windows, `path.posix` on Unix).
+  if (platform === 'win32') {
+    const localAppData = env.LOCALAPPDATA;
+    if (!localAppData) return null;
+    // The installer copies `cursor-agent.exe` to the install root; the
+    // `.exe` is the real launcher (`.cmd`/`.ps1` are shims that can't be
+    // spawned without a shell), so we deliberately target the `.exe`.
+    const exe = path.win32.join(localAppData, 'cursor-agent', 'cursor-agent.exe');
+    return existsSync(exe) ? exe : null;
+  }
+  const home = deps.homedir ?? os.homedir();
+  const unix = path.posix.join(home, '.local', 'bin', 'cursor-agent');
+  return existsSync(unix) ? unix : null;
+}
+
+/**
+ * Readiness gate for cursor-agent: ready once it resolves to an absolute
+ * install path OR appears on PATH (a fresh install racing the spawn
+ * gate). Mirrors {@link waitForCommandOnPath} but also honours the
+ * known-location resolver, so the Windows stale-PATH case (installed but
+ * off our PATH) is treated as ready instead of timing out for 180 s.
+ */
+export async function waitForCursorAgent(
+  opts: WaitForCommandOptions & CursorAgentResolveDeps = {},
+): Promise<boolean> {
+  const timeoutMs = opts.timeoutMs ?? 180_000;
+  const pollMs = opts.pollMs ?? 500;
+  const now = opts.now ?? Date.now;
+  const sleep = opts.sleep ?? realSleep;
+  const check = (): boolean =>
+    resolveCursorAgentBinary(opts) !== null || isCommandOnPath('cursor-agent', opts.probe);
   const deadline = now() + timeoutMs;
   if (check()) return true;
   while (now() < deadline) {
