@@ -4,6 +4,20 @@ All notable changes to the CodeAgent-Mobile JetBrains plugin are documented here
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.59.0] — 2026-07-08
+
+### Added
+
+- **vsc-plugin:** Route stop_task through AgentStrategyRegistry, alias escape_key
+- **vsc-plugin:** CopilotLmStrategy.stop() cancels the active LM stream
+- **jetbrains-plugin:** Alias escape_key to stop_task
+- **jetbrains-plugin:** Best-effort surface-interrupt helper for GUI agents
+- **jetbrains-plugin:** Concrete strategies interrupt their surface on stop()
+
+### Tests
+
+- **cli:** Regression-guard stopTaskH cancels ACP turn and acks once
+
 ## [2.58.1] — 2026-07-08
 
 ### CI
