@@ -37,7 +37,7 @@ import {
 import { capture, identifyUser, shutdownTelemetry } from '../services/telemetry.service';
 import { provisionBeadsForStart } from '../beads/wiring';
 import type { StartedBeads } from '../beads';
-import { isLocalSession, batonEnabled } from '../baton/gate';
+import { isLocalSession } from '../baton/gate';
 import { runBatonSession } from '../baton/wire-baton';
 import { ensureClaudeOnboarded } from '../agents/claude/onboarding';
 import { log } from '../services/logger';
@@ -299,13 +299,13 @@ export async function start(requestedAgent?: AgentId): Promise<void> {
   // Agents WITHOUT an adapter (aider, cursor, coderabbit) keep using
   // the generic PTY runtime below.
   //
-  // LOCAL session baton (flag-gated, local-only) — branches BEFORE the ACP
-  // fork so codespaces/self-hosted fall through UNCHANGED. Only a local
-  // session (`isLocalSession()`) with the kill-switch on (`batonEnabled()`)
-  // and an ACP-capable agent takes this path; it launches the native TUI and
-  // lets mobile take/return control over ACP. The baton owns its own
-  // lifecycle and never returns, exactly like `runAcpSession` below.
-  if (isLocalSession() && batonEnabled() && requiresAcp(session.agent)) {
+  // LOCAL session baton (local-only) — branches BEFORE the ACP fork so
+  // codespaces/self-hosted fall through UNCHANGED. Only a local session
+  // (`isLocalSession()`) with an ACP-capable agent takes this path; it
+  // launches the native TUI and lets mobile take/return control over ACP.
+  // The baton owns its own lifecycle and never returns, exactly like
+  // `runAcpSession` below.
+  if (isLocalSession() && requiresAcp(session.agent)) {
     const adapter = getAcpAdapter(session.agent);
     if (adapter && session.pluginAuthToken) {
       await runBatonSession({
