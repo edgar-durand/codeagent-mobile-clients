@@ -1,5 +1,10 @@
 import { describe, it, expect, vi } from 'vitest';
-import { buildBaton, makeOnCommand, makeMirrorOnNewMessages } from '../../src/baton/wire-baton';
+import {
+  buildBaton,
+  makeOnCommand,
+  makeMirrorOnNewMessages,
+  makeSerializedBatonPoster,
+} from '../../src/baton/wire-baton';
 import type { RemoteCommand } from '../../src/services/command-relay.service';
 import { isLocalSession } from '../../src/baton/gate';
 import type { NormalizedMessage } from '@codeam/shared';
@@ -126,6 +131,40 @@ describe('cloud/self-hosted regression (gate)', () => {
   it('cloud/self-hosted never enter the baton (gate is false)', () => {
     expect(isLocalSession({ CODESPACES: 'true' })).toBe(false);
     expect(isLocalSession({ CODEAM_AUTO_APPROVE: '1' })).toBe(false);
+  });
+});
+
+describe('makeSerializedBatonPoster (SWITCHING can never overtake the steady state)', () => {
+  it('posts in call order even when the first POST is slower than the second', async () => {
+    const completed: string[] = [];
+    // SWITCHING resolves SLOWER than the steady-state POST would on its own —
+    // the exact race that left mobile stuck on "Switching…" with the raw
+    // fire-and-forget `void postBatonEvent`.
+    const post = vi.fn(async (state: string) => {
+      await new Promise((r) => setTimeout(r, state === 'SWITCHING' ? 20 : 1));
+      completed.push(state);
+    });
+    const postOrdered = makeSerializedBatonPoster(post);
+
+    postOrdered('SWITCHING');
+    postOrdered('LOCAL_DRIVE');
+
+    await vi.waitFor(() => expect(completed).toEqual(['SWITCHING', 'LOCAL_DRIVE']));
+  });
+
+  it('a failed POST does not wedge the chain — later posts still run', async () => {
+    const completed: string[] = [];
+    const post = vi.fn(async (state: string) => {
+      if (state === 'SWITCHING') throw new Error('network blip');
+      completed.push(state);
+    });
+    const postOrdered = makeSerializedBatonPoster(post);
+
+    postOrdered('SWITCHING');
+    postOrdered('MOBILE_DRIVE');
+
+    await vi.waitFor(() => expect(completed).toEqual(['MOBILE_DRIVE']));
+    expect(post).toHaveBeenCalledTimes(2);
   });
 });
 
