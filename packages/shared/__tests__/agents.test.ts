@@ -54,6 +54,7 @@ describe('AGENT_REGISTRY', () => {
       'codex',
       'cursor',
       'gemini',
+      'kimi',
     ]);
   });
 

@@ -49,6 +49,7 @@ export type LinkedAgentId =
   | 'aider'
   | 'coderabbit'
   | 'gemini'
+  | 'kimi'
   | typeof HOUSE_AGENT_ID;
 
 export const LINKED_AGENT_IDS: readonly LinkedAgentId[] = [
@@ -58,6 +59,7 @@ export const LINKED_AGENT_IDS: readonly LinkedAgentId[] = [
   'aider',
   'coderabbit',
   'gemini',
+  'kimi',
   HOUSE_AGENT_ID,
 ];
 
@@ -93,6 +95,7 @@ export const PUBLIC_TO_INTERNAL: Readonly<
   aider: 'aider',
   coderabbit: 'coderabbit',
   gemini: 'gemini',
+  kimi: 'kimi',
   // The house agent runs Claude Code under the hood (pointed at the
   // MiniMax proxy). Its internal runtime is therefore `claude`.
   [HOUSE_AGENT_ID]: 'claude',
@@ -110,6 +113,7 @@ export const INTERNAL_TO_PUBLIC: Readonly<Partial<Record<AgentId, LinkedAgentId>
   aider: 'aider',
   coderabbit: 'coderabbit',
   gemini: 'gemini',
+  kimi: 'kimi',
 };
 
 function isPublicToInternalKey(v: string): v is LinkedAgentId | 'claude' | 'copilot' {

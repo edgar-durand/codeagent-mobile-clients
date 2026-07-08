@@ -52,6 +52,7 @@ const PUBLIC_TO_INTERNAL_AGENT: Readonly<Record<string, AgentId>> = {
   aider: 'aider',
   coderabbit: 'coderabbit',
   gemini: 'gemini',
+  kimi: 'kimi',
 };
 
 /** Resolve a public LinkedAgent id to the internal agent id, or null. */
@@ -231,8 +232,35 @@ const cursorProvisioner: AgentProvisioner = {
   },
 };
 
+const kimiProvisioner: AgentProvisioner = {
+  write(auth, home): Record<string, string> {
+    // Kimi's OAuth login-state lives under its data root (~/.kimi-code by
+    // default, overridable with KIMI_CODE_HOME) as per-provider JSON files in
+    // credentials/. ⚠️ The exact per-provider filename is unverified without a
+    // live box — confirm via `strace -f -e openat kimi status | grep -i cred`
+    // during Step 8 before relying on the oauth_token path.
+    const credentialsFile = path.join(home, '.kimi-code', 'credentials', 'kimi.json');
+
+    if (auth.kind === 'api_key') {
+      // Shipping path: `kimi acp` reads the key from KIMI_API_KEY (+ optional
+      // KIMI_BASE_URL, default https://api.moonshot.ai/v1). Remove any stale
+      // login-state file so it can't shadow the freshly-provisioned key.
+      rmIfExists(credentialsFile);
+      return { KIMI_API_KEY: auth.value };
+    }
+
+    // oauth_token → the captured ~/.kimi-code/credentials blob, written
+    // verbatim (phase 2 — the login flow isn't reverse-engineered yet, so this
+    // path is only exercised once the capture side ships and Step 8 confirms
+    // the filename). The accessToken must NOT go in KIMI_API_KEY.
+    writeFile0600(credentialsFile, auth.value);
+    return {};
+  },
+};
+
 const PROVISIONERS: Partial<Record<AgentId, AgentProvisioner>> = {
   claude: claudeProvisioner,
+  kimi: kimiProvisioner,
   codex: codexProvisioner,
   gemini: geminiProvisioner,
   cursor: cursorProvisioner,

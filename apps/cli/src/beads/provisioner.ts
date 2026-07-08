@@ -73,6 +73,9 @@ const AGENT_SETUP_RECIPE: Record<AgentId, string | null> = {
   cursor: 'cursor',
   aider: 'aider',
   gemini: 'gemini',
+  // bd 1.0.5 has no Kimi recipe → skip (like coderabbit); beads still works,
+  // the agent just isn't wired natively via `bd setup`.
+  kimi: null,
   coderabbit: null,
 };
 

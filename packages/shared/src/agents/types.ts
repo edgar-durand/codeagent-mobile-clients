@@ -5,7 +5,8 @@ export type AgentId =
   | 'coderabbit'
   | 'cursor'
   | 'aider'
-  | 'gemini';
+  | 'gemini'
+  | 'kimi';
 
 export type AgentAuthKind = 'oauth_token' | 'api_key' | 'setup_token';
 

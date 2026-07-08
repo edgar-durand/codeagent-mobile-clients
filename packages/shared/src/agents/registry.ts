@@ -111,6 +111,23 @@ export const AGENT_REGISTRY: Record<AgentId, AgentMetadata> = {
     // Native ACP server: `gemini --skip-trust --acp`.
     acp: true,
   },
+  kimi: {
+    id: 'kimi',
+    displayName: 'Kimi Code',
+    binaryName: 'kimi',
+    enabled: true,
+    // API key (KIMI_API_KEY, + optional KIMI_BASE_URL) is the shipping auth —
+    // fully documented, no reverse-engineering. OAuth `/login` (login-state at
+    // ~/.kimi-code/credentials/<name>.json, base https://api.kimi.com/coding/)
+    // is declared so it can land later without a wire change, but capturing
+    // that blob server-side is a separate reverse-engineering spike (phase 2).
+    supportedAuthKinds: ['api_key', 'oauth_token'],
+    preferredAuthKind: 'api_key',
+    // Moonshot's `kimi` is not listed by `headroom wrap --help` — runs native.
+    headroomWrappable: false,
+    // Native ACP server: `kimi acp` (stdio JSON-RPC, answers `initialize`).
+    acp: true,
+  },
 };
 
 export function getEnabledAgents(): AgentMetadata[] {

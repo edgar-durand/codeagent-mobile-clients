@@ -24,6 +24,7 @@ describe('LINKED_AGENT_IDS / PUBLIC_TO_INTERNAL', () => {
       'aider',
       'coderabbit',
       'gemini',
+      'kimi',
       'house-codeagent-cloud',
     ]);
     expect(isLinkedAgentId(HOUSE_AGENT_ID)).toBe(true);
@@ -167,12 +168,12 @@ describe('capability flags (registry)', () => {
     expect(wrappable).toEqual(['claude', 'codex', 'copilot']);
   });
 
-  it('acp = claude/codex/cursor/gemini exactly (adapters.ts REGISTRY)', () => {
+  it('acp = claude/codex/cursor/gemini/kimi exactly (adapters.ts REGISTRY)', () => {
     const acp = Object.values(AGENT_REGISTRY)
       .filter((m) => m.acp)
       .map((m) => m.id)
       .sort();
-    expect(acp).toEqual(['claude', 'codex', 'cursor', 'gemini']);
+    expect(acp).toEqual(['claude', 'codex', 'cursor', 'gemini', 'kimi']);
   });
 
   it('device-flow agents mirror the mobile agentCatalog (codex shows userCode, cursor must not)', () => {

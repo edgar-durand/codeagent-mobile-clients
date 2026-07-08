@@ -160,6 +160,19 @@ const REGISTRY: Partial<Record<AgentId, () => AdapterSpec | null>> = {
     requiresAgentBinary: 'gemini',
     waitForBinary: (o) => waitForCommandOnPath('gemini', o),
   }),
+  // Kimi Code (Moonshot) speaks ACP natively via `kimi acp` — a stdio
+  // JSON-RPC server that answers `initialize` (agentInfo `Kimi Code CLI`,
+  // capabilities, authMethods) and prints no TUI banner. No npm adapter, just
+  // the user-installed `kimi` binary on PATH. Same {@link AdapterSpec} shape as
+  // gemini/cursor. Auth (KIMI_API_KEY env, or the ~/.kimi-code/credentials
+  // login-state file) reaches kimi because the ACP client spawns the adapter
+  // with `env: { ...process.env, ...extraEnv }`.
+  kimi: () => ({
+    command: 'kimi',
+    args: ['acp'],
+    requiresAgentBinary: 'kimi',
+    waitForBinary: (o) => waitForCommandOnPath('kimi', o),
+  }),
 };
 
 /**
