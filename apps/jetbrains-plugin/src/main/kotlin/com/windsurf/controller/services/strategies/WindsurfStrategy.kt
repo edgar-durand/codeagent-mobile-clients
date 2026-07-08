@@ -3,6 +3,7 @@ package com.windsurf.controller.services.strategies
 import com.intellij.openapi.diagnostic.Logger
 import com.windsurf.controller.services.AgentOutputMonitor
 import com.windsurf.controller.services.DetectedAgent
+import com.windsurf.controller.services.IdeIntegrationService
 import com.windsurf.controller.ui.BrandMessages
 
 /**
@@ -20,6 +21,9 @@ class WindsurfStrategy : AgentStrategy {
     override val name: String = "Windsurf / Codeium"
     private val logger = Logger.getInstance(WindsurfStrategy::class.java)
 
+    /** Last handled invocation — lets `stop()` re-resolve the surface to interrupt. */
+    @Volatile private var lastInvocation: AgentInvocation? = null
+
     override fun canHandle(agent: DetectedAgent?): Boolean {
         if (agent == null) return false
         if (agent.pluginId.contains("codeium", ignoreCase = true)) return true
@@ -28,12 +32,15 @@ class WindsurfStrategy : AgentStrategy {
             tw == "codeium" || tw == "codeium chat"
     }
 
-    override fun deliverPrompt(invocation: AgentInvocation): Boolean = deliverPromptViaJcef(
-        invocation = invocation,
-        notificationTitle = "Prompt sent to Windsurf",
-        notFoundMessage = BrandMessages.promptCopiedToClipboard("Windsurf chat not detected"),
-        logger = logger,
-    )
+    override fun deliverPrompt(invocation: AgentInvocation): Boolean {
+        lastInvocation = invocation
+        return deliverPromptViaJcef(
+            invocation = invocation,
+            notificationTitle = "Prompt sent to Windsurf",
+            notFoundMessage = BrandMessages.promptCopiedToClipboard("Windsurf chat not detected"),
+            logger = logger,
+        )
+    }
 
     override fun execute(invocation: AgentInvocation): Boolean {
         if (!deliverPrompt(invocation)) return false
@@ -45,6 +52,14 @@ class WindsurfStrategy : AgentStrategy {
     }
 
     override fun stop() {
+        lastInvocation?.let {
+            try {
+                val ide = IdeIntegrationService.getInstance()
+                SurfaceInterrupt.interrupt(ide, it.project, it.agent, ide.detectInstalledAgents())
+            } catch (e: Exception) {
+                logger.trace(e)
+            }
+        }
         AgentOutputMonitor.getInstance().stopMonitoring()
     }
 }
