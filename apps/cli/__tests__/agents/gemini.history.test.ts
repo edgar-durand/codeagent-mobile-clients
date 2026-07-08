@@ -94,4 +94,13 @@ describe('gemini/history', () => {
   it('parseHistoryFile returns [] for a missing file (no throw)', () => {
     expect(parseHistoryFile('/no/such/session.jsonl')).toEqual([]);
   });
+
+  it('resolveHistoryFile falls back to the newest chats file when the id matches nothing', () => {
+    // Diagnostic path: gemini ignored/renamed our --session-id. We still surface
+    // the live (newest) session so the mirror isn't blank (logs warn about it).
+    const root = makeGeminiRoot(CWD, 'proj-alias', SID);
+    const file = resolveHistoryFile(CWD, 'ffffffff-0000-0000-0000-000000000000', root);
+    // Only one file exists, and it's the newest → resolves to it.
+    expect(file).toContain(`-${SID.slice(0, 8)}.jsonl`);
+  });
 });

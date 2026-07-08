@@ -24,6 +24,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import type { NormalizedMessage } from '@codeam/shared';
+import { log } from '../../services/logger';
 
 const GEMINI_ROOT = path.join(os.homedir(), '.gemini');
 
@@ -48,17 +49,27 @@ function projectNameForCwd(cwd: string, root: string): string | null {
         /* cwd may not exist — fall through to basename */
       }
     }
-  } catch {
-    /* no projects.json yet — fall through to basename */
+    log.debug('gemini', `projects.json has no entry for cwd=${cwd} — using basename fallback`);
+  } catch (err) {
+    log.debug('gemini', `projects.json unreadable at ${root} — using basename fallback`, err);
   }
   return path.basename(cwd) || null;
 }
 
 export function resolveHistoryDir(cwd: string, root: string = GEMINI_ROOT): string | null {
   const name = projectNameForCwd(cwd, root);
-  if (!name) return null;
+  if (!name) {
+    log.warn('gemini', `resolveHistoryDir — could not derive a project name for cwd=${cwd}`);
+    return null;
+  }
   const dir = path.join(root, 'tmp', name, 'chats');
-  return fs.existsSync(dir) ? dir : null;
+  if (!fs.existsSync(dir)) {
+    // Normal before the TUI's first turn (chats/ is created lazily); the mirror
+    // bounded-polls, so this is expected transiently — debug, not warn.
+    log.debug('gemini', `resolveHistoryDir — chats dir not present yet: ${dir} (project=${name})`);
+    return null;
+  }
+  return dir;
 }
 
 /**
@@ -72,28 +83,38 @@ export function resolveHistoryFile(
   sessionId: string,
   root: string = GEMINI_ROOT,
 ): string | null {
+  const id8 = sessionId.slice(0, 8);
   const dir = resolveHistoryDir(cwd, root);
   if (!dir) return null;
   let files: string[];
   try {
     files = fs.readdirSync(dir).filter((f) => f.startsWith('session-') && f.endsWith('.jsonl'));
-  } catch {
+  } catch (err) {
+    log.warn('gemini', `resolveHistoryFile — cannot read chats dir ${dir} (id8=${id8})`, err);
     return null;
   }
-  if (files.length === 0) return null;
+  if (files.length === 0) {
+    log.debug('gemini', `resolveHistoryFile — no session-*.jsonl yet in ${dir} (id8=${id8})`);
+    return null;
+  }
 
-  const id8 = sessionId.slice(0, 8);
   const byName = files.find((f) => id8.length > 0 && f.includes(id8));
-  if (byName) return path.join(dir, byName);
+  if (byName) {
+    log.info('gemini', `resolveHistoryFile — matched by filename id8=${id8}: ${byName}`);
+    return path.join(dir, byName);
+  }
 
   for (const f of files) {
     const full = path.join(dir, f);
     try {
       const firstLine = fs.readFileSync(full, 'utf8').split('\n', 1)[0] ?? '';
       const hdr = JSON.parse(firstLine) as { sessionId?: unknown };
-      if (hdr.sessionId === sessionId) return full;
-    } catch {
-      /* unreadable / non-JSON header — skip */
+      if (hdr.sessionId === sessionId) {
+        log.info('gemini', `resolveHistoryFile — matched by header sessionId: ${f}`);
+        return full;
+      }
+    } catch (err) {
+      log.debug('gemini', `resolveHistoryFile — unreadable/non-JSON header in ${f}`, err);
     }
   }
 
@@ -106,6 +127,14 @@ export function resolveHistoryFile(
       /* skip */
     }
   }
+  // ⚠️ Fell through to the newest-file heuristic: our `--session-id` did NOT
+  // land in the filename OR header. Warn loudly — this is the signal that
+  // gemini ignored/renamed the id (version mismatch, flag not honored, etc.).
+  log.warn(
+    'gemini',
+    `resolveHistoryFile — no id8=${id8} match among ${files.length} file(s) in ${dir}; ` +
+      `falling back to newest=${newest?.file ?? 'none'}`,
+  );
   return newest ? path.join(dir, newest.file) : null;
 }
 
@@ -163,12 +192,14 @@ export function parseHistoryFile(filePath: string): NormalizedMessage[] {
   let raw: string;
   try {
     raw = fs.readFileSync(filePath, 'utf8');
-  } catch {
+  } catch (err) {
+    log.warn('gemini', `parseHistoryFile — cannot read ${filePath}`, err);
     return [];
   }
   const out: NormalizedMessage[] = [];
   const seen = new Set<string>();
   let idx = 0;
+  let malformed = 0;
 
   const consider = (m: GeminiMessage): void => {
     if (m.type !== 'user' && m.type !== 'gemini') return;
@@ -192,6 +223,7 @@ export function parseHistoryFile(filePath: string): NormalizedMessage[] {
     try {
       rec = JSON.parse(line) as GeminiLine;
     } catch {
+      malformed += 1;
       continue;
     }
     if (rec.$set && Array.isArray(rec.$set.messages)) {
@@ -201,6 +233,14 @@ export function parseHistoryFile(filePath: string): NormalizedMessage[] {
     }
     // header line + non-message `$set` ops are ignored.
   }
+  // Per-tick breadcrumb (trace = only under CODEAM_DEBUG=1, so no normal cost):
+  // if the phone shows nothing, this tells you whether the file parsed to zero
+  // real turns vs. wasn't found at all (resolveHistoryFile logs the latter).
+  log.trace(
+    'gemini',
+    `parseHistoryFile — ${out.length} turn(s) from ${path.basename(filePath)}` +
+      (malformed > 0 ? ` (${malformed} malformed line(s) skipped)` : ''),
+  );
   return out;
 }
 

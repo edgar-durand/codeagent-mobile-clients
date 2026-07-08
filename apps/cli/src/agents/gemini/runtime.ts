@@ -34,6 +34,7 @@ import {
 import { randomUUID } from 'node:crypto';
 import { geminiCredentialLocator, geminiLoginLauncher } from './link';
 import * as history from './history';
+import { log } from '../../services/logger';
 import { spawnAndCapture } from '../../services/spawn-and-capture';
 import type { OsStrategy } from '../../os';
 import type { ChangeModelInstruction, RuntimeStrategy } from '../strategy';
@@ -93,6 +94,14 @@ export class GeminiRuntimeStrategy implements RuntimeStrategy {
     // at spawn and the read-only mirror can locate the file by id — no fs races.
     const sessionId = randomUUID();
     const launch = this.os.buildLaunch(binary, ['--session-id', sessionId]);
+    // Observability: gemini's native PTY REPL is exercised (baton) for the first
+    // time here — this breadcrumb ties the spawned session id to the transcript
+    // the mirror will look for (`session-<ts>-<id8>.jsonl`). If the mirror shows
+    // nothing, grep the debug log for this id8 to confirm the id binding.
+    log.info(
+      'gemini',
+      `prepareLaunch — native TUI, binary=${binary} sessionId=${sessionId} (id8=${sessionId.slice(0, 8)})`,
+    );
     return { cmd: launch.cmd, args: launch.args, sessionId };
   }
 
