@@ -31,7 +31,9 @@ import {
   type NormalizedMessage,
   type SelectPrompt,
 } from '@codeam/shared';
+import { randomUUID } from 'node:crypto';
 import { geminiCredentialLocator, geminiLoginLauncher } from './link';
+import * as history from './history';
 import { spawnAndCapture } from '../../services/spawn-and-capture';
 import type { OsStrategy } from '../../os';
 import type { ChangeModelInstruction, RuntimeStrategy } from '../strategy';
@@ -70,7 +72,12 @@ export class GeminiRuntimeStrategy implements RuntimeStrategy {
     this.os = os;
   }
 
-  async prepareLaunch(): Promise<{ cmd: string; args: string[]; env?: Record<string, string> }> {
+  async prepareLaunch(): Promise<{
+    cmd: string;
+    args: string[];
+    env?: Record<string, string>;
+    sessionId?: string;
+  }> {
     const binary = this.os.findInPath('gemini');
     if (!binary) {
       throw new Error(
@@ -79,22 +86,34 @@ export class GeminiRuntimeStrategy implements RuntimeStrategy {
           '    Then run `codeam pair` again.',
       );
     }
-    return this.os.buildLaunch(binary);
+    // Pre-mint the session id and pass it via `--session-id` (Gemini 0.45+:
+    // "Start a new session with a manually provided UUID"), same as Claude's
+    // `--session-id`. Gemini names its transcript `session-<ts>-<uuid8>.jsonl`
+    // and writes our id into the header, so the baton binds `currentConversationId`
+    // at spawn and the read-only mirror can locate the file by id — no fs races.
+    const sessionId = randomUUID();
+    const launch = this.os.buildLaunch(binary, ['--session-id', sessionId]);
+    return { cmd: launch.cmd, args: launch.args, sessionId };
   }
 
-  // Gemini's REPL has no documented "resume previous session" flag,
-  // so a relaunch starts fresh. Returning an empty array is the
-  // documented "no-op resume" path (Cursor / Aider do the same).
-  resumeLaunchArgs(_sessionId: string, _opts?: { auto?: boolean }): string[] {
-    return [];
+  // Re-attach the same conversation on hand-back (baton) by passing the same
+  // `--session-id`. Gemini resolves an existing id to the prior transcript.
+  resumeLaunchArgs(sessionId: string, _opts?: { auto?: boolean }): string[] {
+    return ['--session-id', sessionId];
   }
 
-  resolveHistoryDir(_cwd: string): string | null {
-    return null;
+  resolveHistoryDir(cwd: string): string | null {
+    return history.resolveHistoryDir(cwd);
   }
 
-  parseHistoryFile(_filePath: string): NormalizedMessage[] {
-    return [];
+  /** `~/.gemini/tmp/<project>/chats/session-<ts>-<id8>.jsonl`. Presence of this
+   *  method is what lets the baton engage for Gemini (`runtimeSupportsBaton`). */
+  resolveHistoryFile(cwd: string, sessionId: string): string | null {
+    return history.resolveHistoryFile(cwd, sessionId);
+  }
+
+  parseHistoryFile(filePath: string): NormalizedMessage[] {
+    return history.parseHistoryFile(filePath);
   }
 
   getCurrentUsage(
