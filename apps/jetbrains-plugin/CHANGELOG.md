@@ -4,6 +4,20 @@ All notable changes to the CodeAgent-Mobile JetBrains plugin are documented here
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.60.5] — 2026-07-08
+
+### Added
+
+- **cli:** Baton support for cursor + gate to agents with a resumable transcript
+
+### Documentation
+
+- **cli:** Document the Session Baton (native TUI <-> mobile ACP) architecture + hand-off invariants
+
+### Fixed
+
+- **cli:** Serialize baton state POSTs so handback never sticks on "Switching…"
+
 ## [2.60.4] — 2026-07-08
 
 ### Fixed
