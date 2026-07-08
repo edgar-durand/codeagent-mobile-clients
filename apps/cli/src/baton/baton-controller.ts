@@ -61,11 +61,23 @@ export class BatonController {
   ): Promise<void> {
     if (this._state !== from) return; // single-driver invariant: only the expected steady state may switch
     this.setState('SWITCHING');
-    await current.whenSafeToYield();
-    await current.stop();
-    this._conversationId = await next.start(this._conversationId ?? undefined);
-    this._active = nextKind;
-    this.setState(to);
+    const priorActive = this._active;
+    const priorConversationId = this._conversationId;
+    try {
+      await current.whenSafeToYield();
+      await current.stop();
+      this._conversationId = await next.start(this._conversationId ?? undefined);
+      this._active = nextKind;
+      this.setState(to);
+    } catch (err) {
+      // Recover to the pre-switch steady state so the baton is never wedged
+      // in 'SWITCHING' — a stuck state would no-op every future take/handback
+      // via the `_state !== from` guard above.
+      this._active = priorActive;
+      this._conversationId = priorConversationId;
+      this.setState(from);
+      throw err;
+    }
   }
 
   private setState(state: BatonState): void {

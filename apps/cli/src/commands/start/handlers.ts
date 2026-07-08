@@ -505,7 +505,12 @@ const takeControlH: CommandHandler = async (ctx, cmd) => {
     await ctx.relay.sendResult(cmd.id, 'failed', { code: 'NO_BATON' });
     return;
   }
-  await ctx.baton.takeControl();
+  try {
+    await ctx.baton.takeControl();
+  } catch {
+    await ctx.relay.sendResult(cmd.id, 'failed', { code: 'BATON_SWITCH_FAILED' });
+    return;
+  }
   await ctx.relay.sendResult(cmd.id, 'completed', { state: ctx.baton.state });
 };
 
@@ -514,7 +519,12 @@ const handbackH: CommandHandler = async (ctx, cmd) => {
     await ctx.relay.sendResult(cmd.id, 'failed', { code: 'NO_BATON' });
     return;
   }
-  await ctx.baton.handback();
+  try {
+    await ctx.baton.handback();
+  } catch {
+    await ctx.relay.sendResult(cmd.id, 'failed', { code: 'BATON_SWITCH_FAILED' });
+    return;
+  }
   await ctx.relay.sendResult(cmd.id, 'completed', { state: ctx.baton.state });
 };
 

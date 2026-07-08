@@ -5,13 +5,17 @@ import type { SessionDriver, DriverKind } from '../../src/baton/types';
 function fakeDriver(
   kind: DriverKind,
   id: string,
+  opts: { failStart?: boolean } = {},
 ): SessionDriver & {
   startSpy: ReturnType<typeof vi.fn>;
   stopSpy: ReturnType<typeof vi.fn>;
   releaseYield: () => void;
 } {
   let resolveYield: () => void = () => {};
-  const startSpy = vi.fn(async (resumeId?: string) => resumeId ?? id);
+  const startSpy = vi.fn(async (resumeId?: string) => {
+    if (opts.failStart) throw new Error(`${kind} start failed`);
+    return resumeId ?? id;
+  });
   const stopSpy = vi.fn(async () => {});
   return {
     kind,
@@ -79,5 +83,31 @@ describe('BatonController', () => {
     local.releaseYield();
     await p;
     expect(mobile.startSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('recovers from a driver throwing mid-handoff instead of wedging in SWITCHING', async () => {
+    const local = fakeDriver('local_tui', 'conv-1');
+    const mobileOpts: { failStart?: boolean } = { failStart: true };
+    const mobile = fakeDriver('mobile_acp', 'conv-1', mobileOpts);
+    const publishState = vi.fn();
+    const c = new BatonController({ local, mobile, publishState });
+    await c.begin();
+
+    const p = c.takeControl();
+    local.releaseYield();
+    await expect(p).rejects.toThrow();
+
+    // Not stuck 'SWITCHING' — reverted to the pre-switch steady state.
+    expect(c.state).toBe('LOCAL_DRIVE');
+    expect(c.activeDriver).toBe('local_tui');
+    expect(publishState).toHaveBeenLastCalledWith('LOCAL_DRIVE', 'local_tui', 'conv-1');
+
+    // A subsequent take-control with a now-working mobile driver succeeds.
+    mobileOpts.failStart = false;
+    const p2 = c.takeControl();
+    local.releaseYield();
+    await p2;
+    expect(c.state).toBe('MOBILE_DRIVE');
+    expect(c.activeDriver).toBe('mobile_acp');
   });
 });

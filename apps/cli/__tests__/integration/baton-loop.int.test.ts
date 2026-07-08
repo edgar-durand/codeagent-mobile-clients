@@ -149,6 +149,6 @@ describe.skipIf(!RUN_BATON_INT)('baton cross-mode resume (real claude)', () => {
         fs.rmSync(tempDir, { recursive: true, force: true });
       }
     },
-    120_000,
+    180_000,
   );
 });

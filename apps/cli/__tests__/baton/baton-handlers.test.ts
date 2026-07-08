@@ -13,7 +13,11 @@ const cmd = (type: string) => ({ id: 'c1', sessionId: 's1', type, payload: {} })
 
 describe('baton command handlers', () => {
   it('take_control drives BatonController.takeControl and acks completed', async () => {
-    const baton = { takeControl: vi.fn(async () => {}), handback: vi.fn(async () => {}), state: 'MOBILE_DRIVE' };
+    const baton = {
+      takeControl: vi.fn(async () => {}),
+      handback: vi.fn(async () => {}),
+      state: 'MOBILE_DRIVE',
+    };
     const c = ctx(baton);
     await handlers.take_control(c, cmd('take_control'), {} as never);
     expect(baton.takeControl).toHaveBeenCalledTimes(1);
@@ -21,7 +25,11 @@ describe('baton command handlers', () => {
   });
 
   it('handback drives BatonController.handback and acks completed', async () => {
-    const baton = { takeControl: vi.fn(async () => {}), handback: vi.fn(async () => {}), state: 'LOCAL_DRIVE' };
+    const baton = {
+      takeControl: vi.fn(async () => {}),
+      handback: vi.fn(async () => {}),
+      state: 'LOCAL_DRIVE',
+    };
     const c = ctx(baton);
     await handlers.handback(c, cmd('handback'), {} as never);
     expect(baton.handback).toHaveBeenCalledTimes(1);
@@ -32,5 +40,20 @@ describe('baton command handlers', () => {
     const c = ctx(undefined);
     await handlers.take_control(c, cmd('take_control'), {} as never);
     expect(c.relay.sendResult).toHaveBeenCalledWith('c1', 'failed', { code: 'NO_BATON' });
+  });
+
+  it('acks failed with BATON_SWITCH_FAILED when takeControl rejects', async () => {
+    const baton = {
+      takeControl: vi.fn(async () => {
+        throw new Error('switch blew up');
+      }),
+      handback: vi.fn(async () => {}),
+      state: 'LOCAL_DRIVE',
+    };
+    const c = ctx(baton);
+    await handlers.take_control(c, cmd('take_control'), {} as never);
+    expect(c.relay.sendResult).toHaveBeenCalledWith('c1', 'failed', {
+      code: 'BATON_SWITCH_FAILED',
+    });
   });
 });

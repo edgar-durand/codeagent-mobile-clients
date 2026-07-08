@@ -31,12 +31,28 @@ export function makeOnCommand(deps: {
 }) {
   return async function onCommand(cmd: RemoteCommand): Promise<void> {
     if (cmd.type === 'take_control') {
-      await deps.controller.takeControl();
+      try {
+        await deps.controller.takeControl();
+      } catch (err) {
+        await deps.ack(cmd.id, 'failed', {
+          code: 'BATON_SWITCH_FAILED',
+          message: err instanceof Error ? err.message : String(err),
+        });
+        return;
+      }
       await deps.ack(cmd.id, 'completed', { state: deps.controller.state });
       return;
     }
     if (cmd.type === 'handback') {
-      await deps.controller.handback();
+      try {
+        await deps.controller.handback();
+      } catch (err) {
+        await deps.ack(cmd.id, 'failed', {
+          code: 'BATON_SWITCH_FAILED',
+          message: err instanceof Error ? err.message : String(err),
+        });
+        return;
+      }
       await deps.ack(cmd.id, 'completed', { state: deps.controller.state });
       return;
     }
