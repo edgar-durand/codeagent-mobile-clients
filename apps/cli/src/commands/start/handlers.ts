@@ -2,7 +2,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { randomUUID } from 'crypto';
-import { spawn, execFile } from 'child_process';
+import { spawn, spawnSync, execFile } from 'child_process';
 import which from 'which';
 import type { AgentService } from '../../services/agent.service';
 import type { BatonController } from '../../baton/baton-controller';
@@ -906,10 +906,19 @@ const beadsConfigureH: CommandHandler = async (ctx, cmd, parsed) => {
  *     We document this via a log line and report `relaunching` (indicating the
  *     update is ready, not that a live re-exec happened).
  *
- *   - **Local `codeam start`** (no supervised markers): spawn a fresh process
- *     from `process.argv[1]` (the CLI entry script) with the original args,
- *     detached + stdio:'inherit', then `process.exit(0)`. The OS relaunches
- *     the now-updated global binary.
+ *   - **Local `codeam start` / `codeam pair`** (no supervised markers):
+ *     re-exec SYNCHRONOUSLY in the foreground — `spawnSync('codeam', args,
+ *     { stdio: 'inherit' })`, then `process.exit(child.status)`. This mirrors
+ *     the proven boot-time upgrade in `updateNotifier.maybeAutoUpdate`: the
+ *     child runs in the SAME process group and keeps the controlling terminal,
+ *     so an interactive TUI session relaunches in place. A detached re-exec +
+ *     immediate `process.exit(0)` (the previous implementation) orphaned that
+ *     TUI — the parent left the foreground, the shell reclaimed the TTY, and
+ *     the detached child got SIGTTIN and never came up ("closed the session
+ *     but couldn't relaunch it"). We also re-exec `codeam` from PATH rather
+ *     than the stale `process.argv[1]`, so the freshly-installed binary takes
+ *     over; the local path is gated off codespace/self-hosted (see
+ *     `isSupervised`), where `codeam` is always on PATH.
  */
 export interface CliUpdateDeps {
   /** Run the npm install — injectable so tests don't spawn npm. */
@@ -936,13 +945,13 @@ export const defaultCliUpdateDeps: CliUpdateDeps = {
   isSupervised: () =>
     process.env['CODEAM_AUTO_APPROVE'] === '1' || process.env['CODESPACES'] === 'true',
   relaunch: (args: string[]) => {
-    const entry = process.argv[1];
-    const child = spawn(process.execPath, [entry, ...args], {
-      detached: true,
-      stdio: 'inherit',
-    });
-    child.unref();
-    process.exit(0);
+    // Foreground, SYNCHRONOUS re-exec via `codeam` from PATH (the freshly
+    // installed binary), mirroring updateNotifier.maybeAutoUpdate. Keeping the
+    // child in the same process group preserves the controlling terminal so an
+    // interactive local session (`codeam pair`) relaunches in place instead of
+    // being orphaned by a detached re-exec. See the CliUpdateDeps JSDoc.
+    const child = spawnSync('codeam', args, { stdio: 'inherit', env: process.env });
+    process.exit(child.status ?? 0);
   },
 };
 
