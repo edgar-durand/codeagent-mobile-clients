@@ -122,25 +122,35 @@ async function publishMirroredTurnsLive(
 
 /**
  * Builds the {@link TranscriptMirror} `onNewMessages` handler used while
- * LOCAL_DRIVE holds the baton. Every batch is kept fresh on the
+ * LOCAL_DRIVE holds the baton. The mirror emits only the DELTA appended
+ * since its last read, so this factory accumulates the full message list
+ * and always pushes the COMPLETE current conversation to the
  * `pushConversation` snapshot (the mobile's cold-open / reconnect history
- * source — unchanged behavior). In ADDITION, every batch after the mirror's
- * own initial catch-up read is replayed turn-by-turn over the live output
- * pipe via {@link publishMirroredTurnsLive}, so a mobile client that already
- * has the session open sees each new local turn as it lands.
+ * source). ⚠️ Pushing the delta with `mode:'replace'` (the previous bug)
+ * left the stored snapshot holding only the last turn, so re-opening the
+ * session showed a truncated history. In ADDITION, each qualifying batch is
+ * replayed turn-by-turn over the live output pipe via
+ * {@link publishMirroredTurnsLive}, so a mobile client that already has the
+ * session open sees each new local turn as it lands.
  *
- * ⚠️ Skipping live-publish on the FIRST call is load-bearing, not
- * cosmetic: {@link TranscriptMirror} starts its internal `emitted` counter
- * at 0, so the very first `onNewMessages` call after `start()` always
- * reports the ENTIRE pre-existing history as "new" (that's its catch-up
- * read, not a new turn) — and `startMirror` rebuilds a fresh
- * `TranscriptMirror` (so a fresh "first call") every time the baton
- * re-enters LOCAL_DRIVE. Without this guard, toggling MOBILE_DRIVE ↔
- * LOCAL_DRIVE would replay the whole past conversation over the live pipe
- * as brand-new turns on every re-entry — duplicate bubbles for everything
- * the `pushConversation` snapshot already covers. Real subsequent turns
- * (genuinely new file-tail growth while the mirror stays armed) always
- * live-publish.
+ * ⚠️ FRESH vs RE-ARM decides whether the FIRST emit live-publishes:
+ * {@link TranscriptMirror} starts its internal `emitted` counter at 0, so
+ * the first `onNewMessages` call after `start()` reports everything the file
+ * currently holds as "new".
+ *  - `fresh: true` — the mirror was started by `controller.begin()` (the very
+ *    first LOCAL_DRIVE). The mobile has NOTHING yet, so EVERY turn including
+ *    the first must live-publish, or a mobile watching a brand-new local
+ *    session would see no bubbles until a leave+re-open.
+ *  - `fresh: false` — the mirror was RE-ARMED after a handback
+ *    (MOBILE_DRIVE → LOCAL_DRIVE). The mobile already rendered the whole
+ *    conversation during MOBILE_DRIVE, so the first emit is a pure catch-up
+ *    read (the entire file to date) and MUST NOT be replayed over the live
+ *    pipe — that would duplicate every past bubble. Only turns genuinely
+ *    added during this local drive live-publish.
+ *
+ * The snapshot is pushed on EVERY emit in both modes (it's idempotent —
+ * `mode:'replace'` on the full list), so reconnect/cold-open always reflects
+ * the complete conversation regardless of fresh/re-arm.
  *
  * Batches are drained through a private promise chain so two `onNewMessages`
  * calls in quick succession (rapid file-watch events) can't interleave
@@ -154,9 +164,21 @@ export function makeMirrorOnNewMessages(deps: {
   publisher: MirrorLivePublisher;
   agentId: AgentId;
   conversationId: string;
+  /** True when started by `begin()` (fresh local session, mobile has nothing
+   *  → live-publish from the first turn); false on a handback re-arm (mobile
+   *  already has the history → skip the first catch-up emit's live replay). */
+  fresh: boolean;
 }): (messages: NormalizedMessage[]) => void {
   let isFirstEmit = true;
   let publishChain: Promise<void> = Promise.resolve();
+  // Full running conversation the mirror has seen, so the snapshot is always
+  // the COMPLETE history (the mirror only ever hands us the newest delta).
+  const conversation: Array<{
+    id: string;
+    role: 'user' | 'agent';
+    text: string;
+    timestamp: number;
+  }> = [];
   return (messages: NormalizedMessage[]): void => {
     const relevant = messages.filter((m) => m.role !== 'system');
     if (relevant.length === 0) return;
@@ -166,12 +188,14 @@ export function makeMirrorOnNewMessages(deps: {
       text: m.text,
       timestamp: toEpochMs(m.timestamp),
     }));
+    conversation.push(...mapped);
     void deps.publisher.pushConversation({
       agentId: deps.agentId,
       sessionId: deps.conversationId,
-      messages: mapped,
+      messages: conversation.slice(),
     });
-    if (!isFirstEmit) {
+    // Live-publish every batch EXCEPT a re-arm's first (catch-up) read.
+    if (deps.fresh || !isFirstEmit) {
       publishChain = publishChain
         .then(() => publishMirroredTurnsLive(deps.publisher, relevant))
         .catch((err) => {
@@ -329,7 +353,12 @@ export async function runBatonSession(opts: BatonSessionOptions): Promise<void> 
   // local turn over the chat-output pipe, so an open mobile renders
   // LOCAL_DRIVE turns per-turn instead of only after leave+re-open.
   let mirror: TranscriptMirror | null = null;
-  const startMirror = (conversationId: string): void => {
+  // The FIRST LOCAL_DRIVE is the one `begin()` publishes — a fresh local
+  // session the mobile has never seen (live-publish from turn one). Every
+  // later LOCAL_DRIVE entry can only be reached via a handback, i.e. a re-arm
+  // where the mobile already holds the conversation (skip the catch-up replay).
+  let firstLocalDrive = true;
+  const startMirror = (conversationId: string, fresh: boolean): void => {
     mirror?.stop();
     mirror = new TranscriptMirror({
       runtime,
@@ -339,6 +368,7 @@ export async function runBatonSession(opts: BatonSessionOptions): Promise<void> 
         publisher,
         agentId: opts.agent,
         conversationId,
+        fresh,
       }),
     });
     mirror.start();
@@ -358,9 +388,15 @@ export async function runBatonSession(opts: BatonSessionOptions): Promise<void> 
         driver,
         conversationId,
       });
-      // Re-arm the read-only mirror whenever the native TUI holds the baton.
-      if (state === 'LOCAL_DRIVE' && conversationId) startMirror(conversationId);
-      else if (state !== 'LOCAL_DRIVE') mirror?.stop();
+      // (Re-)arm the read-only mirror whenever the native TUI holds the baton.
+      // The first LOCAL_DRIVE (from `begin()`) is a fresh session; subsequent
+      // ones are handback re-arms.
+      if (state === 'LOCAL_DRIVE' && conversationId) {
+        startMirror(conversationId, firstLocalDrive);
+        firstLocalDrive = false;
+      } else if (state !== 'LOCAL_DRIVE') {
+        mirror?.stop();
+      }
     },
   });
 

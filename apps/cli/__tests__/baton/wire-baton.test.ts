@@ -15,7 +15,13 @@ function msg(
 function fakePublisher() {
   return {
     publishOutput: vi.fn(async (_body: Record<string, unknown>) => {}),
-    pushConversation: vi.fn(async () => {}),
+    pushConversation: vi.fn(
+      async (_args: {
+        agentId: string;
+        sessionId: string;
+        messages: Array<{ id: string; role: 'user' | 'agent'; text: string; timestamp: number }>;
+      }) => {},
+    ),
   };
 }
 
@@ -124,16 +130,17 @@ describe('cloud/self-hosted regression (gate)', () => {
 });
 
 describe('makeMirrorOnNewMessages (LOCAL_DRIVE live mirror)', () => {
-  it('always pushes the conversation snapshot, but skips the live pipe on the first (catch-up) batch', async () => {
+  it('re-arm: pushes the conversation snapshot, but skips the live pipe on the first (catch-up) batch', async () => {
     const publisher = fakePublisher();
     const onNewMessages = makeMirrorOnNewMessages({
       publisher,
       agentId: 'claude',
       conversationId: 'conv-1',
+      fresh: false, // handback re-arm — mobile already has the history
     });
 
     // TranscriptMirror's first call after start() reports the whole
-    // pre-existing history — must NOT replay live.
+    // pre-existing history — on a RE-ARM this must NOT replay live.
     onNewMessages([msg('user', 'hi'), msg('agent', 'hello there')]);
     await vi.waitFor(() => expect(publisher.pushConversation).toHaveBeenCalledTimes(1));
 
@@ -148,12 +155,65 @@ describe('makeMirrorOnNewMessages (LOCAL_DRIVE live mirror)', () => {
     expect(publisher.publishOutput).not.toHaveBeenCalled();
   });
 
+  it('fresh: live-publishes from the very first batch (mobile has nothing yet)', async () => {
+    const publisher = fakePublisher();
+    const onNewMessages = makeMirrorOnNewMessages({
+      publisher,
+      agentId: 'claude',
+      conversationId: 'conv-1',
+      fresh: true, // begin() — brand-new local session
+    });
+
+    onNewMessages([msg('user', 'hi'), msg('agent', 'hello there')]);
+
+    await vi.waitFor(() => expect(publisher.publishOutput).toHaveBeenCalledTimes(4));
+    expect(publisher.publishOutput.mock.calls.map((c) => c[0])).toEqual([
+      { type: 'clear' },
+      { type: 'user_message', content: 'hi', done: true },
+      { type: 'new_turn', done: false },
+      { type: 'text', content: 'hello there', done: true },
+    ]);
+    // And the snapshot still carries the full conversation.
+    expect(publisher.pushConversation).toHaveBeenCalledWith({
+      agentId: 'claude',
+      sessionId: 'conv-1',
+      messages: [
+        expect.objectContaining({ role: 'user', text: 'hi' }),
+        expect.objectContaining({ role: 'agent', text: 'hello there' }),
+      ],
+    });
+  });
+
+  it('snapshot accumulates the FULL conversation across batches (not just the last delta)', async () => {
+    const publisher = fakePublisher();
+    const onNewMessages = makeMirrorOnNewMessages({
+      publisher,
+      agentId: 'claude',
+      conversationId: 'conv-1',
+      fresh: true,
+    });
+
+    onNewMessages([msg('user', 'hi'), msg('agent', 'hello there')]); // turn 1
+    onNewMessages([msg('user', 'what time is it?'), msg('agent', "it's 3pm")]); // turn 2
+
+    await vi.waitFor(() => expect(publisher.pushConversation).toHaveBeenCalledTimes(2));
+    // The SECOND snapshot must contain BOTH turns — re-opening the session
+    // shows the entire conversation, not just the latest turn.
+    expect(publisher.pushConversation.mock.calls[1][0].messages).toEqual([
+      expect.objectContaining({ role: 'user', text: 'hi' }),
+      expect.objectContaining({ role: 'agent', text: 'hello there' }),
+      expect.objectContaining({ role: 'user', text: 'what time is it?' }),
+      expect.objectContaining({ role: 'agent', text: "it's 3pm" }),
+    ]);
+  });
+
   it('live-publishes a genuinely new turn (user then agent) in wire order after the first batch', async () => {
     const publisher = fakePublisher();
     const onNewMessages = makeMirrorOnNewMessages({
       publisher,
       agentId: 'claude',
       conversationId: 'conv-1',
+      fresh: false,
     });
 
     onNewMessages([msg('user', 'hi'), msg('agent', 'hello there')]); // catch-up, skipped
@@ -177,6 +237,7 @@ describe('makeMirrorOnNewMessages (LOCAL_DRIVE live mirror)', () => {
       publisher,
       agentId: 'claude',
       conversationId: 'conv-1',
+      fresh: false,
     });
 
     onNewMessages([msg('user', 'hi'), msg('agent', 'hello')]); // catch-up
@@ -199,6 +260,7 @@ describe('makeMirrorOnNewMessages (LOCAL_DRIVE live mirror)', () => {
       publisher,
       agentId: 'claude',
       conversationId: 'conv-1',
+      fresh: false,
     });
 
     onNewMessages([msg('user', 'hi'), msg('agent', 'hello')]); // catch-up
