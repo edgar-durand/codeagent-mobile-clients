@@ -77,6 +77,7 @@ export const USER_EVENTS = {
   AGENT_INSTALL_FAILED: 'agent_install_failed',
   CLI_UPDATE_PROGRESS: 'cli_update_progress',
   CLI_UPDATE_FAILED: 'cli_update_failed',
+  BATON_STATE: 'baton_state',
 } as const;
 
 export type UserEventName = (typeof USER_EVENTS)[keyof typeof USER_EVENTS];
