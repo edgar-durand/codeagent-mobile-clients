@@ -4,6 +4,12 @@ All notable changes to `codeam-cli` are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.60.11] — 2026-07-08
+
+### Fixed
+
+- P0/P1 batch — pricing default, headroom step export, VSC listener dedup, JB EDT delay
+
 ## [2.60.10] — 2026-07-08
 
 ### Added
