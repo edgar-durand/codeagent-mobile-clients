@@ -176,30 +176,40 @@ class IdeIntegrationService {
      * contenteditable, textarea, and `role=textbox` patterns.
      */
     fun executeJcefPromptInjection(browser: Any, prompt: String): Boolean {
-        try {
+        val escapedPrompt = prompt
+            .replace("\\", "\\\\")
+            .replace("`", "\\`")
+            .replace("\$", "\\\$")
+            .replace("\n", "\\n")
+            .replace("\r", "\\r")
+        val js = JCEF_INJECTION_TEMPLATE.replace("__PROMPT__", escapedPrompt)
+        val ok = executeJcefScript(browser, js)
+        if (ok) logger.info("JCEF prompt injection executed")
+        return ok
+    }
+
+    /**
+     * Run an arbitrary JS snippet in a JBCef browser handle via the
+     * same reflected `CefBrowser.executeJavaScript` primitive used by
+     * prompt injection. Best-effort: returns `false` (never throws) if
+     * the JCEF class chain or the browser handle can't be reached. Used
+     * by both prompt injection and the best-effort stop-generating
+     * interrupt (`SurfaceInterrupt`).
+     */
+    fun executeJcefScript(browser: Any, js: String): Boolean {
+        return try {
             val platformCL = browser.javaClass.classLoader
             val jbCefBaseClass = Class.forName("com.intellij.ui.jcef.JBCefBrowserBase", true, platformCL)
             val cefBrowser = jbCefBaseClass.getMethod("getCefBrowser").invoke(browser) ?: return false
             val cefBrowserIface = Class.forName("org.cef.browser.CefBrowser", true, cefBrowser.javaClass.classLoader)
-
-            val escapedPrompt = prompt
-                .replace("\\", "\\\\")
-                .replace("`", "\\`")
-                .replace("\$", "\\\$")
-                .replace("\n", "\\n")
-                .replace("\r", "\\r")
-
-            val js = JCEF_INJECTION_TEMPLATE.replace("__PROMPT__", escapedPrompt)
-
             val execMethod = cefBrowserIface.getMethod(
                 "executeJavaScript", String::class.java, String::class.java, Int::class.javaPrimitiveType,
             )
             execMethod.invoke(cefBrowser, js, "about:blank", 0)
-            logger.info("JCEF prompt injection executed")
-            return true
+            true
         } catch (e: Exception) {
-            logger.warn("JCEF prompt injection failed: ${e.message}")
-            return false
+            logger.warn("JCEF executeJavaScript failed: ${e.message}")
+            false
         }
     }
 
