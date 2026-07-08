@@ -53,6 +53,34 @@ import { killQuiet } from '../../lib/quiet';
  * stable line; the SDK accepts a numeric major version per its
  * type. Bumping this in the future is a one-liner change.
  */
+/** Shape returned by {@link AcpClient.start} / `startOnce`. */
+export interface AcpStartResult {
+  sessionId: string;
+  initialize: InitializeResponse;
+  /** Adapter-picked model id, e.g. `gpt-5`. `undefined` when the adapter
+   *  doesn't expose `currentModelId` on newSession (claude-agent-acp + gemini). */
+  model?: string;
+  /** Plan / service tier label the adapter advertises (`plus`, `pro`, …). */
+  tier?: string;
+}
+
+/**
+ * A transient spawn race the ADAPTER hits INTERNALLY when it execs the real
+ * agent binary (e.g. claude-agent-acp spawning the ~250MB SDK-bundled `claude`
+ * during newSession). On a fresh/waking codespace that binary is momentarily
+ * open-for-write (`ETXTBSY`) or not-yet-renamed (`ENOENT`) — the adapter
+ * surfaces it as a `-32603 Internal error` whose stderr/data carries the code.
+ * Both clear within milliseconds, so respawning the adapter + re-handshaking
+ * recovers. NOT our own spawn (PATH-augmented + gated) — this is one layer down.
+ */
+const TRANSIENT_ADAPTER_SPAWN_RE = /ETXTBSY|ENOENT/;
+const MAX_START_ATTEMPTS = 5;
+
+/** Backoff seam so the transient-spawn retry is instant under test. */
+export const _acpStartSeam = {
+  sleep: (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms)),
+};
+
 const PROTOCOL_VERSION = 1;
 
 /**
@@ -181,25 +209,62 @@ export class AcpClient {
   constructor(private readonly opts: AcpClientOptions) {}
 
   /**
-   * Spawn the adapter + perform the initial handshake (initialize
-   * → newSession). Returns the ACP-assigned sessionId so the caller
-   * can route subsequent prompts, plus optional model + tier that
-   * some adapters (codex-acp today) surface on the newSession
-   * response — used by the runner to enrich the welcome card
-   * subtitle without an extra round-trip.
+   * Spawn the adapter + handshake, retrying a TRANSIENT in-adapter spawn race.
+   *
+   * The adapter itself execs the real agent binary (claude-agent-acp spawns the
+   * ~250MB SDK-bundled `claude` during newSession). On a fresh/waking codespace
+   * that binary is momentarily open-for-write → the adapter rejects newSession
+   * with `-32603 … spawn ETXTBSY` (or ENOENT before it lands). Both clear within
+   * ms, so we respawn the adapter + re-handshake up to {@link MAX_START_ATTEMPTS}
+   * times. `startOnce` fully cleans up on failure (see cleanupAfterFailedStart),
+   * so each retry starts from a clean slate. Non-transient failures throw on the
+   * first attempt — no masking of real auth/outage errors.
    */
-  async start(): Promise<{
-    sessionId: string;
-    initialize: InitializeResponse;
-    /** Adapter-picked model id, e.g. `gpt-5`. `undefined` when the
-     *  adapter doesn't expose `currentModelId` on newSession
-     *  (claude-agent-acp + gemini --acp today). */
-    model?: string;
-    /** Plan / service tier label the adapter advertises (`plus`,
-     *  `pro`, `team`, …). Same nullability as `model`. */
-    tier?: string;
-  }> {
+  async start(): Promise<AcpStartResult> {
+    let lastErr: unknown;
+    for (let attempt = 1; attempt <= MAX_START_ATTEMPTS; attempt += 1) {
+      try {
+        return await this.startOnce();
+      } catch (err) {
+        lastErr = err;
+        if (attempt < MAX_START_ATTEMPTS && this.isTransientAdapterSpawn(err)) {
+          log.info(
+            'acpClient',
+            `adapter hit a transient spawn race (binary busy) — retrying start ${attempt + 1}/${MAX_START_ATTEMPTS}`,
+          );
+          await _acpStartSeam.sleep(400 * attempt);
+          continue;
+        }
+        throw err;
+      }
+    }
+    throw lastErr;
+  }
+
+  /** True when a failed {@link startOnce} was caused by the adapter's OWN
+   *  transient spawn of the agent binary (ETXTBSY/ENOENT). Checks the thrown
+   *  error's message/data AND the adapter stderr ring — the adapter logs the
+   *  real cause to stderr while returning a generic `-32603 Internal error`. */
+  private isTransientAdapterSpawn(err: unknown): boolean {
+    const parts: string[] = [...this.recentStderr];
+    if (err instanceof Error) parts.push(err.message);
+    if (err && typeof err === 'object') {
+      const e = err as { data?: unknown; details?: unknown };
+      try {
+        parts.push(JSON.stringify(e.data));
+      } catch {
+        /* circular / non-serialisable data — ignore */
+      }
+      if (typeof e.details === 'string') parts.push(e.details);
+    }
+    return TRANSIENT_ADAPTER_SPAWN_RE.test(parts.join(' '));
+  }
+
+  private async startOnce(): Promise<AcpStartResult> {
     if (this.child) throw new Error('AcpClient already started');
+    // Fresh adapter → drop any stderr from a prior (retried) attempt so
+    // `isTransientAdapterSpawn` only sees THIS attempt's output.
+    this.recentStderr.length = 0;
 
     const { adapter, cwd } = this.opts;
     // Expand PATH to cover every well-known npm-global / nvm bin dir
