@@ -42,7 +42,10 @@ function makeDeps(client: ReturnType<typeof fakeClient>): {
       publishOutput: vi.fn(async () => {}),
       publishAwaitingAnswer: vi.fn(async () => {}),
     } as unknown as AcpPublisher,
-    streaming: {} as unknown as StreamingState,
+    streaming: {
+      beginLoadReplay: vi.fn(),
+      endLoadReplay: vi.fn(),
+    } as unknown as StreamingState,
     runtime: { listModels: vi.fn(async () => [{ id: 'm1' }]) } as unknown as RuntimeStrategy,
     recentStderr: [],
     opts: {
@@ -67,6 +70,32 @@ describe('AcpDriver', () => {
     expect(client.loadSession).toHaveBeenCalledWith('conv-42');
     expect(id).toBe('conv-42');
     expect(d.kind).toBe('mobile_acp');
+  });
+
+  it('brackets loadSession with the streaming load-replay guard (no stuck "Thinking…")', async () => {
+    const client = fakeClient('acp-fresh');
+    const { deps } = makeDeps(client);
+    const streaming = deps.streaming as unknown as {
+      beginLoadReplay: ReturnType<typeof vi.fn>;
+      endLoadReplay: ReturnType<typeof vi.fn>;
+    };
+    // loadSession resolving proves ordering: begin before, end after.
+    client.loadSession.mockImplementationOnce(async () => {
+      expect(streaming.beginLoadReplay).toHaveBeenCalledTimes(1);
+      expect(streaming.endLoadReplay).not.toHaveBeenCalled();
+    });
+    await new AcpDriver(deps).start('conv-42');
+    expect(streaming.beginLoadReplay).toHaveBeenCalledTimes(1);
+    expect(streaming.endLoadReplay).toHaveBeenCalledTimes(1);
+  });
+
+  it('ends the load-replay guard even when loadSession throws (finally)', async () => {
+    const client = fakeClient('acp-fresh');
+    const { deps } = makeDeps(client);
+    const streaming = deps.streaming as unknown as { endLoadReplay: ReturnType<typeof vi.fn> };
+    client.loadSession.mockRejectedValueOnce(new Error('resume failed'));
+    await expect(new AcpDriver(deps).start('conv-42')).rejects.toThrow('resume failed');
+    expect(streaming.endLoadReplay).toHaveBeenCalledTimes(1);
   });
 
   it('start(undefined) spawns fresh and returns the new session id (no load)', async () => {

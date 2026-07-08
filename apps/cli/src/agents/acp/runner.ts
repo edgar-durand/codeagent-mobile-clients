@@ -187,6 +187,19 @@ export class StreamingState {
   private text = '';
   private pending: PendingInteractive | null = null;
   /**
+   * While true, {@link append} drops incoming session/update deltas instead of
+   * publishing them. Used by the baton {@link AcpDriver} to swallow the
+   * conversation REPLAY that an ACP `session/load` streams (the agent re-emits
+   * the whole prior conversation as `agent_message_chunk` notifications before
+   * the load resolves — ACP spec). Those deltas are history, not a live turn:
+   * publishing them opens a streaming tail that never closes (no `closeAll`),
+   * so mobile's "Thinking…" activity indicator stays pinned on after Take
+   * Control. Mobile already has that history via `pushConversation`, so the
+   * replay is pure noise. The normal ACP path never calls `loadSession`
+   * (fresh `session/new` + `--resume` at spawn), so only the baton hits this.
+   */
+  private loadReplayActive = false;
+  /**
    * Per-chunkId cumulative buffers for the Epic C streaming-chunk
    * feed. The chat-output pipe (`publishOutput`) coalesces by
    * `(sessionId, type)` and is text-only; this feed coalesces by
@@ -390,7 +403,23 @@ export class StreamingState {
     await this.publisher.publishOutput({ type: 'new_turn', done: false });
   }
 
+  /** Begin swallowing session/update deltas — see {@link loadReplayActive}.
+   *  Called by the baton {@link AcpDriver} around an ACP `session/load` so the
+   *  replayed conversation history never opens a live streaming tail. */
+  beginLoadReplay(): void {
+    this.loadReplayActive = true;
+  }
+
+  /** Stop swallowing deltas — live turns after the load stream normally. */
+  endLoadReplay(): void {
+    this.loadReplayActive = false;
+  }
+
   append(delta: { chunkId: string; kind: StreamingChunkKind; delta: string }): void {
+    // Drop the ACP `session/load` conversation replay (baton Take Control):
+    // it's history mobile already holds, and publishing it would pin the
+    // "Thinking…" indicator on a tail that never closes (see loadReplayActive).
+    if (this.loadReplayActive) return;
     // Reconcile the incoming segment against the chunk's accumulated
     // content with snapshot-vs-delta awareness (see reconcileCumulative):
     // a true-delta adapter (Anthropic Claude) appends, a cumulative-

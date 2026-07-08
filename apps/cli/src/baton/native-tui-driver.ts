@@ -7,6 +7,7 @@ import { buildKeepAlive, type KeepAliveContext } from '../commands/start/keep-al
 import { dispatchCommand, type PtyHandlerContext } from '../commands/start/handlers';
 import type { StartedBeads } from '../beads';
 import type { DriverKind, SessionDriver } from './types';
+import { parkTerminalForReadonly } from './terminal';
 
 export interface NativeTuiDriverDeps {
   /** The native-TUI PTY wrapper. wire-baton forwards each PTY data chunk to
@@ -107,6 +108,11 @@ export class NativeTuiDriver implements SessionDriver {
 
   async stop(): Promise<void> {
     this.agent.kill();
+    // Hand-off (not process exit): the native TUI was hard-killed, so the
+    // terminal modes it turned on (focus reporting, bracketed paste, mouse)
+    // are still latched — a cooked-mode tty would echo each focus event as
+    // `^[[I^[[O`. Reset them + park stdin for the read-only MOBILE_DRIVE view.
+    parkTerminalForReadonly();
   }
 
   async dispatch(cmd: RemoteCommand): Promise<void> {

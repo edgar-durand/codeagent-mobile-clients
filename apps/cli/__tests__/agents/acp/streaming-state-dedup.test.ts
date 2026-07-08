@@ -148,3 +148,33 @@ describe('StreamingState.append — chat-pipe text reconciliation', () => {
     expect(state.getCurrentText()).toBe('Genial, probemos.');
   });
 });
+
+describe('StreamingState — session/load replay guard (baton Take Control)', () => {
+  it('swallows every delta between beginLoadReplay() and endLoadReplay()', () => {
+    const { state, publishOutput } = makeState();
+    // Simulate the ACP `session/load` replay: the agent re-streams the whole
+    // prior conversation as agent_message_chunk notifications. None of these
+    // must reach the chat pipe — they'd open a tail that never closes and pin
+    // mobile's "Thinking…" indicator after Take Control.
+    state.beginLoadReplay();
+    state.append({ chunkId: 'msg-1', kind: 'text', delta: 'hola' });
+    state.append({ chunkId: 'msg-1', kind: 'text', delta: 'hola de nuevo, Edgar' });
+    state.append({ chunkId: 'msg-2', kind: 'thinking', delta: 'recalling context…' });
+
+    expect(publishOutput).not.toHaveBeenCalled();
+    // And no residual buffer leaks into the first real turn.
+    expect(state.getCurrentText()).toBe('');
+  });
+
+  it('resumes normal streaming once the load replay ends', () => {
+    const { state, publishOutput } = makeState();
+    state.beginLoadReplay();
+    state.append({ chunkId: 'old', kind: 'text', delta: 'replayed history' });
+    state.endLoadReplay();
+
+    // The first genuine MOBILE_DRIVE turn streams as usual.
+    state.append({ chunkId: 'live', kind: 'text', delta: 'nueva respuesta' });
+    expect(state.getCurrentText()).toBe('nueva respuesta');
+    expect(lastTextOutput(publishOutput)).toBe('nueva respuesta');
+  });
+});

@@ -76,7 +76,18 @@ export class AcpDriver implements SessionDriver {
     try {
       started = await this.deps.client.start();
       if (resumeId !== undefined) {
-        await this.deps.client.loadSession(resumeId);
+        // `session/load` streams the ENTIRE prior conversation back as
+        // session/update notifications before it resolves (ACP spec). Those
+        // flow into the shared StreamingState via wire-baton's onSessionUpdate
+        // and would open a streaming tail that never closes — pinning mobile's
+        // "Thinking…" indicator after Take Control. Mobile already has this
+        // history (pushConversation), so swallow the replay for the load only.
+        this.deps.streaming.beginLoadReplay();
+        try {
+          await this.deps.client.loadSession(resumeId);
+        } finally {
+          this.deps.streaming.endLoadReplay();
+        }
       }
     } catch (err) {
       // `loadSession` can throw AFTER `client.start()` already succeeded —
