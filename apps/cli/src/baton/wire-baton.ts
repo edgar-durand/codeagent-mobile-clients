@@ -209,6 +209,37 @@ export function makeMirrorOnNewMessages(deps: {
   };
 }
 
+/**
+ * Serialize baton driver-state POSTs so a FAST switch can't let the steady
+ * state overtake the transient `SWITCHING` event on the wire.
+ *
+ * `BatonController` publishes `SWITCHING` and then the steady state
+ * (`LOCAL_DRIVE`/`MOBILE_DRIVE`) back-to-back. On a fast hand-back the native
+ * TUI respawns almost instantly, so both POSTs would leave nearly together and,
+ * being independent requests (potentially served by different Cloud Run
+ * instances), could be fanned out to the mobile in either order — leaving the
+ * app latched on "Switching…" forever. The backend publishes each event on the
+ * per-user SSE bus AND writes the Redis snapshot BEFORE it responds 2xx, so
+ * awaiting each POST before issuing the next guarantees ordered delivery.
+ *
+ * Overall behaviour stays fire-and-forget (the returned function is `void`);
+ * only the ORDER between successive posts is enforced. Each post is
+ * independently non-fatal — a failure never breaks the chain (`postBatonEvent`
+ * already resolves on error, and we swallow anything else defensively).
+ */
+export function makeSerializedBatonPoster<A>(
+  post: (args: A) => Promise<unknown>,
+): (args: A) => void {
+  let chain: Promise<void> = Promise.resolve();
+  return (args: A): void => {
+    chain = chain.then(() => post(args)).then(
+      () => undefined,
+      () => undefined,
+    );
+    void chain;
+  };
+}
+
 export interface BatonSessionOptions {
   agent: AgentId;
   /** The paired-session id (the backend row). */
@@ -375,12 +406,16 @@ export async function runBatonSession(opts: BatonSessionOptions): Promise<void> 
   };
 
   // ─── Controller: single active driver + backend state publish ────────────
+  // Ordered baton-state poster — successive POSTs never overtake one another.
+  const postBatonState = makeSerializedBatonPoster(postBatonEvent);
   const controller = new BatonController({
     local: nativeDriver,
     mobile: mobileDriver,
     publishState: (state: BatonState, driver: DriverKind, conversationId: string | null) => {
-      // Fire-and-forget, non-fatal — mirrors postPreviewEvent semantics.
-      void postBatonEvent({
+      // Fire-and-forget, non-fatal — but ORDERED (see makeSerializedBatonPoster):
+      // a fast SWITCHING→steady-state pair must not arrive reordered and leave
+      // mobile stuck on "Switching…".
+      postBatonState({
         sessionId: opts.sessionId,
         pluginId: opts.pluginId,
         pluginAuthToken: opts.pluginAuthToken,
