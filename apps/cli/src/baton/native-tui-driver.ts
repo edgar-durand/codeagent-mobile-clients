@@ -1,13 +1,32 @@
 import type { AgentService } from '../services/agent.service';
+import type { CommandRelayService, RemoteCommand } from '../services/command-relay.service';
+import type { RuntimeStrategy } from '../agents/strategy';
+import { OutputService } from '../services/output.service';
+import { HistoryService } from '../services/history.service';
+import { buildKeepAlive, type KeepAliveContext } from '../commands/start/keep-alive';
+import { dispatchCommand, type PtyHandlerContext } from '../commands/start/handlers';
+import type { StartedBeads } from '../beads';
 import type { DriverKind, SessionDriver } from './types';
 
-export type AgentServiceLike = Pick<
-  AgentService,
-  'spawn' | 'restart' | 'kill' | 'spawnedSessionId'
->;
-
 export interface NativeTuiDriverDeps {
-  agent: AgentServiceLike;
+  /** The native-TUI PTY wrapper. wire-baton forwards each PTY data chunk to
+   *  {@link NativeTuiDriver.handlePtyData} so the idle boundary detector works
+   *  AND mobile-routed turns stream back through the output pipe. */
+  agent: AgentService;
+  /** Interactive strategy for the agent (drives the PTY + history parsing). */
+  runtime: RuntimeStrategy;
+  /** Session identity + credentials the PTY command handlers read. */
+  opts: {
+    sessionId: string;
+    pluginId: string;
+    agentId: string;
+    pluginAuthToken?: string;
+    cwd: string;
+  };
+  /** Late-bound relay accessor — the single relay is created after the drivers. */
+  getRelay: () => CommandRelayService;
+  /** Live Beads handle (null when beads is off). */
+  getBeads: () => StartedBeads | null;
   /** Quiet PTY window (ms) that counts as a turn boundary. Default 750. */
   idleMs?: number;
   /** Injectable clock for tests. Defaults to `Date.now`. */
@@ -15,18 +34,34 @@ export interface NativeTuiDriverDeps {
 }
 
 /**
- * Drives the native agent TUI in a PTY via the existing AgentService.
- * The caller MUST forward each PTY data chunk to `noteOutput()` so the
+ * Drives the native agent TUI in a PTY via the existing {@link AgentService}.
+ * The caller MUST forward each PTY data chunk to {@link handlePtyData} so the
  * idle-based turn-boundary detector works.
+ *
+ * Beyond lifecycle, this driver OWNS the PTY command machinery: an
+ * {@link OutputService} (streams a mobile-routed turn's reply back to the app),
+ * a {@link HistoryService} (conversation upload), and a no-op keep-alive (the
+ * baton is local-only, so codespace keep-alive never applies). {@link dispatch}
+ * routes each relayed command through the legacy {@link dispatchCommand} with a
+ * {@link PtyHandlerContext} — so after mobile hands the baton back, a prompt from
+ * the app is typed into the local TUI and its reply streams to mobile.
+ *
+ * Turn-boundary safety for hand-off is idle-based ({@link whenSafeToYield}) — a
+ * PTY turn has no clean programmatic end — so `dispatch` does NOT bracket turns.
  */
 export class NativeTuiDriver implements SessionDriver {
   readonly kind: DriverKind = 'local_tui';
-  private readonly agent: AgentServiceLike;
+  private readonly agent: AgentService;
   private readonly idleMs: number;
   private readonly now: () => number;
   private lastOutput: number;
 
-  constructor(deps: NativeTuiDriverDeps) {
+  private readonly outputSvc: OutputService;
+  private readonly historySvc: HistoryService;
+  private readonly setKeepAlive: (enabled: boolean) => void;
+  private readonly keepAliveCtx: KeepAliveContext;
+
+  constructor(private readonly deps: NativeTuiDriverDeps) {
     this.agent = deps.agent;
     this.idleMs = deps.idleMs ?? 750;
     this.now = deps.now ?? Date.now;
@@ -34,6 +69,27 @@ export class NativeTuiDriver implements SessionDriver {
     // first whenSafeToYield() call see a bogus multi-decade quiet
     // window and resolve instantly, before any real output has settled.
     this.lastOutput = this.now();
+
+    this.historySvc = new HistoryService(deps.runtime, deps.opts.pluginId, deps.opts.cwd, {
+      pluginAuthToken: deps.opts.pluginAuthToken,
+    });
+    // Output pipe for mobile-routed turns. We deliberately DON'T wire the
+    // terminal-turn auto-detector here: in LOCAL_DRIVE the read-only
+    // TranscriptMirror already mirrors human-typed turns, so the output pipe
+    // only activates on an explicit `newTurn()` from a mobile-routed command.
+    this.outputSvc = new OutputService(
+      deps.opts.sessionId,
+      deps.opts.pluginId,
+      (conversationId) => this.historySvc.setCurrentConversationId(conversationId),
+      (reset) => this.historySvc.setRateLimitReset(reset),
+      undefined,
+      undefined,
+      deps.opts.pluginAuthToken,
+      deps.runtime,
+    );
+    // Baton is local-only → keep-alive is a no-op (codespace-only mechanism).
+    this.keepAliveCtx = { inCodespace: false, codespaceName: undefined };
+    this.setKeepAlive = buildKeepAlive(this.keepAliveCtx).apply;
   }
 
   async start(resumeId?: string): Promise<string> {
@@ -53,7 +109,33 @@ export class NativeTuiDriver implements SessionDriver {
     this.agent.kill();
   }
 
-  /** Call on every PTY data chunk to reset the idle timer. */
+  async dispatch(cmd: RemoteCommand): Promise<void> {
+    const ctx: PtyHandlerContext = {
+      outputSvc: this.outputSvc,
+      agent: this.agent,
+      historySvc: this.historySvc,
+      runtime: this.deps.runtime,
+      relay: this.deps.getRelay(),
+      setKeepAlive: this.setKeepAlive,
+      keepAliveCtx: this.keepAliveCtx,
+      pluginId: this.deps.opts.pluginId,
+      sessionId: this.deps.opts.sessionId,
+      agentId: this.deps.opts.agentId,
+      pluginAuthToken: this.deps.opts.pluginAuthToken,
+      beads: this.deps.getBeads(),
+    };
+    await dispatchCommand(ctx, cmd);
+  }
+
+  /** Call on every PTY data chunk: reset the idle timer AND feed the output
+   *  pipe so a mobile-routed turn's reply streams back to the app. */
+  handlePtyData(raw: string): void {
+    this.noteOutput();
+    this.outputSvc.push(raw);
+  }
+
+  /** Reset the idle timer only. Retained for callers that just need the boundary
+   *  clock nudged without routing bytes through the output pipe. */
   noteOutput(): void {
     this.lastOutput = this.now();
   }

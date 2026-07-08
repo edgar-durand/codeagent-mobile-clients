@@ -46,6 +46,9 @@ import * as path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { AcpClient } from '../../src/agents/acp/client';
 import { getAcpAdapter } from '../../src/agents/acp/adapters';
+import { AcpPublisher } from '../../src/agents/acp/publisher';
+import { StreamingState } from '../../src/agents/acp/runner';
+import { createRuntimeStrategy } from '../../src/agents/registry';
 import { AcpDriver } from '../../src/baton/acp-driver';
 
 const execFileP = promisify(execFile);
@@ -126,7 +129,33 @@ describe.skipIf(!RUN_BATON_INT)('baton cross-mode resume (real claude)', () => {
           onSessionUpdate: () => undefined,
           onRequestPermission: async () => ({ outcome: { outcome: 'cancelled' } }),
         });
-        driver = new AcpDriver({ client });
+        // This test exercises only start()/stop() (cross-mode resume). The
+        // dispatch machinery (publisher/streaming/runtime/relay) is supplied so
+        // the driver constructs, but is never dereferenced on this path.
+        const publisher = new AcpPublisher({
+          sessionId,
+          pluginId: 'baton-int',
+          pluginAuthToken: 'int-token',
+          refreshAuthToken: async () => 'int-token',
+        });
+        driver = new AcpDriver({
+          client,
+          publisher,
+          streaming: new StreamingState(publisher),
+          runtime: createRuntimeStrategy('claude'),
+          recentStderr: [],
+          opts: {
+            agent: 'claude',
+            sessionId,
+            pluginId: 'baton-int',
+            pluginAuthToken: 'int-token',
+            adapter,
+            cwd: tempDir,
+          },
+          getRelay: () => {
+            throw new Error('relay not used in the cross-mode-resume test');
+          },
+        });
 
         // This is the linchpin under test: AcpDriver.start(resumeId) spawns the
         // adapter fresh (initialize + newSession against an EMPTY session),

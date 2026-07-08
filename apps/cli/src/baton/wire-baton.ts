@@ -5,7 +5,7 @@ import { createRuntimeStrategy } from '../agents/registry';
 import { AcpClient } from '../agents/acp/client';
 import type { AdapterSpec } from '../agents/acp/adapters';
 import { AcpPublisher } from '../agents/acp/publisher';
-import { StreamingState } from '../agents/acp/runner';
+import { StreamingState, type AcpRunnerOptions } from '../agents/acp/runner';
 import { mapSessionUpdate, mapPermissionRequest } from '../agents/acp/mappers';
 import { fetchCurrentPluginAuthToken, postBatonEvent } from '../services/pairing.service';
 import { showInfo, showSuccess, showRelayNotice } from '../ui/banner';
@@ -114,13 +114,12 @@ export interface BatonSessionOptions {
  *   - a {@link CommandRelayService} whose `onCommand` is {@link makeOnCommand}
  *     (baton-control → controller; everything else → the active driver).
  *
- * PLAN-2 BOUNDARY (see report): the full per-command *turn* dispatch for a
- * driving surface — the complete `dispatchAcpCommand` context for MOBILE_DRIVE
- * and the PTY command pipeline for LOCAL_DRIVE — lands with the backend
- * integration (`/api/baton/events` republish + single-driver lock + the mobile
- * drive UI), which is also the only live consumer of driven turns. Until then
- * `dispatchActive` serves the read-only `get_conversation` and acks any other
- * command with an actionable status so mobile never hangs on it.
+ * The baton is DRIVABLE: after a hand-off, every non-baton command is routed to
+ * whichever driver holds the baton via `controller.activeSessionDriver.dispatch`
+ * — the {@link AcpDriver} runs it through `dispatchAcpCommand` (MOBILE_DRIVE),
+ * the {@link NativeTuiDriver} through the legacy PTY `dispatchCommand`
+ * (LOCAL_DRIVE). Each driver owns the command machinery its side needs and acks
+ * over the relay, so mobile never hangs on an unanswered command.
  */
 export async function runBatonSession(opts: BatonSessionOptions): Promise<void> {
   const publisher = new AcpPublisher({
@@ -162,7 +161,32 @@ export async function runBatonSession(opts: BatonSessionOptions): Promise<void> 
       void streaming.closeAll().finally(() => process.exit(code ?? 1));
     },
   });
-  const mobileDriver = new AcpDriver({ client });
+  // The single relay is created near the end (it needs the controller). Declared
+  // here so each driver's `getRelay` closure can reach it — the closures only
+  // fire at dispatch time, long after `relay` is assigned.
+  let relay: CommandRelayService;
+  // ACP-runner-shaped options the AcpDriver reuses to build the exact same
+  // command context runAcpSession builds. autoApprovePermissions is omitted:
+  // the baton is local, so the human answers permission prompts interactively.
+  const acpOpts: AcpRunnerOptions = {
+    agent: opts.agent,
+    sessionId: opts.sessionId,
+    pluginId: opts.pluginId,
+    pluginAuthToken: opts.pluginAuthToken,
+    adapter: opts.adapter,
+    cwd: opts.cwd,
+    getBeads: opts.getBeads,
+    pollSecret: opts.pollSecret,
+  };
+  const mobileDriver = new AcpDriver({
+    client,
+    publisher,
+    streaming,
+    runtime,
+    recentStderr,
+    opts: acpOpts,
+    getRelay: () => relay,
+  });
 
   // ─── LOCAL driver: native TUI over AgentService ──────────────────────────
   // `nativeDriver` is referenced inside `onData` before its assignment below —
@@ -171,15 +195,29 @@ export async function runBatonSession(opts: BatonSessionOptions): Promise<void> 
   let nativeDriver: NativeTuiDriver;
   const agent = new AgentService(runtime, {
     cwd: opts.cwd,
-    onData() {
-      nativeDriver.noteOutput();
+    onData(raw) {
+      // Reset the idle boundary clock AND feed the output pipe so a
+      // mobile-routed turn (LOCAL_DRIVE dispatch) streams its reply back.
+      nativeDriver.handlePtyData(raw);
     },
     onExit(code) {
       teardown();
       process.exit(code);
     },
   });
-  nativeDriver = new NativeTuiDriver({ agent });
+  nativeDriver = new NativeTuiDriver({
+    agent,
+    runtime,
+    opts: {
+      sessionId: opts.sessionId,
+      pluginId: opts.pluginId,
+      agentId: opts.agent,
+      pluginAuthToken: opts.pluginAuthToken,
+      cwd: opts.cwd,
+    },
+    getRelay: () => relay,
+    getBeads: opts.getBeads ?? (() => null),
+  });
 
   // ─── Read-only transcript mirror (rebuilt each LOCAL_DRIVE entry) ─────────
   let mirror: TranscriptMirror | null = null;
@@ -230,24 +268,12 @@ export async function runBatonSession(opts: BatonSessionOptions): Promise<void> 
   });
 
   // ─── Relay: baton-control → controller; else → active driver ─────────────
-  let relay: CommandRelayService;
-  const dispatchActive = async (cmd: RemoteCommand): Promise<void> => {
-    // The read-only conversation is served over SSE by the TranscriptMirror
-    // (LOCAL_DRIVE) and the ACP streaming pipe (MOBILE_DRIVE); ack the history
-    // load so the mobile spinner resolves instead of retrying forever.
-    if (cmd.type === 'get_conversation') {
-      await relay.sendResult(cmd.id, 'completed', {});
-      return;
-    }
-    // Full per-command turn dispatch (ACP for MOBILE_DRIVE, PTY for
-    // LOCAL_DRIVE) lands with the Plan-2 backend integration (see the
-    // PLAN-2 BOUNDARY note above). Ack with an actionable status so mobile
-    // never hangs on an unanswered command.
-    await relay.sendResult(cmd.id, 'failed', {
-      code: 'BATON_DRIVE_PENDING',
-      driver: controller.activeDriver,
-    });
-  };
+  // Every non-baton command is forwarded to whichever driver holds the baton:
+  // the AcpDriver (MOBILE_DRIVE → dispatchAcpCommand) or the NativeTuiDriver
+  // (LOCAL_DRIVE → the legacy PTY dispatchCommand). Each driver owns its own
+  // command machinery and acks via the relay, so mobile never hangs.
+  const dispatchActive = (cmd: RemoteCommand): Promise<void> =>
+    controller.activeSessionDriver.dispatch(cmd);
   relay = new CommandRelayService(
     opts.pluginId,
     makeOnCommand({

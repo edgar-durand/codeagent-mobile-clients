@@ -1,3 +1,5 @@
+import type { RemoteCommand } from '../services/command-relay.service';
+
 /** Which driver is holding the baton. */
 export type DriverKind = 'local_tui' | 'mobile_acp';
 
@@ -13,6 +15,12 @@ export interface SessionDriver {
   stop(): Promise<void>;
   /** Resolves at the next turn boundary — safe to stop this driver without losing output. */
   whenSafeToYield(): Promise<void>;
+  /** Execute a non-baton relay command (send_prompt, start_task, select_option, …)
+   *  against THIS driver's live session — the ACP command pipeline for the mobile
+   *  driver, the legacy PTY command pipeline for the native-TUI driver. The baton
+   *  router forwards every command that is not `take_control` / `handback` here, so
+   *  after a hand-off the taker actually drives. */
+  dispatch(cmd: RemoteCommand): Promise<void>;
 }
 
 export interface BatonControllerDeps {

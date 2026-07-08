@@ -22,6 +22,26 @@ describe('buildBaton composition', () => {
     expect(dispatchActive).toHaveBeenCalledTimes(1);
   });
 
+  it('dispatchActive delegates a non-baton command to the ACTIVE driver dispatch', async () => {
+    // Mirror the exact wiring runBatonSession uses:
+    //   dispatchActive = (cmd) => controller.activeSessionDriver.dispatch(cmd)
+    const dispatch = vi.fn(async (_cmd: RemoteCommand) => {});
+    const controller = {
+      takeControl: vi.fn(),
+      handback: vi.fn(),
+      state: 'MOBILE_DRIVE' as const,
+      activeSessionDriver: { dispatch },
+    };
+    const dispatchActive = (cmd: RemoteCommand): Promise<void> =>
+      controller.activeSessionDriver.dispatch(cmd);
+    const { onCommand } = buildBaton.forTest({ controller: controller as never, dispatchActive });
+    const cmd = { id: 'c9', sessionId: 's', type: 'start_task', payload: {} } as RemoteCommand;
+    await onCommand(cmd);
+    expect(dispatch).toHaveBeenCalledWith(cmd);
+    expect(controller.takeControl).not.toHaveBeenCalled();
+    expect(controller.handback).not.toHaveBeenCalled();
+  });
+
   it('routes handback to the controller (not the active driver dispatcher)', async () => {
     const handback = vi.fn(async () => {});
     const dispatchActive = vi.fn(async () => {});

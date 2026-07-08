@@ -18,6 +18,15 @@ export class BatonController {
     return this._active;
   }
 
+  /** The driver object currently holding the baton. The baton router forwards
+   *  non-baton commands to `activeSessionDriver.dispatch(cmd)`, so whichever side
+   *  holds the baton is the one that actually runs the command. Reads `_active`
+   *  live, so mid-turn commands during a `SWITCHING` window still target the
+   *  pre-switch driver (the switch waits for the turn boundary before flipping). */
+  get activeSessionDriver(): SessionDriver {
+    return this._active === 'local_tui' ? this.deps.local : this.deps.mobile;
+  }
+
   get conversationId(): string | null {
     return this._conversationId;
   }

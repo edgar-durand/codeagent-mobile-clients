@@ -23,6 +23,7 @@ function fakeDriver(
     stopSpy,
     start: startSpy,
     stop: stopSpy,
+    dispatch: vi.fn(async () => {}),
     whenSafeToYield: () => new Promise<void>((r) => (resolveYield = r)),
     releaseYield: () => resolveYield(),
   };
@@ -55,6 +56,18 @@ describe('BatonController', () => {
     expect(mobile.startSpy).toHaveBeenCalledWith('conv-1'); // resume, not fresh
     expect(c.state).toBe('MOBILE_DRIVE');
     expect(c.activeDriver).toBe('mobile_acp');
+  });
+
+  it('activeSessionDriver tracks the live driver object across a take-control', async () => {
+    const local = fakeDriver('local_tui', 'conv-1');
+    const mobile = fakeDriver('mobile_acp', 'conv-1');
+    const c = new BatonController({ local, mobile, publishState: vi.fn() });
+    await c.begin();
+    expect(c.activeSessionDriver).toBe(local); // baton starts local
+    const p = c.takeControl();
+    local.releaseYield();
+    await p;
+    expect(c.activeSessionDriver).toBe(mobile); // flipped after hand-off
   });
 
   it('handback yields mobile then relaunches local with the same id', async () => {
