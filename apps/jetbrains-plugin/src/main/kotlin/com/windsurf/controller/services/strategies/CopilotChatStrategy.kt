@@ -43,6 +43,9 @@ class CopilotChatStrategy : AgentStrategy {
     override val name: String = "GitHub Copilot Chat"
     private val logger = Logger.getInstance(CopilotChatStrategy::class.java)
 
+    /** Last handled invocation — lets `stop()` re-resolve the surface to interrupt. */
+    @Volatile private var lastInvocation: AgentInvocation? = null
+
     override fun canHandle(agent: DetectedAgent?): Boolean {
         if (agent == null) return false
         if (agent.pluginId.equals("com.github.copilot", ignoreCase = true)) return true
@@ -51,6 +54,7 @@ class CopilotChatStrategy : AgentStrategy {
     }
 
     override fun deliverPrompt(invocation: AgentInvocation): Boolean {
+        lastInvocation = invocation
         val ide = IdeIntegrationService.getInstance()
 
         // Primary path — Copilot's own internal API. We attach
@@ -186,6 +190,14 @@ class CopilotChatStrategy : AgentStrategy {
     }
 
     override fun stop() {
+        lastInvocation?.let {
+            try {
+                val ide = IdeIntegrationService.getInstance()
+                SurfaceInterrupt.interrupt(ide, it.project, it.agent, ide.detectInstalledAgents())
+            } catch (e: Exception) {
+                logger.trace(e)
+            }
+        }
         AgentOutputMonitor.getInstance().stopMonitoring()
     }
 

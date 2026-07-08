@@ -3,6 +3,7 @@ package com.windsurf.controller.services.strategies
 import com.intellij.openapi.diagnostic.Logger
 import com.windsurf.controller.services.AgentOutputMonitor
 import com.windsurf.controller.services.DetectedAgent
+import com.windsurf.controller.services.IdeIntegrationService
 import com.windsurf.controller.ui.BrandMessages
 
 /**
@@ -26,17 +27,23 @@ class PRAIAssistantStrategy : AgentStrategy {
     override val name: String = "PR AI Assistant"
     private val logger = Logger.getInstance(PRAIAssistantStrategy::class.java)
 
+    /** Last handled invocation — lets `stop()` re-resolve the surface to interrupt. */
+    @Volatile private var lastInvocation: AgentInvocation? = null
+
     override fun canHandle(agent: DetectedAgent?): Boolean {
         if (agent == null) return false
         return agent.toolWindowId.equals("PR AI Assistant", ignoreCase = true)
     }
 
-    override fun deliverPrompt(invocation: AgentInvocation): Boolean = deliverPromptViaJcef(
-        invocation = invocation,
-        notificationTitle = "Prompt sent to PR AI Assistant",
-        notFoundMessage = BrandMessages.promptCopiedToClipboard("PR AI Assistant not detected"),
-        logger = logger,
-    )
+    override fun deliverPrompt(invocation: AgentInvocation): Boolean {
+        lastInvocation = invocation
+        return deliverPromptViaJcef(
+            invocation = invocation,
+            notificationTitle = "Prompt sent to PR AI Assistant",
+            notFoundMessage = BrandMessages.promptCopiedToClipboard("PR AI Assistant not detected"),
+            logger = logger,
+        )
+    }
 
     override fun execute(invocation: AgentInvocation): Boolean {
         if (!deliverPrompt(invocation)) return false
@@ -52,6 +59,14 @@ class PRAIAssistantStrategy : AgentStrategy {
     }
 
     override fun stop() {
+        lastInvocation?.let {
+            try {
+                val ide = IdeIntegrationService.getInstance()
+                SurfaceInterrupt.interrupt(ide, it.project, it.agent, ide.detectInstalledAgents())
+            } catch (e: Exception) {
+                logger.trace(e)
+            }
+        }
         AgentOutputMonitor.getInstance().stopMonitoring()
     }
 }

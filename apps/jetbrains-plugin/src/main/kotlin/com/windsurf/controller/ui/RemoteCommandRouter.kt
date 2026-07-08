@@ -218,7 +218,7 @@ class RemoteCommandRouter(private val project: Project) {
                         addProperty("message", if (sent) "Task started: $prompt" else "Could not deliver prompt — copied to clipboard")
                     }
                 }
-                "stop_task" -> respondWith(command, relay) {
+                "stop_task", "escape_key" -> respondWith(command, relay) {
                     AgentStrategyRegistry.getInstance().stop()
                     logger.info("Command: stop_task")
                     com.google.gson.JsonObject().apply {

@@ -23,9 +23,8 @@ import { CopilotChatService } from '../copilot-chat.service';
  *     `vscode.lm` API surfaces the same underlying Copilot models
  *     without any DOM scraping, so we route these ids here.
  *
- * Stop is a no-op: the underlying `vscode.lm` request finishes on
- * its own and the streaming cancellation token is managed inside
- * `CopilotChatService`.
+ * `stop()` cancels the in-flight `vscode.lm` request via the
+ * cancellation token `CopilotChatService` owns internally.
  */
 export class CopilotLmStrategy implements AgentStrategy {
   readonly name = 'CopilotLmStrategy';
@@ -66,7 +65,8 @@ export class CopilotLmStrategy implements AgentStrategy {
   }
 
   stop(): void {
-    // vscode.lm streams terminate on their own. CopilotChatService
-    // owns the per-request cancellation token internally.
+    // Cancel the in-flight vscode.lm request via the token CopilotChatService
+    // owns (set per request in sendPrompt, cleared in its finally).
+    CopilotChatService.getInstance().cancelActive();
   }
 }

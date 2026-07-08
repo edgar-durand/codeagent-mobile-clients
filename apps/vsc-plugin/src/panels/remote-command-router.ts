@@ -234,11 +234,13 @@ export class RemoteCommandRouter {
       }
 
       case 'stop_task':
-      case 'cancel_task': {
-        // Stops JCEF / Lexical observer monitoring. Terminal agents
-        // (Claude / Codex / …) are owned by codeam-cli, so a stop_task
-        // for those agents is dispatched to the CLI's pluginId, not
-        // here.
+      case 'cancel_task':
+      case 'escape_key': {
+        // Run active strategy's stop() (e.g. cancel Copilot LM
+        // stream), tear down output monitoring. Terminal agents
+        // (Claude / Codex / …) owned by codeam-cli, so stop
+        // dispatched CLI's pluginId, not here.
+        AgentStrategyRegistry.getInstance(this.log).stop();
         AgentOutputMonitor.getInstance().stopMonitoring();
         relay.sendResult(command.id, 'completed', { message: 'Task cancelled' });
         break;
