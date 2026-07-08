@@ -163,6 +163,12 @@ export class AcpClient {
    *  (the agent is demonstrably working, just blocked on the tool), and
    *  re-arm only once the last one finishes. Reset per prompt. */
   private pendingToolCalls = new Set<string>();
+  /** Serializes {@link prompt}: each turn waits for the previous to fully
+   *  settle before arming its own watchdog. `promptIdle`/`pendingToolCalls`
+   *  are single-instance fields, so a 2nd concurrent prompt() would overwrite
+   *  them mid-turn and break turn A's idle watchdog (mobile "send-while-active"
+   *  can fire two prompts back-to-back). See {@link prompt}. */
+  private promptChain: Promise<unknown> = Promise.resolve();
   /** Last few adapter stderr lines — so a startup failure surfaces the REAL
    *  cause (e.g. gemini's `IneligibleTierError`) instead of a bare timeout. */
   private recentStderr: string[] = [];
@@ -405,6 +411,23 @@ export class AcpClient {
    * shows a permanent "Thinking…" spinner with no way to recover.
    */
   async prompt(input: string | ReadonlyArray<PromptBlock>): Promise<PromptResponse> {
+    // Serialize turns (9u9): `promptIdle`/`pendingToolCalls` are single-instance
+    // fields, so a 2nd prompt() arriving while one is in flight would overwrite
+    // this.promptIdle + clear this.pendingToolCalls mid-turn — turn A's idle
+    // watchdog then stops being fed and can spuriously fail 'ACP prompt idle'
+    // while the agent is still working. Mobile "send-while-active" makes this
+    // reachable. Chain each prompt after the previous fully settles; the adapter
+    // FIFO-queues too, but the CLI-side watchdog state must not be clobbered
+    // before it does. A failed/rejected prompt never wedges the chain.
+    const run = this.promptChain.then(() => this.runPrompt(input));
+    this.promptChain = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    return run;
+  }
+
+  private async runPrompt(input: string | ReadonlyArray<PromptBlock>): Promise<PromptResponse> {
     if (!this.connection || !this.sessionId) {
       throw new Error('AcpClient.prompt called before start()');
     }
