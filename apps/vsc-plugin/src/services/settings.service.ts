@@ -111,6 +111,14 @@ export class SettingsService {
    * cycle.
    */
   onApiBaseUrlChanged(listener: (prev: string, next: string) => void): void {
+    // Dedup by identity: registering the same callback twice is a no-op.
+    // CommandRelayService relies on being subscribed exactly once — a
+    // stacked reconnect callback would tear down + rebuild the SSE stream
+    // N times per apiBaseUrl change (and the silent-401 stop/start cycle
+    // re-runs startPolling). It guards its own registration, but making
+    // this method idempotent at the source keeps the guarantee even if a
+    // caller's guard ever regresses.
+    if (this.apiBaseUrlListeners.includes(listener)) return;
     this.apiBaseUrlListeners.push(listener);
   }
 

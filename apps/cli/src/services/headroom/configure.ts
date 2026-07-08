@@ -1,10 +1,11 @@
 // src/services/headroom/configure.ts
+import { agentIdToHeadroomKind, isHeadroomSupportedAgent } from '../../commands/host-agent';
 import {
-  agentIdToHeadroomKind,
-  isHeadroomSupportedAgent,
+  USER_EVENTS,
+  HEADROOM_EXTRAS_BY_SURFACE,
+  type HeadroomStatus,
   type HeadroomStep,
-} from '../../commands/host-agent';
-import { USER_EVENTS, HEADROOM_EXTRAS_BY_SURFACE, type HeadroomStatus } from '@codeam/shared';
+} from '@codeam/shared';
 import type { Savings } from './stats-reporter';
 
 export interface ConfigureCtx {

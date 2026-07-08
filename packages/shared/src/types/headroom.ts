@@ -14,6 +14,16 @@
 export type HeadroomBudgetPeriod = 'hourly' | 'daily' | 'monthly';
 
 /**
+ * Install-progress milestone emitted on the `headroom_progress` SSE event while
+ * a session is provisioning Headroom on-demand. Must stay byte-for-byte aligned
+ * with the backend's `HEADROOM_STEPS` validator
+ * (`apps/api-v2/src/headroom/headroom.controller.ts`) and the mobile store —
+ * the backend 400s (`INVALID_STEP`) on any value outside this set. Note
+ * `'provisioning'` is a `HeadroomStatus['state']`, NOT a step.
+ */
+export type HeadroomStep = 'pip' | 'model' | 'init' | 'proxy' | 'ready';
+
+/**
  * Command sent via relay to enable/disable/configure Headroom budget settings.
  * The `agentId` field is included because PairedSession has no agentId server-side,
  * so the relay command carries it for the CLI handler to guard on.

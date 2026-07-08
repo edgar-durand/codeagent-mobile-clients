@@ -5,6 +5,7 @@ import {
   isKnownModel,
   MODEL_CONTEXT_WINDOW,
   MODEL_PRICING,
+  UNKNOWN_MODEL_PRICING,
 } from '../src';
 
 // Model ids actually emitted by the shipped catalogs. Keep in sync with:
@@ -16,6 +17,19 @@ const SHIPPED_CLAUDE_MODEL_IDS = [
   'claude-sonnet-4-6',
   'claude-haiku-4-5-20251001',
 ];
+
+// Codex catalog. Keep in sync with apps/cli/src/agents/codex/runtime.ts
+// (CODEX_MODELS / listModels). `codex-auto-review` is the internal review model.
+const SHIPPED_CODEX_MODEL_IDS = [
+  'gpt-5.5',
+  'gpt-5.4',
+  'gpt-5.4-mini',
+  'gpt-5.3-codex',
+  'gpt-5.2',
+  'codex-auto-review',
+];
+
+const SHIPPED_MODEL_IDS = [...SHIPPED_CLAUDE_MODEL_IDS, ...SHIPPED_CODEX_MODEL_IDS];
 
 describe('getPricing', () => {
   it('returns the exact entry for a known model family', () => {
@@ -39,9 +53,18 @@ describe('getPricing', () => {
     expect(getPricing('gpt-5.4-mini-2026-01')).toBe(MODEL_PRICING['gpt-5.4-mini']);
   });
 
-  it('every shipped catalog model id resolves to a real row, not the fallback', () => {
-    for (const id of SHIPPED_CLAUDE_MODEL_IDS) {
+  it('every shipped catalog model id resolves to a real, non-zero priced row (never the fallback)', () => {
+    for (const id of SHIPPED_MODEL_IDS) {
       expect(isKnownModel(id), `${id} hit the unknown-model fallback`).toBe(true);
+      const pricing = getPricing(id);
+      expect(pricing, `${id} resolved to the flagged unknown-model default`).not.toBe(
+        UNKNOWN_MODEL_PRICING,
+      );
+      // A priced row must charge for the two billed dimensions — a $0 row
+      // renders the session as free (the Codex $0 bug + the haiku-at-sonnet
+      // mispricing this table guards against).
+      expect(pricing.input, `${id}.input`).toBeGreaterThan(0);
+      expect(pricing.output, `${id}.output`).toBeGreaterThan(0);
     }
     // The dated haiku id previously matched NO row and was silently billed at
     // sonnet rates via the fallback — it must resolve to the haiku-tier row.
@@ -50,33 +73,25 @@ describe('getPricing', () => {
     expect(getPricing('claude-sonnet-4-6')).toBe(MODEL_PRICING['claude-sonnet-4-6']);
   });
 
-  it('falls back to claude-sonnet-4 pricing for unknown models, and isKnownModel exposes it', () => {
-    expect(getPricing('claude-future-model-v9')).toBe(MODEL_PRICING['claude-sonnet-4']);
-    expect(getPricing('unknown')).toBe(MODEL_PRICING['claude-sonnet-4']);
+  it('resolves unknown models to the flagged (all-zero) default, not a mispriced guess', () => {
+    // Regression: the old fallback returned claude-sonnet-4 rates, silently
+    // MISPRICING unknown ids. The flagged default is visibly $0 instead, and
+    // isKnownModel exposes that it is unpriced.
+    expect(getPricing('claude-future-model-v9')).toBe(UNKNOWN_MODEL_PRICING);
+    expect(getPricing('unknown')).toBe(UNKNOWN_MODEL_PRICING);
+    expect(getPricing('unknown')).not.toBe(MODEL_PRICING['claude-sonnet-4']);
+    expect(UNKNOWN_MODEL_PRICING).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
     expect(isKnownModel('claude-future-model-v9')).toBe(false);
     expect(isKnownModel('unknown')).toBe(false);
     expect(isKnownModel('claude-sonnet-4-20250514')).toBe(true);
   });
 
-  it('exposes positive numbers for every non-placeholder pricing field', () => {
+  it('every priced row exposes positive numbers for every field', () => {
     for (const [model, pricing] of Object.entries(MODEL_PRICING)) {
-      // Codex/OpenAI entries are Phase 2 placeholders (all zeros until OpenAI
-      // publishes confirmed rates). Skip the assertion for those.
-      const isPlaceholder = pricing.input === 0 && pricing.output === 0;
-      if (isPlaceholder) continue;
       expect(pricing.input, `${model}.input`).toBeGreaterThan(0);
       expect(pricing.output, `${model}.output`).toBeGreaterThan(0);
       expect(pricing.cacheRead, `${model}.cacheRead`).toBeGreaterThan(0);
       expect(pricing.cacheWrite, `${model}.cacheWrite`).toBeGreaterThan(0);
-    }
-  });
-
-  it('Codex placeholder entries are present with zero pricing', () => {
-    const codexModels = ['gpt-5.5', 'gpt-5.4', 'gpt-5.4-mini', 'gpt-5.3-codex', 'gpt-5.2', 'codex-auto-review'];
-    for (const model of codexModels) {
-      expect(MODEL_PRICING[model], `missing entry for ${model}`).toBeDefined();
-      expect(MODEL_PRICING[model].input, `${model}.input`).toBe(0);
-      expect(MODEL_PRICING[model].output, `${model}.output`).toBe(0);
     }
   });
 });

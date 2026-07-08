@@ -1,5 +1,11 @@
 import { describe, it, expect } from 'vitest';
-import type { HeadroomBudgetPeriod, HeadroomBudgetCommand, HeadroomBudgetUsage } from '../src/types/headroom';
+import type {
+  HeadroomBudgetPeriod,
+  HeadroomBudgetCommand,
+  HeadroomBudgetUsage,
+  HeadroomStatus,
+  HeadroomStep,
+} from '../src/types/headroom';
 
 describe('Headroom budget types', () => {
   it('HeadroomBudgetPeriod accepts valid period values', () => {
@@ -33,5 +39,20 @@ describe('Headroom budget types', () => {
     expect(usage.periodSpendUsd).toBe(5.5);
     expect(usage.budgetUsd).toBe(10.0);
     expect(usage.budgetPeriod).toBe('monthly');
+  });
+
+  it('HeadroomBudgetUsage carries the budgetReached flag the toast keys on', () => {
+    const usage: HeadroomBudgetUsage = { periodSpendUsd: 10, budgetUsd: 10, budgetReached: true };
+    expect(usage.budgetReached).toBe(true);
+  });
+
+  it('HeadroomStep enumerates the on-demand install milestones (no state values)', () => {
+    const steps: HeadroomStep[] = ['pip', 'model', 'init', 'proxy', 'ready'];
+    expect(steps.length).toBe(5);
+  });
+
+  it('HeadroomStatus.state includes the provisioning state', () => {
+    const status: HeadroomStatus = { state: 'provisioning' };
+    expect(status.state).toBe('provisioning');
   });
 });

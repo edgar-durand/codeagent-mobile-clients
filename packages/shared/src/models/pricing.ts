@@ -26,15 +26,18 @@ export const MODEL_PRICING: Record<string, ModelPricing> = {
   'claude-3-haiku': { input: 0.25, output: 1.25, cacheRead: 0.03, cacheWrite: 0.30 },
 
   // ── Codex / OpenAI ────────────────────────────────────────
-  // Phase 2 placeholder pricing: 0 across the board until OpenAI publishes
-  // confirmed rates for the GPT-5.x catalog. Sync from
-  // developers.openai.com/pricing when available.
-  'gpt-5.5': { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-  'gpt-5.4': { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-  'gpt-5.4-mini': { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-  'gpt-5.3-codex': { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-  'gpt-5.2': { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-  'codex-auto-review': { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+  // GPT-5.x rows are derived from OpenAI's published GPT-5 family rates
+  // (standard tier: $1.25/1M in, $10/1M out, cached input at ~10% of input;
+  // mini tier: $0.25/1M in, $2/1M out). OpenAI has no separate cache-WRITE
+  // premium, so cacheWrite mirrors the input rate. Replace with the exact
+  // per-version numbers from developers.openai.com/pricing when published —
+  // these were the ZERO placeholders that rendered Codex sessions as $0.
+  'gpt-5.5': { input: 1.25, output: 10, cacheRead: 0.125, cacheWrite: 1.25 },
+  'gpt-5.4': { input: 1.25, output: 10, cacheRead: 0.125, cacheWrite: 1.25 },
+  'gpt-5.4-mini': { input: 0.25, output: 2, cacheRead: 0.025, cacheWrite: 0.25 },
+  'gpt-5.3-codex': { input: 1.25, output: 10, cacheRead: 0.125, cacheWrite: 1.25 },
+  'gpt-5.2': { input: 1.25, output: 10, cacheRead: 0.125, cacheWrite: 1.25 },
+  'codex-auto-review': { input: 1.25, output: 10, cacheRead: 0.125, cacheWrite: 1.25 },
 };
 
 export const MODEL_CONTEXT_WINDOW: Record<string, number> = {
@@ -85,13 +88,28 @@ export function isKnownModel(model: string): boolean {
 }
 
 /**
- * Resolve pricing by longest matching prefix. Unknown models fall back to
- * claude-sonnet-4 rates — a guess, kept because existing callers do
- * unconditional arithmetic on the result. Callers that need to distinguish
- * real pricing from the fallback must check `isKnownModel(model)` first.
+ * Flagged default for an unpriced model id. All-zero so an unknown model is
+ * VISIBLY unpriced ($0) rather than silently MISPRICED at some other family's
+ * rates (the old sonnet-4 fallback billed unknown ids — including a haiku id
+ * that matched no row — at sonnet rates). `getPricing` returns this object for
+ * unknown ids so callers that do unconditional arithmetic still work; callers
+ * that must distinguish real pricing from the default check `isKnownModel`.
+ */
+export const UNKNOWN_MODEL_PRICING: ModelPricing = {
+  input: 0,
+  output: 0,
+  cacheRead: 0,
+  cacheWrite: 0,
+};
+
+/**
+ * Resolve pricing by longest matching prefix. Unknown models resolve to the
+ * flagged {@link UNKNOWN_MODEL_PRICING} default (all-zero, i.e. visibly
+ * unpriced) instead of guessing at another model's rates. Callers that need to
+ * distinguish real pricing from the default must check `isKnownModel(model)`.
  */
 export function getPricing(model: string): ModelPricing {
-  return longestPrefixMatch(MODEL_PRICING, model) ?? MODEL_PRICING['claude-sonnet-4'];
+  return longestPrefixMatch(MODEL_PRICING, model) ?? UNKNOWN_MODEL_PRICING;
 }
 
 export function getContextWindow(model: string | null): number {

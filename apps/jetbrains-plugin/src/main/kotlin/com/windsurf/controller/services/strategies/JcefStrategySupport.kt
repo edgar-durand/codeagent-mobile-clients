@@ -4,10 +4,12 @@ import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.diagnostic.Logger
 import com.intellij.openapi.ide.CopyPasteManager
 import com.intellij.openapi.wm.ToolWindow
+import com.intellij.util.concurrency.AppExecutorUtil
 import com.windsurf.controller.services.IdeIntegrationService
 import java.awt.Component
 import java.awt.Container
 import java.awt.datatransfer.StringSelection
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
 
 /**
@@ -74,10 +76,12 @@ internal fun deliverPromptViaJcef(
     // Identity with pre-refactor behaviour: clipboard + Robot Cmd+V on
     // whatever has focus.
     CopyPasteManager.getInstance().setContents(StringSelection(invocation.prompt))
-    app.invokeLater {
-        Thread.sleep(800)
-        ide.simulatePasteAndSubmit()
-    }
+    // Delay off-EDT, then hop back — a Thread.sleep inside
+    // invokeLater would block the Swing EDT (painting + input)
+    // for the whole 800 ms.
+    AppExecutorUtil.getAppScheduledExecutorService().schedule({
+        app.invokeLater { ide.simulatePasteAndSubmit() }
+    }, 800, TimeUnit.MILLISECONDS)
     ide.showNotification(notificationTitle, invocation.prompt)
     return true
 }
