@@ -88,6 +88,18 @@ jobs:
         working-directory: apps/cli
         run: npm run test
 
+      # Explicit STEP-8 gate for the 2026-07 cursor-agent ENOENT fix (bead
+      # codeagent-ce5). The win32-native integration test reproduces Cursor's
+      # real installer layout — %LOCALAPPDATA%\cursor-agent\cursor-agent.exe —
+      # and asserts our resolver returns that absolute path on a REAL Windows
+      # kernel (path.win32 + real fs): the one thing Docker on a non-Windows
+      # host can't prove. Already part of `npm run test` above; surfaced here
+      # as a named, unmissable Windows gate. Self-skips off windows-latest.
+      - name: Cursor-agent Windows PATH resolution (win32 native)
+        if: matrix.os == 'windows-latest'
+        working-directory: apps/cli
+        run: npx vitest run cursor-agent-binary.win32
+
       - name: CLI build
         working-directory: apps/cli
         run: npm run build
