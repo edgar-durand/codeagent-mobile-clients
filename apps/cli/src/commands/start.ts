@@ -37,7 +37,7 @@ import {
 import { capture, identifyUser, shutdownTelemetry } from '../services/telemetry.service';
 import { provisionBeadsForStart } from '../beads/wiring';
 import type { StartedBeads } from '../beads';
-import { isLocalSession } from '../baton/gate';
+import { isLocalSession, runtimeSupportsBaton } from '../baton/gate';
 import { runBatonSession } from '../baton/wire-baton';
 import { ensureClaudeOnboarded } from '../agents/claude/onboarding';
 import { log } from '../services/logger';
@@ -307,7 +307,12 @@ export async function start(requestedAgent?: AgentId): Promise<void> {
   // `runAcpSession` below.
   if (isLocalSession() && requiresAcp(session.agent)) {
     const adapter = getAcpAdapter(session.agent);
-    if (adapter && session.pluginAuthToken) {
+    // Only agents with a resumable transcript (claude/codex/cursor) get the
+    // baton — otherwise the read-only mirror would be a silent no-op and Take
+    // Control couldn't resume the conversation. Everything else falls through
+    // to the plain ACP path below (no Take Control offered).
+    const batonCapable = runtimeSupportsBaton(createRuntimeStrategy(session.agent));
+    if (batonCapable && adapter && session.pluginAuthToken) {
       await runBatonSession({
         agent: session.agent,
         sessionId: session.id,

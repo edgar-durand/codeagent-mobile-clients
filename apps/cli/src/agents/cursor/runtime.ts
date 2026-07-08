@@ -65,6 +65,14 @@ export class CursorRuntimeStrategy implements RuntimeStrategy {
     return history.resolveHistoryDir(cwd);
   }
 
+  /** Session transcript at
+   *  `~/.cursor/projects/<encoded-cwd>/agent-transcripts/<id>/<id>.jsonl`.
+   *  Presence of this method is what lets the baton engage for Cursor
+   *  (`runtimeSupportsBaton`), so the LOCAL_DRIVE mirror can tail it. */
+  resolveHistoryFile(cwd: string, sessionId: string): string | null {
+    return history.resolveHistoryFile(cwd, sessionId);
+  }
+
   parseHistoryFile(filePath: string) {
     return history.parseHistoryFile(filePath);
   }

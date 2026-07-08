@@ -1,12 +1,18 @@
 /**
- * History helpers for Cursor. The CLI keeps per-project history
- * under `~/.cursor/projects/<cwd-hash>/*.jsonl` — same shape Codex
- * uses, so the resolver mirrors codex/history.ts.
+ * History helpers for Cursor.
  *
- * Real fixture-based parser tests for Cursor's exact JSONL schema
- * will land alongside the contract suite (#62); for now we share the
- * shared NormalizedMessage shape so the rest of the pipeline (mobile
- * feed, usage display) works against whatever Cursor emits.
+ * `cursor-agent` writes a per-session transcript at
+ *   `~/.cursor/projects/<encoded-cwd>/agent-transcripts/<sessionId>/<sessionId>.jsonl`
+ * where `<encoded-cwd>` is the cwd with the leading separator stripped and every
+ * path separator replaced by `-` (`/Users/x/Documents/p` → `Users-x-Documents-p`).
+ *
+ * Reverse-engineered from a real Cursor 2026.06.24 install (2026-07-08). Each
+ * JSONL line is one record:
+ *   {"role":"user","message":{"content":[{"type":"text","text":"<user_query>…</user_query>"}]}}
+ *   {"role":"assistant","message":{"content":[{"type":"text","text":"…"}]}}
+ *   {"type":"turn_ended","status":"…"}                            ← boundary, skipped
+ *
+ * Powers the baton read-only mirror (LOCAL_DRIVE) + the mobile session feed.
  */
 
 import * as fs from 'node:fs';
@@ -16,27 +22,107 @@ import type { NormalizedMessage } from '@codeam/shared';
 
 const HISTORY_ROOT = path.join(os.homedir(), '.cursor', 'projects');
 
-export function resolveHistoryDir(cwd: string): string | null {
-  // Cursor mirrors Codex's per-cwd subdir layout (hashed path under
-  // ~/.cursor/projects). We don't compute the hash here — the
-  // mobile feed only needs the agent's chosen file, surfaced via
-  // listJsonl-style probes that the runtime fronts.
-  if (!fs.existsSync(HISTORY_ROOT)) return null;
-  // Defer the per-cwd resolution to a follow-up once we have a real
-  // Cursor install to read against. For now return the root so the
-  // generic JSONL probe still finds something.
-  void cwd;
-  return HISTORY_ROOT;
+/** Cursor's project-dir encoding: strip the leading separator, then replace
+ *  `/ \ :` with `-` (`/Users/x/p` → `Users-x-p`). */
+export function encodeCursorCwd(cwd: string): string {
+  return cwd.replace(/^[/\\]+/, '').replace(/[/\\:]/g, '-');
 }
 
 /**
- * Stub parser. Returns an empty array until we have a captured
- * fixture from a real Cursor install — until then the mobile feed
- * just won't show Cursor session history, which is the documented
- * behaviour for `enabled: false` agents.
+ * Resolve the transcript file for a specific session. Tries the computed
+ * `<encoded-cwd>` dir first, then falls back to scanning every project dir for
+ * the `agent-transcripts/<sessionId>/<sessionId>.jsonl` subtree — the sessionId
+ * is a globally-unique UUID, so the scan can't collide across projects and it
+ * survives any cwd-encoding quirk.
  */
-export function parseHistoryFile(_filePath: string): NormalizedMessage[] {
-  return [];
+export function resolveHistoryFile(
+  cwd: string,
+  sessionId: string,
+  root: string = HISTORY_ROOT,
+): string | null {
+  const rel = path.join('agent-transcripts', sessionId, `${sessionId}.jsonl`);
+  const primary = path.join(root, encodeCursorCwd(cwd), rel);
+  if (fs.existsSync(primary)) return primary;
+
+  let entries: fs.Dirent[];
+  try {
+    entries = fs.readdirSync(root, { withFileTypes: true });
+  } catch {
+    return null; // ~/.cursor/projects absent → no history yet
+  }
+  for (const e of entries) {
+    if (!e.isDirectory()) continue;
+    const candidate = path.join(root, e.name, rel);
+    if (fs.existsSync(candidate)) return candidate;
+  }
+  return null;
+}
+
+export function resolveHistoryDir(cwd: string): string | null {
+  if (!fs.existsSync(HISTORY_ROOT)) return null;
+  const dir = path.join(HISTORY_ROOT, encodeCursorCwd(cwd));
+  return fs.existsSync(dir) ? dir : null;
+}
+
+interface CursorContentBlock {
+  type?: string;
+  text?: string;
+}
+interface CursorRecord {
+  role?: 'user' | 'assistant';
+  type?: string;
+  message?: { content?: CursorContentBlock[] };
+}
+
+/** Concatenate the `text` of every `type:'text'` block, dropping tool/other blocks. */
+function extractText(content: CursorContentBlock[] | undefined): string {
+  if (!Array.isArray(content)) return '';
+  return content
+    .filter((b) => b.type === 'text' && typeof b.text === 'string')
+    .map((b) => b.text as string)
+    .join('');
+}
+
+/** Strip Cursor's `<user_query>…</user_query>` envelope so the mirror shows the
+ *  raw prompt the user typed, not the agent-protocol wrapper. */
+function unwrapUserQuery(text: string): string {
+  const m = text.match(/<user_query>\s*([\s\S]*?)\s*<\/user_query>/);
+  return (m ? m[1] : text).trim();
+}
+
+export function parseHistoryFile(filePath: string): NormalizedMessage[] {
+  let raw: string;
+  try {
+    raw = fs.readFileSync(filePath, 'utf8');
+  } catch {
+    return [];
+  }
+  const out: NormalizedMessage[] = [];
+  let idx = 0;
+  for (const line of raw.split('\n')) {
+    if (!line.trim()) continue;
+    let rec: CursorRecord;
+    try {
+      rec = JSON.parse(line) as CursorRecord;
+    } catch {
+      continue;
+    }
+    // Only user/assistant messages carry conversation text; skip turn_ended etc.
+    if (rec.role !== 'user' && rec.role !== 'assistant') continue;
+    const blockText = extractText(rec.message?.content);
+    const text = rec.role === 'user' ? unwrapUserQuery(blockText) : blockText.trim();
+    if (!text) continue;
+    out.push({
+      id: `cursor:${idx}`,
+      role: rec.role === 'user' ? 'user' : 'agent',
+      text,
+      // Cursor records carry no per-message timestamp; order is preserved by
+      // file position, so a stable epoch keeps the shape valid without lying.
+      timestamp: new Date(0).toISOString(),
+    });
+    idx += 1;
+  }
+  return out;
 }
 
 /** Quota / usage RPC stub. Cursor exposes usage via its own SaaS
