@@ -34,7 +34,12 @@ describe('start dispatch — ACP launch mode', () => {
     expect(requiresAcp('cursor')).toBe(true);
     const spec = getAcpAdapter('cursor');
     expect(spec).not.toBeNull();
-    expect(spec?.command).toBe('cursor-agent');
+    // Native launcher: bare `cursor-agent` (PATH-resolved at spawn) OR an
+    // absolute path to the resolved install binary (cursor-agent[.exe] —
+    // the Windows stale-PATH fix); never the npm-adapter process.execPath.
+    expect(
+      spec?.command === 'cursor-agent' || /[\\/]cursor-agent(\.exe)?$/.test(spec?.command ?? ''),
+    ).toBe(true);
     expect(spec?.args).toEqual(['acp']);
   });
 

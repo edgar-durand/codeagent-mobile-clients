@@ -764,6 +764,17 @@ function knownAgentBinaryDirs(): string[] {
   out.push(path.join(home, '.local/bin'));
   out.push(path.join(home, 'bin'));
 
+  // Windows: agent CLIs install under the user profile, and their
+  // installers update the *User* PATH (setx) — which a long-running
+  // process never inherits. Probe the deterministic dirs directly so a
+  // bare-name spawn still resolves. (cursor-agent additionally resolves
+  // by absolute path in its adapter; this covers the fallback + npm-global.)
+  if (process.platform === 'win32') {
+    const { LOCALAPPDATA, APPDATA } = process.env;
+    if (LOCALAPPDATA) out.push(path.join(LOCALAPPDATA, 'cursor-agent'));
+    if (APPDATA) out.push(path.join(APPDATA, 'npm'));
+  }
+
   return out.filter((p) => {
     try {
       return fsSync.statSync(p).isDirectory();
