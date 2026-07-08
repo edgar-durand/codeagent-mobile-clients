@@ -18,12 +18,16 @@ describe('isLocalSession', () => {
 });
 
 describe('batonEnabled', () => {
-  it('is false by default', () => expect(batonEnabled({})).toBe(false));
+  it('is true by default (ON for local sessions)', () => expect(batonEnabled({})).toBe(true));
 
   it('is true for CODEAM_BATON=1', () => expect(batonEnabled({ CODEAM_BATON: '1' })).toBe(true));
 
-  it('is false for CODEAM_BATON=0 / false', () => {
+  it('is true for an empty string (unset-equivalent)', () =>
+    expect(batonEnabled({ CODEAM_BATON: '' })).toBe(true));
+
+  it('is false for the kill switch CODEAM_BATON=0 / false', () => {
     expect(batonEnabled({ CODEAM_BATON: '0' })).toBe(false);
     expect(batonEnabled({ CODEAM_BATON: 'false' })).toBe(false);
+    expect(batonEnabled({ CODEAM_BATON: 'FALSE' })).toBe(false);
   });
 });
