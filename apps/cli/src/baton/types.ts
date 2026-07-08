@@ -6,7 +6,7 @@ export type BatonState = 'LOCAL_DRIVE' | 'MOBILE_DRIVE' | 'SWITCHING';
 
 /** A driver runs one side of a session (native TUI or mobile ACP). */
 export interface SessionDriver {
-  kind: DriverKind;
+  readonly kind: DriverKind;
   /** Fresh session when `resumeId` is undefined; resumes that conversation otherwise.
    *  Resolves with the conversation id (the resumed id, or a freshly minted one). */
   start(resumeId?: string): Promise<string>;
