@@ -37,7 +37,9 @@ export class NativeTuiDriver implements SessionDriver {
   }
 
   async start(resumeId?: string): Promise<string> {
-    if (resumeId) {
+    // Explicit undefined check (not truthiness): the contract is "fresh when
+    // undefined, else resume" — an empty-string id must still resume, not spawn fresh.
+    if (resumeId !== undefined) {
       await this.agent.restart(resumeId, false);
       return resumeId;
     }
