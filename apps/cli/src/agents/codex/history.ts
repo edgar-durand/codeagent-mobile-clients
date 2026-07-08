@@ -52,11 +52,6 @@ interface MessageVariant {
   content?: Array<{ type?: string; text?: string }>;
 }
 
-interface ResponseItemPayloadWithMessage {
-  Message?: MessageVariant;
-  // other variants ignored
-}
-
 interface TokenCountPayload {
   TokenCount?: {
     info?: {
@@ -105,6 +100,48 @@ function mapRole(codexRole: string | undefined): NormalizedMessage['role'] {
 }
 
 /**
+ * Extract the message from a `response_item` payload, tolerating BOTH Codex
+ * rollout formats: the CURRENT flat shape `{type:'message', role, content}` and
+ * the LEGACY Rust-enum shape `{Message:{role, content}}`. Codex switched to the
+ * flat OpenAI-style payload, which the old `payload.Message`-only lookup silently
+ * dropped → the baton mirror + session feed showed nothing for codex.
+ */
+function messageFromPayload(payload: unknown): MessageVariant | null {
+  if (!payload || typeof payload !== 'object') return null;
+  const p = payload as {
+    type?: unknown;
+    role?: unknown;
+    content?: unknown;
+    Message?: unknown;
+  };
+  if (p.type === 'message' && Array.isArray(p.content)) {
+    return {
+      role: typeof p.role === 'string' ? p.role : undefined,
+      content: p.content as MessageVariant['content'],
+    };
+  }
+  if (p.Message && typeof p.Message === 'object') return p.Message as MessageVariant;
+  return null;
+}
+
+/**
+ * Codex injects its system prompt (`developer` role) and the environment +
+ * compacted-context references as SYNTHETIC turns in the rollout. They aren't
+ * user-facing conversation, so the mirror / feed must skip them — otherwise the
+ * first thing the phone shows is a wall of permissions text and `<ccr:…>` blobs.
+ */
+function isSyntheticCodexTurn(role: string | undefined, text: string): boolean {
+  if (role === 'developer' || role === 'system') return true;
+  const trimmed = text.trim();
+  if (trimmed.startsWith('<environment_context>')) return true;
+  // Codex's turn-interruption marker — a synthetic user turn, not typed input.
+  if (trimmed.startsWith('<turn_aborted>')) return true;
+  // A turn that is ONLY compacted-context reference tokens (`<<ccr:…>>`).
+  if (/^(<<ccr:[^>]*>>\s*)+$/.test(trimmed)) return true;
+  return false;
+}
+
+/**
  * Parse a Codex rollout JSONL file → NormalizedMessage[].
  *
  * Filters: if the file's session_meta records a cwd that doesn't match the
@@ -150,11 +187,11 @@ export function parseHistoryFile(filePath: string): NormalizedMessage[] {
     const rec = parseLine(line);
     if (!rec) continue;
     if (rec.type !== 'response_item') continue;
-    const payload = rec.payload as ResponseItemPayloadWithMessage | undefined;
-    const msg = payload?.Message;
+    const msg = messageFromPayload(rec.payload);
     if (!msg) continue;
     const text = extractMessageText(msg.content);
     if (!text) continue;
+    if (isSyntheticCodexTurn(msg.role, text)) continue;
     out.push({
       id: `rollout:${idx}`,
       role: mapRole(msg.role),
@@ -246,13 +283,12 @@ export function listResumableSessions(
             continue;
           }
           if (!summary && rec.type === 'response_item') {
-            const payload = rec.payload as
-              | ResponseItemPayloadWithMessage
-              | undefined;
-            const msg = payload?.Message;
+            const msg = messageFromPayload(rec.payload);
             if (msg && msg.role === 'user') {
               const text = extractMessageText(msg.content).trim();
-              if (text) summary = text.slice(0, 120);
+              // Skip the synthetic `<environment_context>` / `<<ccr:…>>` turns so
+              // the resume-list title is the user's real first prompt.
+              if (text && !isSyntheticCodexTurn(msg.role, text)) summary = text.slice(0, 120);
             }
           }
           if (metaCwd !== undefined && summary) break;

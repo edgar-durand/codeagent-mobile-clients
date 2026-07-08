@@ -99,6 +99,44 @@ describe('codex/history (rollouts)', () => {
       expect(out[0].timestamp).toBe('2025-05-07T17:24:22.000Z');
     });
 
+    it('parses the CURRENT flat payload format and filters synthetic turns (baton mirror)', () => {
+      // Codex switched from the Rust-enum `{Message:{…}}` to a flat
+      // `{type:'message', role, content}` payload (captured from a real
+      // 2026-06 rollout). The old Message-only lookup dropped everything, so
+      // the codex baton mirror showed nothing. The parser must read the flat
+      // shape AND skip Codex's synthetic developer / environment / turn-aborted
+      // injections — only the real user+assistant turns reach the phone.
+      const dir = mkdtempSync(path.join(tmpdir(), 'codex-flat-'));
+      dirsToClean.push(dir);
+      process.chdir(dir);
+
+      const filePath = path.join(dir, 'rollout-2026-06-22T11-12-40-flat.jsonl');
+      const rec = (type: string, payload: unknown): string =>
+        JSON.stringify({ timestamp: '2026-06-22T11:12:40.000Z', type, payload });
+      const flatMsg = (role: string, text: string): unknown => ({
+        type: 'message',
+        role,
+        content: [{ type: role === 'assistant' ? 'output_text' : 'input_text', text }],
+      });
+      writeFileSync(
+        filePath,
+        [
+          rec('session_meta', { id: 'sess-flat', cwd: dir }),
+          rec('response_item', flatMsg('developer', 'You are Codex. <permissions>…</permissions>')),
+          rec('response_item', flatMsg('user', '<environment_context>\n  <cwd>/x</cwd>\n</environment_context>')),
+          rec('response_item', flatMsg('user', 'hello')),
+          rec('response_item', flatMsg('assistant', 'Hello. What would you like to work on?')),
+          rec('response_item', flatMsg('user', '<turn_aborted> The user interrupted')),
+        ].join('\n'),
+      );
+
+      const out = parseHistoryFile(filePath);
+      expect(out.map((m) => [m.role, m.text])).toEqual([
+        ['user', 'hello'],
+        ['agent', 'Hello. What would you like to work on?'],
+      ]);
+    });
+
     it("returns [] when session_meta.cwd does not match process.cwd()", () => {
       const dir = mkdtempSync(path.join(tmpdir(), 'codex-rollout-'));
       const wrongCwd = mkdtempSync(path.join(tmpdir(), 'codex-other-'));
