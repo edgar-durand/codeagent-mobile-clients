@@ -1,7 +1,23 @@
 import { describe, it, expect, vi } from 'vitest';
-import { buildBaton, makeOnCommand } from '../../src/baton/wire-baton';
+import { buildBaton, makeOnCommand, makeMirrorOnNewMessages } from '../../src/baton/wire-baton';
 import type { RemoteCommand } from '../../src/services/command-relay.service';
 import { isLocalSession } from '../../src/baton/gate';
+import type { NormalizedMessage } from '@codeam/shared';
+
+function msg(
+  role: NormalizedMessage['role'],
+  text: string,
+  id = `${role}-${text}`,
+): NormalizedMessage {
+  return { id, role, text, timestamp: new Date(0).toISOString() };
+}
+
+function fakePublisher() {
+  return {
+    publishOutput: vi.fn(async (_body: Record<string, unknown>) => {}),
+    pushConversation: vi.fn(async () => {}),
+  };
+}
 
 describe('buildBaton composition', () => {
   it('routes take_control to the controller and other commands to the active driver dispatcher', async () => {
@@ -104,5 +120,97 @@ describe('cloud/self-hosted regression (gate)', () => {
   it('cloud/self-hosted never enter the baton (gate is false)', () => {
     expect(isLocalSession({ CODESPACES: 'true' })).toBe(false);
     expect(isLocalSession({ CODEAM_AUTO_APPROVE: '1' })).toBe(false);
+  });
+});
+
+describe('makeMirrorOnNewMessages (LOCAL_DRIVE live mirror)', () => {
+  it('always pushes the conversation snapshot, but skips the live pipe on the first (catch-up) batch', async () => {
+    const publisher = fakePublisher();
+    const onNewMessages = makeMirrorOnNewMessages({
+      publisher,
+      agentId: 'claude',
+      conversationId: 'conv-1',
+    });
+
+    // TranscriptMirror's first call after start() reports the whole
+    // pre-existing history — must NOT replay live.
+    onNewMessages([msg('user', 'hi'), msg('agent', 'hello there')]);
+    await vi.waitFor(() => expect(publisher.pushConversation).toHaveBeenCalledTimes(1));
+
+    expect(publisher.pushConversation).toHaveBeenCalledWith({
+      agentId: 'claude',
+      sessionId: 'conv-1',
+      messages: [
+        expect.objectContaining({ role: 'user', text: 'hi' }),
+        expect.objectContaining({ role: 'agent', text: 'hello there' }),
+      ],
+    });
+    expect(publisher.publishOutput).not.toHaveBeenCalled();
+  });
+
+  it('live-publishes a genuinely new turn (user then agent) in wire order after the first batch', async () => {
+    const publisher = fakePublisher();
+    const onNewMessages = makeMirrorOnNewMessages({
+      publisher,
+      agentId: 'claude',
+      conversationId: 'conv-1',
+    });
+
+    onNewMessages([msg('user', 'hi'), msg('agent', 'hello there')]); // catch-up, skipped
+    onNewMessages([msg('user', 'what time is it?'), msg('agent', "it's 3pm")]); // real new turn
+
+    await vi.waitFor(() => expect(publisher.publishOutput).toHaveBeenCalledTimes(4));
+
+    expect(publisher.publishOutput.mock.calls.map((c) => c[0])).toEqual([
+      { type: 'clear' },
+      { type: 'user_message', content: 'what time is it?', done: true },
+      { type: 'new_turn', done: false },
+      { type: 'text', content: "it's 3pm", done: true },
+    ]);
+    // Snapshot stays fresh for both batches (reconnect/cold-open source).
+    expect(publisher.pushConversation).toHaveBeenCalledTimes(2);
+  });
+
+  it('skips system messages entirely (neither snapshot nor live pipe)', async () => {
+    const publisher = fakePublisher();
+    const onNewMessages = makeMirrorOnNewMessages({
+      publisher,
+      agentId: 'claude',
+      conversationId: 'conv-1',
+    });
+
+    onNewMessages([msg('user', 'hi'), msg('agent', 'hello')]); // catch-up
+    onNewMessages([msg('system', 'internal note')]);
+
+    await vi.waitFor(() => expect(publisher.pushConversation).toHaveBeenCalledTimes(1));
+    expect(publisher.publishOutput).not.toHaveBeenCalled();
+  });
+
+  it('preserves order across two rapid-fire batches (no interleaved network races)', async () => {
+    const publisher = fakePublisher();
+    // Make the first live batch's HTTP calls resolve out of submission order
+    // to prove the internal chain — not call timing — decides ordering.
+    let callIndex = 0;
+    publisher.publishOutput.mockImplementation(async () => {
+      const mine = callIndex++;
+      if (mine === 0) await new Promise((r) => setTimeout(r, 10));
+    });
+    const onNewMessages = makeMirrorOnNewMessages({
+      publisher,
+      agentId: 'claude',
+      conversationId: 'conv-1',
+    });
+
+    onNewMessages([msg('user', 'hi'), msg('agent', 'hello')]); // catch-up
+    onNewMessages([msg('user', 'turn A')]);
+    onNewMessages([msg('agent', 'reply A')]);
+
+    await vi.waitFor(() => expect(publisher.publishOutput).toHaveBeenCalledTimes(4));
+    expect(publisher.publishOutput.mock.calls.map((c) => c[0])).toEqual([
+      { type: 'clear' },
+      { type: 'user_message', content: 'turn A', done: true },
+      { type: 'new_turn', done: false },
+      { type: 'text', content: 'reply A', done: true },
+    ]);
   });
 });

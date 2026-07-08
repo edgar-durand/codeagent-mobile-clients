@@ -1,4 +1,4 @@
-import type { AgentId } from '@codeam/shared';
+import type { AgentId, NormalizedMessage } from '@codeam/shared';
 import { CommandRelayService, type RemoteCommand } from '../services/command-relay.service';
 import { AgentService } from '../services/agent.service';
 import { createRuntimeStrategy } from '../agents/registry';
@@ -79,6 +79,111 @@ export const buildBaton = {
     };
   },
 };
+
+/**
+ * Publisher surface {@link makeMirrorOnNewMessages} needs — a subset of
+ * {@link AcpPublisher} so tests can pass a fake without constructing a real
+ * one (no HTTP, no plugin-auth token).
+ */
+export interface MirrorLivePublisher {
+  publishOutput: (body: Record<string, unknown>) => Promise<void>;
+  pushConversation: (args: {
+    agentId: AgentId;
+    sessionId: string;
+    messages: Array<{ id: string; role: 'user' | 'agent'; text: string; timestamp: number }>;
+  }) => Promise<void>;
+}
+
+/**
+ * Replay one already-completed turn from the transcript mirror over the
+ * SAME live chat-output pipe (`/api/commands/output`) an ACP/legacy-PTY turn
+ * uses, so an open mobile renders it as it happens instead of only after a
+ * leave+re-open (which loads from the `pushConversation` snapshot). Matches
+ * `OutputService.startTerminalTurn`'s locally-typed-turn shape exactly:
+ * a user message opens with `clear` → `user_message` → `new_turn`; the
+ * agent's reply — already complete by the time the mirror sees it (no
+ * per-token deltas available from a JSONL tail) — closes with one final
+ * `text` chunk carrying `done: true`.
+ */
+async function publishMirroredTurnsLive(
+  publisher: Pick<MirrorLivePublisher, 'publishOutput'>,
+  messages: NormalizedMessage[],
+): Promise<void> {
+  for (const m of messages) {
+    if (m.role === 'user') {
+      await publisher.publishOutput({ type: 'clear' });
+      await publisher.publishOutput({ type: 'user_message', content: m.text, done: true });
+      await publisher.publishOutput({ type: 'new_turn', done: false });
+    } else {
+      await publisher.publishOutput({ type: 'text', content: m.text, done: true });
+    }
+  }
+}
+
+/**
+ * Builds the {@link TranscriptMirror} `onNewMessages` handler used while
+ * LOCAL_DRIVE holds the baton. Every batch is kept fresh on the
+ * `pushConversation` snapshot (the mobile's cold-open / reconnect history
+ * source — unchanged behavior). In ADDITION, every batch after the mirror's
+ * own initial catch-up read is replayed turn-by-turn over the live output
+ * pipe via {@link publishMirroredTurnsLive}, so a mobile client that already
+ * has the session open sees each new local turn as it lands.
+ *
+ * ⚠️ Skipping live-publish on the FIRST call is load-bearing, not
+ * cosmetic: {@link TranscriptMirror} starts its internal `emitted` counter
+ * at 0, so the very first `onNewMessages` call after `start()` always
+ * reports the ENTIRE pre-existing history as "new" (that's its catch-up
+ * read, not a new turn) — and `startMirror` rebuilds a fresh
+ * `TranscriptMirror` (so a fresh "first call") every time the baton
+ * re-enters LOCAL_DRIVE. Without this guard, toggling MOBILE_DRIVE ↔
+ * LOCAL_DRIVE would replay the whole past conversation over the live pipe
+ * as brand-new turns on every re-entry — duplicate bubbles for everything
+ * the `pushConversation` snapshot already covers. Real subsequent turns
+ * (genuinely new file-tail growth while the mirror stays armed) always
+ * live-publish.
+ *
+ * Batches are drained through a private promise chain so two `onNewMessages`
+ * calls in quick succession (rapid file-watch events) can't interleave
+ * their HTTP posts out of order (`clear`/`user_message`/`new_turn` must
+ * land before the following turn's `text done:true`).
+ *
+ * Extracted as a pure factory (mirrors {@link makeOnCommand}) so it's
+ * testable with a fake publisher, without a real TranscriptMirror/PTY.
+ */
+export function makeMirrorOnNewMessages(deps: {
+  publisher: MirrorLivePublisher;
+  agentId: AgentId;
+  conversationId: string;
+}): (messages: NormalizedMessage[]) => void {
+  let isFirstEmit = true;
+  let publishChain: Promise<void> = Promise.resolve();
+  return (messages: NormalizedMessage[]): void => {
+    const relevant = messages.filter((m) => m.role !== 'system');
+    if (relevant.length === 0) return;
+    const mapped = relevant.map((m) => ({
+      id: m.id,
+      role: (m.role === 'user' ? 'user' : 'agent') as 'user' | 'agent',
+      text: m.text,
+      timestamp: toEpochMs(m.timestamp),
+    }));
+    void deps.publisher.pushConversation({
+      agentId: deps.agentId,
+      sessionId: deps.conversationId,
+      messages: mapped,
+    });
+    if (!isFirstEmit) {
+      publishChain = publishChain
+        .then(() => publishMirroredTurnsLive(deps.publisher, relevant))
+        .catch((err) => {
+          log.warn(
+            'wireBaton',
+            `mirror live-publish failed: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        });
+    }
+    isFirstEmit = false;
+  };
+}
 
 export interface BatonSessionOptions {
   agent: AgentId;
@@ -220,6 +325,9 @@ export async function runBatonSession(opts: BatonSessionOptions): Promise<void> 
   });
 
   // ─── Read-only transcript mirror (rebuilt each LOCAL_DRIVE entry) ─────────
+  // Keeps the `pushConversation` snapshot fresh AND live-publishes each new
+  // local turn over the chat-output pipe, so an open mobile renders
+  // LOCAL_DRIVE turns per-turn instead of only after leave+re-open.
   let mirror: TranscriptMirror | null = null;
   const startMirror = (conversationId: string): void => {
     mirror?.stop();
@@ -227,22 +335,11 @@ export async function runBatonSession(opts: BatonSessionOptions): Promise<void> 
       runtime,
       cwd: opts.cwd,
       conversationId,
-      onNewMessages: (messages) => {
-        const mapped = messages
-          .filter((m) => m.role !== 'system')
-          .map((m) => ({
-            id: m.id,
-            role: (m.role === 'user' ? 'user' : 'agent') as 'user' | 'agent',
-            text: m.text,
-            timestamp: toEpochMs(m.timestamp),
-          }));
-        if (mapped.length === 0) return;
-        void publisher.pushConversation({
-          agentId: opts.agent,
-          sessionId: conversationId,
-          messages: mapped,
-        });
-      },
+      onNewMessages: makeMirrorOnNewMessages({
+        publisher,
+        agentId: opts.agent,
+        conversationId,
+      }),
     });
     mirror.start();
   };
