@@ -8,27 +8,89 @@ export interface TranscriptMirrorDeps {
   conversationId: string;
   onNewMessages: (messages: NormalizedMessage[]) => void;
   watch?: (file: string, onChange: () => void) => () => void;
+  /** Startup poll cadence while waiting for the agent to create its JSONL
+   *  (default 750 ms). Injectable so tests drive it deterministically. */
+  pollIntervalMs?: number;
+  /** Upper bound on how long `start()` waits for the file to appear before
+   *  giving up (default 10 min; 0 = wait forever). Injectable for tests. */
+  waitTimeoutMs?: number;
+  /** Timer seam so tests can substitute fakes without touching globals. */
+  setInterval?: (fn: () => void, ms: number) => ReturnType<typeof setInterval>;
+  clearInterval?: (handle: ReturnType<typeof setInterval>) => void;
 }
 
 /** Tails the agent's own transcript JSONL and emits only messages appended
- *  since the last emit. Reuses the runtime's history parser (no screen-scrape). */
+ *  since the last emit. Reuses the runtime's history parser (no screen-scrape).
+ *
+ *  ⚠️ The native TUI creates `~/.claude/projects/<encoded-cwd>/<id>.jsonl` only
+ *  on its FIRST turn, so at LOCAL_DRIVE begin the file (and often its parent
+ *  dir) does not exist yet — `resolveHistoryFile` returns null. A previous
+ *  version bailed out permanently there, so a local conversation NEVER mirrored
+ *  to mobile. `start()` instead attaches immediately if the file is already
+ *  present, otherwise runs a BOUNDED startup poll of `resolveHistoryFile` and
+ *  attaches (emit + watch) the moment the file appears, then stops polling.
+ *
+ *  This is NOT a realtime-state poll (which the repo forbids — those must ride
+ *  an existing event stream): it is a one-shot startup wait for a file whose
+ *  parent directory may not yet exist, so there is no fs event to subscribe to.
+ *  Once attached, all realtime tailing rides `fs.watch` — never a poll. */
 export class TranscriptMirror {
   private emitted = 0;
   private unwatch: (() => void) | null = null;
+  private pollHandle: ReturnType<typeof setInterval> | null = null;
+  private attached = false;
 
-  constructor(private readonly deps: TranscriptMirrorDeps) {}
+  private readonly pollIntervalMs: number;
+  private readonly waitTimeoutMs: number;
+  private readonly setIntervalFn: (fn: () => void, ms: number) => ReturnType<typeof setInterval>;
+  private readonly clearIntervalFn: (handle: ReturnType<typeof setInterval>) => void;
+
+  constructor(private readonly deps: TranscriptMirrorDeps) {
+    this.pollIntervalMs = deps.pollIntervalMs ?? 750;
+    this.waitTimeoutMs = deps.waitTimeoutMs ?? 10 * 60_000;
+    this.setIntervalFn = deps.setInterval ?? ((fn, ms) => setInterval(fn, ms));
+    this.clearIntervalFn = deps.clearInterval ?? ((handle) => clearInterval(handle));
+  }
 
   start(): void {
-    const file = this.deps.runtime.resolveHistoryFile?.(this.deps.cwd, this.deps.conversationId);
-    if (!file) return; // nothing to mirror yet
-    this.emit(file);
-    const watch = this.deps.watch ?? defaultWatch;
-    this.unwatch = watch(file, () => this.emit(file));
+    if (this.tryAttach()) return; // file already present — attach now
+    // File not yet created (the native TUI writes it on its first turn). Poll
+    // for it, bounded by waitTimeoutMs, and attach the instant it appears.
+    let waited = 0;
+    this.pollHandle = this.setIntervalFn(() => {
+      waited += this.pollIntervalMs;
+      if (this.tryAttach()) {
+        this.clearPoll();
+        return;
+      }
+      if (this.waitTimeoutMs > 0 && waited >= this.waitTimeoutMs) this.clearPoll();
+    }, this.pollIntervalMs);
   }
 
   stop(): void {
+    this.clearPoll();
     this.unwatch?.();
     this.unwatch = null;
+  }
+
+  /** Resolve the transcript file; if present, emit the current contents and
+   *  begin watching. Returns whether it attached. */
+  private tryAttach(): boolean {
+    if (this.attached) return true;
+    const file = this.deps.runtime.resolveHistoryFile?.(this.deps.cwd, this.deps.conversationId);
+    if (!file) return false;
+    this.attached = true;
+    this.emit(file);
+    const watch = this.deps.watch ?? defaultWatch;
+    this.unwatch = watch(file, () => this.emit(file));
+    return true;
+  }
+
+  private clearPoll(): void {
+    if (this.pollHandle !== null) {
+      this.clearIntervalFn(this.pollHandle);
+      this.pollHandle = null;
+    }
   }
 
   private emit(file: string): void {
