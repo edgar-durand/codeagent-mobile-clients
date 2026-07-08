@@ -159,6 +159,55 @@ JetBrains plugin is Kotlin and does **not** consume the shared package — if th
 
 **Critical: parallel-Claude JSONL detection.** `apps/cli/src/services/history.service.ts` captures a `bootTimeMs` at construction and `detectCurrentConversation()` / `getCurrentUsage()` filter `~/.claude/projects/<cwd>/*.jsonl` entries by `birthtime >= bootTimeMs - 5 s grace`. Without this filter, if the user runs `codeam pair` in a directory where another Claude session is already chatting (common when developing this project itself), the actively-written JSONL of the parallel session wins the mtime sort and the CLI publishes the wrong conversation to the mobile app — bug fixed in `v2.10.8`. Similarly, `tryExtractSessionId` (in `OutputService`) only matches the unambiguous `Resuming session: <uuid>` pattern; the older broader `/Session:|/Conversation:` patterns matched incidental log lines and were dropped in the same fix.
 
+### Session Baton — local Take Control (native TUI ↔ mobile ACP)
+
+**`src/baton/`** implements a **local-only** hybrid: the agent's native TUI runs in the
+user's terminal AND the mobile app can take turn-based control of the SAME conversation
+over ACP. It is a purely ADDITIVE branch — codespace / self-hosted paths are untouched.
+
+- **Gate (`gate.ts`):** `isLocalSession(env)` = NOT (`CODESPACES==='true'` ||
+  `CODEAM_AUTO_APPROVE==='1'` || `HEADROOM_ENABLED==='1'` || `CODEAM_AUTO_TOKEN` ||
+  `CODEAM_ENROLL_TOKEN`). `commands/start.ts` runs the baton branch **before** the
+  `requiresAcp(agent)` fork, so cloud/self-hosted spawn byte-for-byte as before.
+- **Controller (`baton-controller.ts`):** owns exactly ONE active driver;
+  `state ∈ {LOCAL_DRIVE, MOBILE_DRIVE, SWITCHING}`. `takeControl`/`handback` are turn-safe:
+  they `await current.whenSafeToYield()` (no mid-turn cut) → `current.stop()` →
+  `next.start(conversationId)` → publish the new state. On any throw it reverts to the
+  pre-switch steady state so the baton never wedges in `SWITCHING`.
+- **Drivers (`SessionDriver`):** `NativeTuiDriver` (over `AgentService`/PTY — the local TUI)
+  and `AcpDriver` (over `AcpClient` — the mobile side). Both expose
+  `start(resumeId?)/stop()/whenSafeToYield()/dispatch(cmd)`. `AcpDriver.start` resumes the
+  native session via ACP `session/load`.
+- **Read-only mirror (`transcript-mirror.ts` + `makeMirrorOnNewMessages`):** while LOCAL_DRIVE
+  holds the baton, tails the agent's own `~/.claude/projects/<encodeCwd(cwd)>/<sessionId>.jsonl`
+  and mirrors each turn to mobile over the existing `pushConversation` + output pipe (no
+  screen-scrape). ⚠️ **The jsonl doesn't exist until the first turn** → bounded-poll for it,
+  then attach; and `pushConversation` must carry the **FULL** conversation snapshot, not the
+  last delta (else re-open shows a truncated history). `fresh` vs re-arm decides whether the
+  first (catch-up) batch also live-publishes.
+- **Composition root (`wire-baton.ts` `runBatonSession`):** builds both drivers, the controller,
+  the mirror, and the relay. `makeOnCommand` routes `take_control`/`handback` to the controller
+  and every other command to `controller.activeSessionDriver.dispatch`. `makeSerializedBatonPoster`
+  serializes the `postBatonEvent` calls so `SWITCHING`→steady-state can't reorder on the wire.
+
+**⚠️ Hand-off invariants (each shipped a fix — all local-only):**
+- **`terminal.ts` `parkTerminalForReadonly()`** (called from `NativeTuiDriver.stop()`): the native
+  TUI is hard-killed on Take Control, so the terminal modes it enabled (focus reporting
+  `ESC[?1004h`, bracketed paste, mouse) stay latched and a cooked-mode tty echoes `^[[I^[[O` on
+  every focus flap. Reset those modes + park stdin for the read-only phase. (v2.60.3)
+- **`StreamingState.beginLoadReplay/endLoadReplay`** (`agents/acp/runner.ts`, bracketed around
+  `loadSession` in `AcpDriver.start`): ACP `session/load` replays the whole conversation as
+  `session/update` before it resolves; without the guard those land as open `done:false` chunks
+  that never close → mobile "Thinking…" stuck. Mobile already has the history via the mirror. The
+  normal ACP path never calls `loadSession`, so only the baton needs this. (v2.60.3)
+- **Ordered state POSTs** (`makeSerializedBatonPoster`): a bare `void postBatonEvent()` let a fast
+  hand-back's `SWITCHING`→`LOCAL_DRIVE` pair reorder → mobile stuck on "Switching…". The backend
+  publishes each event before responding 2xx, so awaiting each POST before the next guarantees order. (v2.60.4)
+
+Tests: `apps/cli/__tests__/baton/*` (gate, controller wiring, acp-driver load-replay bracket,
+terminal park, serialized poster) + `__tests__/agents/acp/streaming-state-dedup.test.ts`
+(load-replay guard). Spec/plan in the container repo `docs/superpowers/`.
+
 ### Agent-failure messaging — every failed turn ends with a HONEST, visible frame
 
 `apps/cli/src/agents/acp/runner.ts` owns the contract that a turn NEVER ends silently or with a misleading status. Rules (each backed by `__tests__/agents/acp.failureBubble.test.ts`):
