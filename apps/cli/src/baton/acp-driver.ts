@@ -72,13 +72,25 @@ export class AcpDriver implements SessionDriver {
   constructor(private readonly deps: AcpDriverDeps) {}
 
   async start(resumeId?: string): Promise<string> {
-    const started = await this.deps.client.start();
+    let started: Awaited<ReturnType<AcpClient['start']>>;
+    try {
+      started = await this.deps.client.start();
+      if (resumeId !== undefined) {
+        await this.deps.client.loadSession(resumeId);
+      }
+    } catch (err) {
+      // `loadSession` can throw AFTER `client.start()` already succeeded —
+      // the adapter is alive and the client considers itself started. Stop
+      // it so a retried take-control (BatonController reverts to
+      // LOCAL_DRIVE on this throw) spawns a fresh adapter on the next
+      // `start()` instead of failing again for an unrelated reason.
+      // Best-effort: never let teardown mask the real error.
+      await this.deps.client.stop().catch(() => undefined);
+      throw err;
+    }
     // Explicit undefined check (not truthiness): an empty-string id must still
     // resume rather than mint a fresh conversation.
     const conversationId = resumeId !== undefined ? resumeId : started.sessionId;
-    if (resumeId !== undefined) {
-      await this.deps.client.loadSession(resumeId);
-    }
     this.acpSessionId = conversationId;
     this.agentCaps = started.initialize.agentCapabilities;
     // New (re)spawn → drop the memoised session so history/models rebind to the
@@ -90,6 +102,12 @@ export class AcpDriver implements SessionDriver {
 
   async stop(): Promise<void> {
     await this.deps.client.stop();
+    // Clean invariant: a stopped driver holds no conversation/session state,
+    // so a stray dispatch() after stop() (or before the next start()) fails
+    // the defensive `acpSessionId === null` check above rather than reusing
+    // stale state from the previous conversation.
+    this.acpSessionId = null;
+    this.session = null;
   }
 
   async dispatch(cmd: RemoteCommand): Promise<void> {

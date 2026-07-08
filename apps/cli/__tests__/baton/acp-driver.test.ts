@@ -154,4 +154,76 @@ describe('AcpDriver', () => {
       code: 'BATON_MOBILE_NOT_STARTED',
     });
   });
+
+  it('start() stops the client when loadSession throws — driver stays retryable, not half-started', async () => {
+    const client = fakeClient('acp-fresh');
+    client.loadSession.mockRejectedValueOnce(new Error('resume failed'));
+    const d = new AcpDriver(makeDeps(client).deps);
+
+    await expect(d.start('conv-42')).rejects.toThrow('resume failed');
+
+    // client.start() DID succeed before loadSession threw — the driver must
+    // stop it so a retried take-control doesn't hard-throw on a still-alive
+    // adapter, and must not have adopted the failed conversation id.
+    expect(client.stop).toHaveBeenCalledTimes(1);
+  });
+
+  it('start() propagates a client.start() failure and still (harmlessly) calls stop()', async () => {
+    const client = fakeClient('acp-fresh');
+    client.start.mockRejectedValueOnce(new Error('handshake failed'));
+    const d = new AcpDriver(makeDeps(client).deps);
+
+    await expect(d.start('conv-42')).rejects.toThrow('handshake failed');
+
+    // The real AcpClient.stop() no-ops when there's no child (it already
+    // cleaned itself up on the handshake failure) — calling it unconditionally
+    // here is cheap defense-in-depth, not a behavior the driver relies on.
+    expect(client.stop).toHaveBeenCalledTimes(1);
+    expect(client.loadSession).not.toHaveBeenCalled();
+  });
+
+  it('a failed start() leaves the driver unstarted for dispatch (BATON_MOBILE_NOT_STARTED)', async () => {
+    const client = fakeClient('acp-fresh');
+    client.loadSession.mockRejectedValueOnce(new Error('resume failed'));
+    const { deps, relay } = makeDeps(client);
+    const d = new AcpDriver(deps);
+
+    await expect(d.start('conv-42')).rejects.toThrow('resume failed');
+    await d.dispatch({
+      id: 'cmd3',
+      sessionId: 's',
+      type: 'list_models',
+      payload: {},
+    } as RemoteCommand);
+
+    expect(relay.sendResult).toHaveBeenCalledWith('cmd3', 'failed', {
+      code: 'BATON_MOBILE_NOT_STARTED',
+    });
+  });
+
+  it('stop() nulls acpSessionId/session so a stray dispatch fails clean, not on stale state', async () => {
+    const client = fakeClient('x');
+    const { deps, relay } = makeDeps(client);
+    const d = new AcpDriver(deps);
+    await d.start('conv-1');
+    await d.dispatch({
+      id: 'cmd-warm',
+      sessionId: 's',
+      type: 'list_models',
+      payload: {},
+    } as RemoteCommand);
+    relay.sendResult.mockClear();
+
+    await d.stop();
+    await d.dispatch({
+      id: 'cmd4',
+      sessionId: 's',
+      type: 'list_models',
+      payload: {},
+    } as RemoteCommand);
+
+    expect(relay.sendResult).toHaveBeenCalledWith('cmd4', 'failed', {
+      code: 'BATON_MOBILE_NOT_STARTED',
+    });
+  });
 });

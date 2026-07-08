@@ -277,86 +277,120 @@ export class AcpClient {
       this.opts.onUnexpectedExit?.(null, null);
     });
 
-    if (!child.stdin || !child.stdout) {
-      throw new Error('Spawned ACP adapter is missing stdio handles');
-    }
-
-    // Bridge Node streams ↔ the SDK's web-stream Stream surface.
-    // The SDK ships `ndJsonStream(output, input)` which adapts
-    // newline-delimited JSON over byte streams; we hand it the
-    // child's stdout (input) + stdin (output) wrapped as web
-    // streams via Node's `Readable.toWeb`/`Writable.toWeb`.
-    const input = Readable.toWeb(child.stdout) as ReadableStream<Uint8Array>;
-    const output = Writable.toWeb(child.stdin) as WritableStream<Uint8Array>;
-    const stream = ndJsonStream(output, input);
-
-    this.connection = new ClientSideConnection(
-      (_agent: Agent) => this.buildClient(),
-      stream,
-    );
-
-    log.info('acpClient', 'initialize → sending');
-    const initialize = await this.connection.initialize({
-      protocolVersion: PROTOCOL_VERSION,
-      clientCapabilities: CLIENT_CAPABILITIES,
-    });
-    log.info(
-      'acpClient',
-      `initialize ← ok protocolVersion=${initialize.protocolVersion} agentCaps=${JSON.stringify(initialize.agentCapabilities ?? {}).slice(0, 200)}`,
-    );
-
-    log.info('acpClient', 'newSession → sending');
-    // Race the RPC against (a) a fatal stderr line (auth / tier ineligibility),
-    // surfaced fast by the stderr watcher, and (b) a generous timeout backstop.
-    // Without this, `gemini --acp` hangs forever when Code Assist onboarding is
-    // rejected (it swallows the error instead of failing the RPC).
-    let startupTimer: ReturnType<typeof setTimeout> | undefined;
-    const startupFailure = new Promise<never>((_, reject) => {
-      this.startupFailureReject = reject;
-      startupTimer = setTimeout(() => {
-        const tail = this.recentStderr.slice(-4).join(' | ');
-        reject(
-          new Error(
-            `AGENT_STARTUP_TIMEOUT: ${this.opts.adapter.requiresAgentBinary} did not create a session within ${Math.round(
-              NEWSESSION_TIMEOUT_MS / 1000,
-            )}s${tail ? ` — last output: ${tail}` : ''}`,
-          ),
-        );
-      }, NEWSESSION_TIMEOUT_MS);
-    });
-    let newSession: Awaited<ReturnType<ClientSideConnection['newSession']>>;
+    // Everything from here through the `return` is the post-spawn
+    // handshake. If ANY of it throws (missing stdio handles, initialize
+    // rejecting, newSession rejecting/timing out), the child is already
+    // assigned to `this.child` — without the catch below it would stay
+    // set forever and every subsequent `start()` would hard-throw
+    // 'AcpClient already started', permanently wedging a caller (e.g. the
+    // baton's AcpDriver on a failed take-control) that expects a fresh
+    // `start()` to be retryable. On failure we kill the half-started
+    // child and reset all state `start()` set, then rethrow the original
+    // error unchanged so callers keep seeing the real failure reason.
     try {
-      newSession = await Promise.race([
-        this.connection.newSession({ cwd, mcpServers: [] }),
-        startupFailure,
-      ]);
-    } finally {
-      if (startupTimer) clearTimeout(startupTimer);
-      this.startupFailureReject = null;
-    }
-    this.sessionId = newSession.sessionId;
-    // Log the adapter-picked model so account-mismatch bugs (e.g.
-    // codex-acp defaulting to a model the user's account doesn't
-    // include) are immediately visible in the smoke-test log
-    // instead of surfacing as a cryptic "Authentication required"
-    // or "model not supported" error from the prompt response.
-    const newSessionMeta = newSession as unknown as {
-      currentModelId?: string;
-      currentServiceTier?: string;
-    };
-    log.info(
-      'acpClient',
-      `newSession ← ok sessionId=${newSession.sessionId.slice(0, 8)}` +
-        ` model=${newSessionMeta.currentModelId ?? '?'}` +
-        ` tier=${newSessionMeta.currentServiceTier ?? '?'}`,
-    );
+      if (!child.stdin || !child.stdout) {
+        throw new Error('Spawned ACP adapter is missing stdio handles');
+      }
 
-    return {
-      sessionId: newSession.sessionId,
-      initialize,
-      model: newSessionMeta.currentModelId,
-      tier: newSessionMeta.currentServiceTier,
-    };
+      // Bridge Node streams ↔ the SDK's web-stream Stream surface.
+      // The SDK ships `ndJsonStream(output, input)` which adapts
+      // newline-delimited JSON over byte streams; we hand it the
+      // child's stdout (input) + stdin (output) wrapped as web
+      // streams via Node's `Readable.toWeb`/`Writable.toWeb`.
+      const input = Readable.toWeb(child.stdout) as ReadableStream<Uint8Array>;
+      const output = Writable.toWeb(child.stdin) as WritableStream<Uint8Array>;
+      const stream = ndJsonStream(output, input);
+
+      this.connection = new ClientSideConnection(
+        (_agent: Agent) => this.buildClient(),
+        stream,
+      );
+
+      log.info('acpClient', 'initialize → sending');
+      const initialize = await this.connection.initialize({
+        protocolVersion: PROTOCOL_VERSION,
+        clientCapabilities: CLIENT_CAPABILITIES,
+      });
+      log.info(
+        'acpClient',
+        `initialize ← ok protocolVersion=${initialize.protocolVersion} agentCaps=${JSON.stringify(initialize.agentCapabilities ?? {}).slice(0, 200)}`,
+      );
+
+      log.info('acpClient', 'newSession → sending');
+      // Race the RPC against (a) a fatal stderr line (auth / tier ineligibility),
+      // surfaced fast by the stderr watcher, and (b) a generous timeout backstop.
+      // Without this, `gemini --acp` hangs forever when Code Assist onboarding is
+      // rejected (it swallows the error instead of failing the RPC).
+      let startupTimer: ReturnType<typeof setTimeout> | undefined;
+      const startupFailure = new Promise<never>((_, reject) => {
+        this.startupFailureReject = reject;
+        startupTimer = setTimeout(() => {
+          const tail = this.recentStderr.slice(-4).join(' | ');
+          reject(
+            new Error(
+              `AGENT_STARTUP_TIMEOUT: ${this.opts.adapter.requiresAgentBinary} did not create a session within ${Math.round(
+                NEWSESSION_TIMEOUT_MS / 1000,
+              )}s${tail ? ` — last output: ${tail}` : ''}`,
+            ),
+          );
+        }, NEWSESSION_TIMEOUT_MS);
+      });
+      let newSession: Awaited<ReturnType<ClientSideConnection['newSession']>>;
+      try {
+        newSession = await Promise.race([
+          this.connection.newSession({ cwd, mcpServers: [] }),
+          startupFailure,
+        ]);
+      } finally {
+        if (startupTimer) clearTimeout(startupTimer);
+        this.startupFailureReject = null;
+      }
+      this.sessionId = newSession.sessionId;
+      // Log the adapter-picked model so account-mismatch bugs (e.g.
+      // codex-acp defaulting to a model the user's account doesn't
+      // include) are immediately visible in the smoke-test log
+      // instead of surfacing as a cryptic "Authentication required"
+      // or "model not supported" error from the prompt response.
+      const newSessionMeta = newSession as unknown as {
+        currentModelId?: string;
+        currentServiceTier?: string;
+      };
+      log.info(
+        'acpClient',
+        `newSession ← ok sessionId=${newSession.sessionId.slice(0, 8)}` +
+          ` model=${newSessionMeta.currentModelId ?? '?'}` +
+          ` tier=${newSessionMeta.currentServiceTier ?? '?'}`,
+      );
+
+      return {
+        sessionId: newSession.sessionId,
+        initialize,
+        model: newSessionMeta.currentModelId,
+        tier: newSessionMeta.currentServiceTier,
+      };
+    } catch (err) {
+      this.cleanupAfterFailedStart(child);
+      throw err;
+    }
+  }
+
+  /**
+   * Undo the partial state `start()` set before its handshake threw, so a
+   * fresh `start()` call is retryable instead of permanently hard-throwing
+   * 'AcpClient already started'. Removes OUR `exit`/`error` listeners first
+   * so killing the half-started child doesn't also fire
+   * `onUnexpectedExit` — the baton's `onUnexpectedExit` calls
+   * `process.exit`, which must never fire for a failure the caller already
+   * received as a thrown error from `start()`.
+   */
+  private cleanupAfterFailedStart(child: ChildProcess): void {
+    child.removeAllListeners('exit');
+    child.removeAllListeners('error');
+    killQuiet(child, 'SIGKILL');
+    this.child = null;
+    this.connection = null;
+    this.sessionId = null;
+    this.startupFailureReject = null;
   }
 
   /**
