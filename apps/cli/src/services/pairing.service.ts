@@ -397,6 +397,46 @@ export async function postPreviewEvent(input: {
 }
 
 /**
+ * Post a session-baton driver-state event to the backend so the mobile /
+ * web SessionDetail can render "Take Control" / handoff state without
+ * polling. Mirrors `postPreviewEvent` — fire-and-forget, non-fatal.
+ */
+export interface PostBatonEventArgs {
+  sessionId: string;
+  pluginId: string;
+  pluginAuthToken: string;
+  state: 'LOCAL_DRIVE' | 'MOBILE_DRIVE' | 'SWITCHING';
+  driver: 'local_tui' | 'mobile_acp';
+  conversationId: string | null;
+}
+
+export async function postBatonEvent(
+  input: PostBatonEventArgs,
+): Promise<{ ok: true } | { ok: false; status: number; message: string }> {
+  try {
+    await _transport.postJsonAuthed(
+      `${API_BASE}/api/baton/events`,
+      {
+        sessionId: input.sessionId,
+        pluginId: input.pluginId,
+        state: input.state,
+        driver: input.driver,
+        conversationId: input.conversationId,
+      },
+      input.pluginAuthToken,
+    );
+    return { ok: true };
+  } catch (err) {
+    const e = err as Error & { statusCode?: number };
+    return {
+      ok: false,
+      status: typeof e.statusCode === 'number' ? e.statusCode : 0,
+      message: e.message || 'unknown',
+    };
+  }
+}
+
+/**
  * Post a Headroom lifecycle event (enable / disable / progress) to the backend.
  * Mirrors `postPreviewEvent` — fire-and-forget, non-fatal.
  */
