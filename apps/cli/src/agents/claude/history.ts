@@ -9,22 +9,25 @@ import { getContextWindow, type NormalizedMessage } from '@codeam/shared';
  * Claude Code stores per-project session JSONLs under
  * `~/.claude/projects/<encoded-cwd>/`. Encoding rule: every path
  * separator (and the Windows drive-letter colon) becomes a single
- * dash.
+ * dash, AND every underscore is likewise collapsed to a dash —
+ * confirmed empirically against a live `claude` binary (v2.1.204):
+ * running `claude -p … --session-id …` from a cwd ending in
+ * `encode_test_dir` produced a project dir ending in
+ * `encode-test-dir`, i.e. `_` → `-` just like a path separator.
  *
- *   macOS / Linux: `/Users/me/foo`   → `-Users-me-foo`
- *   Windows:       `C:\Users\me\foo` → `C--Users-me-foo`
+ *   macOS / Linux: `/Users/me/my_project` → `-Users-me-my-project`
+ *   Windows:       `C:\Users\me\foo`      → `C--Users-me-foo`
  *                  (`:\` collapses to `--` because both characters
  *                   are replaced; matches Claude Code's own scheme)
  *
- * The previous implementation only replaced `/`, which on Windows
- * left backslashes intact and produced an invalid lookup path inside
- * `~/.claude/projects/` — every history-driven feature
- * (terminal-typed-prompt detection, conversation loading,
- * `waitForNewUserMessage`) silently no-op'd, so prompts typed
- * directly in the terminal never reached the mobile app.
+ * The previous implementation only replaced `/ \ :`, so any cwd
+ * containing an underscore encoded to a directory name Claude never
+ * actually creates — every history-driven feature (terminal-typed-
+ * prompt detection, conversation loading, `waitForNewUserMessage`,
+ * the baton `TranscriptMirror`) silently no-op'd for those projects.
  */
 export function encodeCwd(cwd: string): string {
-  return cwd.replace(/[\\/:]/g, '-');
+  return cwd.replace(/[\\/:_]/g, '-');
 }
 
 /**
@@ -62,6 +65,29 @@ export function resolveHistoryDir(cwd: string, projectsRoot?: string): string | 
     }
   } catch { /* projectsRoot doesn't exist yet — fall through */ }
   return null;
+}
+
+/**
+ * Resolve the on-disk transcript file for a specific Claude session id, or
+ * `null` when it doesn't (yet) exist.
+ *
+ * Claude's layout is simple relative to Codex's rollouts: the session id IS
+ * the filename, `<resolveHistoryDir(cwd)>/<sessionId>.jsonl` — no need to key
+ * off content inside the file. This is what powers the baton
+ * `TranscriptMirror` (`src/baton/transcript-mirror.ts`): it was previously
+ * inert for Claude because `ClaudeRuntimeStrategy` had no
+ * `resolveHistoryFile`, so `TranscriptMirror.start()` always bailed out at
+ * `if (!file) return`.
+ */
+export function resolveHistoryFile(
+  cwd: string,
+  sessionId: string,
+  projectsRoot?: string,
+): string | null {
+  const dir = resolveHistoryDir(cwd, projectsRoot);
+  if (!dir) return null;
+  const filePath = path.join(dir, `${sessionId}.jsonl`);
+  return fs.existsSync(filePath) ? filePath : null;
 }
 
 /**

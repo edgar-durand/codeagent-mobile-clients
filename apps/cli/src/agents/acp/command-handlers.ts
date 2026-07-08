@@ -57,13 +57,15 @@ import { postBudgetReached, reportCredentialInvalid } from './backend-reports';
 import type { AcpHistory, AcpRunnerOptions, StreamingState } from './runner';
 
 /**
- * Everything a relayed command needs to execute against the live ACP session.
- * Built once per command by `runAcpSession`'s relay callback (via the
- * `handleCommand` compat wrapper) — one flat bag instead of the previous
- * 19 positional parameters.
+ * The session-scoped half of {@link AcpCommandContext} — every field that is
+ * fixed for the lifetime of one ACP session (the client, publisher, streaming
+ * state, history, models, …). Assembled ONCE per session by the owner of the
+ * ACP machinery (`runAcpSession` for cloud/self-hosted, {@link
+ * AcpDriver} for the local baton) and combined with the incoming `cmd` via
+ * {@link assembleAcpCommandContext} on every command. Splitting it out lets both
+ * owners build the exact same context shape without duplicating the field list.
  */
-export interface AcpCommandContext {
-  cmd: RemoteCommand;
+export interface AcpSessionContext {
   client: AcpClient;
   relay: CommandRelayService;
   acpSessionId: string;
@@ -81,6 +83,26 @@ export interface AcpCommandContext {
   budgetRecovery: BudgetRecovery<PromptBlock>;
   /** Fire-once guard for the budget-reached backend POST. */
   budgetReachedFlag: { get: () => boolean; set: (v: boolean) => void };
+}
+
+/**
+ * Everything a relayed command needs to execute against the live ACP session:
+ * the {@link AcpSessionContext} plus the specific `cmd` being handled. Built per
+ * command via {@link assembleAcpCommandContext} — one flat bag instead of the
+ * previous 19 positional parameters.
+ */
+export type AcpCommandContext = AcpSessionContext & { cmd: RemoteCommand };
+
+/**
+ * Combine the session-scoped context with a single incoming command into the
+ * per-command {@link AcpCommandContext}. The ONE place the two halves are joined,
+ * so `runAcpSession` and the baton {@link AcpDriver} assemble identical contexts.
+ */
+export function assembleAcpCommandContext(
+  session: AcpSessionContext,
+  cmd: RemoteCommand,
+): AcpCommandContext {
+  return { ...session, cmd };
 }
 
 export type AcpCommandHandler = (ctx: AcpCommandContext) => Promise<void>;

@@ -28,4 +28,12 @@ describe('encodeCwd', () => {
   it('handles a UNC-style Windows path', () => {
     expect(encodeCwd('\\\\server\\share\\foo')).toBe('--server-share-foo');
   });
+
+  it("collapses underscores to dashes, matching real Claude Code's encoding", () => {
+    // Confirmed empirically against a live `claude` binary (v2.1.204): a cwd
+    // ending in `encode_test_dir` produced a `~/.claude/projects/` entry
+    // ending in `encode-test-dir` — underscores are collapsed exactly like
+    // path separators, not left intact.
+    expect(encodeCwd('/Users/foo/my_project')).toBe('-Users-foo-my-project');
+  });
 });

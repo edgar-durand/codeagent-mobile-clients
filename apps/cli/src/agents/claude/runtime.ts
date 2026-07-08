@@ -129,6 +129,10 @@ export class ClaudeRuntimeStrategy implements RuntimeStrategy {
     return history.resolveHistoryDir(cwd);
   }
 
+  resolveHistoryFile(cwd: string, sessionId: string): string | null {
+    return history.resolveHistoryFile(cwd, sessionId);
+  }
+
   parseHistoryFile(filePath: string) {
     return history.parseHistoryFile(filePath);
   }

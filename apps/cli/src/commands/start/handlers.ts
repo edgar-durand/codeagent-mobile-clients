@@ -5,6 +5,7 @@ import { randomUUID } from 'crypto';
 import { spawn, execFile } from 'child_process';
 import which from 'which';
 import type { AgentService } from '../../services/agent.service';
+import type { BatonController } from '../../baton/baton-controller';
 import type { CommandRelayService, RemoteCommand } from '../../services/command-relay.service';
 import type { HistoryService } from '../../services/history.service';
 import type { OutputService } from '../../services/output.service';
@@ -117,6 +118,11 @@ export interface BaseHandlerContext {
    *  `provisionBeadsForStart` resolves. `beads_action` commands are no-ops
    *  while this is null. */
   beads?: StartedBeads | null;
+  /** Live baton controller when this session runs the local-session-baton
+   *  feature (set by the composition root once the feature is enabled for
+   *  this session). Undefined for sessions without a baton — `take_control`
+   *  / `handback` ack `failed` with `{ code: 'NO_BATON' }` in that case. */
+  baton?: BatonController;
 }
 
 /**
@@ -490,6 +496,36 @@ const envWriteH: CommandHandler = async (ctx, cmd, parsed) => {
     await fs.promises.rm(tmpPath, { force: true }).catch(() => undefined);
     await ctx.relay.sendResult(cmd.id, 'failed', { error: (err as Error).message });
   }
+};
+
+// ─── Session baton (take_control / handback) ─────────────────────
+
+const takeControlH: CommandHandler = async (ctx, cmd) => {
+  if (!ctx.baton) {
+    await ctx.relay.sendResult(cmd.id, 'failed', { code: 'NO_BATON' });
+    return;
+  }
+  try {
+    await ctx.baton.takeControl();
+  } catch {
+    await ctx.relay.sendResult(cmd.id, 'failed', { code: 'BATON_SWITCH_FAILED' });
+    return;
+  }
+  await ctx.relay.sendResult(cmd.id, 'completed', { state: ctx.baton.state });
+};
+
+const handbackH: CommandHandler = async (ctx, cmd) => {
+  if (!ctx.baton) {
+    await ctx.relay.sendResult(cmd.id, 'failed', { code: 'NO_BATON' });
+    return;
+  }
+  try {
+    await ctx.baton.handback();
+  } catch {
+    await ctx.relay.sendResult(cmd.id, 'failed', { code: 'BATON_SWITCH_FAILED' });
+    return;
+  }
+  await ctx.relay.sendResult(cmd.id, 'completed', { state: ctx.baton.state });
 };
 
 // ─── Headroom on-demand configure ────────────────────────────────
@@ -1734,6 +1770,8 @@ export const handlers: Record<string, CommandHandler> = {
   save_preview_config: savePreviewConfigH,
   env_read: envReadH,
   env_write: envWriteH,
+  take_control: takeControlH,
+  handback: handbackH,
   headroom_configure: headroomConfigureH,
   headroom_budget: headroomBudgetH,
   beads_configure: beadsConfigureH,
