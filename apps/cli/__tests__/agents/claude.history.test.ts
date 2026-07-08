@@ -1,9 +1,10 @@
 import { describe, it, expect } from 'vitest';
-import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import {
   resolveHistoryDir,
+  resolveHistoryFile,
   parseHistoryFile,
   encodeCwd,
 } from '../../src/agents/claude/history';
@@ -13,9 +14,43 @@ describe('claude/history', () => {
     expect(encodeCwd('/Users/alice/work')).toBe('-Users-alice-work');
   });
 
+  it('encodeCwd collapses underscores to hyphens (matches real Claude Code)', () => {
+    expect(encodeCwd('/Users/alice/my_project')).toBe('-Users-alice-my-project');
+  });
+
   it('resolveHistoryDir returns null when the dir does not exist', () => {
     const fakeRoot = path.join(tmpdir(), 'claude-h-nonexistent-' + Date.now());
     expect(resolveHistoryDir('/non/existent/cwd', fakeRoot)).toBeNull();
+  });
+
+  describe('resolveHistoryFile', () => {
+    it('returns the <historyDir>/<sessionId>.jsonl path when the file exists', () => {
+      const projectsRoot = mkdtempSync(path.join(tmpdir(), 'claude-h-root-'));
+      const cwd = '/Users/alice/work';
+      const historyDir = path.join(projectsRoot, encodeCwd(cwd));
+      mkdirSync(historyDir, { recursive: true });
+      const sessionId = 'c046ec1f-ab2e-4eb3-beff-4b9159174a1d';
+      const filePath = path.join(historyDir, `${sessionId}.jsonl`);
+      writeFileSync(filePath, '');
+
+      expect(resolveHistoryFile(cwd, sessionId, projectsRoot)).toBe(filePath);
+      rmSync(projectsRoot, { recursive: true, force: true });
+    });
+
+    it('returns null when the history dir resolves but the file is missing', () => {
+      const projectsRoot = mkdtempSync(path.join(tmpdir(), 'claude-h-root-'));
+      const cwd = '/Users/alice/work';
+      const historyDir = path.join(projectsRoot, encodeCwd(cwd));
+      mkdirSync(historyDir, { recursive: true });
+
+      expect(resolveHistoryFile(cwd, 'no-such-session', projectsRoot)).toBeNull();
+      rmSync(projectsRoot, { recursive: true, force: true });
+    });
+
+    it('returns null when the history dir itself does not exist', () => {
+      const projectsRoot = path.join(tmpdir(), 'claude-h-root-nonexistent-' + Date.now());
+      expect(resolveHistoryFile('/non/existent/cwd', 'sess', projectsRoot)).toBeNull();
+    });
   });
 
   it('parseHistoryFile maps Claude JSONL to NormalizedMessage', () => {
