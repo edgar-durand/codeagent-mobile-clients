@@ -4,6 +4,7 @@ import type { OsStrategy } from '../../../src/os';
 
 function fakeOs(hasBinary: boolean): OsStrategy {
   return {
+    id: 'linux',
     findInPath: () => (hasBinary ? '/usr/bin/coderabbit' : null),
     homeDir: () => '/home/test',
     augmentPath: () => {},

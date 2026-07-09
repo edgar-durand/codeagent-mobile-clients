@@ -17,6 +17,7 @@
  */
 
 import { spawn, spawnSync } from 'node:child_process';
+import * as path from 'node:path';
 import {
   runCoderabbitOAuthLogin,
   snapshotCredentialDir,
@@ -105,14 +106,24 @@ export async function configureCoderabbit(
   const snapshot = deps.snapshotDir ?? (() => snapshotCredentialDir());
   const capture = deps.captureCredential ?? ((b: DirSnapshot) => diffCapturedCredential(b));
 
-  // CodeRabbit installs to `~/.local/bin` (Linux + macOS) or `/opt/homebrew/bin`
-  // (macOS Homebrew) — dirs a relayed session's process PATH often lacks, so
+  // CodeRabbit installs to dirs a relayed session's process PATH often lacks, so
   // `findInPath` (and thus `installed`/`loggedIn`/`linked`) would falsely report
   // NOT installed even when the CLI is present + authenticated. Augment the PATH
   // for EVERY action (the installer only did it during install; `status` — which
   // drives the mobile "linked" state — never installs). Same class of PATH bug
-  // as the `bd` symlink fix.
-  os.augmentPath([`${os.homeDir()}/.local/bin`, '/opt/homebrew/bin', '/usr/local/bin']);
+  // as the `bd` symlink fix. Platform-aware: macOS/Linux/WSL use the POSIX dirs;
+  // Windows (CodeRabbit officially needs WSL, but cover a native npm/scoop
+  // install too) uses its user-profile equivalents.
+  const home = os.homeDir();
+  os.augmentPath(
+    os.id === 'win32'
+      ? [
+          path.join(home, '.local', 'bin'),
+          path.join(process.env.APPDATA ?? path.join(home, 'AppData', 'Roaming'), 'npm'),
+          path.join(home, 'scoop', 'shims'),
+        ]
+      : [path.join(home, '.local', 'bin'), '/opt/homebrew/bin', '/usr/local/bin'],
+  );
 
   const installed = os.findInPath('coderabbit') !== null;
   const base = (): CoderabbitConfigureResult => ({
