@@ -750,13 +750,18 @@ const coderabbitConfigureH: CommandHandler = async (ctx, cmd, parsed) => {
     },
   );
 
-  // Terminal status snapshot for the app's CodeRabbit slot.
-  emit('coderabbit_status', {
-    installed: result.installed,
-    loggedIn: result.loggedIn,
-    linked: result.linked ?? false,
-    ...(result.error ? { error: result.error } : {}),
-  });
+  // Terminal status snapshot for the app's CodeRabbit slot — ONLY for
+  // status/link actions. A `review` result has no `linked` field, so emitting
+  // here would publish `linked:false` and clobber a previously-confirmed link,
+  // bouncing the app back to the sign-in screen mid-review.
+  if (action !== 'review') {
+    emit('coderabbit_status', {
+      installed: result.installed,
+      loggedIn: result.loggedIn,
+      linked: result.linked ?? false,
+      ...(result.error ? { error: result.error } : {}),
+    });
+  }
   await emitChain;
   await ctx.relay.sendResult(cmd.id, result.error && action !== 'review' ? 'failed' : 'completed', result);
 };
