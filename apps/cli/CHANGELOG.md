@@ -4,6 +4,18 @@ All notable changes to `codeam-cli` are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.60.23] — 2026-07-09
+
+### Added
+
+- **cli:** Coderabbit — OAuth login capture core (Phase 1)
+
+### Fixed
+
+- **cli:** Coderabbit — rewrite batch strategy against the REAL CLI surface
+- **cli:** Coderabbit — parser handles the REAL --agent NDJSON control + error events
+- **cli:** Cursor baton — mint create-chat via os.buildLaunch (Windows spawn fix)
+
 ## [2.60.22] — 2026-07-09
 
 ### Fixed
