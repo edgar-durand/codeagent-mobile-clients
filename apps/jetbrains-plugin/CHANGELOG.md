@@ -4,6 +4,13 @@ All notable changes to the CodeAgent-Mobile JetBrains plugin are documented here
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.60.20] — 2026-07-09
+
+### Fixed
+
+- **cli:** Baton — pre-mint Cursor session id via `create-chat`
+- **cli:** Baton Take Control for Cursor — bridge native↔ACP session stores
+
 ## [2.60.19] — 2026-07-09
 
 ### Fixed
