@@ -261,12 +261,49 @@ const kimiProvisioner: AgentProvisioner = {
   },
 };
 
+const coderabbitProvisioner: AgentProvisioner = {
+  write(auth, home): Record<string, string> {
+    const dir = path.join(home, '.coderabbit');
+    const authJson = path.join(dir, 'auth.json');
+    if (auth.kind === 'api_key') {
+      // A CodeRabbit API key → `coderabbit review` takes it via `--api-key`;
+      // export CODERABBIT_API_KEY so the review handler passes it through.
+      // Remove any stale login-state so it can't shadow the key.
+      rmIfExists(authJson);
+      return { CODERABBIT_API_KEY: auth.value };
+    }
+    // oauth_token → the FILENAME-AGNOSTIC {file, contents} envelope captured by
+    // `diffCapturedCredential` at link time (whatever `coderabbit auth login`
+    // wrote under ~/.coderabbit on the user's machine — its exact name isn't
+    // documented and may shift). Restore it VERBATIM so `coderabbit review`
+    // reads the logged-in credential. We never parse the token internals (it's
+    // an opaque, non-expiring encrypted blob).
+    const value = auth.value.trim();
+    let file = 'auth.json';
+    let contents = value;
+    if (value.startsWith('{')) {
+      try {
+        const parsed = JSON.parse(value) as { file?: unknown; contents?: unknown };
+        if (typeof parsed.file === 'string' && typeof parsed.contents === 'string') {
+          file = path.basename(parsed.file); // sanitise — never escape ~/.coderabbit
+          contents = parsed.contents;
+        }
+      } catch {
+        /* not our envelope → write the raw value to auth.json */
+      }
+    }
+    writeFile0600(path.join(dir, file), contents);
+    return {};
+  },
+};
+
 const PROVISIONERS: Partial<Record<AgentId, AgentProvisioner>> = {
   claude: claudeProvisioner,
   kimi: kimiProvisioner,
   codex: codexProvisioner,
   gemini: geminiProvisioner,
   cursor: cursorProvisioner,
+  coderabbit: coderabbitProvisioner,
 };
 
 /** Raised when a deploy targets an agent we can't provision on the box. */

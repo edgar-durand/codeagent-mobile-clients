@@ -470,6 +470,41 @@ export async function postHeadroomEvent(input: {
 }
 
 /**
+ * Post a CodeRabbit reviewer lifecycle event (link progress / status / review
+ * result) to the backend. Mirrors `postHeadroomEvent` — fire-and-forget,
+ * non-fatal. The backend republishes on the per-user SSE bus so the mobile UI
+ * can render the OAuth `authUrl`, link progress, and review findings live.
+ */
+export async function postCoderabbitEvent(input: {
+  sessionId: string;
+  pluginId: string;
+  pluginAuthToken: string;
+  type: 'coderabbit_progress' | 'coderabbit_status' | 'coderabbit_review';
+  payload?: Record<string, unknown>;
+}): Promise<{ ok: true } | { ok: false; status: number; message: string }> {
+  try {
+    await _transport.postJsonAuthed(
+      `${API_BASE}/api/coderabbit/events`,
+      {
+        sessionId: input.sessionId,
+        pluginId: input.pluginId,
+        type: input.type,
+        payload: input.payload ?? {},
+      },
+      input.pluginAuthToken,
+    );
+    return { ok: true };
+  } catch (err) {
+    const e = err as Error & { statusCode?: number };
+    return {
+      ok: false,
+      status: typeof e.statusCode === 'number' ? e.statusCode : 0,
+      message: e.message || 'unknown',
+    };
+  }
+}
+
+/**
  * Post a Beads lifecycle event (enable / disable / status) to the backend.
  * Mirrors `postHeadroomEvent` — fire-and-forget, non-fatal. The backend
  * republishes these on the per-user SSE bus so the mobile UI can track

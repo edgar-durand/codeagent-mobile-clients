@@ -232,3 +232,34 @@ describe('provisionAgentCredentials — cursor', () => {
     }
   });
 });
+
+describe('provisionAgentCredentials — coderabbit (reviewer add-on)', () => {
+  it('api_key: returns CODERABBIT_API_KEY env var, removes stale ~/.coderabbit/auth.json', () => {
+    const authJson = path.join(tmpHome, '.coderabbit', 'auth.json');
+    fs.mkdirSync(path.dirname(authJson), { recursive: true });
+    fs.writeFileSync(authJson, 'stale');
+
+    const env = provisionAgentCredentials('coderabbit', { kind: 'api_key', value: 'cr-KEY' }, tmpHome);
+
+    expect(env).toEqual({ CODERABBIT_API_KEY: 'cr-KEY' });
+    expect(fs.existsSync(authJson)).toBe(false); // stale login-state removed
+  });
+
+  it('oauth_token {file,contents} envelope: restores the exact file verbatim under ~/.coderabbit', () => {
+    const blob = JSON.stringify({ file: 'auth.json', contents: '{"access_token":"opaque-blob"}' });
+    const env = provisionAgentCredentials('coderabbit', { kind: 'oauth_token', value: blob }, tmpHome);
+
+    expect(env).toEqual({});
+    const written = path.join(tmpHome, '.coderabbit', 'auth.json');
+    expect(fs.readFileSync(written, 'utf8')).toBe('{"access_token":"opaque-blob"}');
+  });
+
+  it('oauth_token: sanitises the envelope filename to a basename (no path traversal)', () => {
+    const blob = JSON.stringify({ file: '../../evil.json', contents: 'x' });
+    provisionAgentCredentials('coderabbit', { kind: 'oauth_token', value: blob }, tmpHome);
+
+    // Written INSIDE ~/.coderabbit as the basename, never escaping it.
+    expect(fs.existsSync(path.join(tmpHome, '.coderabbit', 'evil.json'))).toBe(true);
+    expect(fs.existsSync(path.join(tmpHome, 'evil.json'))).toBe(false);
+  });
+});

@@ -107,8 +107,9 @@ export function parseCoderabbitAuthEvent(line: string): CoderabbitAuthEvent | nu
 }
 
 export interface OAuthLoginDeps {
-  /** Injected spawner (tests provide a fake). Defaults to child_process.spawn. */
-  spawn: (cmd: string, args: string[], opts: { stdio: [unknown, 'pipe', 'pipe'] }) => ChildProcess;
+  /** Injected spawner (tests provide a fake). The impl is responsible for
+   *  wiring `stdout` as a readable pipe; the driver reads it line-by-line. */
+  spawn: (cmd: string, args: string[]) => ChildProcess;
   /** Called on every parsed event — surface `awaiting_browser`'s authUrl to the
    *  app so the user can open it. */
   onEvent?: (e: CoderabbitAuthEvent) => void;
@@ -150,7 +151,7 @@ export function runCoderabbitOAuthLogin(deps: OAuthLoginDeps): Promise<OAuthLogi
     };
     let child: ChildProcess;
     try {
-      child = deps.spawn('coderabbit', ['auth', 'login', '--agent'], { stdio: ['ignore', 'pipe', 'pipe'] });
+      child = deps.spawn('coderabbit', ['auth', 'login', '--agent']);
     } catch (err) {
       resolve({ ok: false, error: err instanceof Error ? err.message : 'spawn failed' });
       return;

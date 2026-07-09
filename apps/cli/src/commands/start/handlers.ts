@@ -38,7 +38,10 @@ import {
 import { showInfo } from '../../ui/banner';
 import { applyFileReview } from '../../services/apply-file-review.service';
 import { buildLinkContext } from '../link';
-import { postLinkCredential, postAiResult, postPreviewEvent, postHeadroomEvent, postBeadsEvent, postCliUpdateEvent } from '../../services/pairing.service';
+import { postLinkCredential, postAiResult, postPreviewEvent, postHeadroomEvent, postBeadsEvent, postCliUpdateEvent, postCoderabbitEvent } from '../../services/pairing.service';
+import { configureCoderabbit, type CoderabbitAction } from '../../agents/coderabbit/configure';
+import { CoderabbitRuntimeStrategy } from '../../agents/coderabbit/runtime';
+import { createOsStrategy } from '../../os';
 import {
   agentIdToHeadroomKind,
   isHeadroomSupportedAgent,
@@ -679,6 +682,83 @@ const headroomConfigureH: CommandHandler = async (ctx, cmd, parsed) => {
   });
 
   await ctx.relay.sendResult(cmd.id, 'completed', result);
+};
+
+// ─── CodeRabbit reviewer ─────────────────────────────────────────────────────
+
+/**
+ * `coderabbit_configure` relay handler — the mobile "Link CodeRabbit reviewer" /
+ * "Review" add-on (available on ANY code session: local, codespace, self-hosted).
+ * Actions: `status | link_oauth | link_apikey | review`. The OAuth link streams
+ * the browser `authUrl` + phases to the app via `postCoderabbitEvent`; the
+ * captured (filename-agnostic) credential is stored in the backend vault via
+ * `postLinkCredential` so it's reusable across the user's sessions. Logic lives
+ * in `agents/coderabbit/configure.ts` — this handler is only the relay glue.
+ */
+const coderabbitConfigureH: CommandHandler = async (ctx, cmd, parsed) => {
+  const action = (parsed.action ?? 'status') as CoderabbitAction;
+  const token = ctx.pluginAuthToken;
+
+  // Serialized event chain so `authUrl`/phase events reach the backend (and the
+  // app) strictly in emit order — same discipline as headroom's emit chain.
+  let emitChain: Promise<unknown> = Promise.resolve();
+  const emit = (type: 'coderabbit_progress' | 'coderabbit_status', payload: Record<string, unknown>): void => {
+    if (!token) return;
+    emitChain = emitChain.then(() =>
+      postCoderabbitEvent({
+        sessionId: ctx.sessionId,
+        pluginId: ctx.pluginId,
+        pluginAuthToken: token,
+        type,
+        payload,
+      }),
+    );
+  };
+
+  const result = await configureCoderabbit(
+    {
+      action,
+      apiKey: parsed.apiKey,
+      review: { changeSet: parsed.changeSet, base: parsed.base, dir: parsed.reviewDir },
+    },
+    {
+      onEvent: (e) => {
+        if (e.kind === 'awaiting_browser') {
+          emit('coderabbit_progress', {
+            phase: 'awaiting_browser',
+            authUrl: e.authUrl,
+            fallbackAuthUrl: e.fallbackAuthUrl,
+          });
+        } else {
+          emit('coderabbit_progress', { phase: e.kind });
+        }
+      },
+      uploadCredential: token
+        ? async (method, credential) => {
+            const r = await postLinkCredential({
+              agentId: 'coderabbit',
+              sessionId: ctx.sessionId,
+              pluginId: ctx.pluginId,
+              pluginAuthToken: token,
+              method,
+              credential,
+            });
+            return r.ok === true;
+          }
+        : undefined,
+      runReview: (input) => new CoderabbitRuntimeStrategy(createOsStrategy()).runOneShot(input),
+    },
+  );
+
+  // Terminal status snapshot for the app's CodeRabbit slot.
+  emit('coderabbit_status', {
+    installed: result.installed,
+    loggedIn: result.loggedIn,
+    linked: result.linked ?? false,
+    ...(result.error ? { error: result.error } : {}),
+  });
+  await emitChain;
+  await ctx.relay.sendResult(cmd.id, result.error && action !== 'review' ? 'failed' : 'completed', result);
 };
 
 // ─── Headroom budget ───────────────────────────────────────────────────────
@@ -1782,6 +1862,7 @@ export const handlers: Record<string, CommandHandler> = {
   take_control: takeControlH,
   handback: handbackH,
   headroom_configure: headroomConfigureH,
+  coderabbit_configure: coderabbitConfigureH,
   headroom_budget: headroomBudgetH,
   beads_configure: beadsConfigureH,
   cli_self_update: cliSelfUpdateH(),
