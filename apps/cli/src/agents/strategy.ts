@@ -297,6 +297,26 @@ export interface InteractiveAgentStrategy extends BaseAgentStrategy {
    * optional hook, a no-op for every other agent.
    */
   discoverSessionId?(cwd: string, opts: { sinceMs: number; timeoutMs?: number }): Promise<string | null>;
+
+  /**
+   * Baton hand-off bridges — for agents whose native-TUI and ACP sessions live in
+   * SEPARATE on-disk stores, so a `session/load` of the native session id would
+   * otherwise fail. Claude/Kimi share ONE store across both modes and leave these
+   * undefined (the hand-off is a bare `session/load`). Cursor overrides them:
+   *
+   * - {@link syncTranscriptForAcpResume}: called just BEFORE the ACP driver
+   *   `session/load`s on Take Control (native TUI → mobile). Copies the native
+   *   conversation store into the ACP store so `session/load` finds it.
+   * - {@link syncTranscriptForNativeResume}: called just BEFORE the native TUI is
+   *   relaunched with `--resume` on hand-back (mobile → native TUI). Copies the
+   *   ACP conversation store back into the native store so the terminal picks up
+   *   whatever mobile did.
+   *
+   * Both are best-effort (never throw into the hand-off) and idempotent. The
+   * baton engine calls them agnostically; the store bridging is cursor-internal.
+   */
+  syncTranscriptForAcpResume?(cwd: string, sessionId: string): Promise<void>;
+  syncTranscriptForNativeResume?(cwd: string, sessionId: string): Promise<void>;
   getCurrentUsage(historyDir: string): { used: number; total: number; percent: number; model?: string } | null;
 
   /**

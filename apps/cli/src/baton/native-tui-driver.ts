@@ -97,6 +97,11 @@ export class NativeTuiDriver implements SessionDriver {
     // Explicit undefined check (not truthiness): the contract is "fresh when
     // undefined, else resume" — an empty-string id must still resume, not spawn fresh.
     if (resumeId !== undefined) {
+      // Cross-store bridge (cursor): mirror whatever mobile did over ACP back
+      // into the native-TUI store BEFORE relaunching `--resume`, so the terminal
+      // picks up the mobile turns. No-op for claude/kimi (shared store) and any
+      // agent that doesn't implement the hook.
+      await this.deps.runtime.syncTranscriptForNativeResume?.(this.deps.opts.cwd, resumeId);
       await this.agent.restart(resumeId, false);
       return resumeId;
     }

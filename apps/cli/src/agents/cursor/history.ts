@@ -18,9 +18,113 @@
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { createHash } from 'node:crypto';
 import type { NormalizedMessage } from '@codeam/shared';
+import { log } from '../../services/logger';
 
 const HISTORY_ROOT = path.join(os.homedir(), '.cursor', 'projects');
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Baton store bridge (native TUI ↔ ACP)
+//
+// Cursor keeps a conversation in TWO separate SQLite stores depending on how it
+// was driven, both under `~/.cursor` (same dir on Windows/macOS/Linux — resolved
+// via os.homedir(), never a hardcoded path or separator):
+//   • native TUI / `create-chat`:  ~/.cursor/chats/<md5(cwd)>/<id>/store.db
+//   • ACP `session/new`:           ~/.cursor/acp-sessions/<id>/store.db (+ meta.json)
+// `session/load` reads ONLY the acp-sessions store, so a native session id is
+// "not found" there. The two stores share an identical `blobs`+`meta` schema, so
+// the baton bridges them with a raw file copy at each hand-off (verified live:
+// the copied store replays the full conversation over `session/load`). All of it
+// is cursor-internal — the baton engine stays agent-agnostic.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const CURSOR_HOME = path.join(os.homedir(), '.cursor');
+// store.db is the DB; -wal / -shm are SQLite's write-ahead log + shared-memory
+// index. Copying whatever exists lets SQLite recover on next open — no dependency
+// on a `sqlite3` binary (which isn't guaranteed on any OS).
+const STORE_FILES = ['store.db', 'store.db-wal', 'store.db-shm'];
+
+function acpSessionDir(sessionId: string): string {
+  return path.join(CURSOR_HOME, 'acp-sessions', sessionId);
+}
+
+/** Locate the native-TUI store dir for a session. Scans `chats/<*>/<id>` first
+ *  (robust across OSes — no dependence on how cursor stringifies the cwd before
+ *  hashing), falling back to the known `chats/<md5(cwd)>/<id>` layout. */
+function nativeStoreDir(cwd: string, sessionId: string): string | null {
+  const chatsRoot = path.join(CURSOR_HOME, 'chats');
+  let buckets: string[] = [];
+  try {
+    buckets = fs.readdirSync(chatsRoot);
+  } catch {
+    /* no chats dir yet */
+  }
+  for (const b of buckets) {
+    const candidate = path.join(chatsRoot, b, sessionId);
+    if (fs.existsSync(path.join(candidate, 'store.db'))) return candidate;
+  }
+  // Fallback for the create-before-first-turn case: the computed bucket.
+  const computed = path.join(chatsRoot, createHash('md5').update(cwd).digest('hex'), sessionId);
+  return fs.existsSync(computed) ? computed : null;
+}
+
+/** Copy the store.db (+ WAL/SHM) from `srcDir` to `dstDir`, replacing any stale
+ *  destination store files first so an old WAL can't shadow the fresh DB. Only
+ *  the store files are touched — never meta.json (each store owns its own). */
+function copyStoreFiles(srcDir: string, dstDir: string): void {
+  fs.mkdirSync(dstDir, { recursive: true });
+  for (const f of STORE_FILES) {
+    const dst = path.join(dstDir, f);
+    if (fs.existsSync(dst)) fs.rmSync(dst, { force: true });
+  }
+  for (const f of STORE_FILES) {
+    const src = path.join(srcDir, f);
+    if (fs.existsSync(src)) fs.copyFileSync(src, path.join(dstDir, f));
+  }
+}
+
+/** Take Control: mirror the native-TUI conversation into the ACP store so
+ *  `session/load(<id>)` finds it. Also writes the minimal acp-sessions meta.json
+ *  ({schemaVersion,cwd}) the ACP layer expects. Best-effort — never throws. */
+export function bridgeNativeToAcp(cwd: string, sessionId: string): void {
+  try {
+    const src = nativeStoreDir(cwd, sessionId);
+    if (!src) {
+      log.warn('cursor', `baton bridge: no native store for ${sessionId.slice(0, 8)} — skip`);
+      return;
+    }
+    const dst = acpSessionDir(sessionId);
+    copyStoreFiles(src, dst);
+    fs.writeFileSync(
+      path.join(dst, 'meta.json'),
+      JSON.stringify({ schemaVersion: 1, cwd }),
+    );
+    log.info('cursor', `baton bridge native→acp ok (${sessionId.slice(0, 8)})`);
+  } catch (err) {
+    log.warn('cursor', `baton bridge native→acp failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
+/** Hand-back: mirror the ACP conversation back into the native store so
+ *  `cursor-agent --resume <id>` in the terminal shows mobile's turns. The native
+ *  store dir + its own meta.json already exist from the initial local drive; only
+ *  the store files are refreshed. Best-effort — never throws. */
+export function bridgeAcpToNative(cwd: string, sessionId: string): void {
+  try {
+    const src = acpSessionDir(sessionId);
+    if (!fs.existsSync(path.join(src, 'store.db'))) {
+      log.warn('cursor', `baton bridge: no acp store for ${sessionId.slice(0, 8)} — skip`);
+      return;
+    }
+    const dst = nativeStoreDir(cwd, sessionId) ??
+      path.join(CURSOR_HOME, 'chats', createHash('md5').update(cwd).digest('hex'), sessionId);
+    copyStoreFiles(src, dst);
+    log.info('cursor', `baton bridge acp→native ok (${sessionId.slice(0, 8)})`);
+  } catch (err) {
+    log.warn('cursor', `baton bridge acp→native failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
 
 /** Cursor's project-dir encoding: strip the leading separator, then replace
  *  `/ \ :` with `-` (`/Users/x/p` → `Users-x-p`). */

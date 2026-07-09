@@ -76,6 +76,11 @@ export class AcpDriver implements SessionDriver {
     try {
       started = await this.deps.client.start();
       if (resumeId !== undefined) {
+        // Cross-store bridge (cursor): its native-TUI conversation lives in a
+        // DIFFERENT on-disk store than ACP `session/load` reads, so mirror it
+        // across BEFORE the load or `session/load` 404s. No-op for claude/kimi
+        // (shared store) and any agent that doesn't implement the hook.
+        await this.deps.runtime.syncTranscriptForAcpResume?.(this.deps.opts.cwd, resumeId);
         // `session/load` streams the ENTIRE prior conversation back as
         // session/update notifications before it resolves (ACP spec). Those
         // flow into the shared StreamingState via wire-baton's onSessionUpdate

@@ -145,6 +145,27 @@ export class CursorRuntimeStrategy implements RuntimeStrategy {
     return history.parseHistoryFile(filePath);
   }
 
+  /**
+   * Baton Take Control (native TUI → mobile ACP). Cursor keeps native-TUI
+   * conversations in `~/.cursor/chats/<md5(cwd)>/<id>` but ACP `session/load`
+   * only reads `~/.cursor/acp-sessions/<id>` — so without this, loading the
+   * native session id fails "not found". Bridge the native store into the ACP
+   * store just before the load. Best-effort; verified live (identical
+   * `blobs`+`meta` SQLite schema, raw file copy replays the conversation).
+   */
+  async syncTranscriptForAcpResume(cwd: string, sessionId: string): Promise<void> {
+    history.bridgeNativeToAcp(cwd, sessionId);
+  }
+
+  /**
+   * Baton hand-back (mobile ACP → native TUI). Copy the ACP conversation store
+   * back into the native `~/.cursor/chats` store so `cursor-agent --resume <id>`
+   * in the terminal picks up whatever mobile did. Best-effort.
+   */
+  async syncTranscriptForNativeResume(cwd: string, sessionId: string): Promise<void> {
+    history.bridgeAcpToNative(cwd, sessionId);
+  }
+
   getCurrentUsage(historyDir: string) {
     return history.getCurrentUsage(historyDir);
   }
