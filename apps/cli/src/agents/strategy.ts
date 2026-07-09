@@ -281,6 +281,22 @@ export interface InteractiveAgentStrategy extends BaseAgentStrategy {
    * with {@link parseHistoryFile} instead of the Claude JSONL parser.
    */
   resolveHistoryFile?(cwd: string, sessionId: string): string | null;
+
+  /**
+   * Discover the session id an agent MINTED ITSELF at spawn time, for the
+   * baton's {@link NativeTuiDriver}. Most runtimes leave this undefined:
+   *   - Claude pre-mints the id (`--session-id <uuid>` in `prepareLaunch`) so
+   *     `AgentService.spawnedSessionId` is already known — no discovery needed.
+   *   - Agents with no baton support never reach this path.
+   * But some agents (Kimi) neither accept a pre-set id NOR expose it on stdout —
+   * they only WRITE it to their on-disk session store when the native TUI boots.
+   * Those implement this to bounded-poll that store for the freshly-created
+   * session dir (mtime ≥ `sinceMs`) and return its id, so the baton can bind the
+   * conversation. Returns null if no fresh session appears within the budget.
+   * Kimi-specific logic stays in the Kimi strategy; the driver just calls the
+   * optional hook, a no-op for every other agent.
+   */
+  discoverSessionId?(cwd: string, opts: { sinceMs: number; timeoutMs?: number }): Promise<string | null>;
   getCurrentUsage(historyDir: string): { used: number; total: number; percent: number; model?: string } | null;
 
   /**

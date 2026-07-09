@@ -112,6 +112,62 @@ function scanBucketsForSession(sessionId: string): string | null {
   return null;
 }
 
+/**
+ * Bounded-poll the cwd's session bucket for the session dir kimi CREATED at TUI
+ * boot (mtime ≥ `sinceMs`), returning its `session_<uuid>` id. Kimi mints the id
+ * itself and writes it to `<bucket>/<sessionId>/` ~1-2 s after the native TUI
+ * spawns (verified live: a fresh `kimi` TUI creates the dir + an empty
+ * `agents/main/wire.jsonl` before the first turn), so the baton's NativeTuiDriver
+ * can't read it from `prepareLaunch` (no pre-mint) nor stdout — it discovers it
+ * here. Returns null if nothing fresh appears within `timeoutMs`.
+ */
+export async function discoverSessionId(
+  cwd: string,
+  opts: { sinceMs: number; timeoutMs?: number },
+): Promise<string | null> {
+  const bucket = path.join(kimiHome(), 'sessions', workDirKey(cwd));
+  // Small grace so a dir created a beat before the caller's timestamp (clock
+  // jitter / the spawn call itself) still counts as "this session".
+  const floor = opts.sinceMs - 2_000;
+  const deadline = Date.now() + (opts.timeoutMs ?? 15_000);
+  for (;;) {
+    const id = newestSessionSince(bucket, floor);
+    if (id) return id;
+    if (Date.now() >= deadline) return null;
+    await sleep(250);
+  }
+}
+
+/** Newest `session_*` dir in `bucket` whose mtime ≥ `floorMs`, or null. */
+function newestSessionSince(bucket: string, floorMs: number): string | null {
+  let entries: fs.Dirent[];
+  try {
+    entries = fs.readdirSync(bucket, { withFileTypes: true });
+  } catch {
+    return null; // bucket not created yet — normal for the first ~1-2 s
+  }
+  let bestId: string | null = null;
+  let bestMtime = -1;
+  for (const e of entries) {
+    if (!e.isDirectory() || !e.name.startsWith('session_')) continue;
+    let mtime: number;
+    try {
+      mtime = fs.statSync(path.join(bucket, e.name)).mtimeMs;
+    } catch {
+      continue;
+    }
+    if (mtime >= floorMs && mtime > bestMtime) {
+      bestMtime = mtime;
+      bestId = e.name;
+    }
+  }
+  return bestId;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 interface WirePart {
   type?: string;
   text?: string;

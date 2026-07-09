@@ -113,6 +113,23 @@ export class KimiRuntimeStrategy implements RuntimeStrategy {
     return history.parseHistoryFile(filePath);
   }
 
+  /**
+   * Kimi neither accepts a pre-set session id (`kimi -S <newid>` fails
+   * "Session not found") NOR prints its id on stdout — it MINTS one itself and
+   * writes it to `<KIMI_CODE_HOME>/sessions/wd_<key>/<sessionId>/` when the
+   * native TUI boots. So `prepareLaunch` can't return a `sessionId` and the
+   * baton's NativeTuiDriver has nothing to bind. This hook bounded-polls that
+   * store for the dir kimi just created (mtime ≥ spawn time) and returns its id.
+   * Kimi-specific — no other agent implements this (claude pre-mints; the rest
+   * have no baton), so the driver's optional call is inert for them.
+   */
+  discoverSessionId(
+    cwd: string,
+    opts: { sinceMs: number; timeoutMs?: number },
+  ): Promise<string | null> {
+    return history.discoverSessionId(cwd, opts);
+  }
+
   getCurrentUsage(
     historyDir: string,
   ): { used: number; total: number; percent: number; model?: string } | null {

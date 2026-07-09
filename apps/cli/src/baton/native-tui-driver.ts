@@ -100,10 +100,23 @@ export class NativeTuiDriver implements SessionDriver {
       await this.agent.restart(resumeId, false);
       return resumeId;
     }
+    // Stamp BEFORE spawn so an agent that mints its id on-disk at boot (Kimi)
+    // can distinguish the session it just created from stale ones for this cwd.
+    const spawnedAt = this.now();
     await this.agent.spawn();
-    const id = this.agent.spawnedSessionId;
-    if (!id) throw new Error('NativeTuiDriver: agent did not expose a session id after spawn');
-    return id;
+    // Fast path: the runtime pre-minted the id (Claude's `--session-id`) →
+    // AgentService already knows it, no discovery needed.
+    const preMinted = this.agent.spawnedSessionId;
+    if (preMinted) return preMinted;
+    // Fallback: some agents neither pre-mint nor print the id — they only WRITE
+    // it to their on-disk session store when the native TUI boots. If the
+    // runtime knows how to find it (Kimi's `discoverSessionId`), bounded-poll
+    // for it. Inert for every other agent (hook undefined).
+    const discovered = await this.deps.runtime.discoverSessionId?.(this.deps.opts.cwd, {
+      sinceMs: spawnedAt,
+    });
+    if (discovered) return discovered;
+    throw new Error('NativeTuiDriver: agent did not expose a session id after spawn');
   }
 
   async stop(): Promise<void> {

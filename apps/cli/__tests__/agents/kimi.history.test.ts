@@ -3,7 +3,12 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { createHash } from 'node:crypto';
 import path from 'node:path';
-import { resolveHistoryDir, resolveHistoryFile, parseHistoryFile } from '../../src/agents/kimi/history';
+import {
+  resolveHistoryDir,
+  resolveHistoryFile,
+  parseHistoryFile,
+  discoverSessionId,
+} from '../../src/agents/kimi/history';
 
 // A real kimi-code 0.23.3 `wire.jsonl` shape (captured live 2026-07-09): a
 // preamble (metadata / config.update), a `turn.prompt` (the user turn), the
@@ -96,5 +101,51 @@ describe('kimi/history resolveHistoryFile', () => {
   it('returns null for an unknown session', () => {
     seed('/workspaces/x', 'session_known');
     expect(resolveHistoryFile('/workspaces/x', 'session_unknown')).toBeNull();
+  });
+});
+
+describe('kimi/history discoverSessionId', () => {
+  const homes: string[] = [];
+  afterEach(() => {
+    delete process.env.KIMI_CODE_HOME;
+    for (const h of homes.splice(0)) rmSync(h, { recursive: true, force: true });
+  });
+
+  function bucketFor(cwd: string): string {
+    const home = mkdtempSync(path.join(tmpdir(), 'kimi-home-'));
+    homes.push(home);
+    process.env.KIMI_CODE_HOME = home;
+    const hash = createHash('sha256').update(cwd).digest('hex').slice(0, 12);
+    const bucket = path.join(home, 'sessions', `wd_${path.basename(cwd)}_${hash}`);
+    mkdirSync(bucket, { recursive: true });
+    return bucket;
+  }
+
+  function makeSessionDir(bucket: string, id: string): string {
+    const dir = path.join(bucket, id);
+    mkdirSync(path.join(dir, 'agents', 'main'), { recursive: true });
+    writeFileSync(path.join(dir, 'agents', 'main', 'wire.jsonl'), '');
+    return dir;
+  }
+
+  it('discovers the freshly-created session dir (mtime ≥ spawn time)', async () => {
+    const cwd = '/workspaces/privacyhawk_webapp';
+    const bucket = bucketFor(cwd);
+    // A stale session from a prior run — must NOT be picked.
+    const stale = makeSessionDir(bucket, 'session_stale');
+    const past = new Date(Date.now() - 60_000);
+    require('node:fs').utimesSync(stale, past, past);
+    // The session kimi mints at boot (mtime = now).
+    makeSessionDir(bucket, 'session_fresh');
+
+    const id = await discoverSessionId(cwd, { sinceMs: Date.now(), timeoutMs: 2_000 });
+    expect(id).toBe('session_fresh');
+  });
+
+  it('returns null when no fresh session appears within the budget', async () => {
+    const cwd = '/workspaces/empty';
+    bucketFor(cwd); // bucket exists but is empty
+    const id = await discoverSessionId(cwd, { sinceMs: Date.now(), timeoutMs: 500 });
+    expect(id).toBeNull();
   });
 });
