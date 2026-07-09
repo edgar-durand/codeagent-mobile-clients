@@ -391,6 +391,125 @@ export function resolveHistoryFile(
 }
 
 /**
+ * Discover the session id Codex MINTED ITSELF at spawn, for the baton's
+ * NativeTuiDriver. Codex neither accepts a pre-set id nor prints it on stdout —
+ * it writes a `rollout-<ts>-<uuid>.jsonl` under `~/.codex/sessions/YYYY/MM/DD`
+ * whose `session_meta` carries the id + cwd. ⚠️ Unlike Kimi (which mints the file
+ * at BOOT), Codex only writes the rollout on the user's FIRST TURN (verified live:
+ * a boot-only spawn creates nothing; the file appears when the first prompt is
+ * submitted). So this poll must be patient — it waits for that first turn. The
+ * native TUI is interactive throughout, so the user naturally types; the moment
+ * their first turn lands the rollout appears and we bind it. Returns the id of the
+ * newest rollout for THIS cwd whose mtime ≥ `sinceMs` (the one this launch just
+ * created), or null if none appears within `timeoutMs`.
+ *
+ * Codex shares ONE rollout store across native TUI and its ACP adapter (verified
+ * live: `codex-acp` `session/load` replays a native rollout id), so — unlike
+ * cursor — no cross-store bridge is needed; discovery alone makes the baton work.
+ */
+export async function discoverSessionId(
+  cwd: string,
+  opts: { sinceMs: number; timeoutMs?: number },
+  homeOverride?: string,
+): Promise<string | null> {
+  const home = homeOverride ?? os.homedir();
+  const sessionsRoot = path.join(home, '.codex', 'sessions');
+  // Grace for clock jitter / the spawn call itself (see kimi's discovery).
+  const floor = opts.sinceMs - 2_000;
+  // Generous default: the rollout only exists after the user's FIRST TURN, so we
+  // wait for them to type it (4 min covers "start baton, read some code, type").
+  // Never worse than the pre-fix behaviour, which failed instantly at 0 s.
+  const deadline = Date.now() + (opts.timeoutMs ?? 240_000);
+
+  let resolvedCurrent: string;
+  try {
+    resolvedCurrent = fs.realpathSync(cwd);
+  } catch {
+    resolvedCurrent = path.resolve(cwd);
+  }
+
+  for (;;) {
+    const id = newestRolloutIdSince(sessionsRoot, resolvedCurrent, floor);
+    if (id) return id;
+    if (Date.now() >= deadline) return null;
+    await sleep(500);
+  }
+}
+
+/** Newest rollout id for `resolvedCwd` whose mtime ≥ `floorMs`, or null. Scans a
+ *  2-day window (the fresh rollout is minutes old; 2 days covers a UTC-midnight
+ *  boot without walking the whole archive). */
+function newestRolloutIdSince(
+  sessionsRoot: string,
+  resolvedCwd: string,
+  floorMs: number,
+): string | null {
+  if (!fs.existsSync(sessionsRoot)) return null;
+  const now = new Date();
+  let bestId: string | null = null;
+  let bestMtime = -1;
+  for (let dayOffset = 0; dayOffset < 2; dayOffset += 1) {
+    const d = new Date(now.getTime() - dayOffset * 24 * 60 * 60 * 1000);
+    const yyyy = String(d.getUTCFullYear());
+    const mm = String(d.getUTCMonth() + 1).padStart(2, '0');
+    const dd = String(d.getUTCDate()).padStart(2, '0');
+    const dayDir = path.join(sessionsRoot, yyyy, mm, dd);
+    let dayFiles: fs.Dirent[];
+    try {
+      dayFiles = fs.readdirSync(dayDir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of dayFiles) {
+      if (!entry.isFile()) continue;
+      if (!entry.name.startsWith('rollout-') || !entry.name.endsWith('.jsonl')) continue;
+      const filePath = path.join(dayDir, entry.name);
+      let mtime: number;
+      try {
+        mtime = fs.statSync(filePath).mtimeMs;
+      } catch {
+        continue;
+      }
+      if (mtime < floorMs || mtime <= bestMtime) continue;
+      // Read only the session_meta (leads the file) to confirm cwd + get the id.
+      let metaCwd: string | undefined;
+      let metaId: string | undefined;
+      try {
+        const raw = fs.readFileSync(filePath, 'utf8');
+        for (const line of raw.split('\n')) {
+          if (!line.trim()) continue;
+          const rec = parseLine(line);
+          if (!rec) continue;
+          if (rec.type === 'session_meta') {
+            const meta = rec.payload as SessionMetaPayload | undefined;
+            metaCwd = typeof meta?.cwd === 'string' ? meta.cwd : undefined;
+            metaId = typeof meta?.id === 'string' ? meta.id : undefined;
+          }
+          break; // session_meta leads the rollout; nothing else to read
+        }
+      } catch {
+        continue;
+      }
+      if (!metaId || !metaCwd) continue;
+      let resolvedMeta: string;
+      try {
+        resolvedMeta = fs.realpathSync(metaCwd);
+      } catch {
+        resolvedMeta = path.resolve(metaCwd);
+      }
+      if (resolvedMeta !== resolvedCwd) continue;
+      bestMtime = mtime;
+      bestId = metaId;
+    }
+  }
+  return bestId;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
  * Aggregated token usage for the most recent rollout in the given dir.
  * Returns null if no rollout files or no TokenCount events found.
  */

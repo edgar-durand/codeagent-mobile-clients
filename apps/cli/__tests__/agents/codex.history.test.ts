@@ -2,12 +2,13 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtempSync, writeFileSync, rmSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { realpathSync } from 'node:fs';
+import { realpathSync, utimesSync } from 'node:fs';
 import {
   resolveHistoryDir,
   parseHistoryFile,
   getCurrentUsage,
   resolveHistoryFile,
+  discoverSessionId,
 } from '../../src/agents/codex/history';
 
 /** Build today's UTC date-bucket dir under a fake ~/.codex/sessions home. */
@@ -345,6 +346,69 @@ describe('codex/history (rollouts)', () => {
       const usage = getCurrentUsage(dir);
       expect(usage).toEqual({ used: 50_000, total: 272_000, percent: 18 });
       rmSync(dir, { recursive: true, force: true });
+    });
+  });
+
+  describe('discoverSessionId (baton)', () => {
+    const dirsToClean: string[] = [];
+    afterEach(() => {
+      while (dirsToClean.length > 0) {
+        try {
+          rmSync(dirsToClean.pop()!, { recursive: true, force: true });
+        } catch {
+          /* best-effort */
+        }
+      }
+    });
+
+    function seedRollout(home: string, id: string, cwd: string): string {
+      const bucket = todayBucket(home);
+      mkdirSync(bucket, { recursive: true });
+      const filePath = path.join(bucket, `rollout-2026-07-09T00-00-00-${id}.jsonl`);
+      writeFileSync(
+        filePath,
+        JSON.stringify({
+          timestamp: '2026-07-09T00:00:00.000Z',
+          type: 'session_meta',
+          payload: { id, cwd },
+        }),
+      );
+      return filePath;
+    }
+
+    it("discovers the fresh rollout's id for this cwd (mtime ≥ sinceMs)", async () => {
+      const home = mkdtempSync(path.join(tmpdir(), 'codex-disc-'));
+      const proj = mkdtempSync(path.join(tmpdir(), 'codex-proj-'));
+      dirsToClean.push(home, proj);
+      const cwd = realpathSync(proj);
+      // A stale rollout from a prior session — must NOT be picked.
+      const stale = seedRollout(home, 'sess-stale', cwd);
+      const past = new Date(Date.now() - 60_000);
+      utimesSync(stale, past, past);
+      // The rollout codex just wrote on the first turn (mtime = now).
+      seedRollout(home, 'sess-fresh', cwd);
+
+      const id = await discoverSessionId(cwd, { sinceMs: Date.now(), timeoutMs: 1_000 }, home);
+      expect(id).toBe('sess-fresh');
+    });
+
+    it('ignores a fresh rollout belonging to a DIFFERENT cwd', async () => {
+      const home = mkdtempSync(path.join(tmpdir(), 'codex-disc-'));
+      const proj = mkdtempSync(path.join(tmpdir(), 'codex-proj-'));
+      const other = mkdtempSync(path.join(tmpdir(), 'codex-other-'));
+      dirsToClean.push(home, proj, other);
+      seedRollout(home, 'sess-other', realpathSync(other));
+
+      const id = await discoverSessionId(realpathSync(proj), { sinceMs: Date.now(), timeoutMs: 600 }, home);
+      expect(id).toBeNull();
+    });
+
+    it('returns null when no fresh rollout appears within the budget', async () => {
+      const home = mkdtempSync(path.join(tmpdir(), 'codex-disc-'));
+      const proj = mkdtempSync(path.join(tmpdir(), 'codex-proj-'));
+      dirsToClean.push(home, proj);
+      const id = await discoverSessionId(realpathSync(proj), { sinceMs: Date.now(), timeoutMs: 600 }, home);
+      expect(id).toBeNull();
     });
   });
 });

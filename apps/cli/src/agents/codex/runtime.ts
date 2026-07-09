@@ -86,6 +86,20 @@ export class CodexRuntimeStrategy implements RuntimeStrategy {
     return history.resolveHistoryFile(cwd, sessionId);
   }
 
+  /**
+   * Codex mints its own session id (into a `rollout-*.jsonl` at TUI boot) and
+   * neither accepts a pre-set one nor prints it — so, like Kimi, the baton's
+   * NativeTuiDriver discovers it post-spawn. Codex shares that rollout store with
+   * its ACP adapter, so discovery alone is enough (no cross-store bridge). The
+   * TUI boots slowly, hence the generous poll budget inside.
+   */
+  discoverSessionId(
+    cwd: string,
+    opts: { sinceMs: number; timeoutMs?: number },
+  ): Promise<string | null> {
+    return history.discoverSessionId(cwd, opts);
+  }
+
   getCurrentUsage(historyDir: string) {
     return history.getCurrentUsage(historyDir);
   }
