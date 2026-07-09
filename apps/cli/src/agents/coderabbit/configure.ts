@@ -105,6 +105,15 @@ export async function configureCoderabbit(
   const snapshot = deps.snapshotDir ?? (() => snapshotCredentialDir());
   const capture = deps.captureCredential ?? ((b: DirSnapshot) => diffCapturedCredential(b));
 
+  // CodeRabbit installs to `~/.local/bin` (Linux + macOS) or `/opt/homebrew/bin`
+  // (macOS Homebrew) — dirs a relayed session's process PATH often lacks, so
+  // `findInPath` (and thus `installed`/`loggedIn`/`linked`) would falsely report
+  // NOT installed even when the CLI is present + authenticated. Augment the PATH
+  // for EVERY action (the installer only did it during install; `status` — which
+  // drives the mobile "linked" state — never installs). Same class of PATH bug
+  // as the `bd` symlink fix.
+  os.augmentPath([`${os.homeDir()}/.local/bin`, '/opt/homebrew/bin', '/usr/local/bin']);
+
   const installed = os.findInPath('coderabbit') !== null;
   const base = (): CoderabbitConfigureResult => ({
     action: input.action,
