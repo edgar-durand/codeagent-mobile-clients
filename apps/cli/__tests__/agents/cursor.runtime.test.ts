@@ -1,7 +1,16 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 vi.mock('../../src/services/spawn-and-capture', () => ({
   spawnAndCapture: vi.fn(async () => '{"framework":"next","port":3000}'),
 }));
+// spawnSync backs cursor's `create-chat` session-id pre-mint. Override ONLY
+// spawnSync (keep every other child_process export) so the baton pre-mint path
+// is unit-testable without a real cursor-agent binary.
+vi.mock('node:child_process', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:child_process')>();
+  return { ...actual, spawnSync: vi.fn() };
+});
+import { spawnSync } from 'node:child_process';
+const spawnSyncMock = spawnSync as unknown as ReturnType<typeof vi.fn>;
 import { CursorRuntimeStrategy } from '../../src/agents/cursor/runtime';
 import { spawnAndCapture } from '../../src/services/spawn-and-capture';
 import type { OsStrategy } from '../../src/os';
@@ -66,6 +75,54 @@ describe('CursorRuntimeStrategy contract', () => {
     } finally {
       process.env.PATH = originalPath;
     }
+  });
+
+  describe('prepareLaunch session-id pre-mint (baton)', () => {
+    const fakeOs = {
+      findInPath: () => '/usr/bin/cursor-agent',
+      buildLaunch: (cmd: string, args: string[] = []) => ({ cmd, args }),
+    } as unknown as OsStrategy;
+
+    beforeEach(() => spawnSyncMock.mockReset());
+
+    it('pre-mints a chat id via `create-chat` and launches the TUI with --resume <id>', async () => {
+      const id = '7d3c1303-434b-4f24-a174-1baa8e4a625e';
+      spawnSyncMock.mockReturnValue({ status: 0, stdout: `${id}\n`, stderr: '' });
+      const r = new CursorRuntimeStrategy(fakeOs);
+      const launch = await r.prepareLaunch();
+      // create-chat was the command we ran to mint the id.
+      expect(spawnSyncMock).toHaveBeenCalledWith(
+        '/usr/bin/cursor-agent',
+        ['create-chat'],
+        expect.objectContaining({ encoding: 'utf8' }),
+      );
+      expect(launch.sessionId).toBe(id);
+      expect(launch.args).toEqual(['--resume', id]);
+    });
+
+    it('falls back to a fresh launch (no sessionId) when create-chat fails', async () => {
+      spawnSyncMock.mockReturnValue({ status: 1, stdout: '', stderr: 'not logged in' });
+      const r = new CursorRuntimeStrategy(fakeOs);
+      const launch = await r.prepareLaunch();
+      expect(launch.sessionId).toBeUndefined();
+      expect(launch.args).toEqual([]);
+    });
+
+    it('falls back when create-chat prints no parseable chat id', async () => {
+      spawnSyncMock.mockReturnValue({ status: 0, stdout: 'welcome!\n', stderr: '' });
+      const r = new CursorRuntimeStrategy(fakeOs);
+      const launch = await r.prepareLaunch();
+      expect(launch.sessionId).toBeUndefined();
+      expect(launch.args).toEqual([]);
+    });
+
+    it('prepareResumeLaunch rebuilds a clean --resume <id> (no duplicate flag)', () => {
+      const r = new CursorRuntimeStrategy(fakeOs);
+      expect(r.prepareResumeLaunch!('sess-xyz')).toEqual({
+        cmd: '/usr/bin/cursor-agent',
+        args: ['--resume', 'sess-xyz'],
+      });
+    });
   });
 
   it('fetchWeeklyUsage returns null (no public RPC yet)', async () => {

@@ -25,6 +25,10 @@ import { detectCursorSelector, filterCursorChrome, parseCursorChrome } from './p
 import type { OsStrategy } from '../../os';
 import type { ChangeModelInstruction, RuntimeStrategy } from '../strategy';
 import { spawnAndCapture } from '../../services/spawn-and-capture';
+import { spawnSync } from 'node:child_process';
+import { log } from '../../services/logger';
+
+const UUID_RE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
 
 const CURSOR_CONTEXT_WINDOW = 200_000;
 
@@ -44,7 +48,12 @@ export class CursorRuntimeStrategy implements RuntimeStrategy {
     this.os = os;
   }
 
-  async prepareLaunch(): Promise<{ cmd: string; args: string[]; env?: Record<string, string> }> {
+  async prepareLaunch(): Promise<{
+    cmd: string;
+    args: string[];
+    env?: Record<string, string>;
+    sessionId?: string;
+  }> {
     const binary = this.os.findInPath('cursor-agent');
     if (!binary) {
       throw new Error(
@@ -53,12 +62,71 @@ export class CursorRuntimeStrategy implements RuntimeStrategy {
           '    then run `codeam pair` again.',
       );
     }
-    return this.os.buildLaunch(binary);
+    // Cursor won't accept an arbitrary pre-set id (`--resume <newid>` on an
+    // unknown chat fails), but its `create-chat` command pre-creates an EMPTY
+    // resumable chat and prints its id. Pre-minting here — exactly like Claude's
+    // `--session-id` — lets the baton bind the conversation the instant the TUI
+    // spawns: `AgentService.spawnedSessionId` is known before the first turn, so
+    // the NativeTuiDriver never has to guess. We then launch the native TUI
+    // attached to that chat with `--resume <id>` (verified live: it opens the TUI
+    // cleanly on the empty chat, not "session not found"). Only the baton reaches
+    // prepareLaunch — the normal cursor path runs over ACP (`cursor-agent acp`).
+    const sessionId = this.mintChatId(binary);
+    if (sessionId) {
+      const launch = this.os.buildLaunch(binary, ['--resume', sessionId]);
+      return { cmd: launch.cmd, args: launch.args, sessionId };
+    }
+    // create-chat unavailable/failed (offline, old cursor-agent) → launch fresh.
+    // The baton then falls back to nothing (no id) and surfaces the normal error;
+    // the non-baton ACP path never gets here.
+    const launch = this.os.buildLaunch(binary);
+    return { cmd: launch.cmd, args: launch.args };
+  }
+
+  /**
+   * Pre-create an empty, resumable Cursor chat and return its id, or null on any
+   * failure. `cursor-agent create-chat` prints a bare UUID and exits 0 (verified
+   * on cursor-agent 2026.06.24). Synchronous + bounded so prepareLaunch stays a
+   * single deterministic step; a timeout/parse failure just disables pre-mint.
+   */
+  private mintChatId(binary: string): string | null {
+    try {
+      const r = spawnSync(binary, ['create-chat'], {
+        encoding: 'utf8',
+        timeout: 20_000,
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      if (r.status !== 0 || r.error) {
+        log.warn('cursor', `create-chat failed (status=${r.status}) — baton id pre-mint skipped`);
+        return null;
+      }
+      const id = (r.stdout ?? '').match(UUID_RE)?.[0] ?? null;
+      if (!id) log.warn('cursor', 'create-chat produced no chat id — baton id pre-mint skipped');
+      return id;
+    } catch (err) {
+      log.warn('cursor', `create-chat threw: ${err instanceof Error ? err.message : String(err)}`);
+      return null;
+    }
   }
 
   /** Cursor mirrors Claude's `--resume <id>` flag for session resume. */
   resumeLaunchArgs(sessionId: string, _opts?: { auto?: boolean }): string[] {
     return ['--resume', sessionId];
+  }
+
+  /**
+   * Resume as a COMPLETE relaunch (mirrors Claude). The initial spawn already
+   * carries `--resume <preMintedId>` from {@link prepareLaunch}, so appending
+   * `resumeLaunchArgs` onto `initialLaunch.args` would emit a duplicate
+   * `--resume … --resume …`. Rebuild a clean `--resume <id>` launch instead.
+   */
+  prepareResumeLaunch(sessionId: string, opts?: { auto?: boolean }): {
+    cmd: string;
+    args: string[];
+  } {
+    const binary = this.os.findInPath('cursor-agent') ?? this.meta.binaryName;
+    const launch = this.os.buildLaunch(binary, this.resumeLaunchArgs(sessionId, opts));
+    return { cmd: launch.cmd, args: launch.args };
   }
 
   resolveHistoryDir(cwd: string): string | null {
