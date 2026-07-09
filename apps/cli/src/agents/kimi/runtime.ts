@@ -11,10 +11,14 @@
  *   - AI Insights / Summary + Preview detection call `generateOneShot()`.
  *   - The agent-contract suite iterates every runtime builder and asserts shape.
  *
- * No baton: Kimi stores sessions as a DIRECTORY tree
- * (`~/.kimi-code/sessions/<workDirKey>/<sessionId>/`), not a single tail-able
- * JSONL, so `resolveHistoryFile` is deliberately NOT implemented — Kimi runs as
- * a plain ACP session with no Take Control affordance (see `runtimeSupportsBaton`).
+ * Baton (Take Control) IS supported — mirroring Cursor. Kimi stores a per-session
+ * append-only transcript at
+ * `<KIMI_CODE_HOME>/sessions/wd_<key>/<sessionId>/agents/main/wire.jsonl`, its
+ * `kimi acp` server advertises `loadSession:true` (session/load resume), and the
+ * native TUI resumes by id with `kimi -S <id>` — all verified live on a real box.
+ * `resolveHistoryFile` (below) is the capability marker `runtimeSupportsBaton`
+ * checks. Everything Kimi-specific lives in this strategy + `./history.ts`; no
+ * shared baton code is touched.
  */
 
 import {
@@ -28,6 +32,7 @@ import {
 import { spawn, type ChildProcess } from 'node:child_process';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import * as history from './history';
 import { spawnAndCapture } from '../../services/spawn-and-capture';
 import { createOsStrategy } from '../../os';
 import type { OsStrategy } from '../../os';
@@ -83,22 +88,35 @@ export class KimiRuntimeStrategy implements RuntimeStrategy {
     return { cmd: launch.cmd, args: launch.args };
   }
 
-  resumeLaunchArgs(_sessionId: string, _opts?: { auto?: boolean }): string[] {
-    return [];
+  /** Re-attach the same conversation on baton hand-back — kimi resumes a session
+   *  by id with `kimi -S <id>` (`-S, --session [id]`). */
+  resumeLaunchArgs(sessionId: string, _opts?: { auto?: boolean }): string[] {
+    return ['-S', sessionId];
   }
 
-  resolveHistoryDir(_cwd: string): string | null {
-    return null;
+  resolveHistoryDir(cwd: string): string | null {
+    return history.resolveHistoryDir(cwd);
   }
 
-  parseHistoryFile(_filePath: string): NormalizedMessage[] {
-    return [];
+  /**
+   * `<KIMI_CODE_HOME>/sessions/wd_<key>/<sessionId>/agents/main/wire.jsonl`.
+   * Implementing this is what lets the baton engage for Kimi
+   * (`runtimeSupportsBaton`), so LOCAL_DRIVE can tail the transcript and Take
+   * Control resumes the SAME conversation over ACP `session/load` — verified
+   * live: `kimi acp` advertises `loadSession:true`.
+   */
+  resolveHistoryFile(cwd: string, sessionId: string): string | null {
+    return history.resolveHistoryFile(cwd, sessionId);
+  }
+
+  parseHistoryFile(filePath: string): NormalizedMessage[] {
+    return history.parseHistoryFile(filePath);
   }
 
   getCurrentUsage(
-    _historyDir: string,
+    historyDir: string,
   ): { used: number; total: number; percent: number; model?: string } | null {
-    return null;
+    return history.getCurrentUsage(historyDir);
   }
 
   async fetchWeeklyUsage(): Promise<{ percent: number; resetAt?: string } | null> {
