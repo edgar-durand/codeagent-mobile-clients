@@ -56,11 +56,19 @@ export class CursorRuntimeStrategy implements RuntimeStrategy {
   }> {
     const binary = this.os.findInPath('cursor-agent');
     if (!binary) {
-      throw new Error(
-        'Cursor Agent CLI ("cursor-agent") is not on PATH.\n' +
-          '    Install Cursor (https://cursor.com/), enable its CLI plugin,\n' +
-          '    then run `codeam pair` again.',
-      );
+      // OS-aware install guidance. On native Windows the Cursor CLI installs via
+      // its own PowerShell one-liner (`irm 'https://cursor.com/install?win32=true' | iex`,
+      // per cursor.com/docs/cli/installation); on macOS/Linux (and WSL) it ships
+      // with the Cursor desktop app / the curl installer.
+      const install =
+        this.os.id === 'win32'
+          ? 'Cursor Agent CLI ("cursor-agent") is not on PATH.\n' +
+            "    Install it with:  irm 'https://cursor.com/install?win32=true' | iex\n" +
+            '    then run `codeam pair` again.'
+          : 'Cursor Agent CLI ("cursor-agent") is not on PATH.\n' +
+            '    Install Cursor (https://cursor.com/), enable its CLI plugin,\n' +
+            '    then run `codeam pair` again.';
+      throw new Error(install);
     }
     // Cursor won't accept an arbitrary pre-set id (`--resume <newid>` on an
     // unknown chat fails), but its `create-chat` command pre-creates an EMPTY

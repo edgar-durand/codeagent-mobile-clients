@@ -77,6 +77,25 @@ describe('CursorRuntimeStrategy contract', () => {
     }
   });
 
+  describe('prepareLaunch install hint is OS-aware when cursor-agent is missing', () => {
+    // Fake OsStrategy that always misses on findInPath so prepareLaunch throws,
+    // with `id` driving the OS-specific install message.
+    const missOs = (id: OsStrategy['id']): OsStrategy =>
+      ({ id, findInPath: () => null }) as unknown as OsStrategy;
+
+    it('WINDOWS: shows the PowerShell installer (irm … | iex), not the bash/desktop path', async () => {
+      const r = new CursorRuntimeStrategy(missOs('win32'));
+      await expect(r.prepareLaunch()).rejects.toThrow(/irm/i);
+      await expect(r.prepareLaunch()).rejects.toThrow(/win32=true/i);
+    });
+
+    it('POSIX (linux): keeps the cursor.com desktop-app guidance, no PowerShell irm', async () => {
+      const r = new CursorRuntimeStrategy(missOs('linux'));
+      await expect(r.prepareLaunch()).rejects.toThrow(/cursor\.com/i);
+      await expect(r.prepareLaunch()).rejects.not.toThrow(/irm/i);
+    });
+  });
+
   describe('prepareLaunch session-id pre-mint (baton)', () => {
     const fakeOs = {
       findInPath: () => '/usr/bin/cursor-agent',

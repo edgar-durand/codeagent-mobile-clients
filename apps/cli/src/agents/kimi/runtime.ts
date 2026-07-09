@@ -76,11 +76,18 @@ export class KimiRuntimeStrategy implements RuntimeStrategy {
   }> {
     const binary = this.os.findInPath('kimi');
     if (!binary) {
-      throw new Error(
-        'Kimi Code CLI is not on PATH. Install it with:\n' +
-          '    curl -fsSL https://code.kimi.com/kimi-code/install.sh | bash\n' +
-          '    Then run `codeam pair` again.',
-      );
+      // OS-aware install guidance — Kimi Code CLI has no Windows-native build, so
+      // on Windows the only path is WSL (matches `ensureKimiInstalled` in
+      // ./installer.ts). Elsewhere it's the official curl|bash script.
+      const install =
+        this.os.id === 'win32'
+          ? 'Kimi Code CLI on Windows requires WSL. Install it inside WSL with:\n' +
+            '    curl -fsSL https://code.kimi.com/kimi-code/install.sh | bash\n' +
+            '    then re-run `codeam pair` from WSL.'
+          : 'Kimi Code CLI is not on PATH. Install it with:\n' +
+            '    curl -fsSL https://code.kimi.com/kimi-code/install.sh | bash\n' +
+            '    Then run `codeam pair` again.';
+      throw new Error(install);
     }
     // Production never spawns Kimi over a PTY (ACP path); this satisfies the
     // contract so `createInteractiveAgentStrategy` resolves cleanly.
