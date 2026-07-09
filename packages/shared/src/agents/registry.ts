@@ -51,10 +51,14 @@ export const AGENT_REGISTRY: Record<AgentId, AgentMetadata> = {
     displayName: 'CodeRabbit',
     binaryName: 'coderabbit',
     enabled: true,
-    // Backend registry is authoritative: CodeRabbit links via a real
-    // API key only (no OAuth flow exists in api-v2).
-    supportedAuthKinds: ['api_key'],
-    preferredAuthKind: 'api_key',
+    // CodeRabbit links via a CLI-driven LOOPBACK OAuth (`coderabbit auth
+    // login --agent`): the CLI captures the token and hands it to the vault
+    // through `linkFromCli` (method:'oauth'), same as the terminal handoff.
+    // `oauth_token` is preferred; a real API key is still accepted as a
+    // fallback. There is no backend PKCE provider — the loopback runs on the
+    // user's own machine, so linking is always CLI-mediated.
+    supportedAuthKinds: ['oauth_token', 'api_key'],
+    preferredAuthKind: 'oauth_token',
     headroomWrappable: false,
     // Legacy PTY runtime — no ACP adapter registered.
     acp: false,
