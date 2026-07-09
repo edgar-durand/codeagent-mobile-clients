@@ -10,8 +10,11 @@ export type BatonState = 'LOCAL_DRIVE' | 'MOBILE_DRIVE' | 'SWITCHING';
 export interface SessionDriver {
   readonly kind: DriverKind;
   /** Fresh session when `resumeId` is undefined; resumes that conversation otherwise.
-   *  Resolves with the conversation id (the resumed id, or a freshly minted one). */
-  start(resumeId?: string): Promise<string>;
+   *  Resolves with the conversation id (the resumed id, or a freshly minted one).
+   *  May resolve `null` ONLY on a fresh start whose agent mints its id on the first
+   *  turn (Codex) — the id is then late-bound via `NativeTuiDriverDeps.onLateBind`.
+   *  The resume path always resolves a real id. */
+  start(resumeId?: string): Promise<string | null>;
   stop(): Promise<void>;
   /** Resolves at the next turn boundary — safe to stop this driver without losing output. */
   whenSafeToYield(): Promise<void>;

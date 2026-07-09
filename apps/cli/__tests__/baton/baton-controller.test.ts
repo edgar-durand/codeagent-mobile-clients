@@ -123,4 +123,54 @@ describe('BatonController', () => {
     expect(c.state).toBe('MOBILE_DRIVE');
     expect(c.activeDriver).toBe('mobile_acp');
   });
+
+  describe('rebindConversation (late-bind, Codex first-turn id)', () => {
+    function deferredLocal(): SessionDriver {
+      // Fresh start resolves null (id not minted until the first turn); resume
+      // returns the given id.
+      return {
+        kind: 'local_tui',
+        start: vi.fn(async (resumeId?: string) => resumeId ?? null),
+        stop: vi.fn(async () => {}),
+        dispatch: vi.fn(async () => {}),
+        whenSafeToYield: vi.fn(async () => {}),
+      };
+    }
+
+    it('begins in LOCAL_DRIVE with a null conversation id, then late-binds it', async () => {
+      const local = deferredLocal();
+      const mobile = fakeDriver('mobile_acp', 'm');
+      const publishState = vi.fn();
+      const c = new BatonController({ local, mobile, publishState });
+
+      await c.begin();
+      expect(c.conversationId).toBeNull();
+      expect(publishState).toHaveBeenLastCalledWith('LOCAL_DRIVE', 'local_tui', null);
+
+      c.rebindConversation('codex-abc');
+      expect(c.conversationId).toBe('codex-abc');
+      // Re-published LOCAL_DRIVE with the now-known id so the mirror can arm.
+      expect(publishState).toHaveBeenLastCalledWith('LOCAL_DRIVE', 'local_tui', 'codex-abc');
+    });
+
+    it('is a no-op once an id is already set (never clobbers a live conversation)', async () => {
+      const local = deferredLocal();
+      const c = new BatonController({ local, mobile: fakeDriver('mobile_acp', 'm'), publishState: vi.fn() });
+      await c.begin();
+      c.rebindConversation('first');
+      c.rebindConversation('second'); // ignored — already bound
+      expect(c.conversationId).toBe('first');
+    });
+
+    it('is a no-op when not in LOCAL_DRIVE (e.g. user already took control)', async () => {
+      const local = deferredLocal();
+      const mobile = fakeDriver('mobile_acp', 'mobile-fresh');
+      const c = new BatonController({ local, mobile, publishState: vi.fn() });
+      await c.begin(); // conversationId = null
+      await c.takeControl(); // mobile.start(undefined) → 'mobile-fresh'
+      expect(c.state).toBe('MOBILE_DRIVE');
+      c.rebindConversation('stray-native-id'); // must NOT clobber
+      expect(c.conversationId).toBe('mobile-fresh');
+    });
+  });
 });

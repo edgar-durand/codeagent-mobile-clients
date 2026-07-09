@@ -120,6 +120,33 @@ describe('NativeTuiDriver', () => {
     expect(agent.restart).not.toHaveBeenCalled();
   });
 
+  it('discoverSessionId (boot-store agent, Kimi): quick probe binds the id', async () => {
+    const agent = fakeAgent('conv-9');
+    agent.spawnedSessionId = null; // no pre-mint
+    const discoverSessionId = vi.fn(async () => 'kimi-boot-id');
+    const runtime = { discoverSessionId } as unknown as RuntimeStrategy;
+    const d = new NativeTuiDriver(makeDeps(agent, { runtime }).deps);
+    await expect(d.start(undefined)).resolves.toBe('kimi-boot-id');
+  });
+
+  it('deferred id (first-turn agent, Codex): start() returns null, then late-binds', async () => {
+    const agent = fakeAgent('conv-9');
+    agent.spawnedSessionId = null;
+    // Quick probe (1st call) finds nothing; background poll (2nd call) resolves.
+    const discoverSessionId = vi
+      .fn()
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce('codex-first-turn-id');
+    const onLateBind = vi.fn();
+    const runtime = { discoverSessionId } as unknown as RuntimeStrategy;
+    const d = new NativeTuiDriver(makeDeps(agent, { runtime, onLateBind }).deps);
+
+    await expect(d.start(undefined)).resolves.toBeNull();
+    // Let the fire-and-forget background discovery settle.
+    await vi.waitFor(() => expect(onLateBind).toHaveBeenCalledWith('codex-first-turn-id'));
+    expect(discoverSessionId).toHaveBeenCalledTimes(2);
+  });
+
   it('dispatch routes a non-baton command through the legacy PTY dispatchCommand', async () => {
     const agent = fakeAgent('conv-9');
     const { deps, relay } = makeDeps(agent);

@@ -32,6 +32,14 @@ export interface NativeTuiDriverDeps {
   idleMs?: number;
   /** Injectable clock for tests. Defaults to `Date.now`. */
   now?: () => number;
+  /**
+   * Late-bind callback for agents that mint their session id only on the FIRST
+   * TURN (Codex), not at spawn. `start()` returns null for them so `begin()`
+   * never blocks/crashes; a background poll then calls this with the real id the
+   * moment the user's first turn creates the transcript, so the controller can
+   * bind the conversation + arm the mirror. Undefined for the common case.
+   */
+  onLateBind?: (conversationId: string) => void;
 }
 
 /**
@@ -56,6 +64,10 @@ export class NativeTuiDriver implements SessionDriver {
   private readonly idleMs: number;
   private readonly now: () => number;
   private lastOutput: number;
+
+  /** How long `start()` waits for a boot-time session store (Kimi) before
+   *  falling back to background/late-bind discovery (Codex, first-turn store). */
+  private static readonly QUICK_DISCOVER_MS = 8_000;
 
   private readonly outputSvc: OutputService;
   private readonly historySvc: HistoryService;
@@ -93,7 +105,7 @@ export class NativeTuiDriver implements SessionDriver {
     this.setKeepAlive = buildKeepAlive(this.keepAliveCtx).apply;
   }
 
-  async start(resumeId?: string): Promise<string> {
+  async start(resumeId?: string): Promise<string | null> {
     // Explicit undefined check (not truthiness): the contract is "fresh when
     // undefined, else resume" — an empty-string id must still resume, not spawn fresh.
     if (resumeId !== undefined) {
@@ -114,14 +126,33 @@ export class NativeTuiDriver implements SessionDriver {
     const preMinted = this.agent.spawnedSessionId;
     if (preMinted) return preMinted;
     // Fallback: some agents neither pre-mint nor print the id — they only WRITE
-    // it to their on-disk session store when the native TUI boots. If the
-    // runtime knows how to find it (Kimi's `discoverSessionId`), bounded-poll
-    // for it. Inert for every other agent (hook undefined).
-    const discovered = await this.deps.runtime.discoverSessionId?.(this.deps.opts.cwd, {
+    // it to their on-disk session store. If the runtime knows how to find it
+    // (Kimi/Codex `discoverSessionId`), poll for it. Inert for other agents.
+    const discover = this.deps.runtime.discoverSessionId;
+    if (!discover) {
+      throw new Error('NativeTuiDriver: agent did not expose a session id after spawn');
+    }
+    // Quick probe: agents that write their store at BOOT (Kimi, ~2 s) resolve
+    // here, so the baton binds immediately with no behaviour change.
+    const quick = await discover(this.deps.opts.cwd, {
       sinceMs: spawnedAt,
+      timeoutMs: NativeTuiDriver.QUICK_DISCOVER_MS,
     });
-    if (discovered) return discovered;
-    throw new Error('NativeTuiDriver: agent did not expose a session id after spawn');
+    if (quick) return quick;
+    // Deferred: agents that mint their id only on the FIRST TURN (Codex) have no
+    // store yet. Blocking here would freeze `begin()` until the user types (or
+    // crash on timeout), so instead return null (the baton comes up in
+    // LOCAL_DRIVE with a pending conversation) and keep discovering in the
+    // BACKGROUND — the native TUI is interactive, so the user's first turn
+    // creates the transcript and we late-bind the id then.
+    void discover(this.deps.opts.cwd, { sinceMs: spawnedAt })
+      .then((id) => {
+        if (id) this.deps.onLateBind?.(id);
+      })
+      .catch(() => {
+        /* best-effort — a failed background poll just leaves take-control off */
+      });
+    return null;
   }
 
   async stop(): Promise<void> {

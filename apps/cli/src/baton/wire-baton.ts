@@ -377,6 +377,11 @@ export async function runBatonSession(opts: BatonSessionOptions): Promise<void> 
     },
     getRelay: () => relay,
     getBeads: opts.getBeads ?? (() => null),
+    // Late-bind for first-turn-minted ids (Codex): the background discovery
+    // calls this once the user's first terminal turn creates the transcript.
+    // Safe forward-ref — `controller` is initialised long before `begin()` runs,
+    // and onLateBind only fires from inside `begin()`'s spawn.
+    onLateBind: (id: string) => controller.rebindConversation(id),
   });
 
   // ─── Read-only transcript mirror (rebuilt each LOCAL_DRIVE entry) ─────────

@@ -37,6 +37,21 @@ export class BatonController {
     this.setState('LOCAL_DRIVE');
   }
 
+  /**
+   * Late-bind the conversation id for an agent (Codex) that minted it only on the
+   * user's first turn, so `begin()` returned null. Fires from the native driver's
+   * background discovery. Idempotent + guarded: only binds while we're still in
+   * the INITIAL, id-less LOCAL_DRIVE — if the user already took control (which
+   * started its own session) or an id is already set, it's a no-op, so a stray
+   * native id can never clobber the live conversation. Re-publishes LOCAL_DRIVE so
+   * the read-only mirror arms on the now-known id.
+   */
+  rebindConversation(conversationId: string): void {
+    if (this._conversationId !== null || this._state !== 'LOCAL_DRIVE') return;
+    this._conversationId = conversationId;
+    this.setState('LOCAL_DRIVE');
+  }
+
   async takeControl(): Promise<void> {
     await this.switchDriver(
       'LOCAL_DRIVE',
