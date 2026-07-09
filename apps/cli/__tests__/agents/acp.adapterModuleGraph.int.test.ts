@@ -51,6 +51,15 @@ beforeAll(() => {
   // An adapter whose install is "still settling": it crashes with a missing
   // module for the first 2 spawns (a marker file counts them), then — once the
   // "install" completes — loads fine and stays alive. Proves the gate recovers.
+  //
+  // ⚠️ The crash MUST be SYNCHRONOUS (a `require()` of a missing module throws at
+  // module-eval time), NOT an async `await import()`. The real incident is a
+  // STATIC import failing at instantiation — synchronous, before any liveness
+  // window. An `await import()` rejects asynchronously, and on a loaded CI runner
+  // that rejection can land AFTER the probe's `livenessMs`, so the probe sees the
+  // process "still alive" and wrongly classifies it `ok` at attempt 2 — the flake
+  // that failed ubuntu·node22 on 2026-07-09 (`expected 2 to be >= 3`). A sync
+  // `require` throw exits 1 deterministically well before the liveness timer.
   fs.writeFileSync(
     path.join(dir, 'counter.txt'),
     '0',
@@ -61,11 +70,14 @@ beforeAll(() => {
       `import { readFileSync, writeFileSync } from 'node:fs';`,
       `import { fileURLToPath } from 'node:url';`,
       `import { dirname, join } from 'node:path';`,
+      `import { createRequire } from 'node:module';`,
+      `const require = createRequire(import.meta.url);`,
       `const here = dirname(fileURLToPath(import.meta.url));`,
       `const cfile = join(here, 'counter.txt');`,
       `const n = Number(readFileSync(cfile, 'utf8')) + 1;`,
       `writeFileSync(cfile, String(n));`,
-      `if (n <= 2) { await import('./not-installed-yet-' + n + '.mjs'); }`,
+      // Synchronous throw → "Cannot find module" on stderr, exit 1, immediately.
+      `if (n <= 2) { require('./not-installed-yet-' + n + '.cjs'); }`,
       `setInterval(() => {}, 1000);`,
     ].join('\n'),
   );
