@@ -10,9 +10,46 @@ describe('CoderabbitRuntimeStrategy contract', () => {
     expect(r.meta.displayName).toBe('CodeRabbit');
   });
 
-  it('getDefaultArgs returns the review subcommand', () => {
+  it('getDefaultArgs returns the structured review subcommand', () => {
     const r = new CoderabbitRuntimeStrategy(new LinuxOsStrategy());
-    expect(r.getDefaultArgs()).toEqual(['review']);
+    expect(r.getDefaultArgs()).toEqual(['review', '--agent']);
+  });
+
+  it('prepareInvocation maps review params to the REAL CLI flags', async () => {
+    // Fake OS so the binary "resolves" and we can inspect the built args.
+    const os = {
+      findInPath: () => '/usr/bin/coderabbit',
+      buildLaunch: (cmd: string, args: string[]) => ({ cmd, args }),
+    } as unknown as ConstructorParameters<typeof CoderabbitRuntimeStrategy>[0];
+    const r = new CoderabbitRuntimeStrategy(os);
+    const launch = await r.prepareInvocation({
+      changeSet: 'uncommitted',
+      base: 'main',
+      dir: 'packages/x',
+    });
+    expect(launch.args).toEqual([
+      'review',
+      '--agent',
+      '--type',
+      'uncommitted',
+      '--base',
+      'main',
+      '--dir',
+      'packages/x',
+    ]);
+    // Never the non-existent flags the old code emitted.
+    expect(launch.args).not.toContain('--pr');
+    expect(launch.args).not.toContain('--message');
+  });
+
+  it('prepareInvocation uses --plain when structured is false', async () => {
+    const os = {
+      findInPath: () => '/usr/bin/coderabbit',
+      buildLaunch: (cmd: string, args: string[]) => ({ cmd, args }),
+    } as unknown as ConstructorParameters<typeof CoderabbitRuntimeStrategy>[0];
+    const r = new CoderabbitRuntimeStrategy(os);
+    const launch = await r.prepareInvocation({ structured: false });
+    expect(launch.args).toEqual(['review', '--plain']);
   });
 
   it('credentialLocator points at ~/.coderabbit/auth.json', () => {
@@ -33,7 +70,7 @@ describe('CoderabbitRuntimeStrategy contract', () => {
     process.env.PATH = '/var/empty';
     try {
       const r = new CoderabbitRuntimeStrategy(new LinuxOsStrategy());
-      await expect(r.prepareInvocation({ prRef: '123' })).rejects.toThrow(
+      await expect(r.prepareInvocation({ changeSet: 'all' })).rejects.toThrow(
         /not on PATH/i,
       );
     } finally {

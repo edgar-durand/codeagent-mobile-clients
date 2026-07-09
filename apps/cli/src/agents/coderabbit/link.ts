@@ -52,9 +52,15 @@ export function coderabbitLoginLauncher(os: OsStrategy): AgentLoginLauncher {
       return ensureCoderabbitInstalled(os);
     },
     launch(): ChildProcess {
-      // CodeRabbit ships a real `coderabbit login` subcommand that
-      // opens the browser; no REPL piping needed.
-      return spawn('coderabbit', ['login'], { stdio: 'inherit' });
+      // CodeRabbit's sign-in is `coderabbit auth login` (NOT `coderabbit
+      // login` — that subcommand does not exist). It starts a local
+      // loopback server and opens the browser to
+      // `app.coderabbit.ai/login?client=cli&redirect_uri=http://127.0.0.1:<port>/callback`,
+      // then captures the callback's `access_token` (a non-expiring,
+      // opaque encrypted envelope) into `~/.coderabbit/`. Inherited stdio
+      // lets the user complete the browser flow. (For the app-driven flow
+      // the `--agent` variant streams JSON status events — see Phase 1.)
+      return spawn('coderabbit', ['auth', 'login'], { stdio: 'inherit' });
     },
   };
 }

@@ -109,7 +109,7 @@ describe('AgentStrategy split', () => {
     });
 
     it('runOneShot pipes through parseOutput', async () => {
-      const out = await agent.runOneShot({ prRef: '123' });
+      const out = await agent.runOneShot({ changeSet: 'all' });
       expect(out.exitCode).toBe(0);
       expect(out.markdown).toContain('coderabbit');
     });

@@ -472,13 +472,24 @@ export interface StartupBanner {
  * a file-only reviewer needs `files`, …).
  */
 export interface BatchInvocationInput {
-  /** Free-form prompt / instruction passed via the agent's input flag
-   *  (e.g. `coderabbit review --message "$prompt"`). */
-  prompt?: string;
-  /** GitHub PR ref the agent should review (e.g. "123" or full URL). */
-  prRef?: string;
-  /** Working-tree-relative paths the agent should focus on. */
-  files?: string[];
+  /** Which git changes to review. Maps to CodeRabbit's `-t/--type`
+   *  (`all` default, `committed`, `uncommitted`). Reviewers operate on
+   *  the working tree / git history, NOT on a PR number. */
+  changeSet?: 'all' | 'committed' | 'uncommitted';
+  /** Compare the working tree against this base branch (`--base`). */
+  base?: string;
+  /** Compare against a specific base commit hash (`--base-commit`). */
+  baseCommit?: string;
+  /** Restrict the review to git changes under this directory (`--dir`);
+   *  the path must be inside an initialized git repo. */
+  dir?: string;
+  /** Emit machine-readable structured findings (`--agent`) rather than the
+   *  human plain-text report (`--plain`). Defaults to true — the mobile /
+   *  cross-review surfaces consume the structured shape. */
+  structured?: boolean;
+  /** API key to authenticate this one invocation (`--api-key`) when the
+   *  agent isn't already logged in via its own credential store. */
+  apiKey?: string;
   /** Additional raw args appended verbatim — escape hatch for power
    *  users. The runtime is responsible for shell-escaping these via
    *  `os.escapeShellArg` if the agent's launcher takes a shell string. */

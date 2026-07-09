@@ -38,10 +38,13 @@ export class CoderabbitRuntimeStrategy implements BatchAgentStrategy {
   }
 
   getDefaultArgs(): string[] {
-    // CodeRabbit's `review` subcommand is the only public surface
-    // the CLI plugin exposes — every invocation starts here. Caller
-    // input adds more flags (`--pr`, `--file`, …) on top.
-    return ['review'];
+    // `coderabbit review` is the only review surface. Structured
+    // `--agent` output is the default we want everywhere (mobile +
+    // cross-review consume the machine-readable findings). Real CLI
+    // flags only — verified against `coderabbit review --help` (0.6.x):
+    // there is NO `--pr` and NO `--message`; reviews are LOCAL git
+    // changes selected by `-t/--base/--dir`.
+    return ['review', '--agent'];
   }
 
   async prepareInvocation(input: BatchInvocationInput): Promise<{
@@ -61,17 +64,17 @@ export class CoderabbitRuntimeStrategy implements BatchAgentStrategy {
       );
     }
 
-    const args = this.getDefaultArgs();
-    if (input.prRef) args.push('--pr', input.prRef);
-    if (input.files && input.files.length > 0) {
-      // Pass files as positional args after the subcommand.
-      args.push(...input.files);
-    }
-    if (input.prompt) {
-      // CodeRabbit accepts a `--message` override the reviewer uses
-      // as additional context.
-      args.push('--message', input.prompt);
-    }
+    // Base: `review` + structured/plain mode.
+    const args = input.structured === false ? ['review', '--plain'] : this.getDefaultArgs();
+    // Change-set selection.
+    if (input.changeSet) args.push('--type', input.changeSet);
+    if (input.base) args.push('--base', input.base);
+    if (input.baseCommit) args.push('--base-commit', input.baseCommit);
+    if (input.dir) args.push('--dir', input.dir);
+    // Per-invocation auth (when not logged in via the credential store).
+    // Passed via argv is unavoidable with this CLI; callers keep the key
+    // out of logs. Prefer the login-state file when available.
+    if (input.apiKey) args.push('--api-key', input.apiKey);
     if (input.extraArgs && input.extraArgs.length > 0) {
       args.push(...input.extraArgs);
     }
