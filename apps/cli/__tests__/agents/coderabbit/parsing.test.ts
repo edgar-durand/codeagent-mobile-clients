@@ -108,4 +108,20 @@ describe('coderabbit/parseReview — structured --agent JSON', () => {
     expect(hunks).toEqual([]);
     expect(markdown).toContain('"status":"ok"');
   });
+
+  it('surfaces the root-cause error from a failed --agent run (REAL captured NDJSON)', () => {
+    // Verbatim from a live `coderabbit review --agent` run (2026-07-09):
+    // control events, then the connection error, then a generic wrapper.
+    const ndjson = [
+      '{"type":"review_context","reviewType":"uncommitted","currentBranch":"main","baseBranch":"main","workingDirectory":"/tmp/x"}',
+      '{"type":"status","phase":"connecting","status":"connecting_to_review_service"}',
+      '{"type":"error","errorType":"connection","message":"Connection failed: Invalid or expired API key","recoverable":true,"details":{"data":{"code":"UNAUTHORIZED","httpStatus":401}}}',
+      '{"type":"error","errorType":"review","message":"Review failed: Unknown error","recoverable":false,"details":{}}',
+    ].join('\n');
+    const { hunks, markdown, stats } = parseReview(ndjson);
+    expect(hunks).toEqual([]); // control + error events produce no findings
+    // The actionable root cause wins over the generic terminal wrapper.
+    expect(markdown).toBe('Connection failed: Invalid or expired API key');
+    expect(stats.error).toBe('Connection failed: Invalid or expired API key');
+  });
 });

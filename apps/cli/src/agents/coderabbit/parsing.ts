@@ -138,8 +138,27 @@ function findingsFrom(value: unknown): Hunk[] {
   return out;
 }
 
+/** Extract a human-readable error message from a `{type:'error',...}` event.
+ *  Verified live: `--agent` streams NDJSON control events, and a failed run
+ *  ends with `{"type":"error","errorType":"connection","message":"Connection
+ *  failed: Invalid or expired API key","recoverable":...,"details":{...}}`. */
+function errorFrom(obj: Record<string, unknown>): string | undefined {
+  if (obj.type !== 'error') return undefined;
+  return asString(pick(obj, ['message', 'error']));
+}
+
+/** Non-finding control events observed live (`--agent` NDJSON): skip them. */
+function isControlEvent(obj: Record<string, unknown>): boolean {
+  return (
+    obj.type === 'review_context' ||
+    obj.type === 'status' ||
+    obj.type === 'progress' ||
+    obj.type === 'error'
+  );
+}
+
 /** Parse stdout as a single JSON object, else as NDJSON, collecting findings. */
-function parseStructured(stdout: string): { hunks: Hunk[]; summary?: string } | null {
+function parseStructured(stdout: string): { hunks: Hunk[]; summary?: string; error?: string } | null {
   const trimmed = stdout.trim();
   if (!trimmed || (trimmed[0] !== '{' && trimmed[0] !== '[')) return null;
   // Single JSON document.
@@ -153,9 +172,10 @@ function parseStructured(stdout: string): { hunks: Hunk[]; summary?: string } | 
   } catch {
     /* fall through to NDJSON */
   }
-  // NDJSON: one object per line (findings and/or a summary event).
+  // NDJSON: one object per line (control events, findings, and/or a summary).
   const hunks: Hunk[] = [];
   let summary: string | undefined;
+  let error: string | undefined;
   let sawJson = false;
   for (const line of trimmed.split(/\r?\n/)) {
     const l = line.trim();
@@ -163,18 +183,23 @@ function parseStructured(stdout: string): { hunks: Hunk[]; summary?: string } | 
     try {
       const obj = JSON.parse(l);
       sawJson = true;
+      const rec = (Array.isArray(obj) ? {} : obj) as Record<string, unknown>;
+      // First error wins — the root cause ("Invalid or expired API key")
+      // precedes the generic terminal wrapper ("Review failed: Unknown error").
+      error ??= errorFrom(rec);
+      if (isControlEvent(rec)) continue;
       const found = findingsFrom(Array.isArray(obj) ? { findings: obj } : obj);
       if (found.length > 0) hunks.push(...found);
       else {
         const single = toHunk(obj);
         if (single) hunks.push(single);
       }
-      summary ??= asString(pick(obj as Record<string, unknown>, ['summary', 'markdown', 'report']));
+      summary ??= asString(pick(rec, ['summary', 'markdown', 'report']));
     } catch {
       /* skip non-JSON line */
     }
   }
-  return sawJson ? { hunks, summary } : null;
+  return sawJson ? { hunks, summary, error } : null;
 }
 
 /** Plain-text fallback for `--plain` output or unparseable JSON. */
@@ -211,7 +236,13 @@ export function parseReview(stdout: string): ParsedReview {
   const structured = parseStructured(stdout);
   const hunks = structured && structured.hunks.length > 0 ? structured.hunks : parsePlain(stdout);
   const counts = severityCounts(hunks);
-  const markdown = (structured?.summary ?? stdout).trim();
+  // Prefer a summary; if the run errored with no findings, surface the error
+  // (e.g. "Connection failed: Invalid or expired API key") so the caller shows
+  // an actionable message instead of raw event JSON.
+  const markdown = (
+    structured?.summary ??
+    (hunks.length === 0 && structured?.error ? structured.error : stdout)
+  ).trim();
   return {
     markdown,
     hunks,
@@ -220,6 +251,7 @@ export function parseReview(stdout: string): ParsedReview {
       critical: counts.error,
       warning: counts.warn,
       info: counts.info,
+      ...(structured?.error ? { error: structured.error } : {}),
     },
   };
 }
