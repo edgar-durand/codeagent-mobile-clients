@@ -234,26 +234,29 @@ const cursorProvisioner: AgentProvisioner = {
 
 const kimiProvisioner: AgentProvisioner = {
   write(auth, home): Record<string, string> {
-    // Kimi's OAuth login-state lives under its data root (~/.kimi-code by
-    // default, overridable with KIMI_CODE_HOME) as per-provider JSON files in
-    // credentials/. ⚠️ The exact per-provider filename is unverified without a
-    // live box — confirm via `strace -f -e openat kimi status | grep -i cred`
-    // during Step 8 before relying on the oauth_token path.
-    const credentialsFile = path.join(home, '.kimi-code', 'credentials', 'kimi.json');
+    // Kimi's OAuth device-flow login-state is a per-provider JSON file named
+    // `kimi-code.json`. kimi-cli reads `~/.kimi/credentials/kimi-code.json`
+    // (reverse-engineered + verified live); the newer Kimi Code CLI uses
+    // `~/.kimi-code/credentials/`. Write/clean BOTH so whichever binary is
+    // installed picks up the same token.
+    const credentialsFiles = [
+      path.join(home, '.kimi', 'credentials', 'kimi-code.json'),
+      path.join(home, '.kimi-code', 'credentials', 'kimi-code.json'),
+    ];
 
     if (auth.kind === 'api_key') {
       // Shipping path: `kimi acp` reads the key from KIMI_API_KEY (+ optional
       // KIMI_BASE_URL, default https://api.moonshot.ai/v1). Remove any stale
       // login-state file so it can't shadow the freshly-provisioned key.
-      rmIfExists(credentialsFile);
+      credentialsFiles.forEach(rmIfExists);
       return { KIMI_API_KEY: auth.value };
     }
 
-    // oauth_token → the captured ~/.kimi-code/credentials blob, written
-    // verbatim (phase 2 — the login flow isn't reverse-engineered yet, so this
-    // path is only exercised once the capture side ships and Step 8 confirms
-    // the filename). The accessToken must NOT go in KIMI_API_KEY.
-    writeFile0600(credentialsFile, auth.value);
+    // oauth_token → the captured device-flow blob (the RFC 8628
+    // {access_token,refresh_token,expires_at,scope,token_type,expires_in} the
+    // backend KimiOAuthProvider produces), written verbatim. Must NOT go in
+    // KIMI_API_KEY.
+    credentialsFiles.forEach((f) => writeFile0600(f, auth.value));
     return {};
   },
 };
