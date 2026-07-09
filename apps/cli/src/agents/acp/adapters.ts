@@ -31,6 +31,8 @@ import {
   waitForCursorAgent,
   type WaitForClaudeBinaryOptions,
 } from './agent-binary';
+import { ensureKimiInstalled } from '../kimi/installer';
+import { isLocalSession } from '../../baton/gate';
 
 // CommonJS module — `require` is already in scope. Aliased so we
 // keep a single grep target if we ever migrate the CLI to ESM.
@@ -171,7 +173,15 @@ const REGISTRY: Partial<Record<AgentId, () => AdapterSpec | null>> = {
     command: 'kimi',
     args: ['acp'],
     requiresAgentBinary: 'kimi',
-    waitForBinary: (o) => waitForCommandOnPath('kimi', o),
+    // On a LOCAL `codeam pair` the CLI installs kimi ON DEMAND before spawning
+    // (parity with the codespace bootstrap's KimiProvisioningStrategy) — so a
+    // user who selected Kimi but hasn't installed the CLI doesn't hit a raw
+    // `ENOENT — 'kimi' not found`. On a codespace/self-hosted box the backend
+    // provisions it, so there we just wait for the binary to appear.
+    waitForBinary: async (o) => {
+      if (isLocalSession()) await ensureKimiInstalled();
+      return waitForCommandOnPath('kimi', o);
+    },
   }),
 };
 
