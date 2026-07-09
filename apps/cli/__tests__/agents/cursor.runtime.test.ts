@@ -100,6 +100,33 @@ describe('CursorRuntimeStrategy contract', () => {
       expect(launch.args).toEqual(['--resume', id]);
     });
 
+    it('WINDOWS: routes create-chat through os.buildLaunch (cmd.exe /c wrap), not a raw spawn', async () => {
+      // Regression for the Windows-only baton failure "agent did not expose a
+      // session id after spawn": `findInPath` resolves `cursor-agent.cmd`, which
+      // Windows cannot spawn directly — it must go through `cmd.exe /c`. mintChatId
+      // must therefore build the spawn via os.buildLaunch (same as the TUI launch),
+      // NOT spawnSync(binary, …) raw. This fakeOs mimics Win32OsStrategy.buildLaunch.
+      const winOs = {
+        findInPath: () => 'C:\\Users\\x\\.local\\bin\\cursor-agent.cmd',
+        buildLaunch: (binaryPath: string, extraArgs: string[] = []) =>
+          binaryPath.toLowerCase().endsWith('.cmd')
+            ? { cmd: 'cmd.exe', args: ['/c', binaryPath, ...extraArgs] }
+            : { cmd: binaryPath, args: extraArgs },
+      } as unknown as OsStrategy;
+      const id = '9faec455-43d6-4e77-aa5c-5324f12ca681';
+      spawnSyncMock.mockReturnValue({ status: 0, stdout: `${id}\n`, stderr: '' });
+      const r = new CursorRuntimeStrategy(winOs);
+      const launch = await r.prepareLaunch();
+      // The spawn was WRAPPED — a raw `spawnSync('…cursor-agent.cmd', ['create-chat'])`
+      // (the pre-fix regression) would EINVAL on Windows and never pre-mint.
+      expect(spawnSyncMock).toHaveBeenCalledWith(
+        'cmd.exe',
+        ['/c', 'C:\\Users\\x\\.local\\bin\\cursor-agent.cmd', 'create-chat'],
+        expect.objectContaining({ encoding: 'utf8' }),
+      );
+      expect(launch.sessionId).toBe(id);
+    });
+
     it('falls back to a fresh launch (no sessionId) when create-chat fails', async () => {
       spawnSyncMock.mockReturnValue({ status: 1, stdout: '', stderr: 'not logged in' });
       const r = new CursorRuntimeStrategy(fakeOs);

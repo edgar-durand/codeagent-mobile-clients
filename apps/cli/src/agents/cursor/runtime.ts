@@ -88,10 +88,20 @@ export class CursorRuntimeStrategy implements RuntimeStrategy {
    * failure. `cursor-agent create-chat` prints a bare UUID and exits 0 (verified
    * on cursor-agent 2026.06.24). Synchronous + bounded so prepareLaunch stays a
    * single deterministic step; a timeout/parse failure just disables pre-mint.
+   *
+   * ⚠️ Windows: `findInPath` resolves `cursor-agent.cmd` (or `.ps1`) via PATHEXT,
+   * and Windows CANNOT spawn a `.cmd`/`.bat`/`.ps1` directly — it needs
+   * `cmd.exe /c` / `powershell -File`. Spawning `binary` raw (as this used to)
+   * failed with EINVAL on Windows → null id → no pre-mint → the baton threw
+   * "agent did not expose a session id after spawn" (Windows-only). Route the
+   * spawn through `os.buildLaunch`, exactly like the TUI launch above, so the
+   * command is wrapped correctly per-platform. On macOS/Linux buildLaunch returns
+   * the bare `{cmd: binary, args: ['create-chat']}` → behaviour unchanged.
    */
   private mintChatId(binary: string): string | null {
     try {
-      const r = spawnSync(binary, ['create-chat'], {
+      const launch = this.os.buildLaunch(binary, ['create-chat']);
+      const r = spawnSync(launch.cmd, launch.args, {
         encoding: 'utf8',
         timeout: 20_000,
         stdio: ['ignore', 'pipe', 'pipe'],
