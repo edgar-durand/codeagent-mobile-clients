@@ -37,7 +37,7 @@ export function describeError(err: unknown): string {
  * the failure and surface {@link AUTH_FAILURE_MESSAGE} as a persistent bubble.
  */
 const AUTH_FAILURE_RE =
-  /invalid authentication credentials|authentication[_ ]error|please run \/login|\bunauthorized\b|\binvalid x-api-key\b|oauth token (?:expired|revoked)|(?:api error|http|status)[:\s]+401|\b401\b[^\n]{0,40}(?:unauthor|authenticat|credential|api[_ ]?key|login)/i;
+  /invalid authentication credentials|authentication[_ ](?:error|required)|please run \/login|\bunauthorized\b|\binvalid x-api-key\b|oauth token (?:expired|revoked)|(?:api error|http|status)[:\s]+401|\b401\b[^\n]{0,40}(?:unauthor|authenticat|credential|api[_ ]?key|login)/i;
 
 export function looksLikeAuthFailure(text: string): boolean {
   return AUTH_FAILURE_RE.test(text);

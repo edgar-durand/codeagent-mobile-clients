@@ -82,6 +82,17 @@ describe('failureBubble — every failed start_task ends with a visible terminal
         agent: 'claude',
       }),
     ).toBe(AUTH_FAILURE_MESSAGE);
+    // Kimi's ACP session/new rejects an unprovisioned credential with the bare
+    // JSON-RPC `-32000 Authentication required` — must route to the re-auth
+    // bubble, not the raw "agent failed to start" dump.
+    expect(
+      failureBubble({
+        detail: "method: 'session/new' { code: -32000, message: 'Authentication required' }",
+        recentStderr: '',
+        hadText: false,
+        agent: 'kimi',
+      }),
+    ).toBe(AUTH_FAILURE_MESSAGE);
   });
 
   it('1M-context usage-credits 429 → the reconnect-subscription bubble (not disable-1M)', () => {
