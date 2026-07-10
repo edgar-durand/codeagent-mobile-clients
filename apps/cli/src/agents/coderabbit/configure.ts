@@ -44,7 +44,17 @@ export interface CoderabbitConfigureResult {
   provider?: string;
   org?: string;
   error?: string;
-  review?: Pick<BatchInvocationOutput, 'markdown' | 'hunks' | 'stats'>;
+  review?: Pick<BatchInvocationOutput, 'markdown' | 'hunks' | 'stats'> & {
+    files?: CoderabbitReviewFileInfo[];
+  };
+}
+
+/** A changed file in the reviewed working tree (from `git diff --numstat`). */
+export interface CoderabbitReviewFileInfo {
+  path: string;
+  additions?: number;
+  deletions?: number;
+  status?: 'added' | 'modified' | 'deleted' | 'renamed';
 }
 
 export interface CoderabbitConfigureInput {
@@ -117,6 +127,54 @@ function defaultLoginWithApiKey(key: string): { ok: boolean; error?: string } {
   if (failLine) return { ok: false, error: failLine[0].replace(/^[✗\s]+/, '').trim() };
   if (r.status !== 0) return { ok: false, error: out.trim() || 'API key authentication failed' };
   return { ok: true };
+}
+
+/**
+ * Enumerate the changed files in the working tree (what a `uncommitted` review
+ * covers) with their diff stat — so the app's "Changes to review" list shows
+ * every changed file (with +/− counts) even when the review found no issues.
+ * Best-effort: any git failure (no repo, no HEAD) yields an empty list.
+ */
+function collectChangedFiles(cwd: string): CoderabbitReviewFileInfo[] {
+  const run = (args: string[]): string => {
+    try {
+      const r = spawnSync('git', args, { cwd, encoding: 'utf8', timeout: 10_000 });
+      return r.status === 0 && typeof r.stdout === 'string' ? r.stdout : '';
+    } catch {
+      return '';
+    }
+  };
+  const STATUS: Record<string, CoderabbitReviewFileInfo['status']> = {
+    A: 'added',
+    M: 'modified',
+    D: 'deleted',
+    R: 'renamed',
+  };
+  const byPath = new Map<string, CoderabbitReviewFileInfo>();
+  // `git status --porcelain` → every changed/untracked path + its status letter.
+  for (const line of run(['status', '--porcelain']).split(/\r?\n/)) {
+    if (!line.trim()) continue;
+    const x = line[0];
+    const y = line[1];
+    let p = line.slice(3).trim();
+    if (p.includes(' -> ')) p = (p.split(' -> ').pop() ?? p).trim(); // rename → new path
+    if (p.startsWith('"') && p.endsWith('"')) p = p.slice(1, -1);
+    const code = x !== ' ' && x !== '?' ? x : y === '?' ? '?' : y;
+    const status = code === '?' ? 'added' : STATUS[code] ?? 'modified';
+    byPath.set(p, { path: p, status });
+  }
+  // `git diff --numstat HEAD` → additions/deletions for tracked changes.
+  for (const line of run(['--no-pager', 'diff', '--numstat', 'HEAD']).split(/\r?\n/)) {
+    const m = line.match(/^(\d+|-)\t(\d+|-)\t(.+)$/);
+    if (!m) continue;
+    let p = m[3];
+    if (p.includes(' => ')) p = p.replace(/.*\{.*? => (.*?)\}.*/, '$1').replace(/.* => /, '');
+    const cur = byPath.get(p) ?? { path: p, status: 'modified' as const };
+    cur.additions = m[1] === '-' ? undefined : Number(m[1]);
+    cur.deletions = m[2] === '-' ? undefined : Number(m[2]);
+    byPath.set(p, cur);
+  }
+  return [...byPath.values()];
 }
 
 export async function configureCoderabbit(
@@ -254,10 +312,16 @@ export async function configureCoderabbit(
   }
   if (!deps.runReview) return { ...res, error: 'No reviewer available' };
   const out = await deps.runReview(input.review ?? {});
+  const files = collectChangedFiles(process.cwd());
   return {
     ...res,
     loggedIn: true,
-    review: { markdown: out.markdown, hunks: out.hunks, stats: out.stats },
+    review: {
+      markdown: out.markdown,
+      hunks: out.hunks,
+      stats: out.stats,
+      ...(files.length > 0 ? { files } : {}),
+    },
     ...(out.stats && typeof out.stats.error === 'string' ? { error: String(out.stats.error) } : {}),
   };
 }
