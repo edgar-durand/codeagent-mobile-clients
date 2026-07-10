@@ -88,6 +88,9 @@ export const startCommandSchema = z.object({
       'status',
       // `coderabbit_configure` — link the reviewer (OAuth or API key) + run a review.
       'link_oauth',
+      // Deliver a mobile-intercepted OAuth redirect to this host's coderabbit
+      // loopback so a remote-host `link_oauth` login completes (session-relay).
+      'link_deliver_callback',
       'link_apikey',
       'review',
     ])
@@ -102,6 +105,10 @@ export const startCommandSchema = z.object({
   changeSet: z.enum(['all', 'committed', 'uncommitted']).optional(),
   base: z.string().max(255).optional(),
   reviewDir: z.string().max(1024).optional(),
+  // `coderabbit_configure` (action='link_deliver_callback') — the exact loopback
+  // redirect URL the mobile WebView intercepted (`http://127.0.0.1:<port>/callback?…`).
+  // Replayed to the local coderabbit login server; SSRF-guarded to loopback only.
+  callbackUrl: z.string().max(4096).optional(),
   // `request_link_credentials` — backend fires this from the
   // heartbeat handler when it notices the user is running an agent
   // they haven't vaulted yet. Also reused by `get_context` /

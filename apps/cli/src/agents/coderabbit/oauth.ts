@@ -29,6 +29,7 @@
 
 import type { ChildProcess } from 'node:child_process';
 import * as fs from 'node:fs';
+import * as http from 'node:http';
 import * as os from 'node:os';
 import * as path from 'node:path';
 
@@ -258,4 +259,60 @@ export function diffCapturedCredential(before: DirSnapshot, home?: string): Capt
   } catch {
     return null;
   }
+}
+
+export interface DeliverCallbackResult {
+  ok: boolean;
+  status?: number;
+  error?: string;
+}
+
+/**
+ * Deliver a mobile-intercepted CodeRabbit OAuth redirect to the LOCAL
+ * `coderabbit auth login --agent` loopback server so the login completes on THIS
+ * host. Needed only for REMOTE hosts (codespace / self-hosted): the browser runs
+ * in the user's PHONE WebView, so CodeRabbit's redirect to
+ * `http://127.0.0.1:<port>/callback?access_token=…&state=…` hits the phone's
+ * loopback, not the host's. The app intercepts that exact URL and relays it here;
+ * we replay it as a plain GET against the host loopback — byte-for-byte what the
+ * browser would have done — and `coderabbit auth login --agent` (blocked on its
+ * loopback) then completes (`processing_callback` → `fetching_user` → writes the
+ * full `~/.coderabbit/auth.json`, which {@link diffCapturedCredential} vaults).
+ *
+ * ⚠️ **SSRF guard — loopback ONLY.** The relayed URL is attacker-influenceable, so
+ * we refuse anything that isn't `http://127.0.0.1|localhost|[::1]:<port>`. We never
+ * GET an arbitrary host.
+ */
+export function deliverLoopbackCallback(
+  callbackUrl: string,
+  opts: { timeoutMs?: number; get?: typeof http.get } = {},
+): Promise<DeliverCallbackResult> {
+  return new Promise((resolve) => {
+    let url: URL;
+    try {
+      url = new URL(callbackUrl);
+    } catch {
+      resolve({ ok: false, error: 'invalid callback URL' });
+      return;
+    }
+    const host = url.hostname.replace(/^\[|\]$/g, '');
+    const isLoopback =
+      url.protocol === 'http:' && (host === '127.0.0.1' || host === 'localhost' || host === '::1');
+    if (!isLoopback) {
+      resolve({ ok: false, error: `refusing non-loopback callback host: ${url.hostname}` });
+      return;
+    }
+    const get = opts.get ?? http.get;
+    const req = get(url, { timeout: opts.timeoutMs ?? 10_000 }, (res) => {
+      // Drain so the socket frees; the loopback server does the real work.
+      res.resume();
+      const status = res.statusCode ?? 0;
+      resolve({ ok: status >= 200 && status < 400, status });
+    });
+    req.on('timeout', () => {
+      req.destroy();
+      resolve({ ok: false, error: 'callback delivery timed out' });
+    });
+    req.on('error', (err: Error) => resolve({ ok: false, error: err.message }));
+  });
 }

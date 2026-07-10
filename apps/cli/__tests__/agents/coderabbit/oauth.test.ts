@@ -3,11 +3,13 @@ import { EventEmitter } from 'node:events';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, utimesSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import * as http from 'node:http';
 import {
   parseCoderabbitAuthEvent,
   runCoderabbitOAuthLogin,
   snapshotCredentialDir,
   diffCapturedCredential,
+  deliverLoopbackCallback,
   type CoderabbitAuthEvent,
 } from '../../../src/agents/coderabbit/oauth';
 
@@ -149,5 +151,61 @@ describe('coderabbit credential snapshot/diff capture', () => {
     const home = seedHome();
     const before = snapshotCredentialDir(home);
     expect(diffCapturedCredential(before, home)).toBeNull();
+  });
+});
+
+describe('coderabbit/deliverLoopbackCallback — session-relay redirect replay', () => {
+  it('replays the intercepted redirect to a REAL loopback server (login completes)', async () => {
+    let receivedUrl: string | undefined;
+    const server = http.createServer((req, res) => {
+      receivedUrl = req.url; // e.g. /callback?access_token=…&state=…
+      res.writeHead(200);
+      res.end('ok — you can close this window');
+    });
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
+    const port = (server.address() as import('node:net').AddressInfo).port;
+    try {
+      const cb = `http://127.0.0.1:${port}/callback?access_token=FRESH&state=abc&provider=github`;
+      const res = await deliverLoopbackCallback(cb);
+      expect(res.ok).toBe(true);
+      expect(res.status).toBe(200);
+      // The loopback server got the EXACT redirect the browser would have hit.
+      expect(receivedUrl).toBe('/callback?access_token=FRESH&state=abc&provider=github');
+    } finally {
+      await new Promise<void>((r) => server.close(() => r()));
+    }
+  });
+
+  it('SSRF guard: refuses a NON-loopback host (never GETs an arbitrary URL)', async () => {
+    const get = vi.fn();
+    for (const bad of [
+      'http://evil.example.com/callback?access_token=x',
+      'https://127.0.0.1:8976/callback', // https is not the loopback CLI scheme
+      'http://169.254.169.254/latest/meta-data', // cloud metadata SSRF classic
+      'http://127.0.0.1.evil.com/callback',
+    ]) {
+      const res = await deliverLoopbackCallback(bad, { get: get as unknown as typeof http.get });
+      expect(res.ok).toBe(false);
+      expect(res.error).toMatch(/non-loopback|invalid/i);
+    }
+    expect(get).not.toHaveBeenCalled(); // guard short-circuits BEFORE any network call
+  });
+
+  it('returns ok:false on an unparseable URL', async () => {
+    const res = await deliverLoopbackCallback('not a url');
+    expect(res.ok).toBe(false);
+  });
+
+  it('accepts localhost and [::1] loopback forms', async () => {
+    const get = vi.fn(() => {
+      const req = new EventEmitter() as http.ClientRequest;
+      // Simulate an immediate 200 by invoking the callback async.
+      return req;
+    });
+    // We only assert the guard PASSES (get is invoked) for loopback forms.
+    for (const ok of ['http://localhost:8976/callback', 'http://[::1]:8976/callback']) {
+      void deliverLoopbackCallback(ok, { get: get as unknown as typeof http.get });
+    }
+    expect(get).toHaveBeenCalledTimes(2);
   });
 });

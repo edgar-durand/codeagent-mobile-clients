@@ -40,6 +40,7 @@ import { applyFileReview } from '../../services/apply-file-review.service';
 import { buildLinkContext } from '../link';
 import { postLinkCredential, postAiResult, postPreviewEvent, postHeadroomEvent, postBeadsEvent, postCliUpdateEvent, postCoderabbitEvent } from '../../services/pairing.service';
 import { configureCoderabbit, type CoderabbitAction } from '../../agents/coderabbit/configure';
+import { deliverLoopbackCallback, type CoderabbitAuthEvent } from '../../agents/coderabbit/oauth';
 import { CoderabbitRuntimeStrategy } from '../../agents/coderabbit/runtime';
 import { createOsStrategy } from '../../os';
 import {
@@ -696,7 +697,7 @@ const headroomConfigureH: CommandHandler = async (ctx, cmd, parsed) => {
  * in `agents/coderabbit/configure.ts` — this handler is only the relay glue.
  */
 const coderabbitConfigureH: CommandHandler = async (ctx, cmd, parsed) => {
-  const action = (parsed.action ?? 'status') as CoderabbitAction;
+  const rawAction = parsed.action ?? 'status';
   const token = ctx.pluginAuthToken;
 
   // Serialized event chain so `authUrl`/phase events reach the backend (and the
@@ -715,6 +716,91 @@ const coderabbitConfigureH: CommandHandler = async (ctx, cmd, parsed) => {
     );
   };
 
+  // ── Session-relay OAuth: deliver the mobile-intercepted redirect ──────────
+  // The WebView on the phone catches CodeRabbit's loopback redirect and relays
+  // the exact URL here; we replay it to THIS host's `coderabbit auth login`
+  // loopback so a remote-host `link_oauth` (below) completes. Stateless + quick
+  // (a loopback GET), so it never blocks the relay — critical, because the
+  // in-flight `link_oauth` login is what it unblocks.
+  if (rawAction === 'link_deliver_callback') {
+    const r = await deliverLoopbackCallback(parsed.callbackUrl ?? '');
+    await ctx.relay.sendResult(cmd.id, r.ok ? 'completed' : 'failed', {
+      action: 'link_deliver_callback',
+      supported: true,
+      installed: true,
+      loggedIn: false,
+      delivered: r.ok,
+      ...(r.error ? { error: r.error } : {}),
+    });
+    return;
+  }
+
+  const action = rawAction as CoderabbitAction;
+
+  const onEvent = (e: CoderabbitAuthEvent): void => {
+    if (e.kind === 'awaiting_browser') {
+      emit('coderabbit_progress', {
+        phase: 'awaiting_browser',
+        authUrl: e.authUrl,
+        fallbackAuthUrl: e.fallbackAuthUrl,
+      });
+    } else {
+      emit('coderabbit_progress', { phase: e.kind });
+    }
+  };
+  const uploadCredential = token
+    ? async (method: 'oauth' | 'api_key', credential: string): Promise<boolean> => {
+        const r = await postLinkCredential({
+          agentId: 'coderabbit',
+          sessionId: ctx.sessionId,
+          pluginId: ctx.pluginId,
+          pluginAuthToken: token,
+          method,
+          credential,
+        });
+        return r.ok === true;
+      }
+    : undefined;
+
+  // ── OAuth link: run the (browser-gated, long) login in the BACKGROUND ─────
+  // `coderabbit auth login --agent` blocks on its loopback until the redirect
+  // arrives — which only happens once the app relays it via
+  // `link_deliver_callback`. If we awaited it here, the relay's SERIAL poll-path
+  // dispatch would never reach that delivery command → deadlock. So we ACK the
+  // command immediately and drive the link login in the background; the outcome
+  // reaches mobile via the `coderabbit_status` event (its canonical signal),
+  // exactly like the blocking path below.
+  if (action === 'link_oauth') {
+    await ctx.relay.sendResult(cmd.id, 'completed', {
+      action: 'link_oauth',
+      supported: true,
+      installed: true,
+      loggedIn: false,
+      linked: false,
+    });
+    void (async () => {
+      try {
+        const result = await configureCoderabbit({ action: 'link_oauth' }, { onEvent, uploadCredential });
+        emit('coderabbit_status', {
+          installed: result.installed,
+          loggedIn: result.loggedIn,
+          linked: result.linked ?? false,
+          ...(result.error ? { error: result.error } : {}),
+        });
+      } catch (err) {
+        emit('coderabbit_status', {
+          installed: false,
+          loggedIn: false,
+          linked: false,
+          error: err instanceof Error ? err.message : 'CodeRabbit login failed',
+        });
+      }
+      await emitChain;
+    })();
+    return;
+  }
+
+  // ── status | link_apikey | review — quick, so blocking is fine ────────────
   const result = await configureCoderabbit(
     {
       action,
@@ -722,30 +808,8 @@ const coderabbitConfigureH: CommandHandler = async (ctx, cmd, parsed) => {
       review: { changeSet: parsed.changeSet, base: parsed.base, dir: parsed.reviewDir },
     },
     {
-      onEvent: (e) => {
-        if (e.kind === 'awaiting_browser') {
-          emit('coderabbit_progress', {
-            phase: 'awaiting_browser',
-            authUrl: e.authUrl,
-            fallbackAuthUrl: e.fallbackAuthUrl,
-          });
-        } else {
-          emit('coderabbit_progress', { phase: e.kind });
-        }
-      },
-      uploadCredential: token
-        ? async (method, credential) => {
-            const r = await postLinkCredential({
-              agentId: 'coderabbit',
-              sessionId: ctx.sessionId,
-              pluginId: ctx.pluginId,
-              pluginAuthToken: token,
-              method,
-              credential,
-            });
-            return r.ok === true;
-          }
-        : undefined,
+      onEvent,
+      uploadCredential,
       runReview: (input) => new CoderabbitRuntimeStrategy(createOsStrategy()).runOneShot(input),
     },
   );
