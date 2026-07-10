@@ -102,11 +102,53 @@ describe('coderabbit/parseReview — structured --agent JSON', () => {
     expect(hunks[1]).toMatchObject({ path: 'src/b.ts', line: 6, severity: 'error' });
   });
 
-  it('degrades to raw markdown when JSON has no recognizable findings', () => {
+  it('never dumps raw JSON as the summary when there are no findings', () => {
+    // Structured JSON we can't extract findings from → the summary card must NOT
+    // become the raw event blob (the unreadable-UI report). Empty is correct;
+    // the "no issues" banner speaks for it.
     const json = JSON.stringify({ status: 'ok', unrelated: true });
     const { hunks, markdown } = parseReview(json);
     expect(hunks).toEqual([]);
-    expect(markdown).toContain('"status":"ok"');
+    expect(markdown).toBe('');
+    expect(markdown).not.toContain('"status"');
+  });
+
+  it('parses the REAL --agent finding shape (fileName + codegenInstructions + heartbeat)', () => {
+    // Verbatim shape from the 2026-07-10 codespace review that rendered raw
+    // NDJSON in the UI: findings key on `fileName`/`codegenInstructions`, plus a
+    // `heartbeat` control event that must be skipped (not dumped).
+    const ndjson = [
+      '{"type":"review_context","reviewType":"uncommitted","currentBranch":"dev","baseBranch":"dev","workingDirectory":"/workspaces/app"}',
+      '{"type":"status","phase":"analyzing","status":"reviewing"}',
+      '{"type":"heartbeat","status":"reviewing"}',
+      '{"type":"finding","severity":"minor","fileName":"CLAUDE.md","codegenInstructions":"Replace the template placeholders with project-specific guidance.","suggestions":[]}',
+      '{"type":"finding","severity":"minor","fileName":"README.md","codegenInstructions":"Fix the malformed Markdown heading.","suggestions":["## Error Monitoring (Sentry)"]}',
+    ].join('\n');
+    const { hunks, markdown, stats } = parseReview(ndjson);
+    expect(hunks.length).toBe(2);
+    expect(hunks[0]).toMatchObject({
+      path: 'CLAUDE.md',
+      severity: 'info', // "minor" → info
+      message: 'Replace the template placeholders with project-specific guidance.',
+    });
+    expect(hunks[1]).toMatchObject({ path: 'README.md', severity: 'info' });
+    // The summary card is a readable one-liner, NEVER the raw event stream.
+    expect(markdown).not.toContain('"type"');
+    expect(markdown).not.toContain('codegenInstructions');
+    expect(markdown).toContain('2 findings');
+    expect(stats.findingCount).toBe(2);
+    expect(stats.info).toBe(2);
+  });
+
+  it('prefers a real summary event over the synthesized one-liner', () => {
+    const ndjson = [
+      '{"type":"finding","severity":"critical","fileName":"a.ts","codegenInstructions":"boom"}',
+      '{"type":"summary","content":"Reviewed 1 file; 1 critical issue to address."}',
+    ].join('\n');
+    const { hunks, markdown } = parseReview(ndjson);
+    expect(hunks.length).toBe(1);
+    expect(hunks[0]).toMatchObject({ path: 'a.ts', severity: 'error' });
+    expect(markdown).toBe('Reviewed 1 file; 1 critical issue to address.');
   });
 
   it('surfaces the root-cause error from a failed --agent run (REAL captured NDJSON)', () => {

@@ -94,12 +94,25 @@ function toHunk(raw: unknown, groupSeverity?: string): Hunk | null {
   if (!raw || typeof raw !== 'object') return null;
   const o = raw as Record<string, unknown>;
   const path =
-    asString(pick(o, ['file_path', 'filePath', 'file', 'path', 'filename'])) ??
+    asString(pick(o, ['file_path', 'filePath', 'file', 'path', 'filename', 'fileName'])) ??
     asString((pick(o, ['location']) as Record<string, unknown> | undefined)?.path);
   if (!path) return null;
+  // `codegenInstructions` is the finding body in the live `--agent` NDJSON
+  // (`{type:'finding',severity:'minor',fileName,codegenInstructions,suggestions}`);
+  // without it the finding parses to "(no message)".
   const message =
-    asString(pick(o, ['comment', 'message', 'body', 'description', 'summary', 'markdown', 'text'])) ??
-    '';
+    asString(
+      pick(o, [
+        'comment',
+        'message',
+        'body',
+        'description',
+        'codegenInstructions',
+        'summary',
+        'markdown',
+        'text',
+      ]),
+    ) ?? '';
   const title = asString(pick(o, ['title', 'rule', 'category', 'check']));
   const severity = normSeverity(pick(o, ['severity', 'level', 'priority', 'impact'])) ?? normSeverity(groupSeverity);
   const locObj = (pick(o, ['location']) as Record<string, unknown>) ?? o;
@@ -147,14 +160,23 @@ function errorFrom(obj: Record<string, unknown>): string | undefined {
   return asString(pick(obj, ['message', 'error']));
 }
 
-/** Non-finding control events observed live (`--agent` NDJSON): skip them. */
+/** Non-finding control events observed live (`--agent` NDJSON): skip them.
+ *  `heartbeat` (`{type:'heartbeat',status:'reviewing'}`) is emitted while the
+ *  review runs — must be skipped too, else it's dumped as raw JSON. */
 function isControlEvent(obj: Record<string, unknown>): boolean {
   return (
     obj.type === 'review_context' ||
     obj.type === 'status' ||
     obj.type === 'progress' ||
+    obj.type === 'heartbeat' ||
     obj.type === 'error'
   );
+}
+
+/** Extract a human summary from a `{type:'summary',...}` event, if present. */
+function summaryFrom(obj: Record<string, unknown>): string | undefined {
+  if (obj.type !== 'summary') return undefined;
+  return asString(pick(obj, ['content', 'text', 'markdown', 'summary', 'body']));
 }
 
 /** Parse stdout as a single JSON object, else as NDJSON, collecting findings. */
@@ -187,6 +209,7 @@ function parseStructured(stdout: string): { hunks: Hunk[]; summary?: string; err
       // First error wins — the root cause ("Invalid or expired API key")
       // precedes the generic terminal wrapper ("Review failed: Unknown error").
       error ??= errorFrom(rec);
+      summary ??= summaryFrom(rec);
       if (isControlEvent(rec)) continue;
       const found = findingsFrom(Array.isArray(obj) ? { findings: obj } : obj);
       if (found.length > 0) hunks.push(...found);
@@ -220,6 +243,19 @@ function parsePlain(stdout: string): Hunk[] {
   return hunks;
 }
 
+/** Human one-liner from finding counts, for when the reviewer emitted findings
+ *  but no summary text (so the summary card isn't the raw event stream). */
+function synthesizeSummary(counts: Record<string, number>, total: number): string {
+  const parts: string[] = [];
+  if (counts.error) parts.push(`${counts.error} critical`);
+  if (counts.warn) parts.push(`${counts.warn} warning`);
+  if (counts.info) parts.push(`${counts.info} suggestion${counts.info === 1 ? '' : 's'}`);
+  const noun = total === 1 ? 'finding' : 'findings';
+  return parts.length > 0
+    ? `CodeRabbit found ${total} ${noun} (${parts.join(', ')}).`
+    : `CodeRabbit found ${total} ${noun}.`;
+}
+
 function severityCounts(hunks: Hunk[]): Record<string, number> {
   const c = { error: 0, warn: 0, info: 0 } as Record<string, number>;
   for (const h of hunks) if (h.severity) c[h.severity] += 1;
@@ -236,13 +272,31 @@ export function parseReview(stdout: string): ParsedReview {
   const structured = parseStructured(stdout);
   const hunks = structured && structured.hunks.length > 0 ? structured.hunks : parsePlain(stdout);
   const counts = severityCounts(hunks);
-  // Prefer a summary; if the run errored with no findings, surface the error
-  // (e.g. "Connection failed: Invalid or expired API key") so the caller shows
-  // an actionable message instead of raw event JSON.
-  const markdown = (
-    structured?.summary ??
-    (hunks.length === 0 && structured?.error ? structured.error : stdout)
-  ).trim();
+  // Markdown summary rules — the raw `--agent` NDJSON must NEVER reach the UI
+  // (it's an unreadable event stream, adds zero value). Precedence:
+  //   1. a real summary the reviewer emitted;
+  //   2. an error message when the run failed with no findings (actionable);
+  //   3. a synthesized one-liner from the finding counts when there ARE findings
+  //      but no summary — the hunks carry the detail, this just tops the card;
+  //   4. empty when the review was structured but clean (the "no issues" banner
+  //      speaks for it) — NOT the raw stdout;
+  //   5. only when the output was NOT structured at all (genuine `--plain`
+  //      text) do we surface stdout verbatim.
+  let markdown: string;
+  if (structured?.summary) {
+    markdown = structured.summary;
+  } else if (structured) {
+    if (hunks.length === 0 && structured.error) {
+      markdown = structured.error;
+    } else if (hunks.length > 0) {
+      markdown = synthesizeSummary(counts, hunks.length);
+    } else {
+      markdown = '';
+    }
+  } else {
+    markdown = stdout;
+  }
+  markdown = markdown.trim();
   return {
     markdown,
     hunks,
