@@ -312,6 +312,18 @@ export async function configureCoderabbit(
   }
   if (!deps.runReview) return { ...res, error: 'No reviewer available' };
   const out = await deps.runReview(input.review ?? {});
+  // exitCode 124 = the review one-shot hit its hard timeout (CodeRabbit's cloud
+  // hung on the WebSocket without streaming anything). Surface a clean, actionable
+  // error INSTEAD of an empty review — an empty `review` would render a false
+  // "No issues found". (2026-07-10 stuck-review incident.)
+  if (out.exitCode === 124) {
+    return {
+      ...res,
+      loggedIn: true,
+      error:
+        "CodeRabbit's review service didn't respond in time — this is usually a temporary CodeRabbit outage. Please try again.",
+    };
+  }
   const files = collectChangedFiles(process.cwd());
   return {
     ...res,
