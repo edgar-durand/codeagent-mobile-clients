@@ -16,7 +16,7 @@
  * internals.
  */
 
-import { spawn, spawnSync } from 'node:child_process';
+import { spawnSync } from 'node:child_process';
 import * as path from 'node:path';
 import {
   runCoderabbitOAuthLogin,
@@ -71,6 +71,9 @@ export interface CoderabbitConfigureDeps {
   /** Hand a captured credential to the backend vault (→ postLinkCredential).
    *  Returns true on a successful store. */
   uploadCredential?: (method: 'oauth' | 'api_key', credential: string) => Promise<boolean>;
+  /** Authenticate the session with a CodeRabbit API key
+   *  (`coderabbit auth login --api-key <key>`). Defaults to the real spawn. */
+  loginWithApiKey?: (key: string) => { ok: boolean; error?: string };
 }
 
 /** Default logged-in probe: `coderabbit auth status --agent` emits a JSON line
@@ -95,6 +98,27 @@ function defaultIsLoggedIn(): boolean {
   return false;
 }
 
+/**
+ * OFFICIAL headless auth: `coderabbit auth login --api-key <key>` validates the
+ * (Agentic) API key against CodeRabbit + stores the session credential. This —
+ * NOT setting a `CODERABBIT_API_KEY` env var (the CLI does NOT read one) — is
+ * what actually authenticates `coderabbit review` in a codespace / CI. Returns
+ * `{ok:false, error}` with CodeRabbit's own message on an invalid/expired key.
+ */
+function defaultLoginWithApiKey(key: string): { ok: boolean; error?: string } {
+  const r = spawnSync('coderabbit', ['auth', 'login', '--api-key', key], {
+    encoding: 'utf8',
+    timeout: 30_000,
+  });
+  const out = `${typeof r.stdout === 'string' ? r.stdout : ''}${typeof r.stderr === 'string' ? r.stderr : ''}`;
+  if (r.error) return { ok: false, error: r.error.message };
+  // CodeRabbit prints "✗ API key authentication failed: <reason>" + exits non-zero.
+  const failLine = out.match(/API key authentication failed:[^\n]*/i);
+  if (failLine) return { ok: false, error: failLine[0].replace(/^[✗\s]+/, '').trim() };
+  if (r.status !== 0) return { ok: false, error: out.trim() || 'API key authentication failed' };
+  return { ok: true };
+}
+
 export async function configureCoderabbit(
   input: CoderabbitConfigureInput,
   deps: CoderabbitConfigureDeps = {},
@@ -105,6 +129,7 @@ export async function configureCoderabbit(
   const runOAuth = deps.runOAuthLogin ?? runCoderabbitOAuthLogin;
   const snapshot = deps.snapshotDir ?? (() => snapshotCredentialDir());
   const capture = deps.captureCredential ?? ((b: DirSnapshot) => diffCapturedCredential(b));
+  const loginWithApiKey = deps.loginWithApiKey ?? defaultLoginWithApiKey;
 
   // CodeRabbit installs to dirs a relayed session's process PATH often lacks, so
   // `findInPath` (and thus `installed`/`loggedIn`/`linked`) would falsely report
@@ -144,8 +169,27 @@ export async function configureCoderabbit(
     const res = base();
     const key = (input.apiKey ?? '').trim();
     if (!key) return { ...res, error: 'No API key provided' };
+    if (!res.installed) {
+      const ok = await ensureInstalled(os);
+      res.installed = ok;
+      if (!ok) return { ...res, error: 'CodeRabbit CLI could not be installed' };
+    }
+    // Authenticate the session with the key — the OFFICIAL headless method. Just
+    // vaulting the key does NOT authenticate `coderabbit review` (the CLI reads
+    // no CODERABBIT_API_KEY env), which is why API-key links used to 401 on
+    // review. `auth login --api-key` validates + stores the session credential.
+    const login = loginWithApiKey(key);
+    if (!login.ok) {
+      return { ...res, loggedIn: false, linked: false, error: login.error ?? 'Invalid or expired API key' };
+    }
+    // Vault the key so future hosts (codespace / self-hosted) can re-auth from it.
     const stored = deps.uploadCredential ? await deps.uploadCredential('api_key', key) : false;
-    return { ...res, linked: stored, error: stored ? undefined : 'Failed to store API key' };
+    return {
+      ...res,
+      loggedIn: true,
+      linked: stored,
+      ...(stored ? {} : { error: 'Signed in, but storing the API key for reuse failed' }),
+    };
   }
 
   if (input.action === 'link_oauth') {
@@ -158,10 +202,11 @@ export async function configureCoderabbit(
     // Fingerprint ~/.coderabbit BEFORE login so we can capture the exact file
     // the CLI writes on success.
     const before = snapshot();
-    const login: OAuthLoginResult = await runOAuth({
-      spawn: (cmd, args) => spawn(cmd, args, { stdio: ['ignore', 'pipe', 'pipe'] }),
-      onEvent: deps.onEvent,
-    });
+    // No explicit `spawn` → runOAuth spawns under a REAL PTY, so CodeRabbit
+    // allows the browser-OAuth flow even on a headless codespace / self-hosted
+    // box (it refuses when stdout.isTTY is false). The intercepted redirect is
+    // fed back via the login's stdin (deliverPendingCoderabbitCallback).
+    const login: OAuthLoginResult = await runOAuth({ onEvent: deps.onEvent });
     if (!login.ok) {
       return { ...res, loggedIn: false, linked: false, error: login.error ?? 'CodeRabbit login failed' };
     }

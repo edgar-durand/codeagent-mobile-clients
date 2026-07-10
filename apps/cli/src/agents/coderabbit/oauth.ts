@@ -27,11 +27,11 @@
  * — filename-agnostic so we don't hard-code a storage path we can't yet confirm.
  */
 
-import type { ChildProcess } from 'node:child_process';
+import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import * as fs from 'node:fs';
-import * as http from 'node:http';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { PYTHON_PTY_HELPER } from '../../services/pty/unix.strategy';
 
 /** Normalised auth event — the app/relay only needs this shape. */
 export type CoderabbitAuthEvent =
@@ -67,7 +67,10 @@ interface RawAuthLine {
 /** Parse one NDJSON stdout line from `coderabbit auth login --agent`. Returns
  *  null for blank/non-JSON/irrelevant lines. */
 export function parseCoderabbitAuthEvent(line: string): CoderabbitAuthEvent | null {
-  const l = line.trim();
+  // Under a PTY the stream can carry ANSI CSI sequences / carriage returns
+  // around the NDJSON — strip them so the `{`-prefix check + JSON.parse hold.
+  // eslint-disable-next-line no-control-regex
+  const l = line.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, '').trim();
   if (!l || l[0] !== '{') return null;
   let rec: RawAuthLine;
   try {
@@ -108,9 +111,11 @@ export function parseCoderabbitAuthEvent(line: string): CoderabbitAuthEvent | nu
 }
 
 export interface OAuthLoginDeps {
-  /** Injected spawner (tests provide a fake). The impl is responsible for
-   *  wiring `stdout` as a readable pipe; the driver reads it line-by-line. */
-  spawn: (cmd: string, args: string[]) => ChildProcess;
+  /** Injected spawner (tests provide a fake). Defaults to spawning
+   *  `coderabbit auth login --agent` under a REAL PTY (see
+   *  {@link spawnCoderabbitLoginProc}). The driver reads the child's stdout
+   *  line-by-line and writes the intercepted callback to its stdin. */
+  spawn?: (cmd: string, args: string[]) => ChildProcess;
   /** Called on every parsed event — surface `awaiting_browser`'s authUrl to the
    *  app so the user can open it. */
   onEvent?: (e: CoderabbitAuthEvent) => void;
@@ -127,14 +132,134 @@ export interface OAuthLoginResult {
   error?: string;
 }
 
+/** Resolve a python interpreter for the PTY helper (POSIX). */
+function resolvePython(): string | null {
+  for (const bin of ['python3', 'python']) {
+    try {
+      const r = spawnSync(bin, ['--version'], { stdio: 'ignore', timeout: 4000 });
+      if (!r.error && r.status === 0) return bin;
+    } catch {
+      /* try next */
+    }
+  }
+  return null;
+}
+
+/**
+ * Spawn `coderabbit auth login --agent` under a REAL PTY.
+ *
+ * ⚠️ **Load-bearing for codespaces / self-hosted.** CodeRabbit refuses the
+ * browser-OAuth flow when `stdout.isTTY === false` — it errors
+ * `environment_unsupported: "Localhost callback and stdin fallback are
+ * unavailable. Use --api-key"`. Under a PTY it emits the authUrl (with a
+ * `coderabbit-cli://auth-callback` redirect) and accepts the token via **stdin**
+ * (the "stdin fallback"). We reuse the Python PTY helper (same one the agent
+ * session uses) so the child sees a TTY without needing our own stdin to be one.
+ * On a box with no python (rare) we fall back to a direct spawn — which works on
+ * a local machine with a browser, but a headless box then needs the API-key path.
+ */
+function spawnCoderabbitLoginProc(cmd: string, args: string[]): ChildProcess {
+  const python = resolvePython();
+  if (python) {
+    const helper = path.join(os.tmpdir(), 'codeam-cr-pty.py');
+    fs.writeFileSync(helper, PYTHON_PTY_HELPER, { mode: 0o644 });
+    return spawn(python, [helper, cmd, ...args], {
+      stdio: ['pipe', 'pipe', 'pipe'],
+      env: { ...process.env, TERM: 'xterm-256color', COLUMNS: '220', LINES: '50' },
+      shell: false,
+    });
+  }
+  return spawn(cmd, args, { stdio: ['pipe', 'pipe', 'pipe'], shell: false });
+}
+
+// ── Pending-login registry (single in-flight login per CLI process) ──────────
+// The `link_oauth` login runs in the background waiting for the mobile app to
+// relay the intercepted OAuth redirect. That relay arrives as a SEPARATE relay
+// command (`link_deliver_callback`), which reaches the running login through
+// this registry and writes the callback to its stdin.
+export interface PendingCoderabbitLogin {
+  /** Write the intercepted callback URL to the login's stdin (PTY). */
+  deliver(callbackUrl: string): void;
+}
+let pendingCoderabbitLogin: PendingCoderabbitLogin | null = null;
+export function setPendingCoderabbitLogin(handle: PendingCoderabbitLogin | null): void {
+  pendingCoderabbitLogin = handle;
+}
+
+export interface DeliverCallbackResult {
+  ok: boolean;
+  error?: string;
+}
+
+/**
+ * Normalise whatever the mobile app relayed into the exact
+ * `coderabbit-cli://auth-callback?…` line CodeRabbit's login reads from stdin.
+ *
+ * The app can relay EITHER form (both verified live 2026-07-10):
+ *  - the raw `coderabbit-cli://auth-callback?access_token=…` URL (from an
+ *    intercepted redirect), or a loopback `http://127.0.0.1:<port>/callback?…`;
+ *  - the base64 **"Token Ready"** blob CodeRabbit shows on its authorize page for
+ *    the agent flow ("Copy this token and paste it into Agent") — which base64-
+ *    decodes to exactly that `coderabbit-cli://auth-callback?…` URL.
+ *
+ * Returns the URL to feed, or `null` if it's neither (so we never write an
+ * arbitrary string to the login's stdin).
+ */
+function normalizeCoderabbitCallback(input: string): string | null {
+  const s = (input ?? '').trim();
+  if (!s) return null;
+  if (
+    /^coderabbit-cli:\/\/auth-callback/i.test(s) ||
+    /^http:\/\/(127\.0\.0\.1|localhost|\[::1\])(:\d+)?\//i.test(s)
+  ) {
+    return s;
+  }
+  // "Token Ready" base64 blob → decode to the callback URL.
+  if (/^[A-Za-z0-9+/=]+$/.test(s) && s.length >= 40) {
+    try {
+      const decoded = Buffer.from(s, 'base64').toString('utf8');
+      if (/^coderabbit-cli:\/\/auth-callback/i.test(decoded)) return decoded;
+    } catch {
+      /* not base64 */
+    }
+  }
+  return null;
+}
+
+/**
+ * Deliver a mobile-relayed CodeRabbit OAuth callback to the in-flight login by
+ * writing it to the login process's **stdin** (→ PTY → coderabbit). This is how a
+ * remote-host (codespace / self-hosted) login completes: CodeRabbit refuses the
+ * browser flow headless UNTIL it's spawned under a PTY, then it delivers the token
+ * as a base64 "paste into Agent" blob rather than a reachable redirect. The phone
+ * WebView captures that blob and relays it here. Accepts the raw URL OR the base64
+ * blob; refuses anything else.
+ */
+export function deliverPendingCoderabbitCallback(callbackUrl: string): DeliverCallbackResult {
+  const url = normalizeCoderabbitCallback(callbackUrl);
+  if (!url) return { ok: false, error: 'not a CodeRabbit callback token/URL' };
+  if (!pendingCoderabbitLogin) {
+    return { ok: false, error: 'no CodeRabbit login is awaiting a callback' };
+  }
+  try {
+    pendingCoderabbitLogin.deliver(url);
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : 'deliver failed' };
+  }
+}
+
 /**
  * Drive `coderabbit auth login --agent` to completion. Resolves `{ok:true,...}`
  * once the CLI reports `authenticated`, or `{ok:false,error}` on failure /
  * early-exit / timeout. Never rejects. The caller reads the actual credential
- * with {@link diffCapturedCredential} once this resolves ok.
+ * with {@link diffCapturedCredential} once this resolves ok. While
+ * `awaiting_browser` is live, the login is registered so
+ * {@link deliverPendingCoderabbitCallback} can feed it the relayed redirect.
  */
 export function runCoderabbitOAuthLogin(deps: OAuthLoginDeps): Promise<OAuthLoginResult> {
   const timeoutMs = deps.timeoutMs ?? 180_000;
+  const spawnProc = deps.spawn ?? spawnCoderabbitLoginProc;
   return new Promise<OAuthLoginResult>((resolve) => {
     let settled = false;
     let stdout = '';
@@ -143,6 +268,7 @@ export function runCoderabbitOAuthLogin(deps: OAuthLoginDeps): Promise<OAuthLogi
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      setPendingCoderabbitLogin(null);
       try {
         child.kill('SIGKILL');
       } catch {
@@ -152,7 +278,7 @@ export function runCoderabbitOAuthLogin(deps: OAuthLoginDeps): Promise<OAuthLogi
     };
     let child: ChildProcess;
     try {
-      child = deps.spawn('coderabbit', ['auth', 'login', '--agent']);
+      child = spawnProc('coderabbit', ['auth', 'login', '--agent']);
     } catch (err) {
       resolve({ ok: false, error: err instanceof Error ? err.message : 'spawn failed' });
       return;
@@ -165,7 +291,14 @@ export function runCoderabbitOAuthLogin(deps: OAuthLoginDeps): Promise<OAuthLogi
       const e = parseCoderabbitAuthEvent(line);
       if (!e) return;
       deps.onEvent?.(e);
-      if (e.kind === 'authenticated') {
+      if (e.kind === 'awaiting_browser') {
+        // Register so the relayed redirect can be written to this login's stdin.
+        setPendingCoderabbitLogin({
+          deliver: (callbackUrl: string) => {
+            child.stdin?.write(`${callbackUrl}\n`);
+          },
+        });
+      } else if (e.kind === 'authenticated') {
         last = e;
         finish({ ok: true, user: e.user, authType: e.authType, provider: e.provider, org: e.org });
       } else if (e.kind === 'failed') {
@@ -261,58 +394,3 @@ export function diffCapturedCredential(before: DirSnapshot, home?: string): Capt
   }
 }
 
-export interface DeliverCallbackResult {
-  ok: boolean;
-  status?: number;
-  error?: string;
-}
-
-/**
- * Deliver a mobile-intercepted CodeRabbit OAuth redirect to the LOCAL
- * `coderabbit auth login --agent` loopback server so the login completes on THIS
- * host. Needed only for REMOTE hosts (codespace / self-hosted): the browser runs
- * in the user's PHONE WebView, so CodeRabbit's redirect to
- * `http://127.0.0.1:<port>/callback?access_token=…&state=…` hits the phone's
- * loopback, not the host's. The app intercepts that exact URL and relays it here;
- * we replay it as a plain GET against the host loopback — byte-for-byte what the
- * browser would have done — and `coderabbit auth login --agent` (blocked on its
- * loopback) then completes (`processing_callback` → `fetching_user` → writes the
- * full `~/.coderabbit/auth.json`, which {@link diffCapturedCredential} vaults).
- *
- * ⚠️ **SSRF guard — loopback ONLY.** The relayed URL is attacker-influenceable, so
- * we refuse anything that isn't `http://127.0.0.1|localhost|[::1]:<port>`. We never
- * GET an arbitrary host.
- */
-export function deliverLoopbackCallback(
-  callbackUrl: string,
-  opts: { timeoutMs?: number; get?: typeof http.get } = {},
-): Promise<DeliverCallbackResult> {
-  return new Promise((resolve) => {
-    let url: URL;
-    try {
-      url = new URL(callbackUrl);
-    } catch {
-      resolve({ ok: false, error: 'invalid callback URL' });
-      return;
-    }
-    const host = url.hostname.replace(/^\[|\]$/g, '');
-    const isLoopback =
-      url.protocol === 'http:' && (host === '127.0.0.1' || host === 'localhost' || host === '::1');
-    if (!isLoopback) {
-      resolve({ ok: false, error: `refusing non-loopback callback host: ${url.hostname}` });
-      return;
-    }
-    const get = opts.get ?? http.get;
-    const req = get(url, { timeout: opts.timeoutMs ?? 10_000 }, (res) => {
-      // Drain so the socket frees; the loopback server does the real work.
-      res.resume();
-      const status = res.statusCode ?? 0;
-      resolve({ ok: status >= 200 && status < 400, status });
-    });
-    req.on('timeout', () => {
-      req.destroy();
-      resolve({ ok: false, error: 'callback delivery timed out' });
-    });
-    req.on('error', (err: Error) => resolve({ ok: false, error: err.message }));
-  });
-}

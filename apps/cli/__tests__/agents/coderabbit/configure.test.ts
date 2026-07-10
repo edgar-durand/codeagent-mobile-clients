@@ -27,14 +27,32 @@ describe('configureCoderabbit — status', () => {
 });
 
 describe('configureCoderabbit — link_apikey', () => {
-  it('stores the key and reports linked', async () => {
+  it('authenticates via `coderabbit auth login --api-key` THEN vaults the key', async () => {
     const upload = vi.fn(async () => true);
+    const loginWithApiKey = vi.fn(() => ({ ok: true }));
     const res = await configureCoderabbit(
       { action: 'link_apikey', apiKey: 'cr-abc' },
-      { os: fakeOs(true), uploadCredential: upload },
+      { os: fakeOs(true), uploadCredential: upload, loginWithApiKey },
     );
+    // Auth login runs (the official headless method) — not just a vault write.
+    expect(loginWithApiKey).toHaveBeenCalledWith('cr-abc');
     expect(upload).toHaveBeenCalledWith('api_key', 'cr-abc');
-    expect(res.linked).toBe(true);
+    expect(res).toMatchObject({ loggedIn: true, linked: true });
+  });
+
+  it('does NOT vault an invalid/expired key — surfaces CodeRabbit’s error', async () => {
+    const upload = vi.fn(async () => true);
+    const res = await configureCoderabbit(
+      { action: 'link_apikey', apiKey: 'cr-bad' },
+      {
+        os: fakeOs(true),
+        uploadCredential: upload,
+        loginWithApiKey: () => ({ ok: false, error: 'Invalid or expired API key.' }),
+      },
+    );
+    expect(upload).not.toHaveBeenCalled();
+    expect(res.linked).toBe(false);
+    expect(res.error).toMatch(/Invalid or expired API key/);
   });
 
   it('errors on an empty key', async () => {

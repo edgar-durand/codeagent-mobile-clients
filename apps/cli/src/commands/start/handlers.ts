@@ -40,7 +40,7 @@ import { applyFileReview } from '../../services/apply-file-review.service';
 import { buildLinkContext } from '../link';
 import { postLinkCredential, postAiResult, postPreviewEvent, postHeadroomEvent, postBeadsEvent, postCliUpdateEvent, postCoderabbitEvent } from '../../services/pairing.service';
 import { configureCoderabbit, type CoderabbitAction } from '../../agents/coderabbit/configure';
-import { deliverLoopbackCallback, type CoderabbitAuthEvent } from '../../agents/coderabbit/oauth';
+import { deliverPendingCoderabbitCallback, type CoderabbitAuthEvent } from '../../agents/coderabbit/oauth';
 import { CoderabbitRuntimeStrategy } from '../../agents/coderabbit/runtime';
 import { createOsStrategy } from '../../os';
 import {
@@ -723,7 +723,7 @@ const coderabbitConfigureH: CommandHandler = async (ctx, cmd, parsed) => {
   // (a loopback GET), so it never blocks the relay — critical, because the
   // in-flight `link_oauth` login is what it unblocks.
   if (rawAction === 'link_deliver_callback') {
-    const r = await deliverLoopbackCallback(parsed.callbackUrl ?? '');
+    const r = deliverPendingCoderabbitCallback(parsed.callbackUrl ?? '');
     await ctx.relay.sendResult(cmd.id, r.ok ? 'completed' : 'failed', {
       action: 'link_deliver_callback',
       supported: true,

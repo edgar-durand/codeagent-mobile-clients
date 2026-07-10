@@ -22,7 +22,7 @@ import { rmIfExistsQuiet } from '../../lib/quiet';
  *      stdin (pipe from Node)  → PTY master  → Claude  (mobile command injection)
  *      PTY master (Claude out) → stdout pipe → Node    (output capture for mobile)
  */
-const PYTHON_PTY_HELPER = `import os,pty,sys,select,signal,struct,fcntl,termios,errno
+export const PYTHON_PTY_HELPER = `import os,pty,sys,select,signal,struct,fcntl,termios,errno
 m,s=pty.openpty()
 try:
     cols=int(os.environ.get('COLUMNS','220'))

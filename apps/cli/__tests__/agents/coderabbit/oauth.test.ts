@@ -3,13 +3,13 @@ import { EventEmitter } from 'node:events';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, utimesSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import * as http from 'node:http';
 import {
   parseCoderabbitAuthEvent,
   runCoderabbitOAuthLogin,
   snapshotCredentialDir,
   diffCapturedCredential,
-  deliverLoopbackCallback,
+  deliverPendingCoderabbitCallback,
+  setPendingCoderabbitLogin,
   type CoderabbitAuthEvent,
 } from '../../../src/agents/coderabbit/oauth';
 
@@ -154,58 +154,58 @@ describe('coderabbit credential snapshot/diff capture', () => {
   });
 });
 
-describe('coderabbit/deliverLoopbackCallback — session-relay redirect replay', () => {
-  it('replays the intercepted redirect to a REAL loopback server (login completes)', async () => {
-    let receivedUrl: string | undefined;
-    const server = http.createServer((req, res) => {
-      receivedUrl = req.url; // e.g. /callback?access_token=…&state=…
-      res.writeHead(200);
-      res.end('ok — you can close this window');
-    });
-    await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
-    const port = (server.address() as import('node:net').AddressInfo).port;
-    try {
-      const cb = `http://127.0.0.1:${port}/callback?access_token=FRESH&state=abc&provider=github`;
-      const res = await deliverLoopbackCallback(cb);
-      expect(res.ok).toBe(true);
-      expect(res.status).toBe(200);
-      // The loopback server got the EXACT redirect the browser would have hit.
-      expect(receivedUrl).toBe('/callback?access_token=FRESH&state=abc&provider=github');
-    } finally {
-      await new Promise<void>((r) => server.close(() => r()));
-    }
+describe('coderabbit/deliverPendingCoderabbitCallback — stdin delivery to the live login', () => {
+  afterEach(() => setPendingCoderabbitLogin(null));
+
+  it('writes the intercepted callback to the pending login (custom scheme)', () => {
+    const deliver = vi.fn();
+    setPendingCoderabbitLogin({ deliver });
+    const cb = 'coderabbit-cli://auth-callback?access_token=FRESH&state=abc&provider=github';
+    const res = deliverPendingCoderabbitCallback(cb);
+    expect(res.ok).toBe(true);
+    expect(deliver).toHaveBeenCalledWith(cb);
   });
 
-  it('SSRF guard: refuses a NON-loopback host (never GETs an arbitrary URL)', async () => {
-    const get = vi.fn();
+  it('also accepts the legacy loopback callback shape', () => {
+    const deliver = vi.fn();
+    setPendingCoderabbitLogin({ deliver });
+    const res = deliverPendingCoderabbitCallback('http://127.0.0.1:51387/callback?access_token=X&state=s');
+    expect(res.ok).toBe(true);
+    expect(deliver).toHaveBeenCalled();
+  });
+
+  it('decodes the base64 "Token Ready" blob → feeds the decoded callback URL', () => {
+    // CodeRabbit's agent authorize page shows a base64 blob to "paste into Agent"
+    // that decodes to the coderabbit-cli:// callback URL (verified live).
+    const decodedUrl = 'coderabbit-cli://auth-callback?access_token=ENV&provider=github&state=s';
+    const blob = Buffer.from(decodedUrl, 'utf8').toString('base64');
+    const deliver = vi.fn();
+    setPendingCoderabbitLogin({ deliver });
+    const res = deliverPendingCoderabbitCallback(blob);
+    expect(res.ok).toBe(true);
+    // Fed the DECODED url (what coderabbit's stdin reads), not the raw blob.
+    expect(deliver).toHaveBeenCalledWith(decodedUrl);
+  });
+
+  it('refuses a non-CodeRabbit callback URL (never writes it to stdin)', () => {
+    const deliver = vi.fn();
+    setPendingCoderabbitLogin({ deliver });
     for (const bad of [
-      'http://evil.example.com/callback?access_token=x',
-      'https://127.0.0.1:8976/callback', // https is not the loopback CLI scheme
-      'http://169.254.169.254/latest/meta-data', // cloud metadata SSRF classic
-      'http://127.0.0.1.evil.com/callback',
+      'https://evil.example.com/callback?access_token=x',
+      'http://169.254.169.254/latest/meta-data',
+      'file:///etc/passwd',
+      'not a url',
     ]) {
-      const res = await deliverLoopbackCallback(bad, { get: get as unknown as typeof http.get });
+      const res = deliverPendingCoderabbitCallback(bad);
       expect(res.ok).toBe(false);
-      expect(res.error).toMatch(/non-loopback|invalid/i);
     }
-    expect(get).not.toHaveBeenCalled(); // guard short-circuits BEFORE any network call
+    expect(deliver).not.toHaveBeenCalled();
   });
 
-  it('returns ok:false on an unparseable URL', async () => {
-    const res = await deliverLoopbackCallback('not a url');
+  it('returns ok:false when no login is awaiting a callback', () => {
+    setPendingCoderabbitLogin(null);
+    const res = deliverPendingCoderabbitCallback('coderabbit-cli://auth-callback?access_token=X&state=s');
     expect(res.ok).toBe(false);
-  });
-
-  it('accepts localhost and [::1] loopback forms', async () => {
-    const get = vi.fn(() => {
-      const req = new EventEmitter() as http.ClientRequest;
-      // Simulate an immediate 200 by invoking the callback async.
-      return req;
-    });
-    // We only assert the guard PASSES (get is invoked) for loopback forms.
-    for (const ok of ['http://localhost:8976/callback', 'http://[::1]:8976/callback']) {
-      void deliverLoopbackCallback(ok, { get: get as unknown as typeof http.get });
-    }
-    expect(get).toHaveBeenCalledTimes(2);
+    expect(res.error).toMatch(/no CodeRabbit login/i);
   });
 });
