@@ -59,7 +59,9 @@ describe('ACP adapter registry', () => {
     // either way (true if cursor-agent happens to be on PATH here, false
     // otherwise) — the point is it's callable and non-throwing.
     await expect(spec!.waitForBinary({ timeoutMs: 0 })).resolves.toBeTypeOf('boolean');
-  });
+    // Explicit generous test timeout: the underlying PATH probe forks a process
+    // that is slow on Windows CI runners, and the default 5s occasionally trips.
+  }, 20000);
 
   it('returns null for an agent without an ACP adapter', () => {
     // `aider` is a registered agent but has no ACP adapter — used
