@@ -807,9 +807,23 @@ export class AcpClient {
       (u.status === 'completed' || u.status === 'failed')
     ) {
       if (typeof u.toolCallId === 'string') this.pendingToolCalls.delete(u.toolCallId);
-      if (this.pendingToolCalls.size === 0) this.promptIdle?.bump();
+      this.rearmIdleIfIdle();
       return;
     }
+    this.rearmIdleIfIdle();
+  }
+
+  /**
+   * Re-arm the idle watchdog ONLY when the agent is genuinely idle — no tool
+   * call in flight. A pending tool (a `yarn install` / build / test that runs
+   * silently for minutes, emitting no `session/update`) is active work, NOT a
+   * wedged adapter, so re-arming the 90s window over it would false-kill the
+   * turn. Every re-arm MUST route through here so no path can accidentally arm
+   * the watchdog while a tool is executing (the 2026-07-10 bug: the
+   * auto-approve permission `finally` bumped unconditionally → a ~150s
+   * `yarn install` tripped "ACP prompt idle for 90s").
+   */
+  private rearmIdleIfIdle(): void {
     if (this.pendingToolCalls.size === 0) this.promptIdle?.bump();
   }
 
@@ -837,7 +851,12 @@ export class AcpClient {
         try {
           return await this.opts.onRequestPermission(params);
         } finally {
-          this.promptIdle?.bump();
+          // Re-arm ONLY if no tool is now executing. Auto-approve resolves in
+          // ms and the approved tool is already tracked as pending, so an
+          // unconditional bump here re-armed the 90s window OVER a silent
+          // long-running tool (the yarn-install false-kill). rearmIdleIfIdle
+          // keeps it suspended until the tool actually settles.
+          this.rearmIdleIfIdle();
         }
       },
       readTextFile: async (params): Promise<ReadTextFileResponse> => {
