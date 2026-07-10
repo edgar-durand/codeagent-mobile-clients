@@ -35,6 +35,7 @@ import { PYTHON_PTY_HELPER } from '../../services/pty/unix.strategy';
 
 /** Normalised auth event — the app/relay only needs this shape. */
 export type CoderabbitAuthEvent =
+  | { kind: 'installing' }
   | { kind: 'starting' }
   | { kind: 'awaiting_browser'; authUrl: string; fallbackAuthUrl?: string }
   | { kind: 'processing_callback' }

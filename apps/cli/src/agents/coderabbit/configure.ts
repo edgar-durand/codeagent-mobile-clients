@@ -195,6 +195,12 @@ export async function configureCoderabbit(
   if (input.action === 'link_oauth') {
     const res = base();
     if (!installed) {
+      // First-ever link on this box installs the CodeRabbit CLI (~30-60s) BEFORE
+      // the browser login can emit its authUrl. That silent gap made the mobile
+      // sign-in look hung on the first try (user gave up + re-entered). Emit an
+      // `installing` phase so the app can show real progress instead of a blank
+      // spinner.
+      deps.onEvent?.({ kind: 'installing' });
       const ok = await ensureInstalled(os);
       res.installed = ok;
       if (!ok) return { ...res, error: 'CodeRabbit CLI could not be installed' };
