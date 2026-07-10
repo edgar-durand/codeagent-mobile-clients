@@ -50,13 +50,69 @@ describe('ensureClaudeOnboarded', () => {
     expect((c.oauthAccount as { id: string }).id).toBe('keep-me'); // creds preserved
   });
 
-  it('is a no-op once onboarding is already complete (does not rewrite)', () => {
+  it('is a no-op once onboarding is already complete AND no cwd is given', () => {
     fs.writeFileSync(
       claudeJson(),
       JSON.stringify({ hasCompletedOnboarding: true, theme: 'dark' }),
     );
     const before = fs.statSync(claudeJson()).mtimeMs;
     ensureClaudeOnboarded();
+    expect(fs.statSync(claudeJson()).mtimeMs).toBe(before); // untouched
+  });
+
+  // ── Per-workspace trust (2026-07-10 regression: Claude Code v2.1.206+ gates a
+  //    fresh dir behind a "trust this folder?" dialog that stalled the headless
+  //    codespace ACP agent; the ACP launch path has no --dangerously-skip-permissions
+  //    to bypass it, so we pre-accept trust for the session cwd). ──
+  it('pre-accepts the per-workspace trust dialog for the given cwd', () => {
+    ensureClaudeOnboarded('/workspaces/my_repo');
+    const c = read();
+    const proj = (c.projects as Record<string, Record<string, unknown>>)['/workspaces/my_repo'];
+    expect(proj.hasTrustDialogAccepted).toBe(true);
+    expect(proj.hasCompletedProjectOnboarding).toBe(true);
+  });
+
+  it('seeds trust EVEN when global onboarding is already complete (dedicated rewrite)', () => {
+    // The pre-fix early-return skipped trust seeding whenever onboarding was done
+    // → the fresh-codespace dir stayed untrusted → the dialog leaked. Guard it.
+    fs.writeFileSync(
+      claudeJson(),
+      JSON.stringify({ hasCompletedOnboarding: true, theme: 'dark' }),
+    );
+    ensureClaudeOnboarded('/workspaces/my_repo');
+    const proj = (read().projects as Record<string, Record<string, unknown>>)['/workspaces/my_repo'];
+    expect(proj.hasTrustDialogAccepted).toBe(true);
+  });
+
+  it('MERGES trust into an existing project entry — keeps other project state', () => {
+    fs.writeFileSync(
+      claudeJson(),
+      JSON.stringify({
+        hasCompletedOnboarding: true,
+        theme: 'dark',
+        projects: { '/workspaces/my_repo': { allowedTools: ['Bash'], exampleFiles: ['a.ts'] } },
+      }),
+    );
+    ensureClaudeOnboarded('/workspaces/my_repo');
+    const proj = (read().projects as Record<string, Record<string, unknown>>)['/workspaces/my_repo'];
+    expect(proj.hasTrustDialogAccepted).toBe(true);
+    expect(proj.allowedTools).toEqual(['Bash']); // pre-existing project state preserved
+    expect(proj.exampleFiles).toEqual(['a.ts']);
+  });
+
+  it('is a no-op when the cwd is already trusted (does not rewrite)', () => {
+    fs.writeFileSync(
+      claudeJson(),
+      JSON.stringify({
+        hasCompletedOnboarding: true,
+        theme: 'dark',
+        projects: {
+          '/workspaces/my_repo': { hasTrustDialogAccepted: true, hasCompletedProjectOnboarding: true },
+        },
+      }),
+    );
+    const before = fs.statSync(claudeJson()).mtimeMs;
+    ensureClaudeOnboarded('/workspaces/my_repo');
     expect(fs.statSync(claudeJson()).mtimeMs).toBe(before); // untouched
   });
 });

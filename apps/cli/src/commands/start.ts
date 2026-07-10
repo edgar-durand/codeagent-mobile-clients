@@ -183,11 +183,14 @@ export async function start(requestedAgent?: AgentId): Promise<void> {
     localHeadroomReporter?.stop();
   });
 
-  // Codespace: pre-complete Claude's first-run onboarding BEFORE anything
+  // Cloud (codespace / self-hosted): pre-complete Claude's first-run onboarding
+  // AND pre-accept the per-workspace "trust this folder?" dialog BEFORE anything
   // launches claude (the ACP agent + the `claude -p` preview prewarm). Without
-  // this, Claude v2.1.177's interactive theme picker stalls both. No-op for a
-  // local `codeam start` (the user's own onboarding is already done).
-  if (process.env.CODESPACES === 'true') ensureClaudeOnboarded();
+  // this, Claude's interactive theme picker OR the fresh-dir trust safety dialog
+  // stalls both — the ACP path has no `--dangerously-skip-permissions` to bypass
+  // trust, so it streams as plain text mobile can't answer (2026-07-10 P0). No-op
+  // for a local `codeam start` (the user's own onboarding + trust are already set).
+  if (!isLocalSession()) ensureClaudeOnboarded(cwd);
 
   // Beads — composition-root concern (SRP decision D10), provisioned ONCE
   // here for BOTH the ACP and the PTY path. `start()` is the single funnel
