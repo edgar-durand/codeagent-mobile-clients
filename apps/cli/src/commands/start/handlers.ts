@@ -757,6 +757,13 @@ const coderabbitConfigureH: CommandHandler = async (ctx, cmd, parsed) => {
           pluginAuthToken: token,
           method,
           credential,
+          // ⚠️ CodeRabbit is an IN-SESSION reviewer add-on — the link ALWAYS
+          // rides the user's REAL active session (codespace / self-hosted /
+          // local), never a throwaway `codeam link` pairing. Without this the
+          // backend `linkFromCli` treats the session as the disposable
+          // handshake session and DELETES it — the codespace vanished the
+          // instant the OAuth link completed (2026-07-10).
+          preserveSession: true,
         });
         return r.ok === true;
       }
