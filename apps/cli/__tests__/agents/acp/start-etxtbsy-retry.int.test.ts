@@ -35,6 +35,39 @@ import fs from 'node:fs';
 const counterFile = process.argv[2];
 const mode = process.argv[3] || 'etxtbsy-then-ok';
 const send = (obj) => process.stdout.write(JSON.stringify(obj) + '\\n');
+
+// module-crash-then-ok: reproduce the 2026-07-10 codespace incident — the
+// adapter itself CRASHES AT IMPORT (ERR_MODULE_NOT_FOUND on a still-installing
+// dep) the FIRST time it's spawned, exiting BEFORE it can answer 'initialize'.
+// The counter is bumped per PROCESS SPAWN (not per session/new) for this mode.
+if (mode === 'module-crash-then-ok') {
+  let n = 0;
+  try { n = parseInt(fs.readFileSync(counterFile, 'utf8'), 10) || 0; } catch {}
+  n += 1;
+  fs.writeFileSync(counterFile, String(n));
+  if (n === 1) {
+    process.stderr.write('node:internal/modules/esm/resolve:275\\n');
+    process.stderr.write("Error [ERR_MODULE_NOT_FOUND]: Cannot find module '/x/@anthropic-ai/claude-agent-sdk/sdk.mjs' imported from /x/@agentclientprotocol/claude-agent-acp/dist/index.js\\n");
+    process.exit(1);
+  }
+  // n >= 2: the install settled — speak the protocol and succeed.
+  const rl2 = readline.createInterface({ input: process.stdin });
+  rl2.on('line', (line) => {
+    if (!line.trim()) return;
+    let msg;
+    try { msg = JSON.parse(line); } catch { return; }
+    if (msg.id === undefined || !msg.method) return;
+    if (msg.method === 'initialize') {
+      send({ jsonrpc: '2.0', id: msg.id, result: {
+        protocolVersion: 1,
+        agentCapabilities: { promptCapabilities: {}, loadSession: false },
+      }});
+      return;
+    }
+    send({ jsonrpc: '2.0', id: msg.id, result: { sessionId: 'sess-ok-' + n } });
+  });
+} else {
+
 const rl = readline.createInterface({ input: process.stdin });
 rl.on('line', (line) => {
   if (!line.trim()) return;
@@ -67,6 +100,7 @@ rl.on('line', (line) => {
     send({ jsonrpc: '2.0', id: msg.id, result: { sessionId: 'sess-ok-' + n } });
   }
 });
+}
 `;
 
 let dir: string;
@@ -114,6 +148,24 @@ describe('AcpClient.start — transient adapter ETXTBSY retry (real subprocess)'
       const res = await client.start();
       expect(res.sessionId).toMatch(/^sess-ok-/);
       // Exactly two adapter session/new attempts: the ETXTBSY failure + the retry.
+      expect(fs.readFileSync(counter, 'utf8')).toBe('2');
+    } finally {
+      await client.stop().catch(() => undefined);
+    }
+  });
+
+  it('retries an adapter that CRASHES AT IMPORT (ERR_MODULE_NOT_FOUND) and starts on the next spawn', async () => {
+    // 2026-07-10 incident: on a fresh codespace `claude-agent-acp` imported
+    // `@anthropic-ai/claude-agent-sdk/sdk.mjs` mid-atomic-rename → the adapter
+    // process exited at load with ERR_MODULE_NOT_FOUND, BEFORE answering
+    // `initialize`. Every codespace claude deploy died "The claude agent failed
+    // to start". start() must classify the import crash as transient + respawn.
+    const counter = path.join(dir, `c-${Date.now()}-mc`);
+    const client = makeClient(counter, 'module-crash-then-ok');
+    try {
+      const res = await client.start();
+      expect(res.sessionId).toMatch(/^sess-ok-/);
+      // Two spawns: the import-crash + the retry that succeeds.
       expect(fs.readFileSync(counter, 'utf8')).toBe('2');
     } finally {
       await client.stop().catch(() => undefined);

@@ -43,6 +43,7 @@ import {
   type WriteTextFileResponse,
 } from '@agentclientprotocol/sdk';
 import type { AdapterSpec } from './adapters';
+import { ADAPTER_MODULE_LOAD_ERROR_RE } from './agent-binary';
 import type { PromptBlock } from './buildAcpPromptBlocks';
 import { createIdleTimeout, type IdleTimeout } from './idleTimeout';
 import { log } from '../../services/logger';
@@ -205,6 +206,14 @@ export class AcpClient {
    *  swallows the Code Assist onboarding error and never rejects `newSession`,
    *  so without this the session hangs forever ("loading… / offline"). */
   private startupFailureReject: ((err: Error) => void) | null = null;
+  /** Set for the WHOLE initial handshake (initialize → newSession). The child
+   *  `exit` handler calls it when the adapter dies mid-startup — e.g. it crashes
+   *  at `import` (ERR_MODULE_NOT_FOUND on a still-installing dep) BEFORE the
+   *  `initialize` response the handshake awaits would ever arrive. Without it,
+   *  `startOnce` hangs on that response and `start()`'s transient-retry never
+   *  engages; with it, the crash rejects immediately → retry respawns once the
+   *  install settles. Broader than {@link startupFailureReject} (newSession-only). */
+  private startAbortReject: ((err: Error) => void) | null = null;
 
   constructor(private readonly opts: AcpClientOptions) {}
 
@@ -241,10 +250,22 @@ export class AcpClient {
     throw lastErr;
   }
 
-  /** True when a failed {@link startOnce} was caused by the adapter's OWN
-   *  transient spawn of the agent binary (ETXTBSY/ENOENT). Checks the thrown
-   *  error's message/data AND the adapter stderr ring — the adapter logs the
-   *  real cause to stderr while returning a generic `-32603 Internal error`. */
+  /** True when a failed {@link startOnce} was caused by a TRANSIENT install
+   *  race that clears within ms, so respawning the adapter recovers. Two
+   *  distinct races, both fresh-codespace only:
+   *   1. The adapter's OWN spawn of the agent binary (`claude-agent-acp`
+   *      exec'ing the ~250 MB SDK-bundled `claude`) mid-atomic-rename →
+   *      `ETXTBSY`/`ENOENT`.
+   *   2. The adapter's OWN `import` of a still-installing dependency
+   *      (`claude-agent-acp` importing `@anthropic-ai/claude-agent-sdk/sdk.mjs`
+   *      before npm finished the package's atomic rename) → the node process
+   *      exits at load with `ERR_MODULE_NOT_FOUND` / a truncated-file
+   *      `SyntaxError` (2026-07-10 incident: EVERY codespace claude deploy died
+   *      "The claude agent failed to start" here — the pre-spawn module-graph
+   *      gate probes just BEFORE the real spawn, leaving a TOCTOU window npm's
+   *      rename slips through). {@link ADAPTER_MODULE_LOAD_ERROR_RE} matches it.
+   *  Checks the thrown error's message/data AND the adapter stderr ring — the
+   *  adapter logs the real cause to stderr while returning a generic error. */
   private isTransientAdapterSpawn(err: unknown): boolean {
     const parts: string[] = [...this.recentStderr];
     if (err instanceof Error) parts.push(err.message);
@@ -257,7 +278,8 @@ export class AcpClient {
       }
       if (typeof e.details === 'string') parts.push(e.details);
     }
-    return TRANSIENT_ADAPTER_SPAWN_RE.test(parts.join(' '));
+    const joined = parts.join(' ');
+    return TRANSIENT_ADAPTER_SPAWN_RE.test(joined) || ADAPTER_MODULE_LOAD_ERROR_RE.test(joined);
   }
 
   private async startOnce(): Promise<AcpStartResult> {
@@ -321,6 +343,23 @@ export class AcpClient {
     child.on('exit', (code, signal) => {
       if (this.stopping) return;
       log.warn('acpClient', `adapter exited unexpectedly code=${code} signal=${signal}`);
+      // If the adapter dies DURING the initial handshake (before start()
+      // resolves), reject the in-flight startup so start() can classify + retry
+      // — otherwise the pending `initialize` awaits a response that will never
+      // come and hangs. A fresh-codespace import crash (ERR_MODULE_NOT_FOUND on
+      // a still-installing dep) lands here; its cause is already in recentStderr,
+      // which `isTransientAdapterSpawn` inspects. Suppress `onUnexpectedExit` in
+      // this case — start()'s retry loop owns the outcome (recover or rethrow).
+      if (this.startAbortReject) {
+        const tail = this.recentStderr.slice(-6).join(' | ');
+        this.startAbortReject(
+          new Error(
+            `ADAPTER_EXITED_DURING_START code=${code} signal=${signal}${tail ? ` — ${tail}` : ''}`,
+          ),
+        );
+        this.startAbortReject = null;
+        return;
+      }
       this.opts.onUnexpectedExit?.(code, signal);
     });
 
@@ -377,11 +416,22 @@ export class AcpClient {
         stream,
       );
 
-      log.info('acpClient', 'initialize → sending');
-      const initialize = await this.connection.initialize({
-        protocolVersion: PROTOCOL_VERSION,
-        clientCapabilities: CLIENT_CAPABILITIES,
+      // Reject the WHOLE handshake if the child dies mid-startup (see
+      // startAbortReject / the exit handler). A never-rejected startAborted just
+      // stays pending; startAbortReject is cleared on success (before return)
+      // and in cleanupAfterFailedStart.
+      const startAborted = new Promise<never>((_, reject) => {
+        this.startAbortReject = reject;
       });
+
+      log.info('acpClient', 'initialize → sending');
+      const initialize = await Promise.race([
+        this.connection.initialize({
+          protocolVersion: PROTOCOL_VERSION,
+          clientCapabilities: CLIENT_CAPABILITIES,
+        }),
+        startAborted,
+      ]);
       log.info(
         'acpClient',
         `initialize ← ok protocolVersion=${initialize.protocolVersion} agentCaps=${JSON.stringify(initialize.agentCapabilities ?? {}).slice(0, 200)}`,
@@ -411,11 +461,15 @@ export class AcpClient {
         newSession = await Promise.race([
           this.connection.newSession({ cwd, mcpServers: [] }),
           startupFailure,
+          startAborted,
         ]);
       } finally {
         if (startupTimer) clearTimeout(startupTimer);
         this.startupFailureReject = null;
       }
+      // Handshake fully succeeded — a later child exit is a genuine
+      // unexpected-exit, not a startup abort.
+      this.startAbortReject = null;
       this.sessionId = newSession.sessionId;
       // Log the adapter-picked model so account-mismatch bugs (e.g.
       // codex-acp defaulting to a model the user's account doesn't
@@ -462,6 +516,7 @@ export class AcpClient {
     this.connection = null;
     this.sessionId = null;
     this.startupFailureReject = null;
+    this.startAbortReject = null;
   }
 
   /**

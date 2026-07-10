@@ -319,8 +319,11 @@ export async function waitForCursorAgent(
 // crash can never reach a real session.
 
 /** Import/parse errors that mean the adapter's node_modules is still settling
- *  (a fresh/partial install), NOT a genuine, permanent failure. */
-const ADAPTER_MODULE_LOAD_ERROR_RE =
+ *  (a fresh/partial install), NOT a genuine, permanent failure. Also consumed
+ *  by {@link AcpClient}'s start-retry to classify a startup crash as transient
+ *  (the adapter's own `import` of a still-installing dep — e.g. claude-agent-acp
+ *  importing `@anthropic-ai/claude-agent-sdk/sdk.mjs` mid-atomic-rename). */
+export const ADAPTER_MODULE_LOAD_ERROR_RE =
   /ERR_MODULE_NOT_FOUND|Cannot find module|ERR_REQUIRE_ESM|ERR_UNKNOWN_BUILTIN_MODULE|SyntaxError|Unexpected (token|end|identifier)|missing \) after argument list/i;
 
 export type AdapterProbeResult = 'ok' | 'transient';
