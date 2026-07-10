@@ -17,6 +17,8 @@
  */
 
 import { spawnSync } from 'node:child_process';
+import { homedir } from 'node:os';
+import { mkdirSync, writeFileSync } from 'node:fs';
 import * as path from 'node:path';
 import {
   runCoderabbitOAuthLogin,
@@ -31,7 +33,12 @@ import { ensureCoderabbitInstalled } from './installer';
 import { createOsStrategy, type OsStrategy } from '../../os';
 import type { BatchInvocationInput, BatchInvocationOutput } from '../strategy';
 
-export type CoderabbitAction = 'status' | 'link_oauth' | 'link_apikey' | 'review';
+export type CoderabbitAction =
+  | 'status'
+  | 'link_oauth'
+  | 'link_apikey'
+  | 'provision'
+  | 'review';
 
 export interface CoderabbitConfigureResult {
   action: CoderabbitAction;
@@ -61,6 +68,8 @@ export interface CoderabbitConfigureInput {
   action: CoderabbitAction;
   /** For `link_apikey`. */
   apiKey?: string;
+  /** For `provision` — the vaulted credential fetched from the backend. */
+  provisionCredential?: { method: 'api_key' | 'oauth'; credential: string };
   /** For `review` — change-set scope. */
   review?: BatchInvocationInput;
 }
@@ -177,6 +186,32 @@ function collectChangedFiles(cwd: string): CoderabbitReviewFileInfo[] {
   return [...byPath.values()];
 }
 
+/**
+ * Restore a vaulted CodeRabbit OAuth login-state blob under `~/.coderabbit` so
+ * `coderabbit review` reads the logged-in credential without a re-login. The
+ * blob is the filename-agnostic `{file, contents}` envelope captured at link
+ * time; write it VERBATIM (never parse the opaque token). Mirrors the
+ * codespace-deploy `coderabbitProvisioner.write`.
+ */
+function restoreCoderabbitOauthBlob(value: string): void {
+  const dir = path.join(homedir(), '.coderabbit');
+  mkdirSync(dir, { recursive: true });
+  let file = 'auth.json';
+  let contents = value.trim();
+  if (contents.startsWith('{')) {
+    try {
+      const parsed = JSON.parse(contents) as { file?: unknown; contents?: unknown };
+      if (typeof parsed.file === 'string' && typeof parsed.contents === 'string') {
+        file = path.basename(parsed.file); // sanitise — never escape ~/.coderabbit
+        contents = parsed.contents;
+      }
+    } catch {
+      /* not our envelope → write the raw value to auth.json */
+    }
+  }
+  writeFileSync(path.join(dir, file), contents, { mode: 0o600 });
+}
+
 export async function configureCoderabbit(
   input: CoderabbitConfigureInput,
   deps: CoderabbitConfigureDeps = {},
@@ -248,6 +283,44 @@ export async function configureCoderabbit(
       linked: stored,
       ...(stored ? {} : { error: 'Signed in, but storing the API key for reuse failed' }),
     };
+  }
+
+  // ── provision: restore the ALREADY-vaulted credential (no re-login) ────────
+  if (input.action === 'provision') {
+    const res = base();
+    const cred = input.provisionCredential;
+    if (!cred || !cred.credential.trim()) {
+      return { ...res, error: 'No vaulted CodeRabbit credential to provision' };
+    }
+    if (!res.installed) {
+      deps.onEvent?.({ kind: 'installing' });
+      const ok = await ensureInstalled(os);
+      res.installed = ok;
+      if (!ok) return { ...res, error: 'CodeRabbit CLI could not be installed' };
+    }
+    if (cred.method === 'api_key') {
+      const login = loginWithApiKey(cred.credential.trim());
+      if (!login.ok) {
+        return {
+          ...res,
+          loggedIn: false,
+          linked: false,
+          error: login.error ?? 'The vaulted CodeRabbit API key was rejected — re-link it.',
+        };
+      }
+      return { ...res, loggedIn: true, linked: true };
+    }
+    // oauth — restore the {file,contents} login-state blob verbatim (mirrors the
+    // codespace-deploy coderabbitProvisioner); `coderabbit review` then reads it.
+    try {
+      restoreCoderabbitOauthBlob(cred.credential);
+    } catch (err) {
+      return {
+        ...res,
+        error: err instanceof Error ? err.message : 'Failed to restore the vaulted credential',
+      };
+    }
+    return { ...res, loggedIn: true, linked: true };
   }
 
   if (input.action === 'link_oauth') {

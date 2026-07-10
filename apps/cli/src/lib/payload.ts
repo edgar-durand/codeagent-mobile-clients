@@ -92,6 +92,9 @@ export const startCommandSchema = z.object({
       // loopback so a remote-host `link_oauth` login completes (session-relay).
       'link_deliver_callback',
       'link_apikey',
+      // Restore the caller's already-vaulted CodeRabbit credential onto this
+      // session (no re-login) — fetches from the backend + installs + writes it.
+      'provision',
       'review',
     ])
     .optional(),

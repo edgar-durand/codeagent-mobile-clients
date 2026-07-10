@@ -155,3 +155,33 @@ describe('configureCoderabbit — review', () => {
     expect(res.error).toMatch(/No reviewer/);
   });
 });
+
+describe('configureCoderabbit — provision (from vault, no re-login)', () => {
+  it('api_key: authenticates with the vaulted key and reports linked', async () => {
+    const loginWithApiKey = vi.fn(() => ({ ok: true }));
+    const res = await configureCoderabbit(
+      { action: 'provision', provisionCredential: { method: 'api_key', credential: 'cr-vaulted' } },
+      { os: fakeOs(true), loginWithApiKey },
+    );
+    expect(loginWithApiKey).toHaveBeenCalledWith('cr-vaulted');
+    expect(res.loggedIn).toBe(true);
+    expect(res.linked).toBe(true);
+    expect(res.error).toBeUndefined();
+  });
+
+  it('api_key: surfaces an error when the vaulted key is rejected', async () => {
+    const loginWithApiKey = vi.fn(() => ({ ok: false, error: 'bad key' }));
+    const res = await configureCoderabbit(
+      { action: 'provision', provisionCredential: { method: 'api_key', credential: 'cr-x' } },
+      { os: fakeOs(true), loginWithApiKey },
+    );
+    expect(res.linked).toBe(false);
+    expect(res.error).toBe('bad key');
+  });
+
+  it('errors when there is no vaulted credential to provision', async () => {
+    const res = await configureCoderabbit({ action: 'provision' }, { os: fakeOs(true) });
+    expect(res.linked).toBeUndefined();
+    expect(res.error).toMatch(/no vaulted/i);
+  });
+});

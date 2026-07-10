@@ -38,7 +38,7 @@ import {
 import { showInfo } from '../../ui/banner';
 import { applyFileReview } from '../../services/apply-file-review.service';
 import { buildLinkContext } from '../link';
-import { postLinkCredential, postAiResult, postPreviewEvent, postHeadroomEvent, postBeadsEvent, postCliUpdateEvent, postCoderabbitEvent } from '../../services/pairing.service';
+import { postLinkCredential, postAiResult, postPreviewEvent, postHeadroomEvent, postBeadsEvent, postCliUpdateEvent, postCoderabbitEvent, fetchProvisionCredential } from '../../services/pairing.service';
 import { configureCoderabbit, type CoderabbitAction } from '../../agents/coderabbit/configure';
 import { deliverPendingCoderabbitCallback, type CoderabbitAuthEvent } from '../../agents/coderabbit/oauth';
 import { CoderabbitRuntimeStrategy } from '../../agents/coderabbit/runtime';
@@ -768,6 +768,61 @@ const coderabbitConfigureH: CommandHandler = async (ctx, cmd, parsed) => {
         return r.ok === true;
       }
     : undefined;
+
+  // ── Provision from the vault: NO re-login. Fetch the caller's already-vaulted
+  // CodeRabbit credential from the backend and restore it onto this session
+  // (install + write login-state). ACK immediately + run in the BACKGROUND
+  // (install can take ~30-60s); the outcome reaches mobile via coderabbit_status.
+  if (action === 'provision') {
+    await ctx.relay.sendResult(cmd.id, 'completed', {
+      action: 'provision',
+      supported: true,
+      installed: false,
+      loggedIn: false,
+      linked: false,
+    });
+    void (async () => {
+      try {
+        const cred = token
+          ? await fetchProvisionCredential({
+              agentId: 'coderabbit',
+              sessionId: ctx.sessionId,
+              pluginId: ctx.pluginId,
+              pluginAuthToken: token,
+            })
+          : null;
+        if (!cred) {
+          emit('coderabbit_status', {
+            installed: false,
+            loggedIn: false,
+            linked: false,
+            error: 'No vaulted CodeRabbit credential — sign in once to link it.',
+          });
+          await emitChain;
+          return;
+        }
+        const result = await configureCoderabbit(
+          { action: 'provision', provisionCredential: cred },
+          { onEvent },
+        );
+        emit('coderabbit_status', {
+          installed: result.installed,
+          loggedIn: result.loggedIn,
+          linked: result.linked ?? false,
+          ...(result.error ? { error: result.error } : {}),
+        });
+      } catch (err) {
+        emit('coderabbit_status', {
+          installed: false,
+          loggedIn: false,
+          linked: false,
+          error: err instanceof Error ? err.message : 'CodeRabbit provisioning failed',
+        });
+      }
+      await emitChain;
+    })();
+    return;
+  }
 
   // ── OAuth link: run the (browser-gated, long) login in the BACKGROUND ─────
   // `coderabbit auth login --agent` blocks on its loopback until the redirect

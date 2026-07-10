@@ -475,6 +475,39 @@ export async function postHeadroomEvent(input: {
  * non-fatal. The backend republishes on the per-user SSE bus so the mobile UI
  * can render the OAuth `authUrl`, link progress, and review findings live.
  */
+/**
+ * Fetch the caller's ALREADY-vaulted credential for an agent so the CLI can
+ * provision it onto a fresh session without a re-login. Returns null on any
+ * failure (404 = no vaulted credential, older backend, network) so the caller
+ * cleanly falls back to the normal link flow.
+ */
+export async function fetchProvisionCredential(input: {
+  agentId: string;
+  sessionId: string;
+  pluginId: string;
+  pluginAuthToken: string;
+}): Promise<{ method: 'api_key' | 'oauth'; credential: string } | null> {
+  try {
+    const res = await _transport.postJsonAuthed(
+      `${API_BASE}/api/plugin/agents/${input.agentId}/provision-credential`,
+      { sessionId: input.sessionId, pluginId: input.pluginId },
+      input.pluginAuthToken,
+    );
+    const data = (res as { data?: { method?: unknown; credential?: unknown } } | null)?.data;
+    if (
+      data &&
+      (data.method === 'api_key' || data.method === 'oauth') &&
+      typeof data.credential === 'string' &&
+      data.credential.length > 0
+    ) {
+      return { method: data.method, credential: data.credential };
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 export async function postCoderabbitEvent(input: {
   sessionId: string;
   pluginId: string;
