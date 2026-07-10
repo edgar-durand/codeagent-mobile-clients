@@ -29,10 +29,8 @@
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { spawnSync } from 'node:child_process';
 import type { AgentAuth, AgentId } from '@codeam/shared';
 import { restrictToOwner } from '../../lib/restrict-to-owner';
-import { createOsStrategy } from '../../os';
 
 /**
  * Map the public LinkedAgent id the deploy command carries
@@ -259,46 +257,17 @@ const kimiProvisioner: AgentProvisioner = {
     // backend KimiOAuthProvider produces), written verbatim. Must NOT go in
     // KIMI_API_KEY.
     credentialsFiles.forEach((f) => writeFile0600(f, auth.value));
-    // ⚠️ Writing the credential blob alone leaves "Model: not set / LLM not set"
-    // — kimi-code keys its model/provider off config.toml, so `session/new`
-    // opens with an EMPTY model list and every turn fails. `kimi login` DETECTS
-    // the on-disk credential, skips the device flow, and just writes config.toml
-    // (managed provider + default_model). The codespace bootstrap already does
-    // this (`kimi login </dev/null`); the self-hosted CLI path was MISSING it, so
-    // self-hosted Kimi came up unconfigured on every platform. Provision it here,
-    // OS-agnostically (see provisionKimiConfig — no `</dev/null` shell redirect,
-    // which is a Windows footgun).
-    provisionKimiConfig(home);
+    // ⚠️ Do NOT run `kimi login` to "provision config.toml". Root-caused live on
+    // kimi 0.23.4 (2026-07-09): `kimi login` does NOT detect the on-disk
+    // credential — it ALWAYS starts the device flow and ZEROES
+    // ~/.kimi-code/credentials/kimi-code.json at flow-start, so headless it leaves
+    // the credential EMPTY → `kimi acp` → "-32000 Authentication required". The
+    // written blob is SUFFICIENT alone: session/new authenticates from it AND a
+    // real prompt completes (stopReason:end_turn) with NO config.toml — kimi-code
+    // defaults to its managed model. (Same fix applied to the codespace bootstrap.)
     return {};
   },
 };
-
-/**
- * Materialise kimi-code's `config.toml` (managed provider + default_model) from
- * the just-written credential by running `kimi login` HEADLESSLY. OS-agnostic
- * and best-effort — never throws, never blocks provisioning:
- *   - Resolves + wraps the binary via the OS strategy (`buildLaunch`), so on
- *     Windows a `kimi.cmd`/`.ps1` shim is invoked correctly (a bare
- *     `spawnSync('kimi', …)` EINVALs on Windows — the same trap the cursor
- *     create-chat fix hit).
- *   - `stdio: 'ignore'` closes stdin so the login is non-interactive WITHOUT a
- *     `</dev/null` redirect (which only exists on POSIX). Bounded timeout.
- */
-function provisionKimiConfig(home: string): void {
-  try {
-    const osStrat = createOsStrategy();
-    const binary = osStrat.findInPath('kimi');
-    if (!binary) return; // kimi not installed yet — nothing to provision against
-    const launch = osStrat.buildLaunch(binary, ['login']);
-    spawnSync(launch.cmd, launch.args, {
-      stdio: 'ignore',
-      timeout: 60_000,
-      env: { ...process.env, HOME: home, USERPROFILE: home },
-    });
-  } catch {
-    /* best-effort — config provisions on first interactive run otherwise */
-  }
-}
 
 const coderabbitProvisioner: AgentProvisioner = {
   write(auth, home): Record<string, string> {
