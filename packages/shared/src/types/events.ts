@@ -78,6 +78,11 @@ export const USER_EVENTS = {
   CLI_UPDATE_PROGRESS: 'cli_update_progress',
   CLI_UPDATE_FAILED: 'cli_update_failed',
   BATON_STATE: 'baton_state',
+  // CodeRabbit reviewer — the CLI posts these to /api/coderabbit/events; the
+  // backend re-publishes them on the per-user SSE bus (mirrored in repo A).
+  CODERABBIT_PROGRESS: 'coderabbit_progress',
+  CODERABBIT_STATUS: 'coderabbit_status',
+  CODERABBIT_REVIEW: 'coderabbit_review',
 } as const;
 
 export type UserEventName = (typeof USER_EVENTS)[keyof typeof USER_EVENTS];
