@@ -36,18 +36,33 @@ const counterFile = process.argv[2];
 const mode = process.argv[3] || 'etxtbsy-then-ok';
 const send = (obj) => process.stdout.write(JSON.stringify(obj) + '\\n');
 
-// module-crash-then-ok: reproduce the 2026-07-10 codespace incident — the
-// adapter itself CRASHES AT IMPORT (ERR_MODULE_NOT_FOUND on a still-installing
-// dep) the FIRST time it's spawned, exiting BEFORE it can answer 'initialize'.
-// The counter is bumped per PROCESS SPAWN (not per session/new) for this mode.
-if (mode === 'module-crash-then-ok') {
+// *-crash-then-ok: the adapter CRASHES AT IMPORT on its FIRST spawn (before it
+// can answer 'initialize'), then the "install settles" and it speaks on respawn.
+// Each mode reproduces a DIFFERENT fresh-codespace install-race variant — the
+// point is that start() recovers ALL of them via the STRUCTURAL "exited during
+// the handshake = transient" rule, not by matching the specific error string:
+//   module-crash  → ERR_MODULE_NOT_FOUND (truncated sdk.mjs, 2026-07-10)
+//   dir-import     → ERR_UNSUPPORTED_DIR_IMPORT on zod/v4 (2026-07-10, the code
+//                    the OLD regex did NOT match — this incident)
+//   unknown        → a SILENT crash with NO recognizable stderr at all (proves
+//                    we no longer depend on the error text → future-proof)
+const IMPORT_CRASH_STDERR = {
+  'module-crash-then-ok': [
+    'node:internal/modules/esm/resolve:275',
+    "Error [ERR_MODULE_NOT_FOUND]: Cannot find module '/x/@anthropic-ai/claude-agent-sdk/sdk.mjs' imported from /x/@agentclientprotocol/claude-agent-acp/dist/index.js",
+  ],
+  'dir-import-crash-then-ok': [
+    "Error [ERR_UNSUPPORTED_DIR_IMPORT]: Directory import '/x/node_modules/zod/v4' is not supported resolving ES modules imported from /x/@agentclientprotocol/sdk/dist/acp.js",
+  ],
+  'unknown-crash-then-ok': [], // NO stderr — a bare non-zero exit
+};
+if (IMPORT_CRASH_STDERR[mode]) {
   let n = 0;
   try { n = parseInt(fs.readFileSync(counterFile, 'utf8'), 10) || 0; } catch {}
   n += 1;
   fs.writeFileSync(counterFile, String(n));
   if (n === 1) {
-    process.stderr.write('node:internal/modules/esm/resolve:275\\n');
-    process.stderr.write("Error [ERR_MODULE_NOT_FOUND]: Cannot find module '/x/@anthropic-ai/claude-agent-sdk/sdk.mjs' imported from /x/@agentclientprotocol/claude-agent-acp/dist/index.js\\n");
+    for (const line of IMPORT_CRASH_STDERR[mode]) process.stderr.write(line + '\\n');
     process.exit(1);
   }
   // n >= 2: the install settled — speak the protocol and succeed.
@@ -166,6 +181,39 @@ describe('AcpClient.start — transient adapter ETXTBSY retry (real subprocess)'
       const res = await client.start();
       expect(res.sessionId).toMatch(/^sess-ok-/);
       // Two spawns: the import-crash + the retry that succeeds.
+      expect(fs.readFileSync(counter, 'utf8')).toBe('2');
+    } finally {
+      await client.stop().catch(() => undefined);
+    }
+  });
+
+  it('retries the zod/v4 ERR_UNSUPPORTED_DIR_IMPORT crash and starts on the next spawn', async () => {
+    // 2026-07-10 incident (this one): `@agentclientprotocol/sdk` imported the
+    // bare directory `zod/v4` before zod's `exports` map materialised →
+    // ERR_UNSUPPORTED_DIR_IMPORT — a code the OLD error-string list did NOT
+    // match, so start() bailed after 2/5 attempts and the user saw "The claude
+    // agent failed to start". The structural rule now retries it.
+    const counter = path.join(dir, `c-${Date.now()}-di`);
+    const client = makeClient(counter, 'dir-import-crash-then-ok');
+    try {
+      const res = await client.start();
+      expect(res.sessionId).toMatch(/^sess-ok-/);
+      expect(fs.readFileSync(counter, 'utf8')).toBe('2');
+    } finally {
+      await client.stop().catch(() => undefined);
+    }
+  });
+
+  it('retries a SILENT crash-before-handshake (no recognizable stderr) — future-proof', async () => {
+    // The whack-a-mole killer: even a startup crash with NO error text we could
+    // pattern-match is recovered, because classification is STRUCTURAL (the
+    // adapter exited before answering `initialize` → not ready → retry). This is
+    // what guarantees the NEXT unknown install-race variant self-heals too.
+    const counter = path.join(dir, `c-${Date.now()}-uk`);
+    const client = makeClient(counter, 'unknown-crash-then-ok');
+    try {
+      const res = await client.start();
+      expect(res.sessionId).toMatch(/^sess-ok-/);
       expect(fs.readFileSync(counter, 'utf8')).toBe('2');
     } finally {
       await client.stop().catch(() => undefined);

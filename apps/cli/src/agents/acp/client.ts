@@ -77,6 +77,46 @@ export interface AcpStartResult {
 const TRANSIENT_ADAPTER_SPAWN_RE = /ETXTBSY|ENOENT/;
 const MAX_START_ATTEMPTS = 5;
 
+/**
+ * The ACP TRANSPORT went down DURING the handshake. This is the SAME structural
+ * fact as {@link AdapterStartCrashError} (the adapter process died before it
+ * could complete startup) — just observed from the SDK's side of a race: when
+ * the adapter exits mid-`initialize`, its stdout closes and the SDK rejects the
+ * in-flight RPC with "ACP connection closed" a beat before (or after) our own
+ * child-`exit` handler fires. Since `cleanupAfterFailedStart` synchronously
+ * removes the exit listener, that handler sometimes never runs — so we must
+ * ALSO recognise the crash by its transport symptom. This is NOT error-code
+ * whack-a-mole: it's OUR transport layer's own stable, bounded error, not the
+ * install's nondeterministic one. Only consulted during `start()`, where a
+ * closed transport can only mean the adapter died starting up (a healthy one
+ * stays connected). Auth/tier failures keep the connection OPEN (they RPC-error
+ * or hang), so they never match this and are never mis-retried.
+ */
+const TRANSPORT_DOWN_DURING_START_RE =
+  /connection (is )?closed|stream (is )?closed|ECONNRESET|EPIPE|write after end|premature close/i;
+
+/**
+ * The adapter process EXITED during the initial handshake (before `initialize`
+ * resolved). This is the STRUCTURAL signal of a fresh-install startup race: a
+ * healthy adapter loads its whole module graph then blocks reading the ACP
+ * handshake off stdin — it never exits mid-startup. So a crash here means a
+ * still-installing dependency broke the adapter's `import`, WHATEVER Node error
+ * code that particular file/package yields at that instant. Classifying on this
+ * fact (not on an enumerated error-string list) is what stops the whack-a-mole:
+ * `SyntaxError`→`ERR_MODULE_NOT_FOUND`→`ERR_UNSUPPORTED_DIR_IMPORT`→… all land
+ * here and are retried uniformly. A genuinely permanent crash-at-import just
+ * fails all {@link MAX_START_ATTEMPTS} attempts and surfaces the real error.
+ * (Permanent auth/tier failures do NOT crash the process — they hang or RPC-
+ * error and are caught by {@link FATAL_STARTUP_RE}, so they never reach here.)
+ */
+export class AdapterStartCrashError extends Error {
+  readonly adapterExitedDuringStart = true as const;
+  constructor(message: string) {
+    super(message);
+    this.name = 'AdapterStartCrashError';
+  }
+}
+
 /** Backoff seam so the transient-spawn retry is instant under test. */
 export const _acpStartSeam = {
   sleep: (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms)),
@@ -267,6 +307,12 @@ export class AcpClient {
    *  Checks the thrown error's message/data AND the adapter stderr ring — the
    *  adapter logs the real cause to stderr while returning a generic error. */
   private isTransientAdapterSpawn(err: unknown): boolean {
+    // PRIMARY (structural): the adapter process died during the handshake — a
+    // healthy one never exits there, so this IS an install-race crash whatever
+    // the error code. This is what stops the error-code whack-a-mole; the regex
+    // below is only a secondary text-based fallback.
+    if (err instanceof AdapterStartCrashError) return true;
+
     const parts: string[] = [...this.recentStderr];
     if (err instanceof Error) parts.push(err.message);
     if (err && typeof err === 'object') {
@@ -279,7 +325,13 @@ export class AcpClient {
       if (typeof e.details === 'string') parts.push(e.details);
     }
     const joined = parts.join(' ');
-    return TRANSIENT_ADAPTER_SPAWN_RE.test(joined) || ADAPTER_MODULE_LOAD_ERROR_RE.test(joined);
+    return (
+      TRANSIENT_ADAPTER_SPAWN_RE.test(joined) ||
+      ADAPTER_MODULE_LOAD_ERROR_RE.test(joined) ||
+      // The transport dying mid-handshake = the adapter crashed starting up,
+      // even when the child-exit handler lost the race (see the RE's doc).
+      TRANSPORT_DOWN_DURING_START_RE.test(joined)
+    );
   }
 
   private async startOnce(): Promise<AcpStartResult> {
@@ -353,7 +405,7 @@ export class AcpClient {
       if (this.startAbortReject) {
         const tail = this.recentStderr.slice(-6).join(' | ');
         this.startAbortReject(
-          new Error(
+          new AdapterStartCrashError(
             `ADAPTER_EXITED_DURING_START code=${code} signal=${signal}${tail ? ` — ${tail}` : ''}`,
           ),
         );

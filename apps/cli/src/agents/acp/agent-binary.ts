@@ -318,13 +318,38 @@ export async function waitForCursorAgent(
 // throwaway child and only releases the spawn once it resolves — so the code=1
 // crash can never reach a real session.
 
-/** Import/parse errors that mean the adapter's node_modules is still settling
- *  (a fresh/partial install), NOT a genuine, permanent failure. Also consumed
- *  by {@link AcpClient}'s start-retry to classify a startup crash as transient
- *  (the adapter's own `import` of a still-installing dep — e.g. claude-agent-acp
- *  importing `@anthropic-ai/claude-agent-sdk/sdk.mjs` mid-atomic-rename). */
+/**
+ * Import/parse errors that mean the adapter's node_modules is still settling
+ * (a fresh/partial install), NOT a genuine, permanent failure. A SECONDARY
+ * signal only — the PRIMARY classification is now STRUCTURAL (a healthy adapter
+ * blocks on stdin and never exits, so an early non-zero exit = not-ready; see
+ * {@link probeAdapterModuleGraph} and `AcpClient`'s start-retry). This regex is
+ * the belt-and-suspenders fallback that still recognises the crash by its text.
+ *
+ * ⚠️ Enumerating error CODES was proven fragile — each fresh-codespace deploy
+ * crashes on whichever package is mid-atomic-rename at that instant, with
+ * whatever code that specific failure yields, so the list kept growing (2026-07:
+ * `SyntaxError`(truncated sdk.mjs) → `ERR_MODULE_NOT_FOUND` → `ETXTBSY` →
+ * `ERR_UNSUPPORTED_DIR_IMPORT` on `zod/v4`). The `node:internal/modules/` clause
+ * is the real catch-all: ANY crash whose stack is inside Node's module resolver
+ * during startup is an install race, regardless of the specific code — that
+ * ends the whack-a-mole even for future variants. The explicit codes remain for
+ * readability + logs that don't include the stack frame.
+ */
 export const ADAPTER_MODULE_LOAD_ERROR_RE =
-  /ERR_MODULE_NOT_FOUND|Cannot find module|ERR_REQUIRE_ESM|ERR_UNKNOWN_BUILTIN_MODULE|SyntaxError|Unexpected (token|end|identifier)|missing \) after argument list/i;
+  /ERR_MODULE_NOT_FOUND|Cannot find module|ERR_REQUIRE_ESM|ERR_UNKNOWN_BUILTIN_MODULE|ERR_UNSUPPORTED_DIR_IMPORT|ERR_PACKAGE_PATH_NOT_EXPORTED|ERR_INVALID_PACKAGE_CONFIG|ERR_INVALID_PACKAGE_TARGET|ERR_INVALID_MODULE_SPECIFIER|node:internal\/modules\/|Directory import|SyntaxError|Unexpected (token|end|identifier)|missing \) after argument list/i;
+
+/**
+ * Adapter stderr patterns that mean a PERMANENT startup failure (auth /
+ * tier-ineligibility) — the ONE thing the structural "any early exit = retry"
+ * gate must NOT loop on. Kept in sync with `client.ts` FATAL_STARTUP_RE (a small
+ * duplication to avoid an import cycle: client.ts imports from THIS file). In
+ * practice the probe never drives the adapter to `session/new`, so auth/tier
+ * doesn't fire during a probe — this is defence-in-depth so a hypothetical
+ * crash-at-load auth error can't be retried in a tight loop.
+ */
+const PERMANENT_ADAPTER_STARTUP_RE =
+  /IneligibleTierError|UNSUPPORTED_CLIENT|no longer supported for Gemini Code Assist|not eligible for Gemini Code Assist|Error authenticating|ProjectIdRequiredError/i;
 
 export type AdapterProbeResult = 'ok' | 'transient';
 
@@ -382,7 +407,18 @@ export function probeAdapterModuleGraph(
     });
     child.on('error', () => finish('ok'));
     child.on('exit', (code) => {
-      if (code !== 0 && code !== null && ADAPTER_MODULE_LOAD_ERROR_RE.test(stderr)) {
+      // STRUCTURAL classification (not error-string matching): a healthy adapter
+      // loads its whole module graph then BLOCKS reading the ACP handshake off
+      // stdin — it does NOT exit inside the liveness window. So ANY early
+      // non-zero exit means the graph isn't ready yet (some still-installing dep
+      // crashed the import), whatever the specific Node error code. Treating it
+      // as 'transient' makes the caller keep polling until the install settles —
+      // and, unlike the old regex gate, it can never be defeated by a new,
+      // unlisted error code (the ERR_UNSUPPORTED_DIR_IMPORT / zod-v4 miss). The
+      // ONLY thing we must not loop on is a PERMANENT startup failure
+      // (auth/tier); let that through as 'ok' so the real spawn surfaces the
+      // actionable error instead of burning the whole gate timeout.
+      if (code !== 0 && code !== null && !PERMANENT_ADAPTER_STARTUP_RE.test(stderr)) {
         finish('transient');
       } else {
         finish('ok');
