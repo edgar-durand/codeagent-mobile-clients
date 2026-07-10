@@ -11,6 +11,7 @@ import { parsePayload, startCommandSchema } from '../lib/payload';
 import { provisionBeadsForStart, beadsActionFromPayload } from '../beads/wiring';
 import { handleBeadsActionCommand, type StartedBeads } from '../beads';
 import { log } from '../services/logger';
+import { installRelayCrashGuards } from '../lib/process-guards';
 
 /**
  * Infra-only run loop: the in-codespace counterpart to `start()`
@@ -99,6 +100,9 @@ const INFRA_ONLY_COMMAND_TYPES: ReadonlySet<string> = new Set([
 ]);
 
 export async function startInfraOnly(agentId: AgentId): Promise<void> {
+  // Daemon crash guard — same rationale as start(): a stray rejection must
+  // not kill the infra-only relay (dashboard Files/terminal would go dead).
+  installRelayCrashGuards();
   const session = getActiveSession();
   if (!session?.pluginId) {
     throw new Error('startInfraOnly: no active session found in config');

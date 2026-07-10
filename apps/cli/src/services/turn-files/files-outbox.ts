@@ -130,7 +130,11 @@ export class FilesOutbox {
     const jittered = delayMs === 0 ? 0 : applyJitter(delayMs);
     this.flushTimer = setTimeout(() => {
       this.flushTimer = null;
-      void this.flush();
+      // NEVER leave this promise un-caught: a `void`-ed rejection here has no
+      // process handler downstream and would crash the whole relay daemon.
+      this.flush().catch((err) => {
+        log.warn('turnFiles', `outbox flush loop threw: ${(err as Error).message}`);
+      });
     }, jittered);
   }
 

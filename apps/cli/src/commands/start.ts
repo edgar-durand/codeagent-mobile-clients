@@ -10,6 +10,7 @@ import { createRuntimeStrategy } from '../agents/registry';
 import { getAcpAdapter, requiresAcp } from '../agents/acp/adapters';
 import { waitForAdapterModuleGraph } from '../agents/acp/agent-binary';
 import { runAcpSession } from '../agents/acp/runner';
+import { installRelayCrashGuards } from '../lib/process-guards';
 import { OutputService } from '../services/output.service';
 import { HistoryService } from '../services/history.service';
 import { FileWatcherService } from '../services/file-watcher.service';
@@ -49,6 +50,10 @@ import { log } from '../services/logger';
  * `start/` so this file stays a readable orchestrator.
  */
 export async function start(requestedAgent?: AgentId): Promise<void> {
+  // A stray unhandled rejection (a failed backend POST after `socket hang up`
+  // / HTTP 404, a fire-and-forget flush) must NOT kill the relay daemon — it
+  // leaves a codespace session hung forever with no supervisor to restart it.
+  installRelayCrashGuards();
   showIntro();
 
   // When the user runs `codeam <agent>`, restore the most-recently-paired

@@ -11,6 +11,7 @@ import { detectCurrentBranch } from '../lib/git-branch';
 import { start } from './start';
 import { startInfraOnly } from './start-infra-only';
 import { maybeStartHeadroomReporter } from './host-agent';
+import { installRelayCrashGuards } from '../lib/process-guards';
 
 /**
  * `codeam pair-auto` — non-interactive pair, used INSIDE a freshly-
@@ -349,6 +350,10 @@ export function acquireSingletonLock(): boolean {
 }
 
 export async function pairAuto(args: string[]): Promise<void> {
+  // Daemon crash guard: a stray unhandled rejection must never take down the
+  // self-hosted/codespace relay (no supervisor relaunches it). Idempotent —
+  // start()/startInfraOnly() call it again once we dispatch into them.
+  installRelayCrashGuards();
   // One pair-auto per codespace — a duplicate launch would split-brain the
   // session (see acquireSingletonLock). Defer to the running owner.
   if (!acquireSingletonLock()) {
