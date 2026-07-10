@@ -17,6 +17,16 @@
 
 import { spawn } from 'node:child_process';
 import { getAgent, type AgentId, type AgentMetadata } from '@codeam/shared';
+
+// Hard ceiling for a single CodeRabbit one-shot (review / detect). CodeRabbit's
+// `review --plain` opens a WebSocket to `ide.coderabbit.ai`; when that hangs the
+// process never exits and `runOneShot`'s promise would never resolve — wedging
+// the command handler that awaits it and, with it, the whole relay's poll +
+// heartbeat loop (the 2026-07-10 "LAST PING —" / stuck-session incident: a review
+// hung on `wss://ide.coderabbit.ai/ws` at 15:07:29 and the codespace never
+// recovered). 5 min is comfortably longer than a real review of local changes
+// yet bounded so a hung socket can't strand the session forever.
+const CODERABBIT_ONESHOT_TIMEOUT_MS = 5 * 60_000;
 import { ensureCoderabbitInstalled } from './installer';
 import { coderabbitCredentialLocator, coderabbitLoginLauncher } from './link';
 import { parseReview } from './parsing';
@@ -107,11 +117,58 @@ export class CoderabbitRuntimeStrategy implements BatchAgentStrategy {
         env: { ...process.env, ...(launch.env ?? {}) },
         stdio: ['ignore', 'pipe', 'pipe'],
       });
+
+      // Guard the whole invocation with a hard timeout so a hung CodeRabbit
+      // WebSocket can't keep this promise (and the awaiting command handler)
+      // pending forever. On expiry: kill the process (SIGTERM → SIGKILL) and
+      // resolve with whatever partial output we captured + a non-zero exit so
+      // the caller surfaces a clean "review timed out" instead of hanging.
+      let settled = false;
+      const finish = (out: BatchInvocationOutput) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve(out);
+      };
+      const timer = setTimeout(() => {
+        if (settled) return;
+        try {
+          proc.kill('SIGTERM');
+        } catch {
+          /* already gone */
+        }
+        // Escalate if SIGTERM didn't land it.
+        setTimeout(() => {
+          try {
+            proc.kill('SIGKILL');
+          } catch {
+            /* already gone */
+          }
+        }, 2_000).unref?.();
+        finish(
+          this.parseOutput({
+            exitCode: 124,
+            stdout: Buffer.concat(stdoutBuf).toString('utf8'),
+            stderr:
+              Buffer.concat(stderrBuf).toString('utf8') +
+              `\nCodeRabbit review timed out after ${Math.round(
+                CODERABBIT_ONESHOT_TIMEOUT_MS / 60_000,
+              )} min and was terminated.`,
+          }),
+        );
+      }, CODERABBIT_ONESHOT_TIMEOUT_MS);
+      timer.unref?.();
+
       proc.stdout?.on('data', (b: Buffer) => stdoutBuf.push(b));
       proc.stderr?.on('data', (b: Buffer) => stderrBuf.push(b));
-      proc.on('error', (err) => reject(err));
+      proc.on('error', (err) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        reject(err);
+      });
       proc.on('close', (code) => {
-        resolve(
+        finish(
           this.parseOutput({
             exitCode: code ?? 0,
             stdout: Buffer.concat(stdoutBuf).toString('utf8'),
