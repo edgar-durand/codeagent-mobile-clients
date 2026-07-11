@@ -40,8 +40,9 @@ import * as os from 'node:os';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { CommandRelayService, type RemoteCommand } from '../services/command-relay.service';
-import type { AgentMetadata } from '@codeam/shared';
+import type { AgentMetadata, IntegrationsManifestEntry } from '@codeam/shared';
 import { resolveApiBaseUrl, getPricing } from '@codeam/shared';
+import { persistIntegrationsManifest, clearIntegrationsManifest } from '../integrations/manifest';
 
 /** Input $/M for the running agent's representative model — values the
  *  compressed-away tokens for the savings reporter. Claude agents → Sonnet
@@ -368,6 +369,14 @@ interface DeployPayload {
    * Required when headroomEnabled is true.
    */
   headroomSavingsIngestUrl?: string;
+  /**
+   * Agent Toolkits integrations manifest for this deploy — the same shape
+   * the codespace bootstrap writes to `~/.codeam/integrations.json`.
+   * Persisted before the pair-auto child spawns so `start()` finds it
+   * (see `persistIntegrationsManifest`/`buildMcpServersForStart`).
+   * Absent or empty = no integrations wired for this deploy.
+   */
+  integrations?: IntegrationsManifestEntry[];
 }
 
 /** The stop command payload (mirrors the backend `SelfHostedStopCommand`). */
@@ -417,6 +426,12 @@ function isDeployPayload(p: Record<string, unknown>): p is DeployPayload & Recor
     return false;
   }
   if (p.headroomSavingsIngestUrl !== undefined && typeof p.headroomSavingsIngestUrl !== 'string') {
+    return false;
+  }
+  // integrations is optional (back-compat: older backends omit it); when
+  // present it must be an array (entries aren't deep-validated here — the
+  // manifest reader is defensive on read).
+  if (p.integrations !== undefined && !Array.isArray(p.integrations)) {
     return false;
   }
   // Exactly one credential source must be present + well-formed.
@@ -1131,6 +1146,17 @@ export class HostAgentSupervisor {
           `Headroom unsupported for agent '${payload.headroomAgent}' — running it natively (no wrap)`,
         );
         persistHeadroomConfig({ enabled: false });
+      }
+
+      // 1e) Agent Toolkits integrations manifest — mirrors the codespace
+      //     bootstrap write so the pair-auto child's `start()` (which reads
+      //     `~/.codeam/integrations.json` via `buildMcpServersForStart`)
+      //     finds the same file regardless of surface. Best-effort (both
+      //     helpers swallow their own errors) and never blocks the deploy.
+      if (payload.integrations?.length) {
+        persistIntegrationsManifest({ integrations: payload.integrations });
+      } else {
+        clearIntegrationsManifest();
       }
 
       // 2) Spawn the supervised `pair-auto` child. Routed through

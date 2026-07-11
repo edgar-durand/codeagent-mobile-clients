@@ -37,6 +37,7 @@ import {
 } from '../services/pairing.service';
 import { capture, identifyUser, shutdownTelemetry } from '../services/telemetry.service';
 import { provisionBeadsForStart } from '../beads/wiring';
+import { buildMcpServersForStart } from '../integrations/provision';
 import type { StartedBeads } from '../beads';
 import { isLocalSession, runtimeSupportsBaton } from '../baton/gate';
 import { runBatonSession } from '../baton/wire-baton';
@@ -221,6 +222,19 @@ export async function start(requestedAgent?: AgentId): Promise<void> {
     return started;
   });
 
+  // Agent Toolkits — build the ACP `mcpServers` list from the integrations
+  // manifest a deploy (or self-hosted `payload.integrations`) persisted to
+  // `~/.codeam/integrations.json`. Pure/synchronous file work (no token
+  // fetch — the `codeam mcp-run` shim brokers that lazily at its own spawn),
+  // so unlike beads/deps it needs no gate; threaded into BOTH the plain ACP
+  // path and the baton's mobile driver below.
+  const mcpServers = buildMcpServersForStart({
+    sessionId: session.id,
+    pluginId,
+    pluginAuthToken: session.pluginAuthToken ?? undefined,
+    pollSecret: session.pollSecret,
+  });
+
   // Auto-provision the project's runtime deps (Postgres/Redis via the repo's
   // compose, or a heuristic one) so the dev server boots on the first preview.
   // CODESPACE ONLY — locally the user owns their own services. Fired in
@@ -330,6 +344,7 @@ export async function start(requestedAgent?: AgentId): Promise<void> {
         cwd,
         adapter,
         getBeads,
+        mcpServers,
       });
       return; // baton owns the lifecycle
     }
@@ -353,6 +368,7 @@ export async function start(requestedAgent?: AgentId): Promise<void> {
       cwd,
       getBeads,
       pollSecret: session.pollSecret,
+      mcpServers,
       // AUTO mode for headless, mobile-driven sessions: no human at the box
       // to answer permission prompts, so auto-approve them rather than stall
       // the turn (the agent-agnostic equivalent of

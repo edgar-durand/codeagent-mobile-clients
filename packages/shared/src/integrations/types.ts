@@ -18,6 +18,9 @@ export interface IntegrationMcpDelivery {
   args: string[];
   /** env var name → credential field (`accessToken` | `cloudId` | …). Env only, never argv. */
   envMapping: Record<string, string>;
+  /** Static, non-credential env the server needs to boot (e.g. mode flags).
+   *  Merged into the child env BENEATH the credential envMapping. Never secrets. */
+  staticEnv?: Record<string, string>;
 }
 
 export interface IntegrationDelivery {

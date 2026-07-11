@@ -12,6 +12,7 @@ import { link } from './commands/link';
 import { invite } from './commands/invite';
 import { doctor } from './commands/doctor';
 import { completion } from './commands/completion';
+import { mcpRun } from './integrations/mcp-run';
 import { version } from './commands/version';
 import { help } from './commands/help';
 import { tryShowSubcommandHelp } from './commands/subcommand-help';
@@ -147,6 +148,16 @@ async function main(): Promise<void> {
   if (typeof command === 'string' && commands[command]) {
     await commands[command]();
     return;
+  }
+
+  // `codeam mcp-run <id>` — the token-refreshing stdio shim for integration
+  // MCP servers. HIDDEN: it's launched BY the agent's own MCP client config
+  // (never typed by a human), so it's dispatched here — outside the
+  // `commands` table — specifically so it never appears in `codeam help`
+  // or in the "Did you mean …" typo-suggestion candidates (those are both
+  // derived from `Object.keys(commands)`, see below).
+  if (command === 'mcp-run') {
+    return mcpRun(args);
   }
 
   // `deploy` has a small sub-router (deploy / deploy ls / deploy

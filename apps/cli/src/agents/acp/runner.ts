@@ -34,7 +34,7 @@ import { log } from '../../services/logger';
 import { HistoryService } from '../../services/history.service';
 import { showInfo, showSuccess, showRelayNotice } from '../../ui/banner';
 import { AGENT_REGISTRY, type AgentId, type AgentModel, type StreamingChunkKind } from '@codeam/shared';
-import type { RequestPermissionResponse } from '@agentclientprotocol/sdk';
+import type { McpServer, RequestPermissionResponse } from '@agentclientprotocol/sdk';
 import { createOsStrategy } from '../../os';
 import { createInteractiveAgentStrategy } from '../registry';
 import { AcpClient, type AcpClientOptions } from './client';
@@ -664,6 +664,10 @@ export interface AcpRunnerOptions {
   autoApprovePermissions?: boolean;
   /** Replayed raw to the gated /api/pairing/reconnect for token refresh. */
   pollSecret?: string;
+  /** Agent Toolkits integration MCP servers to advertise on the ACP session
+   *  (built by {@link buildMcpServersForStart} in the composition root).
+   *  Omitted/empty when there's no manifest or nothing to inject. */
+  mcpServers?: McpServer[];
 }
 
 /** Auto-cancel a permission Promise after this ms. Matches the
@@ -953,6 +957,7 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
     adapter: opts.adapter,
     cwd: opts.cwd,
     extraEnv,
+    mcpServers: opts.mcpServers,
     onSessionUpdate: (notification) => {
       updateCount += 1;
       const variant = (notification.update as { sessionUpdate?: string })?.sessionUpdate ?? 'unknown';

@@ -1,4 +1,5 @@
 import type { AgentId, NormalizedMessage } from '@codeam/shared';
+import type { McpServer } from '@agentclientprotocol/sdk';
 import { CommandRelayService, type RemoteCommand } from '../services/command-relay.service';
 import { AgentService } from '../services/agent.service';
 import { createRuntimeStrategy } from '../agents/registry';
@@ -255,6 +256,10 @@ export interface BatonSessionOptions {
   /** Accessor for the live Beads handle, provisioned by the composition root
    *  (`start()`); null until it resolves or forever when beads is off. */
   getBeads?: () => StartedBeads | null;
+  /** Agent Toolkits integration MCP servers to advertise on the MOBILE
+   *  driver's ACP session — the same list `start.ts` threads into the plain
+   *  ACP path, built once by {@link buildMcpServersForStart}. */
+  mcpServers?: McpServer[];
 }
 
 /**
@@ -300,6 +305,7 @@ export async function runBatonSession(opts: BatonSessionOptions): Promise<void> 
   const client = new AcpClient({
     adapter: opts.adapter,
     cwd: opts.cwd,
+    mcpServers: opts.mcpServers,
     onSessionUpdate: (notification) => {
       for (const delta of mapSessionUpdate(notification)) streaming.append(delta);
     },
@@ -337,6 +343,7 @@ export async function runBatonSession(opts: BatonSessionOptions): Promise<void> 
     cwd: opts.cwd,
     getBeads: opts.getBeads,
     pollSecret: opts.pollSecret,
+    mcpServers: opts.mcpServers,
   };
   const mobileDriver = new AcpDriver({
     client,
