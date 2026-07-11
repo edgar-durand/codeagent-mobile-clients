@@ -90,17 +90,21 @@ async function waitForToken(
   }
 }
 
-function spawnSpecFactory(tokens: string[]): {
+function spawnSpecFactory(
+  tokens: string[],
+  extraEnvPerSpawn: Array<Record<string, string>> = [],
+): {
   spawnSpec: () => Promise<ProxyChildSpec>;
 } {
   let i = 0;
   const spawnSpec = async (): Promise<ProxyChildSpec> => {
     const token = tokens[Math.min(i, tokens.length - 1)];
+    const extra = extraEnvPerSpawn[i] ?? {};
     i += 1;
     return {
       command: process.execPath,
       args: [FIXTURE],
-      env: { FAKE_TOKEN: token, INSTANCE_TAG: `instance-${i}` },
+      env: { FAKE_TOKEN: token, INSTANCE_TAG: `instance-${i}`, ...extra },
     };
   };
   return { spawnSpec };
@@ -216,5 +220,128 @@ describe('RestartableStdioProxy', () => {
 
     expect(process.exitCode).toBe(7);
     process.exitCode = originalExitCode;
+  });
+
+  it('never forwards straggler output from a slow-dying old child after a swap', async () => {
+    const { stdin, stdout, outLines } = makeStreams();
+    // First child ignores SIGTERM for 300 ms, then emits ONE straggler line
+    // and exits — that line must never reach the client.
+    const { spawnSpec } = spawnSpecFactory(
+      ['tok-old', 'tok-new'],
+      [{ IGNORE_SIGTERM_MS: '300' }],
+    );
+    let restart = false;
+    const proxy = new RestartableStdioProxy({
+      spawnSpec,
+      shouldRestartNow: () => restart,
+      stdin,
+      stdout,
+    });
+    const done = proxy.start();
+
+    send(stdin, { jsonrpc: '2.0', id: 1, method: 'initialize', params: {} });
+    await waitForId(outLines, 1);
+
+    restart = true;
+    send(stdin, { jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} });
+    await waitForId(outLines, 2); // completed response → triggers the swap
+
+    await waitForToken(stdin, outLines, 'tok-new');
+
+    // Let the old child's 300 ms SIGTERM-ignore window elapse fully, then
+    // assert its straggler line never reached the client stream.
+    await sleep(450);
+    expect(outLines.some((l) => l.includes('straggler'))).toBe(false);
+
+    stdin.end();
+    await done;
+  });
+
+  it('fails fast (no hang) when the freshly-spawned child dies mid-swap, propagating its exit code', async () => {
+    const { stdin, stdout, outLines } = makeStreams();
+    const originalExitCode = process.exitCode;
+    let calls = 0;
+    const spawnSpec = async (): Promise<ProxyChildSpec> => {
+      calls += 1;
+      if (calls === 1) {
+        return {
+          command: process.execPath,
+          args: [FIXTURE],
+          env: { FAKE_TOKEN: 'tok-old', INSTANCE_TAG: 'instance-1' },
+        };
+      }
+      // Replacement child dies immediately — before it can answer the
+      // replayed initialize.
+      return { command: process.execPath, args: ['-e', 'process.exit(7)'], env: {} };
+    };
+    let restart = false;
+    const proxy = new RestartableStdioProxy({
+      spawnSpec,
+      shouldRestartNow: () => restart,
+      stdin,
+      stdout,
+    });
+    const done = proxy.start();
+
+    send(stdin, { jsonrpc: '2.0', id: 1, method: 'initialize', params: {} });
+    await waitForId(outLines, 1);
+
+    restart = true;
+    send(stdin, { jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} });
+    await waitForId(outLines, 2); // completed response → triggers the swap
+
+    // The proxy must END (resolve start()) with the dead child's code —
+    // never hang. Timeout guard: fail loudly instead of hanging the suite.
+    await Promise.race([
+      done,
+      sleep(5000).then(() => {
+        throw new Error('proxy.start() did not resolve after mid-swap child death');
+      }),
+    ]);
+
+    expect(process.exitCode).toBe(7);
+    process.exitCode = originalExitCode;
+    stdin.end();
+  });
+
+  it('forwards a post-swap client response that reuses the ORIGINAL initialize id (nothing legitimately swallowed)', async () => {
+    const { stdin, stdout, outLines } = makeStreams();
+    const { spawnSpec } = spawnSpecFactory(['tok-old', 'tok-new']);
+    let restart = false;
+    const proxy = new RestartableStdioProxy({
+      spawnSpec,
+      shouldRestartNow: () => restart,
+      stdin,
+      stdout,
+    });
+    const done = proxy.start();
+
+    send(stdin, { jsonrpc: '2.0', id: 1, method: 'initialize', params: {} });
+    await waitForId(outLines, 1);
+
+    restart = true;
+    send(stdin, { jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} });
+    await waitForId(outLines, 2); // completed response → triggers the swap
+    await waitForToken(stdin, outLines, 'tok-new');
+
+    // MCP clients recycle request ids across a session. A post-swap request
+    // that reuses the original initialize id (1) must get its response
+    // forwarded — only the proxy's own replayed initialize (sentinel id) may
+    // be swallowed.
+    expect(countId(outLines, 1)).toBe(1); // just the original initialize response so far
+    send(stdin, { jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} });
+    const start = Date.now();
+    for (;;) {
+      if (countId(outLines, 1) === 2) break;
+      if (Date.now() - start > 3000) {
+        throw new Error(`post-swap response with reused id 1 never arrived; saw ${JSON.stringify(outLines)}`);
+      }
+      await sleep(15);
+    }
+    const responses = parsedLines(outLines).filter((l) => l.id === 1);
+    expect(responses[1]?.result?.tools?.[0]?.token).toBe('tok-new');
+
+    stdin.end();
+    await done;
   });
 });

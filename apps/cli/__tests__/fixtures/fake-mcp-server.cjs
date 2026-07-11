@@ -10,8 +10,27 @@
 //   - any other message with a `method` and an `id` -> generic echo reply
 //   - notifications (no `id`) are ignored
 //   - exits cleanly (code 0) when stdin closes
+//   - IGNORE_SIGTERM_MS=<n> (env): ignore SIGTERM for n ms, then emit ONE
+//     straggler line and exit — simulates a slow-dying uvx/python server
+//     whose late output must never leak to the client after a proxy swap.
 
 const readline = require('node:readline');
+
+const ignoreSigtermMs = Number(process.env.IGNORE_SIGTERM_MS ?? 0);
+if (ignoreSigtermMs > 0) {
+  process.on('SIGTERM', () => {
+    setTimeout(() => {
+      process.stdout.write(
+        JSON.stringify({
+          jsonrpc: '2.0',
+          method: 'straggler',
+          params: { from: process.env.INSTANCE_TAG ?? '' },
+        }) + '\n',
+      );
+      process.exit(0);
+    }, ignoreSigtermMs);
+  });
+}
 
 const rl = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
 

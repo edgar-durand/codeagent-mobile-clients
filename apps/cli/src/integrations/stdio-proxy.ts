@@ -6,11 +6,12 @@
 // agent's MCP client ever seeing a hiccup: when the token is near expiry AND
 // there is no in-flight request, the child is killed, respawned with a
 // freshly-fetched token (via `spawnSpec()`), and the ORIGINAL `initialize`
-// request is replayed to it (so the new child's session state matches what
-// the agent already negotiated) — its response is swallowed (the agent
-// already has one) and a `notifications/initialized` is sent to complete the
-// handshake. Client lines that arrive mid-swap are buffered and flushed once
-// the new child is ready, so nothing is lost or reordered.
+// request is replayed to it under a sentinel id (so the new child's session
+// state matches what the agent already negotiated) — the response to the
+// sentinel is swallowed (the agent already has its initialize response) and
+// a `notifications/initialized` is sent to complete the handshake. Client
+// lines that arrive mid-swap are buffered and flushed once the new child is
+// ready, so nothing is lost or reordered.
 import { spawn as nodeSpawn, type ChildProcess } from 'node:child_process';
 import readline from 'node:readline';
 
@@ -32,14 +33,25 @@ interface Opts {
 
 const RESTART_CHECK_INTERVAL_MS = 30_000;
 
+/** Grace before escalating a swapped-out child from SIGTERM to SIGKILL. */
+const SIGKILL_ESCALATION_MS = 2_000;
+
+/**
+ * Sentinel id used when replaying the recorded `initialize` to a freshly
+ * swapped-in child. MCP clients recycle numeric request ids across a session,
+ * so replaying under the CLIENT's original id risks swallowing a legitimate
+ * later response that reuses it. The sentinel can never collide with a
+ * client-issued id, so the swallow is positively identified.
+ */
+const REPLAY_INIT_ID = '__codeam_replay_init__';
+
 export class RestartableStdioProxy {
   private child: ChildProcess | null = null;
+  private childRl: readline.Interface | null = null;
   private initializeLine: string | null = null;
-  private initializeId: string | number | null = null;
   private inflight = new Set<string | number>();
   private swapping = false;
   private pendingClientLines: string[] = [];
-  private swallowNextInitializeResponse = false;
   private ended: (code: number) => void = () => undefined;
 
   constructor(private readonly opts: Opts) {}
@@ -74,7 +86,6 @@ export class RestartableStdioProxy {
       const msg = JSON.parse(line) as { method?: string; id?: string | number };
       if (msg.method === 'initialize' && this.initializeLine === null) {
         this.initializeLine = line;
-        this.initializeId = msg.id ?? null;
       }
       if (msg.id !== undefined && msg.method !== undefined) this.inflight.add(msg.id);
     } catch {
@@ -87,9 +98,8 @@ export class RestartableStdioProxy {
     try {
       const msg = JSON.parse(line) as { id?: string | number; method?: string };
       if (msg.id !== undefined && msg.method === undefined) {
-        if (this.swallowNextInitializeResponse && msg.id === this.initializeId) {
-          this.swallowNextInitializeResponse = false;
-          return; // replayed-initialize response: the client already has one
+        if (msg.id === REPLAY_INIT_ID) {
+          return; // response to OUR replayed initialize: the client already has one
         }
         this.inflight.delete(msg.id);
       }
@@ -105,13 +115,25 @@ export class RestartableStdioProxy {
     if (this.inflight.size > 0 || this.initializeLine === null || !this.child) return;
     this.swapping = true;
     const old = this.child;
+    const oldRl = this.childRl;
     this.child = null;
-    old.removeAllListeners('exit');
+    this.childRl = null;
+    // Tear down the old child's output path BEFORE killing it: a slow-dying
+    // server (uvx/python ignoring SIGTERM for a beat) can emit straggler
+    // lines that must never reach the client. Belt (close the readline) and
+    // braces (the per-child `child !== this.child` guard in spawnChild).
+    oldRl?.close();
     old.kill('SIGTERM');
+    const escalation = setTimeout(() => {
+      if (!old.killed || old.exitCode === null) old.kill('SIGKILL');
+    }, SIGKILL_ESCALATION_MS);
+    escalation.unref();
     try {
       await this.spawnChild(stdout);
-      this.swallowNextInitializeResponse = true;
-      this.child!.stdin!.write(this.initializeLine + '\n');
+      // Replay the recorded initialize under the sentinel id — positive
+      // identification of the one response we must swallow.
+      const replayed = JSON.parse(this.initializeLine) as Record<string, unknown>;
+      this.child!.stdin!.write(JSON.stringify({ ...replayed, id: REPLAY_INIT_ID }) + '\n');
       this.child!.stdin!.write(
         JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }) + '\n',
       );
@@ -129,10 +151,25 @@ export class RestartableStdioProxy {
       stdio: ['pipe', 'pipe', 'inherit'],
     });
     this.child = child;
+    // A child dying with our writes still buffered on its stdin (e.g. it
+    // exits mid-handshake) surfaces as an EPIPE 'error' event on the stdin
+    // stream — swallow it; the 'exit' handler below owns the outcome.
+    child.stdin?.on('error', () => undefined);
     const rl = readline.createInterface({ input: child.stdout!, crlfDelay: Infinity });
-    rl.on('line', (line) => this.onChildLine(line, stdout));
+    this.childRl = rl;
+    rl.on('line', (line) => {
+      // Per-child guard: once this child has been swapped out (or replaced),
+      // any straggling output it produces must never reach the client.
+      if (child !== this.child) return;
+      this.onChildLine(line, stdout);
+    });
     child.on('exit', (code) => {
-      if (!this.swapping) this.ended(code ?? 1);
+      // Only the CURRENT child's exit ends the proxy. A swapped-out child is
+      // no longer `this.child` when it exits, so its (planned) death is
+      // ignored — while a freshly-spawned child dying mid-swap IS current
+      // and must fail fast rather than hang the session.
+      if (child !== this.child) return;
+      this.ended(code ?? 1);
     });
   }
 }
