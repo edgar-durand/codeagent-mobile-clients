@@ -4,7 +4,6 @@ import { CommandRelayService } from './services/command-relay.service';
 import { PairingService } from './services/pairing.service';
 import { IdeIntegrationService } from './services/ide-integration.service';
 import { AgentOutputMonitor } from './services/agent-output-monitor';
-import { McpConfigWriterService } from './services/mcp-config-writer.service';
 import { CopilotChatService } from './services/copilot-chat.service';
 import { ChatHistoryService } from './services/chat-history.service';
 import { ControllerPanelProvider } from './panels/controller-panel';
@@ -28,7 +27,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   PairingService.initialize(log);
   IdeIntegrationService.initialize(log);
   AgentOutputMonitor.initialize(log);
-  McpConfigWriterService.initialize(log);
   CopilotChatService.initialize(log);
   ChatHistoryService.initialize(context, log);
 
