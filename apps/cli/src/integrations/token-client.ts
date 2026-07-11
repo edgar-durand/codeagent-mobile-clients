@@ -65,7 +65,9 @@ export class IntegrationTokenClient {
 
     if (!resp.ok) {
       const detail = await resp.text().catch(() => '');
-      throw new Error(`INTEGRATION_TOKEN_FAILED status=${resp.status} ${detail}`.trim());
+      // Truncate: a verbose backend error body (HTML page, stack trace) must not
+      // flow unbounded into an Error message that downstream code logs.
+      throw new Error(`INTEGRATION_TOKEN_FAILED status=${resp.status} ${detail.slice(0, 200)}`.trim());
     }
 
     const parsed = (await resp.json()) as { success: boolean; data: BrokeredIntegrationToken };
