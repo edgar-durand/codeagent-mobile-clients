@@ -19,14 +19,20 @@ export const INTEGRATION_REGISTRY: Record<IntegrationId, IntegrationDefinition> 
     delivery: {
       mcp: {
         // mcp-atlassian in BYO-token mode (headless; credentials via env only).
-        // Plan 2's Docker integration test validates this spec end-to-end and
-        // pins the exact version before release.
+        // Version PINNED to the exact release verified headless by Plan 2's
+        // Docker integration test (apps/cli mcp-shim.int.test.ts).
         command: 'uvx',
-        args: ['mcp-atlassian'],
+        args: ['mcp-atlassian==0.22.1'],
         envMapping: {
           ATLASSIAN_OAUTH_ACCESS_TOKEN: 'accessToken',
           ATLASSIAN_OAUTH_CLOUD_ID: 'cloudId',
         },
+        // Without ATLASSIAN_OAUTH_ENABLE=true, JiraConfig.from_env() raises
+        // "Missing required JIRA_URL" (swallowed at server startup) and the
+        // server silently registers ZERO Jira tools. The flag activates
+        // mcp-atlassian's "minimal OAuth config for user-provided tokens"
+        // mode — the BYO-token path the broker feeds. Static + non-secret.
+        staticEnv: { ATLASSIAN_OAUTH_ENABLE: 'true' },
       },
     },
   },

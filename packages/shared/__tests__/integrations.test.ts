@@ -24,6 +24,28 @@ describe('integrations registry', () => {
     expect(jira.delivery.mcp!.args.join(' ')).not.toMatch(/token|secret/i);
   });
 
+  it('jira pins the exact mcp-atlassian version verified by the Docker int test', () => {
+    const mcp = INTEGRATION_REGISTRY.jira.delivery.mcp!;
+    expect(mcp.command).toBe('uvx');
+    expect(mcp.args).toHaveLength(1);
+    // Unpinned `mcp-atlassian` would drift under us between deploys; the pin
+    // is bumped deliberately and re-verified by mcp-shim.int.test.ts.
+    expect(mcp.args[0]).toMatch(/^mcp-atlassian==\d+\.\d+(\.\d+)?$/);
+  });
+
+  it('jira staticEnv enables BYO-token mode and carries no secret-looking material', () => {
+    const mcp = INTEGRATION_REGISTRY.jira.delivery.mcp!;
+    // Verified live (Task 9 Step 1): without ATLASSIAN_OAUTH_ENABLE=true the
+    // server boots but silently registers ZERO Jira tools.
+    expect(mcp.staticEnv?.ATLASSIAN_OAUTH_ENABLE).toBe('true');
+    for (const [key, value] of Object.entries(mcp.staticEnv ?? {})) {
+      // staticEnv is baked into manifests and logs — it must never hold secrets.
+      expect(key).not.toMatch(/token|secret|password/i);
+      expect(value).not.toMatch(/token|secret|password/i);
+      expect(value.length).toBeLessThan(64); // real tokens are long opaque blobs
+    }
+  });
+
   it('every registry entry has id matching its key', () => {
     for (const [id, meta] of Object.entries(INTEGRATION_REGISTRY)) {
       expect((meta as IntegrationDefinition).id).toBe(id);

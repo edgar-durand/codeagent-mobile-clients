@@ -17,12 +17,25 @@ import type { BrokeredIntegrationToken, IntegrationMcpDelivery } from '@codeam/s
 
 const RESTART_AHEAD_MS = 5 * 60 * 1000;
 
-function resolveDelivery(id: string): IntegrationMcpDelivery | null {
+export function resolveDelivery(id: string): IntegrationMcpDelivery | null {
   // Manifest first (data-driven — backend-resolved spec wins), bundled registry fallback.
+  const fromRegistry = isKnownIntegrationId(id) ? (getIntegration(id).delivery.mcp ?? null) : null;
   const fromManifest = readIntegrationsManifest()?.integrations.find((e) => e.id === id)?.delivery
     .mcp;
-  if (fromManifest) return fromManifest;
-  return isKnownIntegrationId(id) ? (getIntegration(id).delivery.mcp ?? null) : null;
+  if (fromManifest) {
+    // Rollout defense: a backend still pinned to a pre-staticEnv @codeam/shared
+    // emits manifests WITHOUT staticEnv. For known ids, merge the bundled
+    // registry's staticEnv UNDERNEATH the manifest's (manifest values win) so
+    // the server still gets its boot flags (jira's ATLASSIAN_OAUTH_ENABLE=true).
+    if (fromRegistry?.staticEnv) {
+      return {
+        ...fromManifest,
+        staticEnv: { ...fromRegistry.staticEnv, ...fromManifest.staticEnv },
+      };
+    }
+    return fromManifest;
+  }
+  return fromRegistry;
 }
 
 /**
@@ -88,7 +101,8 @@ export async function mcpRun(args: string[]): Promise<void> {
   const proxy = new RestartableStdioProxy({
     spawnSpec: async () => {
       current = await client.getToken(id);
-      const env: Record<string, string> = {};
+      // Static boot flags first; the credential mapping wins on any collision.
+      const env: Record<string, string> = { ...delivery.staticEnv };
       for (const [envVar, field] of Object.entries(delivery.envMapping)) {
         const value = current[field as keyof BrokeredIntegrationToken];
         if (typeof value === 'string' && value) env[envVar] = value;
