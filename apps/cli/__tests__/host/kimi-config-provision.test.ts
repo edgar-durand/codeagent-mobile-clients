@@ -59,6 +59,35 @@ describe('kimi oauth_token provisioning — write the credential, NEVER run `kim
     expect(spawnSyncMock).not.toHaveBeenCalled();
   });
 
+  // REGRESSION — ACP login-state slot (2026-07-11 "-32000 Authentication required"
+  // ACP incident, live-verified on a real codespace). The config.toml fix made
+  // HEADLESS work; the ACP failure was MISDIAGNOSED as "the credential belongs in an
+  // oauth/ slot". It does NOT: the 0.23.5 binary's `resolveKimiTokenStorageName`
+  // STRIPS the `oauth/` prefix from `key = "oauth/kimi-code"` → storage name
+  // `kimi-code`, and `FileTokenStorage` reads `<name>.json` from the credentials dir,
+  // so `kimi acp` reads/refreshes `~/.kimi-code/credentials/kimi-code.json`. Live
+  // proof (isolated $KIMI_CODE_HOME): credential there → session/prompt STREAMS;
+  // credential in a bare oauth/kimi-code slot → session/new → -32000. This asserts
+  // the credential lands at the ACP login-state path and NOT the useless oauth/ slot.
+  // Byte-consistent with the codespace test (api-v2 agent.spec.ts).
+  it('oauth_token → credential lands at the ACP login-state slot ~/.kimi-code/credentials/kimi-code.json (NOT a bare oauth/ slot)', () => {
+    const blob = JSON.stringify({
+      access_token: 'x',
+      refresh_token: 'rt',
+      expires_at: 4102444800,
+      scope: 'kimi-code',
+      token_type: 'Bearer',
+    });
+    provisionAgentCredentials('kimi', { kind: 'oauth_token', value: blob }, tmpHome);
+    // The load-bearing file `kimi acp`'s FileTokenStorage reads for key oauth/kimi-code.
+    const acpSlot = path.join(tmpHome, '.kimi-code', 'credentials', 'kimi-code.json');
+    expect(fs.existsSync(acpSlot)).toBe(true);
+    expect(fs.readFileSync(acpSlot, 'utf8')).toBe(blob);
+    // The misdiagnosed slot MUST NOT be where the credential lives — it is never read.
+    expect(fs.existsSync(path.join(tmpHome, '.kimi-code', 'oauth', 'kimi-code'))).toBe(false);
+    expect(fs.existsSync(path.join(tmpHome, '.kimi-code', 'oauth', 'kimi-code.json'))).toBe(false);
+  });
+
   it('api_key path does NOT write config.toml (KIMI_API_KEY needs no managed provider)', () => {
     provisionAgentCredentials('kimi', { kind: 'api_key', value: 'sk-kimi' }, tmpHome);
     expect(fs.existsSync(path.join(tmpHome, '.kimi-code', 'config.toml'))).toBe(false);
