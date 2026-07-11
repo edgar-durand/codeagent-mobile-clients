@@ -129,7 +129,16 @@ beforeAll(() => {
 });
 
 afterAll(() => {
-  fs.rmSync(dir, { recursive: true, force: true });
+  // Windows CI flake: a just-exited child can still hold the temp dir →
+  // rmdir EBUSY (seen repeatedly on main, e.g. runs 29136117097/29157330278,
+  // including merges that never touched the CLI). maxRetries makes Node
+  // retry EBUSY/ENOTEMPTY; the catch is the last resort — the runner wipes
+  // its own temp dir anyway, and a leaked dir must not fail the suite.
+  try {
+    fs.rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
+  } catch {
+    /* best-effort teardown */
+  }
 });
 
 beforeEach(() => {
