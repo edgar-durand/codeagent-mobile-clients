@@ -14,7 +14,7 @@ import type { AcpClientOptions } from '../../../src/agents/acp/client';
  * redundant RPC so the live session keeps responding.
  */
 
-function makeClient(): AcpClient {
+function makeClient(overrides?: Partial<AcpClientOptions>): AcpClient {
   const opts: AcpClientOptions = {
     adapter: {} as unknown as AcpClientOptions['adapter'],
     cwd: '/tmp/work',
@@ -22,6 +22,7 @@ function makeClient(): AcpClient {
     onRequestPermission: (async () => ({
       outcome: { outcome: 'cancelled' },
     })) as unknown as AcpClientOptions['onRequestPermission'],
+    ...overrides,
   };
   return new AcpClient(opts);
 }
@@ -60,5 +61,24 @@ describe('AcpClient.loadSession — self-load guard', () => {
       mcpServers: [],
     });
     expect(internals.sessionId).toBe('sess-older');
+  });
+
+  it('forwards opts.mcpServers into the session/load request', async () => {
+    const mcpServers = [
+      { name: 'jira', command: '/usr/bin/node', args: ['cli.js', 'mcp-run', 'jira'], env: [] },
+    ];
+    const client = makeClient({ mcpServers });
+    const loadSession = vi.fn().mockResolvedValue(undefined);
+    const internals = client as unknown as ClientInternals;
+    internals.connection = { loadSession };
+    internals.sessionId = 'sess-active';
+
+    await client.loadSession('sess-older');
+
+    expect(loadSession).toHaveBeenCalledWith({
+      sessionId: 'sess-older',
+      cwd: '/tmp/work',
+      mcpServers,
+    });
   });
 });

@@ -31,6 +31,7 @@ import {
   type CreateTerminalResponse,
   type InitializeResponse,
   type KillTerminalResponse,
+  type McpServer,
   type NewSessionResponse,
   type PromptResponse,
   type ReadTextFileResponse,
@@ -193,6 +194,10 @@ export interface AcpClientOptions {
   /** Working directory for the agent's session (becomes the
    *  primary `cwd` ACP root). */
   cwd: string;
+  /** Agent Toolkits integration MCP servers to advertise on `newSession` /
+   *  `loadSession` (built by {@link buildMcpServersForStart}). Omitted/empty
+   *  when the caller has no manifest or the agent doesn't need any. */
+  mcpServers?: McpServer[];
   /** Forwarded for every `session/update` notification the agent
    *  sends. Mapping to chunks happens in the caller via the
    *  pure mappers — this wrapper is just a relay. */
@@ -511,7 +516,7 @@ export class AcpClient {
       let newSession: Awaited<ReturnType<ClientSideConnection['newSession']>>;
       try {
         newSession = await Promise.race([
-          this.connection.newSession({ cwd, mcpServers: [] }),
+          this.connection.newSession({ cwd, mcpServers: this.opts.mcpServers ?? [] }),
           startupFailure,
           startAborted,
         ]);
@@ -707,7 +712,7 @@ export class AcpClient {
     await this.connection.loadSession({
       sessionId,
       cwd: this.opts.cwd,
-      mcpServers: [],
+      mcpServers: this.opts.mcpServers ?? [],
     });
     this.sessionId = sessionId;
     log.info('acpClient', `loadSession ← ok sessionId=${sessionId.slice(0, 8)}`);
