@@ -14,7 +14,6 @@ import { CopilotChatService } from '../services/copilot-chat.service';
 import { AgentStrategyRegistry } from '../services/strategies/AgentStrategyRegistry';
 import type { AgentInvocation } from '../services/strategies/AgentStrategy';
 import { ChatHistoryService } from '../services/chat-history.service';
-import { McpConfigWriterService, McpConfigureRequest, McpEntry } from '../services/mcp-config-writer.service';
 import { FileWatcherService } from '../services/file-watcher.service';
 import { Messages } from '../ui/messages';
 import { StatusBar } from '../ui/status-bar';

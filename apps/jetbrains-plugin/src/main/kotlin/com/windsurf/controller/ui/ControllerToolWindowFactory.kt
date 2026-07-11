@@ -23,13 +23,9 @@ import com.windsurf.controller.services.PairingService
 import com.windsurf.controller.services.RecentSessionsApi
 import com.windsurf.controller.services.SettingsService
 import com.windsurf.controller.services.TerminalOpsService
-import com.windsurf.controller.services.McpConfigWriterService
-import com.windsurf.controller.services.McpConfigureRequest
-import com.windsurf.controller.services.McpEntry
 import com.windsurf.controller.services.FileOpsService
 import com.windsurf.controller.services.ProjectOpsService
 import com.windsurf.controller.services.buildCloudFallbackMessage
-import com.windsurf.controller.services.McpServerDef
 import com.windsurf.controller.util.BuildInstallCommand
 import com.windsurf.controller.services.strategies.AgentInvocation
 import com.windsurf.controller.services.strategies.AgentStrategyRegistry

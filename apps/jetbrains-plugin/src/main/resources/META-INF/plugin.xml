@@ -69,8 +69,6 @@
         <applicationService
                 serviceImplementation="com.windsurf.controller.services.AgentOutputMonitor"/>
         <applicationService
-                serviceImplementation="com.windsurf.controller.services.McpConfigWriterService"/>
-        <applicationService
                 serviceImplementation="com.windsurf.controller.services.FileOpsService"/>
         <applicationService
                 serviceImplementation="com.windsurf.controller.services.ProjectOpsService"/>

@@ -12,11 +12,6 @@ import { AgentStrategyRegistry } from '../services/strategies/AgentStrategyRegis
 import type { AgentInvocation, StrategyResult } from '../services/strategies/AgentStrategy';
 import { CopilotChatService } from '../services/copilot-chat.service';
 import { AgentOutputMonitor } from '../services/agent-output-monitor';
-import {
-  McpConfigWriterService,
-  McpConfigureRequest,
-  McpEntry,
-} from '../services/mcp-config-writer.service';
 import { Messages } from '../ui/messages';
 import { buildInstallAndRun as buildInstallAndRunPure } from '../utils/build-install-command';
 import { normalizeCliAgentId } from '../utils/cli-agent-id';
@@ -330,16 +325,6 @@ export class RemoteCommandRouter {
         break;
       }
 
-      case 'mcp_configure': {
-        this.handleMcpConfigure(command, relay);
-        break;
-      }
-
-      case 'mcp_status': {
-        this.handleMcpStatus(command, relay);
-        break;
-      }
-
       case 'read_file': {
         const filePath = (command.payload as Record<string, unknown>)?.path as string | undefined;
         if (!filePath) {
@@ -616,69 +601,6 @@ export class RemoteCommandRouter {
         });
       },
     );
-  }
-
-  private handleMcpConfigure(command: RemoteCommand, relay: CommandRelayService): void {
-    try {
-      const payload = command.payload;
-      const scope = (payload.scope as string) || 'global';
-      const mcpsArray = (payload.mcps as Array<Record<string, unknown>>) || [];
-      const targetAgents = payload.targetAgents as string[] | undefined;
-
-      const mcps: McpEntry[] = mcpsArray.map((obj) => {
-        const serverObj = obj.server as Record<string, unknown>;
-        const envObj = (obj.env as Record<string, string>) || {};
-        return {
-          id: obj.id as string,
-          server: {
-            command: serverObj.command as string,
-            args: serverObj.args as string[],
-          },
-          env: envObj,
-        };
-      });
-
-      const request: McpConfigureRequest = { scope, mcps, targetAgents };
-      const writer = McpConfigWriterService.getInstance();
-      const results = writer.configure(request);
-
-      relay.sendResult(command.id, 'completed', {
-        message: `MCP configuration written for ${results.filter((r) => r.status === 'written').length} agents`,
-        results,
-      });
-    } catch (e) {
-      relay.sendResult(command.id, 'failed', {
-        error: `MCP configuration failed: ${e instanceof Error ? e.message : String(e)}`,
-      });
-    }
-  }
-
-  private handleMcpStatus(command: RemoteCommand, relay: CommandRelayService): void {
-    try {
-      const writer = McpConfigWriterService.getInstance();
-      const configured = writer.getConfiguredMcps();
-
-      const allMcpIds = new Set<string>();
-      const agents: Array<{ agent: string; configFile: string; mcpIds: string[] }> = [];
-
-      for (const info of configured) {
-        info.mcpIds.forEach((id) => allMcpIds.add(id));
-        agents.push({
-          agent: info.agent,
-          configFile: info.configFile,
-          mcpIds: info.mcpIds,
-        });
-      }
-
-      relay.sendResult(command.id, 'completed', {
-        configuredMcpIds: Array.from(allMcpIds),
-        agents,
-      });
-    } catch (e) {
-      relay.sendResult(command.id, 'failed', {
-        error: `Failed to read MCP status: ${e instanceof Error ? e.message : String(e)}`,
-      });
-    }
   }
 
 }

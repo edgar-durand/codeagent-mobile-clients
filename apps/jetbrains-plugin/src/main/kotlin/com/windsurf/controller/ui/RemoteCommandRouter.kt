@@ -18,10 +18,6 @@ import com.windsurf.controller.services.AgentOutputMonitor
 import com.windsurf.controller.services.CommandRelayService
 import com.windsurf.controller.services.FileOpsService
 import com.windsurf.controller.services.IdeIntegrationService
-import com.windsurf.controller.services.McpConfigWriterService
-import com.windsurf.controller.services.McpConfigureRequest
-import com.windsurf.controller.services.McpEntry
-import com.windsurf.controller.services.McpServerDef
 import com.windsurf.controller.services.PairingService
 import com.windsurf.controller.services.ProjectOpsService
 import com.windsurf.controller.services.SettingsService
@@ -244,12 +240,6 @@ class RemoteCommandRouter(private val project: Project) {
                     com.google.gson.JsonObject().apply {
                         addProperty("message", "Input provided")
                     }
-                }
-                "mcp_configure" -> {
-                    handleMcpConfigure(command, relay)
-                }
-                "mcp_status" -> {
-                    handleMcpStatus(command, relay)
                 }
                 "read_file" -> respondWith(command, relay) {
                     val filePath = command.payload.get("path")?.asString
@@ -718,95 +708,4 @@ class RemoteCommandRouter(private val project: Project) {
         }
     }
 
-    private fun handleMcpConfigure(
-        command: CommandRelayService.RemoteCommand,
-        relay: CommandRelayService
-    ) {
-        try {
-            val payload = command.payload
-            val scope = payload.get("scope")?.asString ?: "global"
-            val mcpsArray = payload.getAsJsonArray("mcps") ?: com.google.gson.JsonArray()
-            val targetAgentsArray = payload.getAsJsonArray("targetAgents")
-
-            val mcps = mcpsArray.map { element ->
-                val obj = element.asJsonObject
-                val serverObj = obj.getAsJsonObject("server")
-                val envObj = obj.getAsJsonObject("env") ?: com.google.gson.JsonObject()
-                McpEntry(
-                    id = obj.get("id").asString,
-                    server = McpServerDef(
-                        command = serverObj.get("command").asString,
-                        args = serverObj.getAsJsonArray("args").map { it.asString }
-                    ),
-                    env = envObj.entrySet().associate { it.key to it.value.asString }
-                )
-            }
-
-            val targetAgents = targetAgentsArray?.map { it.asString }
-
-            val request = McpConfigureRequest(
-                scope = scope,
-                mcps = mcps,
-                targetAgents = targetAgents
-            )
-
-            val writer = McpConfigWriterService.getInstance()
-            val results = writer.configure(request)
-
-            val resultsArray = com.google.gson.JsonArray()
-            for (r in results) {
-                resultsArray.add(com.google.gson.JsonObject().apply {
-                    addProperty("agent", r.agent)
-                    addProperty("file", r.file)
-                    addProperty("status", r.status)
-                    if (r.error != null) addProperty("error", r.error)
-                })
-            }
-
-            relay.sendResult(command.id, "completed", com.google.gson.JsonObject().apply {
-                addProperty("message", "MCP configuration written for ${results.count { it.status == "written" }} agents")
-                add("results", resultsArray)
-            })
-        } catch (e: Exception) {
-            relay.sendResult(command.id, "failed", com.google.gson.JsonObject().apply {
-                addProperty("error", "MCP configuration failed: ${e.message}")
-            })
-        }
-    }
-
-    private fun handleMcpStatus(
-        command: CommandRelayService.RemoteCommand,
-        relay: CommandRelayService
-    ) {
-        try {
-            val writer = McpConfigWriterService.getInstance()
-            val configured = writer.getConfiguredMcps()
-
-            val allMcpIds = mutableSetOf<String>()
-            val agentsArray = com.google.gson.JsonArray()
-
-            for (info in configured) {
-                allMcpIds.addAll(info.mcpIds)
-                agentsArray.add(com.google.gson.JsonObject().apply {
-                    addProperty("agent", info.agent)
-                    addProperty("configFile", info.configFile)
-                    val idsArr = com.google.gson.JsonArray()
-                    info.mcpIds.forEach { idsArr.add(it) }
-                    add("mcpIds", idsArr)
-                })
-            }
-
-            val allIdsArray = com.google.gson.JsonArray()
-            allMcpIds.forEach { allIdsArray.add(it) }
-
-            relay.sendResult(command.id, "completed", com.google.gson.JsonObject().apply {
-                add("configuredMcpIds", allIdsArray)
-                add("agents", agentsArray)
-            })
-        } catch (e: Exception) {
-            relay.sendResult(command.id, "failed", com.google.gson.JsonObject().apply {
-                addProperty("error", "Failed to read MCP status: ${e.message}")
-            })
-        }
-    }
 }
