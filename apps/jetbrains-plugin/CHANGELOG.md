@@ -4,6 +4,25 @@ All notable changes to the CodeAgent-Mobile JetBrains plugin are documented here
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.60.47] — 2026-07-11
+
+### Added
+
+- **cli:** Integrations manifest store + broker token client
+- **cli:** Codeam mcp-run — token-refreshing stdio shim for integration MCP servers
+- **cli:** Inject integration MCP servers into ACP sessions from the deploy manifest
+- **shared:** StaticEnv on IntegrationMcpDelivery + pin mcp-atlassian==0.22.1 (jira needs ATLASSIAN_OAUTH_ENABLE)
+
+### Fixed
+
+- **cli:** Truncate broker error detail to 200 chars in thrown message
+- **cli:** Mcp-run proxy — stale-child teardown, SIGKILL escalation, sentinel replay id, fail-fast on mid-swap death
+- **cli:** Mcp-run proxy — cancelled-request inflight cleanup, token-fetch-before-teardown, pip output off stdout
+
+### Tests
+
+- **cli:** Docker integration test — mcp-run shim end-to-end with real mcp-atlassian
+
 ## [2.60.46] — 2026-07-11
 
 ### Added
