@@ -6,6 +6,11 @@ import {
   getIntegration,
   isKnownIntegrationId,
 } from '../src/integrations/registry';
+import {
+  INTEGRATION_BRANDING,
+  UPCOMING_INTEGRATION_IDS,
+  getIntegrationBranding,
+} from '../src/integrations/branding';
 import { USER_EVENTS } from '../src/types/events';
 
 describe('integrations registry', () => {
@@ -63,5 +68,52 @@ describe('integrations registry', () => {
     expect(USER_EVENTS.INTEGRATION_LINKED).toBe('integration_linked');
     expect(USER_EVENTS.INTEGRATION_UNLINKED).toBe('integration_unlinked');
     expect(USER_EVENTS.INTEGRATION_CREDENTIAL_INVALID).toBe('integration_credential_invalid');
+  });
+});
+
+describe('integration branding catalog', () => {
+  const HEX_COLOR_RE = /^#[0-9A-Fa-f]{3,8}$/;
+
+  it('every branding entry has a non-empty logoSvg starting with <svg', () => {
+    for (const [id, branding] of Object.entries(INTEGRATION_BRANDING)) {
+      expect(branding.logoSvg.length).toBeGreaterThan(0);
+      expect(branding.logoSvg.trim().startsWith('<svg')).toBe(true);
+      expect(branding.id).toBe(id);
+    }
+  });
+
+  it('every branding entry has a valid brandColor hex value', () => {
+    for (const branding of Object.values(INTEGRATION_BRANDING)) {
+      expect(branding.brandColor).toMatch(HEX_COLOR_RE);
+    }
+  });
+
+  it('the jira registry id is present in the branding catalog', () => {
+    expect(INTEGRATION_BRANDING.jira).toBeDefined();
+    expect(INTEGRATION_BRANDING.jira.name).toBe('Jira');
+  });
+
+  it('every upcoming integration id has a branding entry', () => {
+    for (const id of UPCOMING_INTEGRATION_IDS) {
+      expect(getIntegrationBranding(id)).not.toBeNull();
+    }
+  });
+
+  it('getIntegrationBranding returns null for an unknown id', () => {
+    expect(getIntegrationBranding('nope')).toBeNull();
+  });
+
+  it('logoSvg strings hold no secret-looking material and no external fetch targets', () => {
+    for (const branding of Object.values(INTEGRATION_BRANDING)) {
+      expect(branding.logoSvg).not.toMatch(/token|secret/i);
+      // xmlns declarations are fine (they're not fetched); href/src fetch targets are not.
+      expect(branding.logoSvg).not.toMatch(/\bhref=/i);
+      expect(branding.logoSvg).not.toMatch(/\bsrc=/i);
+      const httpMatches = branding.logoSvg.match(/https?:\/\/\S+/gi) ?? [];
+      for (const match of httpMatches) {
+        // Only allow the xmlns URI itself, never a live fetch target.
+        expect(match.replace(/["'>].*$/, '')).toBe('http://www.w3.org/2000/svg');
+      }
+    }
   });
 });
