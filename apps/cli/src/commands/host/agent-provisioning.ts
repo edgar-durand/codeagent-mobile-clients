@@ -232,6 +232,52 @@ const cursorProvisioner: AgentProvisioner = {
   },
 };
 
+/**
+ * The managed-provider config kimi-code needs to run from an INJECTED OAuth
+ * credential WITHOUT a `kimi login`. Written verbatim to `~/.kimi-code/config.toml`.
+ *
+ * ⚠️ Regression fix (kimi 0.23.5, 2026-07-11, live-verified on a real codespace):
+ * v2.60.30 / PR #1329 removed `provisionKimiConfig` on the belief that "the
+ * credential blob suffices + kimi defaults to a managed model". That held on
+ * 0.23.4 but is FALSE on 0.23.5: the credential now AUTHENTICATES (ACP
+ * `session/new ← ok`) but the config starts EMPTY, so `kimi provider list` shows
+ * "No providers configured" and every `session/prompt` returns `end_turn` with
+ * ZERO output ("No model configured"). The two-failure trap: running `kimi login`
+ * to populate the config device-flow-WIPES the credential → "Authentication
+ * required". So we must WRITE the config (never run `kimi login`).
+ *
+ * Reverse-engineered from the 0.23.5 binary + validated live (`kimi doctor config`
+ * OK, `kimi -p` returns real text, ACP `session/prompt` streams chunks):
+ *   - Managed provider name is the literal `managed:kimi-code`; `type = "kimi"`.
+ *   - `base_url` = DEFAULT_KIMI_CODE_BASE_URL (overridable via `KIMI_CODE_BASE_URL`).
+ *   - The `[...oauth]` ref points at the on-disk credential slot `oauth/kimi-code`
+ *     (storage="file") authed against `oauthHost = https://auth.kimi.com`; kimi
+ *     reads/refreshes `~/.kimi-code/credentials/kimi-code.json` through it.
+ *   - `default_model` MUST resolve to a `[models."…"]` alias or the prompt fails.
+ *     `kimi-k2` is the managed model (256K context).
+ *
+ * ⚠️ Version-sensitivity: the `kimi-k2` model id + `managed:kimi-code` provider
+ * shape are 0.23.5-specific. If a future kimi renames the managed model this must
+ * change (or the alias/default_model must be refreshed). Keep it byte-for-byte in
+ * sync with the codespace snippet in api-v2 `codespaces/agent.ts`.
+ */
+const KIMI_MANAGED_CONFIG_TOML = `default_model = "kimi-k2"
+
+[providers."managed:kimi-code"]
+type = "kimi"
+base_url = "https://api.kimi.com/coding/v1"
+
+[providers."managed:kimi-code".oauth]
+storage = "file"
+key = "oauth/kimi-code"
+oauthHost = "https://auth.kimi.com"
+
+[models.kimi-k2]
+provider = "managed:kimi-code"
+model = "kimi-k2"
+max_context_size = 262144
+`;
+
 const kimiProvisioner: AgentProvisioner = {
   write(auth, home): Record<string, string> {
     // Kimi's OAuth device-flow login-state is a per-provider JSON file named
@@ -257,14 +303,14 @@ const kimiProvisioner: AgentProvisioner = {
     // backend KimiOAuthProvider produces), written verbatim. Must NOT go in
     // KIMI_API_KEY.
     credentialsFiles.forEach((f) => writeFile0600(f, auth.value));
-    // ⚠️ Do NOT run `kimi login` to "provision config.toml". Root-caused live on
-    // kimi 0.23.4 (2026-07-09): `kimi login` does NOT detect the on-disk
-    // credential — it ALWAYS starts the device flow and ZEROES
-    // ~/.kimi-code/credentials/kimi-code.json at flow-start, so headless it leaves
-    // the credential EMPTY → `kimi acp` → "-32000 Authentication required". The
-    // written blob is SUFFICIENT alone: session/new authenticates from it AND a
-    // real prompt completes (stopReason:end_turn) with NO config.toml — kimi-code
-    // defaults to its managed model. (Same fix applied to the codespace bootstrap.)
+    // ⚠️ Do NOT run `kimi login` to "provision config.toml" — it device-flow-WIPES
+    // the credential (see the two-failure trap in KIMI_MANAGED_CONFIG_TOML). Instead
+    // WRITE the managed-provider config the injected credential needs so kimi
+    // resolves a provider + default_model without a login. This is the
+    // `provisionKimiConfig` that PR #1329 (v2.60.30) removed — brought back as a
+    // config-WRITE, byte-for-byte matched to the codespace snippet in api-v2.
+    // The 0.23.5 CLI reads `~/.kimi-code/config.toml`.
+    writeFile0600(path.join(home, '.kimi-code', 'config.toml'), KIMI_MANAGED_CONFIG_TOML);
     return {};
   },
 };

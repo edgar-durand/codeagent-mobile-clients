@@ -40,6 +40,30 @@ describe('kimi oauth_token provisioning — write the credential, NEVER run `kim
     expect(spawnSyncMock).not.toHaveBeenCalled();
   });
 
+  it('writes the managed-provider config.toml so the injected credential resolves a model (kimi 0.23.5 fix)', () => {
+    provisionAgentCredentials('kimi', { kind: 'oauth_token', value: '{"access_token":"x"}' }, tmpHome);
+
+    const cfgPath = path.join(tmpHome, '.kimi-code', 'config.toml');
+    expect(fs.existsSync(cfgPath)).toBe(true);
+    const cfg = fs.readFileSync(cfgPath, 'utf8');
+    // The managed provider + a resolvable default_model must be present — without
+    // these kimi 0.23.5 authenticates but returns empty (No model configured).
+    expect(cfg).toContain('default_model = "kimi-k2"');
+    expect(cfg).toContain('[providers."managed:kimi-code"]');
+    expect(cfg).toContain('base_url = "https://api.kimi.com/coding/v1"');
+    expect(cfg).toContain('key = "oauth/kimi-code"');
+    expect(cfg).toContain('[models.kimi-k2]');
+    expect(cfg).toContain('max_context_size = 262144');
+
+    // config write must not shell out to `kimi login` either.
+    expect(spawnSyncMock).not.toHaveBeenCalled();
+  });
+
+  it('api_key path does NOT write config.toml (KIMI_API_KEY needs no managed provider)', () => {
+    provisionAgentCredentials('kimi', { kind: 'api_key', value: 'sk-kimi' }, tmpHome);
+    expect(fs.existsSync(path.join(tmpHome, '.kimi-code', 'config.toml'))).toBe(false);
+  });
+
   it('api_key path writes KIMI_API_KEY and runs nothing', () => {
     const env = provisionAgentCredentials('kimi', { kind: 'api_key', value: 'sk-kimi' }, tmpHome);
     expect(env).toEqual({ KIMI_API_KEY: 'sk-kimi' });
