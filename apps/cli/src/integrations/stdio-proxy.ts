@@ -65,7 +65,7 @@ export class RestartableStdioProxy {
     rl.on('line', (line) => this.onClientLine(line));
     rl.on('close', () => this.child?.stdin?.end());
 
-    const timer = setInterval(() => void this.maybeRestart(stdout), RESTART_CHECK_INTERVAL_MS);
+    const timer = setInterval(() => this.checkRestart(stdout), RESTART_CHECK_INTERVAL_MS);
     timer.unref();
 
     return new Promise<void>((resolve) => {
@@ -83,9 +83,21 @@ export class RestartableStdioProxy {
       return;
     }
     try {
-      const msg = JSON.parse(line) as { method?: string; id?: string | number };
+      const msg = JSON.parse(line) as {
+        method?: string;
+        id?: string | number;
+        params?: { requestId?: string | number };
+      };
       if (msg.method === 'initialize' && this.initializeLine === null) {
         this.initializeLine = line;
+      }
+      if (msg.method === 'notifications/cancelled') {
+        // Per MCP, the server SHOULD NOT reply to a cancelled request — so no
+        // response will ever decrement it. Without this, the cancelled id
+        // pins `inflight` > 0 forever and blocks every future token-refresh
+        // restart for the rest of the session.
+        const requestId = msg.params?.requestId;
+        if (requestId !== undefined) this.inflight.delete(requestId);
       }
       if (msg.id !== undefined && msg.method !== undefined) this.inflight.add(msg.id);
     } catch {
@@ -107,13 +119,41 @@ export class RestartableStdioProxy {
       /* forward verbatim */
     }
     stdout.write(line + '\n');
-    if (this.inflight.size === 0) void this.maybeRestart(stdout);
+    if (this.inflight.size === 0) this.checkRestart(stdout);
+  }
+
+  /**
+   * Failsafe wrapper for the fire-and-forget call sites (post-response check
+   * + the 30 s timer): `maybeRestart` handles the token-fetch failure itself,
+   * but nothing that escapes it may become an unhandled rejection — that
+   * would kill the whole shim process.
+   */
+  private checkRestart(stdout: NodeJS.WritableStream): void {
+    this.maybeRestart(stdout).catch((err) => {
+      process.stderr.write(
+        `[codeam mcp-run] restart check failed (will retry): ${err instanceof Error ? err.message : String(err)}\n`,
+      );
+    });
   }
 
   private async maybeRestart(stdout: NodeJS.WritableStream): Promise<void> {
     if (this.swapping || !this.opts.shouldRestartNow()) return;
     if (this.inflight.size > 0 || this.initializeLine === null || !this.child) return;
     this.swapping = true;
+    // Fetch the fresh token/spec BEFORE tearing anything down: if the broker
+    // is unreachable, the healthy old child must keep serving (its token is
+    // near expiry, not expired) and the next opportunistic check retries.
+    let spec: ProxyChildSpec;
+    try {
+      spec = await this.opts.spawnSpec();
+    } catch (err) {
+      process.stderr.write(
+        `[codeam mcp-run] token refresh failed, keeping current server (will retry): ${err instanceof Error ? err.message : String(err)}\n`,
+      );
+      this.swapping = false;
+      for (const l of this.pendingClientLines.splice(0)) this.onClientLine(l);
+      return;
+    }
     const old = this.child;
     const oldRl = this.childRl;
     this.child = null;
@@ -129,7 +169,7 @@ export class RestartableStdioProxy {
     }, SIGKILL_ESCALATION_MS);
     escalation.unref();
     try {
-      await this.spawnChild(stdout);
+      await this.spawnChild(stdout, spec);
       // Replay the recorded initialize under the sentinel id — positive
       // identification of the one response we must swallow.
       const replayed = JSON.parse(this.initializeLine) as Record<string, unknown>;
@@ -143,8 +183,8 @@ export class RestartableStdioProxy {
     }
   }
 
-  private async spawnChild(stdout: NodeJS.WritableStream): Promise<void> {
-    const spec = await this.opts.spawnSpec();
+  private async spawnChild(stdout: NodeJS.WritableStream, preResolved?: ProxyChildSpec): Promise<void> {
+    const spec = preResolved ?? (await this.opts.spawnSpec());
     const spawn = this.opts.spawnImpl ?? nodeSpawn;
     const child = spawn(spec.command, spec.args, {
       env: { ...process.env, ...spec.env }, // env only — never argv

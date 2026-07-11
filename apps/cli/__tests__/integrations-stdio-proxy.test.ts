@@ -344,4 +344,81 @@ describe('RestartableStdioProxy', () => {
     stdin.end();
     await done;
   });
+
+  it('removes a cancelled request from in-flight tracking so a restart is not blocked forever', async () => {
+    const { stdin, stdout, outLines } = makeStreams();
+    const { spawnSpec } = spawnSpecFactory(['tok-old', 'tok-new']);
+    let restart = false;
+    const proxy = new RestartableStdioProxy({
+      spawnSpec,
+      shouldRestartNow: () => restart,
+      stdin,
+      stdout,
+    });
+    const done = proxy.start();
+
+    send(stdin, { jsonrpc: '2.0', id: 1, method: 'initialize', params: {} });
+    await waitForId(outLines, 1);
+
+    // id 2 goes in-flight and is NEVER answered (the fixture holds it) —
+    // per MCP, after notifications/cancelled the server SHOULD NOT reply.
+    send(stdin, { jsonrpc: '2.0', id: 2, method: 'hold', params: {} });
+    await sleep(100); // let the hold request land before cancelling it
+    send(stdin, { jsonrpc: '2.0', method: 'notifications/cancelled', params: { requestId: 2 } });
+
+    restart = true;
+    // The cancelled id must no longer count as in-flight: the next completed
+    // response must be able to trigger the swap.
+    await waitForToken(stdin, outLines, 'tok-new');
+
+    stdin.end();
+    await done;
+  });
+
+  it('leaves the healthy old child running when the token fetch fails, then retries and succeeds', async () => {
+    const { stdin, stdout, outLines } = makeStreams();
+    let calls = 0;
+    const spawnSpec = async (): Promise<ProxyChildSpec> => {
+      calls += 1;
+      if (calls === 2) throw new Error('broker unreachable'); // first RESTART attempt fails
+      return {
+        command: process.execPath,
+        args: [FIXTURE],
+        env: {
+          FAKE_TOKEN: calls === 1 ? 'tok-old' : 'tok-new',
+          INSTANCE_TAG: `instance-${calls}`,
+        },
+      };
+    };
+    let restart = false;
+    const proxy = new RestartableStdioProxy({
+      spawnSpec,
+      shouldRestartNow: () => restart,
+      stdin,
+      stdout,
+    });
+    const done = proxy.start();
+
+    send(stdin, { jsonrpc: '2.0', id: 1, method: 'initialize', params: {} });
+    await waitForId(outLines, 1);
+
+    restart = true;
+    send(stdin, { jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} });
+    await waitForId(outLines, 2); // completed response → triggers the FAILING restart attempt
+
+    // The failed token fetch must leave the old child untouched: it still
+    // answers (and the process must not die on an unhandled rejection).
+    await sleep(150);
+    send(stdin, { jsonrpc: '2.0', id: 3, method: 'tools/list', params: {} });
+    const resp3 = await waitForId(outLines, 3);
+    expect(resp3.result?.tools?.[0]?.token).toBe('tok-old');
+
+    // Subsequent opportunities (each completed probe response) retry the
+    // swap, which now succeeds.
+    await waitForToken(stdin, outLines, 'tok-new');
+    expect(calls).toBeGreaterThanOrEqual(3);
+
+    stdin.end();
+    await done;
+  });
 });

@@ -67,7 +67,13 @@ function ensureCommand(command: string): void {
   }
   if (command === 'uvx') {
     try {
-      execSync('python3 -m pip install --user --quiet uv', { stdio: 'inherit', timeout: 180_000 });
+      // stdout is the live MCP protocol channel — pip's output must NEVER
+      // land there mid-handshake. Route both its stdout and stderr to the
+      // shim's stderr instead.
+      execSync('python3 -m pip install --user --quiet uv', {
+        stdio: ['ignore', process.stderr, process.stderr],
+        timeout: 180_000,
+      });
     } catch {
       /* surface at spawn */
     }
