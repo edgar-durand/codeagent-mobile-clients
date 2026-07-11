@@ -302,6 +302,18 @@ const kimiProvisioner: AgentProvisioner = {
     // {access_token,refresh_token,expires_at,scope,token_type,expires_in} the
     // backend KimiOAuthProvider produces), written verbatim. Must NOT go in
     // KIMI_API_KEY.
+    //
+    // ⚠️ ACP LOGIN-STATE SLOT (root cause of the 2026-07-11 "-32000 Authentication
+    // required" ACP incident — live-verified on a real codespace): the config's
+    // oauth ref `storage="file" key="oauth/kimi-code"` does NOT resolve to
+    // `~/.kimi-code/oauth/`. The 0.23.5 binary's `resolveKimiTokenStorageName`
+    // STRIPS the `oauth/` prefix → storage name `kimi-code`, and `FileTokenStorage`
+    // reads `<name>.json` from the credentials dir → the token MUST be
+    // `~/.kimi-code/credentials/kimi-code.json`. `kimi acp` reads/refreshes THIS
+    // file for auth (strace-confirmed) and streams a real session/prompt reply from
+    // it; writing the blob to a bare `~/.kimi-code/oauth/kimi-code` slot instead →
+    // session/new → -32000 (proven both ways in an isolated $KIMI_CODE_HOME). Do NOT
+    // "move" this to an oauth/ slot — credentialsFiles below IS the ACP login state.
     credentialsFiles.forEach((f) => writeFile0600(f, auth.value));
     // ⚠️ Do NOT run `kimi login` to "provision config.toml" — it device-flow-WIPES
     // the credential (see the two-failure trap in KIMI_MANAGED_CONFIG_TOML). Instead
