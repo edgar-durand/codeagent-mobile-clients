@@ -78,6 +78,9 @@ export const USER_EVENTS = {
   CLI_UPDATE_PROGRESS: 'cli_update_progress',
   CLI_UPDATE_FAILED: 'cli_update_failed',
   BATON_STATE: 'baton_state',
+  INTEGRATION_LINKED: 'integration_linked',
+  INTEGRATION_UNLINKED: 'integration_unlinked',
+  INTEGRATION_CREDENTIAL_INVALID: 'integration_credential_invalid',
   // CodeRabbit reviewer — the CLI posts these to /api/coderabbit/events; the
   // backend re-publishes them on the per-user SSE bus (mirrored in repo A).
   CODERABBIT_PROGRESS: 'coderabbit_progress',
