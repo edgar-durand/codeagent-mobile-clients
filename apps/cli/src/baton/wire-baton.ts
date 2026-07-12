@@ -309,6 +309,14 @@ export async function runBatonSession(opts: BatonSessionOptions): Promise<void> 
     onSessionUpdate: (notification) => {
       for (const delta of mapSessionUpdate(notification)) streaming.append(delta);
     },
+    // Swallow the ACP session/load history replay during the kimi "Session is
+    // closed" recovery (AcpClient.reestablishSession) — kimi 0.23.6 replays the
+    // whole conversation as session/update, which would otherwise prepend a
+    // prior turn's text to the recovered reply on the baton's mobile stream too
+    // (same leak the plain ACP runner wires at runner.ts). Same `streaming`
+    // instance the baton's own AcpDriver.start bracketing uses.
+    beginLoadReplay: () => streaming.beginLoadReplay(),
+    endLoadReplay: () => streaming.endLoadReplay(),
     onRequestPermission: async (request) => {
       const { event, optionIdByLabel } = mapPermissionRequest(request);
       await publisher.publishAwaitingAnswer(event);
