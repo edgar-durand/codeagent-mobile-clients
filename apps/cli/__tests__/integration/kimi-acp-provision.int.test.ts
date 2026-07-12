@@ -37,12 +37,13 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { spawn, execFileSync } from 'node:child_process';
+import { execFileSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 
 import { provisionAgentCredentials } from '../../src/commands/host/agent-provisioning';
+import { acpSmokeDrive, type AcpOutcome } from '../fixtures/acp-smoke-driver';
 
 const RUN_KIMI_INT = process.env.RUN_KIMI_INT === '1';
 const CREDENTIAL = process.env.KIMI_TEST_CREDENTIAL_JSON ?? '';
@@ -73,87 +74,20 @@ if (!RUN_KIMI_INT) {
   console.log('[kimi-acp-provision] SKIPPED — RUN_KIMI_INT=1 but KIMI_TEST_CREDENTIAL_JSON is empty.');
 }
 
-type AcpOutcome =
-  | { kind: 'streamed'; stopReason?: string }
-  | { kind: 'auth_error'; code: number; message: string }
-  | { kind: 'timeout' };
-
 /**
- * Minimal ACP client: initialize → session/new → session/prompt over stdio
- * JSON-RPC. Resolves as soon as the prompt streams a chunk / resolves, or as
- * soon as auth fails, or on timeout.
+ * Drive the kimi ACP handshake via the SHARED smoke driver — the exact same
+ * `initialize → session/new → session/prompt` logic every ACP-provision test
+ * uses (see `../fixtures/acp-smoke-driver.ts`). We only shape kimi's spawn env
+ * (isolated HOME + KIMI_CODE_HOME) and return the terminal outcome.
  */
-function runAcpPrompt(kimiBin: string, home: string, cwd: string): Promise<AcpOutcome> {
-  return new Promise((resolve) => {
-    const child = spawn(kimiBin, ['acp'], {
-      cwd,
-      env: { ...process.env, HOME: home, KIMI_CODE_HOME: path.join(home, '.kimi-code') },
-      stdio: ['pipe', 'pipe', 'pipe'],
-    });
-    let buf = '';
-    let streamedChunk = false;
-    let settled = false;
-    const done = (o: AcpOutcome): void => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      try {
-        child.kill('SIGKILL');
-      } catch {
-        /* noop */
-      }
-      resolve(o);
-    };
-    const send = (o: unknown): void => {
-      child.stdin.write(`${JSON.stringify(o)}\n`);
-    };
-    child.stdout.on('data', (d: Buffer) => {
-      buf += d.toString();
-      let i: number;
-      while ((i = buf.indexOf('\n')) >= 0) {
-        const line = buf.slice(0, i);
-        buf = buf.slice(i + 1);
-        if (!line.trim()) continue;
-        let m: {
-          id?: number;
-          method?: string;
-          result?: { sessionId?: string; stopReason?: string };
-          error?: { code: number; message: string };
-          params?: { update?: { sessionUpdate?: string } };
-        };
-        try {
-          m = JSON.parse(line);
-        } catch {
-          continue;
-        }
-        if (m.id === 1 && m.result) {
-          send({ jsonrpc: '2.0', id: 2, method: 'session/new', params: { cwd, mcpServers: [] } });
-        }
-        if (m.id === 2 && m.result?.sessionId) {
-          send({
-            jsonrpc: '2.0',
-            id: 3,
-            method: 'session/prompt',
-            params: { sessionId: m.result.sessionId, prompt: [{ type: 'text', text: 'reply with just OK' }] },
-          });
-        }
-        if (m.method === 'session/update' && m.params?.update?.sessionUpdate === 'agent_message_chunk') {
-          streamedChunk = true;
-        }
-        if ((m.id === 2 || m.id === 3) && m.error) {
-          done({ kind: 'auth_error', code: m.error.code, message: m.error.message });
-        }
-        if (m.id === 3 && m.result) {
-          done({ kind: 'streamed', stopReason: m.result.stopReason });
-        }
-      }
-    });
-    child.on('error', () => done({ kind: 'timeout' }));
-    send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: 1, clientCapabilities: {} } });
-    const timer = setTimeout(() => {
-      done(streamedChunk ? { kind: 'streamed' } : { kind: 'timeout' });
-    }, 45_000);
+async function runAcpPrompt(kimiBin: string, home: string, cwd: string): Promise<AcpOutcome> {
+  const { outcome } = await acpSmokeDrive({
+    command: kimiBin,
+    args: ['acp'],
+    env: { ...process.env, HOME: home, KIMI_CODE_HOME: path.join(home, '.kimi-code') },
+    cwd,
   });
+  return outcome;
 }
 
 const MANAGED_CONFIG = `default_model = "kimi-k2"
