@@ -4,6 +4,17 @@ All notable changes to `codeam-cli` are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.60.52] — 2026-07-12
+
+### Added
+
+- **shared:** Rebrand Jira integration to Atlassian (Jira + Confluence) — display + Confluence scopes, id kept
+
+### Fixed
+
+- **cli:** Swallow session/load history replay during kimi Session-closed recovery (no prior-turn text prepended)
+- **cli:** Wire load-replay swallow into the baton AcpClient too (kimi recovery)
+
 ## [2.60.51] — 2026-07-12
 
 ### Fixed
