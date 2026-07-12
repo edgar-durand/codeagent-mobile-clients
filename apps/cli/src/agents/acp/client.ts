@@ -234,6 +234,18 @@ export interface AcpClientOptions {
    *  caller can tear down the session. Not called on a normal
    *  `stop()` shutdown. */
   onUnexpectedExit?: (code: number | null, signal: NodeJS.Signals | null) => void;
+  /**
+   * Bracketed around the recovery `session/load` in
+   * {@link AcpClient.reestablishSession}. kimi's `session/load` REPLAYS the
+   * whole prior conversation as `session/update` notifications before it
+   * resolves; those flow through {@link onSessionUpdate} and, if published as
+   * live chunks, prepend a PRIOR turn's text to the recovered turn's reply (the
+   * "¡Hola!…" glued in front of the real answer P0). The runner wires these to
+   * `StreamingState.beginLoadReplay/endLoadReplay` so the replay is swallowed
+   * for the load window only. Optional: the happy path never calls loadSession,
+   * so if unset the bracket is a no-op. Mirrors the baton's load-replay guard. */
+  beginLoadReplay?: () => void;
+  endLoadReplay?: () => void;
 }
 
 export class AcpClient {
@@ -769,13 +781,22 @@ export class AcpClient {
    * on the SAME still-running adapter process, so the pending prompt can be
    * retried. Prefers `session/load` (resume) when the agent advertised
    * `loadSession` — proven live to re-open kimi's closed session with the
-   * conversation context intact, and kimi's `session/load` emits NO history
-   * replay as `session/update`, so no streaming pollution (unlike the baton's
-   * Claude load, which is why this needs no `beginLoadReplay` bracket). Calls
-   * `connection.loadSession` DIRECTLY — the public {@link loadSession} skips a
-   * same-id load (a Claude relaunch-wedge guard), which is exactly the load we
-   * MUST perform here (the closed id IS the active id). Falls back to a fresh
-   * `session/new` (context lost) only when the agent can't resume.
+   * conversation context intact. Calls `connection.loadSession` DIRECTLY — the
+   * public {@link loadSession} skips a same-id load (a Claude relaunch-wedge
+   * guard), which is exactly the load we MUST perform here (the closed id IS the
+   * active id). Falls back to a fresh `session/new` (context lost) only when the
+   * agent can't resume.
+   *
+   * ⚠️ kimi's `session/load` (0.23.6, live-verified) REPLAYS the ENTIRE prior
+   * conversation as `session/update` notifications BEFORE it resolves — the
+   * earlier assumption that it emitted no replay was wrong and caused a P0: the
+   * replayed prior-turn text was published as live chunks and prepended to the
+   * recovered turn's real reply. So the load is bracketed with
+   * `beginLoadReplay()/endLoadReplay()` (wired by the runner to StreamingState)
+   * so those replay updates are swallowed, exactly like the baton's load. The
+   * retried `session/prompt` (after the load resolves) then streams the REAL new
+   * reply cleanly. The `finally` guarantees the guard clears even if the load
+   * throws, so a failed recovery can't wedge streaming off.
    */
   private async reestablishSession(): Promise<void> {
     if (!this.connection) throw new Error('AcpClient.reestablishSession: no connection');
@@ -784,7 +805,12 @@ export class AcpClient {
     const closedSid = this.sessionId;
     if (this.supportsLoadSession && closedSid) {
       log.info('acpClient', `reestablish → loadSession(resume) sid=${closedSid.slice(0, 8)}`);
-      await this.connection.loadSession({ sessionId: closedSid, cwd, mcpServers });
+      this.opts.beginLoadReplay?.();
+      try {
+        await this.connection.loadSession({ sessionId: closedSid, cwd, mcpServers });
+      } finally {
+        this.opts.endLoadReplay?.();
+      }
       // The resumed session keeps the same id — sessionId is unchanged.
       log.info('acpClient', 'reestablish ← loadSession ok');
       return;

@@ -1002,6 +1002,13 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
         streaming.append(delta);
       }
     },
+    // kimi post-turn "Session is closed" recovery brackets its `session/load`
+    // with these so the conversation history the load REPLAYS as session/update
+    // notifications is swallowed by StreamingState instead of published as live
+    // chunks (which prepended a prior turn's text to the recovered reply — P0).
+    // Same guard the baton uses; the happy path never calls loadSession.
+    beginLoadReplay: () => streaming.beginLoadReplay(),
+    endLoadReplay: () => streaming.endLoadReplay(),
     onRequestPermission: async (request) => {
       // AUTO mode (headless / codespace): no human at the phone to answer, so
       // auto-pick an "allow" option instead of stalling the turn forever. Pick
