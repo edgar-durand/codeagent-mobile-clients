@@ -8,13 +8,27 @@ import type { IntegrationDefinition, IntegrationId } from './types';
  */
 export const INTEGRATION_REGISTRY: Record<IntegrationId, IntegrationDefinition> = {
   jira: {
+    // Registry id kept 'jira' for id-stability (existing LinkedIntegration rows
+    // stay valid — zero data migration); only the DISPLAY is "Atlassian". The
+    // one mcp-atlassian server serves BOTH Jira and Confluence, so the same
+    // entry now requests Confluence scopes too.
     id: 'jira',
-    name: 'Jira',
+    name: 'Atlassian',
     icon: 'jira',
     enabled: true,
     auth: {
       kind: 'oauth_redirect',
-      scopes: ['read:jira-work', 'write:jira-work', 'offline_access'],
+      // Jira + Confluence 3LO granular scopes. The Confluence pair
+      // (read:confluence-content.all / write:confluence-content) is the set
+      // mcp-atlassian's own Authentication docs recommend for full read+write
+      // Confluence (matches its documented env scope string).
+      scopes: [
+        'read:jira-work',
+        'write:jira-work',
+        'read:confluence-content.all',
+        'write:confluence-content',
+        'offline_access',
+      ],
     },
     delivery: {
       mcp: {
