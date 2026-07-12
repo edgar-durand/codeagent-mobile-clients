@@ -97,6 +97,23 @@ const TRANSPORT_DOWN_DURING_START_RE =
   /connection (is )?closed|stream (is )?closed|ECONNRESET|EPIPE|write after end|premature close/i;
 
 /**
+ * The adapter rejected a `session/prompt` because ITS side of the ACP session is
+ * gone — the agent tore the session down between turns while the adapter process
+ * itself stays alive and connected. Kimi (`kimi acp`, ≥0.23) does this: after a
+ * turn's `stop_reason:end_turn` (or an idle gap / a self-update that swaps its
+ * binary mid-session) it closes the session server-side, so the NEXT prompt on
+ * the same sessionId rejects INSTANTLY with `-32603 Internal error` whose
+ * `data.details` is `"Session is closed"` (live-verified on codespace
+ * 5ggrj7xgpgxwcv75v, kimi 0.23.6). claude/codex/gemini/cursor keep the session
+ * alive across turns and NEVER emit this, so matching it is agent-safe: the
+ * recovery only ever engages for an adapter that actually closed the session.
+ * The text is highly specific (the error code alone — a generic `-32603` — is
+ * NOT enough; the adapter's own transient spawn races reuse that code), so we
+ * key on the `session is closed` phrase carried in `message`/`details`/`data`.
+ */
+const SESSION_CLOSED_RE = /session is closed/i;
+
+/**
  * The adapter process EXITED during the initial handshake (before `initialize`
  * resolved). This is the STRUCTURAL signal of a fresh-install startup race: a
  * healthy adapter loads its whole module graph then blocks reading the ACP
@@ -224,6 +241,12 @@ export class AcpClient {
   private connection: ClientSideConnection | null = null;
   private stopping = false;
   private sessionId: string | null = null;
+  /** Whether the agent advertised `loadSession` on `initialize`. Drives the
+   *  post-turn session-closed recovery: an agent that supports resume (kimi,
+   *  claude, codex, gemini) is re-established with `session/load` — preserving
+   *  the conversation — whereas one without it falls back to a fresh
+   *  `session/new`. Set once during {@link startOnce}. */
+  private supportsLoadSession = false;
   /** Idle watchdog for the in-flight prompt. The `Client` handlers
    *  (`sessionUpdate` / `requestPermission`) reach for this to keep
    *  the turn alive while the adapter is demonstrably working. Null
@@ -493,6 +516,12 @@ export class AcpClient {
         'acpClient',
         `initialize ← ok protocolVersion=${initialize.protocolVersion} agentCaps=${JSON.stringify(initialize.agentCapabilities ?? {}).slice(0, 200)}`,
       );
+      // Remember whether the agent can resume a session — the closed-session
+      // recovery (see runPrompt) prefers `session/load` over a context-losing
+      // `session/new` when the agent supports it.
+      this.supportsLoadSession =
+        (initialize.agentCapabilities as { loadSession?: boolean } | undefined)?.loadSession ===
+        true;
 
       log.info('acpClient', 'newSession → sending');
       // Race the RPC against (a) a fatal stderr line (auth / tier ineligibility),
@@ -616,6 +645,39 @@ export class AcpClient {
       typeof input === 'string'
         ? [{ type: 'text', text: input }]
         : (input as PromptBlock[]);
+    try {
+      return await this.sendPromptOnce(blocks);
+    } catch (err) {
+      // Post-turn session-closed recovery (kimi). The agent closed its ACP
+      // session between turns, so this prompt rejected INSTANTLY with
+      // `-32603 … "Session is closed"`. Transparently re-establish the session
+      // and retry the prompt ONCE so multi-turn keeps working — the user sees a
+      // normal streamed reply, not the turn-failure bubble. Gated on the
+      // specific closed-session error (SESSION_CLOSED_RE): agents that keep the
+      // session alive across turns (claude/codex/gemini/cursor) never emit it,
+      // so their happy path is byte-for-byte unchanged and pays ZERO latency
+      // here. A second closed-session error on the retry propagates (no loop).
+      if (this.isSessionClosedError(err)) {
+        log.warn(
+          'acpClient',
+          "session/prompt rejected 'Session is closed' — re-establishing session and retrying once",
+        );
+        await this.reestablishSession();
+        return await this.sendPromptOnce(blocks);
+      }
+      throw err;
+    }
+  }
+
+  /**
+   * Send ONE `session/prompt` round-trip with the idle watchdog. Extracted from
+   * {@link runPrompt} so the closed-session recovery can re-invoke it for the
+   * single retry without duplicating the watchdog / tool-ledger setup.
+   */
+  private async sendPromptOnce(blocks: PromptBlock[]): Promise<PromptResponse> {
+    if (!this.connection || !this.sessionId) {
+      throw new Error('AcpClient.sendPromptOnce called before start()');
+    }
     const textLen = blocks.reduce(
       (n, b) => (b.type === 'text' ? n + b.text.length : n),
       0,
@@ -676,6 +738,61 @@ export class AcpClient {
       idle.clear();
       this.promptIdle = null;
     }
+  }
+
+  /**
+   * True when a `session/prompt` rejection is the "the agent closed its ACP
+   * session between turns" fact — the kimi post-turn/idle close. Keyed on the
+   * `session is closed` phrase (in `message` / `details` / serialised `data`),
+   * NOT on the bare `-32603` code: that generic "Internal error" code is also
+   * used for the adapter's own transient spawn races, so matching it alone would
+   * misfire. See {@link SESSION_CLOSED_RE}.
+   */
+  private isSessionClosedError(err: unknown): boolean {
+    if (!err || typeof err !== 'object') return false;
+    const e = err as { message?: unknown; details?: unknown; data?: unknown };
+    const parts: string[] = [];
+    if (typeof e.message === 'string') parts.push(e.message);
+    if (typeof e.details === 'string') parts.push(e.details);
+    if (e.data !== undefined) {
+      try {
+        parts.push(JSON.stringify(e.data));
+      } catch {
+        /* circular / non-serialisable — ignore */
+      }
+    }
+    return SESSION_CLOSED_RE.test(parts.join(' '));
+  }
+
+  /**
+   * Re-establish a session the agent closed out from under us (kimi post-turn),
+   * on the SAME still-running adapter process, so the pending prompt can be
+   * retried. Prefers `session/load` (resume) when the agent advertised
+   * `loadSession` — proven live to re-open kimi's closed session with the
+   * conversation context intact, and kimi's `session/load` emits NO history
+   * replay as `session/update`, so no streaming pollution (unlike the baton's
+   * Claude load, which is why this needs no `beginLoadReplay` bracket). Calls
+   * `connection.loadSession` DIRECTLY — the public {@link loadSession} skips a
+   * same-id load (a Claude relaunch-wedge guard), which is exactly the load we
+   * MUST perform here (the closed id IS the active id). Falls back to a fresh
+   * `session/new` (context lost) only when the agent can't resume.
+   */
+  private async reestablishSession(): Promise<void> {
+    if (!this.connection) throw new Error('AcpClient.reestablishSession: no connection');
+    const cwd = this.opts.cwd;
+    const mcpServers = this.opts.mcpServers ?? [];
+    const closedSid = this.sessionId;
+    if (this.supportsLoadSession && closedSid) {
+      log.info('acpClient', `reestablish → loadSession(resume) sid=${closedSid.slice(0, 8)}`);
+      await this.connection.loadSession({ sessionId: closedSid, cwd, mcpServers });
+      // The resumed session keeps the same id — sessionId is unchanged.
+      log.info('acpClient', 'reestablish ← loadSession ok');
+      return;
+    }
+    log.info('acpClient', 'reestablish → newSession (agent has no loadSession capability)');
+    const ns = await this.connection.newSession({ cwd, mcpServers });
+    this.sessionId = ns.sessionId;
+    log.info('acpClient', `reestablish ← newSession ok sid=${ns.sessionId.slice(0, 8)}`);
   }
 
   /**
