@@ -14,10 +14,16 @@ import {
 import { USER_EVENTS } from '../src/types/events';
 
 describe('integrations registry', () => {
-  it('declares jira with the exact 3LO scopes', () => {
+  it('declares jira (Atlassian) with the exact Jira + Confluence 3LO scopes', () => {
     const jira = getIntegration('jira');
     expect(jira.auth.kind).toBe('oauth_redirect');
-    expect(jira.auth.scopes).toEqual(['read:jira-work', 'write:jira-work', 'offline_access']);
+    expect(jira.auth.scopes).toEqual([
+      'read:jira-work',
+      'write:jira-work',
+      'read:confluence-content.all',
+      'write:confluence-content',
+      'offline_access',
+    ]);
   });
 
   it('jira delivers via mcp with env-only credential mapping', () => {
@@ -90,7 +96,7 @@ describe('integration branding catalog', () => {
 
   it('the jira registry id is present in the branding catalog', () => {
     expect(INTEGRATION_BRANDING.jira).toBeDefined();
-    expect(INTEGRATION_BRANDING.jira.name).toBe('Jira');
+    expect(INTEGRATION_BRANDING.jira.name).toBe('Atlassian');
   });
 
   it('every upcoming integration id has a branding entry', () => {
