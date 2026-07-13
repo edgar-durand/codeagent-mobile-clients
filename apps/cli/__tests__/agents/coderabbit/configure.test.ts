@@ -93,6 +93,30 @@ describe('configureCoderabbit — link_oauth', () => {
     expect(onEvent).toHaveBeenCalledWith(expect.objectContaining({ kind: 'awaiting_browser' }));
   });
 
+  it('gives the browser-gated login a user-paced timeout (>= 15 min, not the 180 s default)', async () => {
+    // 2026-07-13 incident: the user's real sign-in (account creation + IdP
+    // round-trips) landed AFTER two consecutive 180 s windows had killed the
+    // waiting `coderabbit auth login`, so the relayed callback had nothing to
+    // complete. The login is user-paced — it must get a generous budget.
+    let seenTimeout: number | undefined;
+    await configureCoderabbit(
+      { action: 'link_oauth' },
+      {
+        os: fakeOs(true),
+        ensureInstalled: async () => true,
+        runOAuthLogin: async (deps) => {
+          seenTimeout = deps.timeoutMs;
+          return { ok: true, user: { username: 'edgar' } };
+        },
+        snapshotDir: () => ({}),
+        captureCredential: () => ({ file: 'auth.json', contents: '{}' }),
+        uploadCredential: vi.fn(async () => true),
+      },
+    );
+    expect(seenTimeout).toBeDefined();
+    expect(seenTimeout!).toBeGreaterThanOrEqual(900_000);
+  });
+
   it('reports the OAuth error without storing anything', async () => {
     const upload = vi.fn(async () => true);
     const res = await configureCoderabbit(

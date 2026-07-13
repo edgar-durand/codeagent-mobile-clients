@@ -343,7 +343,16 @@ export async function configureCoderabbit(
     // allows the browser-OAuth flow even on a headless codespace / self-hosted
     // box (it refuses when stdout.isTTY is false). The intercepted redirect is
     // fed back via the login's stdin (deliverPendingCoderabbitCallback).
-    const login: OAuthLoginResult = await runOAuth({ onEvent: deps.onEvent });
+    //
+    // timeoutMs: the browser step is USER-PACED — sign-up + IdP round-trips
+    // routinely exceed the old 180 s default. Measured live (2026-07-13,
+    // edgar-ph codespace): the user's real login landed AFTER two consecutive
+    // 180 s windows had already killed the waiting `coderabbit auth login`,
+    // so the delivered callback had nothing to complete. 15 minutes.
+    const login: OAuthLoginResult = await runOAuth({
+      onEvent: deps.onEvent,
+      timeoutMs: 900_000,
+    });
     if (!login.ok) {
       return { ...res, loggedIn: false, linked: false, error: login.error ?? 'CodeRabbit login failed' };
     }
