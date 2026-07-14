@@ -4,6 +4,12 @@ All notable changes to `codeam-cli` are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.60.55] — 2026-07-14
+
+### Fixed
+
+- **cli:** Two-tier ACP idle watchdog — context compaction no longer bricks the session
+
 ## [2.60.54] — 2026-07-13
 
 ### Fixed
