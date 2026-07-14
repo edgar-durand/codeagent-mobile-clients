@@ -1,4 +1,5 @@
 import type { ChildProcess } from 'child_process';
+import { forgetPreviewPort } from './port-registry';
 import type { PreviewDetection } from '@codeam/shared';
 
 export * from './cloudflared';
@@ -11,6 +12,7 @@ export * from './provision-deps';
 export * from './run-setup';
 export * from './setup-deps';
 export * from './tunnel-bringup';
+export * from './port-registry';
 
 /**
  * One running preview slot, keyed by sessionId. The plugin process is
@@ -88,6 +90,10 @@ export function killProcessTree(
 export async function killPreview(sessionId: string): Promise<void> {
   const preview = activePreviews.get(sessionId);
   if (!preview) return;
+
+  // Drop the persistent port-ownership record — a clean teardown means the
+  // next start should probe the LIVE port, not trust a now-stale record.
+  forgetPreviewPort(preview.detection.port);
 
   if (preview.tunnel) {
     killProcessTree(preview.tunnel, 'SIGTERM');

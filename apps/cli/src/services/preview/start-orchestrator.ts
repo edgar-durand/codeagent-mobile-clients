@@ -314,6 +314,11 @@ export async function runPreviewStart(args: PreviewStartArgs): Promise<void> {
     framework: detection.framework,
     detection,
   });
+  // Persist port ownership so a FRESH CLI (after a relay restart / hard-kill
+  // that orphaned this dev server) can reclaim it instead of dead-ending on
+  // "port already in use" (Rafael 2026-07-14). Best-effort; the in-memory
+  // registry above is still the primary record for the live process.
+  previewSvc.recordPreviewPort(detection.port, dev.devServer.pid, sessionId, Date.now());
   log.info('preview', `ready: ${detection.framework} at ${tun.url}`);
   emit(USER_EVENTS.PREVIEW_READY, {
     url: tun.url,
@@ -554,9 +559,29 @@ async function startDevServer(ctx: StageCtx): Promise<DevServerUp | null> {
         return null;
       }
       // Port freed — continue to the spawn below.
+    } else if (previewSvc.reclaimOwnOrphanPort(detection.port)) {
+      // Not in THIS process's in-memory registry, but the persistent registry
+      // says this port is OUR dev server orphaned by a prior CLI (relay
+      // restart / hard-kill). We just SIGTERM'd our own group — wait (bounded)
+      // for the OS to release the port, then fall through and re-spawn.
+      // Rafael's exact complaint: reopening the app → "el puerto ya está
+      // siendo usado" → had to ask the agent to close it. Now it self-heals.
+      log.info('preview', `reclaimed own cross-restart orphan on port ${detection.port}`);
+      const freeDeadline = Date.now() + 4_000;
+      while ((await previewSvc.isPortListening(detection.port)) && Date.now() < freeDeadline) {
+        await new Promise((r) => setTimeout(r, 200));
+      }
+      if (await previewSvc.isPortListening(detection.port)) {
+        emit(USER_EVENTS.PREVIEW_ERROR, {
+          stage: 'spawn',
+          message: `Port ${detection.port} is still in use after stopping the previous preview. Wait a moment and try again.`,
+        });
+        return null;
+      }
+      // Port freed — continue to the spawn below.
     } else {
-      // A foreign process owns the port (not one of ours). Don't kill it —
-      // fail fast with an actionable error.
+      // A genuinely foreign process owns the port (never recorded as ours).
+      // Don't kill it — fail fast with an actionable error.
       emit(USER_EVENTS.PREVIEW_ERROR, {
         stage: 'spawn',
         message: `Port ${detection.port} is already in use by another process, so the dev server can't start there. Stop whatever is listening on port ${detection.port} and try the preview again.`,
