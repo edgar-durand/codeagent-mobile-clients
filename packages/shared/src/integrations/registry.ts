@@ -54,10 +54,11 @@ export const INTEGRATION_REGISTRY: Record<IntegrationId, IntegrationDefinition> 
     id: 'sentry',
     name: 'Sentry',
     icon: 'sentry',
-    // Dark until the Sentry OAuth app is registered + a live end-to-end
-    // deploy is verified (CLAUDE.md non-negotiable). Flip to true in the
-    // same change that lands SENTRY_OAUTH_CLIENT_ID/SECRET/REDIRECT_URI.
-    enabled: false,
+    // LIVE — the Sentry OAuth Application (Confidential) is registered and
+    // SENTRY_OAUTH_CLIENT_ID/SECRET/REDIRECT_URI are in Secret Manager
+    // (prod+dev). The backend SentryOAuthProvider is config-gated (503 if
+    // env unset) so this is safe even mid-rollout before the secrets mount.
+    enabled: true,
     auth: {
       kind: 'oauth_redirect',
       // Sentry OAuth scopes for the MCP's read-first surface: read orgs /

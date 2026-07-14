@@ -70,7 +70,7 @@ describe('integrations registry', () => {
     expect(() => getIntegration('nope' as IntegrationId)).toThrow(/Unknown integration/);
   });
 
-  it('sentry is a known integration, currently DARK (enabled:false) until the OAuth app + live verify land', () => {
+  it('sentry is a live integration with read-first MVP scopes + BYO-token MCP delivery', () => {
     expect(isKnownIntegrationId('sentry')).toBe(true);
     const sentry = getIntegration('sentry');
     expect(sentry.name).toBe('Sentry');
@@ -89,9 +89,9 @@ describe('integrations registry', () => {
       SENTRY_ACCESS_TOKEN: 'accessToken',
       SENTRY_HOST: 'host',
     });
-    // Dark until enabled — must NOT show up in the enabled set yet.
-    expect(sentry.enabled).toBe(false);
-    expect(getEnabledIntegrations().map((m) => m.id)).not.toContain('sentry');
+    // Live — surfaces in the enabled set alongside jira.
+    expect(sentry.enabled).toBe(true);
+    expect(getEnabledIntegrations().map((m) => m.id)).toContain('sentry');
   });
 
   it('declares the three integration USER_EVENTS names', () => {
