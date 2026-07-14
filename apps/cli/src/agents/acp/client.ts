@@ -181,6 +181,13 @@ const NEWSESSION_TIMEOUT_MS = 120_000;
  * "Thinking…" spinner — while long-but-active work runs to completion.
  */
 const PROMPT_IDLE_TIMEOUT_MS = 90_000;
+/**
+ * Relaxed idle window once the turn has streamed ≥1 update (proof the
+ * adapter is alive). Covers legitimately silent long phases — above all
+ * context auto-compaction, a single multi-minute summarization call that
+ * emits nothing until it finishes. See idleTimeout.ts for the incident.
+ */
+const PROMPT_ACTIVE_IDLE_TIMEOUT_MS = 600_000;
 
 /**
  * Capabilities we advertise to the agent. Phase 1 supports:
@@ -717,10 +724,13 @@ export class AcpClient {
       PROMPT_IDLE_TIMEOUT_MS,
       () =>
         new Error(
-          `ACP prompt idle for ${PROMPT_IDLE_TIMEOUT_MS / 1000}s — adapter sent no updates. ` +
+          `ACP prompt idle — adapter sent no updates for the idle window ` +
+            `(${PROMPT_IDLE_TIMEOUT_MS / 1000}s silent-from-start / ` +
+            `${PROMPT_ACTIVE_IDLE_TIMEOUT_MS / 1000}s once active). ` +
             `Likely the underlying agent's auth or network is misconfigured; check the adapter stderr ` +
             `lines above (acpAdapter tag) for the actual error.`,
         ),
+      PROMPT_ACTIVE_IDLE_TIMEOUT_MS,
     );
     this.promptIdle = idle;
     // Fresh tool-call ledger per turn so a stale entry from a prior

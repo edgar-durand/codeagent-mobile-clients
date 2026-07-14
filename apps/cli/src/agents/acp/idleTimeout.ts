@@ -40,12 +40,30 @@ export interface IdleTimeout {
   clear(): void;
 }
 
+/**
+ * @param idleMs      Strict window used until the FIRST `bump()` — a
+ *                    prompt that never produces a single update is the
+ *                    wedged/auth-broken adapter this exists to catch.
+ * @param activeIdleMs Relaxed window used once ANY bump has proven the
+ *                    adapter alive (defaults to `idleMs` = no escalation).
+ *                    Rationale (2026-07-14 compaction brick): Claude's
+ *                    context auto-compaction emits one "Compacting..."
+ *                    chunk then runs silently for minutes — one giant
+ *                    summarization call, no tool calls, no updates. The
+ *                    flat 90s window aborted it every time, and the abort
+ *                    left compaction pending so EVERY next turn re-hit it:
+ *                    a permanently bricked session. Auth/network hangs are
+ *                    silent from the first byte, so the strict window
+ *                    still catches them at full speed.
+ */
 export function createIdleTimeout(
   idleMs: number,
   makeError: () => Error,
+  activeIdleMs: number = idleMs,
 ): IdleTimeout {
   let timer: ReturnType<typeof setTimeout> | undefined;
   let done = false;
+  let alive = false;
   let reject!: (err: Error) => void;
 
   const promise = new Promise<never>((_resolve, rej) => {
@@ -61,10 +79,13 @@ export function createIdleTimeout(
 
   const arm = (): void => {
     if (done) return;
-    timer = setTimeout(() => {
-      done = true;
-      reject(makeError());
-    }, idleMs);
+    timer = setTimeout(
+      () => {
+        done = true;
+        reject(makeError());
+      },
+      alive ? activeIdleMs : idleMs,
+    );
     // Don't let the watchdog alone keep the event loop alive.
     timer.unref?.();
   };
@@ -77,6 +98,7 @@ export function createIdleTimeout(
     promise,
     bump: (): void => {
       if (done) return;
+      alive = true;
       stop();
       arm();
     },

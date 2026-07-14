@@ -76,6 +76,59 @@ describe('createIdleTimeout', () => {
     expect(t.rejected()).toBe(true);
   });
 
+  // ── Two-tier escalation (2026-07-14 compaction-brick incident) ─────
+  //
+  // Claude's context auto-compaction emits ONE "Compacting..." chunk and
+  // then runs SILENTLY for minutes (a single giant summarization call —
+  // no tool calls, no updates). The flat 90s idle window killed it every
+  // time; the abort left compaction pending, so EVERY subsequent turn
+  // re-triggered it and died the same way — a permanently bricked
+  // session. The strict window exists to catch auth/network hangs, which
+  // are silent FROM THE FIRST BYTE — so once ANY bump has proven the
+  // adapter alive, the window escalates to `activeIdleMs`.
+
+  it('escalates the idle window to activeIdleMs after the first bump (compaction survives)', async () => {
+    const ACTIVE = 600_000;
+    const idle = createIdleTimeout(IDLE, makeError, ACTIVE);
+    const t = track(idle.promise);
+
+    // Proof of life: the "Compacting..." message chunk bumps once…
+    await vi.advanceTimersByTimeAsync(10_000);
+    idle.bump();
+
+    // …then compaction runs silently PAST the strict window — must NOT fire.
+    await vi.advanceTimersByTimeAsync(IDLE * 3);
+    expect(t.rejected()).toBe(false);
+
+    // A genuinely wedged mid-turn adapter still surfaces at the active window.
+    await vi.advanceTimersByTimeAsync(ACTIVE - IDLE * 3);
+    expect(t.rejected()).toBe(true);
+  });
+
+  it('without activeIdleMs the flat window is unchanged (default opt-out)', async () => {
+    const idle = createIdleTimeout(IDLE, makeError);
+    const t = track(idle.promise);
+    idle.bump();
+    await vi.advanceTimersByTimeAsync(IDLE + 1);
+    expect(t.rejected()).toBe(true);
+  });
+
+  it('escalation survives suspend/re-arm cycles (permission wait during an active turn)', async () => {
+    const ACTIVE = 600_000;
+    const idle = createIdleTimeout(IDLE, makeError, ACTIVE);
+    const t = track(idle.promise);
+
+    idle.bump(); // turn is alive
+    idle.suspend(); // human decision
+    await vi.advanceTimersByTimeAsync(IDLE * 10);
+    expect(t.rejected()).toBe(false);
+    idle.bump(); // answered — re-arm at the ACTIVE window, not the strict one
+    await vi.advanceTimersByTimeAsync(IDLE * 2);
+    expect(t.rejected()).toBe(false);
+    await vi.advanceTimersByTimeAsync(ACTIVE);
+    expect(t.rejected()).toBe(true);
+  });
+
   it('clear() permanently disarms — late bumps and timers are no-ops', async () => {
     const idle = createIdleTimeout(IDLE, makeError);
     const t = track(idle.promise);
