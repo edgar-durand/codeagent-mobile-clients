@@ -6,7 +6,7 @@
  * ubiquitous CLI for the tool → `cliEnv`; otherwise → `mcp`. A tool may
  * declare both.
  */
-export type IntegrationId = 'jira';
+export type IntegrationId = 'jira' | 'sentry';
 
 export type IntegrationAuthKind = 'oauth_redirect' | 'oauth_device' | 'api_key';
 
@@ -61,5 +61,10 @@ export interface IntegrationStatus {
 export interface BrokeredIntegrationToken {
   accessToken: string;
   expiresAt: string;
+  /** Atlassian cloud id — the site the Jira MCP server targets. */
   cloudId?: string;
+  /** Sentry host (e.g. `sentry.io`, or a self-hosted domain) — the API base
+   *  the Sentry MCP server targets. Absent for integrations that don't need
+   *  a host discriminator. */
+  host?: string;
 }

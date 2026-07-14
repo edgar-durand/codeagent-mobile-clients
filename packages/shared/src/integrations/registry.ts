@@ -50,6 +50,38 @@ export const INTEGRATION_REGISTRY: Record<IntegrationId, IntegrationDefinition> 
       },
     },
   },
+  sentry: {
+    id: 'sentry',
+    name: 'Sentry',
+    icon: 'sentry',
+    // Dark until the Sentry OAuth app is registered + a live end-to-end
+    // deploy is verified (CLAUDE.md non-negotiable). Flip to true in the
+    // same change that lands SENTRY_OAUTH_CLIENT_ID/SECRET/REDIRECT_URI.
+    enabled: false,
+    auth: {
+      kind: 'oauth_redirect',
+      // Sentry OAuth scopes for the MCP's read-first surface: read orgs /
+      // projects / teams, read issues+events (the error→fix loop), and
+      // read releases. `org:read` covers org+project discovery. No write
+      // scopes in the MVP — writes (resolve/assign an issue) land with the
+      // designed Approval-Gates phase, same as Jira's write path.
+      scopes: ['org:read', 'project:read', 'team:read', 'event:read', 'project:releases'],
+    },
+    delivery: {
+      mcp: {
+        // Sentry's official stdio MCP server (Node). BYO-token headless: the
+        // OAuth access token is fed via SENTRY_ACCESS_TOKEN and the host via
+        // SENTRY_HOST (never argv — env only). Version PINNED; bump only
+        // after re-verifying headless in the mcp-shim integration test.
+        command: 'npx',
+        args: ['-y', '@sentry/mcp-server@0.18.0'],
+        envMapping: {
+          SENTRY_ACCESS_TOKEN: 'accessToken',
+          SENTRY_HOST: 'host',
+        },
+      },
+    },
+  },
 };
 
 export function getEnabledIntegrations(): IntegrationDefinition[] {

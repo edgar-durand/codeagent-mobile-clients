@@ -70,6 +70,30 @@ describe('integrations registry', () => {
     expect(() => getIntegration('nope' as IntegrationId)).toThrow(/Unknown integration/);
   });
 
+  it('sentry is a known integration, currently DARK (enabled:false) until the OAuth app + live verify land', () => {
+    expect(isKnownIntegrationId('sentry')).toBe(true);
+    const sentry = getIntegration('sentry');
+    expect(sentry.name).toBe('Sentry');
+    expect(sentry.auth.kind).toBe('oauth_redirect');
+    // read-first MVP scopes (no write scopes — writes gate on Approval Gates).
+    expect(sentry.auth.scopes).toEqual([
+      'org:read',
+      'project:read',
+      'team:read',
+      'event:read',
+      'project:releases',
+    ]);
+    // MCP delivery: BYO-token headless, creds via env only (never argv).
+    expect(sentry.delivery.mcp?.command).toBe('npx');
+    expect(sentry.delivery.mcp?.envMapping).toEqual({
+      SENTRY_ACCESS_TOKEN: 'accessToken',
+      SENTRY_HOST: 'host',
+    });
+    // Dark until enabled — must NOT show up in the enabled set yet.
+    expect(sentry.enabled).toBe(false);
+    expect(getEnabledIntegrations().map((m) => m.id)).not.toContain('sentry');
+  });
+
   it('declares the three integration USER_EVENTS names', () => {
     expect(USER_EVENTS.INTEGRATION_LINKED).toBe('integration_linked');
     expect(USER_EVENTS.INTEGRATION_UNLINKED).toBe('integration_unlinked');
