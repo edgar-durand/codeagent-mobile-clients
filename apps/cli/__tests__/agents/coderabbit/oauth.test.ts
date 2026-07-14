@@ -154,10 +154,62 @@ describe('coderabbit credential snapshot/diff capture', () => {
   });
 });
 
-describe('coderabbit/deliverPendingCoderabbitCallback — stdin delivery to the live login', () => {
+describe('coderabbit/runCoderabbitOAuthLogin — loopback callback delivery', () => {
+  afterEach(() => {
+    setPendingCoderabbitLogin(null);
+    vi.restoreAllMocks();
+  });
+
+  it('makes a real HTTP GET for loopback callback URLs (not a stdin write)', async () => {
+    // The mobile WebView cannot reach the remote host's localhost directly. It
+    // intercepts the navigation to http://127.0.0.1:PORT/callback?... before it
+    // happens and relays it as link_deliver_callback. The CLI must make the
+    // actual GET to CodeRabbit's loopback server on THIS machine — writing the
+    // URL to stdin does nothing for this flow.
+    const fetchSpy = vi.spyOn(global, 'fetch').mockResolvedValueOnce(new Response('ok'));
+    const stdinWrite = vi.fn();
+    const child = fakeChild() as ReturnType<typeof fakeChild> & { stdin: { write: typeof stdinWrite } };
+    child.stdin = { write: stdinWrite };
+
+    const p = runCoderabbitOAuthLogin({ spawn: () => child as never, timeoutMs: 5_000 });
+    child.stdout.emit('data', Buffer.from(AWAITING + '\n'));
+
+    deliverPendingCoderabbitCallback('http://127.0.0.1:51387/callback?access_token=TOKEN&state=abc');
+
+    expect(fetchSpy).toHaveBeenCalledWith(
+      'http://127.0.0.1:51387/callback?access_token=TOKEN&state=abc',
+      expect.objectContaining({ signal: expect.anything() }),
+    );
+    expect(stdinWrite).not.toHaveBeenCalled();
+
+    child.stdout.emit('data', Buffer.from(AUTHED + '\n'));
+    await p;
+  });
+
+  it('writes coderabbit-cli:// callback to stdin (not fetch)', async () => {
+    vi.spyOn(global, 'fetch');
+    const stdinWrite = vi.fn();
+    const child = fakeChild() as ReturnType<typeof fakeChild> & { stdin: { write: typeof stdinWrite } };
+    child.stdin = { write: stdinWrite };
+
+    const p = runCoderabbitOAuthLogin({ spawn: () => child as never, timeoutMs: 5_000 });
+    child.stdout.emit('data', Buffer.from(AWAITING + '\n'));
+
+    const cb = 'coderabbit-cli://auth-callback?access_token=FRESH&state=abc&provider=github';
+    deliverPendingCoderabbitCallback(cb);
+
+    expect(stdinWrite).toHaveBeenCalledWith(`${cb}\n`);
+    expect(fetch).not.toHaveBeenCalled();
+
+    child.stdout.emit('data', Buffer.from(AUTHED + '\n'));
+    await p;
+  });
+});
+
+describe('coderabbit/deliverPendingCoderabbitCallback — normalisation and routing', () => {
   afterEach(() => setPendingCoderabbitLogin(null));
 
-  it('writes the intercepted callback to the pending login (custom scheme)', () => {
+  it('routes the custom-scheme callback to the registered deliver() handler', () => {
     const deliver = vi.fn();
     setPendingCoderabbitLogin({ deliver });
     const cb = 'coderabbit-cli://auth-callback?access_token=FRESH&state=abc&provider=github';
@@ -166,12 +218,15 @@ describe('coderabbit/deliverPendingCoderabbitCallback — stdin delivery to the 
     expect(deliver).toHaveBeenCalledWith(cb);
   });
 
-  it('also accepts the legacy loopback callback shape', () => {
+  it('routes the loopback callback URL to the registered deliver() handler', () => {
+    // The actual HTTP GET vs stdin decision is inside deliver() — tested above.
+    // This test only verifies that normalizeCoderabbitCallback accepts the URL
+    // and calls deliver() with the unmodified value.
     const deliver = vi.fn();
     setPendingCoderabbitLogin({ deliver });
     const res = deliverPendingCoderabbitCallback('http://127.0.0.1:51387/callback?access_token=X&state=s');
     expect(res.ok).toBe(true);
-    expect(deliver).toHaveBeenCalled();
+    expect(deliver).toHaveBeenCalledWith('http://127.0.0.1:51387/callback?access_token=X&state=s');
   });
 
   it('decodes the base64 "Token Ready" blob → feeds the decoded callback URL', () => {

@@ -293,10 +293,26 @@ export function runCoderabbitOAuthLogin(deps: OAuthLoginDeps): Promise<OAuthLogi
       if (!e) return;
       deps.onEvent?.(e);
       if (e.kind === 'awaiting_browser') {
-        // Register so the relayed redirect can be written to this login's stdin.
+        // Register so the mobile-relayed redirect can complete the login on
+        // this host. Two delivery paths depending on URL form:
+        //
+        // • coderabbit-cli://auth-callback?access_token=…  (fallbackAuthUrl flow)
+        //   → write to CodeRabbit's stdin: it reads the token directly and
+        //     stores the credential without needing a loopback round-trip.
+        //
+        // • http://127.0.0.1:PORT/callback?…  (authUrl loopback flow)
+        //   → make the actual HTTP GET to CodeRabbit's loopback server ON THIS
+        //     MACHINE. The mobile WebView intercepted this redirect (the phone
+        //     can't reach the remote host's localhost) and relayed the URL here.
+        //     Writing it to stdin does nothing — the loopback server expects
+        //     a real HTTP request to complete the OAuth exchange.
         setPendingCoderabbitLogin({
           deliver: (callbackUrl: string) => {
-            child.stdin?.write(`${callbackUrl}\n`);
+            if (/^http:\/\/(127\.0\.0\.1|localhost|\[::1\])/i.test(callbackUrl)) {
+              void fetch(callbackUrl, { signal: AbortSignal.timeout(15_000) }).catch(() => {});
+            } else {
+              child.stdin?.write(`${callbackUrl}\n`);
+            }
           },
         });
       } else if (e.kind === 'authenticated') {
