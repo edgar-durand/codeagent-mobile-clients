@@ -582,7 +582,18 @@ function resolveFleetBoxImage(): string {
 export interface DockerRunner {
   run(
     args: string[],
-    opts?: { timeoutMs?: number },
+    opts?: {
+      timeoutMs?: number;
+      /**
+       * Extra env vars for the `docker` CLI process itself — NOT for the
+       * container. This is how a bare `-e NAME` (no `=value`) in `args`
+       * gets its value: docker reads it from ITS OWN process env and
+       * forwards it into the container. Merged OVER `process.env` (never
+       * replaces it — PATH etc. must survive), so secrets never touch argv
+       * (visible via `ps`) while still reaching the container.
+       */
+      env?: Record<string, string>;
+    },
   ): Promise<{ code: number | null; stderr: string; stdout: string }>;
 }
 
@@ -593,7 +604,10 @@ const DOCKER_RUN_TIMEOUT_MS = 120_000;
 export const defaultDockerRunner: DockerRunner = {
   run(args, opts = {}): Promise<{ code: number | null; stderr: string; stdout: string }> {
     return new Promise((resolve) => {
-      const child = spawn('docker', args, { stdio: ['ignore', 'pipe', 'pipe'] });
+      const child = spawn('docker', args, {
+        stdio: ['ignore', 'pipe', 'pipe'],
+        env: { ...process.env, ...opts.env },
+      });
       let stdoutBuf = '';
       let stderrBuf = '';
       let settled = false;
@@ -1148,8 +1162,15 @@ export class HostAgentSupervisor {
    * the isolated `fleet-net` network, a SINGLE named volume mounted at
    * `/home/box` — named identically to the container, per the Global
    * Constraints — and the ops labels). NEVER `--privileged`, NEVER a
-   * `docker.sock` mount, NEVER a host bind mount. The enroll token + api
-   * origin are delivered to the entrypoint via `-e`; never logged.
+   * `docker.sock` mount, NEVER a host bind mount. The api origin (not a
+   * secret) is delivered via a normal `-e KEY=value`. The enroll token IS a
+   * secret — spec invariant #1 is "token via env, NEVER argv" — so it is
+   * delivered as a BARE `-e CODEAM_ENROLL_TOKEN` (no `=value`) with the
+   * actual value passed only through {@link DockerRunner.run}'s `env` map,
+   * which the runner merges into the `docker` CLI process's OWN env; docker
+   * then reads a bare `-e NAME` from its own env and forwards it into the
+   * container. The value never appears in the `docker run` argv, so it's
+   * never visible via `ps` on the shared fleet host; never logged either.
    */
   private async fleetCreateBox(payload: FleetCreateBoxPayload): Promise<void> {
     const { containerName, limits } = payload;
@@ -1184,13 +1205,18 @@ export class HostAgentSupervisor {
       'com.codeagent.created-by=fleet',
       '-v',
       `${containerName}:/home/box`,
+      // Bare `-e NAME` (no `=value`) — docker reads the value from ITS OWN
+      // process env (supplied below via `opts.env`), never from this argv.
       '-e',
-      `CODEAM_ENROLL_TOKEN=${payload.enrollToken}`,
+      'CODEAM_ENROLL_TOKEN',
       '-e',
       `CODEAM_API_URL=${payload.apiOrigin}`,
       resolveFleetBoxImage(),
     ];
-    const res = await this.docker.run(args, { timeoutMs: DOCKER_RUN_TIMEOUT_MS });
+    const res = await this.docker.run(args, {
+      timeoutMs: DOCKER_RUN_TIMEOUT_MS,
+      env: { CODEAM_ENROLL_TOKEN: payload.enrollToken },
+    });
     if (res.code === 0) {
       // stdout is the created container id — not a secret, safe to log.
       log.info(
@@ -1793,25 +1819,6 @@ export async function hostAgent(args: string[] = []): Promise<void> {
     (tokenArg ? tokenArg.slice('--token='.length).trim() : '') ||
     process.env.CODEAM_ENROLL_TOKEN ||
     undefined;
-
-  // Fleet box dry-run (additive test seam — CI `fleet-box.int.test.ts`). Exercise
-  // enrollment up to the network boundary WITHOUT a live backend: assert the
-  // token + origin arrived in the container env, emit a greppable marker (token
-  // LENGTH only — never the token itself), and exit cleanly before opening any
-  // socket or starting the long-lived supervisor. Production boxes never set this.
-  if (process.env.CODEAM_ENROLL_DRY_RUN === '1') {
-    const apiOrigin = process.env.CODEAM_API_URL ?? '(unset)';
-    if (!enrollToken) {
-      process.stdout.write(
-        '[fleet-box:dry-run] MISSING CODEAM_ENROLL_TOKEN — would abort enroll\n',
-      );
-      throw new Error('fleet-box dry-run: no enroll token in container env');
-    }
-    process.stdout.write(
-      `[fleet-box:dry-run] would redeem enroll token (len=${enrollToken.length}) at ${apiOrigin}\n`,
-    );
-    return;
-  }
 
   const identity = await resolveHostIdentity(enrollToken);
   if (!identity) {

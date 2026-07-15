@@ -3067,13 +3067,15 @@ describe('HostAgentSupervisor — fleet control plane', () => {
     result: { code?: number | null; stdout?: string; stderr?: string } = {},
   ) {
     const calls: string[][] = [];
+    const opts: Array<{ timeoutMs?: number; env?: Record<string, string> } | undefined> = [];
     const docker: DockerRunner = {
-      run: vi.fn(async (args: string[]) => {
+      run: vi.fn(async (args: string[], runOpts) => {
         calls.push(args);
+        opts.push(runOpts);
         return { code: result.code ?? 0, stdout: result.stdout ?? 'abcdef123456', stderr: result.stderr ?? '' };
       }),
     };
-    return { docker, calls };
+    return { docker, calls, opts };
   }
 
   function fleetCreateCmd(over: Partial<Record<string, unknown>> = {}): RemoteCommand {
@@ -3110,7 +3112,7 @@ describe('HostAgentSupervisor — fleet control plane', () => {
   });
 
   it('fleet_create_box builds the full argv with every hard-isolation flag + the ops labels', async () => {
-    const { docker, calls } = makeDockerMock();
+    const { docker, calls, opts } = makeDockerMock();
     process.env.CODEAM_FLEET_BOX_IMAGE = 'ghcr.io/edgar-durand/codeam-box:test';
     const sup = new HostAgentSupervisor(IDENTITY, { docker });
 
@@ -3146,13 +3148,24 @@ describe('HostAgentSupervisor — fleet control plane', () => {
     expect(labelValues).toContain('com.codeagent.box-id=box-1');
     expect(labelValues).toContain('com.codeagent.created-by=fleet');
 
-    // Env passthrough to the entrypoint.
+    // Env passthrough to the entrypoint. The enroll token is a SECRET —
+    // spec invariant #1 ("token via env, NEVER argv") — so it must appear
+    // as a BARE `-e CODEAM_ENROLL_TOKEN` (no `=value`) in argv, and the
+    // value string must appear NOWHERE in the argv array. `CODEAM_API_URL`
+    // is not a secret and stays a normal `-e KEY=value`.
     const envPairs = args.reduce<string[]>((acc, a, i) => {
       if (args[i - 1] === '-e') acc.push(a);
       return acc;
     }, []);
-    expect(envPairs).toContain('CODEAM_ENROLL_TOKEN=super-secret-enroll-token');
+    expect(envPairs).toContain('CODEAM_ENROLL_TOKEN');
     expect(envPairs).toContain('CODEAM_API_URL=https://api.codeagent-mobile.com');
+    expect(args).not.toContain('CODEAM_ENROLL_TOKEN=super-secret-enroll-token');
+    expect(args.some((a) => a.includes('super-secret-enroll-token'))).toBe(false);
+
+    // The value is instead delivered via the runner's `env` option — the
+    // `docker` CLI process's OWN env, which is how docker resolves a bare
+    // `-e NAME`.
+    expect(opts[0]?.env).toEqual({ CODEAM_ENROLL_TOKEN: 'super-secret-enroll-token' });
 
     // NEVER --privileged, NEVER the docker.sock, NEVER any other bind mount.
     expect(args).not.toContain('--privileged');
