@@ -24,6 +24,7 @@
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+import { spawnSync } from 'child_process';
 import { log } from '../logger';
 
 interface PortOwner {
@@ -84,13 +85,46 @@ export function forgetPreviewPort(port: number): void {
 
 /** Best-effort "is this process group still alive?" — `kill(pid, 0)`
  *  throws ESRCH when it's gone, EPERM when it exists but we can't signal
- *  it (still counts as alive). */
+ *  it (still counts as alive). POSIX probes the whole group via the
+ *  negative pid; Windows has no process groups, so it probes the leader
+ *  pid directly (signal 0 tests existence on Windows too). */
 function groupAlive(pgid: number): boolean {
+  const probe = process.platform === 'win32' ? pgid : -pgid;
   try {
-    process.kill(-pgid, 0);
+    process.kill(probe, 0);
     return true;
   } catch (err) {
     return (err as NodeJS.ErrnoException).code === 'EPERM';
+  }
+}
+
+/** Terminate the recorded dev-server tree. POSIX: SIGTERM the whole
+ *  process group (`-pgid`) then a SIGKILL backstop for a server that
+ *  ignores SIGTERM. Windows: no process groups, so `taskkill /F /T` force-
+ *  kills the leader AND its child tree (the dev server + its workers) in
+ *  one shot. Best-effort on both — a lost race just means the port frees a
+ *  beat later. */
+function killGroup(pgid: number): void {
+  if (process.platform === 'win32') {
+    spawnSync('taskkill', ['/F', '/T', '/PID', String(pgid)], { stdio: 'ignore' });
+    return;
+  }
+  try {
+    process.kill(-pgid, 'SIGTERM');
+  } catch {
+    /* raced to exit between the alive check and the signal */
+  }
+  // SIGKILL backstop for a dev server that ignores SIGTERM.
+  try {
+    setTimeout(() => {
+      try {
+        process.kill(-pgid, 'SIGKILL');
+      } catch {
+        /* already gone */
+      }
+    }, 300).unref?.();
+  } catch {
+    /* setTimeout unref unsupported — harmless */
   }
 }
 
@@ -101,12 +135,12 @@ function groupAlive(pgid: number): boolean {
  * when the port was never ours (a foreign squatter → leave it alone) or
  * the recorded group is already dead (stale record → clean it up).
  *
- * Windows has no process groups; there we can't have spawned detached, so
- * a cross-restart reclaim isn't available — return false and let the
- * actionable error path handle it.
+ * Cross-platform: POSIX signals the detached process group; Windows has no
+ * process groups, so `killGroup` uses `taskkill /F /T` to force-kill the
+ * recorded leader pid AND its child tree. Either way we only ever kill a
+ * tree WE recorded ourselves as having spawned.
  */
 export function reclaimOwnOrphanPort(port: number): boolean {
-  if (process.platform === 'win32') return false;
   const reg = readRegistry();
   const owner = reg[String(port)];
   if (!owner) return false;
@@ -123,23 +157,7 @@ export function reclaimOwnOrphanPort(port: number): boolean {
     'preview',
     `reclaiming OWN orphaned preview on port ${port} (pgid=${owner.pgid}, session=${owner.sessionId}) after a CLI restart`,
   );
-  try {
-    process.kill(-owner.pgid, 'SIGTERM');
-  } catch {
-    /* raced to exit between the alive check and the signal */
-  }
-  // SIGKILL backstop for a dev server that ignores SIGTERM.
-  try {
-    setTimeout(() => {
-      try {
-        process.kill(-owner.pgid, 'SIGKILL');
-      } catch {
-        /* already gone */
-      }
-    }, 300).unref?.();
-  } catch {
-    /* setTimeout unref unsupported — harmless */
-  }
+  killGroup(owner.pgid);
   delete reg[String(port)];
   writeRegistry(reg);
   return true;
