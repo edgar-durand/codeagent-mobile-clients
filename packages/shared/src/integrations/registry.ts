@@ -171,6 +171,8 @@ export const INTEGRATION_REGISTRY: Record<IntegrationId, IntegrationDefinition> 
         'im:history',
         'mpim:read',
         'mpim:history',
+        // Message search across the user's channels/DMs (a user-only scope).
+        'search:read',
       ],
     },
     delivery: {

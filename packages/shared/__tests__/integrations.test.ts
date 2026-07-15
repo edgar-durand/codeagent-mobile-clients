@@ -143,6 +143,7 @@ describe('integrations registry', () => {
       'im:history',
       'mpim:read',
       'mpim:history',
+      'search:read',
     ]);
     // Official Slack MCP: bot token + team id via env (never argv). PINNED.
     expect(slack.delivery.mcp?.command).toBe('npx');
