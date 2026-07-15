@@ -9,6 +9,9 @@
 // lifetime of the MCP session without the agent's MCP client ever seeing a
 // hiccup.
 import { execFileSync, execSync } from 'node:child_process';
+import { existsSync } from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { readIntegrationsManifest } from './manifest';
 import { IntegrationTokenClient } from './token-client';
 import { RestartableStdioProxy } from './stdio-proxy';
@@ -54,9 +57,48 @@ function commandExists(command: string): boolean {
   }
 }
 
-/** Best-effort: uvx ships via `uv`; codespaces have pip (headroom precedent). */
+/** Per-user bin dirs the uv installers drop binaries into — the host-agent's
+ *  PATH (a systemd unit or a bare login shell) usually does NOT include them,
+ *  so resolution must check them explicitly rather than trust `which`. */
+export function localBinCandidates(command: string): string[] {
+  return [
+    path.join(os.homedir(), '.local', 'bin', command),
+    path.join(os.homedir(), '.cargo', 'bin', command),
+  ];
+}
+
+/**
+ * Resolve the launcher to something spawnable: the bare command when it's on
+ * PATH, else the absolute path of a per-user install (`~/.local/bin`,
+ * `~/.cargo/bin`). Falls back to the bare command (spawn will ENOENT and the
+ * proxy surfaces it) when nothing resolves.
+ */
+export function resolveLauncherPath(
+  command: string,
+  deps: { commandExists: (c: string) => boolean; existsSync: (p: string) => boolean } = {
+    commandExists,
+    existsSync,
+  },
+): string {
+  if (deps.commandExists(command)) return command;
+  for (const candidate of localBinCandidates(command)) {
+    if (deps.existsSync(candidate)) return candidate;
+  }
+  return command;
+}
+
+/**
+ * Best-effort launcher bootstrap. 2026-07-15 fleet-1 incident: a fresh
+ * Ubuntu 24.04 self-hosted box has NO pip (`python3 -m pip` → "No module
+ * named pip") and is PEP-668 externally-managed, so the old pip-only
+ * attempt failed silently and the Jira MCP server (`uvx mcp-atlassian`)
+ * ENOENT'd — the agent just answered "no tengo acceso a Jira". Order now:
+ * official standalone installer (no python dependency at all) first, pip
+ * as the fallback for distros that do ship it. All installer output goes
+ * to stderr — stdout is the live MCP protocol channel.
+ */
 function ensureCommand(command: string): void {
-  if (commandExists(command)) return;
+  if (resolveLauncherPath(command) !== command || commandExists(command)) return;
   if (process.platform === 'win32') {
     // No POSIX-only shell fallback on Windows — surface a clear error and
     // let the child spawn fail with ENOENT rather than silently no-op.
@@ -67,16 +109,27 @@ function ensureCommand(command: string): void {
   }
   if (command === 'uvx') {
     try {
-      // stdout is the live MCP protocol channel — pip's output must NEVER
-      // land there mid-handshake. Route both its stdout and stderr to the
-      // shim's stderr instead.
+      execSync('curl -LsSf https://astral.sh/uv/install.sh | sh', {
+        stdio: ['ignore', process.stderr, process.stderr],
+        timeout: 180_000,
+        env: { ...process.env, UV_NO_MODIFY_PATH: '1' },
+      });
+    } catch {
+      /* try pip next */
+    }
+    if (resolveLauncherPath(command) !== command) return;
+    try {
       execSync('python3 -m pip install --user --quiet uv', {
         stdio: ['ignore', process.stderr, process.stderr],
         timeout: 180_000,
       });
     } catch {
-      /* surface at spawn */
+      /* surface below */
     }
+    if (resolveLauncherPath(command) !== command) return;
+    process.stderr.write(
+      `[codeam mcp-run] could not provision '${command}' (standalone installer + pip both failed) — the '${command}'-launched MCP server will be unavailable.\n`,
+    );
   }
 }
 
@@ -96,6 +149,9 @@ export async function mcpRun(args: string[]): Promise<void> {
   }
 
   ensureCommand(delivery.command);
+  // Absolute path when the launcher lives in a per-user bin dir the
+  // host-agent's PATH doesn't cover (systemd unit, fresh box).
+  const launcher = resolveLauncherPath(delivery.command);
   const client = new IntegrationTokenClient({
     sessionId,
     pluginId,
@@ -113,7 +169,7 @@ export async function mcpRun(args: string[]): Promise<void> {
         const value = current[field as keyof BrokeredIntegrationToken];
         if (typeof value === 'string' && value) env[envVar] = value;
       }
-      return { command: delivery.command, args: delivery.args, env };
+      return { command: launcher, args: delivery.args, env };
     },
     shouldRestartNow: () =>
       current !== null && new Date(current.expiresAt).getTime() - Date.now() < RESTART_AHEAD_MS,

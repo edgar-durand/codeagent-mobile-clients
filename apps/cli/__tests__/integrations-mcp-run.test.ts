@@ -13,7 +13,7 @@ vi.mock('node:os', async (orig) => {
   return { ...actual, homedir: () => FAKE_HOME, default: { ...actual, homedir: () => FAKE_HOME } };
 });
 
-import { resolveDelivery } from '../src/integrations/mcp-run';
+import { resolveDelivery, resolveLauncherPath, localBinCandidates } from '../src/integrations/mcp-run';
 import { persistIntegrationsManifest, clearIntegrationsManifest } from '../src/integrations/manifest';
 import { INTEGRATION_REGISTRY } from '@codeam/shared';
 
@@ -98,5 +98,50 @@ describe('mcp-run resolveDelivery — staticEnv rollout defense', () => {
 
   it('returns null for an unknown id with no manifest', () => {
     expect(resolveDelivery('nope')).toBeNull();
+  });
+});
+
+describe('resolveLauncherPath — per-user bin fallback (fleet-1 uvx incident)', () => {
+  const p = require('node:path') as typeof import('node:path');
+
+  it('returns the bare command when it is on PATH', () => {
+    const out = resolveLauncherPath('uvx', {
+      commandExists: () => true,
+      existsSync: () => false,
+    });
+    expect(out).toBe('uvx');
+  });
+
+  it('falls back to ~/.local/bin when the command is NOT on PATH', () => {
+    const expected = p.join(FAKE_HOME, '.local', 'bin', 'uvx');
+    const out = resolveLauncherPath('uvx', {
+      commandExists: () => false,
+      existsSync: (candidate: string) => candidate === expected,
+    });
+    expect(out).toBe(expected);
+  });
+
+  it('falls back to ~/.cargo/bin when ~/.local/bin misses too', () => {
+    const expected = p.join(FAKE_HOME, '.cargo', 'bin', 'uvx');
+    const out = resolveLauncherPath('uvx', {
+      commandExists: () => false,
+      existsSync: (candidate: string) => candidate === expected,
+    });
+    expect(out).toBe(expected);
+  });
+
+  it('returns the bare command when nothing resolves (spawn surfaces the ENOENT)', () => {
+    const out = resolveLauncherPath('uvx', {
+      commandExists: () => false,
+      existsSync: () => false,
+    });
+    expect(out).toBe('uvx');
+  });
+
+  it('probes the documented per-user install dirs in order', () => {
+    expect(localBinCandidates('uvx')).toEqual([
+      p.join(FAKE_HOME, '.local', 'bin', 'uvx'),
+      p.join(FAKE_HOME, '.cargo', 'bin', 'uvx'),
+    ]);
   });
 });
