@@ -6,7 +6,7 @@
  * ubiquitous CLI for the tool → `cliEnv`; otherwise → `mcp`. A tool may
  * declare both.
  */
-export type IntegrationId = 'jira' | 'sentry' | 'linear';
+export type IntegrationId = 'jira' | 'sentry' | 'linear' | 'slack';
 
 export type IntegrationAuthKind = 'oauth_redirect' | 'oauth_device' | 'api_key';
 
@@ -67,4 +67,7 @@ export interface BrokeredIntegrationToken {
    *  the Sentry MCP server targets. Absent for integrations that don't need
    *  a host discriminator. */
   host?: string;
+  /** Slack workspace/team id (`T…`) — the Slack MCP server needs it alongside
+   *  the bot token (`SLACK_TEAM_ID`). Absent for non-Slack integrations. */
+  teamId?: string;
 }

@@ -66,7 +66,7 @@ describe('integrations registry', () => {
   it('helpers behave like the agents registry helpers', () => {
     expect(getEnabledIntegrations().map((m) => m.id)).toContain('jira');
     expect(isKnownIntegrationId('jira')).toBe(true);
-    expect(isKnownIntegrationId('slack')).toBe(false);
+    expect(isKnownIntegrationId('notion')).toBe(false);
     expect(() => getIntegration('nope' as IntegrationId)).toThrow(/Unknown integration/);
   });
 
@@ -121,6 +121,41 @@ describe('integrations registry', () => {
     // Live — surfaces in the enabled set alongside jira + sentry.
     expect(linear.enabled).toBe(true);
     expect(getEnabledIntegrations().map((m) => m.id)).toContain('linear');
+  });
+
+  it('slack is a live integration with read+write bot scopes + BYO-token stdio MCP delivery', () => {
+    expect(isKnownIntegrationId('slack')).toBe(true);
+    const slack = getIntegration('slack');
+    expect(slack.name).toBe('Slack');
+    expect(slack.icon).toBe('slack');
+    expect(slack.auth.kind).toBe('oauth_redirect');
+    // Bot Token Scopes — read + write across channels/groups/DMs.
+    expect(slack.auth.scopes).toEqual([
+      'channels:read',
+      'channels:history',
+      'groups:read',
+      'groups:history',
+      'chat:write',
+      'reactions:read',
+      'reactions:write',
+      'users:read',
+      'im:read',
+      'im:history',
+      'mpim:read',
+      'mpim:history',
+    ]);
+    // Official Slack MCP: bot token + team id via env (never argv). PINNED.
+    expect(slack.delivery.mcp?.command).toBe('npx');
+    expect(slack.delivery.mcp?.args).toEqual([
+      '-y',
+      '@modelcontextprotocol/server-slack@2025.4.25',
+    ]);
+    expect(slack.delivery.mcp?.envMapping).toEqual({
+      SLACK_BOT_TOKEN: 'accessToken',
+      SLACK_TEAM_ID: 'teamId',
+    });
+    expect(slack.enabled).toBe(true);
+    expect(getEnabledIntegrations().map((m) => m.id)).toContain('slack');
   });
 
   it('declares the three integration USER_EVENTS names', () => {

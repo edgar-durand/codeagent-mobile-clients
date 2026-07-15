@@ -140,6 +140,56 @@ export const INTEGRATION_REGISTRY: Record<IntegrationId, IntegrationDefinition> 
       },
     },
   },
+  slack: {
+    id: 'slack',
+    name: 'Slack',
+    icon: 'slack',
+    // LIVE — the Slack app (OAuth v2, bot token) is registered and
+    // SLACK_OAUTH_CLIENT_ID/SECRET/REDIRECT_URI are in Secret Manager
+    // (prod+dev). The backend SlackOAuthProvider is config-gated (503 if env
+    // unset) so this is safe even mid-rollout before the secrets mount.
+    enabled: true,
+    auth: {
+      kind: 'oauth_redirect',
+      // Slack Bot Token Scopes (OAuth v2). Read + write across channels,
+      // groups, DMs: list/read history, post messages, react. `scope` is
+      // COMMA-separated in the authorize URL. ⚠️ Changing these requires the
+      // user to RE-INSTALL the Slack app — the bot token only carries the
+      // scopes granted at install time. The bot can only read channels it's
+      // been invited to (standard Slack bot behavior).
+      scopes: [
+        'channels:read',
+        'channels:history',
+        'groups:read',
+        'groups:history',
+        'chat:write',
+        'reactions:read',
+        'reactions:write',
+        'users:read',
+        'im:read',
+        'im:history',
+        'mpim:read',
+        'mpim:history',
+      ],
+    },
+    delivery: {
+      mcp: {
+        // Slack's official reference MCP server (Node). BYO-token headless: the
+        // OAuth v2 bot token (xoxb-…) is fed via SLACK_BOT_TOKEN and the team
+        // id via SLACK_TEAM_ID (env only, never argv). The server sends the
+        // token as `Authorization: Bearer`. Version PINNED; bump only after
+        // re-verifying headless. Tools: list_channels, post_message,
+        // reply_to_thread, add_reaction, get_channel_history,
+        // get_thread_replies, get_users, get_user_profile (read + write).
+        command: 'npx',
+        args: ['-y', '@modelcontextprotocol/server-slack@2025.4.25'],
+        envMapping: {
+          SLACK_BOT_TOKEN: 'accessToken',
+          SLACK_TEAM_ID: 'teamId',
+        },
+      },
+    },
+  },
 };
 
 export function getEnabledIntegrations(): IntegrationDefinition[] {
