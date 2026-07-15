@@ -1211,6 +1211,12 @@ export class HostAgentSupervisor {
       'CODEAM_ENROLL_TOKEN',
       '-e',
       `CODEAM_API_URL=${payload.apiOrigin}`,
+      // User-facing label for the rescued box's "My Servers" card. Not a
+      // secret → plain `-e KEY=value`. The box's host-agent reads it at
+      // redeem (resolveHostLabel) so a rescued user sees "CodeAgent Box",
+      // not the generic "my-server" or the ugly container cuid.
+      '-e',
+      'CODEAM_HOST_LABEL=CodeAgent Box',
       resolveFleetBoxImage(),
     ];
     const res = await this.docker.run(args, {

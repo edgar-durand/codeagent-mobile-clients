@@ -301,6 +301,24 @@ async function postJson<T>(pathname: string, body: Record<string, unknown>): Pro
 }
 
 /**
+ * Resolve the host label sent at redeem. Precedence:
+ *   1. an explicit `label` arg (rare — a caller that already knows a name),
+ *   2. `CODEAM_HOST_LABEL` env — set by whoever provisions a co-located
+ *      host-agent so multiple instances on ONE box are distinguishable
+ *      (the fleet host, a per-user 24/7 unit, a fleet box → "CodeAgent Box"),
+ *   3. `os.hostname()` — the natural default for a BYO machine.
+ * Without this, every enroll fell back to the backend's generic "my-server"
+ * and a user's servers were indistinguishable. Bounded to 80 chars (the
+ * backend's own cap) so the two sides never disagree.
+ */
+export function resolveHostLabel(label?: string): string {
+  const explicit = label?.trim();
+  const envLabel = process.env.CODEAM_HOST_LABEL?.trim();
+  const resolved = explicit || envLabel || os.hostname();
+  return resolved.slice(0, 80);
+}
+
+/**
  * Redeem the ephemeral enroll token for the long-lived host identity.
  * Idempotent at the call site (the caller only redeems when no sealed
  * identity exists); the enroll token itself is single-use server-side.
@@ -311,7 +329,7 @@ export async function redeemEnrollToken(
 ): Promise<SealedHostIdentity> {
   const data = await postJson<RedeemResponseData>('/api/self-hosted/redeem', {
     token,
-    ...(label ? { label } : {}),
+    label: resolveHostLabel(label),
     osInfo: collectOsInfo(),
   });
   return {
