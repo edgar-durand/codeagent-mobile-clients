@@ -234,6 +234,32 @@ describe('integration branding catalog', () => {
     }
   });
 
+  it('the COMING SOON set is the expected 17 tools (none already live)', () => {
+    expect([...UPCOMING_INTEGRATION_IDS]).toEqual([
+      'gmail',
+      'posthog',
+      'clickup',
+      'figma',
+      'trello',
+      'resend',
+      'vercel',
+      'supabase',
+      'asana',
+      'postman',
+      'n8n',
+      'stripe',
+      'mixpanel',
+      'pendo',
+      'pagerduty',
+      'amplitude',
+      'datadog',
+    ]);
+    // An upcoming id must NOT collide with a live registry id (that would
+    // render it both as AVAILABLE and COMING SOON).
+    const liveIds = new Set<string>(getEnabledIntegrations().map((m) => m.id));
+    for (const id of UPCOMING_INTEGRATION_IDS) expect(liveIds.has(id)).toBe(false);
+  });
+
   it('getIntegrationBranding returns null for an unknown id', () => {
     expect(getIntegrationBranding('nope')).toBeNull();
   });
