@@ -176,6 +176,29 @@ describe('integrations registry', () => {
     expect(getEnabledIntegrations().map((m) => m.id)).toContain('notion');
   });
 
+  it('azure_devops is a live api_key (PAT) integration with orgUrl + accessToken fields', () => {
+    expect(isKnownIntegrationId('azure_devops')).toBe(true);
+    const ado = getIntegration('azure_devops');
+    expect(ado.name).toBe('Azure DevOps');
+    expect(ado.icon).toBe('azure_devops');
+    // FIRST non-OAuth integration: api_key (the user pastes a PAT + org URL).
+    expect(ado.auth.kind).toBe('api_key');
+    expect(ado.auth.fields?.map((f) => f.key)).toEqual(['orgUrl', 'accessToken']);
+    // The token field is masked; the org URL is not.
+    expect(ado.auth.fields?.find((f) => f.key === 'accessToken')?.secret).toBe(true);
+    expect(ado.auth.fields?.find((f) => f.key === 'orgUrl')?.secret).toBe(false);
+    // Delivery: PAT mode, token + org via env (never argv). PINNED.
+    expect(ado.delivery.mcp?.command).toBe('npx');
+    expect(ado.delivery.mcp?.args).toEqual(['-y', '@tiberriver256/mcp-server-azure-devops@0.1.46']);
+    expect(ado.delivery.mcp?.envMapping).toEqual({
+      AZURE_DEVOPS_PAT: 'accessToken',
+      AZURE_DEVOPS_ORG_URL: 'orgUrl',
+    });
+    expect(ado.delivery.mcp?.staticEnv).toEqual({ AZURE_DEVOPS_AUTH_METHOD: 'pat' });
+    expect(ado.enabled).toBe(true);
+    expect(getEnabledIntegrations().map((m) => m.id)).toContain('azure_devops');
+  });
+
   it('declares the three integration USER_EVENTS names', () => {
     expect(USER_EVENTS.INTEGRATION_LINKED).toBe('integration_linked');
     expect(USER_EVENTS.INTEGRATION_UNLINKED).toBe('integration_unlinked');

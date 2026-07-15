@@ -226,6 +226,53 @@ export const INTEGRATION_REGISTRY: Record<IntegrationId, IntegrationDefinition> 
       },
     },
   },
+  azure_devops: {
+    id: 'azure_devops',
+    name: 'Azure DevOps',
+    icon: 'azure_devops',
+    // LIVE — the FIRST api_key (PAT) integration. No OAuth: Azure DevOps OAuth
+    // apps are being sunset by Microsoft in favor of Entra ID, and PATs are the
+    // native, reliable ADO auth. The user pastes their org URL + a PAT; the
+    // backend validates against the ADO REST API and vaults it. No env secrets
+    // to configure (config-gated 503 doesn't apply — there's no OAuth app).
+    enabled: true,
+    auth: {
+      kind: 'api_key',
+      fields: [
+        {
+          key: 'orgUrl',
+          label: 'Organization URL',
+          placeholder: 'https://dev.azure.com/your-org',
+          secret: false,
+          help: 'Your Azure DevOps organization URL — e.g. https://dev.azure.com/contoso',
+        },
+        {
+          key: 'accessToken',
+          label: 'Personal Access Token',
+          placeholder: 'Paste your PAT',
+          secret: true,
+          help: 'Create in Azure DevOps → User settings → Personal access tokens. Recommended scopes: Work Items (Read & Write), Code (Read), Build (Read), Project and Team (Read).',
+        },
+      ],
+    },
+    delivery: {
+      mcp: {
+        // The @tiberriver256 ADO MCP server (Node) in PAT mode: the PAT is fed
+        // via AZURE_DEVOPS_PAT (Basic auth) + the org via AZURE_DEVOPS_ORG_URL
+        // (env only, never argv). AZURE_DEVOPS_AUTH_METHOD=pat pins the PAT path
+        // (the alternative, azure-identity, uses DefaultAzureCredential and
+        // would ignore our token). Version PINNED; bump only after re-verifying
+        // headless.
+        command: 'npx',
+        args: ['-y', '@tiberriver256/mcp-server-azure-devops@0.1.46'],
+        envMapping: {
+          AZURE_DEVOPS_PAT: 'accessToken',
+          AZURE_DEVOPS_ORG_URL: 'orgUrl',
+        },
+        staticEnv: { AZURE_DEVOPS_AUTH_METHOD: 'pat' },
+      },
+    },
+  },
 };
 
 export function getEnabledIntegrations(): IntegrationDefinition[] {

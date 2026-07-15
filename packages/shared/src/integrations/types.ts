@@ -6,9 +6,28 @@
  * ubiquitous CLI for the tool → `cliEnv`; otherwise → `mcp`. A tool may
  * declare both.
  */
-export type IntegrationId = 'jira' | 'sentry' | 'linear' | 'slack' | 'notion';
+export type IntegrationId = 'jira' | 'sentry' | 'linear' | 'slack' | 'notion' | 'azure_devops';
 
 export type IntegrationAuthKind = 'oauth_redirect' | 'oauth_device' | 'api_key';
+
+/**
+ * One user-entered field for an `api_key` integration (no browser OAuth — the
+ * user pastes credentials directly, e.g. a PAT + an org URL). The mobile form
+ * is driven entirely by this list, and `key` maps to a `BrokeredIntegrationToken`
+ * field the delivery `envMapping` references.
+ */
+export interface IntegrationApiKeyField {
+  /** Maps to a BrokeredIntegrationToken field (`accessToken`, `orgUrl`, …). */
+  key: 'accessToken' | 'orgUrl';
+  /** Form label. */
+  label: string;
+  /** Example / placeholder. */
+  placeholder?: string;
+  /** Masked (secret) input — true for the token, false for a plain URL. */
+  secret?: boolean;
+  /** Short help under the field (e.g. how to create the PAT). */
+  help?: string;
+}
 
 export type IntegrationHealth = 'ok' | 'expired' | 'revoked';
 
@@ -34,7 +53,12 @@ export interface IntegrationDefinition {
   name: string;
   icon: string;
   enabled: boolean;
-  auth: { kind: IntegrationAuthKind; scopes?: string[] };
+  auth: {
+    kind: IntegrationAuthKind;
+    scopes?: string[];
+    /** For `kind: 'api_key'` — the credential fields the user pastes (no OAuth). */
+    fields?: IntegrationApiKeyField[];
+  };
   delivery: IntegrationDelivery;
 }
 
@@ -70,4 +94,8 @@ export interface BrokeredIntegrationToken {
   /** Slack workspace/team id (`T…`) — the Slack MCP server needs it alongside
    *  the bot token (`SLACK_TEAM_ID`). Absent for non-Slack integrations. */
   teamId?: string;
+  /** Azure DevOps organization URL (`https://dev.azure.com/<org>`) — the ADO
+   *  MCP server needs it alongside the PAT (`AZURE_DEVOPS_ORG_URL`). Absent for
+   *  non-ADO integrations. */
+  orgUrl?: string;
 }
