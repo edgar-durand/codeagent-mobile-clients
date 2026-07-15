@@ -61,12 +61,25 @@ export const INTEGRATION_REGISTRY: Record<IntegrationId, IntegrationDefinition> 
     enabled: true,
     auth: {
       kind: 'oauth_redirect',
-      // Sentry OAuth scopes for the MCP's read-first surface: read orgs /
-      // projects / teams, read issues+events (the error→fix loop), and
-      // read releases. `org:read` covers org+project discovery. No write
-      // scopes in the MVP — writes (resolve/assign an issue) land with the
-      // designed Approval-Gates phase, same as Jira's write path.
-      scopes: ['org:read', 'project:read', 'team:read', 'event:read', 'project:releases'],
+      // FULL read+write across every Sentry resource — the agent can read
+      // issues/events/projects AND act (resolve/assign issues, manage
+      // projects/teams/members, releases). `:write` implies `:read`. Admin
+      // (destructive org/member management) is deliberately NOT requested.
+      // ⚠️ Changing these requires the user to RE-LINK Sentry — the existing
+      // token only carries whatever scopes it was granted at link time.
+      scopes: [
+        'org:read',
+        'org:write',
+        'project:read',
+        'project:write',
+        'team:read',
+        'team:write',
+        'member:read',
+        'member:write',
+        'event:read',
+        'event:write',
+        'project:releases',
+      ],
     },
     delivery: {
       mcp: {
@@ -75,7 +88,14 @@ export const INTEGRATION_REGISTRY: Record<IntegrationId, IntegrationDefinition> 
         // SENTRY_HOST (never argv — env only). Version PINNED; bump only
         // after re-verifying headless in the mcp-shim integration test.
         command: 'npx',
-        args: ['-y', '@sentry/mcp-server@0.18.0'],
+        // `--add-scopes` widens the server's default READ-ONLY tool surface to
+        // include the write tools our OAuth scopes now grant (resolve/assign
+        // issue, update project, etc.), so the agent exposes read AND write.
+        args: [
+          '-y',
+          '@sentry/mcp-server@0.18.0',
+          '--add-scopes=org:write,project:write,team:write,member:write,event:write',
+        ],
         envMapping: {
           SENTRY_ACCESS_TOKEN: 'accessToken',
           SENTRY_HOST: 'host',

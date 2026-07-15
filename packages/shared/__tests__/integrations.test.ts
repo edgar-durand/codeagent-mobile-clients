@@ -75,16 +75,26 @@ describe('integrations registry', () => {
     const sentry = getIntegration('sentry');
     expect(sentry.name).toBe('Sentry');
     expect(sentry.auth.kind).toBe('oauth_redirect');
-    // read-first MVP scopes (no write scopes — writes gate on Approval Gates).
+    // FULL read+write scopes across every resource (writes imply reads).
     expect(sentry.auth.scopes).toEqual([
       'org:read',
+      'org:write',
       'project:read',
+      'project:write',
       'team:read',
+      'team:write',
+      'member:read',
+      'member:write',
       'event:read',
+      'event:write',
       'project:releases',
     ]);
-    // MCP delivery: BYO-token headless, creds via env only (never argv).
+    // MCP delivery: BYO-token headless, creds via env only (never argv);
+    // --add-scopes widens the server's default read-only tools to writes.
     expect(sentry.delivery.mcp?.command).toBe('npx');
+    expect(sentry.delivery.mcp?.args).toContain(
+      '--add-scopes=org:write,project:write,team:write,member:write,event:write',
+    );
     expect(sentry.delivery.mcp?.envMapping).toEqual({
       SENTRY_ACCESS_TOKEN: 'accessToken',
       SENTRY_HOST: 'host',
