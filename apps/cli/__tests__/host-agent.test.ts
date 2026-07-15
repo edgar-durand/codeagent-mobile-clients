@@ -24,7 +24,9 @@ import {
   maybeResumeLocalHeadroomReporter,
   type HeadroomRunner,
   type SelfUpdateResult,
+  type DockerRunner,
 } from '../src/commands/host-agent';
+import { log } from '../src/services/logger';
 import { hostEnroll } from '../src/commands/host';
 import {
   hostIdentityPath,
@@ -3049,5 +3051,252 @@ describe('maybeResumeLocalHeadroomReporter — on-demand local resume (additive)
     const reporter = maybeResumeLocalHeadroomReporter(ctx);
     expect(reporter).not.toBeNull();
     reporter?.stop();
+  });
+});
+
+// ── Fleet control plane (CodeAgent Box rescue fleet) — Phase 2 ────────────
+//
+// Design of record: docs/superpowers/specs/2026-07-15-fleet-inhouse-selfhosted-rescue-design.md
+//
+// Unit-level: a mocked DockerRunner captures the exact argv the handlers
+// build so the isolation invariants + ops labels are pinned WITHOUT a real
+// Docker daemon. The real-Docker acceptance gate lives in the separate
+// `fleet-box.int.test.ts` (RUN_FLEET_INT=1).
+describe('HostAgentSupervisor — fleet control plane', () => {
+  function makeDockerMock(
+    result: { code?: number | null; stdout?: string; stderr?: string } = {},
+  ) {
+    const calls: string[][] = [];
+    const docker: DockerRunner = {
+      run: vi.fn(async (args: string[]) => {
+        calls.push(args);
+        return { code: result.code ?? 0, stdout: result.stdout ?? 'abcdef123456', stderr: result.stderr ?? '' };
+      }),
+    };
+    return { docker, calls };
+  }
+
+  function fleetCreateCmd(over: Partial<Record<string, unknown>> = {}): RemoteCommand {
+    return {
+      id: 'cmd-fleet-1',
+      sessionId: 'sh-plugin-1',
+      type: 'fleet_create_box',
+      payload: {
+        boxId: 'box-1',
+        containerName: 'codeam-box-clu1a2b3c',
+        enrollToken: 'super-secret-enroll-token',
+        apiOrigin: 'https://api.codeagent-mobile.com',
+        limits: { memoryMb: 1536, cpus: 1, pidsLimit: 512, diskGb: 10 },
+        ...over,
+      },
+    };
+  }
+
+  function fleetRefCmd(type: string, over: Partial<Record<string, unknown>> = {}): RemoteCommand {
+    return {
+      id: 'cmd-fleet-2',
+      sessionId: 'sh-plugin-1',
+      type,
+      payload: {
+        boxId: 'box-1',
+        containerName: 'codeam-box-clu1a2b3c',
+        ...over,
+      },
+    };
+  }
+
+  afterEach(() => {
+    delete process.env.CODEAM_FLEET_BOX_IMAGE;
+  });
+
+  it('fleet_create_box builds the full argv with every hard-isolation flag + the ops labels', async () => {
+    const { docker, calls } = makeDockerMock();
+    process.env.CODEAM_FLEET_BOX_IMAGE = 'ghcr.io/edgar-durand/codeam-box:test';
+    const sup = new HostAgentSupervisor(IDENTITY, { docker });
+
+    await sup.handleCommand(fleetCreateCmd());
+
+    expect(calls).toHaveLength(1);
+    const args = calls[0];
+
+    // Container identity + image.
+    expect(args).toContain('run');
+    expect(args[args.indexOf('--name') + 1]).toBe('codeam-box-clu1a2b3c');
+    expect(args[args.length - 1]).toBe('ghcr.io/edgar-durand/codeam-box:test');
+
+    // Hard isolation invariants.
+    expect(args[args.indexOf('--cap-drop') + 1]).toBe('ALL');
+    expect(args[args.indexOf('--security-opt') + 1]).toBe('no-new-privileges');
+    expect(args[args.indexOf('--memory') + 1]).toBe('1536m');
+    expect(args[args.indexOf('--cpus') + 1]).toBe('1');
+    expect(args[args.indexOf('--pids-limit') + 1]).toBe('512');
+    expect(args[args.indexOf('--network') + 1]).toBe('fleet-net');
+
+    // Named volume — SAME name as the container, mounted at /home/box; the
+    // ONLY writable surface, no host bind mounts.
+    expect(args).toContain('-v');
+    expect(args[args.indexOf('-v') + 1]).toBe('codeam-box-clu1a2b3c:/home/box');
+
+    // Ops labels (Edgar's Phase-2 requirement).
+    const labelValues = args.reduce<string[]>((acc, a, i) => {
+      if (args[i - 1] === '--label') acc.push(a);
+      return acc;
+    }, []);
+    expect(labelValues).toContain('com.codeagent.user-id=clu1a2b3c');
+    expect(labelValues).toContain('com.codeagent.box-id=box-1');
+    expect(labelValues).toContain('com.codeagent.created-by=fleet');
+
+    // Env passthrough to the entrypoint.
+    const envPairs = args.reduce<string[]>((acc, a, i) => {
+      if (args[i - 1] === '-e') acc.push(a);
+      return acc;
+    }, []);
+    expect(envPairs).toContain('CODEAM_ENROLL_TOKEN=super-secret-enroll-token');
+    expect(envPairs).toContain('CODEAM_API_URL=https://api.codeagent-mobile.com');
+
+    // NEVER --privileged, NEVER the docker.sock, NEVER any other bind mount.
+    expect(args).not.toContain('--privileged');
+    expect(args.join(' ')).not.toContain('docker.sock');
+    // The only `-v` on the whole argv is the named volume asserted above.
+    expect(args.filter((a) => a === '-v')).toHaveLength(1);
+  });
+
+  it('fleet_create_box defaults the image when CODEAM_FLEET_BOX_IMAGE is unset', async () => {
+    const { docker, calls } = makeDockerMock();
+    const sup = new HostAgentSupervisor(IDENTITY, { docker });
+
+    await sup.handleCommand(fleetCreateCmd());
+
+    expect(calls[0][calls[0].length - 1]).toBe('ghcr.io/edgar-durand/codeam-box:latest');
+  });
+
+  it('rejects a malformed fleet_create_box payload (bad containerName) — docker never invoked', async () => {
+    const { docker, calls } = makeDockerMock();
+    const sup = new HostAgentSupervisor(IDENTITY, { docker });
+
+    await sup.handleCommand(fleetCreateCmd({ containerName: 'not-a-fleet-box; rm -rf /' }));
+
+    expect(calls).toHaveLength(0);
+  });
+
+  it('rejects a malformed fleet_create_box payload (missing limits) — docker never invoked', async () => {
+    const { docker, calls } = makeDockerMock();
+    const sup = new HostAgentSupervisor(IDENTITY, { docker });
+
+    await sup.handleCommand(fleetCreateCmd({ limits: undefined }));
+
+    expect(calls).toHaveLength(0);
+  });
+
+  it('rejects a malformed fleet_create_box payload (missing enrollToken) — docker never invoked', async () => {
+    const { docker, calls } = makeDockerMock();
+    const sup = new HostAgentSupervisor(IDENTITY, { docker });
+
+    await sup.handleCommand(fleetCreateCmd({ enrollToken: undefined }));
+
+    expect(calls).toHaveLength(0);
+  });
+
+  it('fleet_start_box issues `docker start <containerName>`', async () => {
+    const { docker, calls } = makeDockerMock();
+    const sup = new HostAgentSupervisor(IDENTITY, { docker });
+
+    await sup.handleCommand(fleetRefCmd('fleet_start_box'));
+
+    expect(calls).toEqual([['start', 'codeam-box-clu1a2b3c']]);
+  });
+
+  it('fleet_stop_box issues `docker stop <containerName>`', async () => {
+    const { docker, calls } = makeDockerMock();
+    const sup = new HostAgentSupervisor(IDENTITY, { docker });
+
+    await sup.handleCommand(fleetRefCmd('fleet_stop_box'));
+
+    expect(calls).toEqual([['stop', 'codeam-box-clu1a2b3c']]);
+  });
+
+  it('fleet_delete_box issues `docker rm -f <containerName>` and, with removeVolume, `docker volume rm`', async () => {
+    const { docker, calls } = makeDockerMock();
+    const sup = new HostAgentSupervisor(IDENTITY, { docker });
+
+    await sup.handleCommand(fleetRefCmd('fleet_delete_box', { removeVolume: true }));
+
+    expect(calls).toEqual([
+      ['rm', '-f', 'codeam-box-clu1a2b3c'],
+      ['volume', 'rm', 'codeam-box-clu1a2b3c'],
+    ]);
+  });
+
+  it('fleet_delete_box WITHOUT removeVolume does not touch the volume', async () => {
+    const { docker, calls } = makeDockerMock();
+    const sup = new HostAgentSupervisor(IDENTITY, { docker });
+
+    await sup.handleCommand(fleetRefCmd('fleet_delete_box'));
+
+    expect(calls).toEqual([['rm', '-f', 'codeam-box-clu1a2b3c']]);
+  });
+
+  it('rejects a malformed fleet_*_box ref payload (bad containerName)', async () => {
+    for (const type of ['fleet_start_box', 'fleet_stop_box', 'fleet_delete_box']) {
+      const { docker, calls } = makeDockerMock();
+      const sup = new HostAgentSupervisor(IDENTITY, { docker });
+      await sup.handleCommand(fleetRefCmd(type, { containerName: 'evil-name' }));
+      expect(calls).toHaveLength(0);
+    }
+  });
+
+  it('fleet_stop_box is idempotent — "No such container" is treated as success (no warn)', async () => {
+    const { docker } = makeDockerMock({ code: 1, stderr: 'Error: No such container: codeam-box-clu1a2b3c' });
+    const sup = new HostAgentSupervisor(IDENTITY, { docker });
+    const warnSpy = vi.spyOn(log, 'warn');
+
+    await sup.handleCommand(fleetRefCmd('fleet_stop_box'));
+
+    expect(warnSpy).not.toHaveBeenCalled();
+  });
+
+  it('fleet_delete_box is idempotent — "No such container"/"No such volume" are success (no warn)', async () => {
+    const docker: DockerRunner = {
+      run: vi.fn(async (args: string[]) => {
+        if (args[0] === 'rm') {
+          return { code: 1, stdout: '', stderr: 'Error: No such container: codeam-box-clu1a2b3c' };
+        }
+        return { code: 1, stdout: '', stderr: 'Error: No such volume: codeam-box-clu1a2b3c' };
+      }),
+    };
+    const sup = new HostAgentSupervisor(IDENTITY, { docker });
+    const warnSpy = vi.spyOn(log, 'warn');
+
+    await sup.handleCommand(fleetRefCmd('fleet_delete_box', { removeVolume: true }));
+
+    expect(warnSpy).not.toHaveBeenCalled();
+  });
+
+  it('a REAL fleet_stop_box failure (not idempotent) IS logged as a warning', async () => {
+    const { docker } = makeDockerMock({ code: 1, stderr: 'Error: some other docker failure' });
+    const sup = new HostAgentSupervisor(IDENTITY, { docker });
+    const warnSpy = vi.spyOn(log, 'warn');
+
+    await sup.handleCommand(fleetRefCmd('fleet_stop_box'));
+
+    expect(warnSpy).toHaveBeenCalled();
+  });
+
+  it('the enroll token never appears in any log call across the fleet_create_box path', async () => {
+    const { docker } = makeDockerMock();
+    const sup = new HostAgentSupervisor(IDENTITY, { docker });
+    const infoSpy = vi.spyOn(log, 'info');
+    const warnSpy = vi.spyOn(log, 'warn');
+    const traceSpy = vi.spyOn(log, 'trace');
+
+    const secret = 'super-secret-enroll-token';
+    await sup.handleCommand(fleetCreateCmd({ enrollToken: secret }));
+
+    const allLoggedArgs = [...infoSpy.mock.calls, ...warnSpy.mock.calls, ...traceSpy.mock.calls]
+      .flat()
+      .map((v) => String(v));
+    for (const line of allLoggedArgs) {
+      expect(line).not.toContain(secret);
+    }
   });
 });

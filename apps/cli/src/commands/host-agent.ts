@@ -444,6 +444,187 @@ function isStopPayload(p: Record<string, unknown>): p is StopPayload & Record<st
   return typeof p.sessionId === 'string';
 }
 
+// ── Fleet control plane (CodeAgent Box rescue fleet) ───────────────────────
+//
+// Design of record: docs/superpowers/specs/2026-07-15-fleet-inhouse-selfhosted-rescue-design.md
+//
+// The fleet host is an ordinary self-hosted `codeam host-agent` (enrolled
+// once as a host of our own system account) that ALSO understands four
+// additive command types pushed down the SAME control channel:
+//
+//   fleet_create_box  → `docker run` a per-user rescue box
+//   fleet_start_box   → `docker start` (wake a sleeping box)
+//   fleet_stop_box    → `docker stop`  (sleep an idle box)
+//   fleet_delete_box  → `docker rm -f` (+ optional volume rm on reap)
+//
+// A normal self-hosted box never receives these — they're only ever pushed
+// to the ONE host enrolled as `FLEET_HOST_ID` on the backend. Payload shapes
+// mirror the backend's `fleet.types.ts` EXACTLY (`FleetCreateBoxCommand` /
+// `FleetBoxRefCommand`) — same hand-rolled-guard precedent as `DeployPayload`
+// above, deliberately NOT hoisted into `@codeam/shared`.
+
+/** The `fleet_create_box` payload (mirrors backend `FleetCreateBoxCommand`). */
+interface FleetCreateBoxPayload {
+  boxId: string;
+  containerName: string;
+  /** Single-use self-hosted enroll token minted for the RESCUED USER — the
+   *  box's `codeam host-agent` entrypoint redeems it on boot. Delivered to
+   *  the container via `-e`; NEVER logged. */
+  enrollToken: string;
+  apiOrigin: string;
+  limits: {
+    memoryMb: number;
+    cpus: number;
+    pidsLimit: number;
+    /** Not enforceable by `docker run` directly (no first-class disk-quota
+     *  flag portable across storage drivers) — documented, not wired into
+     *  argv. The named volume itself is capped at the infra layer. */
+    diskGb: number;
+  };
+}
+
+/** The `fleet_start_box` / `fleet_stop_box` / `fleet_delete_box` payload
+ *  (mirrors backend `FleetBoxRefCommand`). */
+interface FleetBoxRefPayload {
+  boxId: string;
+  containerName: string;
+  /** delete only: also remove the named volume (reap). */
+  removeVolume?: boolean;
+}
+
+/**
+ * Container-name allowlist. The backend derives `codeam-box-<userId>`
+ * (cuids are `[a-z0-9]`, already docker-name-safe) and — per the Global
+ * Constraints — the SAME string also names the box's named volume. Refusing
+ * anything else means this handler can never be steered into touching a
+ * non-fleet container/volume on the shared host.
+ */
+const FLEET_CONTAINER_NAME_RE = /^codeam-box-[a-z0-9]+$/;
+
+function isFleetContainerName(v: unknown): v is string {
+  return typeof v === 'string' && FLEET_CONTAINER_NAME_RE.test(v);
+}
+
+function isFiniteNumber(v: unknown): v is number {
+  return typeof v === 'number' && Number.isFinite(v);
+}
+
+function isFleetLimits(v: unknown): v is FleetCreateBoxPayload['limits'] {
+  if (typeof v !== 'object' || v === null) return false;
+  const l = v as Record<string, unknown>;
+  return (
+    isFiniteNumber(l.memoryMb) &&
+    isFiniteNumber(l.cpus) &&
+    isFiniteNumber(l.pidsLimit) &&
+    isFiniteNumber(l.diskGb)
+  );
+}
+
+function isFleetCreateBoxPayload(
+  p: Record<string, unknown>,
+): p is FleetCreateBoxPayload & Record<string, unknown> {
+  return (
+    typeof p.boxId === 'string' &&
+    isFleetContainerName(p.containerName) &&
+    typeof p.enrollToken === 'string' &&
+    p.enrollToken.length > 0 &&
+    typeof p.apiOrigin === 'string' &&
+    p.apiOrigin.length > 0 &&
+    isFleetLimits(p.limits)
+  );
+}
+
+function isFleetBoxRefPayload(
+  p: Record<string, unknown>,
+): p is FleetBoxRefPayload & Record<string, unknown> {
+  if (typeof p.boxId !== 'string') return false;
+  if (!isFleetContainerName(p.containerName)) return false;
+  if (p.removeVolume !== undefined && typeof p.removeVolume !== 'boolean') return false;
+  return true;
+}
+
+/** `codeam-box-<userId>` → `<userId>`. Only called after {@link isFleetContainerName}
+ *  has validated the shape, so the slice is always well-formed. */
+function fleetUserIdFromContainerName(containerName: string): string {
+  return containerName.slice('codeam-box-'.length);
+}
+
+/** `docker stop` / `docker rm` on an already-gone container exit non-zero
+ *  with this stderr — the fleet handlers treat that as SUCCESS (idempotent:
+ *  the backend's reap sweeps may re-send a stop/delete for a box the host
+ *  already cleaned up). */
+function isMissingContainerError(stderr: string): boolean {
+  return /no such container/i.test(stderr);
+}
+
+/** Same idempotency treatment for `docker volume rm` on reap. */
+function isMissingVolumeError(stderr: string): boolean {
+  return /no such volume/i.test(stderr);
+}
+
+/**
+ * Resolve the box image the fleet host runs. Host-side config, NEVER read
+ * from the wire (the wire payload carries no image field — see
+ * `FleetCreateBoxCommand`). Overridable with `CODEAM_FLEET_BOX_IMAGE` (the
+ * real-Docker CI int test points this at its freshly-built local tag).
+ */
+function resolveFleetBoxImage(): string {
+  return process.env.CODEAM_FLEET_BOX_IMAGE || 'ghcr.io/edgar-durand/codeam-box:latest';
+}
+
+/**
+ * Subprocess runner injectable for the fleet `docker` control-plane
+ * handlers. Mirrors {@link HeadroomRunner} (`commands/host/os-packages.ts`):
+ * `run` resolves — never rejects — with `{code, stderr, stdout}`; `stdout`
+ * is needed to capture the created container id off `docker run -d`. Argv
+ * arrays only — the default runner NEVER shells through `sh -c`.
+ */
+export interface DockerRunner {
+  run(
+    args: string[],
+    opts?: { timeoutMs?: number },
+  ): Promise<{ code: number | null; stderr: string; stdout: string }>;
+}
+
+/** Advisory bound for a fleet `docker` invocation before the runner kills it. */
+const DOCKER_RUN_TIMEOUT_MS = 120_000;
+
+/** Default runner: spawn the real `docker` binary (argv only, no shell). */
+export const defaultDockerRunner: DockerRunner = {
+  run(args, opts = {}): Promise<{ code: number | null; stderr: string; stdout: string }> {
+    return new Promise((resolve) => {
+      const child = spawn('docker', args, { stdio: ['ignore', 'pipe', 'pipe'] });
+      let stdoutBuf = '';
+      let stderrBuf = '';
+      let settled = false;
+      const timer = setTimeout(
+        () => {
+          if (settled) return;
+          killQuiet(child);
+        },
+        opts.timeoutMs ?? DOCKER_RUN_TIMEOUT_MS,
+      );
+      const done = (code: number | null): void => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve({ code, stderr: stderrBuf, stdout: stdoutBuf });
+      };
+      child.stdout?.on('data', (b: Buffer) => {
+        stdoutBuf += b.toString();
+      });
+      child.stderr?.on('data', (b: Buffer) => {
+        stderrBuf += b.toString();
+      });
+      child.once('error', (err) => {
+        stderrBuf += stderrBuf ? `\n${err.message}` : err.message;
+        done(null);
+      });
+      child.once('exit', (code) => done(code));
+    });
+  },
+};
+
 /**
  * The control channel is a relay session, but it hosts NO agent — it is
  * a command pipe. Report it as a synthetic "control" agent so the relay's
@@ -587,6 +768,14 @@ export interface HostAgentDeps {
    * Injectable so tests assert the restart WITHOUT killing the test runner.
    */
   onUpdated?: (version: string) => void;
+  /**
+   * Docker control-plane runner for the fleet `fleet_*` handlers (CodeAgent
+   * Box rescue fleet). Additive — a normal self-hosted box never receives a
+   * `fleet_*` command, so this stays dormant. Defaults to
+   * {@link defaultDockerRunner} (a real `docker` subprocess). Injectable so
+   * tests assert the exact argv without a Docker daemon.
+   */
+  docker?: DockerRunner;
 }
 
 /**
@@ -628,6 +817,8 @@ export class HostAgentSupervisor {
   /** Best-effort systemd de-provision used by `self_hosted_wipe`. */
   private readonly disableService: () => void;
   private readonly teardownHeadroom: () => void;
+  /** Docker runner for the fleet `fleet_*` control-plane handlers. */
+  private readonly docker: DockerRunner;
   /** Guards against firing the self-heal more than once. */
   private healing = false;
 
@@ -647,6 +838,7 @@ export class HostAgentSupervisor {
     this.teardownHeadroom = deps.teardownHeadroom ?? defaultTeardownHeadroom;
     this.selfUpdate = deps.selfUpdate ?? runSelfUpdate;
     this.onUpdated = deps.onUpdated ?? defaultOnUpdated;
+    this.docker = deps.docker ?? defaultDockerRunner;
   }
 
   /**
@@ -867,6 +1059,41 @@ export class HostAgentSupervisor {
    * arbitrary command surface).
    */
   async handleCommand(cmd: RemoteCommand): Promise<void> {
+    // Fleet control plane (additive, CodeAgent Box rescue fleet). A normal
+    // self-hosted box never receives these — they're only ever pushed to the
+    // ONE host enrolled as the fleet host.
+    if (cmd.type === 'fleet_create_box') {
+      if (!isFleetCreateBoxPayload(cmd.payload)) {
+        log.warn('host-agent', `ignoring malformed fleet_create_box id=${cmd.id}`);
+        return;
+      }
+      await this.fleetCreateBox(cmd.payload);
+      return;
+    }
+    if (cmd.type === 'fleet_start_box') {
+      if (!isFleetBoxRefPayload(cmd.payload)) {
+        log.warn('host-agent', `ignoring malformed fleet_start_box id=${cmd.id}`);
+        return;
+      }
+      await this.fleetStartBox(cmd.payload);
+      return;
+    }
+    if (cmd.type === 'fleet_stop_box') {
+      if (!isFleetBoxRefPayload(cmd.payload)) {
+        log.warn('host-agent', `ignoring malformed fleet_stop_box id=${cmd.id}`);
+        return;
+      }
+      await this.fleetStopBox(cmd.payload);
+      return;
+    }
+    if (cmd.type === 'fleet_delete_box') {
+      if (!isFleetBoxRefPayload(cmd.payload)) {
+        log.warn('host-agent', `ignoring malformed fleet_delete_box id=${cmd.id}`);
+        return;
+      }
+      await this.fleetDeleteBox(cmd.payload);
+      return;
+    }
     if (cmd.type === 'self_hosted_deploy') {
       if (!isDeployPayload(cmd.payload)) {
         log.warn('host-agent', `ignoring malformed self_hosted_deploy id=${cmd.id}`);
@@ -910,6 +1137,126 @@ export class HostAgentSupervisor {
       return;
     }
     log.trace('host-agent', `ignoring unsupported command type=${cmd.type}`);
+  }
+
+  /**
+   * `fleet_create_box` — `docker run` a per-user rescue box. Builds the FULL
+   * argv from a fixed template (Global Constraints — nothing from the wire
+   * is passed through as a raw docker argument beyond the already-validated
+   * `containerName` and the numeric resource limits): hard isolation
+   * (`--cap-drop ALL`, `--security-opt no-new-privileges`, resource caps,
+   * the isolated `fleet-net` network, a SINGLE named volume mounted at
+   * `/home/box` — named identically to the container, per the Global
+   * Constraints — and the ops labels). NEVER `--privileged`, NEVER a
+   * `docker.sock` mount, NEVER a host bind mount. The enroll token + api
+   * origin are delivered to the entrypoint via `-e`; never logged.
+   */
+  private async fleetCreateBox(payload: FleetCreateBoxPayload): Promise<void> {
+    const { containerName, limits } = payload;
+    const userId = fleetUserIdFromContainerName(containerName);
+    log.info(
+      'host-agent',
+      `fleet_create_box id=${payload.boxId} name=${containerName} ` +
+        `mem=${limits.memoryMb}m cpus=${limits.cpus} pids=${limits.pidsLimit}`,
+    );
+    const args = [
+      'run',
+      '-d',
+      '--name',
+      containerName,
+      '--cap-drop',
+      'ALL',
+      '--security-opt',
+      'no-new-privileges',
+      '--memory',
+      `${limits.memoryMb}m`,
+      '--cpus',
+      String(limits.cpus),
+      '--pids-limit',
+      String(limits.pidsLimit),
+      '--network',
+      'fleet-net',
+      '--label',
+      `com.codeagent.user-id=${userId}`,
+      '--label',
+      `com.codeagent.box-id=${payload.boxId}`,
+      '--label',
+      'com.codeagent.created-by=fleet',
+      '-v',
+      `${containerName}:/home/box`,
+      '-e',
+      `CODEAM_ENROLL_TOKEN=${payload.enrollToken}`,
+      '-e',
+      `CODEAM_API_URL=${payload.apiOrigin}`,
+      resolveFleetBoxImage(),
+    ];
+    const res = await this.docker.run(args, { timeoutMs: DOCKER_RUN_TIMEOUT_MS });
+    if (res.code === 0) {
+      // stdout is the created container id — not a secret, safe to log.
+      log.info(
+        'host-agent',
+        `fleet box ${containerName} created (${res.stdout.trim().slice(0, 12)})`,
+      );
+    } else {
+      log.warn(
+        'host-agent',
+        `fleet_create_box ${containerName} failed (code=${res.code}): ${res.stderr.trim().slice(-300)}`,
+      );
+    }
+  }
+
+  /** `fleet_start_box` — wake a sleeping box (`docker start`). Idempotent: a
+   *  container the host already removed is treated as success. */
+  private async fleetStartBox(payload: FleetBoxRefPayload): Promise<void> {
+    log.info('host-agent', `fleet_start_box id=${payload.boxId} name=${payload.containerName}`);
+    const res = await this.docker.run(['start', payload.containerName]);
+    if (res.code !== 0 && !isMissingContainerError(res.stderr)) {
+      log.warn(
+        'host-agent',
+        `fleet_start_box ${payload.containerName} failed (code=${res.code}): ${res.stderr.trim().slice(-300)}`,
+      );
+    }
+  }
+
+  /** `fleet_stop_box` — sleep an idle box (`docker stop`). MUST be
+   *  idempotent — the backend's reap sweeps may re-send a stop for a box
+   *  the host already stopped/removed; "No such container" is success. */
+  private async fleetStopBox(payload: FleetBoxRefPayload): Promise<void> {
+    log.info('host-agent', `fleet_stop_box id=${payload.boxId} name=${payload.containerName}`);
+    const res = await this.docker.run(['stop', payload.containerName]);
+    if (res.code !== 0 && !isMissingContainerError(res.stderr)) {
+      log.warn(
+        'host-agent',
+        `fleet_stop_box ${payload.containerName} failed (code=${res.code}): ${res.stderr.trim().slice(-300)}`,
+      );
+    }
+  }
+
+  /** `fleet_delete_box` — `docker rm -f`, plus `docker volume rm` when the
+   *  backend asks for a reap (`removeVolume`). MUST be idempotent — deleting
+   *  an already-gone container/volume is success, never a failure. */
+  private async fleetDeleteBox(payload: FleetBoxRefPayload): Promise<void> {
+    log.info(
+      'host-agent',
+      `fleet_delete_box id=${payload.boxId} name=${payload.containerName} ` +
+        `removeVolume=${Boolean(payload.removeVolume)}`,
+    );
+    const res = await this.docker.run(['rm', '-f', payload.containerName]);
+    if (res.code !== 0 && !isMissingContainerError(res.stderr)) {
+      log.warn(
+        'host-agent',
+        `fleet_delete_box ${payload.containerName} failed (code=${res.code}): ${res.stderr.trim().slice(-300)}`,
+      );
+    }
+    if (payload.removeVolume) {
+      const volRes = await this.docker.run(['volume', 'rm', payload.containerName]);
+      if (volRes.code !== 0 && !isMissingVolumeError(volRes.stderr)) {
+        log.warn(
+          'host-agent',
+          `fleet_delete_box volume rm ${payload.containerName} failed (code=${volRes.code}): ${volRes.stderr.trim().slice(-300)}`,
+        );
+      }
+    }
   }
 
   /**
@@ -1446,6 +1793,25 @@ export async function hostAgent(args: string[] = []): Promise<void> {
     (tokenArg ? tokenArg.slice('--token='.length).trim() : '') ||
     process.env.CODEAM_ENROLL_TOKEN ||
     undefined;
+
+  // Fleet box dry-run (additive test seam — CI `fleet-box.int.test.ts`). Exercise
+  // enrollment up to the network boundary WITHOUT a live backend: assert the
+  // token + origin arrived in the container env, emit a greppable marker (token
+  // LENGTH only — never the token itself), and exit cleanly before opening any
+  // socket or starting the long-lived supervisor. Production boxes never set this.
+  if (process.env.CODEAM_ENROLL_DRY_RUN === '1') {
+    const apiOrigin = process.env.CODEAM_API_URL ?? '(unset)';
+    if (!enrollToken) {
+      process.stdout.write(
+        '[fleet-box:dry-run] MISSING CODEAM_ENROLL_TOKEN — would abort enroll\n',
+      );
+      throw new Error('fleet-box dry-run: no enroll token in container env');
+    }
+    process.stdout.write(
+      `[fleet-box:dry-run] would redeem enroll token (len=${enrollToken.length}) at ${apiOrigin}\n`,
+    );
+    return;
+  }
 
   const identity = await resolveHostIdentity(enrollToken);
   if (!identity) {
