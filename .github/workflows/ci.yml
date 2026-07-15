@@ -200,6 +200,42 @@ jobs:
           # the image loaded above instead of doing a redundant second build.
           npx vitest run headroom-provision
 
+      # Fleet control plane — REAL Docker integration test (Phase 2 gate).
+      # Builds the real apps/box image (installs codeam-cli from npm — the
+      # box is NOT built from this branch's tarball, by design: it tracks
+      # the published release line the same way the real fleet does) and
+      # drives the real fleet_* handlers (HostAgentSupervisor +
+      # defaultDockerRunner, apps/cli/src/commands/host-agent.ts) against the
+      # Docker daemon: fleet_create_box → `docker inspect` asserts every
+      # isolation invariant (single named-volume mount, non-root user,
+      # CapDrop=ALL, no-new-privileges, memory/cpu/pids caps, fleet-net, the
+      # com.codeagent.* labels); the entrypoint redeems against the in-test
+      # stub backend; then stop/start/delete(removeVolume) round-trips.
+      # Gated to Linux + Node 20 (Docker-capable, one cell); RUN_FLEET_INT=1
+      # flips it on, every other cell self-skips cleanly. Layer-caches the
+      # box image build across runs (keyed on the Dockerfile hash), like
+      # the Headroom step above.
+      - name: CLI fleet box Docker integration test (create/inspect/lifecycle)
+        if: matrix.os == 'ubuntu-latest' && matrix.node == '20'
+        working-directory: apps/cli
+        env:
+          RUN_FLEET_INT: '1'
+          # The test reads FLEET_BOX_IMAGE_TAG and, when set, skips its own
+          # docker build and reuses the pre-built image loaded below.
+          FLEET_BOX_IMAGE_TAG: codeam-box-fleet-e2e:ci
+        run: |
+          # Build the box image with GHA layer cache and LOAD it into the
+          # local daemon so the test's `docker run` can use it without a
+          # second build.
+          docker buildx build \
+            --cache-from type=gha,scope=fleet-box \
+            --cache-to   type=gha,scope=fleet-box,mode=max \
+            --load \
+            -t codeam-box-fleet-e2e:ci \
+            "$GITHUB_WORKSPACE/apps/box"
+
+          npx vitest run fleet-box.int
+
       # Smoke from the repo workspace. Confirms the freshly-built
       # binary boots on this OS, the argument parser handles every
       # `<cmd> --help` we ship, and the live backend at
