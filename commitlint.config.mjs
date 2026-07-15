@@ -32,6 +32,14 @@ export default {
         // in both VS Code and JetBrains plugins in lock-step.
         'both-plugins',
         'shared',
+        // apps/box — the codeam-box rescue-fleet runtime image (Docker only;
+        // no TypeScript). Its own scope, distinct from 'cli', since it
+        // ships/versions independently (a container image, not part of the
+        // npm client release line).
+        'box',
+        // Repo-wide test infrastructure not scoped to one app (real-Docker
+        // integration tests, shared fixtures, the CI wiring for a new gate).
+        'test',
         'workflow',
         'meta',
         'deps',
