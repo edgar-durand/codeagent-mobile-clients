@@ -173,6 +173,49 @@ describe('host enroll — redeem flow', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
+  it('defaults the label to os.hostname() when neither --label nor CODEAM_HOST_LABEL is set', async () => {
+    const prev = process.env.CODEAM_HOST_LABEL;
+    delete process.env.CODEAM_HOST_LABEL;
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      statusText: 'OK',
+      json: async () => ({
+        success: true,
+        data: { hostId: 'h1', hostToken: 't', controlPluginId: 'cp' },
+      }),
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    await hostEnroll(['--token=ENROLL']);
+
+    const body = JSON.parse((fetchMock.mock.calls[0][1] as { body: string }).body);
+    expect(body.label).toBe(os.hostname().slice(0, 80));
+    if (prev !== undefined) process.env.CODEAM_HOST_LABEL = prev;
+  });
+
+  it('uses CODEAM_HOST_LABEL over the hostname (co-located host-agents / fleet box → "CodeAgent Box")', async () => {
+    const prev = process.env.CODEAM_HOST_LABEL;
+    process.env.CODEAM_HOST_LABEL = 'CodeAgent Box';
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      statusText: 'OK',
+      json: async () => ({
+        success: true,
+        data: { hostId: 'h1', hostToken: 't', controlPluginId: 'cp' },
+      }),
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    await hostEnroll(['--token=ENROLL']);
+
+    const body = JSON.parse((fetchMock.mock.calls[0][1] as { body: string }).body);
+    expect(body.label).toBe('CodeAgent Box');
+    if (prev === undefined) delete process.env.CODEAM_HOST_LABEL;
+    else process.env.CODEAM_HOST_LABEL = prev;
+  });
+
   it('throws when no token and no existing identity', async () => {
     await expect(hostEnroll([])).rejects.toThrow(/requires --token/);
   });
