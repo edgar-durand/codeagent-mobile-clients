@@ -113,6 +113,41 @@ describe('CommandRelayService', () => {
     relay.stop();
   });
 
+  it('at-least-once: dedupes a redelivered command (runs once) and acks its id', async () => {
+    // The backend now delivers non-destructively (peek) and redelivers until
+    // acked — so the SAME command can arrive on two consecutive polls. It must
+    // run exactly once, and we must POST /api/commands/ack to drain the queue.
+    const dup = [{ id: 'cmd-dup', sessionId: 's1', type: 'start_task', payload: { prompt: 'hi' } }];
+    vi.mocked(pairing._getJson).mockResolvedValue({ data: dup });
+    const onCmd = vi.fn();
+    const relay = new CommandRelayService('plugin-1', onCmd, META);
+    relay.start();
+    await vi.advanceTimersByTimeAsync(2100); // poll #1 delivers cmd-dup
+    await vi.advanceTimersByTimeAsync(2100); // poll #2 REDELIVERS cmd-dup
+    // Dispatched exactly once despite two deliveries.
+    expect(onCmd).toHaveBeenCalledTimes(1);
+    // Acked so the server removes it from the queue.
+    expect(pairing._postJson).toHaveBeenCalledWith(
+      expect.stringContaining('/api/commands/ack'),
+      expect.objectContaining({ pluginId: 'plugin-1', commandIds: ['cmd-dup'] }),
+      expect.anything(),
+    );
+    relay.stop();
+  });
+
+  it('advertises at-least-once support via the X-Codeam-Cmd-Ack header on polls', async () => {
+    vi.mocked(pairing._getJson).mockResolvedValue({ data: [] });
+    const relay = new CommandRelayService('plugin-1', vi.fn(), META);
+    relay.start();
+    await vi.advanceTimersByTimeAsync(2100);
+    // The poll passes the delivery headers (incl. the ack advertisement).
+    expect(pairing._getJson).toHaveBeenCalledWith(
+      expect.stringContaining('/api/commands/pending'),
+      expect.objectContaining({ 'X-Codeam-Cmd-Ack': '1' }),
+    );
+    relay.stop();
+  });
+
   it('sendResult posts to /api/commands/result', async () => {
     const relay = new CommandRelayService('plugin-1', vi.fn(), META);
     await relay.sendResult('cmd1', 'completed', { output: 'done' });

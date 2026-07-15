@@ -67,6 +67,17 @@ export class CommandRelayService {
   private agentsRegistered = false;
   /** SSE connection (null when on the polling fallback or stopped). */
   private sseRequest: http.ClientRequest | null = null;
+  // At-least-once delivery: the backend now delivers commands NON-DESTRUCTIVELY
+  // (peek) when we advertise `X-Codeam-Cmd-Ack: 1`, and drains the queue only
+  // when we ack the ids. So a command can never be lost to a ghost/racing SSE
+  // subscriber during codespace boot (the 2026-07-15 first-prompt loss). The
+  // trade-off is possible REDELIVERY (reconnect, publish re-fire, ghost race),
+  // so we dedupe by id here — a bounded FIFO set of ids we've already
+  // dispatched. Cap keeps memory flat over a long session; the oldest ids are
+  // evicted (a command that old is long gone from the server queue anyway).
+  private readonly processedIds = new Set<string>();
+  private static readonly PROCESSED_ID_CAP = 1000;
+
   /** Polling backoff state (only used on the fallback). */
   private pollTimer: NodeJS.Timeout | null = null;
   private pollFailures = 0;
@@ -435,14 +446,19 @@ export class CommandRelayService {
   // as X-Plugin-Poll-Secret. Empty {} for legacy sessions / older
   // backends (which ignore it).
   private pollSecretHeader(): Record<string, string> {
+    // Advertise at-least-once ack support on EVERY delivery request (SSE
+    // subscribe + poll) so the backend delivers non-destructively and drains
+    // only on our ack. Older backends ignore the unknown header (safe).
+    const headers: Record<string, string> = { 'X-Codeam-Cmd-Ack': '1' };
     try {
       const secret = loadCliConfig().sessions.find(
         (s) => s.pluginId === this.pluginId,
       )?.pollSecret;
-      return secret ? { 'X-Plugin-Poll-Secret': secret } : {};
+      if (secret) headers['X-Plugin-Poll-Secret'] = secret;
     } catch {
-      return {};
+      /* no secret — legacy session */
     }
+    return headers;
   }
 
   private async pollOnce(): Promise<void> {
@@ -469,7 +485,22 @@ export class CommandRelayService {
   }
 
   private async dispatchCommands(commands: RemoteCommand[]): Promise<void> {
+    // Ack EVERY received id first (even ones we dedupe below) so the backend
+    // drains its queue — at-least-once delivery means the command stays queued
+    // until we confirm receipt. Best-effort + non-blocking: a failed ack just
+    // means a harmless redelivery (we dedupe it). Fire before dispatch so a slow
+    // handler can't hold the command on the server queue.
+    this.ackCommands(commands.map((c) => c.id));
+
     for (const cmd of commands) {
+      // Dedupe: at-least-once delivery can redeliver (reconnect, publish
+      // re-fire, ghost-subscriber race). Skip anything we've already run so a
+      // redelivered "post to Slack" can't double-execute.
+      if (cmd.id && this.processedIds.has(cmd.id)) {
+        log.trace('relay', `dedupe skip already-dispatched id=${cmd.id}`);
+        continue;
+      }
+      if (cmd.id) this.rememberProcessed(cmd.id);
       try {
         log.trace('relay', `dispatch type=${cmd.type} id=${cmd.id}`);
         await this.onCommand(cmd);
@@ -477,6 +508,25 @@ export class CommandRelayService {
         log.trace('relay', 'command handler threw', err);
       }
     }
+  }
+
+  /** Record a dispatched id, evicting the oldest when over the cap (FIFO). */
+  private rememberProcessed(id: string): void {
+    this.processedIds.add(id);
+    if (this.processedIds.size > CommandRelayService.PROCESSED_ID_CAP) {
+      const oldest = this.processedIds.values().next().value;
+      if (oldest !== undefined) this.processedIds.delete(oldest);
+    }
+  }
+
+  /** Confirm receipt of command ids so the backend removes them from the queue
+   *  (the at-least-once delivery guarantee). Best-effort — never throws. */
+  private ackCommands(ids: string[]): void {
+    const commandIds = ids.filter((id): id is string => typeof id === 'string' && id.length > 0);
+    if (commandIds.length === 0) return;
+    void _postJson(`${API_BASE}/api/commands/ack`, { pluginId: this.pluginId, commandIds }, {
+      ...this.pollSecretHeader(),
+    }).catch((err) => log.trace('relay', 'ack post failed (will redeliver+dedupe)', err));
   }
 
   // ─── Heartbeat + agents ──────────────────────────────────────────
