@@ -144,19 +144,20 @@ export const INTEGRATION_REGISTRY: Record<IntegrationId, IntegrationDefinition> 
     id: 'slack',
     name: 'Slack',
     icon: 'slack',
-    // LIVE — the Slack app (OAuth v2, bot token) is registered and
+    // LIVE — the Slack app (OAuth v2, USER token — the agent acts AS THE USER)
+    // is registered and
     // SLACK_OAUTH_CLIENT_ID/SECRET/REDIRECT_URI are in Secret Manager
     // (prod+dev). The backend SlackOAuthProvider is config-gated (503 if env
     // unset) so this is safe even mid-rollout before the secrets mount.
     enabled: true,
     auth: {
       kind: 'oauth_redirect',
-      // Slack Bot Token Scopes (OAuth v2). Read + write across channels,
-      // groups, DMs: list/read history, post messages, react. `scope` is
-      // COMMA-separated in the authorize URL. ⚠️ Changing these requires the
-      // user to RE-INSTALL the Slack app — the bot token only carries the
-      // scopes granted at install time. The bot can only read channels it's
-      // been invited to (standard Slack bot behavior).
+      // Slack USER Token Scopes (OAuth v2). Read + write across channels,
+      // groups, DMs: list/read history, post messages, react — all AS THE USER.
+      // The backend provider requests these under `user_scope` (comma-separated)
+      // and stores the authed_user `xoxp-…` token, so the agent sees everything
+      // the user sees (no bot needs to be invited to channels). ⚠️ Changing
+      // these requires the user to RE-AUTHORIZE the Slack app.
       scopes: [
         'channels:read',
         'channels:history',
@@ -175,9 +176,10 @@ export const INTEGRATION_REGISTRY: Record<IntegrationId, IntegrationDefinition> 
     delivery: {
       mcp: {
         // Slack's official reference MCP server (Node). BYO-token headless: the
-        // OAuth v2 bot token (xoxb-…) is fed via SLACK_BOT_TOKEN and the team
-        // id via SLACK_TEAM_ID (env only, never argv). The server sends the
-        // token as `Authorization: Bearer`. Version PINNED; bump only after
+        // OAuth v2 USER token (xoxp-…) is fed via SLACK_BOT_TOKEN (the server's
+        // env var name — it sends whatever token as `Authorization: Bearer`, and
+        // Slack's Web API accepts a user token there) and the team id via
+        // SLACK_TEAM_ID (env only, never argv). Version PINNED; bump only after
         // re-verifying headless. Tools: list_channels, post_message,
         // reply_to_thread, add_reaction, get_channel_history,
         // get_thread_replies, get_users, get_user_profile (read + write).
