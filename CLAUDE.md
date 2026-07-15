@@ -208,6 +208,100 @@ Tests: `apps/cli/__tests__/baton/*` (gate, controller wiring, acp-driver load-re
 terminal park, serialized poster) + `__tests__/agents/acp/streaming-state-dedup.test.ts`
 (load-replay guard). Spec/plan in the container repo `docs/superpowers/`.
 
+### CodeAgent Box rescue fleet — the `fleet_*` control-plane handlers (`host-agent.ts`)
+
+**One line:** the fleet host (`fleet-1`, an ordinary self-hosted `codeam host-agent` enrolled once
+as a host of the system account — see `codeagent-mobile/CLAUDE.md` for the api-v2 `fleet` module
+that dispatches these) receives four ADDITIVE relay command types, handled entirely in
+`apps/cli/src/commands/host-agent.ts`: `fleet_create_box` / `fleet_start_box` / `fleet_stop_box` /
+`fleet_delete_box`. A normal self-hosted box never receives them — they're pushed only to the ONE
+host the backend addresses as `FLEET_HOST_ID`. Spec: `docs/superpowers/specs/2026-07-15-fleet-inhouse-selfhosted-rescue-design.md`
+(container repo). Plan: `docs/superpowers/plans/2026-07-15-fleet-p2-clients.md` (this repo's slice —
+CLI handlers + box image; `…-fleet-p1-infra-backend.md` covers the backend `fleet` module).
+
+**Payload shapes are hand-rolled guards, deliberately NOT hoisted into `@codeam/shared`** — they
+mirror the backend's `fleet.types.ts` (`FleetCreateBoxCommand`/`FleetBoxRefCommand`) exactly, same
+precedent as `DeployPayload`. `isFleetCreateBoxPayload`/`isFleetBoxRefPayload` validate every field,
+including a **container-name allowlist** (`FLEET_CONTAINER_NAME_RE = /^codeam-box-[a-z0-9]+$/`) —
+since the backend derives `codeam-box-<userId>` (cuid, already docker-name-safe) and that same
+string also names the box's named volume, refusing anything else means these handlers can never be
+steered into touching a non-fleet container/volume on the shared host.
+
+**`DockerRunner` abstraction** (exported from `host-agent.ts`, injected on `HostAgentDeps.docker`,
+defaults to `defaultDockerRunner`) — mirrors the `HeadroomRunner` shape: `run(args, opts)` spawns the
+real `docker` binary with **argv only, never `sh -c`**, and *resolves* (never rejects) with
+`{code, stderr, stdout}`. `opts.env` is merged OVER `process.env` for the `docker` CLI process's OWN
+env — this is the mechanism that keeps the enroll token off argv (below). Tests inject a fake runner
+to assert exact argv without a real Docker daemon.
+
+**`fleet_create_box`'s exact isolation flags + ops labels** (the handler builds the FULL `docker run`
+argv from a fixed template — nothing from the wire is passed through as a raw docker argument beyond
+the already-validated `containerName` and the numeric resource limits):
+
+```
+docker run -d --name codeam-box-<userId> \
+  --cap-drop ALL --security-opt no-new-privileges \
+  --memory <memoryMb>m --cpus <cpus> --pids-limit <pidsLimit> \
+  --network fleet-net \
+  --label com.codeagent.user-id=<userId> \
+  --label com.codeagent.box-id=<boxId> \
+  --label com.codeagent.created-by=fleet \
+  -v codeam-box-<userId>:/home/box \
+  -e CODEAM_ENROLL_TOKEN \
+  -e CODEAM_API_URL=<apiOrigin> \
+  <fleet box image>
+```
+
+NEVER `--privileged`, NEVER a `docker.sock` mount, NEVER a host bind mount — the box's only writable
+surface is the single named volume (identically named to the container). The box image is resolved
+host-side (`resolveFleetBoxImage()`, default `ghcr.io/edgar-durand/codeam-box:latest`, overridable via
+`CODEAM_FLEET_BOX_IMAGE` for the CI int test's freshly-built local tag) — the wire payload carries no
+image field.
+
+⚠️ **Enroll-token delivery — env passthrough, NEVER argv.** The enroll token is a secret (spec
+invariant #1: "token via env, never argv"). It's delivered as a **BARE `-e CODEAM_ENROLL_TOKEN`** (no
+`=value`) in the argv above; the actual value is passed only via `DockerRunner.run`'s `opts.env`
+(`{ CODEAM_ENROLL_TOKEN: payload.enrollToken }`), which the runner merges into the `docker` CLI
+process's OWN env — docker then reads a bare `-e NAME` from ITS OWN env and forwards it into the
+container. The value never appears in the `docker run` argv, so it's **never visible via `ps`** on
+the shared fleet host and never logged. The non-secret `CODEAM_API_URL` is delivered as a normal
+`-e KEY=value` since it isn't sensitive.
+
+**Idempotent stop/delete.** `fleet_start_box`/`fleet_stop_box`/`fleet_delete_box` MUST be idempotent
+— the backend's reap/sleep sweeps may re-send a stop/delete for a box the host already
+cleaned up. `isMissingContainerError`/`isMissingVolumeError` (stderr `/no such container|volume/i`)
+treat "already gone" as **success**, not failure. `fleet_delete_box` additionally runs
+`docker volume rm` only when the payload carries `removeVolume: true` (the reap path; a plain
+stop/sleep never touches the volume).
+
+**`apps/box`** (`apps/box/Dockerfile`, `apps/box/README.md`) — the production runtime image:
+`node:20-slim` + git + ca-certificates + python3 + build-essential (so the rescued project's own
+`npm install` / in-app Preview dependency pre-flight can build native addons), non-root `box` user
+(`HOME=/home/box`), `codeam-cli` installed globally from npm (`ARG CODEAM_CLI_VERSION=latest`,
+pinned by the fleet release pipeline), `ENTRYPOINT ["codeam", "host-agent"]`. The image does **not**
+self-isolate — every hard-isolation invariant above is applied by the CALLER (`fleet_create_box`),
+never by anything baked into the image. Runtime env contract: `CODEAM_ENROLL_TOKEN` / `CODEAM_API_URL`
+(required, both `-e`) + optional `REPO_URL`/`GIT_TOKEN` (private-repo clone, same env-not-argv rule).
+
+**`RUN_FLEET_INT` real-Docker CI test** — `apps/cli/__tests__/integration/fleet-box.int.test.ts`,
+env-gated (`RUN_FLEET_INT=1 npx vitest run fleet-box.int` from `apps/cli`, also requires a live Docker
+daemon — mirrors `host-agent.docker.e2e.test.ts`). Builds the real `codeam-box` image, drives the real
+`HostAgentSupervisor.handleCommand` fleet handlers against the real `docker` binary (no mocked
+`DockerRunner`), then `docker inspect` asserts every isolation invariant (no mounts beyond the named
+volume, non-root user, `CapDrop=ALL`, `no-new-privileges`, memory/cpu/pids limits, `fleet-net`, the
+three `com.codeagent.*` labels) against a container the image actually produced — plus a
+stop/start/delete round-trip (delete removes the volume, idempotent on an already-gone container).
+It talks to a HOST-side **stub backend** (`../docker/stub-backend`, same fixture the self-hosted
+Docker E2E test uses), not a live one: a thin wrapper around `defaultDockerRunner` adds
+`--add-host host.docker.internal:host-gateway` (Linux CI only — Docker Desktop provides this alias
+automatically) + `-e CODEAM_SKIP_AGENT_LAUNCH=true` so the stub's auto-pushed `self_hosted_deploy`
+doesn't try to launch a real Claude binary the box lacks; every isolation flag/label/volume mount in
+the argv under test is still the UNMODIFIED, real `fleetCreateBox` template. ⚠️ **Deferred, not
+silently skipped:** asserting `~/.codeam/integrations.json` lands inside a fleet box is documented as
+out of scope for this gate — `FleetCreateBoxCommand` doesn't carry an `integrations` field yet
+(unlike `self_hosted_deploy`'s `DeployPayload`), so there's nothing to assert until the backend wires
+it into the fleet command.
+
 ### Agent-failure messaging — every failed turn ends with a HONEST, visible frame
 
 `apps/cli/src/agents/acp/runner.ts` owns the contract that a turn NEVER ends silently or with a misleading status. Rules (each backed by `__tests__/agents/acp.failureBubble.test.ts`):
