@@ -103,6 +103,43 @@ export const INTEGRATION_REGISTRY: Record<IntegrationId, IntegrationDefinition> 
       },
     },
   },
+  linear: {
+    id: 'linear',
+    name: 'Linear',
+    icon: 'linear',
+    // LIVE — the Linear OAuth Application (Public + Confidential) is registered
+    // and LINEAR_OAUTH_CLIENT_ID/SECRET/REDIRECT_URI are in Secret Manager
+    // (prod+dev). The backend LinearOAuthProvider is config-gated (503 if env
+    // unset) so this is safe even mid-rollout before the secrets mount.
+    enabled: true,
+    auth: {
+      kind: 'oauth_redirect',
+      // Linear's coarse scopes: `read` (all issues/projects/comments/cycles)
+      // + `write` (create/update issues, comments, state). `write` implies the
+      // create/update surface the agent's tools need. `admin` (destructive
+      // workspace management) is deliberately NOT requested. ⚠️ Changing these
+      // requires the user to RE-LINK Linear — the token only carries the scopes
+      // granted at link time. Linear expects a COMMA-separated `scope` param.
+      scopes: ['read', 'write'],
+    },
+    delivery: {
+      mcp: {
+        // mcp-linear (stdio, @linear/sdk) in BYO-token headless mode: the OAuth
+        // access token is fed via LINEAR_API_KEY (env only, never argv) and the
+        // Linear GraphQL API accepts it as the Authorization header directly.
+        // Verified headless end-to-end (search_issues returned real issues) —
+        // the OFFICIAL remote MCP (mcp.linear.app) can't be used here because it
+        // forces its own interactive browser OAuth. Version PINNED; bump only
+        // after re-verifying headless. Tools: search/get/create/update issue +
+        // add comment (read + write).
+        command: 'npx',
+        args: ['-y', 'mcp-linear@0.1.8'],
+        envMapping: {
+          LINEAR_API_KEY: 'accessToken',
+        },
+      },
+    },
+  },
 };
 
 export function getEnabledIntegrations(): IntegrationDefinition[] {

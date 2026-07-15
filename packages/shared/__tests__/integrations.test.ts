@@ -104,6 +104,25 @@ describe('integrations registry', () => {
     expect(getEnabledIntegrations().map((m) => m.id)).toContain('sentry');
   });
 
+  it('linear is a live integration with read+write scopes + BYO-token stdio MCP delivery', () => {
+    expect(isKnownIntegrationId('linear')).toBe(true);
+    const linear = getIntegration('linear');
+    expect(linear.name).toBe('Linear');
+    expect(linear.icon).toBe('linear');
+    expect(linear.auth.kind).toBe('oauth_redirect');
+    // Coarse read + write scopes (write implies the create/update surface).
+    expect(linear.auth.scopes).toEqual(['read', 'write']);
+    // Headless stdio MCP: token via LINEAR_API_KEY (env, never argv). PINNED.
+    expect(linear.delivery.mcp?.command).toBe('npx');
+    expect(linear.delivery.mcp?.args).toEqual(['-y', 'mcp-linear@0.1.8']);
+    expect(linear.delivery.mcp?.envMapping).toEqual({ LINEAR_API_KEY: 'accessToken' });
+    // No extra credential discriminator — the token alone authenticates.
+    expect(linear.delivery.mcp?.staticEnv).toBeUndefined();
+    // Live — surfaces in the enabled set alongside jira + sentry.
+    expect(linear.enabled).toBe(true);
+    expect(getEnabledIntegrations().map((m) => m.id)).toContain('linear');
+  });
+
   it('declares the three integration USER_EVENTS names', () => {
     expect(USER_EVENTS.INTEGRATION_LINKED).toBe('integration_linked');
     expect(USER_EVENTS.INTEGRATION_UNLINKED).toBe('integration_unlinked');
