@@ -194,6 +194,38 @@ export const INTEGRATION_REGISTRY: Record<IntegrationId, IntegrationDefinition> 
       },
     },
   },
+  notion: {
+    id: 'notion',
+    name: 'Notion',
+    icon: 'notion',
+    // LIVE — the Notion public OAuth integration is registered and
+    // NOTION_OAUTH_CLIENT_ID/SECRET/REDIRECT_URI are in Secret Manager
+    // (prod+dev). The backend NotionOAuthProvider is config-gated (503 if env
+    // unset) so this is safe even mid-rollout before the secrets mount.
+    enabled: true,
+    auth: {
+      kind: 'oauth_redirect',
+      // Notion does NOT use per-request OAuth scopes — access is governed by
+      // the integration's configured CAPABILITIES (read/update/insert content
+      // + read user info), set once on the Notion integration, not passed in
+      // the authorize URL. So there is no `scope` param to request here.
+      scopes: [],
+    },
+    delivery: {
+      mcp: {
+        // Notion's OFFICIAL stdio MCP server (Node). BYO-token headless: the
+        // OAuth access token is fed via NOTION_TOKEN and the server sends it as
+        // `Authorization: Bearer` + `Notion-Version: 2022-06-28` (env only,
+        // never argv). No discriminator — the token alone authenticates its
+        // workspace. Version PINNED; bump only after re-verifying headless.
+        command: 'npx',
+        args: ['-y', '@notionhq/notion-mcp-server@2.4.1'],
+        envMapping: {
+          NOTION_TOKEN: 'accessToken',
+        },
+      },
+    },
+  },
 };
 
 export function getEnabledIntegrations(): IntegrationDefinition[] {

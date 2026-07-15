@@ -66,7 +66,7 @@ describe('integrations registry', () => {
   it('helpers behave like the agents registry helpers', () => {
     expect(getEnabledIntegrations().map((m) => m.id)).toContain('jira');
     expect(isKnownIntegrationId('jira')).toBe(true);
-    expect(isKnownIntegrationId('notion')).toBe(false);
+    expect(isKnownIntegrationId('asana')).toBe(false);
     expect(() => getIntegration('nope' as IntegrationId)).toThrow(/Unknown integration/);
   });
 
@@ -157,6 +157,23 @@ describe('integrations registry', () => {
     });
     expect(slack.enabled).toBe(true);
     expect(getEnabledIntegrations().map((m) => m.id)).toContain('slack');
+  });
+
+  it('notion is a live integration with NO oauth scopes + BYO-token stdio MCP delivery', () => {
+    expect(isKnownIntegrationId('notion')).toBe(true);
+    const notion = getIntegration('notion');
+    expect(notion.name).toBe('Notion');
+    expect(notion.icon).toBe('notion');
+    expect(notion.auth.kind).toBe('oauth_redirect');
+    // Notion has no per-request OAuth scopes (access = integration capabilities).
+    expect(notion.auth.scopes).toEqual([]);
+    // Official Notion MCP: token via NOTION_TOKEN (env, never argv). PINNED.
+    expect(notion.delivery.mcp?.command).toBe('npx');
+    expect(notion.delivery.mcp?.args).toEqual(['-y', '@notionhq/notion-mcp-server@2.4.1']);
+    expect(notion.delivery.mcp?.envMapping).toEqual({ NOTION_TOKEN: 'accessToken' });
+    expect(notion.delivery.mcp?.staticEnv).toBeUndefined();
+    expect(notion.enabled).toBe(true);
+    expect(getEnabledIntegrations().map((m) => m.id)).toContain('notion');
   });
 
   it('declares the three integration USER_EVENTS names', () => {

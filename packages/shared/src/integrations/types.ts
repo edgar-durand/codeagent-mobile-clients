@@ -6,7 +6,7 @@
  * ubiquitous CLI for the tool → `cliEnv`; otherwise → `mcp`. A tool may
  * declare both.
  */
-export type IntegrationId = 'jira' | 'sentry' | 'linear' | 'slack';
+export type IntegrationId = 'jira' | 'sentry' | 'linear' | 'slack' | 'notion';
 
 export type IntegrationAuthKind = 'oauth_redirect' | 'oauth_device' | 'api_key';
 
