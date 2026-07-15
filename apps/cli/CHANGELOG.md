@@ -4,6 +4,29 @@ All notable changes to `codeam-cli` are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.60.70] — 2026-07-15
+
+### Added
+
+- **cli:** Fleet control plane — DockerRunner + fleet_* box handlers
+- **box:** Production codeam-box rescue-fleet runtime image
+
+### Chore
+
+- **meta:** Register box/test commitlint scopes for the fleet work
+
+### Documentation
+
+- **fleet:** CLAUDE.md fleet CLI section
+
+### Fixed
+
+- **cli:** Deliver fleet box enroll token via env passthrough, not docker argv
+
+### Tests
+
+- **test:** Real-Docker integration gate for the fleet control plane
+
 ## [2.60.69] — 2026-07-15
 
 ### Fixed
