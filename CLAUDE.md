@@ -249,6 +249,7 @@ docker run -d --name codeam-box-<userId> \
   -v codeam-box-<userId>:/home/box \
   -e CODEAM_ENROLL_TOKEN \
   -e CODEAM_API_URL=<apiOrigin> \
+  -e CODEAM_HOST_LABEL=CodeAgent Box \
   <fleet box image>
 ```
 
@@ -266,6 +267,14 @@ process's OWN env — docker then reads a bare `-e NAME` from ITS OWN env and fo
 container. The value never appears in the `docker run` argv, so it's **never visible via `ps`** on
 the shared fleet host and never logged. The non-secret `CODEAM_API_URL` is delivered as a normal
 `-e KEY=value` since it isn't sensitive.
+
+**Host label — `-e CODEAM_HOST_LABEL="CodeAgent Box"`.** The box's `codeam host-agent`
+entrypoint reads it at redeem via `resolveHostLabel` (`commands/host/host-client.ts`:
+explicit arg → `CODEAM_HOST_LABEL` env → `os.hostname()`) so a rescued user sees a
+friendly "CodeAgent Box" card in "My Servers" instead of the generic `my-server` (the
+old backend default) or the container cuid. Not a secret → plain `-e KEY=value`. Same
+env is how ANY co-located host-agent on one box is disambiguated (the fleet host, a
+per-user 24/7 unit) — see the container repo's fleet section for the coexistence rule.
 
 **Idempotent stop/delete.** `fleet_start_box`/`fleet_stop_box`/`fleet_delete_box` MUST be idempotent
 — the backend's reap/sleep sweeps may re-send a stop/delete for a box the host already
