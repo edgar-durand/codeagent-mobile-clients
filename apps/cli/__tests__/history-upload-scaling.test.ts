@@ -77,3 +77,62 @@ describe('uploadConversationIfChanged — scales to long/heavy conversations', (
     expect(deltaSpy).toHaveBeenCalledWith(SID); // pinned to the explicit ACP id
   });
 });
+
+/**
+ * Persistence-journey guard (2026-07-16 empty-chat SECOND regression): the
+ * backend stores the conversation with a bounded TTL (24 h). An IDLE
+ * session's JSONL never changes, so the pure mtime gate would refuse to
+ * ever re-ship — and once the backend copy expires, every
+ * `get_conversation` → GET round-trip returns EMPTY forever ("la sesión no
+ * carga"). The gate must therefore re-ship a FULL baseline when the last
+ * upload is older than half the backend TTL (12 h), even with an
+ * unchanged mtime — while still skipping unchanged polls inside that
+ * window (the ~20 s poll scale guard above).
+ */
+describe('uploadConversationIfChanged — periodic re-baseline outlives the backend TTL', () => {
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'codeam-hist-rebase-'));
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('re-ships the full baseline after 12 h idle, then goes quiet again', async () => {
+    const svc = makeService();
+    const SID = 'aa11bb22';
+    fs.writeFileSync(path.join(tmpDir, `${SID}.jsonl`), '{"type":"user","message":{}}\n');
+
+    const internal = svc as unknown as { lastUploadedUuid: Map<string, string> };
+    const loadSpy = vi
+      .spyOn(svc, 'loadConversation')
+      .mockImplementation(async (sid: string) => {
+        internal.lastUploadedUuid.set(sid, 'high-water-mark');
+      });
+    const deltaSpy = vi.spyOn(svc, 'uploadDelta').mockResolvedValue(0);
+
+    // Baseline upload at t0.
+    expect(await svc.uploadConversationIfChanged(SID)).toBe(true);
+    expect(loadSpy).toHaveBeenCalledTimes(1);
+
+    // Unchanged poll 20 s later → quiet (scale guard intact).
+    vi.advanceTimersByTime(20_000);
+    expect(await svc.uploadConversationIfChanged(SID)).toBe(false);
+    expect(loadSpy).toHaveBeenCalledTimes(1);
+    expect(deltaSpy).not.toHaveBeenCalled();
+
+    // 12+ h later, SAME mtime — the backend copy may have expired: the gate
+    // must re-ship the FULL baseline (not a delta over a void).
+    vi.advanceTimersByTime(12 * 60 * 60 * 1000 + 1);
+    expect(await svc.uploadConversationIfChanged(SID)).toBe(true);
+    expect(loadSpy).toHaveBeenCalledTimes(2);
+    expect(deltaSpy).not.toHaveBeenCalled();
+
+    // And immediately after, unchanged polls are quiet again.
+    vi.advanceTimersByTime(20_000);
+    expect(await svc.uploadConversationIfChanged(SID)).toBe(false);
+    expect(loadSpy).toHaveBeenCalledTimes(2);
+  });
+});
