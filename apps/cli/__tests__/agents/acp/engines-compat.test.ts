@@ -1,9 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'fs';
 import { join } from 'path';
-import { createRequire } from 'module';
-
-const require = createRequire(import.meta.url);
 
 /**
  * Regression net for the 2026-07-16 incident: bumping
