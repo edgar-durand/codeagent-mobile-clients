@@ -4,6 +4,13 @@ All notable changes to `codeam-cli` are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.61.4] — 2026-07-16
+
+### Fixed
+
+- **box:** Add unzip for CodeRabbit install (curl alone insufficient)
+- **cli:** Bump ACP stack to latest + freeze claude binary (broken-chat fix)
+
 ## [2.61.3] — 2026-07-16
 
 ### Fixed
