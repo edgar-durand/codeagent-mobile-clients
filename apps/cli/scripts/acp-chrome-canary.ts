@@ -10,8 +10,10 @@
  * hit it — run it on a schedule (CI) and on-demand against a live box.
  *
  * Usage:  npx tsx scripts/acp-chrome-canary.ts
- * Auth:   needs a working claude credential in the env — ANTHROPIC_API_KEY, or a
- *         seeded ~/.claude/.credentials.json (as inside a provisioned box).
+ * Auth:   CodeAgent authenticates claude by PLAN SUBSCRIPTION, not an API key —
+ *         so this needs a subscription credential in the env: CLAUDE_CODE_OAUTH_TOKEN
+ *         (from `claude setup-token`), or a seeded ~/.claude/.credentials.json (the
+ *         OAuth blob a provisioned codespace/box already carries).
  * Exit:   0 = clean, 1 = chrome leaked (prints the offending lines), 2 = harness
  *         error (couldn't reach the model at all — inconclusive, not a leak).
  */
