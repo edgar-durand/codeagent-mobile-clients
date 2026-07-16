@@ -862,11 +862,24 @@ export class AcpClient {
       return;
     }
     log.info('acpClient', `loadSession → sessionId=${sessionId.slice(0, 8)}`);
-    await this.connection.loadSession({
-      sessionId,
-      cwd: this.opts.cwd,
-      mcpServers: this.opts.mcpServers ?? [],
-    });
+    // Swallow the load replay. `session/load` makes Claude replay the ENTIRE
+    // prior conversation as `session/update` notifications before it resolves;
+    // without this bracket those land as OPEN (`done:false`) streaming chunks
+    // that nothing ever closes → mobile shows a stuck "Thinking…"/STOP live turn
+    // for history the client already has (the `resume_session` incident). Mirrors
+    // reestablishSession() above and the baton driver — the ONLY three callers of
+    // session/load; the happy path (fresh session/new at spawn) never calls this,
+    // so live streaming for non-resuming users is untouched.
+    this.opts.beginLoadReplay?.();
+    try {
+      await this.connection.loadSession({
+        sessionId,
+        cwd: this.opts.cwd,
+        mcpServers: this.opts.mcpServers ?? [],
+      });
+    } finally {
+      this.opts.endLoadReplay?.();
+    }
     this.sessionId = sessionId;
     log.info('acpClient', `loadSession ← ok sessionId=${sessionId.slice(0, 8)}`);
   }
