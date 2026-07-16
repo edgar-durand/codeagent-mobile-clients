@@ -144,3 +144,40 @@ describe.runIf(process.platform === 'win32')(
     });
   },
 );
+
+import { isPermissionError } from '../../../src/commands/start/handlers';
+
+describe('buildNpmInstallInvocation — sudo escalation (self-hosted root-owned prefix)', () => {
+  it('prepends sudo -n and passes the resolved npm + args through', () => {
+    const inv = buildNpmInstallInvocation({
+      entryScript: '/usr/lib/node_modules/codeam-cli/dist/index.js',
+      execPath: '/usr/bin/node',
+      existsSync: (p: string) => p === '/usr/bin/npm',
+      sudo: true,
+    });
+    expect(inv.command).toBe('sudo');
+    expect(inv.args).toEqual(['-n', '/usr/bin/npm', 'install', '-g', '--prefix', '/usr', 'codeam-cli@latest']);
+  });
+  it('without sudo runs npm directly (unchanged)', () => {
+    const inv = buildNpmInstallInvocation({
+      entryScript: '/usr/lib/node_modules/codeam-cli/dist/index.js',
+      execPath: '/usr/bin/node',
+      existsSync: (p: string) => p === '/usr/bin/npm',
+    });
+    expect(inv.command).toBe('/usr/bin/npm');
+    expect(inv.args[0]).toBe('install');
+  });
+});
+
+describe('isPermissionError', () => {
+  it('detects EACCES / errno -13 / permission denied', () => {
+    expect(isPermissionError('npm error code EACCES')).toBe(true);
+    expect(isPermissionError('npm error errno -13')).toBe(true);
+    expect(isPermissionError('EACCES: permission denied, rename')).toBe(true);
+    expect(isPermissionError('operation not permitted')).toBe(true);
+  });
+  it('does NOT match a transient network error', () => {
+    expect(isPermissionError('ETIMEDOUT request to registry')).toBe(false);
+    expect(isPermissionError('ENOTFOUND registry.npmjs.org')).toBe(false);
+  });
+});
