@@ -39,11 +39,35 @@ export async function ensureCoderabbitInstalled(os: OsStrategy): Promise<boolean
   // which we report verbatim.
   console.log('\n  CodeRabbit CLI not found — installing via the official script…\n');
   const ok = await new Promise<boolean>((resolve) => {
-    const proc = spawn('sh', ['-c', `curl -fsSL ${INSTALL_URL} | sh`], {
-      stdio: 'inherit',
-    });
-    proc.on('close', (code) => resolve(code === 0));
-    proc.on('error', () => resolve(false));
+    // `curl` gets connect/transfer caps AND the spawn gets an overall backstop.
+    // Without them a hung download (common inside a locked-down fleet box with
+    // restricted egress) never settles this promise → `configureCoderabbit`
+    // never returns → the mobile app spins forever with no error. With the caps
+    // a stall becomes a normal non-zero exit, which the caller reports.
+    const INSTALL_TIMEOUT_MS = 150_000;
+    const proc = spawn(
+      'sh',
+      ['-c', `curl -fsSL --connect-timeout 15 --max-time 120 ${INSTALL_URL} | sh`],
+      { stdio: 'inherit' },
+    );
+    let settled = false;
+    const finish = (v: boolean): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(v);
+    };
+    const timer = setTimeout(() => {
+      console.error('\n  ✗ CodeRabbit install timed out — check network egress and retry.\n');
+      try {
+        proc.kill('SIGKILL');
+      } catch {
+        /* already exited */
+      }
+      finish(false);
+    }, INSTALL_TIMEOUT_MS);
+    proc.on('close', (code) => finish(code === 0));
+    proc.on('error', () => finish(false));
   });
   if (!ok) return false;
   // The installer drops the binary into a per-user dir; if PATH
