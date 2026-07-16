@@ -4,6 +4,18 @@ All notable changes to the CodeAgent-Mobile JetBrains plugin are documented here
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.61.5] — 2026-07-16
+
+### Added
+
+- **cli:** ACP chrome-leak canary + detector (stability monitor, part 2)
+- **ci:** Canary seeds onboarding + auths via in-house MiniMax backend
+
+### Fixed
+
+- **ci:** Canary auths by subscription (CLAUDE_CODE_OAUTH_TOKEN), not API key
+- **cli:** Stop the changeset reporter from spamming install/SDK files
+
 ## [2.61.4] — 2026-07-16
 
 ### Fixed
