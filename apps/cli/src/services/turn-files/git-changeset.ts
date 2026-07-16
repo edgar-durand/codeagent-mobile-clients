@@ -3,6 +3,7 @@ import * as fs from 'fs/promises';
 import * as path from 'path';
 import { log } from '../logger';
 import { isIgnoredFilePath } from '../file-watcher/ignored-paths';
+import { makeReviewIgnore } from './review-ignore';
 
 /**
  * One file entry produced by collecting a repo's end-of-turn delta.
@@ -67,16 +68,40 @@ export async function collectRepoChangeset(
   ]).catch(() => null);
   const numstat = parseNumstat(numstatRaw ?? '');
 
-  const entries: ChangesetEntry[] = [];
-  for (const row of parseStatus(status)) {
-    // Defensive ignore. `git status --porcelain` already respects
-    // `.gitignore`, but repos in the wild are missing entries for
-    // `node_modules` / `dist` / `Pods` more often than you'd think
-    // — and when they are, the rail explodes with vendor headers.
-    // Drop before the API hop; api-v2's `isIgnoredFilePath` would
-    // reject these anyway, this just saves the round-trip.
-    if (isIgnoredFilePath(row.filePath)) continue;
+  // Defensive ignore FIRST. `git status --porcelain` already respects
+  // `.gitignore`, but repos in the wild miss `node_modules` / `dist` / `Pods`
+  // entries more often than you'd think (isIgnoredFilePath), AND dev tools /
+  // SDKs get installed into the working dir without ever being `.gitignore`d —
+  // the curated review-ignore list (+ optional `.codeam/reviewignore`) drops
+  // those so they never reach the review as false "changes".
+  const reviewIgnore = makeReviewIgnore(opts.repoRoot);
+  const rows = parseStatus(status).filter(
+    (row) => !isIgnoredFilePath(row.filePath) && !reviewIgnore(row.filePath),
+  );
 
+  // Hard cap on the changeset size. A "review" of hundreds of files with
+  // hundreds of thousands of added lines is never a human change — it's a
+  // dependency / SDK / build-output install that landed in the session's own
+  // working directory and isn't `.gitignore`d (2026-07-16: a `gcloud` SDK
+  // install in a 24/7 session's cwd surfaced 641 files / +368,935 lines,
+  // which spammed false changes AND flooded /api/files/changed + /api/review/*
+  // hard enough to OOM the backend). Beyond the cap we truncate and SKIP the
+  // per-file untracked line scan entirely — the exact counts are meaningless
+  // for a leak, and reading hundreds of files would balloon memory. This
+  // bounds the payload, the memory, and the false-change spam at the source,
+  // regardless of what dumped the files.
+  const MAX_CHANGESET_FILES = Math.max(1, Number(process.env.CODEAM_MAX_CHANGESET_FILES ?? 500));
+  const truncated = rows.length > MAX_CHANGESET_FILES;
+  const bounded = truncated ? rows.slice(0, MAX_CHANGESET_FILES) : rows;
+  if (truncated) {
+    log.warn(
+      'changeset',
+      `${rows.length} changed files exceeds the ${MAX_CHANGESET_FILES}-file cap — reporting the first ${MAX_CHANGESET_FILES} only. This usually means a dependency/SDK/build install landed in the session's working directory; add it to .gitignore to remove it from reviews.`,
+    );
+  }
+
+  const entries: ChangesetEntry[] = [];
+  for (const row of bounded) {
     const numstatEntry = numstat.get(row.filePath);
 
     // Untracked files (`??` porcelain code) are absent from
@@ -96,7 +121,10 @@ export async function collectRepoChangeset(
     //     we use the capped count, which is still >> 0 so the rail
     //     lights up correctly.
     let stats: { added: number; removed: number };
-    if (row.fileStatus === 'added' && numstatEntry === undefined) {
+    if (!truncated && row.fileStatus === 'added' && numstatEntry === undefined) {
+      // Only synthesize untracked line counts for a normal-sized changeset.
+      // On a truncated (install-leak) changeset, reading hundreds of files
+      // would balloon memory for counts nobody will review — skip it.
       const lineCount = await readUntrackedLineCount(
         path.join(opts.repoRoot, row.filePath),
       );

@@ -66,6 +66,30 @@ describe('collectRepoChangeset', () => {
     expect(entries!.find((e) => e.filePath === 'src/gone.ts')!.fileStatus).toBe('deleted');
   });
 
+  it('caps a huge install-leak changeset and skips the per-file line scan', async () => {
+    // A dependency/SDK install dumped 600 untracked files into the session dir
+    // (the 2026-07-16 gcloud incident). Without a cap the collector would ship
+    // all 600 AND read every one to synthesize line counts → memory + a rail
+    // flood. It must truncate and skip the reads.
+    vi.spyOn(_runGitImpl, 'run').mockImplementation(async (_, args) => {
+      if (args.includes('status')) {
+        return Array.from({ length: 600 }, (_, i) => `?? pkg/gen_${i}.py`).join('\0') + '\0';
+      }
+      return ''; // numstat empty → these look untracked
+    });
+    const readSpy = vi.spyOn(_readUntrackedLineCountImpl, 'read');
+
+    const entries = await collectRepoChangeset({
+      repoRoot: '/tmp/fake-repo',
+      repoPath: 'r',
+      repoName: 'r',
+    });
+
+    expect(entries).not.toBeNull();
+    expect(entries!.length).toBe(500); // default MAX_CHANGESET_FILES cap
+    expect(readSpy).not.toHaveBeenCalled(); // no per-file scan on a truncated changeset
+  });
+
   it('returns null when git status fails (no repo)', async () => {
     vi.spyOn(_runGitImpl, 'run').mockResolvedValue(null);
     const entries = await collectRepoChangeset({
