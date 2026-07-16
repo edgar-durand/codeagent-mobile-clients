@@ -1185,6 +1185,14 @@ export function buildNpmInstallInvocation(opts?: {
   entryScript?: string;
   execPath?: string;
   existsSync?: (p: string) => boolean;
+  /**
+   * Prepend `sudo -n` (non-interactive). Used as the retry when the plain
+   * install hits EACCES: a self-hosted box installs the global CLI via
+   * `sudo npm i -g` (root-owned <prefix>/lib/node_modules), so the unprivileged
+   * host-agent can't rename it on update. The enroll flow already established
+   * passwordless sudo for this user, so `sudo -n` succeeds without a prompt.
+   */
+  sudo?: boolean;
 }): { command: string; args: string[] } {
   const entryScript = opts?.entryScript ?? process.argv[1] ?? '';
   const execPath = opts?.execPath ?? process.execPath;
@@ -1203,12 +1211,23 @@ export function buildNpmInstallInvocation(opts?: {
     path.dirname(execPath),
     process.platform === 'win32' ? 'npm.cmd' : 'npm',
   );
-  const command = exists(siblingNpm) ? siblingNpm : 'npm';
+  const npmCommand = exists(siblingNpm) ? siblingNpm : 'npm';
 
-  const args = prefix
+  const npmArgs = prefix
     ? ['install', '-g', '--prefix', prefix, 'codeam-cli@latest']
     : ['install', '-g', 'codeam-cli@latest'];
-  return { command, args };
+
+  // sudo runs npm from root's PATH, which may not include the sibling node's
+  // bin — pass the resolved npm path through explicitly so the right npm runs.
+  if (opts?.sudo) {
+    return { command: 'sudo', args: ['-n', npmCommand, ...npmArgs] };
+  }
+  return { command: npmCommand, args: npmArgs };
+}
+
+/** EACCES / permission-denied from an npm global write against a root-owned prefix. */
+export function isPermissionError(stderr: string): boolean {
+  return /EACCES|permission denied|errno[\s"']*-13|operation not permitted/i.test(stderr);
 }
 
 /**
@@ -1219,21 +1238,24 @@ export function buildNpmInstallInvocation(opts?: {
  */
 export async function runNpmInstallLatest(): Promise<{ ok: boolean; error?: string }> {
   let lastError = '';
-  const invocation = buildNpmInstallInvocation();
-  // Windows: npm resolves to a .cmd shim (npm.cmd), and patched Node
-  // (CVE-2024-27980, >=18.20.2/20.12.2) refuses to spawn .cmd/.bat without
-  // a shell — execFile throws EINVAL and self-update never runs. A shell is
-  // safe here: the args are fixed tokens and Windows layouts never get a
-  // --prefix (buildNpmInstallInvocation's /lib/node_modules marker cannot
-  // match a win32 path — pinned by cli-update-install-target tests). The
-  // command path itself may contain spaces (C:\Program Files\nodejs\npm.cmd)
-  // so it must be quoted for cmd.exe.
-  const useShell = process.platform === 'win32';
-  const command =
-    useShell && invocation.command.includes(' ')
-      ? `"${invocation.command}"`
-      : invocation.command;
+  // Escalates to `sudo -n` after a permission failure (self-hosted box whose
+  // global prefix is root-owned from the `sudo npm i -g` enroll install).
+  let useSudo = false;
   for (let attempt = 1; attempt <= CLI_UPDATE_MAX_ATTEMPTS; attempt++) {
+    const invocation = buildNpmInstallInvocation({ sudo: useSudo });
+    // Windows: npm resolves to a .cmd shim (npm.cmd), and patched Node
+    // (CVE-2024-27980, >=18.20.2/20.12.2) refuses to spawn .cmd/.bat without
+    // a shell — execFile throws EINVAL and self-update never runs. A shell is
+    // safe here: the args are fixed tokens and Windows layouts never get a
+    // --prefix (buildNpmInstallInvocation's /lib/node_modules marker cannot
+    // match a win32 path — pinned by cli-update-install-target tests). The
+    // command path itself may contain spaces (C:\Program Files\nodejs\npm.cmd)
+    // so it must be quoted for cmd.exe. (sudo never runs on win32.)
+    const useShell = process.platform === 'win32';
+    const command =
+      useShell && invocation.command.includes(' ')
+        ? `"${invocation.command}"`
+        : invocation.command;
     const result = await new Promise<{ ok: boolean; error?: string }>((resolve) => {
       execFile(
         command,
@@ -1250,6 +1272,14 @@ export async function runNpmInstallLatest(): Promise<{ ok: boolean; error?: stri
     });
     if (result.ok) return { ok: true };
     lastError = result.error ?? 'unknown';
+    // A root-owned global prefix (the `sudo npm i -g` enroll install) can't be
+    // renamed by the unprivileged host-agent → EACCES. Escalate to `sudo -n`
+    // for the remaining attempts (passwordless sudo established at enroll) and
+    // retry immediately — it's a different command, not a transient blip.
+    if (!useSudo && process.platform !== 'win32' && isPermissionError(lastError)) {
+      useSudo = true;
+      continue;
+    }
     if (attempt < CLI_UPDATE_MAX_ATTEMPTS) {
       await new Promise((r) => setTimeout(r, 1_000 * attempt));
     }
