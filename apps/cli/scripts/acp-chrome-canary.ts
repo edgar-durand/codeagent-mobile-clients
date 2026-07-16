@@ -10,10 +10,12 @@
  * hit it — run it on a schedule (CI) and on-demand against a live box.
  *
  * Usage:  npx tsx scripts/acp-chrome-canary.ts
- * Auth:   CodeAgent authenticates claude by PLAN SUBSCRIPTION, not an API key —
- *         so this needs a subscription credential in the env: CLAUDE_CODE_OAUTH_TOKEN
- *         (from `claude setup-token`), or a seeded ~/.claude/.credentials.json (the
- *         OAuth blob a provisioned codespace/box already carries).
+ * Auth:   any working claude backend — the MODEL is irrelevant, the canary only
+ *         needs a turn to complete so it can inspect the claude BINARY's ACP output.
+ *         Simplest is the in-house-agent backend (what the product uses):
+ *           ANTHROPIC_BASE_URL=https://api.minimax.io/anthropic ANTHROPIC_AUTH_TOKEN=<minimax key>
+ *         A plan subscription (CLAUDE_CODE_OAUTH_TOKEN / a seeded
+ *         ~/.claude/.credentials.json) works too.
  * Exit:   0 = clean, 1 = chrome leaked (prints the offending lines), 2 = harness
  *         error (couldn't reach the model at all — inconclusive, not a leak).
  */
@@ -23,6 +25,7 @@ import * as os from 'node:os';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { detectTuiChromeLeak } from '../src/agents/acp/chrome-leak-detector';
+import { ensureClaudeOnboarded } from '../src/agents/claude/onboarding';
 
 const PROMPT = process.env.CLAUDE_CANARY_PROMPT ?? 'Reply with exactly one word: pong';
 const TIMEOUT_MS = Number(process.env.CLAUDE_CANARY_TIMEOUT_MS ?? 90_000);
@@ -40,6 +43,14 @@ function resolveAdapterBin(): string {
 
 async function main(): Promise<number> {
   const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'acp-canary-'));
+  // Seed onboarding EXACTLY as the product does (`ensureClaudeOnboarded` on the
+  // cloud path) so the turn isn't gated by the theme / trust dialog — and so this
+  // canary genuinely exercises the changelog-sentinel fix. Point HOME at a scratch
+  // dir first so we never touch the operator's real ~/.claude.json.
+  const scratchHome = fs.mkdtempSync(path.join(os.tmpdir(), 'acp-canary-home-'));
+  process.env.HOME = scratchHome;
+  process.env.USERPROFILE = scratchHome;
+  ensureClaudeOnboarded(cwd);
   const bin = resolveAdapterBin();
   const child = spawn(process.execPath, [bin], {
     cwd,

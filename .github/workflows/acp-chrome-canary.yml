@@ -29,13 +29,16 @@ jobs:
         id: pinned
         continue-on-error: true
         env:
-          # CodeAgent authenticates claude via a PLAN SUBSCRIPTION (OAuth), not an
-          # API key. Claude Code reads CLAUDE_CODE_OAUTH_TOKEN — a setup token from
-          # `claude setup-token` on a subscribed account. Store it as this secret.
-          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # Auth via the SAME in-house-agent backend the product already uses:
+          # Claude Code points at MiniMax's Anthropic-compatible endpoint with the
+          # MiniMax key as a Bearer token. The model MiniMax serves is irrelevant —
+          # the canary only needs a turn to complete so we can inspect the claude
+          # BINARY's ACP output for leaked TUI chrome. No per-user credential needed.
+          ANTHROPIC_BASE_URL: https://api.minimax.io/anthropic
+          ANTHROPIC_AUTH_TOKEN: ${{ secrets.MINIMAX_API_KEY }}
         run: |
-          if [ -z "$CLAUDE_CODE_OAUTH_TOKEN" ]; then
-            echo "::warning::CLAUDE_CODE_OAUTH_TOKEN not set — canary is inconclusive (add the secret from 'claude setup-token' to enable)."
+          if [ -z "$ANTHROPIC_AUTH_TOKEN" ]; then
+            echo "::warning::MINIMAX_API_KEY not set — canary is inconclusive (add the repo secret to enable)."
             exit 0
           fi
           cd apps/cli
