@@ -11,7 +11,7 @@ concurrency:
 
 env:
   # Opt into Node.js 24 runtime for GitHub JavaScript actions — silences the
-  # deprecation warning for actions/checkout@v4, actions/setup-node@v6 etc.
+  # deprecation warning for actions/checkout@v4, actions/setup-node@v7 etc.
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
@@ -42,7 +42,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@v7
         with:
           node-version: '20'
           cache: npm
@@ -72,7 +72,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@v7
         with:
           node-version: ${{ matrix.node }}
           cache: npm
@@ -277,7 +277,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@v7
         with:
           node-version: 20
           cache: npm
@@ -313,7 +313,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@v7
         with:
           node-version: 20
           cache: npm
