@@ -1260,6 +1260,14 @@ export class HostAgentSupervisor {
       // not the generic "my-server" or the ugly container cuid.
       '-e',
       'CODEAM_HOST_LABEL=CodeAgent Box',
+      // The enroll token above is a SINGLE-USE bootstrap, but it lives in the
+      // container's fixed env — it can't be stripped after first boot like the
+      // self-hosted systemd unit does. This flag tells `resolveHostIdentity`
+      // that on a restart (docker restart / reboot / fleet_start_box wake) an
+      // expired-token redeem is EXPECTED: resume from the sealed identity
+      // instead of dying with "token expired". Not a secret → plain KEY=value.
+      '-e',
+      'CODEAM_ENROLL_EPHEMERAL=1',
       resolveFleetBoxImage(),
     ];
     const res = await this.docker.run(args, {
@@ -1830,6 +1838,23 @@ export async function resolveHostIdentity(
       // a stale/deleted host. Surface a clear message instead so they know
       // to generate a fresh token in the app.
       if (isTerminalEnrollError(err)) {
+        // Fleet boxes carry the single-use enroll token as a FIXED container
+        // env var (it can't be stripped across restarts the way the
+        // self-hosted systemd unit strips it after first enroll). So on ANY
+        // restart — a `docker restart`, a host reboot, a `fleet_start_box`
+        // wake — the token is already expired and this redeem terminally
+        // fails. When the box was flagged ephemeral AND we already hold a
+        // sealed identity from the first successful enroll, RESUME from it
+        // instead of dying: the token was a one-shot bootstrap, not a
+        // re-enroll request. (If that sealed host was actually deleted, the
+        // backend rejects it and `onIdentityRejected` wipes it — self-correcting.)
+        if (existing && process.env.CODEAM_ENROLL_EPHEMERAL === '1') {
+          log.info(
+            'host-agent',
+            'ephemeral enroll token expired on restart; resuming from sealed identity',
+          );
+          return existing;
+        }
         throw new Error(
           'Enrollment token expired or invalid — generate a new one in the app ' +
             '(Settings › Servers › Add server). Tokens expire after 15 minutes and ' +
