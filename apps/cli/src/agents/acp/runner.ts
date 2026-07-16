@@ -738,6 +738,22 @@ export class AcpHistory {
     },
   ) {}
 
+  /**
+   * Switch the active conversation after a `resume_session` loadSession
+   * (2026-07-16 "conversation never loads on resume" fix). The buffered
+   * turns belong to the PREVIOUS conversation — flushing them under the
+   * new id would corrupt it — so the buffer and summary reset; the loaded
+   * conversation's real history lives in its JSONL, which the resume
+   * handler uploads via HistoryService. Future turn flushes then push
+   * under the new id.
+   */
+  switchActiveSession(id: string): void {
+    if (id === this.opts.acpSessionId) return;
+    this.opts.acpSessionId = id;
+    this.messages.length = 0;
+    this.summary = null;
+  }
+
   appendUserPrompt(text: string): void {
     if (this.summary === null) {
       // Trim newlines/whitespace and cap at 120 chars so the RECENT
@@ -1415,6 +1431,14 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
         recentStderr,
         budgetRecovery,
         { get: () => _budgetReachedPosted, set: (v: boolean) => { _budgetReachedPosted = v; } },
+        // resume_session re-points the runner's active conversation: the
+        // relay callback reads `acpSessionId` per command, so every FUTURE
+        // get_conversation / upload / one-shot serves the RESUMED id — not
+        // the boot-time one (2026-07-16 "resume loads the old/blank
+        // conversation" fix).
+        (id: string) => {
+          acpSessionId = id;
+        },
       );
     },
     { id: opts.agent, name: opts.agent, displayName: opts.agent } as never,
@@ -1504,6 +1528,9 @@ export async function handleCommand(
   budgetRecovery: BudgetRecovery<PromptBlock>,
   /** Fire-once guard for the budget-reached backend POST. */
   budgetReachedFlag: { get: () => boolean; set: (v: boolean) => void },
+  /** resume_session re-points the owner's active-conversation id here —
+   *  see AcpSessionContext.onActiveSessionChanged. Optional (tests / baton). */
+  onActiveSessionChanged?: (id: string) => void,
 ): Promise<void> {
   const session: AcpSessionContext = {
     client,
@@ -1521,6 +1548,7 @@ export async function handleCommand(
     recentStderr,
     budgetRecovery,
     budgetReachedFlag,
+    onActiveSessionChanged,
   };
   await dispatchAcpCommand(assembleAcpCommandContext(session, cmd));
 }

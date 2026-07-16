@@ -83,6 +83,16 @@ export interface AcpSessionContext {
   budgetRecovery: BudgetRecovery<PromptBlock>;
   /** Fire-once guard for the budget-reached backend POST. */
   budgetReachedFlag: { get: () => boolean; set: (v: boolean) => void };
+  /**
+   * Invoked by `resume_session` after a successful loadSession so the OWNER
+   * of the session machinery re-points its active-conversation id — the
+   * runner's `acpSessionId` binding feeds every FUTURE command context
+   * (`get_conversation` acks, transcript uploads, one-shots). Without it a
+   * resumed session kept acking the OLD conversation id and mobile loaded
+   * the wrong history forever (2026-07-16). Optional: the baton AcpDriver
+   * owns its ids differently and may not wire it.
+   */
+  onActiveSessionChanged?: (id: string) => void;
 }
 
 /**
@@ -730,6 +740,34 @@ async function resumeSessionH(ctx: AcpCommandContext): Promise<void> {
   }
   try {
     await client.loadSession(id);
+    // ── Make the switched conversation REACHABLE (2026-07-16 fix) ──
+    // The load replay is deliberately swallowed (the anti-stuck-Thinking
+    // guard), so the conversation CONTENT must reach mobile through the
+    // canonical path instead. Three steps, in order:
+    // 1. Re-point every future command at the new id — get_conversation
+    //    acks, transcript uploads, one-shots. Without this the session
+    //    kept serving the OLD conversation after a resume.
+    ctx.history.switchActiveSession(id);
+    ctx.onActiveSessionChanged?.(id);
+    // 2. Upload the switched conversation's JSONL BEFORE acking, so the
+    //    mobile's follow-up get_conversation → GET finds it stored (first
+    //    upload for this id in this process → full batched baseline).
+    try {
+      await ctx.jsonlHistory.uploadConversationIfChanged(id);
+    } catch (err) {
+      log.warn('acpRunner', `resume_session: transcript upload failed: ${describeError(err)}`);
+    }
+    // 3. Refresh the RECENT list (ordering/titles) — best-effort.
+    void (async () => {
+      try {
+        const listed = await client.listSessions();
+        if (listed && listed.length > 0) {
+          await ctx.publisher.pushSessionList({ agentId: opts.agent, sessions: listed });
+        }
+      } catch (err) {
+        log.warn('acpRunner', `resume_session: list push failed: ${describeError(err)}`);
+      }
+    })();
     await relay.sendResult(cmd.id, 'completed', { sessionId: id });
   } catch (err) {
     log.warn('acpRunner', `resume_session failed: ${describeError(err)}`);
