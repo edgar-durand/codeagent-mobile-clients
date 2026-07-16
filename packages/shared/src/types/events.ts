@@ -67,6 +67,11 @@ export const USER_EVENTS = {
   SELF_HOSTED_HOST_METRICS: 'self_hosted_host_metrics',
   SELF_HOSTED_HOST_SESSIONS: 'self_hosted_host_sessions',
   SELF_HOSTED_DEPLOY_PROGRESS: 'self_hosted_deploy_progress',
+  /** Fleet rescue: the user's CodeAgent Box reached RUNNING (host enrolled
+   *  + online). Drives the mobile "Use a free CodeAgent Box" flow to
+   *  auto-deploy the user's presets instead of hanging on a paired session
+   *  a box never creates. */
+  FLEET_BOX_READY: 'fleet_box_ready',
   REFERRAL_REWARD_EARNED: 'referral_reward_earned',
   HEADROOM_PROGRESS: 'headroom_progress',
   HEADROOM_STATUS: 'headroom_status',
