@@ -1,0 +1,44 @@
+name: ACP chrome-leak canary
+
+# Early-warning net for the 2026-07-16 "broken chat" incident: a drifting Claude
+# Code / ACP-adapter version streams its TUI chrome (banner, status line,
+# box-drawing) into the ACP text channel, which paints as a garbled chat on
+# mobile. This spawns a REAL claude ACP turn and fails if any chrome leaks — so
+# we learn BEFORE users do, and a version bump reaches them only via a gated
+# release. Pairs with the acp-version-freeze contract test (which guards the pins).
+
+on:
+  schedule:
+    - cron: '0 13 * * *' # daily 13:00 UTC
+  workflow_dispatch: {}
+
+# Also probe the LATEST published adapter/SDK (not just the pinned ones) so we see
+# a breaking Claude Code release the moment it lands, before we bump to it.
+jobs:
+  canary:
+    runs-on: ubuntu-latest
+    if: ${{ github.repository == 'edgar-durand/codeagent-mobile-clients' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Install workspaces
+        run: npm ci
+      - name: Run canary against the PINNED adapter (must stay clean)
+        id: pinned
+        continue-on-error: true
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          if [ -z "$ANTHROPIC_API_KEY" ]; then
+            echo "::warning::ANTHROPIC_API_KEY not set — canary is inconclusive (add the secret to enable)."
+            exit 0
+          fi
+          cd apps/cli
+          npx tsx scripts/acp-chrome-canary.ts
+      - name: Fail if the pinned adapter leaked chrome
+        if: ${{ steps.pinned.outcome == 'failure' }}
+        run: |
+          echo "::error::TUI chrome leaked into the ACP stream on the PINNED adapter — the chat is broken. See the canary log above."
+          exit 1
