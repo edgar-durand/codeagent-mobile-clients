@@ -55,15 +55,18 @@ FROM node:20-slim
 # python3 + build-essential: the rescued project's own `npm install` /
 # in-app Preview dependency pre-flight may need to build native addons
 # (node-gyp) — a bare node:20-slim lacks a C toolchain.
-# curl: the CodeRabbit CLI install path is `curl -fsSL …/install.sh | sh`
-# (apps/cli/src/agents/coderabbit/installer.ts). node:20-slim ships without
-# curl, so a rescued user setting up CodeRabbit on the box got an endless
-# "Restoring…/First-time setup…" spinner (the install could never run).
+# curl + unzip: the CodeRabbit CLI install path is `curl -fsSL …/install.sh | sh`
+# (apps/cli/src/agents/coderabbit/installer.ts), and that script downloads a
+# zip and extracts it with `unzip`. node:20-slim ships neither, so a rescued
+# user setting up CodeRabbit on the box got an endless "Restoring…/First-time
+# setup…" spinner (curl missing → install can't run; unzip missing → install
+# aborts with "Missing required tools: unzip"). Both verified end-to-end.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         git \
         ca-certificates \
         curl \
+        unzip \
         python3 \
         build-essential \
     && rm -rf /var/lib/apt/lists/*
