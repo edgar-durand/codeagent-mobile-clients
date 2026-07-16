@@ -69,7 +69,7 @@
     "url": "https://github.com/sponsors/edgar-durand"
   },
   "engines": {
-    "node": ">=20.0.0"
+    "node": ">=22.0.0"
   },
   "dependencies": {
     "@agentclientprotocol/claude-agent-acp": "0.59.0",

@@ -49,7 +49,7 @@
 # config baked in — every box is generic; identity comes entirely from the
 # env vars above at `docker run` time.
 
-FROM node:20-slim
+FROM node:22-slim
 
 # git + ca-certificates: prepareWorkspace clones the rescued user's repo.
 # python3 + build-essential: the rescued project's own `npm install` /
