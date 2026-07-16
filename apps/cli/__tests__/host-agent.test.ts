@@ -354,6 +354,54 @@ describe('resolveHostIdentity — redeem-first', () => {
     expect(loadHostIdentity()).toEqual(IDENTITY);
   });
 
+  it('resumes from the sealed identity when an EPHEMERAL enroll token expires on restart (fleet box)', async () => {
+    // A fleet box carries its single-use token as a FIXED container env var, so
+    // every restart re-attempts the redeem and hits a TERMINAL 410. With the
+    // ephemeral flag set it must resume from the sealed identity, not die.
+    const fetchMock = vi.fn().mockImplementation(async (url: string) => {
+      if (String(url).includes('/api/self-hosted/redeem')) {
+        return {
+          ok: false,
+          status: 410,
+          statusText: 'Gone',
+          json: async () => ({ success: false, error: { code: 'ENROLL_TOKEN_EXPIRED' } }),
+        };
+      }
+      return { ok: true, status: 200, json: async () => ({ success: true }) };
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    fs.mkdirSync(path.dirname(hostIdentityPath()), { recursive: true });
+    fs.writeFileSync(hostIdentityPath(), JSON.stringify(IDENTITY));
+    process.env.CODEAM_ENROLL_EPHEMERAL = '1';
+    try {
+      const resolved = await resolveHostIdentity('EXPIRED-BUT-EPHEMERAL');
+      expect(resolved).toEqual(IDENTITY);
+      expect(loadHostIdentity()).toEqual(IDENTITY);
+    } finally {
+      delete process.env.CODEAM_ENROLL_EPHEMERAL;
+    }
+  });
+
+  it('still throws on a terminal enroll error when NOT ephemeral (self-hosted re-enroll intent preserved)', async () => {
+    const fetchMock = vi.fn().mockImplementation(async (url: string) => {
+      if (String(url).includes('/api/self-hosted/redeem')) {
+        return {
+          ok: false,
+          status: 410,
+          statusText: 'Gone',
+          json: async () => ({ success: false, error: { code: 'ENROLL_TOKEN_EXPIRED' } }),
+        };
+      }
+      return { ok: true, status: 200, json: async () => ({ success: true }) };
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    fs.mkdirSync(path.dirname(hostIdentityPath()), { recursive: true });
+    fs.writeFileSync(hostIdentityPath(), JSON.stringify(IDENTITY));
+    delete process.env.CODEAM_ENROLL_EPHEMERAL;
+
+    await expect(resolveHostIdentity('EXPIRED-TOKEN')).rejects.toThrow(/expired or invalid/i);
+  });
+
   it('rethrows (transient) when redeem fails with 5xx AND there is no sealed identity', async () => {
     const fetchMock = vi.fn().mockImplementation(async (url: string) => {
       if (String(url).includes('/api/self-hosted/redeem')) {
