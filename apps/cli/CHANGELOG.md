@@ -4,6 +4,18 @@ All notable changes to `codeam-cli` are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.61.2] — 2026-07-16
+
+### Added
+
+- **shared:** Add fleet_box_ready user event
+- **cli:** Host_list_dir — read-only directory browse for the deploy path picker
+
+### Tests
+
+- **cli:** Host_list_dir handler (lists dir + failed path via relay result)
+- **cli:** Host_list_dir failed-path assertion is cross-platform (path.resolve normalizes on Windows)
+
 ## [2.61.1] — 2026-07-15
 
 ### Documentation
