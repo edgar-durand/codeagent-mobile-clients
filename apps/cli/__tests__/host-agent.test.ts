@@ -532,7 +532,7 @@ describe('HostAgentSupervisor — control channel reuse', () => {
     ) => {
       capturedPluginId = pluginId;
       capturedMeta = meta;
-      return { start, stop };
+      return { start, stop, sendResult: vi.fn() };
     };
 
     const sup = new HostAgentSupervisor(IDENTITY, {
@@ -1019,7 +1019,7 @@ describe('HostAgentSupervisor — heartbeat metrics', () => {
     vi.stubGlobal('fetch', fetchMock);
 
     const sup = new HostAgentSupervisor(IDENTITY, {
-      makeRelay: () => ({ start: vi.fn(), stop: vi.fn() }),
+      makeRelay: () => ({ start: vi.fn(), stop: vi.fn(), sendResult: vi.fn() }),
     });
     sup.start(); // fires one beat immediately (void this.beat())
     // Let the fire-and-forget beat's microtasks settle.
@@ -1060,7 +1060,7 @@ describe('HostAgentSupervisor — heartbeat metrics', () => {
     };
 
     const sup = new HostAgentSupervisor(IDENTITY, {
-      makeRelay: () => ({ start: vi.fn(), stop: vi.fn() }),
+      makeRelay: () => ({ start: vi.fn(), stop: vi.fn(), sendResult: vi.fn() }),
       metricsCollector: throwingCollector,
     });
     sup.start();
@@ -1165,7 +1165,7 @@ describe('HostAgentSupervisor — event-driven session lifecycle', () => {
     vi.stubGlobal('fetch', fetchMock);
 
     const sup = new HostAgentSupervisor(IDENTITY, {
-      makeRelay: () => ({ start: vi.fn(), stop: vi.fn() }),
+      makeRelay: () => ({ start: vi.fn(), stop: vi.fn(), sendResult: vi.fn() }),
     });
     sup.start();
     await Promise.resolve();
@@ -1194,7 +1194,7 @@ describe('HostAgentSupervisor — event-driven session lifecycle', () => {
       .mockResolvedValue({ kind: 'oauth_token', value: '{"claudeAiOauth":{}}' });
 
     const sup = new HostAgentSupervisor(IDENTITY, {
-      makeRelay: () => ({ start: vi.fn(), stop: vi.fn() }),
+      makeRelay: () => ({ start: vi.fn(), stop: vi.fn(), sendResult: vi.fn() }),
       spawnChild: () => child,
       resolveAgentAuth,
     });
@@ -1250,7 +1250,7 @@ describe('HostAgentSupervisor — self-heal on rejected host-token', () => {
     });
 
     const sup = new HostAgentSupervisor(IDENTITY, {
-      makeRelay: () => ({ start: vi.fn(), stop: vi.fn() }),
+      makeRelay: () => ({ start: vi.fn(), stop: vi.fn(), sendResult: vi.fn() }),
       onIdentityRejected,
     });
     sup.start(); // fires one beat immediately
@@ -1273,7 +1273,7 @@ describe('HostAgentSupervisor — self-heal on rejected host-token', () => {
 
     const onIdentityRejected = vi.fn();
     const sup = new HostAgentSupervisor(IDENTITY, {
-      makeRelay: () => ({ start: vi.fn(), stop: vi.fn() }),
+      makeRelay: () => ({ start: vi.fn(), stop: vi.fn(), sendResult: vi.fn() }),
       onIdentityRejected,
     });
     sup.start();
@@ -1291,7 +1291,7 @@ describe('HostAgentSupervisor — self-heal on rejected host-token', () => {
 
     const onIdentityRejected = vi.fn();
     const sup = new HostAgentSupervisor(IDENTITY, {
-      makeRelay: () => ({ start: vi.fn(), stop: vi.fn() }),
+      makeRelay: () => ({ start: vi.fn(), stop: vi.fn(), sendResult: vi.fn() }),
       onIdentityRejected,
     });
     sup.start();
@@ -1315,7 +1315,7 @@ describe('HostAgentSupervisor — self-heal on rejected host-token', () => {
 
     const onIdentityRejected = vi.fn();
     const sup = new HostAgentSupervisor(IDENTITY, {
-      makeRelay: () => ({ start: vi.fn(), stop: vi.fn() }),
+      makeRelay: () => ({ start: vi.fn(), stop: vi.fn(), sendResult: vi.fn() }),
       onIdentityRejected,
     });
     sup.start();
@@ -1349,7 +1349,7 @@ describe('HostAgentSupervisor — self_hosted_wipe control command', () => {
     });
 
     const sup = new HostAgentSupervisor(IDENTITY, {
-      makeRelay: () => ({ start: vi.fn(), stop: relayStop }),
+      makeRelay: () => ({ start: vi.fn(), stop: relayStop, sendResult: vi.fn() }),
       disableService,
       teardownHeadroom,
       onIdentityRejected,
@@ -1378,7 +1378,7 @@ describe('HostAgentSupervisor — self_hosted_wipe control command', () => {
     // trips the default onIdentityRejected → process.exit(1).
     const teardownHeadroom = vi.fn();
     const sup = new HostAgentSupervisor(IDENTITY, {
-      makeRelay: () => ({ start: vi.fn(), stop: vi.fn() }),
+      makeRelay: () => ({ start: vi.fn(), stop: vi.fn(), sendResult: vi.fn() }),
       teardownHeadroom,
     });
 
@@ -2599,7 +2599,7 @@ describe('HostAgentSupervisor — periodic self-update', () => {
     spawnChild?: ChildSpawner;
   }) {
     return new HostAgentSupervisor(IDENTITY, {
-      makeRelay: () => ({ start: vi.fn(), stop: vi.fn() }),
+      makeRelay: () => ({ start: vi.fn(), stop: vi.fn(), sendResult: vi.fn() }),
       // No real heartbeat collection during these unit ticks.
       metricsCollector: {
         collect: () => {
@@ -2674,7 +2674,7 @@ describe('HostAgentSupervisor — periodic self-update', () => {
       .mockResolvedValue({ status: 'updated', version: '9.9.9' });
     const onUpdated = vi.fn();
     const sup = new HostAgentSupervisor(IDENTITY, {
-      makeRelay: () => ({ start: vi.fn(), stop: vi.fn() }),
+      makeRelay: () => ({ start: vi.fn(), stop: vi.fn(), sendResult: vi.fn() }),
       spawnChild,
       resolveAgentAuth: vi.fn().mockResolvedValue({ kind: 'oauth_token', value: '{}' }),
       selfUpdate,
