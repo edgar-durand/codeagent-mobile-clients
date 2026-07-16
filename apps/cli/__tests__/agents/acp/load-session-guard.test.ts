@@ -1,4 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
+import { readFileSync } from 'fs';
+import { join } from 'path';
 import { AcpClient } from '../../../src/agents/acp/client';
 import type { AcpClientOptions } from '../../../src/agents/acp/client';
 
@@ -132,5 +134,27 @@ describe('AcpClient.loadSession — load-replay guard', () => {
 
     expect(beginLoadReplay).not.toHaveBeenCalled();
     expect(endLoadReplay).not.toHaveBeenCalled();
+  });
+
+  // Harness invariant (prevention, not just regression): a session/load that
+  // isn't bracketed by the replay guard publishes the whole replayed conversation
+  // as a live streaming turn → the resume-hang. This static check fails the build
+  // the moment someone adds a raw `connection.loadSession(` without a preceding
+  // beginLoadReplay — so the class of bug can't come back through a new call site.
+  it('INVARIANT: every raw connection.loadSession call is guarded by beginLoadReplay', () => {
+    const src = readFileSync(join(__dirname, '../../../src/agents/acp/client.ts'), 'utf8');
+    const lines = src.split('\n');
+    const rawCallLines = lines
+      .map((line, idx) => ({ line, idx }))
+      .filter(({ line }) => /\.connection\.loadSession\s*\(/.test(line));
+
+    expect(rawCallLines.length).toBeGreaterThan(0); // guard against the regex silently matching nothing
+    for (const { idx } of rawCallLines) {
+      const preceding = lines.slice(Math.max(0, idx - 10), idx).join('\n');
+      expect(
+        /beginLoadReplay/.test(preceding),
+        `raw connection.loadSession at client.ts:${idx + 1} is missing a beginLoadReplay guard`,
+      ).toBe(true);
+    }
   });
 });
