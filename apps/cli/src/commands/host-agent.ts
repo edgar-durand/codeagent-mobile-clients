@@ -732,7 +732,7 @@ export interface HostAgentDeps {
     pluginId: string,
     onCommand: (cmd: RemoteCommand) => void | Promise<void>,
     meta: AgentMetadata,
-  ) => Pick<CommandRelayService, 'start' | 'stop'>;
+  ) => Pick<CommandRelayService, 'start' | 'stop' | 'sendResult'>;
   /**
    * Called when the host identity is rejected by the backend (host deleted
    * / token revoked) or on `self_hosted_wipe`. The default wipes the sealed
@@ -806,7 +806,7 @@ export class HostAgentSupervisor {
   private readonly isHeadroomInstalled: () => boolean;
   /** Free-disk reader for the install preflight (defaults to getFreeDiskBytes). */
   private readonly getFreeDisk: (dir: string) => Promise<number | null>;
-  private relay: Pick<CommandRelayService, 'start' | 'stop'> | null = null;
+  private relay: Pick<CommandRelayService, 'start' | 'stop' | 'sendResult'> | null = null;
   private heartbeatTimer: NodeJS.Timeout | null = null;
   /** Periodic self-update timer (npm check + install + restart). */
   private selfUpdateTimer: NodeJS.Timeout | null = null;
@@ -1124,6 +1124,10 @@ export class HostAgentSupervisor {
       this.stopChild(cmd.payload.sessionId);
       return;
     }
+    if (cmd.type === 'host_list_dir') {
+      await this.listDir(cmd);
+      return;
+    }
     if (cmd.type === 'self_hosted_refresh_credentials') {
       if (!isRefreshCredentialsPayload(cmd.payload)) {
         log.warn('host-agent', `ignoring malformed self_hosted_refresh_credentials id=${cmd.id}`);
@@ -1151,6 +1155,45 @@ export class HostAgentSupervisor {
       return;
     }
     log.trace('host-agent', `ignoring unsupported command type=${cmd.type}`);
+  }
+
+  /**
+   * `host_list_dir` — read-only directory browse for the app's "Path on
+   * server" picker (self-hosted deploy). Lists a directory on THIS host and
+   * returns its subdirectories + files so the user can NAVIGATE to a project
+   * path instead of guessing a raw one. NEVER writes, NEVER returns file
+   * contents. It's the user's own box (auth already proved ownership at the
+   * backend), so any absolute path is allowed; defaults to `$HOME`. Hidden
+   * dot-entries are filtered (project paths are effectively never dotdirs).
+   * Responds with a relay result the backend awaits.
+   */
+  private async listDir(cmd: RemoteCommand): Promise<void> {
+    const relay = this.relay;
+    if (!relay) return; // only reachable via the relay's onCommand — defensive
+    const raw = (cmd.payload as { path?: unknown } | undefined)?.path;
+    const target =
+      typeof raw === 'string' && raw.trim() ? path.resolve(raw.trim()) : os.homedir();
+    try {
+      const dirents = await fs.promises.readdir(target, { withFileTypes: true });
+      const entries = dirents
+        .filter((d) => !d.name.startsWith('.'))
+        .map((d) => ({ name: d.name, isDir: d.isDirectory() }))
+        .sort((a, b) =>
+          a.isDir === b.isDir ? a.name.localeCompare(b.name) : a.isDir ? -1 : 1,
+        );
+      const parent = path.dirname(target);
+      await relay.sendResult(cmd.id, 'completed', {
+        path: target,
+        // null at the filesystem root so the UI can hide the ".." affordance.
+        parent: parent === target ? null : parent,
+        entries,
+      });
+    } catch (err) {
+      await relay.sendResult(cmd.id, 'failed', {
+        path: target,
+        error: (err as NodeJS.ErrnoException).code ?? (err as Error).message,
+      });
+    }
   }
 
   /**
