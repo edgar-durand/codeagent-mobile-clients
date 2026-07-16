@@ -3331,13 +3331,21 @@ describe('HostAgentSupervisor — fleet control plane', () => {
 
     await sup.handleCommand(fleetCreateCmd());
 
-    expect(calls).toHaveLength(1);
-    const args = calls[0];
+    // Two calls: a defensive `rm -f` of any dead same-name container
+    // (wipe-exit/crash + RestartPolicy=no would otherwise collide the
+    // `docker run --name` — the 2026-07-16 FLEET_RESCUE_FAILED incident),
+    // then the real `run`. The rm never touches the volume (no -v flag).
+    expect(calls).toHaveLength(2);
+    expect(calls[0]).toEqual(['rm', '-f', 'codeam-box-clu1a2b3c']);
+    const args = calls[1];
 
     // Container identity + image.
     expect(args).toContain('run');
     expect(args[args.indexOf('--name') + 1]).toBe('codeam-box-clu1a2b3c');
     expect(args[args.length - 1]).toBe('ghcr.io/edgar-durand/codeam-box:test');
+    // Explicit image override (int test / operator) — docker's default pull
+    // policy, NEVER --pull=always (a local-only tag would fail to pull).
+    expect(args).not.toContain('--pull=always');
 
     // Hard isolation invariants.
     expect(args[args.indexOf('--cap-drop') + 1]).toBe('ALL');
@@ -3378,7 +3386,9 @@ describe('HostAgentSupervisor — fleet control plane', () => {
     // The value is instead delivered via the runner's `env` option — the
     // `docker` CLI process's OWN env, which is how docker resolves a bare
     // `-e NAME`.
-    expect(opts[0]?.env).toEqual({ CODEAM_ENROLL_TOKEN: 'super-secret-enroll-token' });
+    expect(opts[1]?.env).toEqual({ CODEAM_ENROLL_TOKEN: 'super-secret-enroll-token' });
+    // …and the secret is NOT handed to the defensive rm call.
+    expect(opts[0]?.env).toBeUndefined();
 
     // NEVER --privileged, NEVER the docker.sock, NEVER any other bind mount.
     expect(args).not.toContain('--privileged');
@@ -3387,13 +3397,40 @@ describe('HostAgentSupervisor — fleet control plane', () => {
     expect(args.filter((a) => a === '-v')).toHaveLength(1);
   });
 
-  it('fleet_create_box defaults the image when CODEAM_FLEET_BOX_IMAGE is unset', async () => {
+  it('fleet_create_box defaults the image when CODEAM_FLEET_BOX_IMAGE is unset — and pulls it fresh', async () => {
     const { docker, calls } = makeDockerMock();
     const sup = new HostAgentSupervisor(IDENTITY, { docker });
 
     await sup.handleCommand(fleetCreateCmd());
 
-    expect(calls[0][calls[0].length - 1]).toBe('ghcr.io/edgar-durand/codeam-box:latest');
+    const run = calls[1];
+    expect(run[run.length - 1]).toBe('ghcr.io/edgar-durand/codeam-box:latest');
+    // Registry-default image: --pull=always so a new box never silently
+    // runs the fleet host's STALE cached :latest (2026-07-16: the cache
+    // had CLI 2.61.4 while the registry had 2.61.9).
+    expect(run).toContain('--pull=always');
+  });
+
+  it('fleet_create_box proceeds to run even when the defensive rm fails hard', async () => {
+    const calls: string[][] = [];
+    const docker: DockerRunner = {
+      run: vi.fn(async (args: string[]) => {
+        calls.push(args);
+        if (args[0] === 'rm') {
+          return { code: 1, stdout: '', stderr: 'daemon hiccup' };
+        }
+        return { code: 0, stdout: 'abcdef123456', stderr: '' };
+      }),
+    };
+    const sup = new HostAgentSupervisor(IDENTITY, { docker });
+
+    await sup.handleCommand(fleetCreateCmd());
+
+    // rm failed for a non-"missing container" reason — logged, NOT fatal;
+    // the run still happens (it may fail name-in-use, which self-heals via
+    // the provisioning-timeout sweep — strictly better than never trying).
+    expect(calls).toHaveLength(2);
+    expect(calls[1][0]).toBe('run');
   });
 
   it('rejects a malformed fleet_create_box payload (bad containerName) — docker never invoked', async () => {

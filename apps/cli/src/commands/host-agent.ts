@@ -1258,9 +1258,34 @@ export class HostAgentSupervisor {
       `fleet_create_box id=${payload.boxId} name=${containerName} ` +
         `mem=${limits.memoryMb}m cpus=${limits.cpus} pids=${limits.pidsLimit}`,
     );
+    // Defensive: a DEAD same-name container (self_hosted_wipe exits the
+    // box; RestartPolicy is "no") would make `docker run --name` fail
+    // "name already in use" and wedge the box in PROVISIONING until the
+    // backend's 15-min timeout sweep (the 2026-07-16 FLEET_RESCUE_FAILED
+    // incident). The backend also dispatches fleet_delete_box before a
+    // re-create, but a missed/failed delete must not wedge the create.
+    // Name is already allowlist-validated; `rm` (no -v) NEVER touches the
+    // box's named volume. "No such container" = nothing to clean = fine.
+    const rm = await this.docker.run(['rm', '-f', containerName], {
+      timeoutMs: DOCKER_RUN_TIMEOUT_MS,
+    });
+    if (rm.code !== 0 && !isMissingContainerError(rm.stderr)) {
+      log.warn(
+        'host-agent',
+        `fleet_create_box: pre-create rm of ${containerName} failed (code=${rm.code}): ` +
+          `${rm.stderr.trim().slice(-200)} — attempting run anyway`,
+      );
+    }
+    const image = resolveFleetBoxImage();
     const args = [
       'run',
       '-d',
+      // Registry-default image: always pull so a new box never silently
+      // runs this host's STALE cached :latest (2026-07-16: cache had CLI
+      // 2.61.4 while the registry had 2.61.9). An explicit
+      // CODEAM_FLEET_BOX_IMAGE override (int test / operator) keeps
+      // docker's default policy — a local-only tag can't be pulled.
+      ...(process.env.CODEAM_FLEET_BOX_IMAGE ? [] : ['--pull=always']),
       '--name',
       containerName,
       '--cap-drop',
@@ -1303,7 +1328,7 @@ export class HostAgentSupervisor {
       // instead of dying with "token expired". Not a secret → plain KEY=value.
       '-e',
       'CODEAM_ENROLL_EPHEMERAL=1',
-      resolveFleetBoxImage(),
+      image,
     ];
     const res = await this.docker.run(args, {
       timeoutMs: DOCKER_RUN_TIMEOUT_MS,

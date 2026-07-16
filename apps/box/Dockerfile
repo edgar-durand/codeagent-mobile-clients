@@ -85,6 +85,15 @@ RUN npm install -g --omit=optional "codeam-cli@${CODEAM_CLI_VERSION}" \
 # agent credentials) lives here and nowhere else is writable.
 ENV HOME=/home/box
 RUN useradd --create-home --home-dir /home/box box
+# In-place self-update must work WITHOUT sudo (the image ships none and
+# the entrypoint runs as `box`): the hourly host-agent self-update runs
+# `npm i -g codeam-cli@latest`, which rewrites the global prefix
+# (/usr/local/lib/node_modules/codeam-cli + the /usr/local/bin/codeam
+# symlink). Root-owned, it EACCES'd forever and every box stayed pinned
+# to its image's CLI (2026-07-16: boxes stuck on 2.61.4 while 2.61.9 was
+# out). The container is single-user — `box` IS the workload — so owning
+# the prefix leaks no privilege; host isolation is the caller's flags.
+RUN chown -R box:box /usr/local/lib/node_modules /usr/local/bin
 USER box
 WORKDIR /home/box
 
