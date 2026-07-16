@@ -724,7 +724,18 @@ export class AcpHistory {
 
   constructor(
     private readonly publisher: AcpPublisher,
-    private readonly opts: { agent: AgentId; acpSessionId: string },
+    private readonly opts: {
+      agent: AgentId;
+      acpSessionId: string;
+      /**
+       * Agent-agnostic conversation enumerator (the ACP `session/list` RPC via
+       * AcpClient.listSessions). When present, flush() pushes the FULL list so
+       * the mobile RECENT sheet shows every conversation — not just the current
+       * one (which the SET-replace backend would otherwise clobber each turn).
+       * Absent / returns null → fall back to pushing only the current session.
+       */
+      listSessions?: () => Promise<Array<{ id: string; summary: string; timestamp: number }> | null>;
+    },
   ) {}
 
   appendUserPrompt(text: string): void {
@@ -782,17 +793,23 @@ export class AcpHistory {
   async flush(): Promise<void> {
     if (this.summary === null || this.messages.length === 0) return;
     const timestamp = Date.now();
+    const current = { id: this.opts.acpSessionId, summary: this.summary, timestamp };
+    // Prefer the ACP-native session list (all conversations, agent-authored
+    // titles) so the RECENT sheet is complete — the backend SET-replaces the
+    // list, so pushing only the current session (the old behavior) clobbered the
+    // rest every turn. Overlay the CLI-derived summary onto the current row when
+    // the agent hasn't titled it yet, and guarantee the current row is present
+    // (a brand-new conversation may not be enumerated until its first turn lands).
+    let sessions = [current];
+    const listed = this.opts.listSessions ? await this.opts.listSessions() : null;
+    if (listed && listed.length > 0) {
+      sessions = listed.map((s) =>
+        s.id === this.opts.acpSessionId && !s.summary ? { ...s, summary: this.summary! } : s,
+      );
+      if (!sessions.some((s) => s.id === this.opts.acpSessionId)) sessions.unshift(current);
+    }
     await Promise.all([
-      this.publisher.pushSessionList({
-        agentId: this.opts.agent,
-        sessions: [
-          {
-            id: this.opts.acpSessionId,
-            summary: this.summary,
-            timestamp,
-          },
-        ],
-      }),
+      this.publisher.pushSessionList({ agentId: this.opts.agent, sessions }),
       this.publisher.pushConversation({
         agentId: this.opts.agent,
         sessionId: this.opts.acpSessionId,
@@ -898,6 +915,22 @@ export function computeAdapterExtraEnv(params: {
     }) ?? {},
   );
   return env;
+}
+
+/**
+ * Pick the conversation to auto-resume into on a host-agent resume boot: the
+ * most-recent conversation that ISN'T the fresh session just minted by
+ * client.start(). Pure so the selection is unit-tested without a live adapter.
+ * Returns null when there's no prior conversation (a genuinely first-ever boot).
+ */
+export function pickLatestResumableConversation(
+  sessions: Array<{ id: string; timestamp: number }> | null,
+  currentId: string,
+): string | null {
+  const prior = (sessions ?? [])
+    .filter((s) => s.id !== currentId)
+    .sort((a, b) => b.timestamp - a.timestamp)[0];
+  return prior?.id ?? null;
 }
 
 export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
@@ -1155,16 +1188,33 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
     });
     return;
   }
-  const {
-    sessionId: acpSessionId,
-    initialize,
-    model: handshakeModel,
-    tier: handshakeTier,
-  } = handshake;
+  let acpSessionId = handshake.sessionId;
+  const { initialize, model: handshakeModel, tier: handshakeTier } = handshake;
   log.trace(
     'acpRunner',
     `adapter handshake ok protocolVersion=${initialize.protocolVersion} sessionId=${acpSessionId.slice(0, 8)}`,
   );
+
+  // Auto-resume the user's latest conversation on a host-agent RESUME boot
+  // (self-update / restart). client.start() always mints a FRESH session, so
+  // without this the resumed session would open an EMPTY chat and lose the
+  // conversation. Gated on CODEAM_RESUME_LATEST (set by the host-agent's resume
+  // spawner) so a normal fresh pairing is untouched. Agent-agnostic: enumerate
+  // via the ACP session/list RPC and load the most-recent OTHER conversation —
+  // the load-replay is swallowed by the guard on loadSession(). Best-effort: any
+  // failure leaves the fresh session in place.
+  if (process.env.CODEAM_RESUME_LATEST === '1') {
+    try {
+      const priorId = pickLatestResumableConversation(await client.listSessions(), acpSessionId);
+      if (priorId) {
+        await client.loadSession(priorId);
+        acpSessionId = priorId;
+        log.info('acpRunner', `auto-resumed latest conversation ${priorId.slice(0, 8)}`);
+      }
+    } catch (err) {
+      log.trace('acpRunner', 'auto-resume-latest failed (best-effort)', err);
+    }
+  }
   showSuccess(`${opts.agent} online (ACP) — awaiting prompts from mobile.`);
   showRelayNotice();
 
@@ -1203,7 +1253,14 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
   // messages to the backend after each turn so mobile's RECENT
   // sheet renders past conversations even though ACP has no on-disk
   // JSONL the legacy HistoryService can scan.
-  const history = new AcpHistory(publisher, { agent: opts.agent, acpSessionId });
+  const history = new AcpHistory(publisher, {
+    agent: opts.agent,
+    acpSessionId,
+    // Agent-agnostic RECENT list: enumerate via the ACP session/list RPC (any
+    // adapter advertising sessionCapabilities.list). Returns null on unsupported
+    // agents → flush() falls back to the current session only.
+    listSessions: () => client.listSessions(),
+  });
 
   // Canonical-transcript uploader. ACP agents (claude/codex/gemini) DO write the
   // same `~/.claude/projects/<cwd>/<sessionId>.jsonl` the legacy PTY path parses

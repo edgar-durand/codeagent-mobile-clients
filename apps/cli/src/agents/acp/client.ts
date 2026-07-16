@@ -266,6 +266,7 @@ export class AcpClient {
    *  the conversation — whereas one without it falls back to a fresh
    *  `session/new`. Set once during {@link startOnce}. */
   private supportsLoadSession = false;
+  private supportsListSessions = false;
   /** Idle watchdog for the in-flight prompt. The `Client` handlers
    *  (`sessionUpdate` / `requestPermission`) reach for this to keep
    *  the turn alive while the adapter is demonstrably working. Null
@@ -541,6 +542,15 @@ export class AcpClient {
       this.supportsLoadSession =
         (initialize.agentCapabilities as { loadSession?: boolean } | undefined)?.loadSession ===
         true;
+      // Agent-agnostic conversation enumeration: any ACP agent that advertises
+      // sessionCapabilities.list answers session/list with the full SessionInfo
+      // set (id + agent-authored title + updatedAt) — so the RECENT list works
+      // for claude/codex/gemini alike without per-agent JSONL scanning.
+      this.supportsListSessions = !!(
+        initialize.agentCapabilities as
+          | { sessionCapabilities?: { list?: unknown } }
+          | undefined
+      )?.sessionCapabilities?.list;
 
       log.info('acpClient', 'newSession → sending');
       // Race the RPC against (a) a fatal stderr line (auth / tier ineligibility),
@@ -862,13 +872,54 @@ export class AcpClient {
       return;
     }
     log.info('acpClient', `loadSession → sessionId=${sessionId.slice(0, 8)}`);
-    await this.connection.loadSession({
-      sessionId,
-      cwd: this.opts.cwd,
-      mcpServers: this.opts.mcpServers ?? [],
-    });
+    // Swallow the load replay. `session/load` makes Claude replay the ENTIRE
+    // prior conversation as `session/update` notifications before it resolves;
+    // without this bracket those land as OPEN (`done:false`) streaming chunks
+    // that nothing ever closes → mobile shows a stuck "Thinking…"/STOP live turn
+    // for history the client already has (the `resume_session` incident). Mirrors
+    // reestablishSession() above and the baton driver — the ONLY three callers of
+    // session/load; the happy path (fresh session/new at spawn) never calls this,
+    // so live streaming for non-resuming users is untouched.
+    this.opts.beginLoadReplay?.();
+    try {
+      await this.connection.loadSession({
+        sessionId,
+        cwd: this.opts.cwd,
+        mcpServers: this.opts.mcpServers ?? [],
+      });
+    } finally {
+      this.opts.endLoadReplay?.();
+    }
     this.sessionId = sessionId;
     log.info('acpClient', `loadSession ← ok sessionId=${sessionId.slice(0, 8)}`);
+  }
+
+  /**
+   * Enumerate the workspace's conversations via the ACP `session/list` RPC.
+   * Agent-agnostic — works for ANY adapter that advertises
+   * `sessionCapabilities.list` (claude/codex/gemini alike), so the mobile RECENT
+   * list no longer depends on per-agent JSONL scanning. Maps SessionInfo (id +
+   * agent-authored title + updatedAt) to the backend's RECENT-list shape.
+   *
+   * Returns null when the agent doesn't advertise `list` (caller falls back or
+   * skips). Best-effort — never throws out to the caller.
+   */
+  async listSessions(): Promise<
+    Array<{ id: string; summary: string; timestamp: number }> | null
+  > {
+    if (!this.connection || !this.supportsListSessions) return null;
+    try {
+      const res = await this.connection.listSessions({ cwd: this.opts.cwd });
+      return (res.sessions ?? []).map((s) => ({
+        id: s.sessionId,
+        summary: s.title ?? '',
+        // updatedAt is an ISO string; fall back to now on absent/unparseable.
+        timestamp: s.updatedAt ? Date.parse(s.updatedAt) || Date.now() : Date.now(),
+      }));
+    } catch (err) {
+      log.trace('acpClient', 'listSessions failed (best-effort)', err);
+      return null;
+    }
   }
 
   /**

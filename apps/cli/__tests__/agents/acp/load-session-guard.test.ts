@@ -1,4 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
+import { readFileSync } from 'fs';
+import { join } from 'path';
 import { AcpClient } from '../../../src/agents/acp/client';
 import type { AcpClientOptions } from '../../../src/agents/acp/client';
 
@@ -80,5 +82,79 @@ describe('AcpClient.loadSession — self-load guard', () => {
       cwd: '/tmp/work',
       mcpServers,
     });
+  });
+});
+
+/**
+ * The load-replay guard (2026-07-16). `session/load` replays the whole prior
+ * conversation as `session/update` notifications; without bracketing the RPC in
+ * beginLoadReplay/endLoadReplay those land as OPEN streaming chunks that never
+ * close → mobile stuck on "Thinking…"/STOP after `resume_session`. The baton
+ * driver + reestablishSession already do this; the public loadSession() must too.
+ */
+describe('AcpClient.loadSession — load-replay guard', () => {
+  it('brackets session/load with beginLoadReplay → load → endLoadReplay', async () => {
+    const calls: string[] = [];
+    const beginLoadReplay = vi.fn(() => void calls.push('begin'));
+    const endLoadReplay = vi.fn(() => void calls.push('end'));
+    const client = makeClient({ beginLoadReplay, endLoadReplay });
+    const loadSession = vi.fn().mockImplementation(async () => void calls.push('load'));
+    const internals = client as unknown as ClientInternals;
+    internals.connection = { loadSession };
+    internals.sessionId = 'sess-active';
+
+    await client.loadSession('sess-older');
+
+    expect(calls).toEqual(['begin', 'load', 'end']); // replay swallowed around the RPC
+  });
+
+  it('runs endLoadReplay even when session/load throws (finally-safe)', async () => {
+    const beginLoadReplay = vi.fn();
+    const endLoadReplay = vi.fn();
+    const client = makeClient({ beginLoadReplay, endLoadReplay });
+    const loadSession = vi.fn().mockRejectedValue(new Error('boom'));
+    const internals = client as unknown as ClientInternals;
+    internals.connection = { loadSession };
+    internals.sessionId = 'sess-active';
+
+    await expect(client.loadSession('sess-older')).rejects.toThrow('boom');
+    expect(beginLoadReplay).toHaveBeenCalledTimes(1);
+    expect(endLoadReplay).toHaveBeenCalledTimes(1); // never leaks the swallow state
+  });
+
+  it('does NOT arm the replay guard on a self-load (no RPC, nothing to swallow)', async () => {
+    const beginLoadReplay = vi.fn();
+    const endLoadReplay = vi.fn();
+    const client = makeClient({ beginLoadReplay, endLoadReplay });
+    const internals = client as unknown as ClientInternals;
+    internals.connection = { loadSession: vi.fn() };
+    internals.sessionId = 'sess-active';
+
+    await client.loadSession('sess-active');
+
+    expect(beginLoadReplay).not.toHaveBeenCalled();
+    expect(endLoadReplay).not.toHaveBeenCalled();
+  });
+
+  // Harness invariant (prevention, not just regression): a session/load that
+  // isn't bracketed by the replay guard publishes the whole replayed conversation
+  // as a live streaming turn → the resume-hang. This static check fails the build
+  // the moment someone adds a raw `connection.loadSession(` without a preceding
+  // beginLoadReplay — so the class of bug can't come back through a new call site.
+  it('INVARIANT: every raw connection.loadSession call is guarded by beginLoadReplay', () => {
+    const src = readFileSync(join(__dirname, '../../../src/agents/acp/client.ts'), 'utf8');
+    const lines = src.split('\n');
+    const rawCallLines = lines
+      .map((line, idx) => ({ line, idx }))
+      .filter(({ line }) => /\.connection\.loadSession\s*\(/.test(line));
+
+    expect(rawCallLines.length).toBeGreaterThan(0); // guard against the regex silently matching nothing
+    for (const { idx } of rawCallLines) {
+      const preceding = lines.slice(Math.max(0, idx - 10), idx).join('\n');
+      expect(
+        /beginLoadReplay/.test(preceding),
+        `raw connection.loadSession at client.ts:${idx + 1} is missing a beginLoadReplay guard`,
+      ).toBe(true);
+    }
   });
 });

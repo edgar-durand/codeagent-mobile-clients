@@ -707,7 +707,10 @@ const defaultSpawner: ChildSpawner = (env, cwd, args = []) =>
 const defaultResumeSpawner: ChildSpawner = (env, cwd) =>
   spawn(process.execPath, [process.argv[1]], {
     cwd,
-    env: { ...process.env, ...env, CODEAM_AUTO_APPROVE: '1' },
+    // CODEAM_AUTO_APPROVE=1 → ACP path (baton off). CODEAM_RESUME_LATEST=1 →
+    // continue the user's most-recent conversation instead of opening an empty
+    // one (runAcpSession loads it via the ACP session/list RPC).
+    env: { ...process.env, ...env, CODEAM_AUTO_APPROVE: '1', CODEAM_RESUME_LATEST: '1' },
     stdio: ['ignore', 'pipe', 'pipe'],
     detached: false,
   });
