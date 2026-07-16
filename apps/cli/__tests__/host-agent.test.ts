@@ -55,6 +55,15 @@ vi.mock('../src/commands/host/git-tooling', async (importActual) => {
   };
 });
 
+// getActiveSession reads the real ~/.codeam config — default it to "no session"
+// so start()'s auto-resume is a deterministic no-op unless a test opts in. Without
+// this, a dev machine with real sessions would spawn a resume child (and fork a
+// real `codeam`) inside every start() test.
+vi.mock('../src/config', async (importActual) => {
+  const actual = await importActual<typeof import('../src/config')>();
+  return { ...actual, getActiveSession: vi.fn(() => null) };
+});
+
 // ── HOME isolation so ~/.codeam writes land in a throwaway dir ──────────
 let tmpHome: string;
 let origHome: string | undefined;
@@ -607,6 +616,52 @@ describe('HostAgentSupervisor — control channel reuse', () => {
 
     sup.stop();
     expect(stop).toHaveBeenCalledTimes(1);
+  });
+
+  // 2026-07-16 churn fix: a restart/self-update must auto-resume the user's
+  // session (reconnect, same pluginId) instead of leaving it "CLI disconnected".
+  it('auto-resumes the persisted session on boot via the resume spawner', async () => {
+    const config = await import('../src/config');
+    vi.mocked(config.getActiveSession).mockReturnValueOnce({
+      id: 'sess-1',
+      pluginId: 'plug-1',
+      pollSecret: 'sec',
+      agent: 'claude',
+      userName: 'u',
+      userEmail: 'e',
+      plan: 'pro',
+      pairedAt: 0,
+      pluginAuthToken: 't',
+    } as never);
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => ({ success: true, data: {} }) }),
+    );
+    const fakeProc = { stdout: { on: vi.fn() }, stderr: { on: vi.fn() }, once: vi.fn(), kill: vi.fn() };
+    const resumeSpawner = vi.fn(() => fakeProc as never);
+    const sup = new HostAgentSupervisor(IDENTITY, {
+      makeRelay: () => ({ start: vi.fn(), stop: vi.fn(), sendResult: vi.fn() }),
+      resumeSpawner,
+    });
+    sup.start();
+    expect(resumeSpawner).toHaveBeenCalledTimes(1);
+    sup.stop();
+  });
+
+  it('does NOT resume when there is no persisted session', async () => {
+    // getActiveSession defaults to null via the module mock above.
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => ({ success: true, data: {} }) }),
+    );
+    const resumeSpawner = vi.fn();
+    const sup = new HostAgentSupervisor(IDENTITY, {
+      makeRelay: () => ({ start: vi.fn(), stop: vi.fn(), sendResult: vi.fn() }),
+      resumeSpawner,
+    });
+    sup.start();
+    expect(resumeSpawner).not.toHaveBeenCalled();
+    sup.stop();
   });
 
   it('host_list_dir lists a directory (dirs first, dotfiles hidden) via the relay result', async () => {
