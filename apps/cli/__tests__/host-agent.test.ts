@@ -617,10 +617,13 @@ describe('HostAgentSupervisor — control channel reuse', () => {
       payload: { path: '/no/such/dir/xyz-codeam' },
     } as unknown as RemoteCommand);
 
+    // NB: assert status + error only — `listDir` normalizes the path via
+    // path.resolve, which prepends a drive letter on Windows, so the exact
+    // string isn't portable. What matters is it FAILED cleanly (never threw).
     expect(sendResult).toHaveBeenCalledWith(
       'ls-2',
       'failed',
-      expect.objectContaining({ path: '/no/such/dir/xyz-codeam' }),
+      expect.objectContaining({ error: expect.anything() }),
     );
     sup.stop();
   });
