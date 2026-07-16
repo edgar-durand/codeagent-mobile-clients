@@ -198,6 +198,56 @@ jobs:
           name: cli-tgz
           path: apps/cli/codeam-cli-${{ needs.setup.outputs.version }}.tgz
 
+  # Builds + pushes the CodeAgent Box runtime image (apps/box) to GHCR on every
+  # stable tag. Previously a MANUAL `docker build`, which is exactly how the box
+  # drifted a node major behind the codespace bootstrap (2026-07-16: the box was
+  # still node:20-slim while the ACP adapter had moved to engines.node ">=22").
+  # Automating it here keeps the image's node + pinned codeam-cli in lockstep
+  # with the release, so a rescued user never boots on a stale runtime.
+  #
+  # Depends on publish-cli: the image does `npm install -g codeam-cli@<version>`,
+  # so that version must already be live on npm.
+  publish-box:
+    name: Build and publish CodeAgent Box image
+    needs: [setup, publish-cli]
+    if: needs.setup.outputs.is_prerelease != 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      - name: Wait for codeam-cli on npm
+        env:
+          VERSION: ${{ needs.setup.outputs.version }}
+        run: |
+          for i in $(seq 1 40); do
+            if npm view "codeam-cli@${VERSION}" version >/dev/null 2>&1; then
+              echo "codeam-cli@${VERSION} is live on npm"; exit 0
+            fi
+            echo "waiting for codeam-cli@${VERSION} on npm (attempt ${i})..."; sleep 5
+          done
+          echo "::error::codeam-cli@${VERSION} never appeared on npm — cannot build the box image against it"
+          exit 1
+
+      - name: Build and push box image (node 22 base, pinned CLI)
+        env:
+          VERSION: ${{ needs.setup.outputs.version }}
+        run: |
+          IMAGE="ghcr.io/${{ github.repository_owner }}/codeam-box"
+          docker build \
+            --build-arg "CODEAM_CLI_VERSION=${VERSION}" \
+            -t "${IMAGE}:${VERSION}" \
+            -t "${IMAGE}:latest" \
+            apps/box
+          docker push "${IMAGE}:${VERSION}"
+          docker push "${IMAGE}:latest"
+
   trigger-api-integration:
     # Cross-repo regression gate: as soon as codeam-cli@<version>
     # is live on npm, dispatch the api-v2-integration workflow in

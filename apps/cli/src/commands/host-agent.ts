@@ -55,6 +55,7 @@ function resolveInputPricePerMillion(agentId: string): number {
 }
 import { log } from '../services/logger';
 import { killQuiet } from '../lib/quiet';
+import { getActiveSession } from '../config';
 import {
   deleteHostIdentity,
   isHostAuthRejection,
@@ -696,6 +697,22 @@ const defaultSpawner: ChildSpawner = (env, cwd, args = []) =>
   });
 
 /**
+ * Default RESUME spawner: bare `codeam` — resumes the last active session
+ * (reconnects with the SAME pluginId via start(), then heartbeats). Used on
+ * supervisor boot to bring the user's session back after a restart/self-update
+ * without a manual reconnect. `CODEAM_AUTO_APPROVE=1` forces the ACP path and
+ * keeps the local baton / native-TUI OFF (self-hosted + codespace sessions are
+ * ACP-only), mirroring how a deploy child stays ACP via `CODEAM_AUTO_TOKEN`.
+ */
+const defaultResumeSpawner: ChildSpawner = (env, cwd) =>
+  spawn(process.execPath, [process.argv[1]], {
+    cwd,
+    env: { ...process.env, ...env, CODEAM_AUTO_APPROVE: '1' },
+    stdio: ['ignore', 'pipe', 'pipe'],
+    detached: false,
+  });
+
+/**
  * Default self-heal action when the backend rejects the host identity:
  * wipe the sealed identity and exit non-zero so systemd restarts us. On
  * restart, `resolveHostIdentity` redeems a fresh env token if one is
@@ -724,6 +741,8 @@ export type HostMetricsCollector = Pick<MetricsCollector, 'collect' | 'recordLat
 /** Dependencies the supervisor needs — all injectable for tests. */
 export interface HostAgentDeps {
   spawnChild?: ChildSpawner;
+  /** Injectable resume spawner (bare `codeam`) so tests don't fork. */
+  resumeSpawner?: ChildSpawner;
   resolveAgentAuth?: AgentAuthResolver;
   /** Live-metrics collector; defaults to a real one. Injectable for tests. */
   metricsCollector?: HostMetricsCollector;
@@ -800,6 +819,7 @@ export interface HostAgentDeps {
 export class HostAgentSupervisor {
   private readonly children = new Map<string, ChildSession>();
   private readonly spawnChild: ChildSpawner;
+  private readonly resumeSpawner: ChildSpawner;
   private readonly resolveAgentAuth: AgentAuthResolver;
   private readonly setupHeadroom: (agent: string) => Promise<boolean>;
   /** Probe whether Headroom is already installed (defaults to `which headroom`). */
@@ -841,6 +861,7 @@ export class HostAgentSupervisor {
     private readonly deps: HostAgentDeps = {},
   ) {
     this.spawnChild = deps.spawnChild ?? defaultSpawner;
+    this.resumeSpawner = deps.resumeSpawner ?? defaultResumeSpawner;
     this.resolveAgentAuth = deps.resolveAgentAuth ?? unsealAgentAuth;
     this.setupHeadroom = deps.setupHeadroom ?? setupHeadroomForSelfHosted;
     this.isHeadroomInstalled =
@@ -888,6 +909,17 @@ export class HostAgentSupervisor {
     void this.beat();
     this.heartbeatTimer = setInterval(() => void this.beat(), HEARTBEAT_INTERVAL_MS);
     this.heartbeatTimer.unref?.();
+
+    // Auto-resume the user's session (2026-07-16 churn fix). Before this, a
+    // restart / self-update killed the session child and NEVER re-spawned it
+    // ("children are NOT auto-resumed (v1)"), so the user's chat went "CLI
+    // disconnected" and they had to reconnect by hand — churn right after an
+    // update. Re-spawn bare `codeam` (= resume the last active session:
+    // reconnects with the SAME pluginId via start(), then heartbeats) so the
+    // session comes back on its own, in its ORIGINAL ACP shape (self-hosted /
+    // codespace sessions are ACP-only — CODEAM_AUTO_APPROVE keeps the baton /
+    // native-TUI path OFF, exactly like a deploy child's CODEAM_AUTO_TOKEN).
+    this.resumePersistedSession();
 
     // Boot reconcile: a fresh supervisor owns NO children yet (a restart /
     // crash / reboot killed any previous ones), so the authoritative live
@@ -1680,6 +1712,63 @@ export class HostAgentSupervisor {
     args: string[] = [],
   ): ChildProcess {
     return this.spawnChild({ ...env, ...readHeadroomChildEnv() }, cwd, args);
+  }
+
+  /**
+   * Auto-resume the user's last active session on supervisor boot (2026-07-16
+   * churn fix). Before this, a restart / self-update killed the session child
+   * and never re-spawned it — the session lost its heartbeat, went "CLI
+   * disconnected", and the user had to reconnect by hand (churn right after an
+   * update). Spawn bare `codeam` via the resume spawner (reconnects the SAME
+   * pluginId via start(), then heartbeats) so the session comes back on its own
+   * in its ORIGINAL ACP shape (self-hosted/codespace = ACP-only; the resume
+   * spawner sets CODEAM_AUTO_APPROVE=1 to keep the local baton/native-TUI OFF).
+   *
+   * Best-effort + guarded: no-op when there's no persisted session, when the
+   * persisted session lacks the reconnect material (pluginId + pollSecret +
+   * agent), or when a fresh deploy already owns a child this boot.
+   */
+  private resumePersistedSession(): void {
+    try {
+      if (this.children.size > 0) return; // a fresh deploy already owns a child
+      const session = getActiveSession();
+      if (!session || !session.pluginId || !session.pollSecret || !session.agent) return;
+
+      const cwd = process.cwd();
+      const proc = this.resumeSpawner({ ...readHeadroomChildEnv() }, cwd);
+      const child: ChildSession = {
+        deployId: session.id,
+        proc,
+        agent: session.agent,
+        startedAt: Date.now(),
+      };
+      this.children.set(session.id, child);
+
+      let tail = '';
+      const appendTail = (buf: Buffer): void => {
+        tail = (tail + buf.toString('utf8')).slice(-2_000);
+      };
+      proc.stdout?.on('data', appendTail);
+      proc.stderr?.on('data', appendTail);
+      proc.once('exit', (code) => {
+        if (this.children.get(session.id)?.proc === proc) this.children.delete(session.id);
+        if (typeof code === 'number' && code !== 0) {
+          log.warn(
+            'host-agent',
+            `resumed session ${session.id.slice(0, 8)} exited (${code}): ${tail.trim().slice(-300)}`,
+          );
+        }
+      });
+      log.info(
+        'host-agent',
+        `resumed session ${session.id.slice(0, 8)} pluginId=${session.pluginId.slice(0, 12)} (ACP)`,
+      );
+    } catch (err) {
+      log.warn(
+        'host-agent',
+        `resume persisted session failed (best-effort): ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
   }
 
   /**
