@@ -53,11 +53,31 @@ describe('ensureClaudeOnboarded', () => {
   it('is a no-op once onboarding is already complete AND no cwd is given', () => {
     fs.writeFileSync(
       claudeJson(),
-      JSON.stringify({ hasCompletedOnboarding: true, theme: 'dark' }),
+      JSON.stringify({
+        hasCompletedOnboarding: true,
+        theme: 'dark',
+        lastOnboardingVersion: '9999.0.0', // changelog sentinel already present
+      }),
     );
     const before = fs.statSync(claudeJson()).mtimeMs;
     ensureClaudeOnboarded();
     expect(fs.statSync(claudeJson()).mtimeMs).toBe(before); // untouched
+  });
+
+  it("forces the changelog sentinel — repairs a stale lastOnboardingVersion so the \"What's new\" banner can't leak into the ACP stream", () => {
+    // A config seeded by an older CLI (or a fresh binary) carries a real version
+    // that goes stale as Claude Code self-updates (e.g. 2.1.177 < running 2.1.211)
+    // → Claude streams its changelog banner as plain text → broken chat on mobile.
+    fs.writeFileSync(
+      claudeJson(),
+      JSON.stringify({
+        hasCompletedOnboarding: true,
+        theme: 'dark',
+        lastOnboardingVersion: '2.1.177',
+      }),
+    );
+    ensureClaudeOnboarded();
+    expect(read().lastOnboardingVersion).toBe('9999.0.0');
   });
 
   // ── Per-workspace trust (2026-07-10 regression: Claude Code v2.1.206+ gates a
@@ -106,6 +126,7 @@ describe('ensureClaudeOnboarded', () => {
       JSON.stringify({
         hasCompletedOnboarding: true,
         theme: 'dark',
+        lastOnboardingVersion: '9999.0.0', // changelog sentinel already present
         projects: {
           '/workspaces/my_repo': { hasTrustDialogAccepted: true, hasCompletedProjectOnboarding: true },
         },

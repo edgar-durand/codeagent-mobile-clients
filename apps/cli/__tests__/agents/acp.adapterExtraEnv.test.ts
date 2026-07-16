@@ -37,19 +37,26 @@ describe('computeAdapterExtraEnv', () => {
     expect(env.INITIAL_AGENT_MODE).toBeUndefined();
   });
 
+  // claude ALWAYS freezes the self-updating binary (DISABLE_AUTOUPDATER) so it
+  // can't drift past the pinned ACP adapter and leak TUI chrome into the stream.
+  const CLAUDE_FREEZE = {
+    DISABLE_AUTOUPDATER: '1',
+    CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1',
+  };
+
   it('carries the 1M-context opt-out independently, and both knobs can coexist for Codex', () => {
     expect(
       computeAdapterExtraEnv({ agent: 'claude', autoApprovePermissions: false, disable1mContext: true }),
-    ).toEqual({ CLAUDE_CODE_DISABLE_1M_CONTEXT: '1' });
+    ).toEqual({ CLAUDE_CODE_DISABLE_1M_CONTEXT: '1', ...CLAUDE_FREEZE });
 
     expect(
       computeAdapterExtraEnv({ agent: 'codex', autoApprovePermissions: true, disable1mContext: true }),
     ).toEqual({ CLAUDE_CODE_DISABLE_1M_CONTEXT: '1', INITIAL_AGENT_MODE: 'agent-full-access' });
   });
 
-  it('returns an empty env in the plain interactive default', () => {
+  it('claude freezes the auto-updater even in the plain interactive default', () => {
     expect(
       computeAdapterExtraEnv({ agent: 'claude', autoApprovePermissions: false, disable1mContext: false }),
-    ).toEqual({});
+    ).toEqual({ ...CLAUDE_FREEZE });
   });
 });

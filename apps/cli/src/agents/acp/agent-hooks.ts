@@ -90,6 +90,17 @@ function isGeminiIneligibleTier(haystack: string): boolean {
 export const ACP_AGENT_HOOKS: Partial<Record<AgentId, AcpAgentHooks>> = {
   claude: {
     statusPage: { vendor: 'Anthropic', url: 'https://status.anthropic.com' },
+    // Freeze the SDK-bundled Claude Code binary at the version this CLI (and its
+    // pinned ACP adapter) was tested against. Without this the binary silently
+    // self-updates to @latest and can drift PAST the adapter — a newer Claude
+    // Code (v2.1.211) started streaming its TUI chrome (What's-new banner, status
+    // line, box-drawing) into the ACP text channel, which paints as a broken chat
+    // on mobile. A version regression must now reach users only through a gated
+    // codeam-cli release, never silently via auto-update.
+    startupExtraEnv: (): Record<string, string> => ({
+      DISABLE_AUTOUPDATER: '1',
+      CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1',
+    }),
   },
   codex: {
     statusPage: { vendor: 'OpenAI', url: 'https://status.openai.com' },

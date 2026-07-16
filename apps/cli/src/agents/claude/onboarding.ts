@@ -4,6 +4,13 @@ import * as path from 'path';
 import { log } from '../../services/logger';
 
 /**
+ * Sentinel written to `~/.claude.json` `lastOnboardingVersion`. Higher than any
+ * real Claude Code version so the "What's new" changelog banner never fires in a
+ * headless ACP session (it would otherwise stream as raw text to mobile).
+ */
+const ONBOARDING_VERSION_SENTINEL = '9999.0.0';
+
+/**
  * Pre-complete Claude Code's first-run onboarding so it never shows an
  * interactive gate that STALLS the headless ACP agent. Two gates are covered:
  *
@@ -41,9 +48,19 @@ export function ensureClaudeOnboarded(cwd?: string): void {
     if (config.hasCompletedOnboarding !== true || typeof config.theme !== 'string') {
       config.hasCompletedOnboarding = true;
       config.theme = typeof config.theme === 'string' ? config.theme : 'dark';
-      if (typeof config.lastOnboardingVersion !== 'string') {
-        config.lastOnboardingVersion = '2.1.177';
-      }
+      changed = true;
+    }
+
+    // 1b) Suppress Claude Code's "What's new" changelog banner. Claude shows it
+    //     whenever `lastOnboardingVersion` < the running binary version; in a
+    //     HEADLESS ACP session that banner streams as PLAIN TEXT and paints as a
+    //     garbled box on mobile (the 2026-07-16 "broken chat" incident). A FIXED
+    //     number here (the old '2.1.177') goes stale the moment the self-updating
+    //     binary floats past it (→ v2.1.211) and the banner returns. Pin a
+    //     sentinel that is always ≥ any real version, and FORCE it every run so a
+    //     config previously seeded with a now-stale version is repaired too.
+    if (config.lastOnboardingVersion !== ONBOARDING_VERSION_SENTINEL) {
+      config.lastOnboardingVersion = ONBOARDING_VERSION_SENTINEL;
       changed = true;
     }
 
