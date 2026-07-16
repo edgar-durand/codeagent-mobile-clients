@@ -650,6 +650,20 @@ export class HistoryService {
   /** Per-session JSONL mtime at the last upload — gates {@link uploadConversationIfChanged}. */
   private readonly lastTranscriptMtimeMs = new Map<string, number>();
 
+  /** Wall-clock of the last upload per session — drives the periodic
+   *  re-baseline below. */
+  private readonly lastUploadWallMs = new Map<string, number>();
+
+  /** The backend stores the conversation with a bounded TTL (24 h,
+   *  `WS_SESSION_TTL`). An IDLE session's JSONL never changes, so a pure
+   *  mtime gate would never re-ship and the backend copy would expire —
+   *  every later `get_conversation` → GET then returns EMPTY forever (the
+   *  2026-07-16 "la sesión no carga" regression, second occurrence: the
+   *  first fix pushed at session START but nothing refreshed an idle
+   *  session past the TTL). Re-baseline at half the backend TTL so the
+   *  stored copy can never lapse while the session lives. */
+  private static readonly REBASELINE_INTERVAL_MS = 12 * 60 * 60 * 1000;
+
   /**
    * Upload a session's transcript when its JSONL changed since the last upload.
    * Scales to long/heavy conversations: the ACP `get_conversation` handler is
@@ -675,7 +689,19 @@ export class HistoryService {
     } catch {
       return false; // no transcript yet
     }
-    if (this.lastTranscriptMtimeMs.get(sessionId) === mtimeMs) return false;
+    // Periodic re-baseline: past half the backend's conversation TTL, the
+    // stored copy may be about to (or already did) expire — re-ship the
+    // FULL baseline even when the mtime is unchanged. A delta over an
+    // expired copy would persist only the tail, so this must reset the
+    // high-water mark, never go through uploadDelta.
+    const now = Date.now();
+    const staleBaseline =
+      now - (this.lastUploadWallMs.get(sessionId) ?? 0) >
+      HistoryService.REBASELINE_INTERVAL_MS;
+    if (!staleBaseline && this.lastTranscriptMtimeMs.get(sessionId) === mtimeMs) {
+      return false;
+    }
+    if (staleBaseline) this.lastUploadedUuid.delete(sessionId);
     // First upload for this session → batched full baseline (also sets the
     // high-water mark). Afterwards → incremental delta only.
     let uploaded: boolean;
@@ -686,6 +712,7 @@ export class HistoryService {
       uploaded = true;
     }
     this.lastTranscriptMtimeMs.set(sessionId, mtimeMs);
+    this.lastUploadWallMs.set(sessionId, now);
     return uploaded;
   }
 
