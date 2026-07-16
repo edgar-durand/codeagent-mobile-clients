@@ -560,6 +560,70 @@ describe('HostAgentSupervisor — control channel reuse', () => {
     sup.stop();
     expect(stop).toHaveBeenCalledTimes(1);
   });
+
+  it('host_list_dir lists a directory (dirs first, dotfiles hidden) via the relay result', async () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'codeam-lsdir-'));
+    fs.mkdirSync(path.join(tmp, 'projects'));
+    fs.writeFileSync(path.join(tmp, 'readme.md'), 'x');
+    fs.writeFileSync(path.join(tmp, '.hidden'), 'x'); // dotfile — must be filtered
+
+    const sendResult = vi.fn();
+    const sup = new HostAgentSupervisor(IDENTITY, {
+      makeRelay: () => ({ start: vi.fn(), stop: vi.fn(), sendResult }),
+    });
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => ({ success: true }) }),
+    );
+    sup.start();
+
+    await sup.handleCommand({
+      id: 'ls-1',
+      type: 'host_list_dir',
+      payload: { path: tmp },
+    } as unknown as RemoteCommand);
+
+    expect(sendResult).toHaveBeenCalledWith(
+      'ls-1',
+      'completed',
+      expect.objectContaining({
+        path: tmp,
+        parent: path.dirname(tmp),
+        entries: [
+          { name: 'projects', isDir: true },
+          { name: 'readme.md', isDir: false },
+        ],
+      }),
+    );
+
+    sup.stop();
+    fs.rmSync(tmp, { recursive: true, force: true });
+  });
+
+  it('host_list_dir on an unreadable path returns a failed relay result (never throws)', async () => {
+    const sendResult = vi.fn();
+    const sup = new HostAgentSupervisor(IDENTITY, {
+      makeRelay: () => ({ start: vi.fn(), stop: vi.fn(), sendResult }),
+    });
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => ({ success: true }) }),
+    );
+    sup.start();
+
+    await sup.handleCommand({
+      id: 'ls-2',
+      type: 'host_list_dir',
+      payload: { path: '/no/such/dir/xyz-codeam' },
+    } as unknown as RemoteCommand);
+
+    expect(sendResult).toHaveBeenCalledWith(
+      'ls-2',
+      'failed',
+      expect.objectContaining({ path: '/no/such/dir/xyz-codeam' }),
+    );
+    sup.stop();
+  });
 });
 
 describe('HostAgentSupervisor — command routing', () => {
