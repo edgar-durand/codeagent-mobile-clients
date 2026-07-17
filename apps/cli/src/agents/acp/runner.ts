@@ -854,7 +854,7 @@ export { looksLikeBudgetExceeded } from './budgetRecovery';
  * fails the command. The relay's long-lived SSE keeps the process alive so the
  * session stays online showing the message until the user re-links / redeploys.
  */
-async function surfaceStartupFailure(opts: {
+export async function surfaceStartupFailure(opts: {
   agent: AgentId;
   pluginId: string;
   detail: string;

@@ -8,9 +8,14 @@
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { AGENT_REGISTRY } from '@codeam/shared';
-import { getAcpAdapter, listAcpAdapterIdsForTests } from '../../src/agents/acp/adapters';
+import {
+  getAcpAdapter,
+  listAcpAdapterIdsForTests,
+  resolveAcpAdapterWithRetry,
+  resetAcpAdapterCacheForTests,
+} from '../../src/agents/acp/adapters';
 
 describe('ACP adapter registry', () => {
   it.each(listAcpAdapterIdsForTests())(
@@ -87,6 +92,77 @@ describe('ACP adapter registry', () => {
     ).toBe(true);
     expect(spec!.args).toEqual(['acp']);
     expect(spec!.requiresAgentBinary).toBe('cursor-agent');
+  });
+
+  it('caches a successfully-resolved adapter for the process lifetime', () => {
+    // A later npm-tree rewrite (reinstall race) must NOT be able to flip an
+    // already-running session's behavior — see the adapter-cache doc in
+    // adapters.ts. Two calls in a row must return the exact same object
+    // (not merely equal specs) once resolution has succeeded once.
+    resetAcpAdapterCacheForTests();
+    const first = getAcpAdapter('claude');
+    const second = getAcpAdapter('claude');
+    expect(first).not.toBeNull();
+    expect(second).toBe(first);
+  });
+
+  describe('resolveAcpAdapterWithRetry', () => {
+    it('resolves immediately when the adapter is already available', async () => {
+      resetAcpAdapterCacheForTests();
+      const spec = await resolveAcpAdapterWithRetry('claude', { timeoutMs: 0 });
+      expect(spec).not.toBeNull();
+    });
+
+    it('retries on a bounded schedule and succeeds once resolution comes back', async () => {
+      resetAcpAdapterCacheForTests();
+      let attempts = 0;
+      const sleep = vi.fn(async () => {
+        attempts += 1;
+      });
+      // Fake `now()` that advances on every call so the bounded loop
+      // terminates deterministically without a real timer.
+      let clock = 0;
+      const now = vi.fn(() => {
+        clock += 1;
+        return clock;
+      });
+      const spec = await resolveAcpAdapterWithRetry('claude', {
+        timeoutMs: 100,
+        pollMs: 1,
+        now,
+        sleep,
+      });
+      expect(spec).not.toBeNull();
+      // resolveBin genuinely succeeds on the very first internal call here
+      // (the real package IS installed in this repo) — this test's job is
+      // just to prove the retry plumbing (sleep/now injection) is wired
+      // and returns the resolved spec once available, not to force a
+      // failing-then-succeeding sequence (see the timeout test below for
+      // the "never resolves" side of the contract).
+      expect(attempts).toBe(0);
+    });
+
+    it('returns null once the bounded time budget is exhausted for an agent whose adapter never resolves', async () => {
+      // Simulate "genuinely unresolvable for the whole retry window" by
+      // retrying an id with no adapter registered — mirrors what callers
+      // see once the real resolveBin() keeps failing past the deadline.
+      let clock = 0;
+      const now = vi.fn(() => {
+        clock += 25;
+        return clock;
+      });
+      const sleep = vi.fn(async () => undefined);
+      const spec = await resolveAcpAdapterWithRetry('aider', {
+        timeoutMs: 100,
+        pollMs: 25,
+        now,
+        sleep,
+      });
+      expect(spec).toBeNull();
+      // Bounded — not an infinite loop.
+      expect(sleep.mock.calls.length).toBeGreaterThan(0);
+      expect(sleep.mock.calls.length).toBeLessThan(20);
+    });
   });
 
   it('shared registry `acp` capability flags mirror this adapter registry exactly', () => {

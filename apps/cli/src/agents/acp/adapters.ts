@@ -186,30 +186,122 @@ const REGISTRY: Partial<Record<AgentId, () => AdapterSpec | null>> = {
 };
 
 /**
+ * Cache of successfully-resolved adapter specs, keyed by agent id.
+ *
+ * Resolution (in particular {@link resolveBin} for the npm-adapter
+ * shape) touches the filesystem/module-resolution cache, which is
+ * NOT stable for the lifetime of a running process — an `npm
+ * install -g` reinstall race can transiently delete and recreate a
+ * package's files on disk while a session daemon is already live
+ * (2026-07-17 incident: `@agentclientprotocol/claude-agent-acp` was
+ * deleted mid-reinstall exactly as a codespace daemon dispatched a
+ * new session — `resolveBin` returned `null`, which — because
+ * `requiresAcp` used to be DERIVED from adapter resolution — flipped
+ * the dispatch decision and silently downgraded Claude to its legacy
+ * PTY runtime).
+ *
+ * Once an agent's adapter resolves successfully, we cache the spec
+ * for the rest of the process's lifetime: a LATER filesystem rewrite
+ * can never flip an already-running session's behavior. A resolution
+ * FAILURE is deliberately NOT cached — the failure may be transient
+ * (mid-reinstall), so the next call gets a fresh attempt (see
+ * {@link resolveAcpAdapterWithRetry} for a bounded retry loop around
+ * that).
+ */
+const resolvedAdapterCache = new Map<AgentId, AdapterSpec>();
+
+/**
  * Resolve the adapter spec for an agent, or `null` if we have no
- * ACP coverage. Used by the dispatch in `start.ts` — when this
- * returns null the legacy PTY `RuntimeStrategy` is used instead
- * (aider, cursor, coderabbit).
+ * ACP coverage OR resolution is currently failing (see the cache
+ * doc above). Used by the dispatch in `start.ts` — when this
+ * returns null for an agent that HAS no adapter at all (aider,
+ * cursor's legacy path is gone, coderabbit), the legacy PTY
+ * `RuntimeStrategy` is used instead. For an agent that DOES have an
+ * adapter (i.e. `requiresAcp(agent)` is true) a `null` return here
+ * means "resolution is currently failing" — callers on that path
+ * must retry (see {@link resolveAcpAdapterWithRetry}) and fail loudly
+ * rather than silently falling back to PTY.
  */
 export function getAcpAdapter(agent: AgentId): AdapterSpec | null {
+  const cached = resolvedAdapterCache.get(agent);
+  if (cached) return cached;
   const factory = REGISTRY[agent];
-  return factory ? factory() : null;
+  if (!factory) return null;
+  const spec = factory();
+  if (spec) resolvedAdapterCache.set(agent, spec);
+  return spec;
 }
 
 /**
- * Pure dispatch predicate: does this agent run over ACP?
+ * Pure, STATIC dispatch predicate: does this agent run over ACP?
  *
  * `true` ⇒ ACP is the agent's ONLY launch path (claude / codex /
- * gemini today). There is no env flag and no PTY fallback for these
- * agents — if the adapter resolves, the session runs over the typed
- * protocol. `false` ⇒ the agent has no ACP adapter and runs over the
- * legacy PTY runtime (aider, cursor, coderabbit).
+ * gemini / cursor / kimi today). There is no env flag and no PTY
+ * fallback for these agents — the session must run over the typed
+ * protocol or fail loudly. `false` ⇒ the agent has no ACP adapter and
+ * runs over the legacy PTY runtime (aider, coderabbit).
+ *
+ * ⚠️ Deliberately does NOT touch adapter resolution (no
+ * {@link getAcpAdapter} call, no filesystem/module lookup). Whether an
+ * agent runs over ACP is a fact about the agent, fixed at REGISTRY
+ * definition time — it must never depend on the transient state of
+ * `node_modules` on disk. (Before the 2026-07-17 fix this called
+ * `getAcpAdapter(agent) !== null`, so a mid-session module-resolution
+ * hiccup for claude/codex could flip `requiresAcp('claude')` to
+ * `false` and silently downgrade the session to the legacy PTY
+ * runtime — see the adapter-cache doc above.)
  *
  * Extracted so `start.ts`'s dispatch decision is unit-testable
  * without standing up the whole run-loop.
  */
 export function requiresAcp(agent: AgentId): boolean {
-  return getAcpAdapter(agent) !== null;
+  return Object.prototype.hasOwnProperty.call(REGISTRY, agent);
+}
+
+export interface ResolveAdapterRetryOptions {
+  /** Total time budget across all retry attempts. Default 8s. */
+  timeoutMs?: number;
+  /** Delay between attempts. Default 750ms. */
+  pollMs?: number;
+  now?: () => number;
+  sleep?: (ms: number) => Promise<void>;
+}
+
+const DEFAULT_ADAPTER_RETRY_TIMEOUT_MS = 8_000;
+const DEFAULT_ADAPTER_RETRY_POLL_MS = 750;
+
+/**
+ * Bounded retry around {@link getAcpAdapter} for an agent that IS
+ * ACP-required (`requiresAcp(agent) === true`) but whose adapter spec
+ * didn't resolve on the first try. Mirrors the beads `bd-adapter`
+ * spawn-race retry (ENOENT/ETXTBSY during an npm postinstall atomic
+ * rename) — the failure this guards against is the SAME class of race
+ * applied to the ACP adapter package instead of `@beads/bd`.
+ *
+ * Resolves to the spec the instant resolution succeeds (and that
+ * success is then permanently cached by {@link getAcpAdapter}), or
+ * `null` once the time budget is exhausted — callers on the
+ * ACP-required path must treat that `null` as a hard failure, never
+ * as "fall back to PTY".
+ */
+export async function resolveAcpAdapterWithRetry(
+  agent: AgentId,
+  opts: ResolveAdapterRetryOptions = {},
+): Promise<AdapterSpec | null> {
+  const timeoutMs = opts.timeoutMs ?? DEFAULT_ADAPTER_RETRY_TIMEOUT_MS;
+  const pollMs = opts.pollMs ?? DEFAULT_ADAPTER_RETRY_POLL_MS;
+  const now = opts.now ?? Date.now;
+  const sleep = opts.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+
+  let spec = getAcpAdapter(agent);
+  if (spec) return spec;
+  const deadline = now() + timeoutMs;
+  while (now() < deadline) {
+    await sleep(pollMs);
+    spec = getAcpAdapter(agent);
+    if (spec) return spec;
+  }
+  return null;
 }
 
 /**
@@ -219,4 +311,14 @@ export function requiresAcp(agent: AgentId): boolean {
  */
 export function listAcpAdapterIdsForTests(): AgentId[] {
   return Object.keys(REGISTRY) as AgentId[];
+}
+
+/**
+ * Test-only — clear the resolved-adapter cache. Tests that mock
+ * `resolveBin` / module resolution and assert on repeated
+ * `getAcpAdapter` calls must reset the cache between cases, or a
+ * PRIOR test's successful resolution leaks in as a cache hit.
+ */
+export function resetAcpAdapterCacheForTests(): void {
+  resolvedAdapterCache.clear();
 }

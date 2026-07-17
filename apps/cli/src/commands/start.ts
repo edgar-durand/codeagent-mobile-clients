@@ -7,9 +7,10 @@ import { showIntro, showInfo, showError } from '../ui/banner';
 import { CommandRelayService } from '../services/command-relay.service';
 import { AgentService } from '../services/agent.service';
 import { createRuntimeStrategy } from '../agents/registry';
-import { getAcpAdapter, requiresAcp } from '../agents/acp/adapters';
+import { getAcpAdapter, requiresAcp, resolveAcpAdapterWithRetry } from '../agents/acp/adapters';
 import { waitForAdapterModuleGraph } from '../agents/acp/agent-binary';
-import { runAcpSession } from '../agents/acp/runner';
+import { runAcpSession, surfaceStartupFailure } from '../agents/acp/runner';
+import { AcpPublisher } from '../agents/acp/publisher';
 import { installRelayCrashGuards } from '../lib/process-guards';
 import { OutputService } from '../services/output.service';
 import { HistoryService } from '../services/history.service';
@@ -351,8 +352,54 @@ export async function start(requestedAgent?: AgentId): Promise<void> {
   }
 
   if (requiresAcp(session.agent)) {
-    const adapter = getAcpAdapter(session.agent);
-    if (!adapter || !session.pluginAuthToken) {
+    let adapter = getAcpAdapter(session.agent);
+    if (!adapter) {
+      // `requiresAcp` is now STATIC (registry membership only — see
+      // adapters.ts) so it never tells us resolution actually succeeded.
+      // A `null` here means the adapter's module resolution is
+      // currently failing — almost always transient (an npm reinstall
+      // race mid-rename/ETXTBSY). Give it a bounded second chance
+      // before treating the agent as unable to start; NEVER silently
+      // fall through to the legacy PTY runtime below for an
+      // ACP-required agent (the 2026-07-17 incident).
+      adapter = await resolveAcpAdapterWithRetry(session.agent);
+    }
+    if (!adapter) {
+      log.error(
+        'acp',
+        `[acp] REQUIRED adapter unresolvable — refusing PTY downgrade (agent=${session.agent})`,
+      );
+      const failureMsg =
+        `${AGENT_REGISTRY[session.agent].displayName}'s ACP adapter is unavailable — ` +
+        'the session cannot start; redeploy or retry.';
+      if (session.pluginAuthToken) {
+        // Bring the plugin online with a minimal relay and publish the
+        // failure into chat — same standard failure-bubble path a live
+        // ACP session uses when `client.start()` throws (see
+        // `surfaceStartupFailure` in `agents/acp/runner.ts`). Without
+        // this the app would just show a spinner forever.
+        await surfaceStartupFailure({
+          agent: session.agent,
+          pluginId,
+          detail: failureMsg,
+          recentStderr: '',
+          publisher: new AcpPublisher({
+            sessionId: session.id,
+            pluginId,
+            pluginAuthToken: session.pluginAuthToken,
+            refreshAuthToken: () =>
+              fetchCurrentPluginAuthToken(session.id, pluginId, session.pollSecret),
+          }),
+        });
+        return;
+      }
+      // No token at all — nothing to authenticate a bubble POST with.
+      // Fall back to the local terminal message (matches the pre-existing
+      // "no token" behavior below).
+      showError(failureMsg);
+      process.exit(1);
+    }
+    if (!session.pluginAuthToken) {
       showError(
         `${AGENT_REGISTRY[session.agent].displayName} requires a paired session with an ` +
           'auth token. Re-pair with `codeam pair` to continue.',
@@ -381,6 +428,14 @@ export async function start(requestedAgent?: AgentId): Promise<void> {
     return;
   }
 
+  // Defense in depth: the block above always `return`s for an ACP-required
+  // agent, so this line should be unreachable for one. If a future
+  // refactor ever reintroduces a fall-through, log loudly rather than
+  // silently spawning the legacy PTY runtime for an agent that must run
+  // over ACP (the exact shape of the 2026-07-17 incident).
+  if (requiresAcp(session.agent)) {
+    log.error('acp', `[anomaly] acp-required agent on PTY runtime (agent=${session.agent})`);
+  }
   const runtime = createRuntimeStrategy(session.agent);
   // SEC crit1 (#819): pass the per-pairing token so conversation-history
   // writes carry X-Plugin-Auth-Token for the backend to authorize.
