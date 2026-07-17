@@ -72,7 +72,15 @@ function makeCtx(over: Partial<Record<string, unknown>> = {}) {
 }
 
 function resumeCmd(id = 'new-conv'): RemoteCommand {
-  return { id: 'cmd-1', sessionId: 's1', type: 'resume_session', payload: { id } } as RemoteCommand;
+  return {
+    id: 'cmd-1',
+    sessionId: 's1',
+    pluginId: 'p1',
+    type: 'resume_session',
+    payload: { id },
+    status: 'pending',
+    createdAt: Date.now(),
+  };
 }
 
 describe('resume_session — switched conversation becomes reachable', () => {
