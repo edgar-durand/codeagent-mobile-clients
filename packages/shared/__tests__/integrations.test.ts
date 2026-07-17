@@ -199,6 +199,31 @@ describe('integrations registry', () => {
     expect(getEnabledIntegrations().map((m) => m.id)).toContain('azure_devops');
   });
 
+  it('figma is a live integration with read-only granular scopes + BYO-token MCP delivery', () => {
+    // Figma — LIVE. Read-only granular scopes (design-to-code + asset export);
+    // the api-v2 FigmaOAuthProvider is config-gated (503 if env unset).
+    expect(isKnownIntegrationId('figma')).toBe(true);
+    expect(INTEGRATION_REGISTRY.figma.enabled).toBe(true);
+    expect(INTEGRATION_REGISTRY.figma.auth.kind).toBe('oauth_redirect');
+    expect(INTEGRATION_REGISTRY.figma.auth.scopes).toEqual([
+      'current_user:read',
+      'file_content:read',
+      'file_metadata:read',
+      'file_dev_resources:read',
+      'library_content:read',
+    ]);
+    expect(INTEGRATION_REGISTRY.figma.delivery.mcp?.command).toBe('npx');
+    expect(INTEGRATION_REGISTRY.figma.delivery.mcp?.args).toEqual([
+      '-y',
+      'figma-developer-mcp@0.13.2',
+      '--stdio',
+      '--no-telemetry',
+    ]);
+    expect(INTEGRATION_REGISTRY.figma.delivery.mcp?.envMapping).toEqual({
+      FIGMA_OAUTH_TOKEN: 'accessToken',
+    });
+  });
+
   it('declares the three integration USER_EVENTS names', () => {
     expect(USER_EVENTS.INTEGRATION_LINKED).toBe('integration_linked');
     expect(USER_EVENTS.INTEGRATION_UNLINKED).toBe('integration_unlinked');
@@ -234,12 +259,11 @@ describe('integration branding catalog', () => {
     }
   });
 
-  it('the COMING SOON set is the expected 17 tools (none already live)', () => {
+  it('the COMING SOON set is the expected 16 tools (none already live)', () => {
     expect([...UPCOMING_INTEGRATION_IDS]).toEqual([
       'gmail',
       'posthog',
       'clickup',
-      'figma',
       'trello',
       'resend',
       'vercel',

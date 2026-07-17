@@ -273,6 +273,49 @@ export const INTEGRATION_REGISTRY: Record<IntegrationId, IntegrationDefinition> 
       },
     },
   },
+  figma: {
+    id: 'figma',
+    name: 'Figma',
+    icon: 'figma',
+    // LIVE — the Figma OAuth app (Confidential, both prod+dev redirect URIs)
+    // is registered and FIGMA_OAUTH_CLIENT_ID/SECRET/REDIRECT_URI are in
+    // Secret Manager (prod+dev, created 2026-07-16). The backend
+    // FigmaOAuthProvider is config-gated (503 if env unset) so this is safe
+    // even mid-rollout before the secrets mount.
+    enabled: true,
+    auth: {
+      kind: 'oauth_redirect',
+      // Granular READ-ONLY scopes (legacy `files:read` is deprecated for
+      // OAuth). Asset export (GET /v1/images) rides file_content:read.
+      // file_variables:read is Enterprise-only and would break linking for
+      // normal accounts — deliberately excluded. ⚠️ Changing these requires
+      // the user to RE-LINK Figma.
+      scopes: [
+        'current_user:read',
+        'file_content:read',
+        'file_metadata:read',
+        'file_dev_resources:read',
+        'library_content:read',
+      ],
+    },
+    delivery: {
+      mcp: {
+        // Framelink figma-developer-mcp (Node, stdio) in BYO-token headless
+        // mode — the ONLY known Figma MCP server that accepts an OAuth
+        // Bearer token: FIGMA_OAUTH_TOKEN → `Authorization: Bearer` (env
+        // only, never argv). Figma's official servers can't be used here
+        // (remote = interactive OAuth + client allowlist; Dev Mode =
+        // desktop app). Version PINNED; bump only after re-verifying
+        // headless. Tools: get_figma_data (condensed layout extraction) +
+        // download_figma_images (asset export).
+        command: 'npx',
+        args: ['-y', 'figma-developer-mcp@0.13.2', '--stdio', '--no-telemetry'],
+        envMapping: {
+          FIGMA_OAUTH_TOKEN: 'accessToken',
+        },
+      },
+    },
+  },
 };
 
 export function getEnabledIntegrations(): IntegrationDefinition[] {
