@@ -277,12 +277,11 @@ export const INTEGRATION_REGISTRY: Record<IntegrationId, IntegrationDefinition> 
     id: 'figma',
     name: 'Figma',
     icon: 'figma',
-    // LIVE — the Figma OAuth app (Confidential, both prod+dev redirect URIs)
-    // is registered and FIGMA_OAUTH_CLIENT_ID/SECRET/REDIRECT_URI are in
-    // Secret Manager (prod+dev, created 2026-07-16). The backend
-    // FigmaOAuthProvider is config-gated (503 if env unset) so this is safe
-    // even mid-rollout before the secrets mount.
-    enabled: true,
+    // DARK — pending Figma's OAuth-app review approval (submitted 2026-07-16).
+    // Figma OAuth apps do NOT exist publicly until review passes (authorize URL
+    // errors "OAuth app ... doesn't exist"). Backend provider + secrets are
+    // already deployed; flip to true once approved (bead codeagent-m4ix).
+    enabled: false,
     auth: {
       kind: 'oauth_redirect',
       // Granular READ-ONLY scopes (legacy `files:read` is deprecated for

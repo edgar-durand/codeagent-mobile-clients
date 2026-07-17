@@ -247,6 +247,7 @@ export const UPCOMING_INTEGRATION_IDS = [
   'gmail',
   'posthog',
   'clickup',
+  'figma',
   'trello',
   'resend',
   'vercel',
