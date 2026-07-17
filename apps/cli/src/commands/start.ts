@@ -283,7 +283,17 @@ export async function start(requestedAgent?: AgentId): Promise<void> {
     // waitForAdapterModuleGraph probes the graph by actually loading the adapter
     // and only releases once it resolves; both resolve instantly on the happy
     // path (already installed).
-    const acpAdapterForGate = getAcpAdapter(session.agent);
+    // Resolve the gate's adapter through the SAME bounded retry the ACP
+    // dispatch fork uses: a transient `getAcpAdapter` null (npm reinstall
+    // race mid-rename/ETXTBSY) would otherwise leave `acpAdapterForGate`
+    // null → both the waitForBinary AND waitForAdapterModuleGraph waits get
+    // skipped and the gate releases early, exactly the readiness race the
+    // gate exists to prevent. Guarded on `requiresAcp` so a non-ACP agent
+    // (aider) still short-circuits to `Promise.resolve(true)` instead of
+    // burning the retry budget on an id that has no adapter by design.
+    const acpAdapterForGate = requiresAcp(session.agent)
+      ? await resolveAcpAdapterWithRetry(session.agent)
+      : null;
     const agentBinaryReady: Promise<unknown> = acpAdapterForGate
       ? Promise.all([
           acpAdapterForGate.waitForBinary({ timeoutMs: GATE_TIMEOUT_MS }).catch(() => false),
@@ -329,7 +339,11 @@ export async function start(requestedAgent?: AgentId): Promise<void> {
   // The baton owns its own lifecycle and never returns, exactly like
   // `runAcpSession` below.
   if (isLocalSession() && requiresAcp(session.agent)) {
-    const adapter = getAcpAdapter(session.agent);
+    // Resolve via the SAME bounded retry the main ACP fork uses — a
+    // transient `getAcpAdapter` null (npm reinstall race) would otherwise
+    // silently drop Take Control to the plain ACP path below instead of
+    // waiting out the race and offering the baton.
+    const adapter = await resolveAcpAdapterWithRetry(session.agent);
     // Only agents with a resumable transcript (claude/codex/cursor) get the
     // baton — otherwise the read-only mirror would be a silent no-op and Take
     // Control couldn't resume the conversation. Everything else falls through

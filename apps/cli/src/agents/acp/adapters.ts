@@ -265,6 +265,19 @@ export interface ResolveAdapterRetryOptions {
   pollMs?: number;
   now?: () => number;
   sleep?: (ms: number) => Promise<void>;
+  /**
+   * Adapter resolver — defaults to {@link getAcpAdapter}. Injectable so a
+   * test can drive a genuine fail-then-succeed sequence: the real
+   * `getAcpAdapter` resolves on the very first call in this repo (the
+   * adapter package IS installed), so it can't exercise the retry
+   * transition on its own. A resolver that THROWS is treated exactly like
+   * a transient `null` (keep retrying) — the same spawn-race class the
+   * beads `bd-adapter` retry guards against (ENOENT/ETXTBSY during an npm
+   * postinstall atomic rename), just surfaced as an exception instead of a
+   * null. The production call sites never pass this, so their behavior is
+   * unchanged (the default resolver never throws).
+   */
+  resolve?: (agent: AgentId) => AdapterSpec | null;
 }
 
 const DEFAULT_ADAPTER_RETRY_TIMEOUT_MS = 8_000;
@@ -292,13 +305,26 @@ export async function resolveAcpAdapterWithRetry(
   const pollMs = opts.pollMs ?? DEFAULT_ADAPTER_RETRY_POLL_MS;
   const now = opts.now ?? Date.now;
   const sleep = opts.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+  const resolve = opts.resolve ?? getAcpAdapter;
 
-  let spec = getAcpAdapter(agent);
+  // A THROW from the resolver is the SAME transient-failure class as a
+  // `null` (npm reinstall mid-rename) — swallow it and let the loop retry
+  // rather than propagate. The default resolver (getAcpAdapter) never
+  // throws, so this is a no-op for the production call sites.
+  const attempt = (): AdapterSpec | null => {
+    try {
+      return resolve(agent);
+    } catch {
+      return null;
+    }
+  };
+
+  let spec = attempt();
   if (spec) return spec;
   const deadline = now() + timeoutMs;
   while (now() < deadline) {
     await sleep(pollMs);
-    spec = getAcpAdapter(agent);
+    spec = attempt();
     if (spec) return spec;
   }
   return null;
