@@ -1,4 +1,8 @@
-import type { IntegrationDefinition, IntegrationId } from './types';
+import type {
+  IntegrationCategory,
+  IntegrationDefinition,
+  IntegrationId,
+} from './types';
 
 /**
  * The single source of truth for supported integrations. Adding one =
@@ -15,6 +19,7 @@ export const INTEGRATION_REGISTRY: Record<IntegrationId, IntegrationDefinition> 
     id: 'jira',
     name: 'Atlassian',
     icon: 'jira',
+    category: 'tracker',
     enabled: true,
     auth: {
       kind: 'oauth_redirect',
@@ -54,6 +59,7 @@ export const INTEGRATION_REGISTRY: Record<IntegrationId, IntegrationDefinition> 
     id: 'sentry',
     name: 'Sentry',
     icon: 'sentry',
+    category: 'observability',
     // LIVE — the Sentry OAuth Application (Confidential) is registered and
     // SENTRY_OAUTH_CLIENT_ID/SECRET/REDIRECT_URI are in Secret Manager
     // (prod+dev). The backend SentryOAuthProvider is config-gated (503 if
@@ -107,6 +113,7 @@ export const INTEGRATION_REGISTRY: Record<IntegrationId, IntegrationDefinition> 
     id: 'linear',
     name: 'Linear',
     icon: 'linear',
+    category: 'tracker',
     // LIVE — the Linear OAuth Application (Public + Confidential) is registered
     // and LINEAR_OAUTH_CLIENT_ID/SECRET/REDIRECT_URI are in Secret Manager
     // (prod+dev). The backend LinearOAuthProvider is config-gated (503 if env
@@ -144,6 +151,7 @@ export const INTEGRATION_REGISTRY: Record<IntegrationId, IntegrationDefinition> 
     id: 'slack',
     name: 'Slack',
     icon: 'slack',
+    category: 'comms',
     // LIVE — the Slack app (OAuth v2, USER token — the agent acts AS THE USER)
     // is registered and
     // SLACK_OAUTH_CLIENT_ID/SECRET/REDIRECT_URI are in Secret Manager
@@ -198,6 +206,7 @@ export const INTEGRATION_REGISTRY: Record<IntegrationId, IntegrationDefinition> 
     id: 'notion',
     name: 'Notion',
     icon: 'notion',
+    category: 'docs',
     // LIVE — the Notion public OAuth integration is registered and
     // NOTION_OAUTH_CLIENT_ID/SECRET/REDIRECT_URI are in Secret Manager
     // (prod+dev). The backend NotionOAuthProvider is config-gated (503 if env
@@ -230,6 +239,7 @@ export const INTEGRATION_REGISTRY: Record<IntegrationId, IntegrationDefinition> 
     id: 'azure_devops',
     name: 'Azure DevOps',
     icon: 'azure_devops',
+    category: 'tracker',
     // LIVE — the FIRST api_key (PAT) integration. No OAuth: Azure DevOps OAuth
     // apps are being sunset by Microsoft in favor of Entra ID, and PATs are the
     // native, reliable ADO auth. The user pastes their org URL + a PAT; the
@@ -277,6 +287,7 @@ export const INTEGRATION_REGISTRY: Record<IntegrationId, IntegrationDefinition> 
     id: 'figma',
     name: 'Figma',
     icon: 'figma',
+    category: 'design',
     // DARK — pending Figma's OAuth-app review approval (submitted 2026-07-16).
     // Figma OAuth apps do NOT exist publicly until review passes (authorize URL
     // errors "OAuth app ... doesn't exist"). Backend provider + secrets are
@@ -329,4 +340,12 @@ export function getIntegration(id: IntegrationId): IntegrationDefinition {
 
 export function isKnownIntegrationId(id: string): id is IntegrationId {
   return id in INTEGRATION_REGISTRY;
+}
+
+export function getIntegrationsByCategory(
+  category: IntegrationCategory,
+): IntegrationDefinition[] {
+  return Object.values(INTEGRATION_REGISTRY).filter(
+    (m) => m.category === category && m.enabled,
+  );
 }

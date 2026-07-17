@@ -17,6 +17,16 @@ export type IntegrationId =
 
 export type IntegrationAuthKind = 'oauth_redirect' | 'oauth_device' | 'api_key';
 
+/** Grouping used by category-driven surfaces (Start-from-Work-Item picker,
+ *  catalog sections). A future tracker integration joins those features with
+ *  ZERO feature code — they resolve sources from the registry by category. */
+export type IntegrationCategory =
+  | 'tracker'
+  | 'design'
+  | 'comms'
+  | 'docs'
+  | 'observability';
+
 /**
  * One user-entered field for an `api_key` integration (no browser OAuth — the
  * user pastes credentials directly, e.g. a PAT + an org URL). The mobile form
@@ -59,6 +69,7 @@ export interface IntegrationDefinition {
   id: IntegrationId;
   name: string;
   icon: string;
+  category: IntegrationCategory;
   enabled: boolean;
   auth: {
     kind: IntegrationAuthKind;

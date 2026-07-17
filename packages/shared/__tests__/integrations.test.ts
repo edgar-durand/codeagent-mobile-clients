@@ -5,6 +5,7 @@ import {
   getEnabledIntegrations,
   getIntegration,
   isKnownIntegrationId,
+  getIntegrationsByCategory,
 } from '../src/integrations/registry';
 import {
   INTEGRATION_BRANDING,
@@ -229,6 +230,28 @@ describe('integrations registry', () => {
     expect(USER_EVENTS.INTEGRATION_LINKED).toBe('integration_linked');
     expect(USER_EVENTS.INTEGRATION_UNLINKED).toBe('integration_unlinked');
     expect(USER_EVENTS.INTEGRATION_CREDENTIAL_INVALID).toBe('integration_credential_invalid');
+  });
+
+  it('every integration declares its category (Start-from-Work-Item groups by it)', () => {
+    const expected: Record<string, string> = {
+      jira: 'tracker',
+      linear: 'tracker',
+      azure_devops: 'tracker',
+      sentry: 'observability',
+      slack: 'comms',
+      notion: 'docs',
+      figma: 'design',
+    };
+    for (const [id, meta] of Object.entries(INTEGRATION_REGISTRY)) {
+      expect(meta.category).toBe(expected[id]);
+    }
+    // Helper returns ONLY enabled integrations of the category (figma is dark).
+    expect(getIntegrationsByCategory('tracker').map((m) => m.id).sort()).toEqual([
+      'azure_devops',
+      'jira',
+      'linear',
+    ]);
+    expect(getIntegrationsByCategory('design').map((m) => m.id)).toEqual([]);
   });
 });
 
