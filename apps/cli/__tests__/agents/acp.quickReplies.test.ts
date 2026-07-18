@@ -95,7 +95,6 @@ function makeHarness(opts: {
       client as never,
       relay as never,
       'acp-sess-quick',
-      [],
       streaming,
       runOpts as never,
       {

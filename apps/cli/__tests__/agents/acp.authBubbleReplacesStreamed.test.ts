@@ -96,7 +96,6 @@ function makeHarness() {
       client as never,
       relay as never,
       'acp-sess-1',
-      [],
       streaming,
       opts as never,
       // AcpHistory + jsonlHistory + agentCaps are not load-bearing for the
@@ -214,7 +213,6 @@ describe('ACP start_task — generic failure with partial text keeps the partial
       client as never,
       { sendResult: vi.fn(async () => undefined) } as never,
       'acp-sess-1',
-      [],
       streaming,
       {
         agent: 'claude',
@@ -307,7 +305,6 @@ describe('ACP start_task — tool/thinking-only turn that throws keeps its trans
       client as never,
       { sendResult: vi.fn(async () => undefined) } as never,
       'acp-sess-rich',
-      [],
       streaming,
       {
         agent: 'claude',
@@ -488,7 +485,6 @@ describe('ACP handleCommand — budget-reached POST fires exactly once (fire-onc
       client as never,
       relay as never,
       'acp-sess-budget',
-      [],
       streaming1,
       sharedOpts,
       sharedHistory,
@@ -521,7 +517,6 @@ describe('ACP handleCommand — budget-reached POST fires exactly once (fire-onc
       client as never,
       relay as never,
       'acp-sess-budget',
-      [],
       streaming2,
       sharedOpts,
       sharedHistory,

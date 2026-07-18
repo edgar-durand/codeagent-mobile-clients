@@ -17,7 +17,7 @@
 
 import { log } from '../../services/logger';
 import { _postJsonAuthed } from '../../services/pairing.service';
-import { resolveApiBaseUrl, type AgentModel } from '@codeam/shared';
+import { resolveApiBaseUrl } from '@codeam/shared';
 import { showInfo } from '../../ui/banner';
 import { createOsStrategy } from '../../os';
 import { createInteractiveAgentStrategy } from '../registry';
@@ -69,7 +69,6 @@ export interface AcpSessionContext {
   client: AcpClient;
   relay: CommandRelayService;
   acpSessionId: string;
-  models: AgentModel[];
   streaming: StreamingState;
   opts: AcpRunnerOptions;
   history: AcpHistory;
@@ -614,8 +613,55 @@ async function getConversationH(ctx: AcpCommandContext): Promise<void> {
 }
 
 async function listModelsH(ctx: AcpCommandContext): Promise<void> {
-  const { cmd, relay, models } = ctx;
-  await relay.sendResult(cmd.id, 'completed', { models });
+  const { cmd, relay, client } = ctx;
+  // NATIVE ACP is the SINGLE source of truth: the models come from the agent's
+  // own `category:'model'` config option (captured on newSession/loadSession),
+  // NOT a hardcoded per-agent strategy list. An agent that exposes no model
+  // selector returns an EMPTY list → mobile hides the model picker for it.
+  // `currentModelId` lets mobile mark the in-use model (the model line under the
+  // composer) without a separate round-trip; `undefined` when no model option.
+  await relay.sendResult(cmd.id, 'completed', {
+    models: client.getAvailableModels(),
+    currentModelId: client.getCurrentModelId(),
+  });
+  return;
+}
+
+async function listModesH(ctx: AcpCommandContext): Promise<void> {
+  const { cmd, relay, client } = ctx;
+  // NATIVE ACP is the SINGLE source of truth: the modes come from the agent's
+  // own `SessionModeState` (captured on newSession/loadSession) — a DIFFERENT
+  // axis than models. An agent that advertises no modes returns an EMPTY list →
+  // mobile hides the mode picker for it. `currentModeId` lets mobile mark the
+  // active mode without a separate round-trip; `undefined` when no modes.
+  await relay.sendResult(cmd.id, 'completed', {
+    modes: client.getAvailableModes(),
+    currentModeId: client.getCurrentModeId(),
+  });
+  return;
+}
+
+async function setModeH(ctx: AcpCommandContext): Promise<void> {
+  const { cmd, client, relay, opts } = ctx;
+  // client.setMode drives the NATIVE `session/set_mode` RPC against the agent's
+  // own `SessionModeState` (single source of truth). Agents that advertise no
+  // modes throw → we ack `failed` with the reason so mobile surfaces "mode
+  // switching not supported on this agent".
+  const payload = cmd.payload as { modeId?: string };
+  const modeId = payload?.modeId?.trim();
+  if (!modeId) {
+    await relay.sendResult(cmd.id, 'failed', { error: 'modeId required' });
+    return;
+  }
+  try {
+    await client.setMode(modeId);
+    await relay.sendResult(cmd.id, 'completed', { modeId });
+  } catch (err) {
+    log.warn('acpRunner', `set_mode failed: ${describeError(err)}`);
+    await relay.sendResult(cmd.id, 'failed', {
+      error: `Mode switching not supported on ${opts.agent} via ACP: ${describeError(err)}`,
+    });
+  }
   return;
 }
 
@@ -788,11 +834,10 @@ async function resumeSessionH(ctx: AcpCommandContext): Promise<void> {
 
 async function changeModelH(ctx: AcpCommandContext): Promise<void> {
   const { cmd, client, relay, opts } = ctx;
-  // Non-standard ACP extension — claude-agent-acp + codex-acp
-  // expose `session/set_model`; others reject. We try the raw
-  // RPC; on rejection we ack `failed` with the adapter's reason
-  // so mobile can surface "model picker not supported on this
-  // agent".
+  // client.setModel drives the NATIVE `session/set_config_option` RPC against
+  // the agent's own `category:'model'` config option (single source of truth).
+  // Agents that expose no model config option throw → we ack `failed` with the
+  // reason so mobile surfaces "model picker not supported on this agent".
   const payload = cmd.payload as { modelId?: string };
   const modelId = payload?.modelId?.trim();
   if (!modelId) {
@@ -996,6 +1041,8 @@ export const ACP_COMMAND_HANDLERS: Record<string, AcpCommandHandler> = {
   escape_key: stopTaskH,
   get_conversation: getConversationH,
   list_models: listModelsH,
+  list_modes: listModesH,
+  set_mode: setModeH,
   set_keep_alive: ackEmptyH,
   get_context: ackEmptyH,
   select_option: selectOptionH,

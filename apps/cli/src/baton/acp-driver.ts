@@ -159,7 +159,6 @@ export class AcpDriver implements SessionDriver {
     if (this.session) return this.session;
     const { opts, publisher, streaming, runtime, recentStderr } = this.deps;
 
-    const models = await runtime.listModels();
     // On-disk transcript uploader (get_conversation heals a truncated live turn)
     // — ACP agents write the same `<acpSessionId>.jsonl` the legacy path parses.
     const jsonlHistory = new HistoryService(runtime, opts.pluginId, opts.cwd, {
@@ -206,7 +205,6 @@ export class AcpDriver implements SessionDriver {
       client: this.deps.client,
       relay,
       acpSessionId,
-      models,
       streaming,
       opts,
       history,
