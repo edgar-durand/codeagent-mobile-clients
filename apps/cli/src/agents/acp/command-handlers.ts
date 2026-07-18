@@ -412,12 +412,22 @@ async function startTaskH(ctx: AcpCommandContext): Promise<void> {
       await relay.sendResult(cmd.id, 'completed', { stopReason: reply.stopReason });
     }
   } catch (err) {
-    // Whether the turn streamed any assistant text BEFORE recover resets
-    // it. When it did, `closeAll` already published that partial reply as
-    // the terminal frame — we must NOT clobber it. When it didn't, the only
-    // frame is an empty `done:true` (dropped by the mobile snapshot-guard),
+    // Whether the turn ALREADY streamed VISIBLE progress before it threw —
+    // assistant text OR thinking/tool activity (`hasVisibleProgress`, NOT
+    // `getCurrentText` alone). When it did, `closeAll` finalises that partial
+    // reply as the terminal frame — we must NOT clobber it. When it didn't, the
+    // only frame is an empty `done:true` (dropped by the mobile snapshot-guard),
     // so we MUST synthesize a visible failure bubble below.
-    const hadText = streaming.getCurrentText().trim().length > 0;
+    //
+    // ⚠️ Text ALONE is the wrong signal: a long agentic turn streams lots of
+    // tool/thinking progress and can throw (idle watchdog tripping as the agent
+    // finishes its last tool, or a trailing error after the work completed)
+    // BEFORE a final `text` reply. Treating that as "no content" fired the
+    // generic TURN_FAILURE_MESSAGE and `closeWithBubble` REPLACED the whole
+    // streamed transcript with it — the error wiped a finished turn and
+    // mis-reported "couldn't finish" (2026-07-17). The broader check keeps such
+    // a turn on the non-destructive `closeAll` (bubble === null) path.
+    const hadText = streaming.hasVisibleProgress();
     const detail = describeError(err);
     log.warn('acpRunner', `prompt failed: ${detail}`);
     // CANCEL the adapter's stuck turn now (the `promptQueueing` poison),

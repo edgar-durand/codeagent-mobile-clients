@@ -375,6 +375,32 @@ export class StreamingState {
     return this.text;
   }
 
+  /**
+   * True when the in-progress turn has ALREADY streamed VISIBLE content —
+   * assistant text OR any thinking / tool_use / tool_result activity (the
+   * SessionDetail rich feed). Deliberately BROADER than {@link getCurrentText}:
+   * a long agentic turn can stream lots of tool/thinking progress and yet NOT
+   * have emitted a final assistant `text` reply at the instant `client.prompt`
+   * throws — the idle watchdog tripping just as the agent finishes its last
+   * tool, or a trailing adapter error AFTER the work completed. Keying the
+   * failure-bubble decision off `text` alone then mis-reads that visible work
+   * as "nothing streamed" → fires the generic TURN_FAILURE_MESSAGE, and
+   * {@link closeWithBubble} REPLACES the whole turn with it (overwriting the
+   * durable snapshot) — an error wiping a fully-streamed transcript AND a false
+   * "couldn't finish" (2026-07-17 incident). The catch path keys "don't clobber
+   * — a partial reply already serves as the terminal frame" off THIS instead,
+   * routing to the non-destructive {@link closeAll}. streamingChunks still holds
+   * the turn's content at catch time (none of the close/flush methods have run
+   * yet on the throw path), so this reflects the real streamed progress.
+   */
+  hasVisibleProgress(): boolean {
+    if (this.text.trim().length > 0) return true;
+    for (const { content } of this.streamingChunks.values()) {
+      if (content.trim().length > 0) return true;
+    }
+    return false;
+  }
+
   async beginTurn(opts?: { clear?: boolean }): Promise<void> {
     this.text = '';
     this.streamingChunks.clear();
