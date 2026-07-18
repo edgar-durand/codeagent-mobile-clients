@@ -28,7 +28,10 @@ export interface AgentAuth {
 export interface AgentModel {
   id: string;
   label: string;
-  contextWindow: number;
+  /** Optional — omitted when the model id isn't in the context-window catalog
+   *  (opaque native aliases / proxied ids). The UI hides the sub-label rather
+   *  than printing a misleading default. */
+  contextWindow?: number;
   pricing?: {
     inputPerM: number;
     outputPerM: number;

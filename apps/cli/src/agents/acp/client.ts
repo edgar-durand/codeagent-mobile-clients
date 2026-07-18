@@ -48,7 +48,7 @@ import {
   type WaitForTerminalExitResponse,
   type WriteTextFileResponse,
 } from '@agentclientprotocol/sdk';
-import { getContextWindow, type AgentModel, type AgentMode } from '@codeam/shared';
+import { tryGetContextWindow, type AgentModel, type AgentMode } from '@codeam/shared';
 import type { AdapterSpec } from './adapters';
 import { ADAPTER_MODULE_LOAD_ERROR_RE } from './agent-binary';
 import type { PromptBlock } from './buildAcpPromptBlocks';
@@ -1048,7 +1048,10 @@ export class AcpClient {
     this.availableModels = flattenSelectOptions(modelOption.options).map((opt) => ({
       id: opt.value,
       label: opt.name,
-      contextWindow: getContextWindow(opt.value),
+      // Only when it's a real catalog match — native ids are often opaque
+      // aliases ("default"/"opus") or proxied (MiniMax house agent), for which a
+      // default 200K is a fake; undefined → the UI omits the context sub-label.
+      contextWindow: tryGetContextWindow(opt.value),
     }));
   }
 

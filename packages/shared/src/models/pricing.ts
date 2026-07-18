@@ -116,3 +116,16 @@ export function getContextWindow(model: string | null): number {
   if (!model) return DEFAULT_CONTEXT_WINDOW;
   return longestPrefixMatch(MODEL_CONTEXT_WINDOW, model) ?? DEFAULT_CONTEXT_WINDOW;
 }
+
+/**
+ * Context window ONLY when it's a confident match — `undefined` otherwise (no
+ * default). Use where a wrong value is worse than none: the runtime model
+ * selector maps native ACP model ids, many of which are opaque aliases
+ * ("default", "opus") or proxied ids (a MiniMax-backed house agent) that aren't
+ * in the catalog. Falling back to 200K for those printed a fake "200K context"
+ * on every row; returning undefined lets the UI omit the sub-label instead.
+ */
+export function tryGetContextWindow(model: string | null): number | undefined {
+  if (!model) return undefined;
+  return longestPrefixMatch(MODEL_CONTEXT_WINDOW, model);
+}
