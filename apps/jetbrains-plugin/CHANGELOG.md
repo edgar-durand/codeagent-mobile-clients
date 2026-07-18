@@ -4,6 +4,13 @@ All notable changes to the CodeAgent-Mobile JetBrains plugin are documented here
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.61.18] — 2026-07-18
+
+### Added
+
+- **cli:** List_models reports the in-use model (currentModelId)
+- **cli:** Native ACP model + mode list/switch (single source of truth, no hardcoded/hacky)
+
 ## [2.61.17] — 2026-07-18
 
 ### Fixed
