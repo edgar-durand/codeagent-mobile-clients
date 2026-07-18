@@ -113,12 +113,26 @@ describe('ACP adapter registry', () => {
       expect(spec).not.toBeNull();
     });
 
-    it('retries on a bounded schedule and succeeds once resolution comes back', async () => {
+    it('retries a transiently-failing resolver until it recovers (real fail-then-succeed)', async () => {
       resetAcpAdapterCacheForTests();
-      let attempts = 0;
-      const sleep = vi.fn(async () => {
-        attempts += 1;
+      const realSpec = getAcpAdapter('claude');
+      expect(realSpec).not.toBeNull();
+
+      // Drive an HONEST fail-then-succeed: the injected resolver THROWS on
+      // the first two attempts (the npm-reinstall mid-rename race) and only
+      // hands back the real spec on the third. The real getAcpAdapter can't
+      // exercise this — the adapter package IS installed here, so it
+      // resolves on the very first call. We assert the retry actually fired
+      // (>1 attempt) AND that it returns the adapter once resolution
+      // recovers, rather than degrading on the transient failure.
+      let calls = 0;
+      const resolve = vi.fn(() => {
+        calls += 1;
+        if (calls <= 2) throw new Error('ENOENT: adapter package mid-rename');
+        return realSpec;
       });
+
+      const sleep = vi.fn(async () => undefined);
       // Fake `now()` that advances on every call so the bounded loop
       // terminates deterministically without a real timer.
       let clock = 0;
@@ -126,20 +140,20 @@ describe('ACP adapter registry', () => {
         clock += 1;
         return clock;
       });
+
       const spec = await resolveAcpAdapterWithRetry('claude', {
         timeoutMs: 100,
         pollMs: 1,
         now,
         sleep,
+        resolve,
       });
-      expect(spec).not.toBeNull();
-      // resolveBin genuinely succeeds on the very first internal call here
-      // (the real package IS installed in this repo) — this test's job is
-      // just to prove the retry plumbing (sleep/now injection) is wired
-      // and returns the resolved spec once available, not to force a
-      // failing-then-succeeding sequence (see the timeout test below for
-      // the "never resolves" side of the contract).
-      expect(attempts).toBe(0);
+
+      expect(spec).toBe(realSpec);
+      // The fail-then-recover transition was genuinely traversed: the first
+      // (pre-loop) attempt threw, so the loop had to fire more than once.
+      expect(calls).toBeGreaterThan(1);
+      expect(sleep.mock.calls.length).toBeGreaterThan(0);
     });
 
     it('returns null once the bounded time budget is exhausted for an agent whose adapter never resolves', async () => {
