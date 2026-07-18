@@ -4,6 +4,14 @@ All notable changes to the CodeAgent-Mobile JetBrains plugin are documented here
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.61.17] — 2026-07-18
+
+### Fixed
+
+- **cli:** Reuse bounded adapter-resolve retry in baton + codespace-gate paths; honest fail-then-succeed retry test
+- **cli:** Make buildNpmInstallInvocation platform-injectable → deterministic cross-OS tests (fixes red Windows CI)
+- **cli:** Never wipe a streamed transcript on a turn error (false 'couldn't finish')
+
 ## [2.61.16] — 2026-07-17
 
 ### Fixed
