@@ -13,8 +13,7 @@ export type IntegrationId =
   | 'slack'
   | 'notion'
   | 'azure_devops'
-  | 'figma'
-  | 'github';
+  | 'figma';
 
 export type IntegrationAuthKind = 'oauth_redirect' | 'oauth_device' | 'api_key';
 
@@ -26,12 +25,7 @@ export type IntegrationCategory =
   | 'design'
   | 'comms'
   | 'docs'
-  | 'observability'
-  // Code hosts (GitHub, and later GitLab / Bitbucket). Drives the
-  // category-driven `vcs` engine — the PR/MR Command Center resolves its
-  // providers by this category, never by a per-vendor switch.
-  // Spec: docs/superpowers/specs/2026-07-18-pr-mr-command-center-design.md
-  | 'vcs';
+  | 'observability';
 
 /**
  * One user-entered field for an `api_key` integration (no browser OAuth — the
