@@ -614,8 +614,15 @@ async function getConversationH(ctx: AcpCommandContext): Promise<void> {
 }
 
 async function listModelsH(ctx: AcpCommandContext): Promise<void> {
-  const { cmd, relay, models } = ctx;
-  await relay.sendResult(cmd.id, 'completed', { models });
+  const { cmd, relay, models, client } = ctx;
+  // `currentModelId` lets mobile mark the in-use model (the model line under the
+  // composer) without a separate round-trip. `undefined` when the adapter didn't
+  // advertise a model on newSession (claude-agent-acp + gemini) — mobile then
+  // falls back to no check / the first model.
+  await relay.sendResult(cmd.id, 'completed', {
+    models,
+    currentModelId: client.getCurrentModelId(),
+  });
   return;
 }
 

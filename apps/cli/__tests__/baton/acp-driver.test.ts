@@ -20,6 +20,7 @@ function fakeClient(id: string) {
     })),
     loadSession: vi.fn(async (_id: string) => {}),
     stop: vi.fn(async () => {}),
+    getCurrentModelId: vi.fn((): string | undefined => undefined),
   };
 }
 
@@ -128,8 +129,11 @@ describe('AcpDriver', () => {
     expect(client.stop).toHaveBeenCalledTimes(1);
   });
 
-  it('dispatch routes a non-baton command through dispatchAcpCommand (list_models acks with models)', async () => {
+  it('dispatch routes a non-baton command through dispatchAcpCommand (list_models acks with models + currentModelId)', async () => {
     const client = fakeClient('x');
+    // The adapter's in-use model must ride the list_models result so mobile can
+    // mark it (the model line under the composer).
+    client.getCurrentModelId.mockReturnValue('m1');
     const { deps, relay } = makeDeps(client);
     const d = new AcpDriver(deps);
     await d.start('conv-1');
@@ -139,7 +143,10 @@ describe('AcpDriver', () => {
       type: 'list_models',
       payload: {},
     } as RemoteCommand);
-    expect(relay.sendResult).toHaveBeenCalledWith('cmd1', 'completed', { models: [{ id: 'm1' }] });
+    expect(relay.sendResult).toHaveBeenCalledWith('cmd1', 'completed', {
+      models: [{ id: 'm1' }],
+      currentModelId: 'm1',
+    });
   });
 
   it('dispatch brackets the turn so whenSafeToYield blocks until it resolves', async () => {

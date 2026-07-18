@@ -260,6 +260,12 @@ export class AcpClient {
   private connection: ClientSideConnection | null = null;
   private stopping = false;
   private sessionId: string | null = null;
+  /** The adapter's current model id — seeded from `newSession`'s
+   *  `currentModelId` and updated on a successful {@link setModel}. Exposed via
+   *  {@link getCurrentModelId} so `list_models` can report the in-use model to
+   *  mobile (the model line under the composer). `undefined` when the adapter
+   *  doesn't advertise a model (claude-agent-acp + gemini on newSession). */
+  private currentModelId: string | undefined = undefined;
   /** Whether the agent advertised `loadSession` on `initialize`. Drives the
    *  post-turn session-closed recovery: an agent that supports resume (kimi,
    *  claude, codex, gemini) is re-established with `session/load` — preserving
@@ -601,6 +607,8 @@ export class AcpClient {
           ` model=${newSessionMeta.currentModelId ?? '?'}` +
           ` tier=${newSessionMeta.currentServiceTier ?? '?'}`,
       );
+
+      this.currentModelId = newSessionMeta.currentModelId;
 
       return {
         sessionId: newSession.sessionId,
@@ -946,7 +954,14 @@ export class AcpClient {
       sessionId: this.sessionId,
       modelId,
     });
+    // Track the in-use model so a subsequent list_models reports it as current.
+    this.currentModelId = modelId;
     log.info('acpClient', `setModel ← ok modelId=${modelId}`);
+  }
+
+  /** The adapter's current model id (or undefined if none advertised). */
+  getCurrentModelId(): string | undefined {
+    return this.currentModelId;
   }
 
   /**
