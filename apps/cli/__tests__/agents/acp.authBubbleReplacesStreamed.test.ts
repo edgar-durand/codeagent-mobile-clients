@@ -30,6 +30,7 @@ import {
   StreamingState,
   handleCommand,
   AUTH_FAILURE_MESSAGE,
+  TURN_FAILURE_MESSAGE,
 } from '../../src/agents/acp/runner';
 
 // reportCredentialInvalid resolves a fresh token via this service on a 401;
@@ -240,6 +241,150 @@ describe('ACP start_task — generic failure with partial text keeps the partial
     // ONE terminal frame, carrying the genuine partial reply (not a bubble).
     expect(finals).toHaveLength(1);
     expect(finals[0].content).toBe(PARTIAL);
+  });
+});
+
+/**
+ * Regression (2026-07-17 transcript-loss) — a long agentic turn that streamed
+ * VISIBLE progress as thinking / tool activity (but had NOT yet emitted a final
+ * assistant `text` reply) and THEN threw a trailing NON-auth / NON-outage error
+ * must NOT be wiped by the generic `TURN_FAILURE_MESSAGE`.
+ *
+ * The bug: the catch keyed "did anything stream?" off `getCurrentText()` — the
+ * chat `text` buffer ONLY. The turn's work lived on the rich streaming-chunk
+ * feed (thinking + tool_use + tool_result), so `hadText` was false → the runner
+ * published `TURN_FAILURE_MESSAGE` via `closeWithBubble`, which REPLACES the
+ * turn's terminal `text` frame (and overwrites the durable `output:snapshot`
+ * on the backend) — the whole streamed transcript vanished on the next catchup,
+ * leaving only the welcome + a false "the agent hit an error and couldn't
+ * finish this turn".
+ *
+ * Fixed: the catch keys off `streaming.hasVisibleProgress()` (text OR rich
+ * chunks) → `failureBubble` returns null → the NON-destructive `closeAll`
+ * finalises the streamed progress (and flushes the rich chunks `isFinal:true`)
+ * with NO generic bubble.
+ */
+describe('ACP start_task — tool/thinking-only turn that throws keeps its transcript (no generic wipe)', () => {
+  beforeEach(() => {
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, status: 200 }) as Response));
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it('does NOT publish TURN_FAILURE_MESSAGE and preserves the streamed tool/thinking chunks', async () => {
+    const publisher = new AcpPublisher({
+      sessionId: 'sess-rich',
+      pluginId: 'plugin-rich',
+      pluginAuthToken: 'tok-rich',
+      apiBaseUrl: 'https://api.example.test',
+    });
+    const publishOutput = vi.spyOn(publisher, 'publishOutput').mockResolvedValue(undefined);
+    const publishStreamingChunk = vi
+      .spyOn(publisher, 'publishStreamingChunk')
+      .mockResolvedValue(undefined);
+    vi.spyOn(publisher, 'pushConversation').mockResolvedValue(undefined);
+    vi.spyOn(publisher, 'pushSessionList').mockResolvedValue(undefined);
+    const streaming = new StreamingState(publisher);
+
+    // The turn streams rich progress (a thought + a tool call) but NO assistant
+    // `text`, then throws a generic trailing error (idle watchdog / adapter blip
+    // right as the agent finished its last tool).
+    const client = {
+      prompt: vi.fn(async () => {
+        streaming.append({ chunkId: 'th-1', kind: 'thinking', delta: 'Planning the refactor…' });
+        streaming.append({ chunkId: 'toolu_01', kind: 'tool_use', delta: 'edit_file src/app.ts' });
+        throw new Error('ACP prompt idle — adapter sent no updates for the idle window');
+      }),
+      cancel: vi.fn(async () => undefined),
+    };
+
+    const appendAgentReply = vi.fn();
+
+    await handleCommand(
+      { id: 'cmd-rich', type: 'start_task', payload: { prompt: 'do the big task' } } as never,
+      client as never,
+      { sendResult: vi.fn(async () => undefined) } as never,
+      'acp-sess-rich',
+      [],
+      streaming,
+      {
+        agent: 'claude',
+        sessionId: 'sess-rich',
+        pluginId: 'plugin-rich',
+        pluginAuthToken: 'tok-rich',
+        adapter: { command: 'noop', args: [] },
+        cwd: '/tmp',
+      } as never,
+      { appendUserPrompt: vi.fn(), appendAgentReply, flush: vi.fn(async () => undefined) } as never,
+      { uploadConversationIfChanged: vi.fn(async () => undefined) } as never,
+      undefined,
+      { flushTurn: vi.fn(async () => undefined) } as never,
+      () => null,
+      publisher,
+      [],
+      { offer: vi.fn(async () => undefined), tryRecover: vi.fn(async () => false) } as never,
+      { get: () => false, set: vi.fn() },
+    );
+
+    // The generic destructive bubble must NEVER be published.
+    const textFrames = publishOutput.mock.calls
+      .map((c) => c[0] as OutputCall)
+      .filter((b) => b.type === 'text');
+    expect(textFrames.some((f) => f.content === TURN_FAILURE_MESSAGE)).toBe(false);
+
+    // …and it must NOT be persisted into the durable conversation either
+    // (closeWithBubble's history clobber that wiped the transcript).
+    expect(appendAgentReply).not.toHaveBeenCalledWith(TURN_FAILURE_MESSAGE);
+
+    // The terminal chat frame is the NON-destructive empty `closeAll` frame:
+    // the backend snapshot-guard drops an empty `text done:true`, so the durable
+    // snapshot (the earlier meaningful state) is left intact — NOT overwritten.
+    const terminalText = textFrames.filter((b) => b.done === true);
+    expect(terminalText).toHaveLength(1);
+    expect(terminalText[0].content).toBe('');
+
+    // The streamed rich progress is finalised (isFinal:true), not dropped — the
+    // thinking + tool_use chunks flip out of "still streaming" and survive.
+    const finalRich = publishStreamingChunk.mock.calls
+      .map((c) => c[0] as { kind?: string; isFinal?: boolean })
+      .filter((e) => e.isFinal === true);
+    expect(finalRich.some((e) => e.kind === 'thinking')).toBe(true);
+    expect(finalRich.some((e) => e.kind === 'tool_use')).toBe(true);
+  });
+});
+
+describe('StreamingState.hasVisibleProgress — text OR rich activity counts as streamed', () => {
+  function makeStreaming() {
+    const publisher = new AcpPublisher({
+      sessionId: 's',
+      pluginId: 'p',
+      pluginAuthToken: 't',
+      apiBaseUrl: 'https://api.example.test',
+    });
+    vi.spyOn(publisher, 'publishOutput').mockResolvedValue(undefined);
+    vi.spyOn(publisher, 'publishStreamingChunk').mockResolvedValue(undefined);
+    return new StreamingState(publisher);
+  }
+  afterEach(() => vi.restoreAllMocks());
+
+  it('false when nothing streamed', () => {
+    expect(makeStreaming().hasVisibleProgress()).toBe(false);
+  });
+
+  it('true when only assistant text streamed', () => {
+    const s = makeStreaming();
+    s.append({ chunkId: 'm1', kind: 'text', delta: 'hello' });
+    expect(s.hasVisibleProgress()).toBe(true);
+  });
+
+  it('true when only thinking/tool activity streamed (no text) — the transcript-loss guard', () => {
+    const s = makeStreaming();
+    s.append({ chunkId: 'th', kind: 'thinking', delta: 'let me think' });
+    s.append({ chunkId: 'tu', kind: 'tool_use', delta: 'run tests' });
+    expect(s.getCurrentText()).toBe(''); // no chat text at all
+    expect(s.hasVisibleProgress()).toBe(true); // …yet visible progress streamed
   });
 });
 
