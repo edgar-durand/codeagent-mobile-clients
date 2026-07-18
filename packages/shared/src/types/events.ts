@@ -91,6 +91,11 @@ export const USER_EVENTS = {
   CODERABBIT_PROGRESS: 'coderabbit_progress',
   CODERABBIT_STATUS: 'coderabbit_status',
   CODERABBIT_REVIEW: 'coderabbit_review',
+
+  // VCS / PR Command Center — the backend publishes this after an agent finishes
+  // reviewing a PR (verdict + comment count + findings), driving the mobile
+  // completion screen + push. Mirrored in repo A's app-shared events.ts.
+  VCS_AGENT_REVIEW_COMPLETE: 'vcs_agent_review_complete',
 } as const;
 
 export type UserEventName = (typeof USER_EVENTS)[keyof typeof USER_EVENTS];

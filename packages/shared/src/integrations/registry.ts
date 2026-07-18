@@ -283,6 +283,39 @@ export const INTEGRATION_REGISTRY: Record<IntegrationId, IntegrationDefinition> 
       },
     },
   },
+  github: {
+    id: 'github',
+    name: 'GitHub',
+    icon: 'github',
+    category: 'vcs',
+    // The FIRST `vcs` (code-host) integration — powers the PR/MR Command
+    // Center's agent-review toolkit + future GitLab/Bitbucket parity.
+    // v1 auth REUSES the GitHub token the user already linked for Codespaces
+    // (`ProviderToken` provider='github-codespaces', classic `repo` scope) —
+    // this registry entry establishes the `vcs` category + the delivery rail
+    // so a review session's agent gets an authenticated `gh`, and does NOT (in
+    // v1) require a separate GitHub OAuth link. See the design spec §4/§10.
+    enabled: true,
+    auth: {
+      kind: 'oauth_redirect',
+      // Classic `repo` fully covers PR read + write (reviews / merge / close /
+      // comment). `read:user` + `user:email` mirror the codespaces token's
+      // identity scopes so `resolveMe` (author/reviewer disambiguation) works.
+      scopes: ['repo', 'read:user', 'user:email'],
+    },
+    delivery: {
+      // `gh` is ubiquitous and already authenticated on every session box (the
+      // codespace / self-hosted bootstrap checks out the repo with the user's
+      // token), so the delivery rail is `cliEnv` — NOT an MCP server. Both env
+      // var names are set because tools split on which one they read
+      // (`gh` honours GH_TOKEN then GITHUB_TOKEN; the git credential helper +
+      // most Actions tooling read GITHUB_TOKEN).
+      cliEnv: {
+        GITHUB_TOKEN: 'accessToken',
+        GH_TOKEN: 'accessToken',
+      },
+    },
+  },
   figma: {
     id: 'figma',
     name: 'Figma',
