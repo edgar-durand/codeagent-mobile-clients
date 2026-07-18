@@ -37,6 +37,19 @@ export interface AgentModel {
   };
 }
 
+/**
+ * An agent operating/permission MODE — a DIFFERENT ACP axis than {@link AgentModel}.
+ * Sourced from the native ACP `SessionModeState` on `newSession`/`loadSession`
+ * (the standard `session/set_mode` write targets it), e.g. Claude's
+ * default/plan/acceptEdits/bypass. Modes have neither pricing nor a context
+ * window — just an id, a human label, and an optional description.
+ */
+export interface AgentMode {
+  id: string;
+  label: string;
+  description?: string;
+}
+
 export interface NormalizedMessage {
   id: string;
   role: 'user' | 'agent' | 'system';

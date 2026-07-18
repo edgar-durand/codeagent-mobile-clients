@@ -38,11 +38,17 @@ import {
   type ReleaseTerminalResponse,
   type RequestPermissionRequest,
   type RequestPermissionResponse,
+  type SessionConfigOption,
+  type SessionConfigSelectGroup,
+  type SessionConfigSelectOption,
+  type SessionConfigSelectOptions,
+  type SessionModeState,
   type SessionNotification,
   type TerminalOutputResponse,
   type WaitForTerminalExitResponse,
   type WriteTextFileResponse,
 } from '@agentclientprotocol/sdk';
+import { getContextWindow, type AgentModel, type AgentMode } from '@codeam/shared';
 import type { AdapterSpec } from './adapters';
 import { ADAPTER_MODULE_LOAD_ERROR_RE } from './agent-binary';
 import type { PromptBlock } from './buildAcpPromptBlocks';
@@ -59,8 +65,9 @@ import { killQuiet } from '../../lib/quiet';
 export interface AcpStartResult {
   sessionId: string;
   initialize: InitializeResponse;
-  /** Adapter-picked model id, e.g. `gpt-5`. `undefined` when the adapter
-   *  doesn't expose `currentModelId` on newSession (claude-agent-acp + gemini). */
+  /** Adapter-picked model id, e.g. `gpt-5`. Sourced from the NATIVE ACP model
+   *  config option (the `category:'model'` `SessionConfigSelect`'s `currentValue`)
+   *  on newSession. `undefined` when the agent exposes no model config option. */
   model?: string;
   /** Plan / service tier label the adapter advertises (`plus`, `pro`, …). */
   tier?: string;
@@ -260,12 +267,34 @@ export class AcpClient {
   private connection: ClientSideConnection | null = null;
   private stopping = false;
   private sessionId: string | null = null;
-  /** The adapter's current model id — seeded from `newSession`'s
-   *  `currentModelId` and updated on a successful {@link setModel}. Exposed via
+  /** The id of the NATIVE ACP `category:'model'` `SessionConfigSelect` option
+   *  captured from `newSession`/`loadSession` `configOptions`. It's the SINGLE
+   *  source of truth for model listing/switching: `session/set_config_option`
+   *  targets this id, and `undefined` here means the agent exposes no native
+   *  model selector → {@link getAvailableModels} is empty and {@link setModel}
+   *  throws (mobile then hides the picker). */
+  private modelConfigId: string | undefined = undefined;
+  /** The models the native model config option advertises — mapped from its
+   *  `options` (id = option `value`, label = option `name`). Empty when the
+   *  agent has no model config option. NO hardcoded fallback. */
+  private availableModels: AgentModel[] = [];
+  /** The native model select's current value — seeded from the config option's
+   *  `currentValue` and updated on a successful {@link setModel}. Exposed via
    *  {@link getCurrentModelId} so `list_models` can report the in-use model to
-   *  mobile (the model line under the composer). `undefined` when the adapter
-   *  doesn't advertise a model (claude-agent-acp + gemini on newSession). */
+   *  mobile (the model line under the composer). `undefined` when no model
+   *  config option is advertised. */
   private currentModelId: string | undefined = undefined;
+  /** The operating/permission MODES the native ACP `SessionModeState` advertises
+   *  (a DIFFERENT axis than models) — mapped from `newSession`/`loadSession`
+   *  `modes.availableModes` (id = mode id, label = mode name, description passthrough).
+   *  Empty when the agent advertises no modes → {@link getAvailableModes} is empty
+   *  and {@link setMode} throws (mobile then hides the mode picker). */
+  private availableModes: AgentMode[] = [];
+  /** The native `SessionModeState.currentModeId` — seeded from `modes.currentModeId`
+   *  and updated on a successful {@link setMode}. Exposed via {@link getCurrentModeId}
+   *  so `list_modes` can report the in-use mode to mobile. `undefined` when the agent
+   *  advertises no modes. */
+  private currentModeId: string | undefined = undefined;
   /** Whether the agent advertised `loadSession` on `initialize`. Drives the
    *  post-turn session-closed recovery: an agent that supports resume (kimi,
    *  claude, codex, gemini) is re-established with `session/load` — preserving
@@ -592,29 +621,36 @@ export class AcpClient {
       // unexpected-exit, not a startup abort.
       this.startAbortReject = null;
       this.sessionId = newSession.sessionId;
-      // Log the adapter-picked model so account-mismatch bugs (e.g.
-      // codex-acp defaulting to a model the user's account doesn't
-      // include) are immediately visible in the smoke-test log
-      // instead of surfacing as a cryptic "Authentication required"
-      // or "model not supported" error from the prompt response.
-      const newSessionMeta = newSession as unknown as {
-        currentModelId?: string;
-        currentServiceTier?: string;
-      };
+      // Capture the NATIVE model config option (category:'model' select) — the
+      // single source of truth for `list_models` / `change_model`. Sets
+      // modelConfigId + availableModels + currentModelId (all empty/undefined
+      // when the agent exposes no model selector — NO hardcoded fallback).
+      this.captureModelConfig(newSession.configOptions ?? []);
+      // Capture the NATIVE ACP session MODES (`SessionModeState`) — a DIFFERENT
+      // axis than models. Sets availableModes + currentModeId (empty/undefined
+      // when the agent advertises no modes — NO hardcoded fallback).
+      this.captureModes(newSession.modes ?? null);
+      // `currentServiceTier` is a legacy non-standard codex-acp field surfaced
+      // only in the welcome banner — not part of the native model contract.
+      const tier = (newSession as unknown as { currentServiceTier?: string })
+        .currentServiceTier;
+      // Log the model so account-mismatch bugs (e.g. an adapter defaulting to a
+      // model the user's account doesn't include) are immediately visible in
+      // the smoke-test log instead of surfacing as a cryptic "Authentication
+      // required" / "model not supported" error from the prompt response.
       log.info(
         'acpClient',
         `newSession ← ok sessionId=${newSession.sessionId.slice(0, 8)}` +
-          ` model=${newSessionMeta.currentModelId ?? '?'}` +
-          ` tier=${newSessionMeta.currentServiceTier ?? '?'}`,
+          ` model=${this.currentModelId ?? '?'}` +
+          ` models=${this.availableModels.length}` +
+          ` tier=${tier ?? '?'}`,
       );
-
-      this.currentModelId = newSessionMeta.currentModelId;
 
       return {
         sessionId: newSession.sessionId,
         initialize,
-        model: newSessionMeta.currentModelId,
-        tier: newSessionMeta.currentServiceTier,
+        model: this.currentModelId,
+        tier,
       };
     } catch (err) {
       this.cleanupAfterFailedStart(child);
@@ -889,8 +925,9 @@ export class AcpClient {
     // session/load; the happy path (fresh session/new at spawn) never calls this,
     // so live streaming for non-resuming users is untouched.
     this.opts.beginLoadReplay?.();
+    let loaded: Awaited<ReturnType<ClientSideConnection['loadSession']>> | undefined;
     try {
-      await this.connection.loadSession({
+      loaded = await this.connection.loadSession({
         sessionId,
         cwd: this.opts.cwd,
         mcpServers: this.opts.mcpServers ?? [],
@@ -899,6 +936,14 @@ export class AcpClient {
       this.opts.endLoadReplay?.();
     }
     this.sessionId = sessionId;
+    // Re-capture the native model config from the resumed session — the loaded
+    // conversation may sit on a different model than the one at spawn, and
+    // `loadSession` returns the same `configOptions` shape as `newSession`.
+    if (loaded?.configOptions) this.captureModelConfig(loaded.configOptions);
+    // Re-capture the native session modes too — the resumed conversation may sit
+    // on a different mode than the one at spawn (`loadSession` returns the same
+    // `modes` shape as `newSession`).
+    if (loaded?.modes !== undefined) this.captureModes(loaded.modes ?? null);
     log.info('acpClient', `loadSession ← ok sessionId=${sessionId.slice(0, 8)}`);
   }
 
@@ -931,37 +976,144 @@ export class AcpClient {
   }
 
   /**
-   * Switch the active session's model via the non-standard
-   * `session/set_model` RPC. The standard ACP SDK doesn't expose
-   * this — claude-agent-acp and codex-acp implement it as an
-   * extension. Adapters without it reject and `change_model`
-   * surfaces a clean "not supported" affordance on mobile.
+   * Switch the active session's model via the NATIVE ACP
+   * `session/set_config_option` RPC, targeting the `category:'model'`
+   * `SessionConfigSelect` option captured on newSession/loadSession. This is
+   * the single source of truth — there is no PTY `/model` fallback and no
+   * non-standard `session/set_model` extension.
+   *
+   * Throws a clear error when the agent exposes no model config option, so
+   * `change_model` acks `failed` and mobile surfaces "model picker not
+   * supported on this agent".
    */
   async setModel(modelId: string): Promise<void> {
     if (!this.connection || !this.sessionId) {
       throw new Error('AcpClient.setModel called before start()');
     }
-    log.info('acpClient', `setModel → ${modelId}`);
-    // Use the SDK's raw request escape hatch — sendRequest sits
-    // below the typed RPC layer, so non-standard methods like
-    // `session/set_model` route through without typed-shape friction.
-    const rawConn = this.connection as unknown as {
-      connection: {
-        sendRequest: (method: string, params: unknown) => Promise<unknown>;
-      };
-    };
-    await rawConn.connection.sendRequest('session/set_model', {
+    if (!this.modelConfigId) {
+      throw new Error(
+        'model selection not available: this agent exposes no ACP model config option',
+      );
+    }
+    log.info('acpClient', `setModel → ${modelId} (configId=${this.modelConfigId})`);
+    // Typed native RPC (`session/set_config_option`). The select variant of the
+    // request is `{ sessionId, configId, value }` — `value` is the model's
+    // SessionConfigValueId (= the model id).
+    await this.connection.setSessionConfigOption({
       sessionId: this.sessionId,
-      modelId,
+      configId: this.modelConfigId,
+      value: modelId,
     });
     // Track the in-use model so a subsequent list_models reports it as current.
     this.currentModelId = modelId;
     log.info('acpClient', `setModel ← ok modelId=${modelId}`);
   }
 
-  /** The adapter's current model id (or undefined if none advertised). */
+  /**
+   * The models the agent natively advertises via its `category:'model'` config
+   * option (mapped: id = option value, label = option name, contextWindow
+   * derived from the id). Empty array when the agent has no model config option
+   * — mobile then hides the model selector. NO hardcoded fallback.
+   */
+  getAvailableModels(): AgentModel[] {
+    return this.availableModels;
+  }
+
+  /** The native model select's current value (or undefined if none advertised). */
   getCurrentModelId(): string | undefined {
     return this.currentModelId;
+  }
+
+  /**
+   * Parse the native model config option out of a `newSession`/`loadSession`
+   * `configOptions` array and populate {@link modelConfigId},
+   * {@link availableModels}, and {@link currentModelId}. The list itself is
+   * native (the option's `options`); `contextWindow` is a display attribute
+   * derived per-id via {@link getContextWindow}. When no `category:'model'`
+   * select option is present, everything resets to empty/undefined — no
+   * hardcoded list, no guessed model.
+   */
+  private captureModelConfig(configOptions: SessionConfigOption[]): void {
+    const modelOption = configOptions.find(
+      (o) => o.category === 'model' && o.type === 'select',
+    );
+    if (!modelOption || modelOption.type !== 'select') {
+      this.modelConfigId = undefined;
+      this.availableModels = [];
+      this.currentModelId = undefined;
+      return;
+    }
+    this.modelConfigId = modelOption.id;
+    this.currentModelId = modelOption.currentValue;
+    this.availableModels = flattenSelectOptions(modelOption.options).map((opt) => ({
+      id: opt.value,
+      label: opt.name,
+      contextWindow: getContextWindow(opt.value),
+    }));
+  }
+
+  /**
+   * Switch the active session's operating/permission MODE via the NATIVE ACP
+   * `session/set_mode` RPC (the standard {@link SessionModeState} axis — DISTINCT
+   * from the model config option). This is the single source of truth — there is
+   * no PTY fallback.
+   *
+   * Throws a clear error when the agent advertises no modes, so `set_mode` acks
+   * `failed` and mobile surfaces "mode switching not supported on this agent".
+   */
+  async setMode(modeId: string): Promise<void> {
+    if (!this.connection || !this.sessionId) {
+      throw new Error('AcpClient.setMode called before start()');
+    }
+    if (this.availableModes.length === 0) {
+      throw new Error(
+        'mode selection not available: this agent advertises no ACP session modes',
+      );
+    }
+    log.info('acpClient', `setMode → ${modeId}`);
+    // Typed native RPC (`session/set_mode`) — request is `{ sessionId, modeId }`.
+    await this.connection.setSessionMode({
+      sessionId: this.sessionId,
+      modeId,
+    });
+    // Track the in-use mode so a subsequent list_modes reports it as current.
+    this.currentModeId = modeId;
+    log.info('acpClient', `setMode ← ok modeId=${modeId}`);
+  }
+
+  /**
+   * The operating/permission modes the agent natively advertises via its ACP
+   * `SessionModeState` (mapped: id = mode id, label = mode name, description
+   * passthrough). Empty array when the agent advertises no modes — mobile then
+   * hides the mode selector. NO hardcoded fallback.
+   */
+  getAvailableModes(): AgentMode[] {
+    return this.availableModes;
+  }
+
+  /** The native current mode id (or undefined if the agent advertises no modes). */
+  getCurrentModeId(): string | undefined {
+    return this.currentModeId;
+  }
+
+  /**
+   * Parse the native ACP {@link SessionModeState} out of a `newSession`/`loadSession`
+   * response `modes` field and populate {@link availableModes} + {@link currentModeId}.
+   * When absent (`null`/undefined — the agent advertises no modes) everything resets
+   * to empty/undefined — no hardcoded list, no guessed mode.
+   */
+  private captureModes(modes: SessionModeState | null): void {
+    if (!modes) {
+      this.availableModes = [];
+      this.currentModeId = undefined;
+      return;
+    }
+    this.currentModeId = modes.currentModeId;
+    this.availableModes = (modes.availableModes ?? []).map((mode) => ({
+      id: mode.id,
+      label: mode.name,
+      description: mode.description ?? undefined,
+    }));
   }
 
   /**
@@ -1163,6 +1315,27 @@ export class AcpClient {
       },
     };
   }
+}
+
+/**
+ * Flatten a native `SessionConfigSelectOptions` — which is EITHER a flat
+ * `SessionConfigSelectOption[]` OR a grouped `SessionConfigSelectGroup[]` — into
+ * a single option list. Groups (e.g. "Anthropic" / "OpenAI" headers) are UX-only
+ * for the model picker; the CLI presents one flat model list to mobile, so we
+ * splice each group's `options` in. Exported for the client-level unit test.
+ */
+export function flattenSelectOptions(
+  options: SessionConfigSelectOptions,
+): SessionConfigSelectOption[] {
+  const out: SessionConfigSelectOption[] = [];
+  for (const entry of options as Array<SessionConfigSelectOption | SessionConfigSelectGroup>) {
+    if ('group' in entry) {
+      out.push(...entry.options);
+    } else {
+      out.push(entry);
+    }
+  }
+  return out;
 }
 
 /**

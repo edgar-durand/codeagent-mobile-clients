@@ -33,7 +33,7 @@ import { fetchCurrentPluginAuthToken } from '../../services/pairing.service';
 import { log } from '../../services/logger';
 import { HistoryService } from '../../services/history.service';
 import { showInfo, showSuccess, showRelayNotice } from '../../ui/banner';
-import { AGENT_REGISTRY, type AgentId, type AgentModel, type StreamingChunkKind } from '@codeam/shared';
+import { AGENT_REGISTRY, type AgentId, type StreamingChunkKind } from '@codeam/shared';
 import type { McpServer, RequestPermissionResponse } from '@agentclientprotocol/sdk';
 import { createOsStrategy } from '../../os';
 import { createInteractiveAgentStrategy } from '../registry';
@@ -1285,11 +1285,11 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
     done: true,
   });
 
-  // Model catalog comes from the registered RuntimeStrategy — same
-  // list mobile gets in the legacy PTY path so the model-picker UI
-  // stays consistent even when ACP is on.
+  // The RuntimeStrategy is still needed for the JSONL history uploader (and
+  // one-shots), but NOT for model listing: `list_models` reads the NATIVE ACP
+  // model config option off the AcpClient (single source of truth), never a
+  // hardcoded strategy catalog.
   const runtime = createInteractiveAgentStrategy(opts.agent, createOsStrategy());
-  const models = await runtime.listModels();
 
   // Conversation history accumulator — pushes session list +
   // messages to the backend after each turn so mobile's RECENT
@@ -1312,7 +1312,8 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
   // heal (the recurring "chat stuck but the preview has the full reply"). On
   // `get_conversation` we now read + upload that JSONL via the legacy
   // HistoryService so the app can fetch the full transcript and replace a
-  // truncated turn. `runtime` is the same per-agent strategy `listModels` used.
+  // truncated turn. `runtime` is the per-agent strategy (still used for the
+  // JSONL history uploader + one-shots), NOT for model listing.
   const jsonlHistory = new HistoryService(runtime, opts.pluginId, opts.cwd, {
     pluginAuthToken: opts.pluginAuthToken,
   });
@@ -1445,7 +1446,6 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
         client,
         relay,
         acpSessionId,
-        models,
         streaming,
         opts,
         history,
@@ -1540,7 +1540,6 @@ export async function handleCommand(
   client: AcpClient,
   relay: CommandRelayService,
   acpSessionId: string,
-  models: AgentModel[],
   streaming: StreamingState,
   opts: AcpRunnerOptions,
   history: AcpHistory,
@@ -1562,7 +1561,6 @@ export async function handleCommand(
     client,
     relay,
     acpSessionId,
-    models,
     streaming,
     opts,
     history,

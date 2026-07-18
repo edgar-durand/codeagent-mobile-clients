@@ -20,7 +20,14 @@ function fakeClient(id: string) {
     })),
     loadSession: vi.fn(async (_id: string) => {}),
     stop: vi.fn(async () => {}),
+    // list_models is now sourced from the NATIVE ACP model config option on the
+    // client (single source of truth), not the runtime strategy's hardcoded list.
+    getAvailableModels: vi.fn((): Array<{ id: string }> => []),
     getCurrentModelId: vi.fn((): string | undefined => undefined),
+    // list_modes is sourced from the NATIVE ACP SessionModeState on the client
+    // (a DIFFERENT axis than models), same single-source-of-truth shape.
+    getAvailableModes: vi.fn((): Array<{ id: string; label: string }> => []),
+    getCurrentModeId: vi.fn((): string | undefined => undefined),
   };
 }
 
@@ -129,10 +136,11 @@ describe('AcpDriver', () => {
     expect(client.stop).toHaveBeenCalledTimes(1);
   });
 
-  it('dispatch routes a non-baton command through dispatchAcpCommand (list_models acks with models + currentModelId)', async () => {
+  it('dispatch routes a non-baton command through dispatchAcpCommand (list_models acks with the NATIVE model list + currentModelId)', async () => {
     const client = fakeClient('x');
-    // The adapter's in-use model must ride the list_models result so mobile can
-    // mark it (the model line under the composer).
+    // The native ACP model config option is the source: getAvailableModels() +
+    // getCurrentModelId() come straight off the client, not the runtime strategy.
+    client.getAvailableModels.mockReturnValue([{ id: 'm1' }]);
     client.getCurrentModelId.mockReturnValue('m1');
     const { deps, relay } = makeDeps(client);
     const d = new AcpDriver(deps);
@@ -146,6 +154,33 @@ describe('AcpDriver', () => {
     expect(relay.sendResult).toHaveBeenCalledWith('cmd1', 'completed', {
       models: [{ id: 'm1' }],
       currentModelId: 'm1',
+    });
+  });
+
+  it('dispatch routes list_modes through dispatchAcpCommand (acks with the NATIVE mode list + currentModeId)', async () => {
+    const client = fakeClient('x');
+    // The native ACP SessionModeState is the source: getAvailableModes() +
+    // getCurrentModeId() come straight off the client, not the runtime strategy.
+    client.getAvailableModes.mockReturnValue([
+      { id: 'default', label: 'Default' },
+      { id: 'plan', label: 'Plan' },
+    ]);
+    client.getCurrentModeId.mockReturnValue('default');
+    const { deps, relay } = makeDeps(client);
+    const d = new AcpDriver(deps);
+    await d.start('conv-1');
+    await d.dispatch({
+      id: 'cmd-modes',
+      sessionId: 's',
+      type: 'list_modes',
+      payload: {},
+    } as RemoteCommand);
+    expect(relay.sendResult).toHaveBeenCalledWith('cmd-modes', 'completed', {
+      modes: [
+        { id: 'default', label: 'Default' },
+        { id: 'plan', label: 'Plan' },
+      ],
+      currentModeId: 'default',
     });
   });
 
