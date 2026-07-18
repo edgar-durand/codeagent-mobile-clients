@@ -38,10 +38,11 @@ import {
 import { showInfo } from '../../ui/banner';
 import { applyFileReview } from '../../services/apply-file-review.service';
 import { buildLinkContext } from '../link';
-import { postLinkCredential, postAiResult, postPreviewEvent, postHeadroomEvent, postBeadsEvent, postCliUpdateEvent, postCoderabbitEvent, fetchProvisionCredential } from '../../services/pairing.service';
+import { postLinkCredential, postAiResult, postPreviewEvent, postHeadroomEvent, postBeadsEvent, postCliUpdateEvent, postCoderabbitEvent, postAgentReviewReport, fetchProvisionCredential } from '../../services/pairing.service';
 import { configureCoderabbit, type CoderabbitAction } from '../../agents/coderabbit/configure';
 import { deliverPendingCoderabbitCallback, type CoderabbitAuthEvent } from '../../agents/coderabbit/oauth';
 import { CoderabbitRuntimeStrategy } from '../../agents/coderabbit/runtime';
+import { reviewPullRequest, defaultRunGh } from '../../agents/coderabbit/review-pr';
 import { createOsStrategy } from '../../os';
 import {
   agentIdToHeadroomKind,
@@ -890,6 +891,92 @@ const coderabbitConfigureH: CommandHandler = async (ctx, cmd, parsed) => {
   }
   await emitChain;
   await ctx.relay.sendResult(cmd.id, result.error && action !== 'review' ? 'failed' : 'completed', result);
+};
+
+// ─── VCS agent review (PR/MR Command Center, Phase 2) ───────────────────────
+
+/**
+ * `vcs_agent_review` relay handler — "Ask an agent to review PR #X".
+ *
+ * Spec: docs/superpowers/specs/2026-07-18-pr-mr-command-center-design.md §6.
+ *
+ * ONLY CodeRabbit needs CLI code: it's the one reviewer that isn't ACP and has
+ * no GitHub-posting of its own, so the CLI runs `coderabbit review` over the
+ * checked-out PR branch, then posts the findings + verdict to GitHub with `gh`
+ * (already authenticated on the box) and POSTs an `AgentReviewReport` back.
+ *
+ * For ACP agents (claude / codex / gemini) this is a deliberate NO-OP — the
+ * backend delivers the review task to them as an initial prompt and they call
+ * `gh pr review` / `gh api` themselves. The handler is fanned to every active
+ * relay session, so it guards on THIS session's authoritative agent id
+ * (`ctx.agentId`) and skips cleanly for anything but CodeRabbit.
+ *
+ * ACKs immediately, then runs the review in the BACKGROUND (a real review can
+ * take minutes); the outcome reaches the app via the backend completion push
+ * fired from the posted report — not this command's result.
+ */
+const vcsAgentReviewH: CommandHandler = async (ctx, cmd, parsed) => {
+  const pr = parsed.pr;
+  if (!pr) {
+    await ctx.relay.sendResult(cmd.id, 'failed', { error: 'Missing PR reference' });
+    return;
+  }
+  const prRef = {
+    owner: pr.owner,
+    repo: pr.repo,
+    number: pr.number,
+    ...(pr.url ? { url: pr.url } : {}),
+  };
+
+  // Only the CodeRabbit path is CLI-driven. `ctx.agentId` is the authoritative
+  // "what agent is this session running" — never trust a client-supplied hint.
+  if (normalizeAgentId(ctx.agentId) !== 'coderabbit') {
+    await ctx.relay.sendResult(cmd.id, 'completed', {
+      action: 'vcs_agent_review',
+      skipped: true,
+      reason: 'non-coderabbit agent posts its review via the prompt + gh',
+    });
+    return;
+  }
+
+  await ctx.relay.sendResult(cmd.id, 'completed', {
+    action: 'vcs_agent_review',
+    started: true,
+  });
+
+  const token = ctx.pluginAuthToken;
+  void (async () => {
+    const os = createOsStrategy();
+    try {
+      const report = await reviewPullRequest(
+        {
+          prRef,
+          agentId: 'coderabbit',
+          baseBranch: parsed.baseBranch,
+        },
+        {
+          runReview: (input) => new CoderabbitRuntimeStrategy(os).runOneShot(input),
+          runGh: (args) => defaultRunGh(args),
+          postReport: async (r) => {
+            if (!token) return;
+            await postAgentReviewReport({
+              sessionId: ctx.sessionId,
+              pluginId: ctx.pluginId,
+              pluginAuthToken: token,
+              report: r,
+            });
+          },
+        },
+      );
+      log.info(
+        'vcs',
+        `agent review of ${prRef.owner}/${prRef.repo}#${prRef.number} posted: ` +
+          `${report.verdict} (${report.commentCount} inline comment(s))`,
+      );
+    } catch (err) {
+      log.warn('vcs', 'agent PR review failed (non-fatal)', err);
+    }
+  })();
 };
 
 // ─── Headroom budget ───────────────────────────────────────────────────────
@@ -2036,6 +2123,7 @@ export const handlers: Record<string, CommandHandler> = {
   handback: handbackH,
   headroom_configure: headroomConfigureH,
   coderabbit_configure: coderabbitConfigureH,
+  vcs_agent_review: vcsAgentReviewH,
   headroom_budget: headroomBudgetH,
   beads_configure: beadsConfigureH,
   cli_self_update: cliSelfUpdateH(),

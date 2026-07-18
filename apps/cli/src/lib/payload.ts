@@ -190,6 +190,22 @@ export const startCommandSchema = z.object({
       notes: z.string().max(4096).nullable().optional(),
     })
     .optional(),
+  // `vcs_agent_review` (Phase-2 "Ask an agent to review PR #X") — the PR the
+  // review session should review + post its verdict to via `gh`. Only the
+  // CodeRabbit CLI path consumes it; ACP agents get the task as an initial
+  // prompt instead. `agentId` / `prompt` (declared above) carry the reviewing
+  // agent + the composed review prompt. Spec:
+  // docs/superpowers/specs/2026-07-18-pr-mr-command-center-design.md §6.
+  pr: z
+    .object({
+      owner: z.string().min(1).max(255),
+      repo: z.string().min(1).max(255),
+      number: z.number().int().min(1),
+      url: z.string().max(2048).optional(),
+    })
+    .optional(),
+  // The PR base branch, so CodeRabbit reviews the PR diff (committed vs base).
+  baseBranch: z.string().max(255).optional(),
   // `env_write` carries the full desired set of environment variables
   // for the project `.env`. Bounded so a malformed payload can't flood
   // the disk-side serializer. `env_read` / `preview_restart` send no payload.

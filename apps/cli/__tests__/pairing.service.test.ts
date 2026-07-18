@@ -121,6 +121,56 @@ describe('fetchCurrentPluginAuthToken', () => {
   });
 });
 
+describe('postAgentReviewReport', () => {
+  afterEach(() => { vi.restoreAllMocks(); });
+
+  it('POSTs the report to /api/vcs/agent-review/report with X-Plugin-Auth-Token + sessionId/pluginId', async () => {
+    const spy = vi
+      .spyOn(pairing._transport, 'postJsonAuthed')
+      .mockResolvedValue({ success: true } as never);
+
+    const report = {
+      prRef: { owner: 'acme', repo: 'web', number: 42, url: 'https://github.com/acme/web/pull/42' },
+      agentId: 'coderabbit',
+      verdict: 'request_changes' as const,
+      commentCount: 2,
+      findings: [{ path: 'src/a.ts', line: 10, severity: 'error' as const, message: 'null deref' }],
+    };
+
+    const result = await pairing.postAgentReviewReport({
+      sessionId: 'sess-1',
+      pluginId: 'plug-1',
+      pluginAuthToken: 'v1.tok',
+      report,
+    });
+
+    expect(result).toEqual({ ok: true });
+    const [url, body, token] = spy.mock.calls[0];
+    expect(url).toMatch(/\/api\/vcs\/agent-review\/report$/);
+    expect(body).toMatchObject({ sessionId: 'sess-1', pluginId: 'plug-1', report });
+    expect(token).toBe('v1.tok');
+  });
+
+  it('returns { ok: false, status, message } on HTTP error (non-fatal)', async () => {
+    const err = Object.assign(new Error('HTTP 403: missing scope'), { statusCode: 403 });
+    vi.spyOn(pairing._transport, 'postJsonAuthed').mockRejectedValue(err);
+
+    const result = await pairing.postAgentReviewReport({
+      sessionId: 'sess-1',
+      pluginId: 'plug-1',
+      pluginAuthToken: 'v1.tok',
+      report: {
+        prRef: { owner: 'acme', repo: 'web', number: 1 },
+        agentId: 'coderabbit',
+        verdict: 'approve',
+        commentCount: 0,
+      },
+    });
+
+    expect(result).toEqual({ ok: false, status: 403, message: 'HTTP 403: missing scope' });
+  });
+});
+
 describe('postLinkCredential', () => {
   afterEach(() => { vi.restoreAllMocks(); });
 

@@ -3,6 +3,7 @@ import * as http from 'http';
 import * as os from 'os';
 import {
   resolveApiBaseUrl,
+  type AgentReviewReport,
   type BeadsProvisioningPayload,
   type BeadsProvisioningStatus,
 } from '@codeam/shared';
@@ -505,6 +506,41 @@ export async function fetchProvisionCredential(input: {
     return null;
   } catch {
     return null;
+  }
+}
+
+/**
+ * POST the finished agent-review report to the backend so it can fire the
+ * completion push + render the Completion Result card. Mirrors
+ * `postCoderabbitEvent` — fire-and-forget, non-fatal. Only CodeRabbit (the
+ * one non-ACP reviewer) posts this from the CLI; ACP agents leave the verdict
+ * on GitHub via their own prompt and the backend derives the report itself.
+ * Endpoint: `POST /api/vcs/agent-review/report` (X-Plugin-Auth-Token).
+ */
+export async function postAgentReviewReport(input: {
+  sessionId: string;
+  pluginId: string;
+  pluginAuthToken: string;
+  report: AgentReviewReport;
+}): Promise<{ ok: true } | { ok: false; status: number; message: string }> {
+  try {
+    await _transport.postJsonAuthed(
+      `${API_BASE}/api/vcs/agent-review/report`,
+      {
+        sessionId: input.sessionId,
+        pluginId: input.pluginId,
+        report: input.report,
+      },
+      input.pluginAuthToken,
+    );
+    return { ok: true };
+  } catch (err) {
+    const e = err as Error & { statusCode?: number };
+    return {
+      ok: false,
+      status: typeof e.statusCode === 'number' ? e.statusCode : 0,
+      message: e.message || 'unknown',
+    };
   }
 }
 
