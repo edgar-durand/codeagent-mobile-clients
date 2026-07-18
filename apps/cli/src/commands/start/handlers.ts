@@ -1193,23 +1193,35 @@ export function buildNpmInstallInvocation(opts?: {
    * passwordless sudo for this user, so `sudo -n` succeeds without a prompt.
    */
   sudo?: boolean;
+  /**
+   * Target OS. Defaults to the host (`process.platform`). DI'd ONLY so the
+   * tests can exercise BOTH the POSIX and the win32 path/npm-name resolution
+   * deterministically on any CI runner (a Windows leg no longer needs the
+   * POSIX cases skipped, nor vice-versa) — production always uses the default.
+   */
+  platform?: NodeJS.Platform;
 }): { command: string; args: string[] } {
   const entryScript = opts?.entryScript ?? process.argv[1] ?? '';
   const execPath = opts?.execPath ?? process.execPath;
   const exists = opts?.existsSync ?? fs.existsSync;
+  const platform = opts?.platform ?? process.platform;
+  // Resolve paths with the module matching the TARGET platform (not the host
+  // running this code) so behavior — and the tests — are identical on every OS.
+  const p = platform === 'win32' ? path.win32 : path.posix;
 
   // Global npm layout: <prefix>/lib/node_modules/codeam-cli/... → target
   // that prefix explicitly so the running install is replaced in place.
-  const normalized = entryScript.split(path.sep).join('/');
+  // Split on EITHER separator so a win32 entryScript is handled off-host too.
+  const normalized = entryScript.split(/[\\/]/).join('/');
   const marker = '/lib/node_modules/codeam-cli/';
   const markerIdx = normalized.indexOf(marker);
   const prefix = markerIdx > 0 ? entryScript.slice(0, markerIdx) : null;
 
   // Prefer the npm sibling of the running node — the detached daemon may
   // have no npm on PATH at all (codespace: /tmp/codeam-node20/bin/npm).
-  const siblingNpm = path.join(
-    path.dirname(execPath),
-    process.platform === 'win32' ? 'npm.cmd' : 'npm',
+  const siblingNpm = p.join(
+    p.dirname(execPath),
+    platform === 'win32' ? 'npm.cmd' : 'npm',
   );
   const npmCommand = exists(siblingNpm) ? siblingNpm : 'npm';
 

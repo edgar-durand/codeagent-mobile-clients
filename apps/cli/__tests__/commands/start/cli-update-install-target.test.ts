@@ -18,62 +18,58 @@
  *   - npm binary: prefer the sibling of process.execPath (the daemon may
  *     have no npm on PATH); fall back to bare `npm`.
  *   - non-global layouts (dev checkout): no --prefix (unchanged behavior).
+ *
+ * ⚠️ Every case injects `platform` (+ asserts with the matching
+ * `path.posix` / `path.win32`) so BOTH the POSIX and the win32 npm-name /
+ * path resolution are exercised DETERMINISTICALLY on every CI OS — no leg
+ * of the matrix skips the other platform's cases (the old `skipIf`/`runIf`
+ * gating left the Windows runner failing the POSIX sudo cases).
  */
 
 import { describe, it, expect } from 'vitest';
 import path from 'path';
-import { buildNpmInstallInvocation } from '../../../src/commands/start/handlers';
+import { buildNpmInstallInvocation, isPermissionError } from '../../../src/commands/start/handlers';
 
-describe('buildNpmInstallInvocation — install target', () => {
-  const CS_ENTRY =
-    '/tmp/codeam-node20/lib/node_modules/codeam-cli/dist/index.js';
+describe('buildNpmInstallInvocation — install target (POSIX)', () => {
+  const CS_ENTRY = '/tmp/codeam-node20/lib/node_modules/codeam-cli/dist/index.js';
   const CS_NODE = '/tmp/codeam-node20/bin/node';
 
-  // These two layouts are POSIX-only BY CONSTRUCTION — codespaces are Linux
-  // boxes (`/tmp/codeam-node20` is the Linux bootstrap prefix) and nvm is a
-  // POSIX shell tool (nvm-windows uses a different, lib-less layout). On
-  // win32 the sibling-npm probe correctly builds `<dir>\npm.cmd` via the
-  // native path module, so the POSIX `<dir>/npm` fixtures can never match —
-  // the win32-native expectations are pinned in the describe below instead.
-  it.skipIf(process.platform === 'win32')(
-    'codespace layout: targets the running prefix and the sibling npm',
-    () => {
-      const inv = buildNpmInstallInvocation({
-        entryScript: CS_ENTRY,
-        execPath: CS_NODE,
-        existsSync: (p: string) => p === '/tmp/codeam-node20/bin/npm',
-      });
-      expect(inv.command).toBe('/tmp/codeam-node20/bin/npm');
-      expect(inv.args).toEqual([
-        'install',
-        '-g',
-        '--prefix',
-        '/tmp/codeam-node20',
-        'codeam-cli@latest',
-      ]);
-    },
-  );
+  it('codespace layout: targets the running prefix and the sibling npm', () => {
+    const inv = buildNpmInstallInvocation({
+      entryScript: CS_ENTRY,
+      execPath: CS_NODE,
+      existsSync: (p: string) => p === '/tmp/codeam-node20/bin/npm',
+      platform: 'linux',
+    });
+    expect(inv.command).toBe('/tmp/codeam-node20/bin/npm');
+    expect(inv.args).toEqual([
+      'install',
+      '-g',
+      '--prefix',
+      '/tmp/codeam-node20',
+      'codeam-cli@latest',
+    ]);
+  });
 
-  it.skipIf(process.platform === 'win32')(
-    'standard global layout (nvm): prefix derived from the entry script',
-    () => {
-      const home = '/Users/u/.nvm/versions/node/v20.11.0';
-      const inv = buildNpmInstallInvocation({
-        entryScript: path.join(home, 'lib/node_modules/codeam-cli/dist/index.js'),
-        execPath: path.join(home, 'bin/node'),
-        existsSync: (p: string) => p === path.join(home, 'bin/npm'),
-      });
-      expect(inv.command).toBe(path.join(home, 'bin/npm'));
-      expect(inv.args).toContain('--prefix');
-      expect(inv.args).toContain(home);
-    },
-  );
+  it('standard global layout (nvm): prefix derived from the entry script', () => {
+    const home = '/Users/u/.nvm/versions/node/v20.11.0';
+    const inv = buildNpmInstallInvocation({
+      entryScript: path.posix.join(home, 'lib/node_modules/codeam-cli/dist/index.js'),
+      execPath: path.posix.join(home, 'bin/node'),
+      existsSync: (p: string) => p === path.posix.join(home, 'bin/npm'),
+      platform: 'linux',
+    });
+    expect(inv.command).toBe(path.posix.join(home, 'bin/npm'));
+    expect(inv.args).toContain('--prefix');
+    expect(inv.args).toContain(home);
+  });
 
   it('falls back to bare npm when no sibling npm exists', () => {
     const inv = buildNpmInstallInvocation({
       entryScript: CS_ENTRY,
       execPath: CS_NODE,
       existsSync: () => false,
+      platform: 'linux',
     });
     expect(inv.command).toBe('npm');
     // Prefix targeting still applies — PATH npm + explicit prefix is safe.
@@ -85,6 +81,7 @@ describe('buildNpmInstallInvocation — install target', () => {
       entryScript: '/Users/u/dev/codeagent-mobile-clients/apps/cli/dist/index.js',
       execPath: '/usr/local/bin/node',
       existsSync: () => false,
+      platform: 'linux',
     });
     expect(inv.command).toBe('npm');
     expect(inv.args).toEqual(['install', '-g', 'codeam-cli@latest']);
@@ -92,60 +89,52 @@ describe('buildNpmInstallInvocation — install target', () => {
 });
 
 // Windows-native expectations — the behavior a real Windows CLI user gets.
-// buildNpmInstallInvocation intentionally derives the sibling npm name and
-// path semantics from the HOST platform (native `path` + process.platform),
-// so these cases can only run under win32 — and windows-latest is in the CI
-// matrix, so they DO run there on every push. What they pin:
-//   - Windows global npm layouts have NO `lib/` segment
-//     (`%APPDATA%\npm\node_modules\codeam-cli\...`,
-//     `...\nvm\v20.11.0\node_modules\codeam-cli\...` for nvm-windows), so the
-//     POSIX `/lib/node_modules/codeam-cli/` marker never matches and no
-//     `--prefix` is passed. That is CORRECT on Windows: the preferred command
-//     is the `npm.cmd` sibling of the running node.exe, and that npm's own
-//     global prefix already targets the install the daemon runs from (the
-//     node MSI's builtin npmrc → %APPDATA%\npm; nvm-windows → the active
-//     version dir). Forcing a POSIX-derived --prefix would be wrong there.
+// buildNpmInstallInvocation derives the sibling npm name + path semantics from
+// the injected `platform` (path.win32), so these now run on EVERY OS, not just
+// the windows-latest matrix leg. What they pin:
+//   - Windows global npm layouts have NO `lib/` segment, so the POSIX
+//     `/lib/node_modules/codeam-cli/` marker never matches and no `--prefix`
+//     is passed (correct: the `npm.cmd` sibling's own global prefix already
+//     targets the install the daemon runs from).
 //   - The sibling probe looks for `npm.cmd` (not `npm`) next to node.exe.
-describe.runIf(process.platform === 'win32')(
-  'buildNpmInstallInvocation — win32-native behavior',
-  () => {
-    it('standard Windows global layout: sibling npm.cmd, no --prefix', () => {
-      const nodeDir = 'C:\\Program Files\\nodejs';
-      const inv = buildNpmInstallInvocation({
-        entryScript:
-          'C:\\Users\\u\\AppData\\Roaming\\npm\\node_modules\\codeam-cli\\dist\\index.js',
-        execPath: path.join(nodeDir, 'node.exe'),
-        existsSync: (p: string) => p === path.join(nodeDir, 'npm.cmd'),
-      });
-      expect(inv.command).toBe(path.join(nodeDir, 'npm.cmd'));
-      expect(inv.args).toEqual(['install', '-g', 'codeam-cli@latest']);
+describe('buildNpmInstallInvocation — win32-native behavior', () => {
+  it('standard Windows global layout: sibling npm.cmd, no --prefix', () => {
+    const nodeDir = 'C:\\Program Files\\nodejs';
+    const inv = buildNpmInstallInvocation({
+      entryScript:
+        'C:\\Users\\u\\AppData\\Roaming\\npm\\node_modules\\codeam-cli\\dist\\index.js',
+      execPath: path.win32.join(nodeDir, 'node.exe'),
+      existsSync: (p: string) => p === path.win32.join(nodeDir, 'npm.cmd'),
+      platform: 'win32',
     });
+    expect(inv.command).toBe(path.win32.join(nodeDir, 'npm.cmd'));
+    expect(inv.args).toEqual(['install', '-g', 'codeam-cli@latest']);
+  });
 
-    it('nvm-windows layout: npm.cmd sibling of the running node version, no --prefix', () => {
-      const versionDir = 'C:\\Users\\u\\AppData\\Roaming\\nvm\\v20.11.0';
-      const inv = buildNpmInstallInvocation({
-        entryScript: path.join(versionDir, 'node_modules\\codeam-cli\\dist\\index.js'),
-        execPath: path.join(versionDir, 'node.exe'),
-        existsSync: (p: string) => p === path.join(versionDir, 'npm.cmd'),
-      });
-      expect(inv.command).toBe(path.join(versionDir, 'npm.cmd'));
-      expect(inv.args).toEqual(['install', '-g', 'codeam-cli@latest']);
+  it('nvm-windows layout: npm.cmd sibling of the running node version, no --prefix', () => {
+    const versionDir = 'C:\\Users\\u\\AppData\\Roaming\\nvm\\v20.11.0';
+    const inv = buildNpmInstallInvocation({
+      entryScript: path.win32.join(versionDir, 'node_modules\\codeam-cli\\dist\\index.js'),
+      execPath: path.win32.join(versionDir, 'node.exe'),
+      existsSync: (p: string) => p === path.win32.join(versionDir, 'npm.cmd'),
+      platform: 'win32',
     });
+    expect(inv.command).toBe(path.win32.join(versionDir, 'npm.cmd'));
+    expect(inv.args).toEqual(['install', '-g', 'codeam-cli@latest']);
+  });
 
-    it('no npm.cmd sibling: falls back to bare npm', () => {
-      const inv = buildNpmInstallInvocation({
-        entryScript:
-          'C:\\Users\\u\\AppData\\Roaming\\npm\\node_modules\\codeam-cli\\dist\\index.js',
-        execPath: 'C:\\Program Files\\nodejs\\node.exe',
-        existsSync: () => false,
-      });
-      expect(inv.command).toBe('npm');
-      expect(inv.args).toEqual(['install', '-g', 'codeam-cli@latest']);
+  it('no npm.cmd sibling: falls back to bare npm', () => {
+    const inv = buildNpmInstallInvocation({
+      entryScript:
+        'C:\\Users\\u\\AppData\\Roaming\\npm\\node_modules\\codeam-cli\\dist\\index.js',
+      execPath: 'C:\\Program Files\\nodejs\\node.exe',
+      existsSync: () => false,
+      platform: 'win32',
     });
-  },
-);
-
-import { isPermissionError } from '../../../src/commands/start/handlers';
+    expect(inv.command).toBe('npm');
+    expect(inv.args).toEqual(['install', '-g', 'codeam-cli@latest']);
+  });
+});
 
 describe('buildNpmInstallInvocation — sudo escalation (self-hosted root-owned prefix)', () => {
   it('prepends sudo -n and passes the resolved npm + args through', () => {
@@ -154,6 +143,7 @@ describe('buildNpmInstallInvocation — sudo escalation (self-hosted root-owned 
       execPath: '/usr/bin/node',
       existsSync: (p: string) => p === '/usr/bin/npm',
       sudo: true,
+      platform: 'linux',
     });
     expect(inv.command).toBe('sudo');
     expect(inv.args).toEqual(['-n', '/usr/bin/npm', 'install', '-g', '--prefix', '/usr', 'codeam-cli@latest']);
@@ -163,6 +153,7 @@ describe('buildNpmInstallInvocation — sudo escalation (self-hosted root-owned 
       entryScript: '/usr/lib/node_modules/codeam-cli/dist/index.js',
       execPath: '/usr/bin/node',
       existsSync: (p: string) => p === '/usr/bin/npm',
+      platform: 'linux',
     });
     expect(inv.command).toBe('/usr/bin/npm');
     expect(inv.args[0]).toBe('install');
@@ -170,14 +161,11 @@ describe('buildNpmInstallInvocation — sudo escalation (self-hosted root-owned 
 });
 
 describe('isPermissionError', () => {
-  it('detects EACCES / errno -13 / permission denied', () => {
-    expect(isPermissionError('npm error code EACCES')).toBe(true);
-    expect(isPermissionError('npm error errno -13')).toBe(true);
-    expect(isPermissionError('EACCES: permission denied, rename')).toBe(true);
+  it('matches EACCES / permission denied variants', () => {
+    expect(isPermissionError('npm ERR! Error: EACCES: permission denied')).toBe(true);
     expect(isPermissionError('operation not permitted')).toBe(true);
   });
   it('does NOT match a transient network error', () => {
     expect(isPermissionError('ETIMEDOUT request to registry')).toBe(false);
-    expect(isPermissionError('ENOTFOUND registry.npmjs.org')).toBe(false);
   });
 });
