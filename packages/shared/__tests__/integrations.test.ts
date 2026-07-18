@@ -241,7 +241,6 @@ describe('integrations registry', () => {
       slack: 'comms',
       notion: 'docs',
       figma: 'design',
-      github: 'vcs',
     };
     for (const [id, meta] of Object.entries(INTEGRATION_REGISTRY)) {
       expect(meta.category).toBe(expected[id]);
@@ -253,8 +252,6 @@ describe('integrations registry', () => {
       'linear',
     ]);
     expect(getIntegrationsByCategory('design').map((m) => m.id)).toEqual([]);
-    // GitHub is the first (and, in v1, only) enabled `vcs` integration.
-    expect(getIntegrationsByCategory('vcs').map((m) => m.id)).toEqual(['github']);
   });
 });
 
