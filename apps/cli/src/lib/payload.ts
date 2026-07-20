@@ -96,6 +96,11 @@ export const startCommandSchema = z.object({
       // session (no re-login) — fetches from the backend + installs + writes it.
       'provision',
       'review',
+      // `skills_configure` — attach/detach a curated Agent Skill on a RUNNING
+      // session (Claude hot-reloads ~/.claude/skills/), or list what's installed.
+      'add',
+      'remove',
+      'list',
     ])
     .optional(),
   // `headroom_configure` — savings ingest URL delivered from the session
@@ -218,6 +223,10 @@ export const startCommandSchema = z.object({
     )
     .max(512)
     .optional(),
+  // `skills_configure` — the curated `SkillId` to add/remove. `list` (and a
+  // malformed/unknown id on add/remove) sends no `skillId` or an invalid one;
+  // `configureSkill` itself validates against the shared registry.
+  skillId: z.string().min(1).max(128).optional(),
 });
 
 export type StartCommandPayload = z.infer<typeof startCommandSchema>;

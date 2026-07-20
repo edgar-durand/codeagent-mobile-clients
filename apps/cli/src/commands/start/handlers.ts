@@ -78,6 +78,7 @@ import { handleBeadsActionCommand, type StartedBeads, startBeads } from '../../b
 import { beadsActionFromPayload } from '../../beads/wiring';
 import { configureBeads, probeBeadsStatus, type ConfigureBeadsDeps } from '../../beads/configure';
 import { persistBeadsConfig, readBeadsEnabled } from '../../beads/config-store';
+import { configureSkill, type SkillsConfigureAction } from '../../skills/configure';
 import { provisionBeads } from '../../beads/provisioner';
 import type { BeadsConfigureAction } from '@codeam/shared';
 // Self-namespace import: `previewRestartH` invokes `startPreviewFromDetection`
@@ -501,6 +502,14 @@ const envWriteH: CommandHandler = async (ctx, cmd, parsed) => {
     await fs.promises.rm(tmpPath, { force: true }).catch(() => undefined);
     await ctx.relay.sendResult(cmd.id, 'failed', { error: (err as Error).message });
   }
+};
+
+// ─── Agent Skills (on-demand add/remove/list on a RUNNING session) ─
+
+const skillsConfigureH: CommandHandler = async (ctx, cmd, parsed) => {
+  const action = parsed.action as SkillsConfigureAction | undefined;
+  const res = configureSkill(action ?? 'list', parsed.skillId);
+  await ctx.relay.sendResult(cmd.id, res.ok ? 'completed' : 'failed', res);
 };
 
 // ─── Session baton (take_control / handback) ─────────────────────
@@ -2119,6 +2128,7 @@ export const handlers: Record<string, CommandHandler> = {
   save_preview_config: savePreviewConfigH,
   env_read: envReadH,
   env_write: envWriteH,
+  skills_configure: skillsConfigureH,
   take_control: takeControlH,
   handback: handbackH,
   headroom_configure: headroomConfigureH,
