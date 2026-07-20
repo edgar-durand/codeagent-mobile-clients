@@ -27,4 +27,14 @@ describe('skills manifest', () => {
     fs.writeFileSync(skillsManifestPath(), '{ not json');
     expect(readSkillsManifest()).toBeNull();
   });
+
+  it('drops malformed entries (null / missing string id) instead of throwing', () => {
+    fs.mkdirSync(path.dirname(skillsManifestPath()), { recursive: true });
+    fs.writeFileSync(
+      skillsManifestPath(),
+      JSON.stringify({ skills: [null, { id: 'code-review' }, { nope: 1 }] }),
+    );
+    expect(() => readSkillsManifest()).not.toThrow();
+    expect(readSkillsManifest()).toEqual({ skills: [{ id: 'code-review' }] });
+  });
 });

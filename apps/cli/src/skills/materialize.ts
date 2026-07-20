@@ -19,7 +19,11 @@ export function skillDirFor(id: SkillId, home: string = os.homedir()): string {
 function renderSkillMd(id: SkillId, description: string, body: string): string {
   // description is single-line by contract; collapse any stray newlines.
   const desc = description.replace(/\s*\n\s*/g, ' ').trim();
-  return `---\nname: ${NS}${id}\ndescription: ${desc}\n---\n\n${body.trim()}\n`;
+  // Emit as a double-quoted YAML scalar: an unquoted (plain) scalar is
+  // invalid YAML wherever the value contains ": " (colon-space), which the
+  // code-review skill's description does. JSON.stringify produces a valid
+  // YAML double-quoted string (same escaping rules) for any input.
+  return `---\nname: ${NS}${id}\ndescription: ${JSON.stringify(desc)}\n---\n\n${body.trim()}\n`;
 }
 
 export function materializeSkill(id: SkillId, home: string = os.homedir()): boolean {

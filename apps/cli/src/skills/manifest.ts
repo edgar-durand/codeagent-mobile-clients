@@ -7,7 +7,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import type { SkillsManifest } from '@codeam/shared';
+import type { SkillsManifest, SkillsManifestEntry } from '@codeam/shared';
 import { log } from '../services/logger';
 import { restrictToOwner } from '../lib/restrict-to-owner';
 
@@ -20,6 +20,16 @@ export function readSkillsManifest(): SkillsManifest | null {
   try {
     const raw = JSON.parse(fs.readFileSync(skillsManifestPath(), 'utf8')) as SkillsManifest;
     if (!Array.isArray(raw?.skills)) return null;
+    // Defensive: drop malformed entries (null, non-object, missing string id)
+    // so a corrupt/partial write can't later throw on `entry.id` deep inside
+    // configureSkill/provision — those callers have no outer try/catch, so
+    // an unhandled throw there means the skills_configure command never
+    // acks and mobile hangs. isSkillId still filters unknown-but-well-formed
+    // ids downstream.
+    raw.skills = raw.skills.filter(
+      (s): s is SkillsManifestEntry =>
+        Boolean(s) && typeof s === 'object' && typeof (s as { id?: unknown }).id === 'string',
+    );
     return raw;
   } catch {
     return null;
