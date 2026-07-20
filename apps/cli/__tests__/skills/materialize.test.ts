@@ -14,7 +14,7 @@ describe('materializeSkill', () => {
     const file = path.join(skillDirFor('code-review', home), 'SKILL.md');
     const md = fs.readFileSync(file, 'utf8');
     expect(skillDirFor('code-review', home)).toContain('.claude/skills/codeam-code-review');
-    expect(md).toMatch(/^---\nname: code-review\ndescription: .+\n---\n/);
+    expect(md).toMatch(/^---\nname: codeam-code-review\ndescription: .+\n---\n/);
     expect(md).toContain('Review priorities');
   });
 

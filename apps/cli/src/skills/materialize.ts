@@ -16,10 +16,10 @@ export function skillDirFor(id: SkillId, home: string = os.homedir()): string {
 
 /** Build the SKILL.md with generated frontmatter (name/description drive
  *  Claude's progressive-disclosure index; the body is the full skill). */
-function renderSkillMd(id: SkillId, name: string, description: string, body: string): string {
+function renderSkillMd(id: SkillId, description: string, body: string): string {
   // description is single-line by contract; collapse any stray newlines.
   const desc = description.replace(/\s*\n\s*/g, ' ').trim();
-  return `---\nname: ${id}\ndescription: ${desc}\n---\n\n${body.trim()}\n`;
+  return `---\nname: ${NS}${id}\ndescription: ${desc}\n---\n\n${body.trim()}\n`;
 }
 
 export function materializeSkill(id: SkillId, home: string = os.homedir()): boolean {
@@ -30,11 +30,17 @@ export function materializeSkill(id: SkillId, home: string = os.homedir()): bool
     fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
     fs.writeFileSync(
       path.join(dir, 'SKILL.md'),
-      renderSkillMd(id, def.name, def.description, def.delivery.skillFile.body),
+      renderSkillMd(id, def.description, def.delivery.skillFile.body),
       { encoding: 'utf8', mode: 0o600 },
     );
+    const baseDir = path.resolve(dir);
+    const baseDirWithSep = baseDir + path.sep;
     for (const [rel, contents] of Object.entries(def.delivery.skillFile.files ?? {})) {
       const target = path.join(dir, rel);
+      // Path containment guard: ensure target is inside dir
+      if (!path.resolve(target).startsWith(baseDirWithSep) && path.resolve(target) !== baseDir) {
+        continue;
+      }
       fs.mkdirSync(path.dirname(target), { recursive: true, mode: 0o700 });
       fs.writeFileSync(target, contents, { encoding: 'utf8', mode: 0o600 });
     }

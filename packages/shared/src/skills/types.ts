@@ -14,7 +14,8 @@ export type SkillRail = 'skillFile' | 'instruction';
 /** `skillFile` payload — a Claude-Code SKILL.md bundle (body + optional files). */
 export interface SkillFileDelivery {
   /** The SKILL.md markdown body (WITHOUT frontmatter — frontmatter is generated
-   *  from `name`/`description` at materialize time). */
+   *  at materialize time with `name` set to the namespaced skill id `codeam-<id>` and
+   *  `description` from the skill definition). */
   body: string;
   /** Extra files written alongside SKILL.md: relative path → file contents. */
   files?: Record<string, string>;
