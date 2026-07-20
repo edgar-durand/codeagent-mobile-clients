@@ -117,6 +117,11 @@ export interface AgentReviewPlan {
   branch: string;
   /** Toolkit integrations the review box is provisioned with (includes `github`). */
   integrationIds: string[];
+  /** Curated skill id(s) attached to this session's purpose (e.g. `code-review`).
+   *  Claude gets them as `~/.codeam/skills.json`; other agents get the instruction
+   *  preamble prepended to `prompt` server-side. The client forwards these into the
+   *  deploy request the same way as `integrationIds`. */
+  skillIds: string[];
 }
 
 /**
