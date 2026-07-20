@@ -39,6 +39,7 @@ import {
 import { capture, identifyUser, shutdownTelemetry } from '../services/telemetry.service';
 import { provisionBeadsForStart } from '../beads/wiring';
 import { buildMcpServersForStart } from '../integrations/provision';
+import { provisionSkillsForStart } from '../skills/provision';
 import type { StartedBeads } from '../beads';
 import { isLocalSession, runtimeSupportsBaton } from '../baton/gate';
 import { runBatonSession } from '../baton/wire-baton';
@@ -235,6 +236,11 @@ export async function start(requestedAgent?: AgentId): Promise<void> {
     pluginAuthToken: session.pluginAuthToken ?? undefined,
     pollSecret: session.pollSecret,
   });
+
+  // Agent Skills — materialize any curated SKILL.md the deploy attached
+  // (~/.codeam/skills.json) under $HOME before the agent spawns. Claude
+  // discovers + hot-reloads them. Best-effort, never gated.
+  provisionSkillsForStart();
 
   // Auto-provision the project's runtime deps (Postgres/Redis via the repo's
   // compose, or a heuristic one) so the dev server boots on the first preview.

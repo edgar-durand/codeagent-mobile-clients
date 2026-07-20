@@ -40,9 +40,10 @@ import * as os from 'node:os';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { CommandRelayService, type RemoteCommand } from '../services/command-relay.service';
-import type { AgentMetadata, IntegrationsManifestEntry } from '@codeam/shared';
+import type { AgentMetadata, IntegrationsManifestEntry, SkillsManifestEntry } from '@codeam/shared';
 import { resolveApiBaseUrl, getPricing } from '@codeam/shared';
 import { persistIntegrationsManifest, clearIntegrationsManifest } from '../integrations/manifest';
+import { persistOrClearSkillsFromPayload } from '../skills/persist-from-payload';
 
 /** Input $/M for the running agent's representative model — values the
  *  compressed-away tokens for the savings reporter. Claude agents → Sonnet
@@ -1648,6 +1649,16 @@ export class HostAgentSupervisor {
       } else {
         clearIntegrationsManifest();
       }
+
+      // 1f) Agent Skills manifest — same mirror-the-codespace-bootstrap
+      //     pattern as 1e above, writing `~/.codeam/skills.json` before the
+      //     pair-auto child's `start()` (which reads it via
+      //     `provisionSkillsForStart`) spawns. Best-effort, never blocks the
+      //     deploy. `DeployPayload` doesn't declare `skills` yet (backend
+      //     field lands separately), hence the typed cast.
+      persistOrClearSkillsFromPayload(
+        (payload as { skills?: SkillsManifestEntry[] }).skills,
+      );
 
       // 2) Spawn the supervised `pair-auto` child. Routed through
       //    spawnSessionChild so the persisted HEADROOM_* env (the source of

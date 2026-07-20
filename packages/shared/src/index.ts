@@ -5,6 +5,7 @@ export * from './protocol/remote-command';
 export * from './models/pricing';
 export * from './agents';
 export * from './integrations';
+export * from './skills';
 export * from './types/file-change';
 export * from './types/streaming';
 export * from './api-url';

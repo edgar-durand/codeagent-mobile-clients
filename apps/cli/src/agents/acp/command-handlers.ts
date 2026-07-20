@@ -29,6 +29,7 @@ import type { HistoryService } from '../../services/history.service';
 import type { TurnFileAggregator } from '../../services/turn-files/turn-file-aggregator';
 import { beadsActionFromPayload } from '../../beads/wiring';
 import { handleBeadsActionCommand, type StartedBeads } from '../../beads';
+import { configureSkill, type SkillsConfigureAction } from '../../skills/configure';
 import {
   handlers as legacyHandlers,
   dispatchCommand as legacyDispatchCommand,
@@ -665,6 +666,18 @@ async function setModeH(ctx: AcpCommandContext): Promise<void> {
   return;
 }
 
+async function skillsConfigureH(ctx: AcpCommandContext): Promise<void> {
+  const { cmd, relay } = ctx;
+  // On-demand add/remove/list of a curated Agent Skill for THIS session.
+  // Pure filesystem + manifest work (materialize/remove under ~/.claude/skills/
+  // + ~/.codeam/skills.json) — no PTY/ACP-adapter dependency, so no try/catch
+  // recovery dance is needed; `configureSkill` itself is best-effort internally.
+  const payload = cmd.payload as { action?: SkillsConfigureAction; skillId?: string };
+  const res = configureSkill(payload?.action ?? 'list', payload?.skillId);
+  await relay.sendResult(cmd.id, res.ok ? 'completed' : 'failed', res);
+  return;
+}
+
 async function ackEmptyH(ctx: AcpCommandContext): Promise<void> {
   const { cmd, relay } = ctx;
   // Codespace-only / not-applicable in ACP mode. Ack as completed
@@ -1056,6 +1069,7 @@ export const ACP_COMMAND_HANDLERS: Record<string, AcpCommandHandler> = {
   preview_start: previewH,
   preview_stop: previewH,
   save_preview_config: previewH,
+  skills_configure: skillsConfigureH,
 };
 
 /**
