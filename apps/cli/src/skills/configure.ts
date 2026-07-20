@@ -35,9 +35,11 @@ export function configureSkill(
       return { ok: false, installed: [...set], error: `skill ${skillId} has no skillFile rail` };
     }
     set.add(skillId);
-  } else {
+  } else if (action === 'remove') {
     removeSkill(skillId, home);
     set.delete(skillId);
+  } else {
+    return { ok: false, installed: currentInstalled(), error: `unknown action: ${action}` };
   }
   const installed = [...set];
   persistSkillsManifest({ skills: installed.map((id) => ({ id })) });

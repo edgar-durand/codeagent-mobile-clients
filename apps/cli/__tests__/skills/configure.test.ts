@@ -42,4 +42,13 @@ describe('configureSkill', () => {
     expect(r.ok).toBe(false);
     expect(r.error).toMatch(/unknown skill/i);
   });
+  it('rejects unknown action instead of destructive remove', () => {
+    configureSkill('add', 'code-review', home);
+    const r = configureSkill('enable' as any, 'code-review', home);
+    expect(r.ok).toBe(false);
+    expect(r.error).toMatch(/unknown action/i);
+    // Skill must still be installed (not deleted)
+    expect(r.installed).toContain('code-review');
+    expect(fs.existsSync(skillDirFor('code-review', home))).toBe(true);
+  });
 });
