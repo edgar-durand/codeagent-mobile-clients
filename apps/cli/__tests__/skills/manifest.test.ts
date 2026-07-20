@@ -16,7 +16,7 @@ describe('skills manifest', () => {
   it('round-trips a manifest and clears it', () => {
     expect(readSkillsManifest()).toBeNull();
     persistSkillsManifest({ skills: [{ id: 'code-review' }] });
-    expect(skillsManifestPath()).toContain('.codeam/skills.json');
+    expect(skillsManifestPath()).toContain(path.join('.codeam', 'skills.json'));
     expect(readSkillsManifest()).toEqual({ skills: [{ id: 'code-review' }] });
     clearSkillsManifest();
     expect(readSkillsManifest()).toBeNull();
