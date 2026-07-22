@@ -4,6 +4,22 @@ All notable changes to `codeam-cli` are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.61.24] — 2026-07-22
+
+### Chore
+
+- **cli:** Declare yaml as devDependency (skills materialize test)
+- **deps:** Bump actions/setup-node from 4 to 7 (#452)
+- **deps-dev:** Bump typescript from 6.0.3 to 7.0.2 in /apps/cli (#432)
+- **deps-dev:** Bump typescript from 6.0.3 to 7.0.2 in /apps/vsc-plugin (#430)
+- **deps:** Bump org.jetbrains.kotlin.jvm in /apps/jetbrains-plugin (#453)
+- **deps:** Bump ignore from 5.3.2 to 7.0.6 in /apps/cli (#323)
+- **deps:** Bump org.jetbrains.intellij.platform (#454)
+
+### Fixed
+
+- **cli:** Break self-hosted enroll-token crash-loop on identity self-heal
+
 ## [2.61.23] — 2026-07-20
 
 ### Added
