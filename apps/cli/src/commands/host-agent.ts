@@ -57,6 +57,7 @@ function resolveInputPricePerMillion(agentId: string): number {
 import { log } from '../services/logger';
 import { killQuiet } from '../lib/quiet';
 import { getActiveSession } from '../config';
+import { installRelayCrashGuards } from '../lib/process-guards';
 import {
   deleteHostIdentity,
   isHostAuthRejection,
@@ -717,14 +718,28 @@ const defaultResumeSpawner: ChildSpawner = (env, cwd) =>
   });
 
 /**
- * Default self-heal action when the backend rejects the host identity:
- * wipe the sealed identity and exit non-zero so systemd restarts us. On
- * restart, `resolveHostIdentity` redeems a fresh env token if one is
- * present (re-enroll), or fails cleanly if not.
+ * Default self-heal action when the backend rejects the host identity: this
+ * identity can NEVER work again (the host was deleted server-side, or its
+ * token revoked) — the box will fail every future redeem/heartbeat with the
+ * exact same rejection. Disable the systemd unit FIRST (the same best-effort
+ * `systemctl disable --now` the `self_hosted_wipe` de-provision path uses —
+ * see `defaultDisableService`), THEN wipe the sealed identity and exit.
+ *
+ * Disabling here matters for the case where the host was deleted while this
+ * box was OFFLINE and so never received the best-effort `self_hosted_wipe`
+ * push: without it, `Restart=always` would just relaunch us straight back
+ * into the same dead identity, forever (a P0 crash-loop, 2026-07). Calling
+ * `defaultDisableService()` here is safe even when `self_hosted_wipe` already
+ * disabled the unit moments earlier — it's idempotent and best-effort
+ * (wrapped in its own try/catch).
  */
-const defaultOnIdentityRejected = (): void => {
+export const defaultOnIdentityRejected = (): void => {
+  defaultDisableService();
   deleteHostIdentity();
-  log.warn('host-agent', 'host identity rejected by backend — wiped sealed identity, exiting');
+  log.warn(
+    'host-agent',
+    'host identity rejected by backend — disabled service + wiped sealed identity, exiting',
+  );
   process.exit(1);
 };
 
@@ -1323,10 +1338,13 @@ export class HostAgentSupervisor {
       'CODEAM_HOST_LABEL=CodeAgent Box',
       // The enroll token above is a SINGLE-USE bootstrap, but it lives in the
       // container's fixed env — it can't be stripped after first boot like the
-      // self-hosted systemd unit does. This flag tells `resolveHostIdentity`
-      // that on a restart (docker restart / reboot / fleet_start_box wake) an
-      // expired-token redeem is EXPECTED: resume from the sealed identity
-      // instead of dying with "token expired". Not a secret → plain KEY=value.
+      // self-hosted systemd unit does, so on every restart (docker restart /
+      // reboot / fleet_start_box wake) the redeem terminally expires.
+      // `resolveHostIdentity` now resumes from a sealed identity on ANY
+      // terminal enroll-token rejection (not just ephemeral boxes — see its
+      // doc comment), so this flag is no longer load-bearing for that
+      // decision; kept set for observability/back-compat with older CLI
+      // builds that still gate on it. Not a secret → plain KEY=value.
       '-e',
       'CODEAM_ENROLL_EPHEMERAL=1',
       image,
@@ -1933,8 +1951,19 @@ export class HostAgentSupervisor {
  *     identity sealed and returned. Re-enrollment works, and a deleted host
  *     self-replaces.
  *   - Plain service restart / reboot (the SAME token is still in the unit
- *     but was already consumed) → redeem fails → we fall back to the sealed
- *     identity and carry on. No spurious failure on every reboot.
+ *     but was already consumed) → redeem fails TERMINALLY (the backend has
+ *     no way to distinguish "replayed token" from "genuinely bad token" —
+ *     both come back as the same `ENROLL_TOKEN_EXPIRED`/`INVALID` 4xx) → we
+ *     fall back to the sealed identity and carry on, REGARDLESS of whether
+ *     the box is a normal self-hosted install or an ephemeral/fleet one.
+ *     `Restart=always` bakes the token in permanently, so this is the common
+ *     case on every restart after the first successful enroll — treating it
+ *     as fatal is what turned a single dead token into an infinite
+ *     restart-crash loop (P0, 2026-07). If the sealed identity itself turns
+ *     out to be dead too (the host was actually deleted server-side), the
+ *     very next heartbeat gets a genuine auth-rejection and
+ *     `onIdentityRejected` self-heals from there — so resuming here is
+ *     always safe to attempt.
  *
  * Returns null only when there is neither a usable token nor a sealed
  * identity to fall back to.
@@ -1966,20 +1995,26 @@ export async function resolveHostIdentity(
       // a stale/deleted host. Surface a clear message instead so they know
       // to generate a fresh token in the app.
       if (isTerminalEnrollError(err)) {
-        // Fleet boxes carry the single-use enroll token as a FIXED container
-        // env var (it can't be stripped across restarts the way the
-        // self-hosted systemd unit strips it after first enroll). So on ANY
-        // restart — a `docker restart`, a host reboot, a `fleet_start_box`
-        // wake — the token is already expired and this redeem terminally
-        // fails. When the box was flagged ephemeral AND we already hold a
-        // sealed identity from the first successful enroll, RESUME from it
-        // instead of dying: the token was a one-shot bootstrap, not a
-        // re-enroll request. (If that sealed host was actually deleted, the
-        // backend rejects it and `onIdentityRejected` wipes it — self-correcting.)
-        if (existing && process.env.CODEAM_ENROLL_EPHEMERAL === '1') {
+        // A terminal 4xx here almost always means "this token was already
+        // consumed" (a plain restart replaying the same baked-in env var —
+        // the systemd unit's `Restart=always` never strips it after first
+        // enroll), not "the user just typed a bad token". The backend
+        // response is IDENTICAL either way, so the only safe signal we have
+        // is: do we already hold a sealed identity from a prior successful
+        // enroll? If so, RESUME from it instead of dying — this applies to
+        // every self-hosted box, not just fleet/ephemeral ones (fleet boxes
+        // hit this on literally every restart since their token is a fixed
+        // container env var, but a plain self-hosted box hits the exact
+        // same failure mode on its second boot after enroll). If that sealed
+        // identity turns out to be genuinely dead (the host was deleted
+        // server-side), the very next heartbeat gets a real auth-rejection
+        // and `onIdentityRejected` wipes it + disables the service —
+        // self-correcting, so resuming here can never wedge the box.
+        if (existing) {
           log.info(
             'host-agent',
-            'ephemeral enroll token expired on restart; resuming from sealed identity',
+            'enroll token terminally rejected (expired/replayed) but a sealed identity is ' +
+              'present; resuming from it — likely a restart, not a re-enroll',
           );
           return existing;
         }
@@ -2016,6 +2051,14 @@ export async function resolveHostIdentity(
  * `--token=…`, resolves the identity, and runs the supervisor.
  */
 export async function hostAgent(args: string[] = []): Promise<void> {
+  // Daemon crash guard: `hostAgent()` is the ONE long-lived entry point that
+  // didn't install this (unlike `pairAuto`/`start`/`startInfraOnly`), so a
+  // stray unhandled rejection inside the supervisor (a fire-and-forget
+  // heartbeat/progress POST, background provisioning, etc.) surfaced as a
+  // bare uncaught exception — silent process death, immediately restarted
+  // by systemd into the same failure (part of the P0 crash-loop). Idempotent.
+  installRelayCrashGuards();
+
   const tokenArg = args.find((a) => a.startsWith('--token='));
   const enrollToken =
     (tokenArg ? tokenArg.slice('--token='.length).trim() : '') ||
