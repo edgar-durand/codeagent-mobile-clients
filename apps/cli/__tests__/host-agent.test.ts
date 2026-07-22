@@ -4,12 +4,14 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { EventEmitter } from 'node:events';
 import type { ChildProcess } from 'node:child_process';
+import * as childProcessModule from 'node:child_process';
 import type { AgentAuth, AgentMetadata } from '@codeam/shared';
 import { isOwnerOnly } from '../src/lib/restrict-to-owner';
 
 import {
   HostAgentSupervisor,
   resolveHostIdentity,
+  defaultOnIdentityRejected,
   type ChildSpawner,
   setupHeadroomForSelfHosted,
   resolveHeadroomPython,
@@ -40,6 +42,20 @@ import {
   type SealedHostIdentity,
 } from '../src/commands/host/host-client';
 import type { RemoteCommand } from '../src/services/command-relay.service';
+
+// Wrap execFileSync so ONE test (defaultOnIdentityRejected's disableService
+// call) can fake a single invocation without touching every other caller in
+// this file's dependency graph (git-tooling's probe, Headroom teardown, …):
+// the default implementation forwards to the REAL execFileSync, so every
+// existing test's behavior is unchanged unless a test explicitly overrides
+// it with `mockImplementationOnce`. A bare `vi.spyOn` doesn't work here —
+// vitest loads this file as ESM and node:child_process's named exports are
+// non-configurable, so `vi.spyOn(childProcessModule, 'execFileSync')` throws
+// "Module namespace is not configurable in ESM".
+vi.mock('node:child_process', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:child_process')>();
+  return { ...actual, execFileSync: vi.fn(actual.execFileSync) };
+});
 
 // Stub the git-tooling NETWORK ops (gh CLI download + `gh auth login`) so the
 // cloneToken deploy path is deterministic + fast. Without this the cloneToken
@@ -391,7 +407,15 @@ describe('resolveHostIdentity — redeem-first', () => {
     }
   });
 
-  it('still throws on a terminal enroll error when NOT ephemeral (self-hosted re-enroll intent preserved)', async () => {
+  it('resumes from the sealed identity on a terminal enroll error even when NOT ephemeral (plain restart, same consumed token — the P0 crash-loop fix)', async () => {
+    // `Restart=always` bakes CODEAM_ENROLL_TOKEN in permanently on a normal
+    // self-hosted box too (not just fleet/ephemeral ones) — any restart
+    // after the first successful enroll replays the same, now-consumed
+    // token and the backend can't tell that apart from a genuinely bad
+    // token. A sealed identity on disk must win over a terminal redeem
+    // rejection regardless of CODEAM_ENROLL_EPHEMERAL, or the box
+    // crash-loops forever (the confirmed root cause of the first paying
+    // subscriber's P0 outage).
     const fetchMock = vi.fn().mockImplementation(async (url: string) => {
       if (String(url).includes('/api/self-hosted/redeem')) {
         return {
@@ -408,7 +432,9 @@ describe('resolveHostIdentity — redeem-first', () => {
     fs.writeFileSync(hostIdentityPath(), JSON.stringify(IDENTITY));
     delete process.env.CODEAM_ENROLL_EPHEMERAL;
 
-    await expect(resolveHostIdentity('EXPIRED-TOKEN')).rejects.toThrow(/expired or invalid/i);
+    const resolved = await resolveHostIdentity('EXPIRED-TOKEN');
+    expect(resolved).toEqual(IDENTITY);
+    expect(loadHostIdentity()).toEqual(IDENTITY);
   });
 
   it('rethrows (transient) when redeem fails with 5xx AND there is no sealed identity', async () => {
@@ -463,7 +489,7 @@ describe('resolveHostIdentity — terminal enroll errors stop retrying', () => {
     );
   });
 
-  it('throws a clear user-facing message on ENROLL_TOKEN_EXPIRED even when a sealed identity exists', async () => {
+  it('resumes from the sealed identity on ENROLL_TOKEN_EXPIRED instead of throwing, when a sealed identity exists', async () => {
     const fetchMock = vi.fn().mockImplementation(async (url: string) => {
       if (String(url).includes('/api/self-hosted/redeem')) {
         return {
@@ -480,13 +506,15 @@ describe('resolveHostIdentity — terminal enroll errors stop retrying', () => {
     });
     vi.stubGlobal('fetch', fetchMock);
 
-    // Sealed identity exists on disk — terminal errors must NOT fall back to it.
+    // Sealed identity exists on disk — a terminal expiry now falls back to
+    // it (the box's own `Restart=always` replaying an already-consumed
+    // token is indistinguishable, server-side, from a genuinely bad one).
     fs.mkdirSync(path.dirname(hostIdentityPath()), { recursive: true });
     fs.writeFileSync(hostIdentityPath(), JSON.stringify(IDENTITY));
 
-    await expect(resolveHostIdentity('EXPIRED-TOKEN')).rejects.toThrow(
-      /Enrollment token expired or invalid/,
-    );
+    const resolved = await resolveHostIdentity('EXPIRED-TOKEN');
+    expect(resolved).toEqual(IDENTITY);
+    expect(loadHostIdentity()).toEqual(IDENTITY);
   });
 
   it('throws a clear user-facing message on ENROLL_TOKEN_INVALID (400)', async () => {
@@ -1494,6 +1522,35 @@ describe('HostAgentSupervisor — self-heal on rejected host-token', () => {
 
     expect(onIdentityRejected).not.toHaveBeenCalled();
     expect(fs.existsSync(hostIdentityPath())).toBe(true);
+  });
+});
+
+describe('defaultOnIdentityRejected — disables the systemd unit before wiping/exiting', () => {
+  it('calls systemctl disable --now BEFORE deleting the sealed identity and exiting(1)', () => {
+    // A box that missed the best-effort self_hosted_wipe push (it was
+    // offline when the host was deleted) must not restart-loop forever on
+    // an identity that can never work again — the default self-heal action
+    // now disables the systemd unit itself instead of relying solely on the
+    // explicit self_hosted_wipe command to have done it.
+    fs.mkdirSync(path.dirname(hostIdentityPath()), { recursive: true });
+    fs.writeFileSync(hostIdentityPath(), JSON.stringify(IDENTITY));
+
+    const execSpy = vi
+      .mocked(childProcessModule.execFileSync)
+      .mockImplementationOnce(() => Buffer.from(''));
+    const exitSpy = vi
+      .spyOn(process, 'exit')
+      .mockImplementation(((_code?: string | number | null) => {
+        throw new Error(`process.exit(${_code})`);
+      }) as never);
+
+    expect(() => defaultOnIdentityRejected()).toThrow('process.exit(1)');
+
+    expect(execSpy).toHaveBeenCalledWith('systemctl', ['disable', '--now', 'codeam-host-agent'], {
+      stdio: 'ignore',
+    });
+    expect(fs.existsSync(hostIdentityPath())).toBe(false);
+    expect(exitSpy).toHaveBeenCalledWith(1);
   });
 });
 
