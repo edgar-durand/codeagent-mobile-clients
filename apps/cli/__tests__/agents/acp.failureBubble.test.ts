@@ -93,6 +93,25 @@ describe('failureBubble — every failed start_task ends with a visible terminal
         agent: 'kimi',
       }),
     ).toBe(AUTH_FAILURE_MESSAGE);
+    // Claude's OAuth-refresh failure can also arrive as a thrown error / stderr
+    // ("Failed to authenticate: OAuth session expired and could not be
+    // refreshed") — same re-auth bubble, even with partial text streamed.
+    expect(
+      failureBubble({
+        detail: 'Failed to authenticate: OAuth session expired and could not be refreshed',
+        recentStderr: '',
+        hadText: false,
+        agent: 'claude',
+      }),
+    ).toBe(AUTH_FAILURE_MESSAGE);
+    expect(
+      failureBubble({
+        detail: 'boom',
+        recentStderr: 'Failed to authenticate: OAuth session expired and could not be refreshed',
+        hadText: true,
+        agent: 'claude',
+      }),
+    ).toBe(AUTH_FAILURE_MESSAGE);
   });
 
   it('1M-context usage-credits 429 → the reconnect-subscription bubble (not disable-1M)', () => {
@@ -286,6 +305,36 @@ describe('replyIsAuthFailure — auth error arriving as a COMPLETED-turn reply',
   });
   it('does NOT flag a normal short reply', () => {
     expect(replyIsAuthFailure('Done — pushed the commit.')).toBe(false);
+  });
+
+  // Observed twice on a codespace review session: Claude's OAuth subscription
+  // token could no longer be renewed and it printed the failure as a plain
+  // completed-turn reply (no throw, no exit) — so it leaked as chat text with
+  // NO reconnect CTA. Must be classified as an auth failure → re-auth bubble.
+  it('flags the OAuth-refresh failure reply (Failed to authenticate: OAuth session expired…)', () => {
+    expect(
+      replyIsAuthFailure('Failed to authenticate: OAuth session expired and could not be refreshed'),
+    ).toBe(true);
+    // Its parts each anchor independently.
+    expect(replyIsAuthFailure('OAuth session expired')).toBe(true);
+    expect(replyIsAuthFailure('Failed to authenticate.')).toBe(true);
+  });
+
+  it('does NOT flag conversational prose that merely mentions OAuth / refreshing (no failure phrasing)', () => {
+    // Short but clearly discussion, not a failure notice — none of the auth
+    // failure anchors ("failed to authenticate", "oauth session expired",
+    // "…could not be refreshed") appear.
+    expect(
+      replyIsAuthFailure('Your OAuth token auto-refreshes in the background, so you rarely re-auth.'),
+    ).toBe(false);
+    // Long prose about OAuth refresh — the ≤200-char guard also rejects it.
+    const longReply =
+      'When you authenticate with OAuth the CLI stores a refresh token and quietly ' +
+      'renews your session before it expires. If it ever cannot be renewed you would ' +
+      'be asked to log in again, but that is not happening here — I have finished the ' +
+      'refactor across the three services and every test in the suite is now passing.';
+    expect(longReply.length).toBeGreaterThan(200);
+    expect(replyIsAuthFailure(longReply)).toBe(false);
   });
 });
 
