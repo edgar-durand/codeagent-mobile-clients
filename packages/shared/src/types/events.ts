@@ -96,6 +96,11 @@ export const USER_EVENTS = {
   // reviewing a PR (verdict + comment count + findings), driving the mobile
   // completion screen + push. Mirrored in repo A's app-shared events.ts.
   VCS_AGENT_REVIEW_COMPLETE: 'vcs_agent_review_complete',
+  /** PR-review launch progress toast — the "Review with an agent" flow shows a
+   *  toast when the review runs server-side (Inngest). Mobile-only surface,
+   *  produced by api-v2 (the CLI neither produces nor consumes it). Mirrored in
+   *  repo A. */
+  PR_REVIEW_LAUNCH: 'pr_review_launch',
 } as const;
 
 export type UserEventName = (typeof USER_EVENTS)[keyof typeof USER_EVENTS];
