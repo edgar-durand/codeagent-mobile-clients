@@ -35,9 +35,16 @@ export function describeError(err: unknown): string {
  * the ACP text stream — so a turn that fails on it would otherwise leave only
  * a transient flash that's gone on the next `clear`/reconnect. We classify
  * the failure and surface {@link AUTH_FAILURE_MESSAGE} as a persistent bubble.
+ *
+ * Also matches the OAuth-refresh failure Claude prints when its subscription
+ * token can no longer be renewed — "Failed to authenticate: OAuth session
+ * expired and could not be refreshed" — which arrives as a plain COMPLETED-turn
+ * reply (no throw). The "could not be refreshed" alternative is anchored behind
+ * an auth-ish token (session/token/credential/oauth within 40 chars) so a prose
+ * reply about, say, a cache that "could not be refreshed" is not misclassified.
  */
 const AUTH_FAILURE_RE =
-  /invalid authentication credentials|authentication[_ ](?:error|required)|please run \/login|\bunauthorized\b|\binvalid x-api-key\b|oauth token (?:expired|revoked)|(?:api error|http|status)[:\s]+401|\b401\b[^\n]{0,40}(?:unauthor|authenticat|credential|api[_ ]?key|login)/i;
+  /invalid authentication credentials|failed to authenticate|authentication[_ ](?:error|required)|please run \/login|\bunauthorized\b|\binvalid x-api-key\b|oauth (?:token|session) (?:expired|revoked)|(?:session|token|credentials?|oauth)[^\n]{0,40}could not be refreshed|(?:api error|http|status)[:\s]+401|\b401\b[^\n]{0,40}(?:unauthor|authenticat|credential|api[_ ]?key|login)/i;
 
 export function looksLikeAuthFailure(text: string): boolean {
   return AUTH_FAILURE_RE.test(text);
