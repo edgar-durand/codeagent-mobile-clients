@@ -109,6 +109,7 @@ const IDENTITY: SealedHostIdentity = {
   hostId: 'host-123',
   hostToken: 'tok-abc',
   controlPluginId: 'sh-plugin-1',
+  controlPollSecret: 'raw-control-poll-secret',
 };
 
 /** A fake child process that records SIGTERM kills. */
@@ -183,15 +184,28 @@ describe('host enroll — redeem flow', () => {
     expect(typeof body.osInfo.distro).toBe('string');
     expect(typeof body.osInfo.arch).toBe('string');
 
-    // 2) Sealed to ~/.codeam/host-agent.json at mode 0600.
+    // 1b) Enrolled a control-plugin proof-of-possession poll secret:
+    // body carries `pluginSecretHash` = sha256(controlPollSecret) as hex.
+    expect(typeof body.pluginSecretHash).toBe('string');
+    expect(body.pluginSecretHash).toMatch(/^[0-9a-f]{64}$/);
+
+    // 2) Sealed to ~/.codeam/host-agent.json at mode 0600, WITH the raw
+    // control-plugin poll secret persisted next to controlPluginId.
     const file = hostIdentityPath();
     expect(fs.existsSync(file)).toBe(true);
     expect(isOwnerOnly(file)).toBe(true);
-    expect(loadHostIdentity()).toEqual({
+    const sealed = loadHostIdentity();
+    expect(sealed).toMatchObject({
       hostId: 'h1',
       hostToken: 'long-lived',
       controlPluginId: 'sh-cp',
     });
+    expect(typeof sealed?.controlPollSecret).toBe('string');
+    // The sealed raw secret must hash to the enrolled hash (matching scheme).
+    const { createHash } = await import('node:crypto');
+    expect(createHash('sha256').update(sealed!.controlPollSecret as string).digest('hex')).toBe(
+      body.pluginSecretHash,
+    );
 
     // 3) Idempotent — a second enroll does NOT re-redeem.
     await hostEnroll(['--token=ENROLL']);
@@ -346,9 +360,12 @@ describe('resolveHostIdentity — redeem-first', () => {
 
     const resolved = await resolveHostIdentity('FRESH-ENROLL');
 
-    // The fresh token wins — the stale identity is replaced, not reused.
-    expect(resolved).toEqual(fresh);
-    expect(loadHostIdentity()).toEqual(fresh);
+    // The fresh token wins — the stale identity is replaced, not reused. Redeem
+    // now also mints a fresh control-plugin poll secret alongside the identity.
+    expect(resolved).toMatchObject(fresh);
+    expect(typeof resolved?.controlPollSecret).toBe('string');
+    expect(loadHostIdentity()).toMatchObject(fresh);
+    expect(typeof loadHostIdentity()?.controlPollSecret).toBe('string');
     const redeemCall = fetchMock.mock.calls.find((c) =>
       String(c[0]).includes('/api/self-hosted/redeem'),
     );
@@ -610,13 +627,16 @@ describe('HostAgentSupervisor — control channel reuse', () => {
     const stop = vi.fn();
     let capturedPluginId = '';
     let capturedMeta: AgentMetadata | null = null;
+    let capturedPollSecret: string | undefined;
     const makeRelay = (
       pluginId: string,
       _onCommand: (cmd: RemoteCommand) => void | Promise<void>,
       meta: AgentMetadata,
+      pollSecret?: string,
     ) => {
       capturedPluginId = pluginId;
       capturedMeta = meta;
+      capturedPollSecret = pollSecret;
       return { start, stop, sendResult: vi.fn() };
     };
 
@@ -641,6 +661,9 @@ describe('HostAgentSupervisor — control channel reuse', () => {
     expect(start).toHaveBeenCalledTimes(1);
     expect(capturedPluginId).toBe(IDENTITY.controlPluginId);
     expect(capturedMeta).not.toBeNull();
+    // The control channel carries the sealed poll secret so its /pending +
+    // /ack requests are proof-of-possession authenticated.
+    expect(capturedPollSecret).toBe(IDENTITY.controlPollSecret);
 
     sup.stop();
     expect(stop).toHaveBeenCalledTimes(1);

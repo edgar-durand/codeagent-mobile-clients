@@ -148,6 +148,28 @@ describe('CommandRelayService', () => {
     relay.stop();
   });
 
+  it('replays an explicit poll secret as X-Plugin-Poll-Secret on /pending (host-agent control channel)', async () => {
+    // The host-agent control channel has NO session row for its plugin, so it
+    // passes the sealed control poll secret directly (5th ctor arg). It must be
+    // sent verbatim as X-Plugin-Poll-Secret so /pending + /ack are PoP-authed —
+    // closing the PLUGIN_SECRET_REQUIRED window on self_hosted_deploy.
+    vi.mocked(pairing._getJson).mockResolvedValue({ data: [] });
+    const relay = new CommandRelayService(
+      'sh-control-plugin',
+      vi.fn(),
+      META,
+      undefined,
+      'raw-control-poll-secret',
+    );
+    relay.start();
+    await vi.advanceTimersByTimeAsync(2100);
+    expect(pairing._getJson).toHaveBeenCalledWith(
+      expect.stringContaining('/api/commands/pending'),
+      expect.objectContaining({ 'X-Plugin-Poll-Secret': 'raw-control-poll-secret' }),
+    );
+    relay.stop();
+  });
+
   it('sendResult posts to /api/commands/result', async () => {
     const relay = new CommandRelayService('plugin-1', vi.fn(), META);
     await relay.sendResult('cmd1', 'completed', { output: 'done' });

@@ -8,7 +8,12 @@
  * SUPERVISOR — it never touches the session layer:
  *
  *   1. Loads the sealed host identity (`~/.codeam/host-agent.json`), or
- *      redeems the `CODEAM_ENROLL_TOKEN` on first run and seals it.
+ *      redeems the `CODEAM_ENROLL_TOKEN` on first run and seals it. Redeem
+ *      also enrolls a proof-of-possession poll secret for the control plugin
+ *      (`pluginSecretHash` on the redeem body; the raw secret sealed as
+ *      `controlPollSecret`) so the control channel is command-ready the moment
+ *      the host exists — a pushed `self_hosted_deploy` can't race ahead of
+ *      poll-secret enrollment and get a `PLUGIN_SECRET_REQUIRED` ack 401.
  *   2. Opens ONE outbound control channel by REUSING the existing
  *      `CommandRelayService` (the same SSE-pull relay a normal session
  *      uses), subscribed on the host's `controlPluginId`. No new poll
@@ -770,6 +775,8 @@ export interface HostAgentDeps {
     pluginId: string,
     onCommand: (cmd: RemoteCommand) => void | Promise<void>,
     meta: AgentMetadata,
+    /** Control-plugin proof-of-possession poll secret (sealed identity). */
+    pollSecret?: string,
   ) => Pick<CommandRelayService, 'start' | 'stop' | 'sendResult'>;
   /**
    * Called when the host identity is rejected by the backend (host deleted
@@ -913,13 +920,18 @@ export class HostAgentSupervisor {
   start(): void {
     const make =
       this.deps.makeRelay ??
-      ((pluginId, onCommand, meta) => new CommandRelayService(pluginId, onCommand, meta));
+      ((pluginId, onCommand, meta, pollSecret) =>
+        new CommandRelayService(pluginId, onCommand, meta, undefined, pollSecret));
     // Reuse the existing SSE-pull relay as the control channel — exactly
     // like a normal session, but subscribed on the host's controlPluginId.
+    // Pass the sealed control-plugin poll secret so every /pending + /ack
+    // carries `X-Plugin-Poll-Secret`; undefined for an identity sealed by a
+    // pre-secret CLI (see the redeem note above).
     this.relay = make(
       this.identity.controlPluginId,
       (cmd) => this.handleCommand(cmd),
       CONTROL_AGENT_META,
+      this.identity.controlPollSecret,
     );
     this.relay.start();
 
