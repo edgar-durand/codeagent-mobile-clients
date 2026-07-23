@@ -24,6 +24,7 @@
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { randomBytes, createHash } from 'node:crypto';
 import { resolveApiBaseUrl } from '@codeam/shared';
 import type { AgentAuth } from '@codeam/shared';
 import { vercelBypassHeader } from '../../lib/backend-headers';
@@ -131,6 +132,22 @@ export interface SealedHostIdentity {
   hostToken: string;
   /** The relay pluginId the host-agent subscribes to for commands. */
   controlPluginId: string;
+  /**
+   * Raw proof-of-possession poll secret for the CONTROL plugin.
+   *
+   * Generated locally at redeem; its SHA-256 hash is enrolled on the backend
+   * (redeem body `pluginSecretHash`) so the control channel is command-ready
+   * the moment the host exists — a `self_hosted_deploy` can no longer race
+   * ahead of enrollment (the PLUGIN_SECRET_REQUIRED ack 401). Replayed verbatim
+   * as the `X-Plugin-Poll-Secret` header on the control channel's
+   * `/api/commands/pending` + `/api/commands/ack` requests (the relay's
+   * `pollSecretHeader`).
+   *
+   * OPTIONAL for backward-compat: an identity sealed by an OLDER CLI enrolled
+   * no secret (and no hash) — see the reconnect note in host-agent.ts. Undefined
+   * there → the control channel sends no header, exactly as before.
+   */
+  controlPollSecret?: string;
 }
 
 /** Shape of `POST /api/self-hosted/redeem`'s `data`. */
@@ -174,8 +191,16 @@ export function loadHostIdentity(): SealedHostIdentity | null {
       typeof (parsed as Record<string, unknown>).hostToken === 'string' &&
       typeof (parsed as Record<string, unknown>).controlPluginId === 'string'
     ) {
-      const p = parsed as Record<string, string>;
-      return { hostId: p.hostId, hostToken: p.hostToken, controlPluginId: p.controlPluginId };
+      const p = parsed as Record<string, unknown>;
+      return {
+        hostId: p.hostId as string,
+        hostToken: p.hostToken as string,
+        controlPluginId: p.controlPluginId as string,
+        // Optional — absent on identities sealed by a pre-secret CLI.
+        ...(typeof p.controlPollSecret === 'string'
+          ? { controlPollSecret: p.controlPollSecret }
+          : {}),
+      };
     }
     return null;
   } catch {
@@ -327,15 +352,28 @@ export async function redeemEnrollToken(
   token: string,
   label?: string,
 ): Promise<SealedHostIdentity> {
+  // Proof-of-possession secret for the CONTROL plugin. Same generation +
+  // hashing as the interactive pair flow (pair.ts / pair-auto.ts) so the scheme
+  // matches the backend verifier byte-for-byte: a random 32-byte secret,
+  // replayed raw as `X-Plugin-Poll-Secret`, whose SHA-256 hex is enrolled as
+  // `pluginSecretHash`. Enrolling it here makes the control channel
+  // command-ready the instant the host exists — a pushed `self_hosted_deploy`
+  // can no longer beat the host to poll-secret enrollment (the ack 401 bug).
+  const controlPollSecret = randomBytes(32).toString('base64url');
+  const pluginSecretHash = createHash('sha256').update(controlPollSecret).digest('hex');
   const data = await postJson<RedeemResponseData>('/api/self-hosted/redeem', {
     token,
     label: resolveHostLabel(label),
     osInfo: collectOsInfo(),
+    // OPTIONAL + backward-compatible: older backends ignore the unknown field
+    // and keep the pre-existing (no-secret) control-channel behavior.
+    pluginSecretHash,
   });
   return {
     hostId: data.hostId,
     hostToken: data.hostToken,
     controlPluginId: data.controlPluginId,
+    controlPollSecret,
   };
 }
 

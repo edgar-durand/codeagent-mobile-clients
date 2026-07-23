@@ -153,6 +153,17 @@ export class CommandRelayService {
       icon: string;
       installed: boolean;
     }>,
+    /**
+     * Explicit proof-of-possession poll secret for THIS relay's plugin.
+     *
+     * Session relays leave this undefined and let `pollSecretHeader` resolve
+     * the secret from the persisted session (keyed by `pluginId`). The
+     * host-agent's CONTROL channel has no session row — its plugin is not a
+     * session — so it passes the secret directly (persisted in the sealed host
+     * identity as `controlPollSecret`). When set, it takes precedence over the
+     * config lookup and is replayed as `X-Plugin-Poll-Secret`.
+     */
+    private readonly explicitPollSecret?: string,
   ) {}
 
   start(): void {
@@ -450,6 +461,12 @@ export class CommandRelayService {
     // subscribe + poll) so the backend delivers non-destructively and drains
     // only on our ack. Older backends ignore the unknown header (safe).
     const headers: Record<string, string> = { 'X-Codeam-Cmd-Ack': '1' };
+    // An explicit secret (host-agent control channel — no session row exists
+    // for its plugin) wins over the config lookup.
+    if (this.explicitPollSecret) {
+      headers['X-Plugin-Poll-Secret'] = this.explicitPollSecret;
+      return headers;
+    }
     try {
       const secret = loadCliConfig().sessions.find(
         (s) => s.pluginId === this.pluginId,
