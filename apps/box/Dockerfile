@@ -109,11 +109,14 @@ RUN mkdir -p "${AGENT_HOME}" \
     && (HOME="${AGENT_HOME}" bash -c 'curl -fsS  --connect-timeout 15 --max-time 300 https://cursor.com/install | bash' || true) \
     && (HOME="${AGENT_HOME}" bash -c 'curl -fsSL --connect-timeout 15 --max-time 300 https://code.kimi.com/kimi-code/install.sh | bash' || true) \
     && (HOME="${AGENT_HOME}" sh   -c 'curl -fsSL --connect-timeout 15 --max-time 300 https://cli.coderabbit.ai/install.sh | sh' || true) \
-    && echo "verifying agent binaries landed…" \
-    && ls -l "${AGENT_HOME}/.local/bin/claude" \
-             "${AGENT_HOME}/.local/bin/cursor-agent" \
-             "${AGENT_HOME}/.kimi-code/bin/kimi" \
-             "${AGENT_HOME}/.local/bin/coderabbit"
+    && echo "agent binaries present after install (pre-install is a deploy-speed" \
+    && echo "optimization; a missing one is installed on first deploy — NEVER fail the build):" \
+    && for b in "${AGENT_HOME}/.local/bin/claude" \
+                "${AGENT_HOME}/.local/bin/cursor-agent" \
+                "${AGENT_HOME}/.kimi-code/bin/kimi" \
+                "${AGENT_HOME}/.local/bin/coderabbit"; do \
+         if [ -x "$b" ]; then echo "  OK   $b"; else echo "  MISS $b (installs on first deploy)"; fi; \
+       done
 
 # ── aider (pip) ────────────────────────────────────────────────────────────
 # Debian's system Python is PEP-668 "externally managed" → --break-system-packages
