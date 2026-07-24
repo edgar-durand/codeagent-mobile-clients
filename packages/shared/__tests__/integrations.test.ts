@@ -226,6 +226,24 @@ describe('integrations registry', () => {
     });
   });
 
+  it('gitlab is a live oauth_redirect integration in version_control with api + write_repository', () => {
+    expect(isKnownIntegrationId('gitlab')).toBe(true);
+    const gl = getIntegration('gitlab');
+    expect(gl.name).toBe('GitLab');
+    expect(gl.category).toBe('version_control');
+    expect(gl.enabled).toBe(true);
+    // A NORMAL vaulted OAuth integration — NOT connection-backed like github,
+    // because nothing else in the product owns a GitLab connection.
+    expect(gl.auth.kind).toBe('oauth_redirect');
+    expect(gl.auth.connection).toBeUndefined();
+    expect(gl.auth.derivedFrom).toBeUndefined();
+    // `api` is the only GitLab scope granting MR write; `write_repository` is
+    // the git-over-HTTPS rail. ⚠️ Changing these forces every user to re-auth.
+    expect(gl.auth.scopes).toEqual(['api', 'write_repository']);
+    // No MCP — the MR surface is backend-side, same as github.
+    expect(gl.delivery).toEqual({});
+  });
+
   it('github is a live CONNECTION integration in version_control — owns its actions', () => {
     // GitHub is the code substrate, and was historically the ONE connection
     // outside the registry (hand-written row, illegal in `integrationIds`).
@@ -280,6 +298,7 @@ describe('integrations registry', () => {
   it('every integration declares its category (Start-from-Work-Item groups by it)', () => {
     const expected: Record<string, string> = {
       github: 'version_control',
+      gitlab: 'version_control',
       jira: 'tracker',
       linear: 'tracker',
       azure_devops: 'tracker',
@@ -303,7 +322,10 @@ describe('integrations registry', () => {
       'linear',
     ]);
     expect(getIntegrationsByCategory('design').map((m) => m.id)).toEqual([]);
-    expect(getIntegrationsByCategory('version_control').map((m) => m.id)).toEqual(['github']);
+    expect(getIntegrationsByCategory('version_control').map((m) => m.id).sort()).toEqual([
+      'github',
+      'gitlab',
+    ]);
   });
 });
 
