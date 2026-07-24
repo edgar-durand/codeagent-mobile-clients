@@ -71,9 +71,12 @@ RUN apt-get update \
         build-essential \
     && rm -rf /var/lib/apt/lists/*
 
-# The non-root box user + the volume mount point — created UP FRONT so the
-# in-place chown in the npm RUN below can target `box`.
-ENV HOME=/home/box
+# The non-root box user — created UP FRONT so the in-place chown in the npm RUN
+# below can target `box`. ⚠️ Do NOT set `ENV HOME=/home/box` here: the build's
+# root RUNs (codeam --version, etc.) would then write config/telemetry to
+# /home/box/.codeam as ROOT (0700) → the runtime `box` user gets EACCES on
+# host-agent.json and the box crash-loops. HOME stays /root during the build;
+# it's set to /home/box only at the very end (below).
 RUN useradd --create-home --home-dir /home/box box
 
 # ── codeam-cli + npm-global agents + Beads (→ /usr/local, box-owned) ───────
@@ -166,6 +169,13 @@ PY
 
 # ── PATH: expose the curl-installer bin dirs under the runtime HOME=/home/box ─
 ENV PATH="/opt/agents/.local/bin:/opt/agents/.kimi-code/bin:/opt/agents/bin:${PATH}"
+
+# Runtime HOME + final ownership. Set HOME here (NOT earlier — see the useradd
+# note) so the box's sealed identity lands in /home/box/.codeam. `chown -R
+# /home/box` guarantees `box` owns its entire home even if a build step left a
+# root-owned dotdir there; it's a tiny tree (skeleton + telemetry), no COW bloat.
+ENV HOME=/home/box
+RUN chown -R box:box /home/box
 
 USER box
 WORKDIR /home/box
