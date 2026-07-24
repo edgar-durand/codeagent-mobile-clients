@@ -58,6 +58,12 @@ FROM node:22-slim
 # python3/python3-pip/python3-venv: aider + headroom are pip packages, and the
 #   rescued project's own native-addon build (node-gyp) needs python3.
 # build-essential: C toolchain for node-gyp / native pip wheels.
+# ⚠️ procps (`ps`): LOAD-BEARING for Beads. node:slim ships NO `ps`, and both
+#   Dolt (port-conflict check) and bd's shared-server management enumerate
+#   processes — without `ps`, Dolt reports "port 3308 is busy but cannot identify
+#   the process", bd starts a COMPETING dolt server, and beads provisioning fails
+#   ("shared dolt sql-server not up — beads disabled"). apt/dpkg can't run inside
+#   the running box (--cap-drop ALL + no-new-privileges), so it MUST be baked here.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         git \
@@ -69,6 +75,7 @@ RUN apt-get update \
         python3-pip \
         python3-venv \
         build-essential \
+        procps \
     && rm -rf /var/lib/apt/lists/*
 
 # The non-root box user — created UP FRONT so the in-place chown in the npm RUN
