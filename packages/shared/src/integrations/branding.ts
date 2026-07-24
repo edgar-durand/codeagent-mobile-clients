@@ -32,10 +32,10 @@ export interface IntegrationBranding {
 }
 
 export const INTEGRATION_BRANDING: Record<string, IntegrationBranding> = {
-  // GitHub — a brand-only entry (NOT an `IntegrationId`; v1 reuses the
-  // codespaces OAuth token rather than exposing GitHub as a linkable toolkit).
-  // Present so the PR/MR Command Center surfaces (the review-launch toast, etc.)
-  // render the official GitHub mark from the ONE shared catalog.
+  // GitHub — now a REAL `IntegrationId` (`version_control`, `kind: 'connection'`).
+  // It started life here as a brand-only entry, back when GitHub was rendered by
+  // a hand-written special-case row; the mark is unchanged, it's just also the
+  // catalog row's logo now. Still used by the PR/MR Command Center surfaces.
   github: {
     id: 'github',
     name: 'GitHub',

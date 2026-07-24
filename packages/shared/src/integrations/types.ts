@@ -17,7 +17,8 @@ export type IntegrationId =
   | 'microsoft_teams'
   | 'google_chat'
   | 'discord'
-  | 'github_issues';
+  | 'github_issues'
+  | 'github';
 
 /**
  * `derived` = no link flow of its own: the credential is BORROWED live from a
@@ -26,13 +27,28 @@ export type IntegrationId =
  * there is exactly one source of truth. Such an integration is "linked" iff its
  * source connection exists, and has no Connect/Disconnect action of its own.
  */
-export type IntegrationAuthKind = 'oauth_redirect' | 'oauth_device' | 'api_key' | 'derived';
+/**
+ * `connection` = the integration IS a standing connection whose credential lives
+ * in a `ProviderToken` row rather than the integrations vault, and whose
+ * connect/disconnect flow is owned by ANOTHER module (GitHub's OAuth belongs to
+ * the codespaces rail). It renders and acts like any other connector — the only
+ * difference is which code performs the link.
+ *
+ * Contrast `derived`, which BORROWS such a connection and owns no actions at
+ * all. Both resolve their credential from the same place; only `derived` has no
+ * link flow of its own.
+ */
+export type IntegrationAuthKind =
+  | 'oauth_redirect'
+  | 'oauth_device'
+  | 'api_key'
+  | 'derived'
+  | 'connection';
 
 /**
- * The external connection a `derived` integration borrows its credential from.
- * Deliberately NOT an `IntegrationId` — these connections are owned OUTSIDE the
- * toolkit registry (GitHub's OAuth belongs to the codespaces/VCS rail, which is
- * why `'github'` is not a linkable toolkit id).
+ * A standing connection whose credential lives in a `ProviderToken` row — either
+ * because the integration IS that connection (`kind: 'connection'`) or because
+ * it borrows it (`kind: 'derived'`). Its own id doubles as the source name.
  */
 export type DerivedCredentialSource = 'github';
 
@@ -40,6 +56,7 @@ export type DerivedCredentialSource = 'github';
  *  catalog sections). A future tracker integration joins those features with
  *  ZERO feature code — they resolve sources from the registry by category. */
 export type IntegrationCategory =
+  | 'version_control'
   | 'tracker'
   | 'design'
   | 'comms'
@@ -99,6 +116,11 @@ export interface IntegrationDefinition {
      *  Drives both the backend's credential resolution and the client's
      *  "no connect action, managed by <source>" rendering. */
     derivedFrom?: DerivedCredentialSource;
+    /** For `kind: 'connection'` — the connection this integration IS. Same
+     *  credential lookup as `derivedFrom`, but this one owns its link flow
+     *  (performed by the module that owns the connection, not by the generic
+     *  integrations OAuth path). */
+    connection?: DerivedCredentialSource;
   };
   delivery: IntegrationDelivery;
 }
