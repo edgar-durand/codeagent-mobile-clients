@@ -95,6 +95,15 @@ export const INTEGRATION_BRANDING: Record<string, IntegrationBranding> = {
     logoSvg:
       '<svg width="54" height="54" viewBox="0 0 54 54" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M46 6H8a3.5 3.5 0 0 0-3.5 3.5v26A3.5 3.5 0 0 0 8 39h4.5v8.2a1.3 1.3 0 0 0 2.15 1L26 39h20a3.5 3.5 0 0 0 3.5-3.5v-26A3.5 3.5 0 0 0 46 6z" fill="#00AC47"/><circle cx="19.5" cy="22.5" r="3.1" fill="#fff"/><circle cx="34.5" cy="22.5" r="3.1" fill="#fff"/></svg>',
   },
+  discord: {
+    id: 'discord',
+    name: 'Discord',
+    vendor: 'Discord',
+    tagline: 'Voice, video & text chat',
+    brandColor: '#5865F2',
+    logoSvg:
+      '<svg width="54" height="54" viewBox="0 0 54 54" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M43.6 12.2A38 38 0 0 0 34.1 9.3a26 26 0 0 0-1.2 2.5 35.3 35.3 0 0 0-10.6 0 26 26 0 0 0-1.2-2.5 38 38 0 0 0-9.5 2.9C4.6 21.2 3 30 3.8 38.6a38.4 38.4 0 0 0 11.6 5.9 28 28 0 0 0 2.5-4 24.8 24.8 0 0 1-3.9-1.9c.33-.24.65-.5.95-.75a27.5 27.5 0 0 0 23.5 0c.3.27.62.52.95.75a24.8 24.8 0 0 1-3.9 1.9 28 28 0 0 0 2.5 4 38.3 38.3 0 0 0 11.6-5.9c.94-9.9-1.6-18.6-6.6-26.4zM19.4 33.3c-2.3 0-4.2-2.1-4.2-4.7s1.85-4.7 4.2-4.7 4.24 2.13 4.2 4.7c0 2.6-1.87 4.7-4.2 4.7zm15.3 0c-2.3 0-4.2-2.1-4.2-4.7s1.85-4.7 4.2-4.7 4.24 2.13 4.2 4.7c0 2.6-1.85 4.7-4.2 4.7z" fill="#5865F2"/></svg>',
+  },
   linear: {
     id: 'linear',
     name: 'Linear',
