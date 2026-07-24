@@ -147,6 +147,30 @@ export const INTEGRATION_REGISTRY: Record<IntegrationId, IntegrationDefinition> 
       },
     },
   },
+  github_issues: {
+    id: 'github_issues',
+    name: 'GitHub Issues',
+    icon: 'github_issues',
+    category: 'tracker',
+    // LIVE, and the ONLY integration with NO link flow of its own: the
+    // credential is DERIVED from the GitHub connection the user already made
+    // for codespaces/PRs (`ProviderToken` provider='github-codespaces', which
+    // carries `repo` scope — enough for the whole Issues surface). So there is
+    // no OAuth app, no client id/secret, no Secret Manager entry and nothing
+    // to configuration-gate. The backend auto-provisions the catalog row the
+    // same way `ensureHouseAgentRow` does for the house agent, and resolves
+    // the token live per call rather than vaulting a copy (it can't go stale,
+    // and GitHub token refresh stays owned by exactly one place).
+    enabled: true,
+    auth: { kind: 'derived', derivedFrom: 'github' },
+    // NO MCP server on purpose. Every other tracker needs one to give the agent
+    // tools, but a deployed box ALREADY has an authenticated `gh` on PATH (the
+    // codespace bootstrap exports GH_TOKEN), so `gh issue list/create/comment`
+    // works with zero delivery. That also means nothing to pre-warm and no
+    // third-party MCP package to pin and keep alive. The Start-from-Work-Item
+    // side is served backend-side by the `TrackerProvider`, not by delivery.
+    delivery: {},
+  },
   slack: {
     id: 'slack',
     name: 'Slack',
