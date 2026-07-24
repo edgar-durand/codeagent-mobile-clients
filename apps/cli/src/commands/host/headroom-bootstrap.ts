@@ -9,12 +9,14 @@
 // the shared `spawnHeadroomProxy`). host-agent.ts re-exports the surface.
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import * as os from 'node:os';
 import {
   headroomKindFor,
   HEADROOM_EXTRAS_BY_SURFACE,
   HEADROOM_PIP_COMPANIONS,
   headroomPipPackage,
   headroomModelPredownloadScript,
+  HEADROOM_MODELS,
 } from '@codeam/shared';
 import { log } from '../../services/logger';
 import { spawnHeadroomProxy } from '../../services/headroom/proxy-process';
@@ -189,10 +191,35 @@ export async function getFreeDiskBytes(dir: string): Promise<number | null> {
  * @param runner - Injectable subprocess runner. Defaults to `defaultHeadroomRunner`.
  *                 Tests pass a mock so no real apt/pip runs.
  */
+/**
+ * True when Headroom's Kompress models are ALREADY warmed in the HF cache. The
+ * codeam-box fleet image pre-downloads them into HF_HOME (/opt/hf-cache), so a
+ * deploy on a baked box can skip the ~840 MB download entirely. Filesystem-only
+ * (NO network): checks the canonical `<hub>/models--<org>--<repo>` dir for every
+ * model in the shared manifest — the same cache layout `snapshot_download`
+ * writes, so a hit here guarantees the runtime loader finds them offline.
+ */
+function headroomModelsCached(): boolean {
+  const hubDir =
+    process.env.HUGGINGFACE_HUB_CACHE ||
+    path.join(
+      process.env.HF_HOME || path.join(os.homedir(), '.cache', 'huggingface'),
+      'hub',
+    );
+  return HEADROOM_MODELS.every((m) =>
+    fs.existsSync(path.join(hubDir, `models--${m.repo.replace('/', '--')}`)),
+  );
+}
+
 export async function setupHeadroomForSelfHosted(
   agent: string,
   runner: HeadroomRunner = defaultHeadroomRunner,
-  opts: { extras?: string[]; onProgress?: (step: HeadroomStep) => void } = {},
+  opts: {
+    extras?: string[];
+    onProgress?: (step: HeadroomStep) => void;
+    /** Test seam — override the filesystem "models already warmed" probe. */
+    modelsCached?: () => boolean;
+  } = {},
 ): Promise<boolean> {
   const extras = opts.extras ?? [...HEADROOM_EXTRAS_BY_SURFACE.selfHosted];
   const onProgress = opts.onProgress ?? (() => {});
@@ -267,37 +294,55 @@ export async function setupHeadroomForSelfHosted(
   // attribute 'library' — circular import", wedging every prompt at
   // "Thinking…"). ONNX is lighter (~1.5 GB total) and robust. All best-effort +
   // bounded: a box too small falls back to launching the agent direct.
-  onProgress('pip');
-  const headroomPkg = headroomPipPackage(extras);
-  const installOk = await pipInstall([headroomPkg, ...SERVER_DEPS], [], ENGINE_INSTALL_TIMEOUT_MS);
-  if (!installOk) {
-    log.warn('host-agent', `headroom engine install failed (${headroomPkg}) — skipping Headroom`);
-    return false;
-  }
-  log.info('host-agent', `headroom + ONNX engines installed (${headroomPkg})`);
+  // ── Fast path: a PRE-BAKED box already ships headroom + the warmed model ──
+  // The codeam-box fleet image installs headroom-ai and pre-downloads the
+  // Kompress model into HF_HOME. When BOTH are already present we skip the pip
+  // install AND the ~840 MB model download entirely — re-running them is a slow
+  // no-op at best and a network round-trip / re-download at worst. This is what
+  // makes pre-baking the image actually pay off: a deploy on a baked box goes
+  // straight to `headroom init` + proxy warm-start. (Agents/beads/dolt already
+  // skip-if-present via findInPath/which; this closes the gap for headroom.)
+  const modelsCached = opts.modelsCached ?? headroomModelsCached;
+  if (runner.which('headroom') !== null && modelsCached()) {
+    log.info(
+      'host-agent',
+      'headroom + Kompress model already present (baked image) — skipping pip install + model download',
+    );
+    onProgress('pip');
+    onProgress('model');
+  } else {
+    onProgress('pip');
+    const headroomPkg = headroomPipPackage(extras);
+    const installOk = await pipInstall([headroomPkg, ...SERVER_DEPS], [], ENGINE_INSTALL_TIMEOUT_MS);
+    if (!installOk) {
+      log.warn('host-agent', `headroom engine install failed (${headroomPkg}) — skipping Headroom`);
+      return false;
+    }
+    log.info('host-agent', `headroom + ONNX engines installed (${headroomPkg})`);
 
-  onProgress('model');
-  // ── Step 1b: pre-download the Kompress model so the first prompt isn't slow ─
-  // The proxy eager-preloads the model at startup with allow_download=False and
-  // DEFERS the ~840 MB download to the FIRST prompt on a cache miss — that
-  // deferred download blows the agent's 90s idle timeout → "Thinking…" forever
-  // on message 1. Warming the cache here moves the download to setup time. Two
-  // separate HF repos are required: kompress-v2-base (the ONNX model; skip its
-  // .pt/.safetensors torch artifacts) and ModernBERT-base (TOKENIZER ONLY —
-  // Kompress loads its tokenizer from there; skip its model weights). Best-
-  // effort: a download failure leaves Kompress to lazy-load later. Repos +
-  // allow_patterns come from the shared Headroom manifest (byte-identical to
-  // the previous inline literal — guarded by the manifest test).
-  const predownloadPy = headroomModelPredownloadScript();
-  const dl = await runner.run(py, ['-c', predownloadPy], {
-    timeoutMs: ENGINE_INSTALL_TIMEOUT_MS,
-  });
-  log.info(
-    'host-agent',
-    dl.code === 0
-      ? 'Kompress model pre-downloaded — first prompt will be fast'
-      : 'Kompress model pre-download failed (best-effort) — first prompt may be slow',
-  );
+    onProgress('model');
+    // ── Step 1b: pre-download the Kompress model so the first prompt isn't slow ─
+    // The proxy eager-preloads the model at startup with allow_download=False and
+    // DEFERS the ~840 MB download to the FIRST prompt on a cache miss — that
+    // deferred download blows the agent's 90s idle timeout → "Thinking…" forever
+    // on message 1. Warming the cache here moves the download to setup time. Two
+    // separate HF repos are required: kompress-v2-base (the ONNX model; skip its
+    // .pt/.safetensors torch artifacts) and ModernBERT-base (TOKENIZER ONLY —
+    // Kompress loads its tokenizer from there; skip its model weights). Best-
+    // effort: a download failure leaves Kompress to lazy-load later. Repos +
+    // allow_patterns come from the shared Headroom manifest (byte-identical to
+    // the previous inline literal — guarded by the manifest test).
+    const predownloadPy = headroomModelPredownloadScript();
+    const dl = await runner.run(py, ['-c', predownloadPy], {
+      timeoutMs: ENGINE_INSTALL_TIMEOUT_MS,
+    });
+    log.info(
+      'host-agent',
+      dl.code === 0
+        ? 'Kompress model pre-downloaded — first prompt will be fast'
+        : 'Kompress model pre-download failed (best-effort) — first prompt may be slow',
+    );
+  }
 
   // ── Step 2: `headroom init --global <agent>` (only when headroom is on PATH) ──
   // Verify headroom is on PATH before calling init; on some boxes pip installs
