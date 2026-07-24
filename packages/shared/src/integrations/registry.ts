@@ -147,6 +147,30 @@ export const INTEGRATION_REGISTRY: Record<IntegrationId, IntegrationDefinition> 
       },
     },
   },
+  github: {
+    id: 'github',
+    name: 'GitHub',
+    icon: 'github',
+    category: 'version_control',
+    // LIVE. GitHub is the product's code substrate (codespaces + the PR
+    // Command Center), and it was historically the ONE connection outside this
+    // registry: its credential lives in a `ProviderToken` row rather than the
+    // integrations vault, so it was rendered by a hand-written special-case row
+    // and could not legally appear in a deploy's `integrationIds` (the manifest
+    // resolver rejects unknown ids — a recurring bug class).
+    //
+    // `kind: 'connection'` closes that gap without re-plumbing OAuth: the entry
+    // makes GitHub a first-class, categorised catalog row whose credential the
+    // backend resolves from the SAME `ProviderToken` it always used, while the
+    // connect/disconnect flow stays owned by the codespaces rail (the clients
+    // route those two actions there). ⚠️ It is a REAL connection with a REAL
+    // disconnect — do NOT treat it like `github_issues`, which merely derives
+    // from it and has no actions of its own.
+    enabled: true,
+    auth: { kind: 'connection', connection: 'github' },
+    // No MCP: a deployed box already has an authenticated `gh` on PATH.
+    delivery: {},
+  },
   github_issues: {
     id: 'github_issues',
     name: 'GitHub Issues',

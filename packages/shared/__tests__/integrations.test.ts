@@ -226,6 +226,24 @@ describe('integrations registry', () => {
     });
   });
 
+  it('github is a live CONNECTION integration in version_control — owns its actions', () => {
+    // GitHub is the code substrate, and was historically the ONE connection
+    // outside the registry (hand-written row, illegal in `integrationIds`).
+    expect(isKnownIntegrationId('github')).toBe(true);
+    const gh = getIntegration('github');
+    expect(gh.name).toBe('GitHub');
+    expect(gh.category).toBe('version_control');
+    expect(gh.enabled).toBe(true);
+    expect(getEnabledIntegrations().map((m) => m.id)).toContain('github');
+
+    // `connection` — NOT `derived`. It IS the source, so unlike github_issues
+    // it keeps a real connect/disconnect (performed by the codespaces rail).
+    expect(gh.auth.kind).toBe('connection');
+    expect(gh.auth.connection).toBe('github');
+    expect(gh.auth.derivedFrom).toBeUndefined();
+    expect(gh.delivery).toEqual({});
+  });
+
   it('github_issues is a live DERIVED tracker — no link flow, no MCP delivery', () => {
     // The only integration whose credential is borrowed from another
     // connection (the codespaces GitHub OAuth token) instead of being linked
@@ -261,6 +279,7 @@ describe('integrations registry', () => {
 
   it('every integration declares its category (Start-from-Work-Item groups by it)', () => {
     const expected: Record<string, string> = {
+      github: 'version_control',
       jira: 'tracker',
       linear: 'tracker',
       azure_devops: 'tracker',
@@ -284,6 +303,7 @@ describe('integrations registry', () => {
       'linear',
     ]);
     expect(getIntegrationsByCategory('design').map((m) => m.id)).toEqual([]);
+    expect(getIntegrationsByCategory('version_control').map((m) => m.id)).toEqual(['github']);
   });
 });
 
