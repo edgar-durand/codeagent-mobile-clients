@@ -1389,7 +1389,6 @@ export class HostAgentSupervisor {
    */
   private async fleetCreateBox(payload: FleetCreateBoxPayload): Promise<void> {
     const { containerName, limits } = payload;
-    const userId = fleetUserIdFromContainerName(containerName);
     log.info(
       'host-agent',
       `fleet_create_box id=${payload.boxId} name=${containerName} ` +
@@ -1435,14 +1434,96 @@ export class HostAgentSupervisor {
   /** `fleet_start_box` — wake a sleeping box (`docker start`). Idempotent: a
    *  container the host already removed is treated as success. */
   private async fleetStartBox(payload: FleetBoxRefPayload): Promise<void> {
-    log.info('host-agent', `fleet_start_box id=${payload.boxId} name=${payload.containerName}`);
-    const res = await this.docker.run(['start', payload.containerName]);
+    const { containerName } = payload;
+    // SELF-HEAL: when the backend sent recreate credentials (fresh token + api
+    // origin + limits) AND the box's container is running a STALE image (or is
+    // gone), RECREATE it from the current :latest instead of `docker start`ing
+    // the old runtime. The named volume (workspace + sealed identity) is
+    // preserved; a fresh enroll token makes `resolveHostIdentity` re-redeem so
+    // the box picks up control-channel changes its old sealed identity lacked
+    // (e.g. the poll secret). This is how a box created before a breaking
+    // control-plane change heals on its next wake — without it, a wake reuses
+    // the stale container forever (the 2026-07-24 poll-secret hang). A plain
+    // wake (older backend, no creds) or a current image falls through to the
+    // fast `docker start` path below.
+    if (fleetRefCanRecreate(payload) && (await this.fleetBoxImageStale(containerName))) {
+      log.info(
+        'host-agent',
+        `fleet_start_box id=${payload.boxId} name=${containerName} — image stale → recreating from :latest`,
+      );
+      // rm WITHOUT -v → the named volume (and the user's workspace) survives.
+      const rm = await this.docker.run(['rm', '-f', containerName], {
+        timeoutMs: DOCKER_RUN_TIMEOUT_MS,
+      });
+      if (rm.code !== 0 && !isMissingContainerError(rm.stderr)) {
+        log.warn(
+          'host-agent',
+          `fleet_start_box: pre-recreate rm of ${containerName} failed (code=${rm.code}): ` +
+            `${rm.stderr.trim().slice(-200)} — attempting run anyway`,
+        );
+      }
+      const args = buildFleetBoxRunArgs({
+        boxId: payload.boxId,
+        containerName,
+        apiOrigin: payload.apiOrigin,
+        limits: payload.limits,
+      });
+      const res = await this.docker.run(args, {
+        timeoutMs: DOCKER_RUN_TIMEOUT_MS,
+        env: { CODEAM_ENROLL_TOKEN: payload.enrollToken },
+      });
+      if (res.code === 0) {
+        log.info(
+          'host-agent',
+          `fleet box ${containerName} recreated from :latest (${res.stdout.trim().slice(0, 12)})`,
+        );
+      } else {
+        log.warn(
+          'host-agent',
+          `fleet_start_box recreate ${containerName} failed (code=${res.code}): ${res.stderr.trim().slice(-300)}`,
+        );
+      }
+      return;
+    }
+
+    // Fast path — image current (or no recreate creds / local-image override):
+    // just wake the existing container. Idempotent: a container the host already
+    // removed is treated as success.
+    log.info('host-agent', `fleet_start_box id=${payload.boxId} name=${containerName}`);
+    const res = await this.docker.run(['start', containerName]);
     if (res.code !== 0 && !isMissingContainerError(res.stderr)) {
       log.warn(
         'host-agent',
-        `fleet_start_box ${payload.containerName} failed (code=${res.code}): ${res.stderr.trim().slice(-300)}`,
+        `fleet_start_box ${containerName} failed (code=${res.code}): ${res.stderr.trim().slice(-300)}`,
       );
     }
+  }
+
+  /**
+   * True when the box's container was created from an image OTHER than the
+   * current registry `:latest` (a stale runtime), or the container is gone.
+   * Pulls `:latest` first so the comparison is against the freshest image.
+   * Best-effort + fail-SAFE: a local-image override (int test / operator) or any
+   * pull/inspect error returns false → the caller falls back to a plain
+   * `docker start`, so a transient docker hiccup can never wedge a wake.
+   */
+  private async fleetBoxImageStale(containerName: string): Promise<boolean> {
+    // A CODEAM_FLEET_BOX_IMAGE override is a local-only tag that can't be
+    // pulled/compared — never recreate under it.
+    if (process.env.CODEAM_FLEET_BOX_IMAGE) return false;
+    const image = resolveFleetBoxImage();
+    // The image id the container currently runs.
+    const cur = await this.docker.run(['inspect', '--format', '{{.Image}}', containerName]);
+    if (cur.code !== 0) {
+      // Missing container → recreate; any other inspect error → play it safe.
+      return isMissingContainerError(cur.stderr);
+    }
+    // Pull so the local :latest reflects the registry before comparing.
+    const pull = await this.docker.run(['pull', image], { timeoutMs: DOCKER_RUN_TIMEOUT_MS });
+    if (pull.code !== 0) return false;
+    const latest = await this.docker.run(['inspect', '--format', '{{.Id}}', image]);
+    if (latest.code !== 0) return false;
+    return cur.stdout.trim() !== '' && cur.stdout.trim() !== latest.stdout.trim();
   }
 
   /** `fleet_stop_box` — sleep an idle box (`docker stop`). MUST be

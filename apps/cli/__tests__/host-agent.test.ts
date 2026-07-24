@@ -3540,13 +3540,72 @@ describe('HostAgentSupervisor — fleet control plane', () => {
     expect(calls).toHaveLength(0);
   });
 
-  it('fleet_start_box issues `docker start <containerName>`', async () => {
+  it('fleet_start_box issues `docker start <containerName>` (no recreate creds → fast path)', async () => {
     const { docker, calls } = makeDockerMock();
     const sup = new HostAgentSupervisor(IDENTITY, { docker });
 
     await sup.handleCommand(fleetRefCmd('fleet_start_box'));
 
     expect(calls).toEqual([['start', 'codeam-box-clu1a2b3c']]);
+  });
+
+  // A per-argv docker mock so the wake-recreate image-staleness probe can return
+  // different image ids for the container vs the freshly-pulled :latest.
+  function makeImageRouterDocker(containerImageId: string, latestImageId: string) {
+    const calls: string[][] = [];
+    const opts: Array<{ env?: Record<string, string> } | undefined> = [];
+    const docker: DockerRunner = {
+      run: vi.fn(async (args: string[], runOpts) => {
+        calls.push(args);
+        opts.push(runOpts as { env?: Record<string, string> } | undefined);
+        if (args[0] === 'inspect' && args.includes('{{.Image}}')) {
+          return { code: 0, stdout: containerImageId, stderr: '' };
+        }
+        if (args[0] === 'inspect' && args.includes('{{.Id}}')) {
+          return { code: 0, stdout: latestImageId, stderr: '' };
+        }
+        return { code: 0, stdout: 'newcontainerid', stderr: '' };
+      }),
+    };
+    return { docker, calls, opts };
+  }
+
+  const recreateCreds = {
+    enrollToken: 'fresh-wake-token',
+    apiOrigin: 'https://api.codeagent-mobile.com',
+    limits: { memoryMb: 1536, cpus: 1, pidsLimit: 512, diskGb: 5 },
+  };
+
+  it('fleet_start_box WITH recreate creds + STALE image → rm + full run (self-heal, volume preserved)', async () => {
+    const { docker, calls, opts } = makeImageRouterDocker('sha256:OLD', 'sha256:NEW');
+    const sup = new HostAgentSupervisor(IDENTITY, { docker });
+
+    await sup.handleCommand(fleetRefCmd('fleet_start_box', recreateCreds));
+
+    const argv0 = calls.map((c) => c[0]);
+    expect(argv0).toContain('pull'); // pulled :latest before comparing
+    expect(calls).toContainEqual(['rm', '-f', 'codeam-box-clu1a2b3c']); // rm WITHOUT -v → volume kept
+    const run = calls.find((c) => c[0] === 'run');
+    expect(run).toBeDefined();
+    expect(run).toContain('codeam-box-clu1a2b3c'); // recreated with the same container/volume
+    // The fresh enroll token rides opts.env, NEVER argv.
+    const runIdx = calls.findIndex((c) => c[0] === 'run');
+    expect(opts[runIdx]?.env).toEqual({ CODEAM_ENROLL_TOKEN: 'fresh-wake-token' });
+    expect(run).not.toContain('fresh-wake-token');
+    // Did NOT just `docker start` the stale container.
+    expect(argv0).not.toContain('start');
+  });
+
+  it('fleet_start_box WITH recreate creds + CURRENT image → plain `docker start` (no churn)', async () => {
+    const { docker, calls } = makeImageRouterDocker('sha256:SAME', 'sha256:SAME');
+    const sup = new HostAgentSupervisor(IDENTITY, { docker });
+
+    await sup.handleCommand(fleetRefCmd('fleet_start_box', recreateCreds));
+
+    const argv0 = calls.map((c) => c[0]);
+    expect(argv0).toContain('start');
+    expect(argv0).not.toContain('rm');
+    expect(argv0).not.toContain('run');
   });
 
   it('fleet_stop_box issues `docker stop <containerName>`', async () => {
