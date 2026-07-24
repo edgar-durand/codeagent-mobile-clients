@@ -4,6 +4,12 @@ on:
   push:
     branches: [main]
   pull_request:
+  schedule:
+    # Nightly full cross-OS matrix at 06:00 UTC. PRs run Linux-only for a fast,
+    # cheap signal; macOS/Windows coverage (10×/2× the Linux cost) runs here and
+    # on merges to main — see the `matrix-setup` job. Manual runs get it too.
+    - cron: '0 6 * * *'
+  workflow_dispatch:
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -15,6 +21,29 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
+  # Resolves the cross-OS test matrix by event. PRs get Linux-only (fast, cheap
+  # signal on every push); merges to main + the nightly cron + manual dispatch get
+  # the full macOS/Windows coverage. macOS runners bill 10× Linux and Windows 2×,
+  # so keeping them off every-PR iteration is the single biggest CI-cost lever.
+  # macOS/Windows run Node 20 only — their OS-specific steps all gate on Node 20,
+  # so a Node-22 cell there would just burn minutes.
+  matrix-setup:
+    name: Resolve cross-OS matrix
+    runs-on: ubuntu-latest
+    outputs:
+      cli: ${{ steps.set.outputs.cli }}
+      vsc: ${{ steps.set.outputs.vsc }}
+    steps:
+      - id: set
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            echo 'cli=[{"os":"ubuntu-latest","node":"20"},{"os":"ubuntu-latest","node":"22"}]' >> "$GITHUB_OUTPUT"
+            echo 'vsc=["ubuntu-latest"]' >> "$GITHUB_OUTPUT"
+          else
+            echo 'cli=[{"os":"ubuntu-latest","node":"20"},{"os":"ubuntu-latest","node":"22"},{"os":"macos-latest","node":"20"},{"os":"windows-latest","node":"20"}]' >> "$GITHUB_OUTPUT"
+            echo 'vsc=["ubuntu-latest","windows-latest"]' >> "$GITHUB_OUTPUT"
+          fi
+
   commitlint:
     name: Lint PR commit messages
     if: github.event_name == 'pull_request'
@@ -55,20 +84,18 @@ jobs:
 
   cli:
     name: CLI (${{ matrix.os }} · node ${{ matrix.node }})
+    needs: matrix-setup
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
+      # Matrix resolved by `matrix-setup`: PRs run Linux × Node 20/22 only;
+      # main-push + nightly + manual add macOS/Windows on Node 20. macOS covers
+      # the darwin code paths (Keychain probes, /opt/homebrew PATH augment,
+      # Python helper); Node 18 was dropped when vitest 4 / rolldown adopted a
+      # node:util.styleText API absent on 18 (the published CLI still boots on
+      # `engines.node >=18`; only the test runner needs 20+).
       matrix:
-        # 3 OS × 2 Node = 6 jobs. macOS added in #63 — covers the
-        # darwin code paths (Keychain probes, /opt/homebrew PATH
-        # augment, Python helper) that previously only ran indirectly
-        # via the Linux runner. Node 18 was dropped from the test
-        # matrix when vitest 4 / rolldown moved to a node:util.styleText
-        # API that doesn't exist on 18. The published CLI's
-        # `engines.node` still says `>=18` and the binary continues to
-        # boot there; only the *test runner* needs 20+.
-        os: [ubuntu-latest, windows-latest, macos-latest]
-        node: ['20', '22']
+        include: ${{ fromJSON(needs.matrix-setup.outputs.cli) }}
     steps:
       - uses: actions/checkout@v6
 
@@ -305,11 +332,14 @@ jobs:
 
   vsc-plugin:
     name: VS Code plugin (${{ matrix.os }})
+    needs: matrix-setup
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
+      # PRs run Linux only; main-push + nightly + manual add Windows (see
+      # `matrix-setup`).
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        os: ${{ fromJSON(needs.matrix-setup.outputs.vsc) }}
     steps:
       - uses: actions/checkout@v6
 
