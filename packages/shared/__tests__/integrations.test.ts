@@ -239,6 +239,8 @@ describe('integrations registry', () => {
       azure_devops: 'tracker',
       sentry: 'observability',
       slack: 'comms',
+      microsoft_teams: 'comms',
+      google_chat: 'comms',
       notion: 'docs',
       figma: 'design',
     };

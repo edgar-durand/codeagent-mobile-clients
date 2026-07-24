@@ -13,7 +13,9 @@ export type IntegrationId =
   | 'slack'
   | 'notion'
   | 'azure_devops'
-  | 'figma';
+  | 'figma'
+  | 'microsoft_teams'
+  | 'google_chat';
 
 export type IntegrationAuthKind = 'oauth_redirect' | 'oauth_device' | 'api_key';
 
