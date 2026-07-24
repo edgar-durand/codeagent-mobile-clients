@@ -86,6 +86,8 @@ import { provisionAgentCredentials } from './host/agent-provisioning';
 import {
   ensureGhCli,
   ensureGhAuth,
+  ensureGlabCli,
+  ensureGlabAuth,
   defaultGitToolingRunner,
   codeamBinDir,
 } from './host/git-tooling';
@@ -327,6 +329,9 @@ interface HouseProxy {
 interface DeployPayload {
   deployId: string;
   repoOrPath: string;
+  /** Code host of `repoOrPath` when it's a repo — 'github' (default/absent)
+   *  or 'gitlab'. Selects the clone URL scheme + which CLI (gh/glab) we set up. */
+  repoProvider?: 'github' | 'gitlab';
   agentId: string;
   /** Sealed LinkedAgent credential. Present iff NOT a house-agent deploy. */
   sealedAgentAuth?: string;
@@ -423,6 +428,10 @@ function isDeployPayload(p: Record<string, unknown>): p is DeployPayload & Recor
   }
   // cloneToken is optional, but must be a string when present.
   if (p.cloneToken !== undefined && typeof p.cloneToken !== 'string') {
+    return false;
+  }
+  // repoProvider is optional (absent ⇒ github) but constrained when present.
+  if (p.repoProvider !== undefined && p.repoProvider !== 'github' && p.repoProvider !== 'gitlab') {
     return false;
   }
   // headroom fields are optional (back-compat: older backends omit them).
@@ -1469,7 +1478,12 @@ export class HostAgentSupervisor {
       if (!isAbsolutePathTarget(payload.repoOrPath)) {
         report('cloning', 'cloning repository');
       }
-      const cwd = await prepareWorkspace(payload.repoOrPath, payload.deployId, payload.cloneToken);
+      const cwd = await prepareWorkspace(
+        payload.repoOrPath,
+        payload.deployId,
+        payload.cloneToken,
+        payload.repoProvider ?? 'github',
+      );
 
       // Two mutually-exclusive credential shapes (see DeployPayload):
       //   - House agent ("CodeAgent Cloud"): point the underlying agent at
@@ -1556,17 +1570,27 @@ export class HostAgentSupervisor {
       if (payload.cloneToken) {
         try {
           report('preparing', 'configuring git tooling');
-          const ghCmd = await ensureGhCli(defaultGitToolingRunner, payload.cloneToken);
-          if (ghCmd) {
-            // Make the installed binary findable by the agent (OS-agnostic
-            // PATH separator).
-            childEnv.PATH = `${codeamBinDir()}${path.delimiter}${childEnv.PATH}`;
-            await ensureGhAuth(defaultGitToolingRunner, ghCmd, payload.cloneToken);
+          if ((payload.repoProvider ?? 'github') === 'gitlab') {
+            // GitLab deploy → install + authenticate `glab` so the agent can
+            // run `glab mr ...` against the cloned project.
+            const glabCmd = await ensureGlabCli(defaultGitToolingRunner);
+            if (glabCmd) {
+              childEnv.PATH = `${codeamBinDir()}${path.delimiter}${childEnv.PATH}`;
+              await ensureGlabAuth(defaultGitToolingRunner, glabCmd, payload.cloneToken);
+            }
+          } else {
+            const ghCmd = await ensureGhCli(defaultGitToolingRunner, payload.cloneToken);
+            if (ghCmd) {
+              // Make the installed binary findable by the agent (OS-agnostic
+              // PATH separator).
+              childEnv.PATH = `${codeamBinDir()}${path.delimiter}${childEnv.PATH}`;
+              await ensureGhAuth(defaultGitToolingRunner, ghCmd, payload.cloneToken);
+            }
           }
         } catch (e) {
           log.warn(
             'host-agent',
-            `gh tooling setup skipped: ${e instanceof Error ? e.message : String(e)}`,
+            `git tooling setup skipped: ${e instanceof Error ? e.message : String(e)}`,
           );
         }
       }

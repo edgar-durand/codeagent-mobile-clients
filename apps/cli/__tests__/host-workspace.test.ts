@@ -99,9 +99,27 @@ describe('repoCloneUrl — token embedding', () => {
     expect(repoCloneUrl('owner/repo')).toBe('https://github.com/owner/repo.git');
   });
 
-  it('does not embed a token for a non-GitHub host', () => {
+  it('does not embed a github token for a non-GitHub host', () => {
     expect(repoCloneUrl('https://gitlab.com/owner/repo.git', 'ghs_TOKEN')).toBe(
       'https://gitlab.com/owner/repo.git',
+    );
+  });
+
+  it('embeds an oauth2 URL for a GitLab project (nested group) when provider is gitlab', () => {
+    expect(repoCloneUrl('group/sub/web', 'glpat_T', 'gitlab')).toBe(
+      'https://oauth2:glpat_T@gitlab.com/group/sub/web.git',
+    );
+  });
+
+  it('embeds the token into a https gitlab.com URL under the gitlab provider', () => {
+    expect(repoCloneUrl('https://gitlab.com/group/sub/web.git', 'glpat_T', 'gitlab')).toBe(
+      'https://oauth2:glpat_T@gitlab.com/group/sub/web.git',
+    );
+  });
+
+  it('falls back to a plain gitlab.com URL with no token', () => {
+    expect(repoCloneUrl('group/web', undefined, 'gitlab')).toBe(
+      'https://gitlab.com/group/web.git',
     );
   });
 });
