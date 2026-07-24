@@ -4,6 +4,16 @@ All notable changes to the CodeAgent Mobile VS Code extension are documented her
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.61.28] — 2026-07-24
+
+### Added
+
+- **shared:** Add Microsoft Teams + Google Chat to the comms catalog (coming soon)
+
+### CI
+
+- **cli:** Run macOS/Windows only on main + nightly, not every PR
+
 ## [2.61.27] — 2026-07-24
 
 ### Added
