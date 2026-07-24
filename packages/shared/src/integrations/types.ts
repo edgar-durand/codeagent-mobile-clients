@@ -15,7 +15,8 @@ export type IntegrationId =
   | 'azure_devops'
   | 'figma'
   | 'microsoft_teams'
-  | 'google_chat';
+  | 'google_chat'
+  | 'discord';
 
 export type IntegrationAuthKind = 'oauth_redirect' | 'oauth_device' | 'api_key';
 

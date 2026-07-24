@@ -227,6 +227,18 @@ export const INTEGRATION_REGISTRY: Record<IntegrationId, IntegrationDefinition> 
     auth: { kind: 'oauth_redirect' },
     delivery: {},
   },
+  discord: {
+    id: 'discord',
+    name: 'Discord',
+    icon: 'discord',
+    category: 'comms',
+    // COMING SOON — placeholder catalog entry (no OAuth provider / MCP yet). The
+    // agent will post review pings + read channels over the Discord API once the
+    // provider lands. `enabled:false` → dimmed "coming soon" tile.
+    enabled: false,
+    auth: { kind: 'oauth_redirect' },
+    delivery: {},
+  },
   notion: {
     id: 'notion',
     name: 'Notion',

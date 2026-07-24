@@ -241,6 +241,7 @@ describe('integrations registry', () => {
       slack: 'comms',
       microsoft_teams: 'comms',
       google_chat: 'comms',
+      discord: 'comms',
       notion: 'docs',
       figma: 'design',
     };
