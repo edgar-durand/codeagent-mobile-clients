@@ -71,13 +71,43 @@ function githubOwnerRepo(repoRef: string): { owner: string; repo: string } | nul
   return null;
 }
 
-/**
- * Normalise an `owner/repo` (or URL) ref into an https clone URL. When a
- * `cloneToken` is supplied and the target is a GitHub repo, the token is
- * embedded as `x-access-token:<token>` so the clone authenticates.
- */
-export function repoCloneUrl(repoRef: string, cloneToken?: string): string {
+/** The code host a `repoOrPath` repo lives on. */
+export type RepoProvider = 'github' | 'gitlab';
+
+/** Parse a GitLab project PATH (nested groups allowed) out of a ref or URL;
+ *  null if it doesn't look like a gitlab.com target. */
+function gitlabProjectPath(repoRef: string): string | null {
   const trimmed = repoRef.trim();
+  const https = /^https?:\/\/gitlab\.com\/(.+?)(?:\.git)?\/?$/.exec(trimmed);
+  if (https) return https[1];
+  // `group/sub/project` shorthand (>= 2 segments, no scheme/host).
+  if (!/^https?:\/\//.test(trimmed) && !trimmed.startsWith('git@') && trimmed.includes('/')) {
+    return trimmed.replace(/\.git$/, '');
+  }
+  return null;
+}
+
+/**
+ * Normalise an `owner/repo` (GitHub) or `group/sub/project` (GitLab) ref into
+ * an https clone URL. When a `cloneToken` is supplied it's embedded so a
+ * private repo clones cleanly — as `x-access-token:<t>@github.com` for GitHub,
+ * `oauth2:<t>@gitlab.com` for GitLab (GitLab's documented OAuth clone form).
+ */
+export function repoCloneUrl(
+  repoRef: string,
+  cloneToken?: string,
+  provider: RepoProvider = 'github',
+): string {
+  const trimmed = repoRef.trim();
+  if (provider === 'gitlab') {
+    const glPath = gitlabProjectPath(trimmed);
+    if (glPath) {
+      return cloneToken
+        ? `https://oauth2:${cloneToken}@gitlab.com/${glPath}.git`
+        : `https://gitlab.com/${glPath}.git`;
+    }
+    if (/^https?:\/\//.test(trimmed) || trimmed.startsWith('git@')) return trimmed;
+  }
   if (cloneToken) {
     const gh = githubOwnerRepo(trimmed);
     if (gh) {
@@ -142,13 +172,20 @@ export async function configureGitCredentials(
   dest: string,
   repoRef: string,
   cloneToken: string,
+  provider: RepoProvider = 'github',
 ): Promise<void> {
-  const gh = githubOwnerRepo(repoRef.trim());
-  if (!gh || !cloneToken) return;
+  const isGitlab = provider === 'gitlab';
+  // Only proceed for a recognised repo target of this provider.
+  if (isGitlab ? !gitlabProjectPath(repoRef.trim()) : !githubOwnerRepo(repoRef.trim())) return;
+  if (!cloneToken) return;
 
   const credFile = path.join(dest, '.git', 'codeam-credentials');
   // 0600 credentials file holding the token, inside .git (never committed/pushed).
-  fs.writeFileSync(credFile, `https://x-access-token:${cloneToken}@github.com\n`, { mode: 0o600 });
+  // GitLab clones over HTTPS as `oauth2:<token>`; GitHub as `x-access-token:<token>`.
+  const credLine = isGitlab
+    ? `https://oauth2:${cloneToken}@gitlab.com\n`
+    : `https://x-access-token:${cloneToken}@github.com\n`;
+  fs.writeFileSync(credFile, credLine, { mode: 0o600 });
   restrictToOwner(credFile);
 
   const env = nonInteractiveGitEnv();
@@ -172,7 +209,7 @@ export async function configureGitCredentials(
   ]).catch(() => {});
   // Strip the token from the remote URL — the helper supplies it now, and the
   // remote should never carry a secret that ends up in logs / `git remote -v`.
-  await git(['remote', 'set-url', 'origin', repoCloneUrl(repoRef)]).catch(() => {});
+  await git(['remote', 'set-url', 'origin', repoCloneUrl(repoRef, undefined, provider)]).catch(() => {});
 
   // Commit identity: without user.name/user.email, `git commit` aborts ("Please
   // tell me who you are"), so the agent's push would have nothing to send. Set
@@ -182,14 +219,13 @@ export async function configureGitCredentials(
     .then(() => true)
     .catch(() => false);
   if (!hasIdentity) {
-    const who = await fetchGithubIdentity(cloneToken);
-    if (who?.login) {
-      await git(['config', '--local', 'user.name', who.login]).catch(() => {});
-    }
-    const email = who?.email ?? (who?.login ? `${who.login}@users.noreply.github.com` : undefined);
-    if (email) {
-      await git(['config', '--local', 'user.email', email]).catch(() => {});
-    }
+    const who = isGitlab ? null : await fetchGithubIdentity(cloneToken);
+    const login = who?.login ?? 'CodeAgent';
+    await git(['config', '--local', 'user.name', login]).catch(() => {});
+    const email =
+      who?.email ??
+      (isGitlab ? 'agent@codeagent-mobile.com' : `${login}@users.noreply.github.com`);
+    await git(['config', '--local', 'user.email', email]).catch(() => {});
   }
 }
 
@@ -217,6 +253,7 @@ export async function prepareWorkspace(
   repoOrPath: string,
   deployId: string,
   cloneToken?: string,
+  provider: RepoProvider = 'github',
 ): Promise<string> {
   if (isAbsolutePathTarget(repoOrPath)) {
     if (!fs.existsSync(repoOrPath)) {
@@ -229,11 +266,11 @@ export async function prepareWorkspace(
   if (fs.existsSync(path.join(dest, '.git'))) {
     // Already cloned for this deploy — refresh the scoped credential helper so a
     // re-deploy picks up a newer token and push/pull keep working.
-    if (cloneToken) await configureGitCredentials(dest, repoOrPath, cloneToken);
+    if (cloneToken) await configureGitCredentials(dest, repoOrPath, cloneToken, provider);
     return dest;
   }
   fs.mkdirSync(selfHostedWorkspaceRoot(), { recursive: true, mode: 0o700 });
-  const cloneUrl = repoCloneUrl(repoOrPath, cloneToken);
+  const cloneUrl = repoCloneUrl(repoOrPath, cloneToken, provider);
   try {
     await execFileP('git', ['clone', '--depth', '1', cloneUrl, dest], {
       timeout: 120_000,
@@ -248,6 +285,6 @@ export async function prepareWorkspace(
   // Install a persistent, workspace-local git credential helper so the agent's
   // later `git pull` / `git push` authenticate even after the token would have
   // expired from the (now stripped) remote URL — the "access denied" fix.
-  if (cloneToken) await configureGitCredentials(dest, repoOrPath, cloneToken);
+  if (cloneToken) await configureGitCredentials(dest, repoOrPath, cloneToken, provider);
   return dest;
 }

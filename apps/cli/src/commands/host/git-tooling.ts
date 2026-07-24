@@ -200,6 +200,121 @@ export async function ensureGhAuth(
   }
 }
 
+/** Pinned fallback glab version when the releases API can't be reached. */
+const FALLBACK_GLAB_VERSION = '1.54.0';
+const GLAB_RELEASE_API = 'https://gitlab.com/api/v4/projects/gitlab-org%2Fcli/releases/permalink/latest';
+
+/** Resolve the latest published `glab` version (no leading `v`). Best-effort;
+ *  falls back to the pinned version on any failure. */
+async function resolveLatestGlabVersion(): Promise<string> {
+  try {
+    const res = await fetch(GLAB_RELEASE_API, { headers: { Accept: 'application/json' } });
+    if (res.ok) {
+      const body = (await res.json()) as { tag_name?: string };
+      const tag = (body.tag_name ?? '').replace(/^v/, '');
+      if (/^\d+\.\d+\.\d+$/.test(tag)) return tag;
+    }
+  } catch {
+    /* fall through to the pin */
+  }
+  return FALLBACK_GLAB_VERSION;
+}
+
+/**
+ * Install the GitLab CLI (`glab`) so the agent can drive GitLab MRs
+ * (`glab mr ...`) the same way the GitHub deploy gets `gh`. Mirrors
+ * {@link ensureGhCli}: static release binary, no root, PATH-prepend. Returns
+ * the resolved command or null (never throws; git push/pull already work via
+ * the credential helper). glab ships as `glab_<ver>_<os>_<arch>.tar.gz`
+ * (linux/darwin) / `.zip` (windows) with the binary at `bin/glab`.
+ */
+export async function ensureGlabCli(
+  runner: GitToolingRunner,
+  deps: { downloadFn?: (url: string, dest: string) => Promise<boolean> } = {},
+): Promise<string | null> {
+  if (runner.which('glab')) return 'glab';
+  const arch = ghArch(); // same amd64/arm64 mapping
+  const platform = process.platform;
+  if (arch === null || (platform !== 'linux' && platform !== 'darwin' && platform !== 'win32')) {
+    log.warn('host-agent', `glab auto-install unsupported on ${platform}/${process.arch} — skipping`);
+    return null;
+  }
+  const osToken = platform === 'darwin' ? 'darwin' : platform === 'win32' ? 'windows' : 'linux';
+  const ext = platform === 'win32' ? 'zip' : 'tar.gz';
+  const binaryName = platform === 'win32' ? 'glab.exe' : 'glab';
+  const downloadFn = deps.downloadFn ?? download;
+  try {
+    const version = await resolveLatestGlabVersion();
+    const asset = `glab_${version}_${osToken}_${arch}`;
+    const url = `https://gitlab.com/gitlab-org/cli/-/releases/v${version}/downloads/${asset}.${ext}`;
+    const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'codeam-glab-'));
+    const archive = path.join(tmpRoot, `${asset}.${ext}`);
+    if (!(await downloadFn(url, archive))) {
+      log.warn('host-agent', 'glab download failed — skipping (git push/pull still work)');
+      return null;
+    }
+    const extract = await runner.run('tar', ['-xf', archive, '-C', tmpRoot], { timeoutMs: 60_000 });
+    if (extract.code !== 0) {
+      log.warn('host-agent', `glab archive extraction failed (code=${String(extract.code)}) — skipping`);
+      return null;
+    }
+    // glab's archive lays the binary at `bin/glab` (no per-asset subdir).
+    const candidates = [
+      path.join(tmpRoot, 'bin', binaryName),
+      path.join(tmpRoot, asset, 'bin', binaryName),
+      path.join(tmpRoot, binaryName),
+    ];
+    const extractedBin = candidates.find((c) => fs.existsSync(c));
+    if (!extractedBin) {
+      log.warn('host-agent', 'glab binary not found in the extracted archive — skipping');
+      return null;
+    }
+    const binDir = codeamBinDir();
+    fs.mkdirSync(binDir, { recursive: true });
+    const target = path.join(binDir, binaryName);
+    fs.copyFileSync(extractedBin, target);
+    fs.chmodSync(target, 0o755);
+    log.info('host-agent', `glab installed to ${target} (v${version})`);
+    return target;
+  } catch (e) {
+    log.warn('host-agent', `glab auto-install errored: ${e instanceof Error ? e.message : String(e)} — skipping`);
+    return null;
+  }
+}
+
+/**
+ * Authenticate `glab` for gitlab.com with the user's OAuth token — ONLY if it
+ * isn't already logged in (never clobber an existing login on the user's own
+ * box). glab reads the token from `GITLAB_TOKEN` on `glab auth login --hostname
+ * gitlab.com --stdin`. Best-effort, never throws.
+ */
+export async function ensureGlabAuth(
+  runner: GitToolingRunner,
+  glabCmd: string,
+  token: string,
+): Promise<void> {
+  if (!token) return;
+  try {
+    const status = await runner.run(glabCmd, ['auth', 'status'], { timeoutMs: 15_000 });
+    if (status.code === 0) {
+      log.info('host-agent', 'glab already authenticated — leaving the existing login untouched');
+      return;
+    }
+    const login = await runner.run(
+      glabCmd,
+      ['auth', 'login', '--hostname', 'gitlab.com', '--stdin'],
+      { timeoutMs: 20_000, input: `${token}\n` },
+    );
+    if (login.code === 0) {
+      log.info('host-agent', 'glab authenticated with the linked GitLab token');
+    } else {
+      log.warn('host-agent', `glab auth login failed (code=${String(login.code)}) — glab unauthenticated`);
+    }
+  } catch (e) {
+    log.warn('host-agent', `glab auth errored: ${e instanceof Error ? e.message : String(e)}`);
+  }
+}
+
 /**
  * Default runner backed by node's spawn — supports stdin `input` for
  * `gh auth login --with-token`. Mirrors host-agent's `defaultHeadroomRunner`
