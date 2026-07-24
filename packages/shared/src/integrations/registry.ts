@@ -202,6 +202,31 @@ export const INTEGRATION_REGISTRY: Record<IntegrationId, IntegrationDefinition> 
       },
     },
   },
+  microsoft_teams: {
+    id: 'microsoft_teams',
+    name: 'Microsoft Teams',
+    icon: 'microsoft_teams',
+    category: 'comms',
+    // COMING SOON — placeholder catalog entry (no OAuth provider / MCP yet). The
+    // agent will post review pings + read threads AS THE USER over Microsoft Graph
+    // once the provider lands. `enabled:false` renders it as a dimmed "coming
+    // soon" tile inside the (live) comms category.
+    enabled: false,
+    auth: { kind: 'oauth_redirect' },
+    delivery: {},
+  },
+  google_chat: {
+    id: 'google_chat',
+    name: 'Google Chat',
+    icon: 'google_chat',
+    category: 'comms',
+    // COMING SOON — placeholder catalog entry (no OAuth provider / MCP yet). The
+    // agent will post review pings + read spaces AS THE USER over the Google Chat
+    // API once the provider lands. `enabled:false` → dimmed "coming soon" tile.
+    enabled: false,
+    auth: { kind: 'oauth_redirect' },
+    delivery: {},
+  },
   notion: {
     id: 'notion',
     name: 'Notion',
