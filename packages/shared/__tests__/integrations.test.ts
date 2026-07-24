@@ -226,6 +226,33 @@ describe('integrations registry', () => {
     });
   });
 
+  it('github_issues is a live DERIVED tracker — no link flow, no MCP delivery', () => {
+    // The only integration whose credential is borrowed from another
+    // connection (the codespaces GitHub OAuth token) instead of being linked
+    // and vaulted in its own right.
+    expect(isKnownIntegrationId('github_issues')).toBe(true);
+    const gh = getIntegration('github_issues');
+    expect(gh.name).toBe('GitHub Issues');
+    expect(gh.icon).toBe('github_issues');
+    expect(gh.category).toBe('tracker');
+    expect(gh.enabled).toBe(true);
+    expect(getEnabledIntegrations().map((m) => m.id)).toContain('github_issues');
+
+    // Derived auth: no OAuth app, so no scopes and no pasted api_key fields —
+    // the source connection is the whole credential story.
+    expect(gh.auth.kind).toBe('derived');
+    expect(gh.auth.derivedFrom).toBe('github');
+    expect(gh.auth.scopes).toBeUndefined();
+    expect(gh.auth.fields).toBeUndefined();
+
+    // Empty delivery is DELIBERATE (a deployed box already has an
+    // authenticated `gh`), so there is nothing to pre-warm. Guarding it here
+    // means adding an MCP server later has to be a conscious edit.
+    expect(gh.delivery).toEqual({});
+    expect(gh.delivery.mcp).toBeUndefined();
+    expect(gh.delivery.cliEnv).toBeUndefined();
+  });
+
   it('declares the three integration USER_EVENTS names', () => {
     expect(USER_EVENTS.INTEGRATION_LINKED).toBe('integration_linked');
     expect(USER_EVENTS.INTEGRATION_UNLINKED).toBe('integration_unlinked');
@@ -237,6 +264,7 @@ describe('integrations registry', () => {
       jira: 'tracker',
       linear: 'tracker',
       azure_devops: 'tracker',
+      github_issues: 'tracker',
       sentry: 'observability',
       slack: 'comms',
       microsoft_teams: 'comms',
@@ -251,6 +279,7 @@ describe('integrations registry', () => {
     // Helper returns ONLY enabled integrations of the category (figma is dark).
     expect(getIntegrationsByCategory('tracker').map((m) => m.id).sort()).toEqual([
       'azure_devops',
+      'github_issues',
       'jira',
       'linear',
     ]);

@@ -16,9 +16,25 @@ export type IntegrationId =
   | 'figma'
   | 'microsoft_teams'
   | 'google_chat'
-  | 'discord';
+  | 'discord'
+  | 'github_issues';
 
-export type IntegrationAuthKind = 'oauth_redirect' | 'oauth_device' | 'api_key';
+/**
+ * `derived` = no link flow of its own: the credential is BORROWED live from a
+ * connection the user already made elsewhere (see `derivedFrom`). The backend
+ * resolves it per call instead of vaulting a copy, so it can never go stale and
+ * there is exactly one source of truth. Such an integration is "linked" iff its
+ * source connection exists, and has no Connect/Disconnect action of its own.
+ */
+export type IntegrationAuthKind = 'oauth_redirect' | 'oauth_device' | 'api_key' | 'derived';
+
+/**
+ * The external connection a `derived` integration borrows its credential from.
+ * Deliberately NOT an `IntegrationId` — these connections are owned OUTSIDE the
+ * toolkit registry (GitHub's OAuth belongs to the codespaces/VCS rail, which is
+ * why `'github'` is not a linkable toolkit id).
+ */
+export type DerivedCredentialSource = 'github';
 
 /** Grouping used by category-driven surfaces (Start-from-Work-Item picker,
  *  catalog sections). A future tracker integration joins those features with
@@ -79,6 +95,10 @@ export interface IntegrationDefinition {
     scopes?: string[];
     /** For `kind: 'api_key'` — the credential fields the user pastes (no OAuth). */
     fields?: IntegrationApiKeyField[];
+    /** For `kind: 'derived'` — the connection whose credential this borrows.
+     *  Drives both the backend's credential resolution and the client's
+     *  "no connect action, managed by <source>" rendering. */
+    derivedFrom?: DerivedCredentialSource;
   };
   delivery: IntegrationDelivery;
 }
