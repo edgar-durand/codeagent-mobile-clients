@@ -171,6 +171,36 @@ export const INTEGRATION_REGISTRY: Record<IntegrationId, IntegrationDefinition> 
     // No MCP: a deployed box already has an authenticated `gh` on PATH.
     delivery: {},
   },
+  gitlab: {
+    id: 'gitlab',
+    name: 'GitLab',
+    icon: 'gitlab',
+    category: 'version_control',
+    // LIVE — a user-owned gitlab.com application (Confidential) with BOTH env
+    // callbacks registered, so dev/prod share the client and differ only in
+    // GITLAB_OAUTH_REDIRECT_URI. The backend GitLabOAuthProvider is
+    // config-gated (503 if env unset), so this is safe mid-rollout.
+    //
+    // ⚠️ Unlike `github`, this is a NORMAL `oauth_redirect` integration: its
+    // credential is vaulted here rather than living in a ProviderToken, because
+    // nothing else in the product owns a GitLab connection (GitHub's lives on
+    // the codespaces rail, which is why it's `kind: 'connection'`).
+    enabled: true,
+    auth: {
+      kind: 'oauth_redirect',
+      // GitLab has NO per-resource scopes — `api` is the only one that grants
+      // merge-request WRITE (comment / approve / merge / close), so a
+      // read-only alternative would make the whole MR surface useless.
+      // `write_repository` is the git-over-HTTPS rail for the agent's push;
+      // `api` already covers it for user tokens, but it costs nothing on a
+      // consent screen that already says "complete read/write access" and
+      // changing scopes later forces EVERY user to re-authorize.
+      scopes: ['api', 'write_repository'],
+    },
+    // No MCP: the box's `git` is authenticated for push, and the MR surface is
+    // served backend-side by the VCS provider — same shape as `github`.
+    delivery: {},
+  },
   github_issues: {
     id: 'github_issues',
     name: 'GitHub Issues',

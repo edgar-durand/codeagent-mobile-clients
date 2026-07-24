@@ -18,7 +18,8 @@ export type IntegrationId =
   | 'google_chat'
   | 'discord'
   | 'github_issues'
-  | 'github';
+  | 'github'
+  | 'gitlab';
 
 /**
  * `derived` = no link flow of its own: the credential is BORROWED live from a
