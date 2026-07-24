@@ -507,6 +507,19 @@ interface FleetBoxRefPayload {
   containerName: string;
   /** delete only: also remove the named volume (reap). */
   removeVolume?: boolean;
+  /**
+   * start (wake) only — the recreate credentials. When the backend includes a
+   * FRESH enroll token + api origin + limits, `fleet_start_box` can RECREATE
+   * the container from the current `:latest` image (not just `docker start` the
+   * stale one) so a box never stays pinned to an old runtime. The box's sealed
+   * volume (workspace) is preserved; a fresh token makes `resolveHostIdentity`
+   * re-redeem → the box picks up any control-channel changes (e.g. the poll
+   * secret) that the old sealed identity lacked. Absent on an older backend →
+   * the handler falls back to a plain `docker start` (fully back-compatible).
+   */
+  enrollToken?: string;
+  apiOrigin?: string;
+  limits?: FleetCreateBoxPayload['limits'];
 }
 
 /**
@@ -557,7 +570,28 @@ function isFleetBoxRefPayload(
   if (typeof p.boxId !== 'string') return false;
   if (!isFleetContainerName(p.containerName)) return false;
   if (p.removeVolume !== undefined && typeof p.removeVolume !== 'boolean') return false;
+  // Optional recreate credentials (start/wake). Validate ONLY if present — a
+  // plain wake omits them and falls back to `docker start`.
+  if (p.enrollToken !== undefined && (typeof p.enrollToken !== 'string' || !p.enrollToken)) {
+    return false;
+  }
+  if (p.apiOrigin !== undefined && (typeof p.apiOrigin !== 'string' || !p.apiOrigin)) return false;
+  if (p.limits !== undefined && !isFleetLimits(p.limits)) return false;
   return true;
+}
+
+/** True when a start payload carries everything needed to RECREATE the box
+ *  (fresh token + api origin + limits), not just wake the existing container. */
+function fleetRefCanRecreate(
+  p: FleetBoxRefPayload,
+): p is FleetBoxRefPayload & Required<Pick<FleetBoxRefPayload, 'enrollToken' | 'apiOrigin' | 'limits'>> {
+  return (
+    typeof p.enrollToken === 'string' &&
+    p.enrollToken.length > 0 &&
+    typeof p.apiOrigin === 'string' &&
+    p.apiOrigin.length > 0 &&
+    p.limits !== undefined
+  );
 }
 
 /** `codeam-box-<userId>` → `<userId>`. Only called after {@link isFleetContainerName}
@@ -587,6 +621,72 @@ function isMissingVolumeError(stderr: string): boolean {
  */
 function resolveFleetBoxImage(): string {
   return process.env.CODEAM_FLEET_BOX_IMAGE || 'ghcr.io/edgar-durand/codeam-box:latest';
+}
+
+/**
+ * Build the FULL `docker run` argv for a fleet box — the SINGLE source of the
+ * isolation template, shared by `fleet_create_box` AND the wake-recreate path
+ * (`fleet_start_box` when the container's image is stale). Nothing from the wire
+ * flows through as a raw docker arg beyond the already-validated containerName +
+ * numeric limits. The enroll token is delivered via `DockerRunner.run`'s
+ * `opts.env` (a bare `-e CODEAM_ENROLL_TOKEN`), NEVER argv → never visible in
+ * `ps` on the shared host, never logged.
+ */
+function buildFleetBoxRunArgs(p: {
+  boxId: string;
+  containerName: string;
+  apiOrigin: string;
+  limits: FleetCreateBoxPayload['limits'];
+}): string[] {
+  const userId = fleetUserIdFromContainerName(p.containerName);
+  const image = resolveFleetBoxImage();
+  return [
+    'run',
+    '-d',
+    // Registry-default image: always pull so the box never silently runs this
+    // host's STALE cached :latest. An explicit CODEAM_FLEET_BOX_IMAGE override
+    // (int test / operator) keeps docker's default policy — a local-only tag
+    // can't be pulled.
+    ...(process.env.CODEAM_FLEET_BOX_IMAGE ? [] : ['--pull=always']),
+    '--name',
+    p.containerName,
+    '--cap-drop',
+    'ALL',
+    '--security-opt',
+    'no-new-privileges',
+    '--memory',
+    `${p.limits.memoryMb}m`,
+    '--cpus',
+    String(p.limits.cpus),
+    '--pids-limit',
+    String(p.limits.pidsLimit),
+    '--network',
+    'fleet-net',
+    '--label',
+    `com.codeagent.user-id=${userId}`,
+    '--label',
+    `com.codeagent.box-id=${p.boxId}`,
+    '--label',
+    'com.codeagent.created-by=fleet',
+    '-v',
+    `${p.containerName}:/home/box`,
+    // Bare `-e NAME` — docker reads the value from ITS OWN process env (supplied
+    // via opts.env), never from this argv.
+    '-e',
+    'CODEAM_ENROLL_TOKEN',
+    '-e',
+    `CODEAM_API_URL=${p.apiOrigin}`,
+    // User-facing "My Servers" label; read at redeem via resolveHostLabel.
+    '-e',
+    'CODEAM_HOST_LABEL=CodeAgent Box',
+    // The enroll token is single-use but lives in the container's fixed env;
+    // resolveHostIdentity resumes from the sealed identity on a terminal
+    // enroll-token rejection (a plain wake/restart replaying the consumed
+    // token). Kept for observability / older-CLI back-compat.
+    '-e',
+    'CODEAM_ENROLL_EPHEMERAL=1',
+    image,
+  ];
 }
 
 /**
@@ -1313,63 +1413,7 @@ export class HostAgentSupervisor {
           `${rm.stderr.trim().slice(-200)} — attempting run anyway`,
       );
     }
-    const image = resolveFleetBoxImage();
-    const args = [
-      'run',
-      '-d',
-      // Registry-default image: always pull so a new box never silently
-      // runs this host's STALE cached :latest (2026-07-16: cache had CLI
-      // 2.61.4 while the registry had 2.61.9). An explicit
-      // CODEAM_FLEET_BOX_IMAGE override (int test / operator) keeps
-      // docker's default policy — a local-only tag can't be pulled.
-      ...(process.env.CODEAM_FLEET_BOX_IMAGE ? [] : ['--pull=always']),
-      '--name',
-      containerName,
-      '--cap-drop',
-      'ALL',
-      '--security-opt',
-      'no-new-privileges',
-      '--memory',
-      `${limits.memoryMb}m`,
-      '--cpus',
-      String(limits.cpus),
-      '--pids-limit',
-      String(limits.pidsLimit),
-      '--network',
-      'fleet-net',
-      '--label',
-      `com.codeagent.user-id=${userId}`,
-      '--label',
-      `com.codeagent.box-id=${payload.boxId}`,
-      '--label',
-      'com.codeagent.created-by=fleet',
-      '-v',
-      `${containerName}:/home/box`,
-      // Bare `-e NAME` (no `=value`) — docker reads the value from ITS OWN
-      // process env (supplied below via `opts.env`), never from this argv.
-      '-e',
-      'CODEAM_ENROLL_TOKEN',
-      '-e',
-      `CODEAM_API_URL=${payload.apiOrigin}`,
-      // User-facing label for the rescued box's "My Servers" card. Not a
-      // secret → plain `-e KEY=value`. The box's host-agent reads it at
-      // redeem (resolveHostLabel) so a rescued user sees "CodeAgent Box",
-      // not the generic "my-server" or the ugly container cuid.
-      '-e',
-      'CODEAM_HOST_LABEL=CodeAgent Box',
-      // The enroll token above is a SINGLE-USE bootstrap, but it lives in the
-      // container's fixed env — it can't be stripped after first boot like the
-      // self-hosted systemd unit does, so on every restart (docker restart /
-      // reboot / fleet_start_box wake) the redeem terminally expires.
-      // `resolveHostIdentity` now resumes from a sealed identity on ANY
-      // terminal enroll-token rejection (not just ephemeral boxes — see its
-      // doc comment), so this flag is no longer load-bearing for that
-      // decision; kept set for observability/back-compat with older CLI
-      // builds that still gate on it. Not a secret → plain KEY=value.
-      '-e',
-      'CODEAM_ENROLL_EPHEMERAL=1',
-      image,
-    ];
+    const args = buildFleetBoxRunArgs(payload);
     const res = await this.docker.run(args, {
       timeoutMs: DOCKER_RUN_TIMEOUT_MS,
       env: { CODEAM_ENROLL_TOKEN: payload.enrollToken },
