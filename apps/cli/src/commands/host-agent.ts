@@ -1893,6 +1893,22 @@ export class HostAgentSupervisor {
           report('failed', detail ? `agent exited (${code}): ${detail}` : `agent exited (${code})`);
         }
       });
+
+      // ⚠️ A spawn that fails to EXEC (bad path, resource limit, EAGAIN fork)
+      // emits 'error', NOT 'exit' — without this handler that child dies
+      // SILENTLY: the map entry leaks (the supervisor thinks the session is
+      // live) and the backend never sees a 'failed'. Report it + reap the map
+      // exactly like an early exit. (2026-07-25: surfaced while debugging warm-
+      // codespace multi-session — the real cause was the daemon-lock collision
+      // below, but a silent spawn 'error' would mask any future failure the same
+      // way, so both are fixed.)
+      proc.once('error', (err) => {
+        const tracked = this.children.get(payload.deployId)?.proc === proc;
+        if (tracked) this.children.delete(payload.deployId);
+        if (tracked) {
+          report('failed', `agent failed to start: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      });
     } catch (err) {
       // Any failure before/while spawning (clone hang→fast-fail, unseal
       // error, provisioning error) lands here. Report a concise `failed`
