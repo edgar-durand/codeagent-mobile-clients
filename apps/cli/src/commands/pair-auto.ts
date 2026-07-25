@@ -3,7 +3,7 @@ import * as os from 'os';
 import * as path from 'path';
 import { randomUUID, randomBytes, createHash } from 'crypto';
 import { resolveApiBaseUrl, isKnownAgentId } from '@codeam/shared';
-import { addSession, loadCliConfig } from '../config';
+import { addSession, loadCliConfig, type SavedSession } from '../config';
 import { capture, identifyUser } from '../services/telemetry.service';
 import { vercelBypassHeader } from '../lib/backend-headers';
 import { rmIfExistsQuiet } from '../lib/quiet';
@@ -383,7 +383,13 @@ export async function pairAuto(args: string[]): Promise<void> {
     );
   }
 
-  addSession({
+  // Build THIS deploy's session once so we can both persist it AND pin start()
+  // to it. ⚠️ Multi-session (warm codespace): the host-agent spawns one
+  // pair-auto child per deploy, and `addSession` clobbers the single shared
+  // "active" pointer — so we must hand start() this exact session rather than
+  // let it re-read `getActiveSession()` (which every concurrent child would
+  // resolve to the SAME newest one → daemon-lock collision → all but one exit).
+  const claimedSession: SavedSession = {
     id: claimed.sessionId,
     pluginId,
     userName: claimed.user.name,
@@ -394,7 +400,8 @@ export async function pairAuto(args: string[]): Promise<void> {
     // SEC crit1 (#813): persist so boot-time /reconnect proves possession.
     pollSecret,
     agent: claimed.agent,
-  });
+  };
+  addSession(claimedSession);
 
   identifyUser({
     userId: claimed.user.email,
@@ -472,6 +479,8 @@ export async function pairAuto(args: string[]): Promise<void> {
     : null;
   process.once('exit', () => { headroomReporter?.stop(); });
 
-  // Hand off to the same long-running poller `codeam pair` ends with.
-  await start();
+  // Hand off to the same long-running poller `codeam pair` ends with — PINNED to
+  // this deploy's own session so concurrent host-agent children don't collide on
+  // the shared active-session pointer / daemon lock (multi-session, warm codespace).
+  await start(undefined, claimedSession);
 }

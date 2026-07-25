@@ -1,6 +1,6 @@
 import pc from 'picocolors';
 import { AGENT_REGISTRY, type AgentId } from '@codeam/shared';
-import { addSession, getActiveSession, getActiveSessionForAgent, ensurePluginId, loadCliConfig } from '../config';
+import { addSession, getActiveSession, getActiveSessionForAgent, ensurePluginId, loadCliConfig, type SavedSession } from '../config';
 import { acquireDaemonLock } from './pair-auto';
 import { maybeStartHeadroomReporter, maybeResumeLocalHeadroomReporter } from './host-agent';
 import { showIntro, showInfo, showError } from '../ui/banner';
@@ -53,7 +53,10 @@ import { log } from '../services/logger';
  * of behaviour beyond wiring lives in a sibling module under
  * `start/` so this file stays a readable orchestrator.
  */
-export async function start(requestedAgent?: AgentId): Promise<void> {
+export async function start(
+  requestedAgent?: AgentId,
+  presetSession?: SavedSession,
+): Promise<void> {
   // A stray unhandled rejection (a failed backend POST after `socket hang up`
   // / HTTP 404, a fire-and-forget flush) must NOT kill the relay daemon — it
   // leaves a codespace session hung forever with no supervisor to restart it.
@@ -64,9 +67,20 @@ export async function start(requestedAgent?: AgentId): Promise<void> {
   // session for THAT agent — not whatever session was last promoted to the
   // global activeSessionId pointer (which is shared across terminals and
   // gets clobbered every time any terminal pairs a new session).
-  const session = requestedAgent
-    ? getActiveSessionForAgent(requestedAgent)
-    : getActiveSession();
+  //
+  // ⚠️ Warm-codespace multi-session (2026-07-25): a `presetSession` pins THIS
+  // run to a SPECIFIC session, bypassing the shared `getActiveSession()` read.
+  // The host-agent supervisor spawns one `pair-auto` child per deploy; each
+  // `addSession()` clobbers the single "active" pointer, so without a preset all
+  // concurrent children resolve the SAME (newest) session, collide on the
+  // per-session daemon lock (`acquireDaemonLock`), and all but one `exit(0)` —
+  // only ONE session ever survives on the box. Passing the child's own claimed
+  // session makes the lock + the whole run per-deploy → N concurrent sessions.
+  const session = presetSession
+    ? presetSession
+    : requestedAgent
+      ? getActiveSessionForAgent(requestedAgent)
+      : getActiveSession();
   if (!session) {
     if (requestedAgent) {
       const displayName = AGENT_REGISTRY[requestedAgent]?.displayName ?? requestedAgent;
