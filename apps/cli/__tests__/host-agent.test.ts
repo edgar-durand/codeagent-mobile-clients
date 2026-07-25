@@ -872,7 +872,10 @@ describe('HostAgentSupervisor — command routing', () => {
     // config into its own dir (CLAUDE_CONFIG_DIR) so it can NEVER read the box
     // owner's personal credentials. Without this env var the house deploy
     // regresses to a 401 on any box that already has a personal `claude` login.
-    const houseConfigDir = path.join(tmpHome, '.codeam', 'house-claude');
+    // Per-deploy isolation (multi-session): the house config dir is namespaced by
+    // deployId so two concurrent house sessions on one box don't contend on
+    // Claude's mutable config.
+    const houseConfigDir = path.join(tmpHome, '.codeam', 'house-claude', 'deploy-1');
     expect(calls[0].env.CLAUDE_CONFIG_DIR).toBe(houseConfigDir);
     // …and the isolated dir is actually created up-front so Claude writes its
     // own session/config state there instead of falling back to ~/.claude.

@@ -1642,7 +1642,18 @@ export class HostAgentSupervisor {
         // so they never hit this.) Point the house agent at a dedicated, empty
         // config dir so it boots clean in gateway mode (ANTHROPIC_AUTH_TOKEN +
         // the proxy) and NEVER touches the user's personal Claude login.
-        const houseConfigDir = path.join(os.homedir(), '.codeam', 'house-claude');
+        // ⚠️ Multi-session: isolate the config dir PER DEPLOY. Two concurrent
+        // house sessions on one box each run their own Claude — a SHARED
+        // house-claude dir would make them contend on Claude's mutable config
+        // (`.claude.json` project state, `settings.json`), which can corrupt or
+        // cross-wire the two sessions. A per-deploy dir keeps each isolated (and
+        // each still boots clean in gateway mode via ANTHROPIC_AUTH_TOKEN).
+        const houseConfigDir = path.join(
+          os.homedir(),
+          '.codeam',
+          'house-claude',
+          payload.deployId,
+        );
         try {
           fs.mkdirSync(houseConfigDir, { recursive: true, mode: 0o700 });
         } catch {
@@ -1668,6 +1679,15 @@ export class HostAgentSupervisor {
       // `CODESPACES=true` gate in `start.ts`), instead of stalling every turn
       // on a confirmation.
       childEnv = { ...childEnv, CODEAM_AUTO_APPROVE: '1' };
+
+      // ⚠️ Multi-session: mark this child as supervised so `pairAuto` SKIPS the
+      // box-wide "one pair-auto per box" singleton lock. The supervisor spawns
+      // one child per deploy (each a distinct session); the singleton would make
+      // the 2nd+ concurrent deploy defer + exit(0) before claiming — only ONE
+      // session would ever survive (the warm-codespace multi-session bug). Each
+      // child is still protected against a duplicate of its OWN session by the
+      // per-session daemon lock in start().
+      childEnv = { ...childEnv, CODEAM_HOST_AGENT_CHILD: '1' };
 
       // 1b) Install the selected agent's CLI (per-agent strategy from the
       //     backend — same one the codespace bootstrap runs). Best-effort:

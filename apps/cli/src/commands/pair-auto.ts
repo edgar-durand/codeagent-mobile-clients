@@ -356,7 +356,16 @@ export async function pairAuto(args: string[]): Promise<void> {
   installRelayCrashGuards();
   // One pair-auto per codespace — a duplicate launch would split-brain the
   // session (see acquireSingletonLock). Defer to the running owner.
-  if (!acquireSingletonLock()) {
+  //
+  // ⚠️ EXCEPT under a multi-session host-agent supervisor (self-hosted / fleet /
+  // warm codespace): it spawns ONE pair-auto child PER deploy, each a DISTINCT
+  // session, so the box-wide singleton is exactly wrong there — it made the 2nd+
+  // concurrent deploy defer + exit(0) before it could even claim, so only ONE
+  // session ever survived per box (the warm-codespace multi-session bug). The
+  // supervisor marks its children with `CODEAM_HOST_AGENT_CHILD=1`; they skip the
+  // singleton entirely. Each is still protected against a DUPLICATE of its OWN
+  // session by the per-session `acquireDaemonLock(session.id)` in start().
+  if (process.env.CODEAM_HOST_AGENT_CHILD !== '1' && !acquireSingletonLock()) {
     capture('pair_auto_deferred_singleton', {});
     // eslint-disable-next-line no-console
     console.log('  A codeam session is already running here — deferring to it.');
