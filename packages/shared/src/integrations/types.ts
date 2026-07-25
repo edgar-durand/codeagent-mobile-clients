@@ -162,4 +162,10 @@ export interface BrokeredIntegrationToken {
    *  MCP server needs it alongside the PAT (`AZURE_DEVOPS_ORG_URL`). Absent for
    *  non-ADO integrations. */
   orgUrl?: string;
+  /** Discord guild (server) id the app's bot was invited into for this user —
+   *  the `mcp-discord` server scopes to it (`DISCORD_GUILD_ID`). ⚠️ Discord OAuth
+   *  gives NO per-install token (unlike Slack): `accessToken` here is the app's
+   *  single BOT token, injected by the broker from config — the per-user
+   *  credential IS the guildId. Absent for non-Discord integrations. */
+  guildId?: string;
 }

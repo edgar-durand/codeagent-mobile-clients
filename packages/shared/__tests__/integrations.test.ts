@@ -226,6 +226,31 @@ describe('integrations registry', () => {
     });
   });
 
+  it('discord is a LIVE comms integration (OAuth bot-invite, guildId discriminator, mcp-discord delivery)', () => {
+    // Discord — LIVE. Follows the Slack pattern (OAuth redirect) EXCEPT there's
+    // no per-install token: `accessToken` = the app's bot token (broker-injected
+    // from config) and the per-user credential is the invited guild id. The
+    // backend DiscordOAuthProvider is config-gated (503 if env unset).
+    expect(isKnownIntegrationId('discord')).toBe(true);
+    const discord = getIntegration('discord');
+    expect(discord.name).toBe('Discord');
+    expect(discord.icon).toBe('discord');
+    expect(discord.category).toBe('comms');
+    expect(discord.enabled).toBe(true);
+    expect(discord.auth.kind).toBe('oauth_redirect');
+    // `bot` invites the app's bot into the guild; `guilds` reads the guild name.
+    expect(discord.auth.scopes).toEqual(['bot', 'guilds']);
+    // mcp-discord (Node stdio) — bot token via DISCORD_TOKEN, guild scope via
+    // DISCORD_GUILD_ID (env, never argv). PINNED.
+    expect(discord.delivery.mcp?.command).toBe('npx');
+    expect(discord.delivery.mcp?.args).toEqual(['-y', 'mcp-discord@1.3.4']);
+    expect(discord.delivery.mcp?.envMapping).toEqual({
+      DISCORD_TOKEN: 'accessToken',
+      DISCORD_GUILD_ID: 'guildId',
+    });
+    expect(getEnabledIntegrations().map((m) => m.id)).toContain('discord');
+  });
+
   it('gitlab is a live oauth_redirect integration in version_control with api + write_repository', () => {
     expect(isKnownIntegrationId('gitlab')).toBe(true);
     const gl = getIntegration('gitlab');
