@@ -332,6 +332,9 @@ interface DeployPayload {
   /** Code host of `repoOrPath` when it's a repo — 'github' (default/absent)
    *  or 'gitlab'. Selects the clone URL scheme + which CLI (gh/glab) we set up. */
   repoProvider?: 'github' | 'gitlab';
+  /** Git branch/ref to check out after cloning (e.g. a PR head branch for an
+   *  agent PR review). Absent ⇒ the repo's default branch. */
+  branch?: string;
   agentId: string;
   /** Sealed LinkedAgent credential. Present iff NOT a house-agent deploy. */
   sealedAgentAuth?: string;
@@ -432,6 +435,10 @@ function isDeployPayload(p: Record<string, unknown>): p is DeployPayload & Recor
   }
   // repoProvider is optional (absent ⇒ github) but constrained when present.
   if (p.repoProvider !== undefined && p.repoProvider !== 'github' && p.repoProvider !== 'gitlab') {
+    return false;
+  }
+  // branch is optional (absent ⇒ default branch); a string when present.
+  if (p.branch !== undefined && typeof p.branch !== 'string') {
     return false;
   }
   // headroom fields are optional (back-compat: older backends omit them).
@@ -1608,6 +1615,7 @@ export class HostAgentSupervisor {
         payload.deployId,
         payload.cloneToken,
         payload.repoProvider ?? 'github',
+        payload.branch,
       );
 
       // Two mutually-exclusive credential shapes (see DeployPayload):
