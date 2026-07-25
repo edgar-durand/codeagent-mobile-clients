@@ -38,6 +38,7 @@ import {
 } from '../services/pairing.service';
 import { capture, identifyUser, shutdownTelemetry } from '../services/telemetry.service';
 import { provisionBeadsForStart } from '../beads/wiring';
+import { ensureBeadsWorkflowHint } from '../beads/workflow-hint';
 import { buildMcpServersForStart } from '../integrations/provision';
 import { provisionSkillsForStart } from '../skills/provision';
 import type { StartedBeads } from '../beads';
@@ -211,6 +212,10 @@ export async function start(requestedAgent?: AgentId): Promise<void> {
   // `beads_action` commands route into the orchestrator.
   let beads: StartedBeads | null = null;
   const getBeads = (): StartedBeads | null => beads;
+  // STATIC "use bd" instruction — written synchronously NOW (before the agent
+  // spawn, DB-independent) so the agent learns to use beads immediately even
+  // though beads provisioning (below) is no longer gated. See ensureBeadsWorkflowHint.
+  ensureBeadsWorkflowHint();
   const beadsReady = provisionBeadsForStart({
     sessionId: session.id,
     pluginId,
@@ -257,15 +262,23 @@ export async function start(requestedAgent?: AgentId): Promise<void> {
       ? provisionProjectDependencies(cwd).catch(() => undefined)
       : Promise.resolve();
 
-  // Gate the agent spawn on beads + dep provisioning — codespace only. bd's
-  // SessionStart `bd prime` hook must be installed before the agent inits (else
-  // it never learns to use bd), and the docker pull must finish before the
-  // agent spawns (else they OOM together). The onboarding welcome is published
-  // hardcoded by the runner, so this delays ONLY the agent, never the welcome.
-  // Generously bounded so a normal cold pull completes inside the gate (no
-  // overlap); if it overruns, the agent spawns anyway (nice/ionice keeps the
-  // tail from starving it) rather than wedging the session. Local `codeam
-  // start` keeps the original fire-and-forget.
+  // Gate the agent spawn on dep provisioning + the agent binary — codespace only.
+  // ⚠️ BEADS IS NO LONGER GATED (2026-07-25 speed fix). It used to block here so
+  // bd's SessionStart `bd prime` hook landed before the agent inited (else the
+  // agent "never learns to use bd" and writes files instead of `bd remember`).
+  // But beads provisioning is ~20s of SEQUENTIAL Dolt startup (bd init → server →
+  // DB — verified un-parallelizable) and it dominated the whole prebaked-image
+  // deploy. The "learns to use bd" guarantee now comes from a STATIC bd-workflow
+  // instruction written to `~/.claude/CLAUDE.md` synchronously BEFORE the agent
+  // spawn (`ensureBeadsWorkflowHint`, below) — DB-INDEPENDENT, so the agent knows
+  // to use bd the instant it spawns, and beads (server + DB + the dynamic
+  // `bd prime` MEMORIES) finishes in the background (`beadsReady` still runs, just
+  // isn't awaited here). A `bd` command in the first ~15s waits for the shared
+  // server (reuse-if-running) rather than failing. (A runtime write, NOT a baked
+  // file: the fleet box mounts a volume over /home/box that would shadow a bake.)
+  // The docker pull is still gated (else it OOMs with the agent).
+  // The onboarding welcome is published hardcoded by the runner, so this delays
+  // ONLY the agent, never the welcome. Local `codeam start` keeps fire-and-forget.
   if (process.env.CODESPACES === 'true') {
     const GATE_TIMEOUT_MS = 240_000;
     // An agent's launch binary can still be installing when this gate
@@ -309,8 +322,10 @@ export async function start(requestedAgent?: AgentId): Promise<void> {
         ])
       : Promise.resolve(true);
     let gateTimer: ReturnType<typeof setTimeout> | undefined;
+    // Beads intentionally EXCLUDED — it provisions in the background (static bd
+    // instruction is baked into the image, so the agent learns bd without waiting).
     await Promise.race([
-      Promise.all([beadsReady.catch(() => null), depsReady, agentBinaryReady]),
+      Promise.all([depsReady, agentBinaryReady]),
       new Promise<void>((resolve) => {
         gateTimer = setTimeout(resolve, GATE_TIMEOUT_MS);
       }),
@@ -318,7 +333,7 @@ export async function start(requestedAgent?: AgentId): Promise<void> {
     if (gateTimer) clearTimeout(gateTimer);
     log.info(
       'beads',
-      `agent-spawn gate released — beads ${beads ? 'ready' : 'pending'}; project deps provisioned`,
+      `agent-spawn gate released (beads ungated, ${beads ? 'already ready' : 'still provisioning in background'}); project deps provisioned`,
     );
   }
 
