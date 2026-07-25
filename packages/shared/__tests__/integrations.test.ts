@@ -200,6 +200,34 @@ describe('integrations registry', () => {
     expect(getEnabledIntegrations().map((m) => m.id)).toContain('azure_devops');
   });
 
+  it('resend is a live api_key SEND-ONLY comms integration (excluded from conversation sources)', () => {
+    expect(isKnownIntegrationId('resend')).toBe(true);
+    const resend = getIntegration('resend');
+    expect(resend.name).toBe('Resend');
+    expect(resend.icon).toBe('resend');
+    expect(resend.category).toBe('comms');
+    // api_key (like Azure DevOps): the user pastes a Resend API key, no OAuth.
+    expect(resend.auth.kind).toBe('api_key');
+    expect(resend.auth.fields?.map((f) => f.key)).toEqual(['accessToken']);
+    expect(resend.auth.fields?.find((f) => f.key === 'accessToken')?.secret).toBe(true);
+    // Official resend-mcp — key via RESEND_API_KEY (env, never argv). PINNED.
+    expect(resend.delivery.mcp?.command).toBe('npx');
+    expect(resend.delivery.mcp?.args).toEqual(['-y', 'resend-mcp@2.6.1']);
+    expect(resend.delivery.mcp?.envMapping).toEqual({ RESEND_API_KEY: 'accessToken' });
+    expect(resend.enabled).toBe(true);
+    expect(getEnabledIntegrations().map((m) => m.id)).toContain('resend');
+    // ⚠️ SEND-ONLY: a comms integration with no readable threads → excluded from
+    // the From-Conversation source set (comms MINUS sendOnly), but Slack/Discord
+    // (conversational) stay in.
+    expect(resend.sendOnly).toBe(true);
+    const conversationSources = getIntegrationsByCategory('comms')
+      .filter((m) => !m.sendOnly)
+      .map((m) => m.id);
+    expect(conversationSources).not.toContain('resend');
+    expect(conversationSources).toContain('slack');
+    expect(conversationSources).toContain('discord');
+  });
+
   it('figma is a dark integration (pending OAuth-app review) with read-only granular scopes + BYO-token MCP delivery', () => {
     // Figma — DARK pending Figma's OAuth-app review approval. Read-only granular
     // scopes (design-to-code + asset export); the api-v2 FigmaOAuthProvider is
@@ -333,6 +361,7 @@ describe('integrations registry', () => {
       microsoft_teams: 'comms',
       google_chat: 'comms',
       discord: 'comms',
+      resend: 'comms',
       notion: 'docs',
       figma: 'design',
     };
@@ -382,14 +411,13 @@ describe('integration branding catalog', () => {
     }
   });
 
-  it('the COMING SOON set is the expected 17 tools (none already live)', () => {
+  it('the COMING SOON set is the expected 16 tools (none already live)', () => {
     expect([...UPCOMING_INTEGRATION_IDS]).toEqual([
       'gmail',
       'posthog',
       'clickup',
       'figma',
       'trello',
-      'resend',
       'vercel',
       'supabase',
       'asana',

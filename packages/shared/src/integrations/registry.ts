@@ -345,6 +345,45 @@ export const INTEGRATION_REGISTRY: Record<IntegrationId, IntegrationDefinition> 
       },
     },
   },
+  resend: {
+    id: 'resend',
+    name: 'Resend',
+    icon: 'resend',
+    category: 'comms',
+    // LIVE — api_key (like Azure DevOps): the user pastes a Resend API key
+    // (`re_…`); Resend has NO OAuth, so there's no OAuth app / GSM secret /
+    // config-gated 503 — a backend VALIDATOR proves the key against the Resend
+    // API and vaults it. ⚠️ SEND-ONLY email → `sendOnly: true` keeps it OUT of
+    // From-Conversation (comms conversation sources need readable threads; Resend
+    // has none) while still being a linkable comms tool the agent uses via MCP.
+    enabled: true,
+    sendOnly: true,
+    auth: {
+      kind: 'api_key',
+      fields: [
+        {
+          key: 'accessToken',
+          label: 'API Key',
+          placeholder: 're_xxxxxxxxxxxxxxxx',
+          secret: true,
+          help: 'Create in Resend → API Keys (https://resend.com/api-keys). "Sending access" is enough.',
+        },
+      ],
+    },
+    delivery: {
+      mcp: {
+        // The OFFICIAL resend-mcp (Node) in BYO-token mode: the API key is fed
+        // via RESEND_API_KEY (env only, never argv). Version PINNED; bump only
+        // after re-verifying headless. Tools: send email + contacts/broadcasts/
+        // domains.
+        command: 'npx',
+        args: ['-y', 'resend-mcp@2.6.1'],
+        envMapping: {
+          RESEND_API_KEY: 'accessToken',
+        },
+      },
+    },
+  },
   notion: {
     id: 'notion',
     name: 'Notion',

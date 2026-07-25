@@ -17,6 +17,7 @@ export type IntegrationId =
   | 'microsoft_teams'
   | 'google_chat'
   | 'discord'
+  | 'resend'
   | 'github_issues'
   | 'github'
   | 'gitlab';
@@ -108,6 +109,12 @@ export interface IntegrationDefinition {
   icon: string;
   category: IntegrationCategory;
   enabled: boolean;
+  /** A `comms` integration that only SENDS (e.g. Resend email) — it has no
+   *  readable threads, so it is EXCLUDED from From-Conversation's source list
+   *  (which needs `listRecentThreads`/`getThread`/`postReply`) while still being
+   *  a linkable comms tool the agent uses via its MCP delivery. Absent/false for
+   *  conversational comms (Slack, Discord). */
+  sendOnly?: boolean;
   auth: {
     kind: IntegrationAuthKind;
     scopes?: string[];
