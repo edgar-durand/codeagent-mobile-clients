@@ -248,6 +248,43 @@ jobs:
           docker push "${IMAGE}:${VERSION}"
           docker push "${IMAGE}:latest"
 
+      # Keep the wrapper repo's Codespaces PREBUILD in sync with the image we just
+      # pushed. The prebuild snapshots `codeam-box:latest` and only rebuilds on a
+      # devcontainer CONFIG change (not when `:latest` moves), so bump a version
+      # marker to trigger a rebuild. This is LOAD-BEARING for deploy speed: the
+      # codespace deploy skips the ~24s codeam-cli reinstall ONLY when the prebuild's
+      # baked CLI == npm latest — a stale prebuild silently brings the reinstall back.
+      # Best-effort (the image is already published); needs a PAT with `contents:write`
+      # on CodeAgentMobile/codeam-codespace (secret WRAPPER_REPO_PAT).
+      - name: Refresh the wrapper-repo Codespaces prebuild
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.WRAPPER_REPO_PAT }}
+          VERSION: ${{ needs.setup.outputs.version }}
+        run: |
+          if [ -z "${GH_TOKEN}" ]; then
+            echo "::warning::WRAPPER_REPO_PAT not set — skipping prebuild refresh (deploy will reinstall the CLI until the prebuild is refreshed manually)"
+            exit 0
+          fi
+          git clone --depth 1 \
+            "https://x-access-token:${GH_TOKEN}@github.com/CodeAgentMobile/codeam-codespace.git" wrapper
+          cd wrapper
+          f=.devcontainer/devcontainer.json
+          if grep -qE '// prebuild-refresh:' "$f"; then
+            sed -i -E "s|// prebuild-refresh:.*|// prebuild-refresh: codeam-cli ${VERSION}|" "$f"
+          else
+            # insert the marker right after the opening brace
+            sed -i "0,/{/s|{|{\n  // prebuild-refresh: codeam-cli ${VERSION}|" "$f"
+          fi
+          git config user.name "codeam-release"
+          git config user.email "release@codeagent-mobile.com"
+          if git commit -am "chore: refresh prebuild → codeam-box:latest (codeam-cli ${VERSION}) [skip ci]"; then
+            git push
+            echo "Prebuild refresh triggered on CodeAgentMobile/codeam-codespace"
+          else
+            echo "devcontainer.json unchanged — nothing to refresh"
+          fi
+
   trigger-api-integration:
     # Cross-repo regression gate: as soon as codeam-cli@<version>
     # is live on npm, dispatch the api-v2-integration workflow in
