@@ -254,6 +254,7 @@ export async function prepareWorkspace(
   deployId: string,
   cloneToken?: string,
   provider: RepoProvider = 'github',
+  branch?: string,
 ): Promise<string> {
   if (isAbsolutePathTarget(repoOrPath)) {
     if (!fs.existsSync(repoOrPath)) {
@@ -271,8 +272,14 @@ export async function prepareWorkspace(
   }
   fs.mkdirSync(selfHostedWorkspaceRoot(), { recursive: true, mode: 0o700 });
   const cloneUrl = repoCloneUrl(repoOrPath, cloneToken, provider);
+  // A specific branch (e.g. a PR head branch for an agent review) is a shallow
+  // single-branch clone; absent ⇒ the repo's default branch. `--branch` accepts a
+  // branch name or tag; a bad ref surfaces as the clone error below.
+  const cloneArgs = branch
+    ? ['clone', '--depth', '1', '--branch', branch, cloneUrl, dest]
+    : ['clone', '--depth', '1', cloneUrl, dest];
   try {
-    await execFileP('git', ['clone', '--depth', '1', cloneUrl, dest], {
+    await execFileP('git', cloneArgs, {
       timeout: 120_000,
       maxBuffer: 16 * 1024 * 1024,
       env: nonInteractiveGitEnv(),
