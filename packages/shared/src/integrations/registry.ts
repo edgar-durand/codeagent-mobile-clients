@@ -310,12 +310,40 @@ export const INTEGRATION_REGISTRY: Record<IntegrationId, IntegrationDefinition> 
     name: 'Discord',
     icon: 'discord',
     category: 'comms',
-    // COMING SOON — placeholder catalog entry (no OAuth provider / MCP yet). The
-    // agent will post review pings + read channels over the Discord API once the
-    // provider lands. `enabled:false` → dimmed "coming soon" tile.
-    enabled: false,
-    auth: { kind: 'oauth_redirect' },
-    delivery: {},
+    // LIVE — the DiscordOAuthProvider + DISCORD_* secrets (client id/secret,
+    // bot token, per-env redirect) are registered; the backend provider is
+    // config-gated (503 if env unset). Follows the SLACK pattern (OAuth redirect, zero friction),
+    // EXCEPT Discord OAuth gives no per-install token: the user's `bot`-scope
+    // authorize INVITES the app's single bot into their guild, and we store the
+    // returned guild id as the per-user credential. The broker injects the app's
+    // BOT token as `accessToken` (from config), so `DISCORD_TOKEN` = that bot
+    // token and `DISCORD_GUILD_ID` = the user's guild.
+    enabled: true,
+    auth: {
+      kind: 'oauth_redirect',
+      // `bot` invites the app's bot into the user's guild (Guild Install);
+      // `guilds` lets the exchange read the guild name for display. The bot's
+      // channel permissions (View Channels + Read Message History + Send
+      // Messages + Send Messages in Threads) are set on the app's bot, NOT here.
+      // ⚠️ The app's bot MUST have the Message Content privileged intent enabled
+      // or read_messages returns empty content.
+      scopes: ['bot', 'guilds'],
+    },
+    delivery: {
+      mcp: {
+        // mcp-discord (barryyip0625) — Node stdio, BYO bot token headless via the
+        // DISCORD_TOKEN env (never argv). Version PINNED; bump only after
+        // re-verifying headless. Tools: list/read channels + messages, send
+        // message, reply in thread, add reaction. `DISCORD_GUILD_ID` scopes it to
+        // the user's invited guild.
+        command: 'npx',
+        args: ['-y', 'mcp-discord@1.3.4'],
+        envMapping: {
+          DISCORD_TOKEN: 'accessToken',
+          DISCORD_GUILD_ID: 'guildId',
+        },
+      },
+    },
   },
   notion: {
     id: 'notion',
