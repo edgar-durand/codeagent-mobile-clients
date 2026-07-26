@@ -11,18 +11,24 @@
 import { IntegrationTokenClient } from './token-client';
 import type { BrokeredIntegrationToken, IntegrationMcpDelivery } from '@codeam/shared';
 
-/** Fill `{field}` placeholders in each header template from the brokered token
- *  (e.g. `Bearer {accessToken}` → `Bearer phx_…`). A missing field → empty. */
+/** Fill `{field}` placeholders in a template from the brokered token (e.g.
+ *  `Bearer {accessToken}` → `Bearer phx_…`, or `mcp.{host}` → `mcp.datadoghq.com`).
+ *  A missing field → empty. */
+export function fillTemplate(template: string, token: BrokeredIntegrationToken): string {
+  return template.replace(/\{(\w+)\}/g, (_m, field: string) => {
+    const v = token[field as keyof BrokeredIntegrationToken];
+    return typeof v === 'string' ? v : '';
+  });
+}
+
+/** Fill `{field}` placeholders in each header template from the brokered token. */
 export function buildHttpHeaders(
   httpHeaders: Record<string, string> | undefined,
   token: BrokeredIntegrationToken,
 ): Record<string, string> {
   const headers: Record<string, string> = {};
   for (const [name, template] of Object.entries(httpHeaders ?? {})) {
-    headers[name] = template.replace(/\{(\w+)\}/g, (_m, field: string) => {
-      const v = token[field as keyof BrokeredIntegrationToken];
-      return typeof v === 'string' ? v : '';
-    });
+    headers[name] = fillTemplate(template, token);
   }
   return headers;
 }
@@ -44,7 +50,10 @@ export async function runHttpRelay(
   );
 
   const token = await client.getToken(id);
-  const httpTransport = new StreamableHTTPClientTransport(new URL(delivery.httpUrl), {
+  // `httpUrl` may template a per-user field (e.g. Datadog's regional site
+  // `https://mcp.{host}/…`); headers template the credential(s).
+  const url = new URL(fillTemplate(delivery.httpUrl, token));
+  const httpTransport = new StreamableHTTPClientTransport(url, {
     requestInit: { headers: buildHttpHeaders(delivery.httpHeaders, token) },
   });
   const stdioTransport = new StdioServerTransport();

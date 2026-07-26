@@ -19,6 +19,7 @@ export type IntegrationId =
   | 'discord'
   | 'resend'
   | 'posthog'
+  | 'datadog'
   | 'github_issues'
   | 'github'
   | 'gitlab';
@@ -73,8 +74,9 @@ export type IntegrationCategory =
  * field the delivery `envMapping` references.
  */
 export interface IntegrationApiKeyField {
-  /** Maps to a BrokeredIntegrationToken field (`accessToken`, `orgUrl`, …). */
-  key: 'accessToken' | 'orgUrl';
+  /** Maps to a BrokeredIntegrationToken field (`accessToken`, `orgUrl`,
+   *  `appKey`, `host`, …). */
+  key: 'accessToken' | 'orgUrl' | 'appKey' | 'host';
   /** Form label. */
   label: string;
   /** Example / placeholder. */
@@ -106,12 +108,15 @@ export interface IntegrationMcpDelivery {
    *  Merged into the child env BENEATH the credential envMapping. Never secrets. STDIO transport. */
   staticEnv?: Record<string, string>;
   /** HTTP transport — a REMOTE MCP URL (Streamable HTTP). When set, the shim
-   *  relays to it instead of spawning `command`. */
+   *  relays to it instead of spawning `command`. May carry `{field}` placeholders
+   *  filled from the BrokeredIntegrationToken (e.g. a per-user regional host:
+   *  `https://mcp.{host}/…`). */
   httpUrl?: string;
   /** HTTP transport — header name → value TEMPLATE with `{field}` placeholders
    *  filled from the BrokeredIntegrationToken at spawn (e.g.
-   *  `{ Authorization: 'Bearer {accessToken}' }`). The token stays server-side of
-   *  the shim — never on argv. */
+   *  `{ Authorization: 'Bearer {accessToken}' }` or Datadog's
+   *  `{ 'DD-API-KEY': '{accessToken}', 'DD-APPLICATION-KEY': '{appKey}' }`). The
+   *  token stays server-side of the shim — never on argv. */
   httpHeaders?: Record<string, string>;
 }
 
@@ -193,4 +198,8 @@ export interface BrokeredIntegrationToken {
    *  single BOT token, injected by the broker from config — the per-user
    *  credential IS the guildId. Absent for non-Discord integrations. */
   guildId?: string;
+  /** Datadog Application key (user-scoped) — sent alongside the API key
+   *  (`accessToken`) as the `DD-APPLICATION-KEY` header; `host` carries the
+   *  regional site. Absent for non-Datadog integrations. */
+  appKey?: string;
 }

@@ -249,6 +249,28 @@ describe('integrations registry', () => {
     expect(getEnabledIntegrations().map((m) => m.id)).toContain('posthog');
   });
 
+  it('datadog is a live api_key observability integration (2 keys + site) over HTTP transport', () => {
+    expect(isKnownIntegrationId('datadog')).toBe(true);
+    const dd = getIntegration('datadog');
+    expect(dd.name).toBe('Datadog');
+    expect(dd.category).toBe('observability');
+    expect(dd.auth.kind).toBe('api_key');
+    // Three fields: API key + Application key (both secret) + site (plain).
+    expect(dd.auth.fields?.map((f) => f.key)).toEqual(['accessToken', 'appKey', 'host']);
+    expect(dd.auth.fields?.find((f) => f.key === 'accessToken')?.secret).toBe(true);
+    expect(dd.auth.fields?.find((f) => f.key === 'appKey')?.secret).toBe(true);
+    expect(dd.auth.fields?.find((f) => f.key === 'host')?.secret).toBe(false);
+    // HTTP transport — site templated into the URL, both keys as headers.
+    expect(dd.delivery.mcp?.command).toBe('');
+    expect(dd.delivery.mcp?.httpUrl).toBe('https://mcp.{host}/api/unstable/mcp-server/mcp');
+    expect(dd.delivery.mcp?.httpHeaders).toEqual({
+      'DD-API-KEY': '{accessToken}',
+      'DD-APPLICATION-KEY': '{appKey}',
+    });
+    expect(dd.enabled).toBe(true);
+    expect(getEnabledIntegrations().map((m) => m.id)).toContain('datadog');
+  });
+
   it('figma is a dark integration (pending OAuth-app review) with read-only granular scopes + BYO-token MCP delivery', () => {
     // Figma — DARK pending Figma's OAuth-app review approval. Read-only granular
     // scopes (design-to-code + asset export); the api-v2 FigmaOAuthProvider is
@@ -379,6 +401,7 @@ describe('integrations registry', () => {
       github_issues: 'tracker',
       sentry: 'observability',
       posthog: 'observability',
+      datadog: 'observability',
       slack: 'comms',
       microsoft_teams: 'comms',
       google_chat: 'comms',
@@ -433,7 +456,7 @@ describe('integration branding catalog', () => {
     }
   });
 
-  it('the COMING SOON set is the expected 15 tools (none already live)', () => {
+  it('the COMING SOON set is the expected 14 tools (none already live)', () => {
     expect([...UPCOMING_INTEGRATION_IDS]).toEqual([
       'gmail',
       'clickup',
@@ -449,7 +472,6 @@ describe('integration branding catalog', () => {
       'pendo',
       'pagerduty',
       'amplitude',
-      'datadog',
     ]);
     // An upcoming id must NOT collide with a live registry id (that would
     // render it both as AVAILABLE and COMING SOON).
