@@ -50,6 +50,7 @@ export type LinkedAgentId =
   | 'coderabbit'
   | 'gemini'
   | 'kimi'
+  | 'omniroute'
   | typeof HOUSE_AGENT_ID;
 
 export const LINKED_AGENT_IDS: readonly LinkedAgentId[] = [
@@ -60,6 +61,7 @@ export const LINKED_AGENT_IDS: readonly LinkedAgentId[] = [
   'coderabbit',
   'gemini',
   'kimi',
+  'omniroute',
   HOUSE_AGENT_ID,
 ];
 
@@ -96,6 +98,11 @@ export const PUBLIC_TO_INTERNAL: Readonly<
   coderabbit: 'coderabbit',
   gemini: 'gemini',
   kimi: 'kimi',
+  // OmniRoute runs Claude Code under the hood, pointed at the user's OmniRoute
+  // gateway (their vaulted base URL + token) instead of the house MiniMax
+  // proxy. Same internal runtime as the house agent — `claude` — differing only
+  // in WHERE Anthropic env is pointed (a buildOmniRouteBootstrap variant).
+  omniroute: 'claude',
   // The house agent runs Claude Code under the hood (pointed at the
   // MiniMax proxy). Its internal runtime is therefore `claude`.
   [HOUSE_AGENT_ID]: 'claude',
