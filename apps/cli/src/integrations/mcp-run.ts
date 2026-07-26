@@ -148,6 +148,21 @@ export async function mcpRun(args: string[]): Promise<void> {
     process.exit(1);
   }
 
+  // HTTP-transport delivery (a hosted remote MCP, e.g. PostHog) — relay to it
+  // over Streamable HTTP with the brokered token as a header, instead of
+  // spawning a stdio child. `command` is empty for these.
+  if (delivery.httpUrl) {
+    const httpClient = new IntegrationTokenClient({
+      sessionId,
+      pluginId,
+      pluginAuthToken,
+      pollSecret: process.env.CODEAM_MCP_POLL_SECRET,
+    });
+    const { runHttpRelay } = await import('./http-relay');
+    await runHttpRelay(delivery, httpClient, id);
+    return;
+  }
+
   ensureCommand(delivery.command);
   // Absolute path when the launcher lives in a per-user bin dir the
   // host-agent's PATH doesn't cover (systemd unit, fresh box).

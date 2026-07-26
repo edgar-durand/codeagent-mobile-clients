@@ -228,6 +228,27 @@ describe('integrations registry', () => {
     expect(conversationSources).toContain('discord');
   });
 
+  it('posthog is a live api_key observability integration with HTTP-transport delivery', () => {
+    expect(isKnownIntegrationId('posthog')).toBe(true);
+    const ph = getIntegration('posthog');
+    expect(ph.name).toBe('PostHog');
+    expect(ph.icon).toBe('posthog');
+    expect(ph.category).toBe('observability');
+    // api_key: the user pastes a Personal API Key (phx_…), no OAuth.
+    expect(ph.auth.kind).toBe('api_key');
+    expect(ph.auth.fields?.map((f) => f.key)).toEqual(['accessToken']);
+    expect(ph.auth.fields?.find((f) => f.key === 'accessToken')?.secret).toBe(true);
+    // HTTP transport — the shim relays to PostHog's hosted MCP with the key as a
+    // Bearer header (NOT a spawned stdio command). command/args/envMapping empty.
+    expect(ph.delivery.mcp?.command).toBe('');
+    expect(ph.delivery.mcp?.args).toEqual([]);
+    expect(ph.delivery.mcp?.envMapping).toEqual({});
+    expect(ph.delivery.mcp?.httpUrl).toBe('https://mcp.posthog.com/mcp');
+    expect(ph.delivery.mcp?.httpHeaders).toEqual({ Authorization: 'Bearer {accessToken}' });
+    expect(ph.enabled).toBe(true);
+    expect(getEnabledIntegrations().map((m) => m.id)).toContain('posthog');
+  });
+
   it('figma is a dark integration (pending OAuth-app review) with read-only granular scopes + BYO-token MCP delivery', () => {
     // Figma — DARK pending Figma's OAuth-app review approval. Read-only granular
     // scopes (design-to-code + asset export); the api-v2 FigmaOAuthProvider is
@@ -357,6 +378,7 @@ describe('integrations registry', () => {
       azure_devops: 'tracker',
       github_issues: 'tracker',
       sentry: 'observability',
+      posthog: 'observability',
       slack: 'comms',
       microsoft_teams: 'comms',
       google_chat: 'comms',
@@ -411,10 +433,9 @@ describe('integration branding catalog', () => {
     }
   });
 
-  it('the COMING SOON set is the expected 16 tools (none already live)', () => {
+  it('the COMING SOON set is the expected 15 tools (none already live)', () => {
     expect([...UPCOMING_INTEGRATION_IDS]).toEqual([
       'gmail',
-      'posthog',
       'clickup',
       'figma',
       'trello',
