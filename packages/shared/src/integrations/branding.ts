@@ -336,7 +336,6 @@ export const UPCOMING_INTEGRATION_IDS = [
   'pendo',
   'pagerduty',
   'amplitude',
-  'datadog',
 ] as const;
 
 export function getIntegrationBranding(id: string): IntegrationBranding | null {

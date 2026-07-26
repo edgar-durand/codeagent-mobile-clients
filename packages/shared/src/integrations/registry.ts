@@ -422,6 +422,60 @@ export const INTEGRATION_REGISTRY: Record<IntegrationId, IntegrationDefinition> 
       },
     },
   },
+  datadog: {
+    id: 'datadog',
+    name: 'Datadog',
+    icon: 'datadog',
+    category: 'observability',
+    // LIVE — api_key: the user pastes a Datadog API key (org-scoped) + an
+    // Application key (user-scoped, grants the read scopes) + their regional
+    // site. Datadog's OFFICIAL hosted MCP (mcp.<site>) accepts these as headers
+    // headless (verified) — no OAuth, no GSM secret. Delivery uses the shim's
+    // HTTP transport with the site templated into the URL and both keys sent as
+    // DD-API-KEY / DD-APPLICATION-KEY headers.
+    enabled: true,
+    auth: {
+      kind: 'api_key',
+      fields: [
+        {
+          key: 'accessToken',
+          label: 'API Key',
+          placeholder: 'Datadog API key',
+          secret: true,
+          help: 'Organization API key — Datadog → Organization Settings → API Keys.',
+        },
+        {
+          key: 'appKey',
+          label: 'Application Key',
+          placeholder: 'Datadog application key',
+          secret: true,
+          help: 'User Application key (grants the read scopes) — Datadog → Organization Settings → Application Keys.',
+        },
+        {
+          key: 'host',
+          label: 'Site',
+          placeholder: 'datadoghq.com',
+          secret: false,
+          help: 'Your Datadog site — US1: datadoghq.com · EU: datadoghq.eu · US3: us3.datadoghq.com · US5: us5.datadoghq.com · AP1: ap1.datadoghq.com.',
+        },
+      ],
+    },
+    delivery: {
+      mcp: {
+        // HTTP transport — the shim relays to Datadog's hosted MCP for the
+        // user's site, with both keys as headers. Keys stay server-side of the
+        // shim, never on argv.
+        command: '',
+        args: [],
+        envMapping: {},
+        httpUrl: 'https://mcp.{host}/api/unstable/mcp-server/mcp',
+        httpHeaders: {
+          'DD-API-KEY': '{accessToken}',
+          'DD-APPLICATION-KEY': '{appKey}',
+        },
+      },
+    },
+  },
   notion: {
     id: 'notion',
     name: 'Notion',

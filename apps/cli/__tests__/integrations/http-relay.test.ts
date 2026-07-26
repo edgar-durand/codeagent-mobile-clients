@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { buildHttpHeaders } from '../../src/integrations/http-relay';
+import { buildHttpHeaders, fillTemplate } from '../../src/integrations/http-relay';
 import type { BrokeredIntegrationToken } from '@codeam/shared';
 
 const token = (over: Partial<BrokeredIntegrationToken> = {}): BrokeredIntegrationToken => ({
@@ -30,5 +30,17 @@ describe('buildHttpHeaders', () => {
 
   it('returns {} for no header templates', () => {
     expect(buildHttpHeaders(undefined, token())).toEqual({});
+  });
+});
+
+describe('fillTemplate', () => {
+  it('templates a per-user host into a URL (Datadog regional site)', () => {
+    expect(
+      fillTemplate('https://mcp.{host}/api/unstable/mcp-server/mcp', token({ host: 'datadoghq.eu' })),
+    ).toBe('https://mcp.datadoghq.eu/api/unstable/mcp-server/mcp');
+  });
+
+  it('leaves a URL with no placeholders unchanged', () => {
+    expect(fillTemplate('https://mcp.posthog.com/mcp', token())).toBe('https://mcp.posthog.com/mcp');
   });
 });
