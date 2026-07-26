@@ -20,6 +20,7 @@ export type IntegrationId =
   | 'resend'
   | 'posthog'
   | 'datadog'
+  | 'stitch'
   | 'github_issues'
   | 'github'
   | 'gitlab';

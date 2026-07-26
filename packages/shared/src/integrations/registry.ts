@@ -600,6 +600,42 @@ export const INTEGRATION_REGISTRY: Record<IntegrationId, IntegrationDefinition> 
       },
     },
   },
+  stitch: {
+    id: 'stitch',
+    name: 'Stitch',
+    icon: 'stitch',
+    category: 'design',
+    // LIVE — api_key: the user pastes a Stitch API key (Google Stitch →
+    // Settings → API Key). Stitch's MCP is hosted-only (stitch.googleapis.com)
+    // and accepts the key as the `X-Goog-Api-Key` header headless (verified) —
+    // no OAuth, no GSM secret. Delivery uses the shim's HTTP transport.
+    // (Stitch ALSO supports Google OAuth 2.0, but that's a follow-up — our model
+    // is one auth kind per integration and api_key is the simple, headless path.)
+    enabled: true,
+    auth: {
+      kind: 'api_key',
+      fields: [
+        {
+          key: 'accessToken',
+          label: 'API Key',
+          placeholder: 'Stitch API key',
+          secret: true,
+          help: 'Google Stitch → profile menu → Stitch Settings → API Key → Create Key.',
+        },
+      ],
+    },
+    delivery: {
+      mcp: {
+        // HTTP transport — the shim relays to Stitch's hosted MCP with the key
+        // as the X-Goog-Api-Key header. Key stays server-side of the shim.
+        command: '',
+        args: [],
+        envMapping: {},
+        httpUrl: 'https://stitch.googleapis.com/mcp',
+        httpHeaders: { 'X-Goog-Api-Key': '{accessToken}' },
+      },
+    },
+  },
 };
 
 export function getEnabledIntegrations(): IntegrationDefinition[] {
