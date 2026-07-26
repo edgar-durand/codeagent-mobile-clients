@@ -73,7 +73,7 @@
   },
   "dependencies": {
     "@agentclientprotocol/claude-agent-acp": "0.59.0",
-    "@agentclientprotocol/codex-acp": "1.1.4",
+    "@agentclientprotocol/codex-acp": "1.1.7",
     "@agentclientprotocol/sdk": "1.2.1",
     "@clack/prompts": "^1.2.0",
     "@modelcontextprotocol/sdk": "1.29.0",
