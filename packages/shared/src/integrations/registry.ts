@@ -384,6 +384,44 @@ export const INTEGRATION_REGISTRY: Record<IntegrationId, IntegrationDefinition> 
       },
     },
   },
+  posthog: {
+    id: 'posthog',
+    name: 'PostHog',
+    icon: 'posthog',
+    category: 'observability',
+    // LIVE — api_key: the user pastes a PostHog Personal API Key (phx_…, created
+    // with the "MCP Server" preset). PostHog's MCP is HOSTED-ONLY
+    // (mcp.posthog.com) over HTTP, and its stdio bridge (mcp-remote) forces its
+    // own browser OAuth — incompatible with our headless broker. So delivery
+    // uses the shim's HTTP transport: it relays to the hosted MCP with the key
+    // as a Bearer header (exactly Cursor's {url, headers} config). No OAuth, no
+    // GSM secret; a backend VALIDATOR proves the key + vaults it.
+    enabled: true,
+    auth: {
+      kind: 'api_key',
+      fields: [
+        {
+          key: 'accessToken',
+          label: 'Personal API Key',
+          placeholder: 'phx_xxxxxxxxxxxxxxxx',
+          secret: true,
+          help: 'PostHog → Settings → Personal API keys → create with the "MCP Server" preset (scopes it to a project).',
+        },
+      ],
+    },
+    delivery: {
+      mcp: {
+        // HTTP transport (not a spawned stdio server) — the shim relays to
+        // PostHog's hosted MCP with the key as a Bearer header. The key stays
+        // server-side of the shim, never on argv.
+        command: '',
+        args: [],
+        envMapping: {},
+        httpUrl: 'https://mcp.posthog.com/mcp',
+        httpHeaders: { Authorization: 'Bearer {accessToken}' },
+      },
+    },
+  },
   notion: {
     id: 'notion',
     name: 'Notion',

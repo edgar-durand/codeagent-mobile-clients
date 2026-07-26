@@ -18,6 +18,7 @@ export type IntegrationId =
   | 'google_chat'
   | 'discord'
   | 'resend'
+  | 'posthog'
   | 'github_issues'
   | 'github'
   | 'gitlab';
@@ -86,15 +87,32 @@ export interface IntegrationApiKeyField {
 
 export type IntegrationHealth = 'ok' | 'expired' | 'revoked';
 
-/** stdio MCP server spec, executed as DATA by the CLI shim (`codeam mcp-run <id>`). */
+/** stdio MCP server spec, executed as DATA by the CLI shim (`codeam mcp-run <id>`).
+ *
+ * Two transports:
+ *  - **stdio (default):** the shim spawns `command args` (with `envMapping`
+ *    credentials in the env) and byte-pipes it to the agent.
+ *  - **HTTP (`httpUrl` set):** the shim connects to a REMOTE MCP over
+ *    Streamable HTTP and relays it to the agent's stdio — for vendors that only
+ *    ship a hosted MCP (e.g. PostHog `mcp.posthog.com`). `command`/`args` are
+ *    unused (empty); credentials go in `httpHeaders` (never `envMapping`).
+ */
 export interface IntegrationMcpDelivery {
   command: string;
   args: string[];
-  /** env var name → credential field (`accessToken` | `cloudId` | …). Env only, never argv. */
+  /** env var name → credential field (`accessToken` | `cloudId` | …). Env only, never argv. STDIO transport. */
   envMapping: Record<string, string>;
   /** Static, non-credential env the server needs to boot (e.g. mode flags).
-   *  Merged into the child env BENEATH the credential envMapping. Never secrets. */
+   *  Merged into the child env BENEATH the credential envMapping. Never secrets. STDIO transport. */
   staticEnv?: Record<string, string>;
+  /** HTTP transport — a REMOTE MCP URL (Streamable HTTP). When set, the shim
+   *  relays to it instead of spawning `command`. */
+  httpUrl?: string;
+  /** HTTP transport — header name → value TEMPLATE with `{field}` placeholders
+   *  filled from the BrokeredIntegrationToken at spawn (e.g.
+   *  `{ Authorization: 'Bearer {accessToken}' }`). The token stays server-side of
+   *  the shim — never on argv. */
+  httpHeaders?: Record<string, string>;
 }
 
 export interface IntegrationDelivery {
