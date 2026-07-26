@@ -4,6 +4,12 @@ All notable changes to the CodeAgent-Mobile JetBrains plugin are documented here
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.61.47] — 2026-07-26
+
+### Added
+
+- **shared:** Stitch integration (api_key, hosted MCP over HTTP transport, design)
+
 ## [2.61.46] — 2026-07-26
 
 ### Added
