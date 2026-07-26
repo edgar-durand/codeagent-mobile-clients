@@ -271,6 +271,21 @@ describe('integrations registry', () => {
     expect(getEnabledIntegrations().map((m) => m.id)).toContain('datadog');
   });
 
+  it('stitch is a live api_key design integration over HTTP transport', () => {
+    expect(isKnownIntegrationId('stitch')).toBe(true);
+    const st = getIntegration('stitch');
+    expect(st.name).toBe('Stitch');
+    expect(st.category).toBe('design');
+    expect(st.auth.kind).toBe('api_key');
+    expect(st.auth.fields?.map((f) => f.key)).toEqual(['accessToken']);
+    expect(st.delivery.mcp?.httpUrl).toBe('https://stitch.googleapis.com/mcp');
+    expect(st.delivery.mcp?.httpHeaders).toEqual({ 'X-Goog-Api-Key': '{accessToken}' });
+    expect(st.enabled).toBe(true);
+    // Being live makes `design` a LIVE category (figma is dark) — the mobile grid
+    // renders it as a half-width card instead of a full-width COMING SOON banner.
+    expect(getIntegrationsByCategory('design').map((m) => m.id)).toEqual(['stitch']);
+  });
+
   it('figma is a dark integration (pending OAuth-app review) with read-only granular scopes + BYO-token MCP delivery', () => {
     // Figma — DARK pending Figma's OAuth-app review approval. Read-only granular
     // scopes (design-to-code + asset export); the api-v2 FigmaOAuthProvider is
@@ -402,6 +417,7 @@ describe('integrations registry', () => {
       sentry: 'observability',
       posthog: 'observability',
       datadog: 'observability',
+      stitch: 'design',
       slack: 'comms',
       microsoft_teams: 'comms',
       google_chat: 'comms',
@@ -420,7 +436,7 @@ describe('integrations registry', () => {
       'jira',
       'linear',
     ]);
-    expect(getIntegrationsByCategory('design').map((m) => m.id)).toEqual([]);
+    expect(getIntegrationsByCategory('design').map((m) => m.id)).toEqual(['stitch']);
     expect(getIntegrationsByCategory('version_control').map((m) => m.id).sort()).toEqual([
       'github',
       'gitlab',
