@@ -323,6 +323,13 @@ interface HouseProxy {
   baseUrl: string;
   token: string;
   agentKind: string;
+  /**
+   * OmniRoute (Model A): the gateway is the USER's OmniRoute (BYO endpoint +
+   * key), not our house proxy. Do NOT pin the house MiniMax model — OmniRoute
+   * routes the real Claude model names the agent sends. Absent/false ⇒ house.
+   * Mirrors the backend `SelfHostedHouseProxy.omniRoute`.
+   */
+  omniRoute?: boolean;
 }
 
 /** The deploy command payload (mirrors the backend `SelfHostedDeployCommand`). */
@@ -1629,14 +1636,20 @@ export class HostAgentSupervisor {
       let childEnv: Record<string, string>;
       let extraArgs: string[] = [];
       if (payload.houseProxy) {
-        const { baseUrl, token, agentKind } = payload.houseProxy;
+        const { baseUrl, token, agentKind, omniRoute } = payload.houseProxy;
         childEnv = {
           ANTHROPIC_BASE_URL: baseUrl,
           ANTHROPIC_AUTH_TOKEN: token,
-          ANTHROPIC_MODEL: 'MiniMax-M3',
-          ANTHROPIC_DEFAULT_SONNET_MODEL: 'MiniMax-M3',
-          ANTHROPIC_DEFAULT_OPUS_MODEL: 'MiniMax-M3',
-          ANTHROPIC_DEFAULT_HAIKU_MODEL: 'MiniMax-M3',
+          // House pins MiniMax; OmniRoute routes the real Claude model names the
+          // agent sends, so it sets NO model overrides.
+          ...(omniRoute
+            ? {}
+            : {
+                ANTHROPIC_MODEL: 'MiniMax-M3',
+                ANTHROPIC_DEFAULT_SONNET_MODEL: 'MiniMax-M3',
+                ANTHROPIC_DEFAULT_OPUS_MODEL: 'MiniMax-M3',
+                ANTHROPIC_DEFAULT_HAIKU_MODEL: 'MiniMax-M3',
+              }),
           CLAUDE_CODE_AUTO_COMPACT_WINDOW: '512000',
           API_TIMEOUT_MS: '3000000',
           CODEAM_AUTO_TOKEN: payload.autoPairToken,
