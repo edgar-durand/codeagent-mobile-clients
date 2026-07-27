@@ -26,7 +26,8 @@ export type IntegrationId =
   | 'gitlab'
   | 'vercel'
   | 'trello'
-  | 'clickup';
+  | 'clickup'
+  | 'n8n';
 
 /**
  * `derived` = no link flow of its own: the credential is BORROWED live from a
@@ -70,7 +71,8 @@ export type IntegrationCategory =
   | 'comms'
   | 'docs'
   | 'observability'
-  | 'deployment';
+  | 'deployment'
+  | 'automation';
 
 /**
  * One user-entered field for an `api_key` integration (no browser OAuth — the
@@ -81,7 +83,7 @@ export type IntegrationCategory =
 export interface IntegrationApiKeyField {
   /** Maps to a BrokeredIntegrationToken field (`accessToken`, `orgUrl`,
    *  `appKey`, `host`, …). */
-  key: 'accessToken' | 'orgUrl' | 'appKey' | 'host' | 'apiKey';
+  key: 'accessToken' | 'orgUrl' | 'appKey' | 'host' | 'apiKey' | 'instanceUrl';
   /** Form label. */
   label: string;
   /** Example / placeholder. */
@@ -211,4 +213,7 @@ export interface BrokeredIntegrationToken {
    *  alongside the user token (`TRELLO_API_KEY` + `TRELLO_TOKEN`=`accessToken`).
    *  Absent for non-Trello integrations. */
   apiKey?: string;
+  /** n8n instance base URL (self-hosted or n8n.cloud) — the MCP server needs it
+   *  alongside the API key (N8N_API_URL + N8N_API_KEY). Absent for non-n8n. */
+  instanceUrl?: string;
 }

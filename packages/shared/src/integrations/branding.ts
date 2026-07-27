@@ -338,7 +338,6 @@ export const UPCOMING_INTEGRATION_IDS = [
   'supabase',
   'asana',
   'postman',
-  'n8n',
   'stripe',
   'mixpanel',
   'pendo',
