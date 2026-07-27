@@ -51,6 +51,7 @@ export type LinkedAgentId =
   | 'gemini'
   | 'kimi'
   | 'omniroute'
+  | 'opencode'
   | typeof HOUSE_AGENT_ID;
 
 export const LINKED_AGENT_IDS: readonly LinkedAgentId[] = [
@@ -62,6 +63,7 @@ export const LINKED_AGENT_IDS: readonly LinkedAgentId[] = [
   'gemini',
   'kimi',
   'omniroute',
+  'opencode',
   HOUSE_AGENT_ID,
 ];
 
@@ -98,6 +100,9 @@ export const PUBLIC_TO_INTERNAL: Readonly<
   coderabbit: 'coderabbit',
   gemini: 'gemini',
   kimi: 'kimi',
+  // opencode is a real, distinct agent (its own binary + ACP server) — it does
+  // NOT map onto another runtime. Public id === internal id.
+  opencode: 'opencode',
   // OmniRoute runs Claude Code under the hood, pointed at the user's OmniRoute
   // gateway (their vaulted base URL + token) instead of the house MiniMax
   // proxy. Same internal runtime as the house agent — `claude` — differing only
@@ -121,6 +126,7 @@ export const INTERNAL_TO_PUBLIC: Readonly<Partial<Record<AgentId, LinkedAgentId>
   coderabbit: 'coderabbit',
   gemini: 'gemini',
   kimi: 'kimi',
+  opencode: 'opencode',
 };
 
 function isPublicToInternalKey(v: string): v is LinkedAgentId | 'claude' | 'copilot' {

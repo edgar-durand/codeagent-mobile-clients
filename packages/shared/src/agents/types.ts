@@ -6,7 +6,8 @@ export type AgentId =
   | 'cursor'
   | 'aider'
   | 'gemini'
-  | 'kimi';
+  | 'kimi'
+  | 'opencode';
 
 export type AgentAuthKind = 'oauth_token' | 'api_key' | 'setup_token';
 

@@ -98,6 +98,7 @@ RUN npm install -g --omit=optional \
         "codeam-cli@${CODEAM_CLI_VERSION}" \
         @openai/codex \
         @google/gemini-cli \
+        opencode-ai \
         @beads/bd \
     && codeam --version \
     && npm cache clean --force \

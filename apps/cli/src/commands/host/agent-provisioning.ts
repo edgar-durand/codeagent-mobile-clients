@@ -53,6 +53,7 @@ const PUBLIC_TO_INTERNAL_AGENT: Readonly<Record<string, AgentId>> = {
   coderabbit: 'coderabbit',
   gemini: 'gemini',
   kimi: 'kimi',
+  opencode: 'opencode',
 };
 
 /** Resolve a public LinkedAgent id to the internal agent id, or null. */
@@ -363,6 +364,18 @@ const coderabbitProvisioner: AgentProvisioner = {
   },
 };
 
+const opencodeProvisioner: AgentProvisioner = {
+  write(auth, home): Record<string, string> {
+    // opencode reads its multi-provider login state from
+    // ~/.local/share/opencode/auth.json (written locally by `opencode auth
+    // login`). Our vaulted credential IS that JSON blob → write it verbatim,
+    // like the codex ~/.codex/auth.json path. Everything is a file; no env.
+    const authJson = path.join(home, '.local', 'share', 'opencode', 'auth.json');
+    writeFile0600(authJson, auth.value);
+    return {};
+  },
+};
+
 const PROVISIONERS: Partial<Record<AgentId, AgentProvisioner>> = {
   claude: claudeProvisioner,
   kimi: kimiProvisioner,
@@ -370,6 +383,7 @@ const PROVISIONERS: Partial<Record<AgentId, AgentProvisioner>> = {
   gemini: geminiProvisioner,
   cursor: cursorProvisioner,
   coderabbit: coderabbitProvisioner,
+  opencode: opencodeProvisioner,
 };
 
 /** Raised when a deploy targets an agent we can't provision on the box. */
