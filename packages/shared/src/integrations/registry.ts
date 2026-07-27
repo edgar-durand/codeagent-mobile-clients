@@ -636,6 +636,37 @@ export const INTEGRATION_REGISTRY: Record<IntegrationId, IntegrationDefinition> 
       },
     },
   },
+  vercel: {
+    id: 'vercel',
+    name: 'Vercel',
+    icon: 'vercel',
+    category: 'deployment',
+    // DARK — OAuth (PKCE public client). The user authorizes our registered
+    // Vercel OAuth app; the access token calls Vercel's OFFICIAL hosted remote
+    // MCP (mcp.vercel.com, Streamable HTTP) as a Bearer header — the SAME shim
+    // HTTP transport as PostHog/Datadog. Vercel MCP is approved-clients + per-
+    // connection OAuth consent, but that consent is the ONE-TIME authorize (not
+    // per MCP request), so a backend-brokered access token works headless.
+    // Endpoints (from mcp.vercel.com/.well-known/oauth-protected-resource →
+    // vercel.com/.well-known/oauth-authorization-server): authorize
+    // https://vercel.com/oauth/authorize, token
+    // https://vercel.com/api/login/oauth/token, PKCE S256, token-endpoint auth
+    // 'none' (public). enabled:false until Step-8 live-verify of the Bearer.
+    enabled: false,
+    auth: {
+      kind: 'oauth_redirect',
+      scopes: ['openid', 'offline_access'],
+    },
+    delivery: {
+      mcp: {
+        command: '',
+        args: [],
+        envMapping: {},
+        httpUrl: 'https://mcp.vercel.com',
+        httpHeaders: { Authorization: 'Bearer {accessToken}' },
+      },
+    },
+  },
 };
 
 export function getEnabledIntegrations(): IntegrationDefinition[] {
