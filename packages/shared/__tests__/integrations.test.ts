@@ -435,6 +435,7 @@ describe('integrations registry', () => {
     // Helper returns ONLY enabled integrations of the category (figma is dark).
     expect(getIntegrationsByCategory('tracker').map((m) => m.id).sort()).toEqual([
       'azure_devops',
+      'clickup',
       'github_issues',
       'jira',
       'linear',
@@ -476,10 +477,9 @@ describe('integration branding catalog', () => {
     }
   });
 
-  it('the COMING SOON set is the expected 12 tools (none already live)', () => {
+  it('the COMING SOON set is the expected 11 tools (none already live)', () => {
     expect([...UPCOMING_INTEGRATION_IDS]).toEqual([
       'gmail',
-      'clickup',
       'figma',
       'supabase',
       'asana',
