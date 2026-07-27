@@ -720,7 +720,7 @@ export const INTEGRATION_REGISTRY: Record<IntegrationId, IntegrationDefinition> 
     // has NO refresh token, and its OAuth has NO granular scopes (the app gets
     // the workspaces the user authorizes). enabled:false until the OAuth app is
     // registered (client_id/secret) + secrets land + Step-8 live-verify.
-    enabled: false,
+    enabled: true,
     auth: {
       kind: 'oauth_redirect',
       scopes: [],
