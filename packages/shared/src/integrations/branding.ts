@@ -336,7 +336,6 @@ export const UPCOMING_INTEGRATION_IDS = [
   'gmail',
   'clickup',
   'figma',
-  'trello',
   'supabase',
   'asana',
   'postman',

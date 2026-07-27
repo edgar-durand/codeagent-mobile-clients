@@ -668,6 +668,49 @@ export const INTEGRATION_REGISTRY: Record<IntegrationId, IntegrationDefinition> 
       },
     },
   },
+  trello: {
+    id: 'trello',
+    name: 'Trello',
+    icon: 'trello',
+    category: 'tracker',
+    // LIVE — api_key rail (like Azure DevOps). Trello's auth is a developer API
+    // key + a user token, NOT an OAuth2 code exchange: its token returns via a
+    // URL fragment / OAuth 1.0a, incompatible with our server-side broker. The
+    // user pastes both; the backend validates against the Trello REST API and
+    // vaults them. No OAuth app, no GSM secrets, no config-gated 503.
+    enabled: true,
+    auth: {
+      kind: 'api_key',
+      fields: [
+        {
+          key: 'apiKey',
+          label: 'API Key',
+          placeholder: 'Your Trello API key',
+          secret: false,
+          help: 'Create a Power-Up at https://trello.com/power-ups/admin and copy its API key.',
+        },
+        {
+          key: 'accessToken',
+          label: 'Token',
+          placeholder: 'Your Trello token',
+          secret: true,
+          help: 'On the API-key page, click the "Token" link to authorize + generate a token (scope read,write, never-expiring).',
+        },
+      ],
+    },
+    delivery: {
+      mcp: {
+        // mcp-server-trello (Node): TRELLO_API_KEY + TRELLO_TOKEN via env only,
+        // never argv. Version PINNED; bump only after re-verifying headless.
+        command: 'npx',
+        args: ['-y', 'mcp-server-trello@1.0.4'],
+        envMapping: {
+          TRELLO_API_KEY: 'apiKey',
+          TRELLO_TOKEN: 'accessToken',
+        },
+      },
+    },
+  },
 };
 
 export function getEnabledIntegrations(): IntegrationDefinition[] {
