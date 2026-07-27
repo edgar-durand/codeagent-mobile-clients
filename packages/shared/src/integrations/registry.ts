@@ -740,6 +740,52 @@ export const INTEGRATION_REGISTRY: Record<IntegrationId, IntegrationDefinition> 
       },
     },
   },
+  n8n: {
+    id: 'n8n',
+    name: 'n8n',
+    icon: 'n8n',
+    category: 'automation',
+    // LIVE — api_key rail (like Trello / Azure DevOps). n8n auth is an API key
+    // (Settings → n8n API) + the instance URL (n8n.cloud or self-hosted). The
+    // user pastes both; the backend validates against the n8n REST API + vaults
+    // them. No OAuth app, no GSM secrets, no config-gated 503.
+    // ⚠️ The instance MUST be PUBLICLY reachable (n8n.cloud or a public self-host)
+    // — a localhost/private n8n can't be reached from the deploy box.
+    enabled: true,
+    auth: {
+      kind: 'api_key',
+      fields: [
+        {
+          key: 'instanceUrl',
+          label: 'Instance URL',
+          placeholder: 'https://your-workspace.app.n8n.cloud',
+          secret: false,
+          help: 'Your n8n base URL — n8n.cloud or your public self-hosted instance.',
+        },
+        {
+          key: 'accessToken',
+          label: 'API Key',
+          placeholder: 'n8n_api_…',
+          secret: true,
+          help: 'Create in n8n → Settings → n8n API → Create an API key.',
+        },
+      ],
+    },
+    delivery: {
+      mcp: {
+        // n8n-mcp (Node): N8N_API_URL + N8N_API_KEY via env only, never argv.
+        // Version PINNED; bump only after re-verifying headless.
+        command: 'npx',
+        args: ['-y', 'n8n-mcp@2.66.2'],
+        envMapping: {
+          N8N_API_URL: 'instanceUrl',
+          N8N_API_KEY: 'accessToken',
+        },
+        // stdio transport (the CLI mcp-shim spawns it over stdio, not HTTP).
+        staticEnv: { MCP_MODE: 'stdio' },
+      },
+    },
+  },
 };
 
 export function getEnabledIntegrations(): IntegrationDefinition[] {
