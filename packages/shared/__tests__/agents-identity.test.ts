@@ -25,7 +25,7 @@ describe('LINKED_AGENT_IDS / PUBLIC_TO_INTERNAL', () => {
       'coderabbit',
       'gemini',
       'kimi',
-      'omniroute',
+      'openrouter',
       'opencode',
       'house-codeagent-cloud',
     ]);
@@ -42,9 +42,9 @@ describe('LINKED_AGENT_IDS / PUBLIC_TO_INTERNAL', () => {
     expect(publicToInternal('gemini')).toBe('gemini');
     // The house agent runs Claude Code under the hood.
     expect(publicToInternal(HOUSE_AGENT_ID)).toBe('claude');
-    // OmniRoute also runs Claude Code under the hood (pointed at the user's
+    // OpenRouter also runs Claude Code under the hood (pointed at the user's
     // gateway) — same lossy-to-'claude' mapping as the house agent.
-    expect(publicToInternal('omniroute')).toBe('claude');
+    expect(publicToInternal('openrouter')).toBe('claude');
   });
 
   it('additionally accepts the CLI-side extras (agent-provisioning.ts asymmetry)', () => {
@@ -62,9 +62,9 @@ describe('LINKED_AGENT_IDS / PUBLIC_TO_INTERNAL', () => {
 
   it('INTERNAL_TO_PUBLIC round-trips every non-house public id', () => {
     for (const publicId of LINKED_AGENT_IDS) {
-      // house + omniroute both map to internal 'claude' (lossy on purpose) —
+      // house + openrouter both map to internal 'claude' (lossy on purpose) —
       // internalToPublic('claude') is 'claude_code', never these.
-      if (publicId === HOUSE_AGENT_ID || publicId === 'omniroute') continue;
+      if (publicId === HOUSE_AGENT_ID || publicId === 'openrouter') continue;
       const internal = PUBLIC_TO_INTERNAL[publicId];
       expect(internalToPublic(internal)).toBe(publicId);
     }

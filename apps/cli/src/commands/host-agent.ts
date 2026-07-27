@@ -324,12 +324,12 @@ interface HouseProxy {
   token: string;
   agentKind: string;
   /**
-   * OmniRoute (Model A): the gateway is the USER's OmniRoute (BYO endpoint +
-   * key), not our house proxy. Do NOT pin the house MiniMax model — OmniRoute
+   * OpenRouter (Model A): the gateway is the USER's OpenRouter (BYO endpoint +
+   * key), not our house proxy. Do NOT pin the house MiniMax model — OpenRouter
    * routes the real Claude model names the agent sends. Absent/false ⇒ house.
-   * Mirrors the backend `SelfHostedHouseProxy.omniRoute`.
+   * Mirrors the backend `SelfHostedHouseProxy.openRouter`.
    */
-  omniRoute?: boolean;
+  openRouter?: boolean;
 }
 
 /** The deploy command payload (mirrors the backend `SelfHostedDeployCommand`). */
@@ -1636,14 +1636,16 @@ export class HostAgentSupervisor {
       let childEnv: Record<string, string>;
       let extraArgs: string[] = [];
       if (payload.houseProxy) {
-        const { baseUrl, token, agentKind, omniRoute } = payload.houseProxy;
+        const { baseUrl, token, agentKind, openRouter } = payload.houseProxy;
         childEnv = {
           ANTHROPIC_BASE_URL: baseUrl,
           ANTHROPIC_AUTH_TOKEN: token,
-          // House pins MiniMax; OmniRoute routes the real Claude model names the
-          // agent sends, so it sets NO model overrides.
-          ...(omniRoute
-            ? {}
+          // House pins MiniMax; OpenRouter routes the real Claude model names the
+          // agent sends, so it sets NO model overrides — but it DOES need
+          // ANTHROPIC_API_KEY empty so a stale key can't override the Bearer auth
+          // token (OpenRouter's Claude Code setup requires ANTHROPIC_API_KEY="").
+          ...(openRouter
+            ? { ANTHROPIC_API_KEY: '' }
             : {
                 ANTHROPIC_MODEL: 'MiniMax-M3',
                 ANTHROPIC_DEFAULT_SONNET_MODEL: 'MiniMax-M3',

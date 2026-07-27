@@ -50,7 +50,7 @@ export type LinkedAgentId =
   | 'coderabbit'
   | 'gemini'
   | 'kimi'
-  | 'omniroute'
+  | 'openrouter'
   | 'opencode'
   | typeof HOUSE_AGENT_ID;
 
@@ -62,7 +62,7 @@ export const LINKED_AGENT_IDS: readonly LinkedAgentId[] = [
   'coderabbit',
   'gemini',
   'kimi',
-  'omniroute',
+  'openrouter',
   'opencode',
   HOUSE_AGENT_ID,
 ];
@@ -103,11 +103,14 @@ export const PUBLIC_TO_INTERNAL: Readonly<
   // opencode is a real, distinct agent (its own binary + ACP server) — it does
   // NOT map onto another runtime. Public id === internal id.
   opencode: 'opencode',
-  // OmniRoute runs Claude Code under the hood, pointed at the user's OmniRoute
-  // gateway (their vaulted base URL + token) instead of the house MiniMax
-  // proxy. Same internal runtime as the house agent — `claude` — differing only
-  // in WHERE Anthropic env is pointed (a buildOmniRouteBootstrap variant).
-  omniroute: 'claude',
+  // OpenRouter runs Claude Code under the hood, pointed at OpenRouter's hosted
+  // "Anthropic Skin" (https://openrouter.ai/api — native Anthropic Messages
+  // protocol) with the user's vaulted `sk-or-…` key as ANTHROPIC_AUTH_TOKEN,
+  // instead of the house MiniMax proxy. Same internal runtime as the house
+  // agent — `claude` — differing only in WHERE the Anthropic env is pointed (a
+  // buildOpenRouterBootstrap variant). The endpoint is FIXED (hosted), so there
+  // is no per-user base URL — just the key.
+  openrouter: 'claude',
   // The house agent runs Claude Code under the hood (pointed at the
   // MiniMax proxy). Its internal runtime is therefore `claude`.
   [HOUSE_AGENT_ID]: 'claude',
