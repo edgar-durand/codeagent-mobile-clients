@@ -419,6 +419,7 @@ describe('integrations registry', () => {
       datadog: 'observability',
       stitch: 'design',
       vercel: 'deployment',
+      trello: 'tracker',
       slack: 'comms',
       microsoft_teams: 'comms',
       google_chat: 'comms',
@@ -436,6 +437,7 @@ describe('integrations registry', () => {
       'github_issues',
       'jira',
       'linear',
+      'trello',
     ]);
     expect(getIntegrationsByCategory('design').map((m) => m.id)).toEqual(['stitch']);
     expect(getIntegrationsByCategory('version_control').map((m) => m.id).sort()).toEqual([
@@ -473,12 +475,11 @@ describe('integration branding catalog', () => {
     }
   });
 
-  it('the COMING SOON set is the expected 13 tools (none already live)', () => {
+  it('the COMING SOON set is the expected 12 tools (none already live)', () => {
     expect([...UPCOMING_INTEGRATION_IDS]).toEqual([
       'gmail',
       'clickup',
       'figma',
-      'trello',
       'supabase',
       'asana',
       'postman',

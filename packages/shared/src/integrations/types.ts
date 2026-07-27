@@ -24,7 +24,8 @@ export type IntegrationId =
   | 'github_issues'
   | 'github'
   | 'gitlab'
-  | 'vercel';
+  | 'vercel'
+  | 'trello';
 
 /**
  * `derived` = no link flow of its own: the credential is BORROWED live from a
@@ -79,7 +80,7 @@ export type IntegrationCategory =
 export interface IntegrationApiKeyField {
   /** Maps to a BrokeredIntegrationToken field (`accessToken`, `orgUrl`,
    *  `appKey`, `host`, …). */
-  key: 'accessToken' | 'orgUrl' | 'appKey' | 'host';
+  key: 'accessToken' | 'orgUrl' | 'appKey' | 'host' | 'apiKey';
   /** Form label. */
   label: string;
   /** Example / placeholder. */
@@ -205,4 +206,8 @@ export interface BrokeredIntegrationToken {
    *  (`accessToken`) as the `DD-APPLICATION-KEY` header; `host` carries the
    *  regional site. Absent for non-Datadog integrations. */
   appKey?: string;
+  /** Trello developer API key — the app-level key the Trello MCP server needs
+   *  alongside the user token (`TRELLO_API_KEY` + `TRELLO_TOKEN`=`accessToken`).
+   *  Absent for non-Trello integrations. */
+  apiKey?: string;
 }
