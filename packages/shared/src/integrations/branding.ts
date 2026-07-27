@@ -337,7 +337,6 @@ export const UPCOMING_INTEGRATION_IDS = [
   'clickup',
   'figma',
   'trello',
-  'vercel',
   'supabase',
   'asana',
   'postman',

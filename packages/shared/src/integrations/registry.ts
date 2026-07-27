@@ -651,8 +651,9 @@ export const INTEGRATION_REGISTRY: Record<IntegrationId, IntegrationDefinition> 
     // vercel.com/.well-known/oauth-authorization-server): authorize
     // https://vercel.com/oauth/authorize, token
     // https://vercel.com/api/login/oauth/token, PKCE S256, token-endpoint auth
-    // 'none' (public). enabled:false until Step-8 live-verify of the Bearer.
-    enabled: false,
+    // 'none' (public). LIVE — the headless Bearer against mcp.vercel.com was
+    // verified (2026-07-27).
+    enabled: true,
     auth: {
       kind: 'oauth_redirect',
       scopes: ['openid', 'offline_access'],
