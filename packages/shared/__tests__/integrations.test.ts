@@ -473,13 +473,12 @@ describe('integration branding catalog', () => {
     }
   });
 
-  it('the COMING SOON set is the expected 14 tools (none already live)', () => {
+  it('the COMING SOON set is the expected 13 tools (none already live)', () => {
     expect([...UPCOMING_INTEGRATION_IDS]).toEqual([
       'gmail',
       'clickup',
       'figma',
       'trello',
-      'vercel',
       'supabase',
       'asana',
       'postman',
