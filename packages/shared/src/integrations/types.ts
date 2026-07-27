@@ -23,7 +23,8 @@ export type IntegrationId =
   | 'stitch'
   | 'github_issues'
   | 'github'
-  | 'gitlab';
+  | 'gitlab'
+  | 'vercel';
 
 /**
  * `derived` = no link flow of its own: the credential is BORROWED live from a
@@ -66,7 +67,8 @@ export type IntegrationCategory =
   | 'design'
   | 'comms'
   | 'docs'
-  | 'observability';
+  | 'observability'
+  | 'deployment';
 
 /**
  * One user-entered field for an `api_key` integration (no browser OAuth — the

@@ -418,6 +418,7 @@ describe('integrations registry', () => {
       posthog: 'observability',
       datadog: 'observability',
       stitch: 'design',
+      vercel: 'deployment',
       slack: 'comms',
       microsoft_teams: 'comms',
       google_chat: 'comms',
