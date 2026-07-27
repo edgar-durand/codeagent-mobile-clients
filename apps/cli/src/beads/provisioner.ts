@@ -77,6 +77,8 @@ const AGENT_SETUP_RECIPE: Record<AgentId, string | null> = {
   // the agent just isn't wired natively via `bd setup`.
   kimi: null,
   coderabbit: null,
+  // bd 1.0.5 has no opencode recipe → skip; beads still works.
+  opencode: null,
 };
 
 export interface ProvisionOptions {

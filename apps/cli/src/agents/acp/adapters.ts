@@ -32,6 +32,7 @@ import {
   type WaitForClaudeBinaryOptions,
 } from './agent-binary';
 import { ensureKimiInstalled } from '../kimi/installer';
+import { ensureOpencodeInstalled } from '../opencode/installer';
 import { isLocalSession } from '../../baton/gate';
 
 // CommonJS module — `require` is already in scope. Aliased so we
@@ -181,6 +182,21 @@ const REGISTRY: Partial<Record<AgentId, () => AdapterSpec | null>> = {
     waitForBinary: async (o) => {
       if (isLocalSession()) await ensureKimiInstalled();
       return waitForCommandOnPath('kimi', o);
+    },
+  }),
+  // opencode speaks ACP natively via `opencode acp` — a stdio JSON-RPC server.
+  // No npm adapter, just the user-installed `opencode` binary on PATH (baked in
+  // the box image; provisioned on codespaces; installed on demand for a LOCAL
+  // pair). Same {@link AdapterSpec} shape as gemini/cursor/kimi. Auth (the
+  // ~/.local/share/opencode/auth.json login-state file) reaches opencode because
+  // the ACP client spawns the adapter with `env: { ...process.env, ...extraEnv }`.
+  opencode: () => ({
+    command: 'opencode',
+    args: ['acp'],
+    requiresAgentBinary: 'opencode',
+    waitForBinary: async (o) => {
+      if (isLocalSession()) await ensureOpencodeInstalled();
+      return waitForCommandOnPath('opencode', o);
     },
   }),
 };

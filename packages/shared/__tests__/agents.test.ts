@@ -55,6 +55,7 @@ describe('AGENT_REGISTRY', () => {
       'cursor',
       'gemini',
       'kimi',
+      'opencode',
     ]);
   });
 

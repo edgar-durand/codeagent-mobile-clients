@@ -132,6 +132,23 @@ export const AGENT_REGISTRY: Record<AgentId, AgentMetadata> = {
     // Native ACP server: `kimi acp` (stdio JSON-RPC, answers `initialize`).
     acp: true,
   },
+  opencode: {
+    id: 'opencode',
+    displayName: 'opencode',
+    binaryName: 'opencode',
+    enabled: true,
+    // opencode auth = `opencode auth login` (multi-provider; API keys AND
+    // provider OAuth), which writes a login-state file at
+    // ~/.local/share/opencode/auth.json. The CLI captures that blob (like
+    // claude/codex capture their local login), so the vaulted credential is
+    // the auth.json — an `oauth_token`-kind login blob, not a bare api_key.
+    supportedAuthKinds: ['oauth_token'],
+    preferredAuthKind: 'oauth_token',
+    // Not listed by `headroom init --global` (claude/codex/copilot only) — native.
+    headroomWrappable: false,
+    // Native ACP server: `opencode acp` (stdio JSON-RPC).
+    acp: true,
+  },
 };
 
 export function getEnabledAgents(): AgentMetadata[] {

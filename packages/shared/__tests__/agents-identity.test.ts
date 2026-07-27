@@ -26,6 +26,7 @@ describe('LINKED_AGENT_IDS / PUBLIC_TO_INTERNAL', () => {
       'gemini',
       'kimi',
       'omniroute',
+      'opencode',
       'house-codeagent-cloud',
     ]);
     expect(isLinkedAgentId(HOUSE_AGENT_ID)).toBe(true);
@@ -179,7 +180,7 @@ describe('capability flags (registry)', () => {
       .filter((m) => m.acp)
       .map((m) => m.id)
       .sort();
-    expect(acp).toEqual(['claude', 'codex', 'cursor', 'gemini', 'kimi']);
+    expect(acp).toEqual(['claude', 'codex', 'cursor', 'gemini', 'kimi', 'opencode']);
   });
 
   it('device-flow agents mirror the mobile agentCatalog (codex shows userCode, cursor must not)', () => {
