@@ -1339,12 +1339,102 @@ export function isPermissionError(stderr: string): boolean {
 }
 
 /**
+ * Resolve the global `node_modules` dir the running CLI installs into, so we
+ * can sweep leftover npm staging dirs before an update. Mirrors the prefix
+ * logic in {@link buildNpmInstallInvocation}. Returns null when the layout
+ * doesn't match (win32 has no `/lib/` segment; a dev checkout isn't global) —
+ * the sweep is then skipped, never fatal. DI'd for tests.
+ */
+export function resolveGlobalNodeModulesDir(opts?: {
+  entryScript?: string;
+  platform?: NodeJS.Platform;
+}): string | null {
+  const entryScript = opts?.entryScript ?? process.argv[1] ?? '';
+  const platform = opts?.platform ?? process.platform;
+  const p = platform === 'win32' ? path.win32 : path.posix;
+  const marker = '/lib/node_modules/codeam-cli/';
+  const markerIdx = entryScript.split(/[\\/]/).join('/').indexOf(marker);
+  if (markerIdx <= 0) return null;
+  const prefix = entryScript.slice(0, markerIdx);
+  return p.join(prefix, 'lib', 'node_modules');
+}
+
+/**
+ * A staging dir older than the longest possible install cannot belong to a
+ * live install, so it's safe to remove. Keeps the sweep from ever disturbing a
+ * concurrent in-flight sibling install's freshly-created staging dir.
+ */
+const STALE_STAGING_AGE_MS = CLI_UPDATE_INSTALL_TIMEOUT_MS;
+
+/**
+ * Sweep leftover npm staging dirs (`.codeam-cli-<hash>`) that a crashed or
+ * concurrent global install left behind in `node_modules`. On update npm
+ * renames the CURRENT package INTO one of these; a stale leftover makes that
+ * rename fail with `ENOTEMPTY` and permanently wedges the self-update — even
+ * the "Retry" button keeps hitting it (Rafael 2026-07-27: three pair-auto
+ * children of one warm codespace fired concurrent `npm i -g` that raced on the
+ * shared `/usr/local` prefix, and the wreckage blocked every retry). Only
+ * removes entries OLDER than {@link STALE_STAGING_AGE_MS} so an in-flight
+ * sibling install is never touched. Best-effort — never throws; returns the
+ * count removed (for tests/logging).
+ */
+export function sweepStaleCliStagingDirs(
+  nodeModulesDir: string | null,
+  now: number = Date.now(),
+  deps?: {
+    readdirSync?: typeof fs.readdirSync;
+    statSync?: typeof fs.statSync;
+    rmSync?: typeof fs.rmSync;
+  },
+): number {
+  if (!nodeModulesDir) return 0;
+  const readdirSync = deps?.readdirSync ?? fs.readdirSync;
+  const statSync = deps?.statSync ?? fs.statSync;
+  const rmSync = deps?.rmSync ?? fs.rmSync;
+  let removed = 0;
+  let entries: string[];
+  try {
+    entries = readdirSync(nodeModulesDir) as string[];
+  } catch {
+    return 0; // node_modules unreadable — nothing to sweep.
+  }
+  for (const name of entries) {
+    // npm's global staging/trash dirs for this package: `.codeam-cli-<hash>`.
+    if (!/^\.codeam-cli-/.test(name)) continue;
+    const full = path.join(nodeModulesDir, name);
+    try {
+      const st = statSync(full);
+      if (now - st.mtimeMs < STALE_STAGING_AGE_MS) continue; // possibly in-flight
+      rmSync(full, { recursive: true, force: true });
+      removed++;
+    } catch {
+      /* best-effort — a racing rm or permission blip must not fail the update */
+    }
+  }
+  return removed;
+}
+
+/**
  * Run `npm install -g codeam-cli@latest` (targeted at the running
  * install's prefix — see {@link buildNpmInstallInvocation}), retrying up
  * to {@link CLI_UPDATE_MAX_ATTEMPTS} times with exponential back-off.
  * Resolves `{ ok, error? }` — never rejects.
  */
 export async function runNpmInstallLatest(): Promise<{ ok: boolean; error?: string }> {
+  // Clear any stale `.codeam-cli-<hash>` staging dir a prior crashed/concurrent
+  // install left in the global node_modules — npm renames the current package
+  // into one on update, and a leftover makes that rename fail ENOTEMPTY and
+  // wedges every retry (Rafael 2026-07-27). Best-effort + stale-age-gated so an
+  // in-flight sibling is never touched.
+  try {
+    const swept = sweepStaleCliStagingDirs(resolveGlobalNodeModulesDir());
+    if (swept > 0) {
+      log.info('cli-update', `cleared ${swept} stale npm staging dir(s) before install`);
+    }
+  } catch {
+    /* never let the pre-clean fail the update */
+  }
+
   let lastError = '';
   // Escalates to `sudo -n` after a permission failure (self-hosted box whose
   // global prefix is root-owned from the `sudo npm i -g` enroll install).
