@@ -420,6 +420,7 @@ describe('integrations registry', () => {
       stitch: 'design',
       vercel: 'deployment',
       trello: 'tracker',
+      clickup: 'tracker',
       slack: 'comms',
       microsoft_teams: 'comms',
       google_chat: 'comms',

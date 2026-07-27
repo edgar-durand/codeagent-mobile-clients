@@ -711,6 +711,35 @@ export const INTEGRATION_REGISTRY: Record<IntegrationId, IntegrationDefinition> 
       },
     },
   },
+  clickup: {
+    id: 'clickup',
+    name: 'ClickUp',
+    icon: 'clickup',
+    category: 'tracker',
+    // DARK — OAuth 2.0 (authorization code). ClickUp's token DOES NOT expire and
+    // has NO refresh token, and its OAuth has NO granular scopes (the app gets
+    // the workspaces the user authorizes). enabled:false until the OAuth app is
+    // registered (client_id/secret) + secrets land + Step-8 live-verify.
+    enabled: false,
+    auth: {
+      kind: 'oauth_redirect',
+      scopes: [],
+    },
+    delivery: {
+      mcp: {
+        // @taazkareem/clickup-mcp-server (Node): CLICKUP_API_KEY (the OAuth
+        // access token — ClickUp accepts it in the Authorization header) +
+        // CLICKUP_TEAM_ID (the workspace id, captured at exchange) via env only.
+        // Version PINNED; bump only after re-verifying headless.
+        command: 'npx',
+        args: ['-y', '@taazkareem/clickup-mcp-server@0.14.4'],
+        envMapping: {
+          CLICKUP_API_KEY: 'accessToken',
+          CLICKUP_TEAM_ID: 'teamId',
+        },
+      },
+    },
+  },
 };
 
 export function getEnabledIntegrations(): IntegrationDefinition[] {

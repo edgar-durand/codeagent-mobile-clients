@@ -25,7 +25,8 @@ export type IntegrationId =
   | 'github'
   | 'gitlab'
   | 'vercel'
-  | 'trello';
+  | 'trello'
+  | 'clickup';
 
 /**
  * `derived` = no link flow of its own: the credential is BORROWED live from a
