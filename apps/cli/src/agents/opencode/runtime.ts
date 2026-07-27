@@ -141,7 +141,7 @@ export class OpencodeRuntimeStrategy implements RuntimeStrategy {
     return {
       publicId: 'opencode',
       vendor: 'opencode',
-      hint: '~/.local/share/opencode/auth.json',
+      hint: 'ANTHROPIC_API_KEY / OPENAI_API_KEY / … env var (opencode auto-detects)',
       watchPaths: opencodeCredentialsPaths,
       extract: extractLocalOpencodeToken,
       validate: validateNonEmptyCredential,
@@ -154,8 +154,9 @@ export class OpencodeRuntimeStrategy implements RuntimeStrategy {
         return createOsStrategy().findInPath('opencode') !== null;
       },
       launch(): ChildProcess {
-        // opencode's login is `opencode auth login` (interactive provider picker
-        // + browser/API-key). Inherited stdio lets the user complete it.
+        // opencode auto-detects provider keys from env vars (like aider) — no
+        // interactive login needed. `opencode auth login` also works for users
+        // who prefer the provider picker; inherited stdio lets them complete it.
         return spawn('opencode', ['auth', 'login'], { stdio: 'inherit' });
       },
     };

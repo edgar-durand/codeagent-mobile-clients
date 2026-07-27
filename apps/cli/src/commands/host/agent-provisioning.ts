@@ -365,14 +365,17 @@ const coderabbitProvisioner: AgentProvisioner = {
 };
 
 const opencodeProvisioner: AgentProvisioner = {
-  write(auth, home): Record<string, string> {
-    // opencode reads its multi-provider login state from
-    // ~/.local/share/opencode/auth.json (written locally by `opencode auth
-    // login`). Our vaulted credential IS that JSON blob → write it verbatim,
-    // like the codex ~/.codex/auth.json path. Everything is a file; no env.
-    const authJson = path.join(home, '.local', 'share', 'opencode', 'auth.json');
-    writeFile0600(authJson, auth.value);
-    return {};
+  write(auth): Record<string, string> {
+    // opencode is model-agnostic and AUTO-DETECTS provider keys from env vars
+    // (like aider). The credential is the user's provider key — detect the
+    // provider by prefix and export the matching var; opencode picks it up.
+    const key = auth.value.trim();
+    const envName = key.startsWith('sk-ant-')
+      ? 'ANTHROPIC_API_KEY'
+      : key.startsWith('AIza')
+        ? 'GEMINI_API_KEY'
+        : 'OPENAI_API_KEY';
+    return { [envName]: key };
   },
 };
 

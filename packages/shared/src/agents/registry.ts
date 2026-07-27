@@ -137,13 +137,12 @@ export const AGENT_REGISTRY: Record<AgentId, AgentMetadata> = {
     displayName: 'opencode',
     binaryName: 'opencode',
     enabled: true,
-    // opencode auth = `opencode auth login` (multi-provider; API keys AND
-    // provider OAuth), which writes a login-state file at
-    // ~/.local/share/opencode/auth.json. The CLI captures that blob (like
-    // claude/codex capture their local login), so the vaulted credential is
-    // the auth.json — an `oauth_token`-kind login blob, not a bare api_key.
-    supportedAuthKinds: ['oauth_token'],
-    preferredAuthKind: 'oauth_token',
+    // opencode is model-AGNOSTIC and AUTO-DETECTS provider API keys from env
+    // vars (ANTHROPIC_API_KEY / OPENAI_API_KEY / GEMINI_API_KEY / …) — same
+    // model as aider. So the credential is the user's OWN provider key; we set
+    // the matching env var (detected by prefix) at deploy. api_key only.
+    supportedAuthKinds: ['api_key'],
+    preferredAuthKind: 'api_key',
     // Not listed by `headroom init --global` (claude/codex/copilot only) — native.
     headroomWrappable: false,
     // Native ACP server: `opencode acp` (stdio JSON-RPC).
