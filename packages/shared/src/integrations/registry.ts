@@ -870,6 +870,37 @@ export const INTEGRATION_REGISTRY: Record<IntegrationId, IntegrationDefinition> 
       },
     },
   },
+  supabase: {
+    id: 'supabase',
+    name: 'Supabase',
+    icon: 'supabase',
+    category: 'database',
+    // LIVE — OAuth 2.0 (authorization code, Confidential). authorize
+    // api.supabase.com/v1/oauth/authorize; token /v1/oauth/token
+    // (form-urlencoded, client creds via HTTP Basic); rotating refresh tokens.
+    // The OAuth app (Organization → OAuth Apps) is registered and
+    // SUPABASE_OAUTH_CLIENT_ID/SECRET/REDIRECT_URI are in Secret Manager
+    // (prod+dev); the config-gated 503 keeps this safe mid-rollout.
+    enabled: true,
+    auth: {
+      kind: 'oauth_redirect',
+      // ⚠️ Supabase scopes are configured ON THE OAUTH APP, NOT sent in the
+      // authorize URL — this list is informational (what the app was granted).
+      scopes: ['all'],
+    },
+    delivery: {
+      mcp: {
+        // Supabase's OFFICIAL MCP server (Node). The OAuth access token IS a
+        // Management API token → fed via SUPABASE_ACCESS_TOKEN (env only, never
+        // argv). Version PINNED; bump only after re-verifying headless.
+        command: 'npx',
+        args: ['-y', '@supabase/mcp-server-supabase@0.9.0'],
+        envMapping: {
+          SUPABASE_ACCESS_TOKEN: 'accessToken',
+        },
+      },
+    },
+  },
 };
 
 export function getEnabledIntegrations(): IntegrationDefinition[] {

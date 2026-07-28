@@ -423,6 +423,7 @@ describe('integrations registry', () => {
       clickup: 'tracker',
       n8n: 'automation',
       postman: 'api_tools',
+      supabase: 'database',
       mixpanel: 'analytics',
       slack: 'comms',
       microsoft_teams: 'comms',
@@ -480,11 +481,10 @@ describe('integration branding catalog', () => {
     }
   });
 
-  it('the COMING SOON set is the expected 8 tools (none already live)', () => {
+  it('the COMING SOON set is the expected 7 tools (none already live)', () => {
     expect([...UPCOMING_INTEGRATION_IDS]).toEqual([
       'gmail',
       'figma',
-      'supabase',
       'asana',
       'stripe',
       'pendo',
