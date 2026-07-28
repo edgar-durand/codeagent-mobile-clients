@@ -173,6 +173,18 @@ export interface IntegrationDefinition {
      *  resolves the credential by delegating to the source integration, and the
      *  client renders it as "part of <source>" with no Connect action of its own. */
     aliasOf?: IntegrationId;
+    /** SECONDARY api-key / PAT path for a PRIMARY OAuth integration. OAuth
+     *  (`kind`) stays the primary/preferred flow; this lets the user paste a
+     *  personal access token instead — a fallback while the vendor's OAuth app
+     *  is in review, or a permanent alternative (like GitHub OAuth + PAT).
+     *  ⚠️ The PAT often needs a DIFFERENT delivery env var than the OAuth token
+     *  (e.g. Figma: OAuth → `FIGMA_OAUTH_TOKEN`/Bearer, PAT →
+     *  `FIGMA_API_KEY`/`X-Figma-Token`), so it carries its OWN `envMapping` used
+     *  INSTEAD of `delivery.mcp.envMapping` when the credential was linked via PAT. */
+    apiKeyFallback?: {
+      fields: IntegrationApiKeyField[];
+      envMapping: Record<string, string>;
+    };
   };
   delivery: IntegrationDelivery;
 }

@@ -343,7 +343,6 @@ export const INTEGRATION_BRANDING: Record<string, IntegrationBranding> = {
 
 export const UPCOMING_INTEGRATION_IDS = [
   'gmail',
-  'figma',
   'asana',
   'stripe',
   'pendo',
