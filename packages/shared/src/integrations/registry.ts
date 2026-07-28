@@ -786,6 +786,90 @@ export const INTEGRATION_REGISTRY: Record<IntegrationId, IntegrationDefinition> 
       },
     },
   },
+  postman: {
+    id: 'postman',
+    name: 'Postman',
+    icon: 'postman',
+    category: 'api_tools',
+    // LIVE — api_key rail. Postman auth is a personal API key (Settings → API
+    // keys). The user pastes it; the backend validates via GET /me + vaults it.
+    // No OAuth (Postman's API has no user OAuth), no secrets, no config-503.
+    enabled: true,
+    auth: {
+      kind: 'api_key',
+      fields: [
+        {
+          key: 'accessToken',
+          label: 'API Key',
+          placeholder: 'PMAK-…',
+          secret: true,
+          help: 'Postman → Settings → API keys → Generate API Key.',
+        },
+      ],
+    },
+    delivery: {
+      mcp: {
+        // Postman's OFFICIAL stdio MCP server (Node). BYO key via POSTMAN_API_KEY
+        // (env only). Version PINNED; bump only after re-verifying headless.
+        command: 'npx',
+        args: ['-y', '@postman/postman-mcp-server@2.11.2'],
+        envMapping: {
+          POSTMAN_API_KEY: 'accessToken',
+        },
+      },
+    },
+  },
+  mixpanel: {
+    id: 'mixpanel',
+    name: 'Mixpanel',
+    icon: 'mixpanel',
+    category: 'analytics',
+    // LIVE — api_key rail. Mixpanel query/export auth is a SERVICE ACCOUNT
+    // (username + password, Basic auth) scoped to a project (project id). The
+    // user pastes all three; the backend validates + vaults them. No OAuth
+    // redirect (service accounts are machine-to-machine), no GSM secrets.
+    enabled: true,
+    auth: {
+      kind: 'api_key',
+      fields: [
+        {
+          key: 'accessToken',
+          label: 'Service Account Username',
+          placeholder: 'your-sa.mp-service-account',
+          secret: false,
+          help: 'Mixpanel → Organization Settings → Service Accounts → create one with project access.',
+        },
+        {
+          key: 'secretKey',
+          label: 'Service Account Secret',
+          placeholder: 'the service account secret',
+          secret: true,
+          help: 'Shown once when you create the service account — copy it then.',
+        },
+        {
+          key: 'projectId',
+          label: 'Project ID',
+          placeholder: '1234567',
+          secret: false,
+          help: 'Mixpanel → Project Settings → Project ID.',
+        },
+      ],
+    },
+    delivery: {
+      mcp: {
+        // @mendeel/mcp-mixpanel (Node): the service account + project id via env
+        // only (MIXPANEL_SERVICE_ACCOUNT_USERNAME/PASSWORD + MIXPANEL_PROJECT_ID).
+        // Version PINNED; bump only after re-verifying headless. Default region US.
+        command: 'npx',
+        args: ['-y', '@mendeel/mcp-mixpanel@1.0.4'],
+        envMapping: {
+          MIXPANEL_SERVICE_ACCOUNT_USERNAME: 'accessToken',
+          MIXPANEL_SERVICE_ACCOUNT_PASSWORD: 'secretKey',
+          MIXPANEL_PROJECT_ID: 'projectId',
+        },
+      },
+    },
+  },
 };
 
 export function getEnabledIntegrations(): IntegrationDefinition[] {
