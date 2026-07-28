@@ -81,7 +81,7 @@ import {
   type HostSession,
   type SealedHostIdentity,
 } from './host/host-client';
-import { isAbsolutePathTarget, prepareWorkspace } from './host/workspace';
+import { isAbsolutePathTarget, prepareWorkspace, selfHostedWorkspaceRoot } from './host/workspace';
 import { provisionAgentCredentials } from './host/agent-provisioning';
 import {
   ensureGhCli,
@@ -407,6 +407,16 @@ interface StopPayload {
   sessionId: string;
 }
 
+/**
+ * The workspace-cleanup command payload (mirrors the backend
+ * `SelfHostedCleanupCommand`). Pushed on session DELETE so a persistent box
+ * doesn't accumulate one `~/.codeam/self-hosted/<deployId>` dir per deleted
+ * session. Keyed by `deployId` — the dir is fully derivable from it.
+ */
+interface CleanupPayload {
+  deployId: string;
+}
+
 /** Payload of `self_hosted_refresh_credentials` (re-link credential sweep). */
 interface RefreshCredentialsPayload {
   agentId: string;
@@ -473,6 +483,12 @@ function isDeployPayload(p: Record<string, unknown>): p is DeployPayload & Recor
 
 function isStopPayload(p: Record<string, unknown>): p is StopPayload & Record<string, unknown> {
   return typeof p.sessionId === 'string';
+}
+
+function isCleanupPayload(
+  p: Record<string, unknown>,
+): p is CleanupPayload & Record<string, unknown> {
+  return typeof p.deployId === 'string' && p.deployId.length > 0;
 }
 
 // ── Fleet control plane (CodeAgent Box rescue fleet) ───────────────────────
@@ -1310,6 +1326,14 @@ export class HostAgentSupervisor {
       this.stopChild(cmd.payload.sessionId);
       return;
     }
+    if (cmd.type === 'self_hosted_cleanup') {
+      if (!isCleanupPayload(cmd.payload)) {
+        log.warn('host-agent', `ignoring malformed self_hosted_cleanup id=${cmd.id}`);
+        return;
+      }
+      this.cleanupWorkspace(cmd.payload.deployId);
+      return;
+    }
     if (cmd.type === 'host_list_dir') {
       await this.listDir(cmd);
       return;
@@ -2126,6 +2150,48 @@ export class HostAgentSupervisor {
       /* already gone */
     }
     this.children.delete(child.deployId);
+  }
+
+  /**
+   * Handle `self_hosted_cleanup { deployId }` — the app deleted this deploy's
+   * session. Remove its on-disk workspace so a persistent box doesn't accumulate
+   * one dir per deleted session. Stops any still-running child for the deploy
+   * first (the delete also pushes `session_terminated` to the child, but this is
+   * race-safe), then removes the two `~/.codeam/...<deployId>` dirs.
+   *
+   * Idempotent (`force: true` → no throw if already gone) and inherently safe:
+   * the dir is keyed by the UNIQUE `deployId`, so it can never be another live
+   * session's workspace, and these paths only ever exist for a cloned
+   * self-hosted deploy (a local / absolute-path target has no such dir → no-op).
+   */
+  private cleanupWorkspace(deployId: string): void {
+    const short = deployId.slice(0, 8);
+    // Stop the child if it's somehow still tracked (its own session_terminated
+    // usually already exited it) so nothing holds the dir open mid-remove.
+    const child = this.children.get(deployId);
+    if (child) {
+      try {
+        child.proc.kill('SIGTERM');
+      } catch {
+        /* already gone */
+      }
+      this.children.delete(deployId);
+    }
+    const dirs = [
+      path.join(selfHostedWorkspaceRoot(), deployId),
+      path.join(os.homedir(), '.codeam', 'house-claude', deployId),
+    ];
+    for (const dir of dirs) {
+      try {
+        fs.rmSync(dir, { recursive: true, force: true });
+      } catch (err) {
+        log.warn(
+          'host-agent',
+          `cleanup: failed to remove ${dir}: ${(err as Error).message}`,
+        );
+      }
+    }
+    log.info('host-agent', `cleaned up workspace for deleted deploy=${short}`);
   }
 
   /**

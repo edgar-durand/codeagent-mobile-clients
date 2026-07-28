@@ -754,6 +754,58 @@ describe('HostAgentSupervisor — control channel reuse', () => {
     fs.rmSync(tmp, { recursive: true, force: true });
   });
 
+  it('self_hosted_cleanup removes the deploy workspace + house-claude dir (idempotent)', async () => {
+    // HOME is tmpHome (beforeEach), so ~/.codeam/... resolves under the sandbox.
+    const deployId = 'dep-abc123';
+    const wsDir = path.join(tmpHome, '.codeam', 'self-hosted', deployId);
+    const houseDir = path.join(tmpHome, '.codeam', 'house-claude', deployId);
+    const otherWs = path.join(tmpHome, '.codeam', 'self-hosted', 'dep-KEEPME');
+    fs.mkdirSync(wsDir, { recursive: true });
+    fs.writeFileSync(path.join(wsDir, 'repo.txt'), 'x');
+    fs.mkdirSync(houseDir, { recursive: true });
+    fs.mkdirSync(otherWs, { recursive: true }); // a DIFFERENT deploy must survive
+
+    const sup = new HostAgentSupervisor(IDENTITY, {
+      makeRelay: () => ({ start: vi.fn(), stop: vi.fn(), sendResult: vi.fn() }),
+    });
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => ({ success: true }) }),
+    );
+    sup.start();
+
+    await sup.handleCommand({
+      id: 'cl-1',
+      type: 'self_hosted_cleanup',
+      payload: { deployId },
+    } as unknown as RemoteCommand);
+
+    expect(fs.existsSync(wsDir)).toBe(false);
+    expect(fs.existsSync(houseDir)).toBe(false);
+    expect(fs.existsSync(otherWs)).toBe(true); // another deploy's dir untouched
+
+    // Idempotent: a second cleanup (dirs already gone) must not throw.
+    await expect(
+      sup.handleCommand({
+        id: 'cl-2',
+        type: 'self_hosted_cleanup',
+        payload: { deployId },
+      } as unknown as RemoteCommand),
+    ).resolves.toBeUndefined();
+
+    // Malformed payload (no deployId) is ignored, not crashed.
+    await expect(
+      sup.handleCommand({
+        id: 'cl-3',
+        type: 'self_hosted_cleanup',
+        payload: {},
+      } as unknown as RemoteCommand),
+    ).resolves.toBeUndefined();
+
+    sup.stop();
+    fs.rmSync(otherWs, { recursive: true, force: true });
+  });
+
   it('host_list_dir on an unreadable path returns a failed relay result (never throws)', async () => {
     const sendResult = vi.fn();
     const sup = new HostAgentSupervisor(IDENTITY, {
