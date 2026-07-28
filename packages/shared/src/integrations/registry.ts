@@ -689,7 +689,7 @@ export const INTEGRATION_REGISTRY: Record<IntegrationId, IntegrationDefinition> 
     id: 'vercel',
     name: 'Vercel',
     icon: 'vercel',
-    category: 'deployment',
+    category: 'infrastructure',
     // DARK — OAuth (PKCE public client). The user authorizes our registered
     // Vercel OAuth app; the access token calls Vercel's OFFICIAL hosted remote
     // MCP (mcp.vercel.com, Streamable HTTP) as a Bearer header — the SAME shim
@@ -982,7 +982,7 @@ export const INTEGRATION_REGISTRY: Record<IntegrationId, IntegrationDefinition> 
     id: 'cloudflare',
     name: 'Cloudflare',
     icon: 'cloudflare',
-    category: 'deployment',
+    category: 'infrastructure',
     // LIVE — Cloudflare self-managed OAuth (dash.cloudflare.com OAuth server,
     // the same one Wrangler uses). Confidential (Client Secret POST). The agent
     // inspects/deploys Workers, Pages, DNS, KV, R2 + reads analytics/logs on the
