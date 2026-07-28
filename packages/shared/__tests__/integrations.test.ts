@@ -422,6 +422,8 @@ describe('integrations registry', () => {
       trello: 'tracker',
       clickup: 'tracker',
       n8n: 'automation',
+      postman: 'api_tools',
+      mixpanel: 'analytics',
       slack: 'comms',
       microsoft_teams: 'comms',
       google_chat: 'comms',
@@ -478,15 +480,13 @@ describe('integration branding catalog', () => {
     }
   });
 
-  it('the COMING SOON set is the expected 10 tools (none already live)', () => {
+  it('the COMING SOON set is the expected 8 tools (none already live)', () => {
     expect([...UPCOMING_INTEGRATION_IDS]).toEqual([
       'gmail',
       'figma',
       'supabase',
       'asana',
-      'postman',
       'stripe',
-      'mixpanel',
       'pendo',
       'pagerduty',
       'amplitude',

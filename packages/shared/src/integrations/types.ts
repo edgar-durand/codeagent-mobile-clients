@@ -27,7 +27,9 @@ export type IntegrationId =
   | 'vercel'
   | 'trello'
   | 'clickup'
-  | 'n8n';
+  | 'n8n'
+  | 'postman'
+  | 'mixpanel';
 
 /**
  * `derived` = no link flow of its own: the credential is BORROWED live from a
@@ -72,7 +74,9 @@ export type IntegrationCategory =
   | 'docs'
   | 'observability'
   | 'deployment'
-  | 'automation';
+  | 'automation'
+  | 'analytics'
+  | 'api_tools';
 
 /**
  * One user-entered field for an `api_key` integration (no browser OAuth — the
@@ -83,7 +87,7 @@ export type IntegrationCategory =
 export interface IntegrationApiKeyField {
   /** Maps to a BrokeredIntegrationToken field (`accessToken`, `orgUrl`,
    *  `appKey`, `host`, …). */
-  key: 'accessToken' | 'orgUrl' | 'appKey' | 'host' | 'apiKey' | 'instanceUrl';
+  key: 'accessToken' | 'orgUrl' | 'appKey' | 'host' | 'apiKey' | 'instanceUrl' | 'secretKey' | 'projectId';
   /** Form label. */
   label: string;
   /** Example / placeholder. */
@@ -216,4 +220,9 @@ export interface BrokeredIntegrationToken {
   /** n8n instance base URL (self-hosted or n8n.cloud) — the MCP server needs it
    *  alongside the API key (N8N_API_URL + N8N_API_KEY). Absent for non-n8n. */
   instanceUrl?: string;
+  /** Secret half of a 2-part api_key credential (Amplitude secret, Mixpanel
+   *  service-account password, etc.). Absent for single-key integrations. */
+  secretKey?: string;
+  /** Project/workspace id some analytics APIs require (Mixpanel project id). */
+  projectId?: string;
 }
