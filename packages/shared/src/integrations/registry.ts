@@ -901,6 +901,34 @@ export const INTEGRATION_REGISTRY: Record<IntegrationId, IntegrationDefinition> 
       },
     },
   },
+  confluence: {
+    id: 'confluence',
+    name: 'Confluence',
+    icon: 'confluence',
+    category: 'docs',
+    // Confluence is served by the SAME Atlassian OAuth + the SAME `mcp-atlassian`
+    // server as Jira (the `jira` entry already requests Confluence scopes). This
+    // entry is a DISPLAY ALIAS so Confluence is explicit in the Knowledge tab: it
+    // BORROWS jira's vaulted credential (`aliasOf: 'jira'`) and has no link flow of
+    // its own — connecting Atlassian (the Jira/Atlassian card) lights it up, and
+    // the backend resolves its token by delegating to `jira`.
+    enabled: true,
+    auth: { kind: 'derived', aliasOf: 'jira' },
+    delivery: {
+      mcp: {
+        // Same mcp-atlassian server + BYO-token env as Jira — it exposes the
+        // Confluence tools when the deploy selects Confluence without Jira. If
+        // BOTH are selected the deploy manifest dedupes identical MCP specs.
+        command: 'uvx',
+        args: ['mcp-atlassian==0.22.1'],
+        envMapping: {
+          ATLASSIAN_OAUTH_ACCESS_TOKEN: 'accessToken',
+          ATLASSIAN_OAUTH_CLOUD_ID: 'cloudId',
+        },
+        staticEnv: { ATLASSIAN_OAUTH_ENABLE: 'true' },
+      },
+    },
+  },
 };
 
 export function getEnabledIntegrations(): IntegrationDefinition[] {

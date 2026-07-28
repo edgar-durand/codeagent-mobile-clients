@@ -431,6 +431,7 @@ describe('integrations registry', () => {
       discord: 'comms',
       resend: 'comms',
       notion: 'docs',
+      confluence: 'docs',
       figma: 'design',
     };
     for (const [id, meta] of Object.entries(INTEGRATION_REGISTRY)) {
