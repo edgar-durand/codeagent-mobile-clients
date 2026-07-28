@@ -30,7 +30,8 @@ export type IntegrationId =
   | 'n8n'
   | 'postman'
   | 'mixpanel'
-  | 'supabase';
+  | 'supabase'
+  | 'confluence';
 
 /**
  * `derived` = no link flow of its own: the credential is BORROWED live from a
@@ -165,6 +166,13 @@ export interface IntegrationDefinition {
      *  (performed by the module that owns the connection, not by the generic
      *  integrations OAuth path). */
     connection?: DerivedCredentialSource;
+    /** For `kind: 'derived'` — the OTHER integration whose vaulted credential
+     *  this one reuses (Confluence → `jira`, since one Atlassian OAuth + the one
+     *  `mcp-atlassian` server serves both). Like `derivedFrom` but the source is
+     *  a vault-backed integration, not a `ProviderToken` connection: the backend
+     *  resolves the credential by delegating to the source integration, and the
+     *  client renders it as "part of <source>" with no Connect action of its own. */
+    aliasOf?: IntegrationId;
   };
   delivery: IntegrationDelivery;
 }
