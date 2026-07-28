@@ -285,13 +285,43 @@ export const INTEGRATION_REGISTRY: Record<IntegrationId, IntegrationDefinition> 
     name: 'Microsoft Teams',
     icon: 'microsoft_teams',
     category: 'comms',
-    // COMING SOON — placeholder catalog entry (no OAuth provider / MCP yet). The
-    // agent will post review pings + read threads AS THE USER over Microsoft Graph
-    // once the provider lands. `enabled:false` renders it as a dimmed "coming
-    // soon" tile inside the (live) comms category.
-    enabled: false,
-    auth: { kind: 'oauth_redirect' },
-    delivery: {},
+    // LIVE — Microsoft identity platform v2.0 OAuth (multi-tenant, Confidential).
+    // The agent reads chats/channels + posts AS THE USER over Microsoft Graph.
+    // MS_TEAMS_OAUTH_CLIENT_ID/SECRET/REDIRECT_URI are in Secret Manager (prod+dev);
+    // the backend TeamsOAuthProvider is config-gated (503 if env unset).
+    // ⚠️ Chat.* + ChannelMessage.Read.All (`.All`) require TENANT-ADMIN consent
+    // (MC1163922, Oct-2025) — the connecting user must be an org admin, or their
+    // IT admin approves the app for the tenant. Not a self-serve funnel like Slack.
+    enabled: true,
+    auth: {
+      kind: 'oauth_redirect',
+      // Delegated Microsoft Graph scopes. `offline_access` → rotating refresh
+      // (Teams access tokens are ~1h). ⚠️ Changing these requires the user to
+      // RE-LINK — the token carries only the scopes granted at link time.
+      scopes: [
+        'User.Read',
+        'User.ReadBasic.All',
+        'Team.ReadBasic.All',
+        'Channel.ReadBasic.All',
+        'ChannelMessage.Read.All',
+        'ChannelMessage.Send',
+        'Chat.Read',
+        'Chat.ReadWrite',
+        'offline_access',
+      ],
+    },
+    delivery: {
+      mcp: {
+        // @floriscornel/teams-mcp (Node): BYO Graph access token via AUTH_TOKEN
+        // (env only, never argv). Headless. Version PINNED; bump only after
+        // re-verifying headless. Tools: get/send channel + chat messages, replies.
+        command: 'npx',
+        args: ['-y', '@floriscornel/teams-mcp@0.9.0'],
+        envMapping: {
+          AUTH_TOKEN: 'accessToken',
+        },
+      },
+    },
   },
   google_chat: {
     id: 'google_chat',
