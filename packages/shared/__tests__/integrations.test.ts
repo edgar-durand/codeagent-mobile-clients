@@ -281,18 +281,25 @@ describe('integrations registry', () => {
     expect(st.delivery.mcp?.httpUrl).toBe('https://stitch.googleapis.com/mcp');
     expect(st.delivery.mcp?.httpHeaders).toEqual({ 'X-Goog-Api-Key': '{accessToken}' });
     expect(st.enabled).toBe(true);
-    // Being live makes `design` a LIVE category (figma is dark) — the mobile grid
+    // Both figma + stitch are live now, so `design` is a LIVE category.
     // renders it as a half-width card instead of a full-width COMING SOON banner.
-    expect(getIntegrationsByCategory('design').map((m) => m.id)).toEqual(['stitch']);
+    expect(getIntegrationsByCategory('design').map((m) => m.id)).toEqual(['figma', 'stitch']);
   });
 
-  it('figma is a dark integration (pending OAuth-app review) with read-only granular scopes + BYO-token MCP delivery', () => {
-    // Figma — DARK pending Figma's OAuth-app review approval. Read-only granular
-    // scopes (design-to-code + asset export); the api-v2 FigmaOAuthProvider is
-    // config-gated (503 if env unset).
+  it('figma is a LIVE design integration — OAuth PRIMARY + PAT fallback (dual-auth)', () => {
+    // Figma — LIVE. OAuth is the primary flow (app pending Figma's review); a PAT
+    // `apiKeyFallback` ships alongside so it works today. The PAT uses a different
+    // delivery env var (X-Figma-Token vs OAuth Bearer).
     expect(isKnownIntegrationId('figma')).toBe(true);
-    expect(INTEGRATION_REGISTRY.figma.enabled).toBe(false);
+    expect(INTEGRATION_REGISTRY.figma.enabled).toBe(true);
     expect(INTEGRATION_REGISTRY.figma.auth.kind).toBe('oauth_redirect');
+    // PAT fallback: its own field + its own delivery env var.
+    expect(INTEGRATION_REGISTRY.figma.auth.apiKeyFallback?.fields.map((f) => f.key)).toEqual([
+      'accessToken',
+    ]);
+    expect(INTEGRATION_REGISTRY.figma.auth.apiKeyFallback?.envMapping).toEqual({
+      FIGMA_API_KEY: 'accessToken',
+    });
     expect(INTEGRATION_REGISTRY.figma.auth.scopes).toEqual([
       'current_user:read',
       'file_content:read',
@@ -437,7 +444,7 @@ describe('integrations registry', () => {
     for (const [id, meta] of Object.entries(INTEGRATION_REGISTRY)) {
       expect(meta.category).toBe(expected[id]);
     }
-    // Helper returns ONLY enabled integrations of the category (figma is dark).
+    // Helper returns ONLY enabled integrations of the category (figma + stitch both live).
     expect(getIntegrationsByCategory('tracker').map((m) => m.id).sort()).toEqual([
       'azure_devops',
       'clickup',
@@ -446,7 +453,7 @@ describe('integrations registry', () => {
       'linear',
       'trello',
     ]);
-    expect(getIntegrationsByCategory('design').map((m) => m.id)).toEqual(['stitch']);
+    expect(getIntegrationsByCategory('design').map((m) => m.id)).toEqual(['figma', 'stitch']);
     expect(getIntegrationsByCategory('version_control').map((m) => m.id).sort()).toEqual([
       'github',
       'gitlab',
@@ -482,10 +489,9 @@ describe('integration branding catalog', () => {
     }
   });
 
-  it('the COMING SOON set is the expected 7 tools (none already live)', () => {
+  it('the COMING SOON set is the expected 6 tools (none already live)', () => {
     expect([...UPCOMING_INTEGRATION_IDS]).toEqual([
       'gmail',
-      'figma',
       'asana',
       'stripe',
       'pendo',

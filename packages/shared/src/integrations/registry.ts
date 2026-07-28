@@ -592,11 +592,12 @@ export const INTEGRATION_REGISTRY: Record<IntegrationId, IntegrationDefinition> 
     name: 'Figma',
     icon: 'figma',
     category: 'design',
-    // DARK — pending Figma's OAuth-app review approval (submitted 2026-07-16).
-    // Figma OAuth apps do NOT exist publicly until review passes (authorize URL
-    // errors "OAuth app ... doesn't exist"). Backend provider + secrets are
-    // already deployed; flip to true once approved (bead codeagent-m4ix).
-    enabled: false,
+    // LIVE. OAuth is the PRIMARY flow (app pending Figma's review — until it
+    // passes the authorize URL errors "OAuth app doesn't exist"), so a PAT
+    // fallback (`apiKeyFallback`) ships alongside it and works TODAY: the user
+    // pastes a Figma personal access token. Same OAuth-primary + PAT-secondary
+    // shape as GitHub. Flip of the OAuth review is transparent (bead codeagent-m4ix).
+    enabled: true,
     auth: {
       kind: 'oauth_redirect',
       // Granular READ-ONLY scopes (legacy `files:read` is deprecated for
@@ -611,6 +612,24 @@ export const INTEGRATION_REGISTRY: Record<IntegrationId, IntegrationDefinition> 
         'file_dev_resources:read',
         'library_content:read',
       ],
+      // SECONDARY: paste a Figma personal access token instead of OAuth. The
+      // PAT uses the `X-Figma-Token` header, so the delivery env var differs
+      // from OAuth (`FIGMA_API_KEY` vs `FIGMA_OAUTH_TOKEN`) — hence its own
+      // envMapping, used when the credential was linked via PAT.
+      apiKeyFallback: {
+        fields: [
+          {
+            key: 'accessToken',
+            label: 'Figma personal access token',
+            placeholder: 'figd_…',
+            secret: true,
+            help: 'Figma → Settings → Security → Personal access tokens (read-only scopes).',
+          },
+        ],
+        envMapping: {
+          FIGMA_API_KEY: 'accessToken',
+        },
+      },
     },
     delivery: {
       mcp: {
