@@ -426,6 +426,7 @@ describe('integrations registry', () => {
       datadog: 'observability',
       stitch: 'design',
       vercel: 'deployment',
+      cloudflare: 'deployment',
       trello: 'tracker',
       clickup: 'tracker',
       n8n: 'automation',

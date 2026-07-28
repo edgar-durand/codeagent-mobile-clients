@@ -978,6 +978,92 @@ export const INTEGRATION_REGISTRY: Record<IntegrationId, IntegrationDefinition> 
       },
     },
   },
+  cloudflare: {
+    id: 'cloudflare',
+    name: 'Cloudflare',
+    icon: 'cloudflare',
+    category: 'deployment',
+    // LIVE — Cloudflare self-managed OAuth (dash.cloudflare.com OAuth server,
+    // the same one Wrangler uses). Confidential (Client Secret POST). The agent
+    // inspects/deploys Workers, Pages, DNS, KV, R2 + reads analytics/logs on the
+    // user's account. CLOUDFLARE_OAUTH_CLIENT_ID/SECRET/REDIRECT_URI in Secret
+    // Manager (prod+dev); the backend CloudflareOAuthProvider is config-gated (503).
+    enabled: true,
+    auth: {
+      kind: 'oauth_redirect',
+      // Cloudflare OAuth scope IDs == API-token permission-group names (dot
+      // form, e.g. `workers-scripts.write`). ⚠️ MUST exactly match the scopes
+      // configured on the OAuth client (b2b4b87e…). `offline_access` → refresh.
+      scopes: [
+        // Developer Platform (Workers / Pages / KV / R2 / D1 / observability)
+        'd1.read',
+        'page.read',
+        'page.write',
+        'workers-ci.read',
+        'workers-ci.write',
+        'containers.read',
+        'containers.write',
+        'workers-kv-storage.read',
+        'workers-kv-storage.write',
+        'workers-observability.read',
+        'workers-observability-telemetry.write',
+        'workers-observability.write',
+        'r2-catalog.read',
+        'r2-catalog.write',
+        'r2-catalog-sql.read',
+        'workers-r2-bucket-item.read',
+        'workers-r2-bucket-item.write',
+        'workers-r2.read',
+        'workers-r2.write',
+        'workers-routes.read',
+        'workers-routes.write',
+        'workers-scripts.read',
+        'workers-scripts.write',
+        'workers-tail.read',
+        // DNS & Zones
+        'account-dns-settings.read',
+        'account-dns-settings.write',
+        'dns-firewall.read',
+        'dns-firewall.write',
+        'dns.read',
+        'dns-view.read',
+        'dns.write',
+        'registrar-domains.admin',
+        'registrar-sandbox-domains.admin',
+        'zone-dns-settings.read',
+        'zone-dns-settings.write',
+        'zone.read',
+        'zone-settings.read',
+        'zone-settings.write',
+        // Analytics & Logs
+        'account-analytics.read',
+        'analytics.read',
+        'account-logs.read',
+        'logs.read',
+        'radar.read',
+        // Account & Billing
+        'account-api-gateway.read',
+        'account-settings.read',
+        'memberships.read',
+        'notifications.read',
+        'user-details.read',
+        'offline_access',
+      ],
+    },
+    delivery: {
+      mcp: {
+        // Headless stdio Cloudflare MCP (Cloudflare API v4) — BYO token via env,
+        // the OAuth access token works as a Bearer against api.cloudflare.com.
+        // The account id is the discriminator for account-level ops. PINNED.
+        command: 'npx',
+        args: ['-y', '@itunified.io/mcp-cloudflare@2026.4.10-1'],
+        envMapping: {
+          CLOUDFLARE_API_TOKEN: 'accessToken',
+          CLOUDFLARE_ACCOUNT_ID: 'accountId',
+        },
+      },
+    },
+  },
 };
 
 export function getEnabledIntegrations(): IntegrationDefinition[] {

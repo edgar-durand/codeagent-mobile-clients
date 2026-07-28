@@ -31,7 +31,8 @@ export type IntegrationId =
   | 'postman'
   | 'mixpanel'
   | 'supabase'
-  | 'confluence';
+  | 'confluence'
+  | 'cloudflare';
 
 /**
  * `derived` = no link flow of its own: the credential is BORROWED live from a
@@ -247,4 +248,9 @@ export interface BrokeredIntegrationToken {
   secretKey?: string;
   /** Project/workspace id some analytics APIs require (Mixpanel project id). */
   projectId?: string;
+  /** Cloudflare account id — the Cloudflare MCP needs it alongside the OAuth
+   *  access token (`CLOUDFLARE_ACCOUNT_ID` + `CLOUDFLARE_API_TOKEN`) for
+   *  account-level operations. Captured at link time from `GET /accounts`.
+   *  Absent for non-Cloudflare integrations. */
+  accountId?: string;
 }
