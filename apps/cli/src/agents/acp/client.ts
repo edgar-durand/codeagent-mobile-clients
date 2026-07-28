@@ -53,6 +53,8 @@ import type { AdapterSpec } from './adapters';
 import { ADAPTER_MODULE_LOAD_ERROR_RE } from './agent-binary';
 import type { PromptBlock } from './buildAcpPromptBlocks';
 import { createIdleTimeout, type IdleTimeout } from './idleTimeout';
+import { pathIsInternal, INTERNAL_BLOCK_REASON } from './internal-paths';
+import { isLocalSession } from '../../baton/gate';
 import { log } from '../../services/logger';
 import { killQuiet } from '../../lib/quiet';
 
@@ -1254,6 +1256,14 @@ export class AcpClient {
         // (-32002) is the spec-correct shape for "this path doesn't
         // exist"; the adapter's read-before-write check sees it and
         // falls through to the write branch immediately.
+        // CodeAgent internals guard (MANAGED deploys only): refuse a delegated
+        // read of a platform-internal path (~/.codeam, ~/.beads, house-claude,
+        // host log). -32002 (resource error) is the same shape the adapter
+        // already handles for permission-denied, so it degrades cleanly instead
+        // of exposing the file. Not applied locally (there it's the user's own).
+        if (!isLocalSession() && pathIsInternal(params.path)) {
+          throw new RequestError(-32002, INTERNAL_BLOCK_REASON, { uri: params.path });
+        }
         try {
           const content = await fs.readFile(params.path, 'utf8');
           return applyLineRange(content, params.line ?? null, params.limit ?? null);
@@ -1274,6 +1284,11 @@ export class AcpClient {
         }
       },
       writeTextFile: async (params): Promise<WriteTextFileResponse> => {
+        // Internals guard (MANAGED only) — also refuse WRITES into platform
+        // paths so a turn can't tamper with CodeAgent's own runtime config.
+        if (!isLocalSession() && pathIsInternal(params.path)) {
+          throw new RequestError(-32002, INTERNAL_BLOCK_REASON, { uri: params.path });
+        }
         try {
           await fs.writeFile(params.path, params.content, 'utf8');
           return {};
