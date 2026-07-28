@@ -51,6 +51,8 @@ import {
   closeAllTerminals,
 } from '../../services/terminal-ops.service';
 import { mapSessionUpdate, mapPermissionRequest } from './mappers';
+import { internalPathPermissionOutcome } from './internal-paths';
+import { isLocalSession } from '../../baton/gate';
 import { extractSelectPrompt } from './selectPromptExtractor';
 import { prewarmPreviewDetection } from '../../commands/start/handlers';
 import { loadCliConfig } from '../../config';
@@ -1085,6 +1087,22 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
     beginLoadReplay: () => streaming.beginLoadReplay(),
     endLoadReplay: () => streaming.endLoadReplay(),
     onRequestPermission: async (request) => {
+      // CodeAgent platform-internals guard (MANAGED deploys only). Deny a tool
+      // call (bash cat/ls, write, edit) that references an internal path BEFORE
+      // auto-approve would allow it. Agent-agnostic — every ACP agent asks the
+      // client here — so this covers claude/codex/gemini/cursor/opencode without
+      // any Claude-specific settings. Not applied on a local session (there
+      // ~/.codeam is the user's own config). See ./internal-paths.ts.
+      if (!isLocalSession()) {
+        const denied = internalPathPermissionOutcome(request);
+        if (denied) {
+          log.warn(
+            'acpRunner',
+            'internal-path guard — denying tool call referencing a CodeAgent platform internal',
+          );
+          return denied;
+        }
+      }
       // AUTO mode (headless / codespace): no human at the phone to answer, so
       // auto-pick an "allow" option instead of stalling the turn forever. Pick
       // the broadest grant available (allow_always > allow_once). If the agent
