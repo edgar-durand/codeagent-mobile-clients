@@ -76,7 +76,7 @@ export type IntegrationCategory =
   | 'comms'
   | 'docs'
   | 'observability'
-  | 'deployment'
+  | 'infrastructure'
   | 'automation'
   | 'analytics'
   | 'api_tools'
