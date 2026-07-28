@@ -57,6 +57,62 @@ export async function reportCredentialInvalid(
 }
 
 /**
+ * Best-effort: push the user's FRESH local agent credential to the vault so a
+ * LATER deploy injects a currently-valid token instead of a stale one. Fired by
+ * the credential-sync watcher when the local agent rotates its OAuth token on an
+ * active session (Anthropic single-use refresh tokens → the vaulted snapshot
+ * goes stale → "Claude creds expired on a new deploy"). The backend auto-creates
+ * the LinkedAgent when none exists and never clobbers a durable setup-token, so
+ * this is safe to fire broadly. Never throws — a sync failure must not break the
+ * session. `fetchImpl` injectable for tests.
+ */
+export async function postCredentialSync(
+  opts: {
+    agent: string;
+    sessionId: string;
+    pluginId: string;
+    pluginAuthToken: string;
+    method: 'oauth' | 'setup_token';
+    credential: string;
+    agentState?: string;
+    pollSecret?: string;
+  },
+  fetchImpl: typeof fetch = fetch,
+): Promise<void> {
+  const url = `${resolveApiBaseUrl()}/api/plugin/agents/${encodeURIComponent(opts.agent)}/credential-sync`;
+  const body = JSON.stringify({
+    sessionId: opts.sessionId,
+    pluginId: opts.pluginId,
+    method: opts.method,
+    credential: opts.credential,
+    ...(opts.agentState ? { agentState: opts.agentState } : {}),
+  });
+  try {
+    const makeHeaders = (token: string): Record<string, string> => ({
+      'Content-Type': 'application/json',
+      'X-Plugin-Auth-Token': token,
+    });
+    const response = await fetchImpl(url, {
+      method: 'POST',
+      headers: makeHeaders(opts.pluginAuthToken),
+      body,
+    });
+    if (response.status === 401 || response.status === 403) {
+      const freshToken = await fetchCurrentPluginAuthToken(
+        opts.sessionId,
+        opts.pluginId,
+        opts.pollSecret,
+      );
+      if (freshToken !== null) {
+        await fetchImpl(url, { method: 'POST', headers: makeHeaders(freshToken), body });
+      }
+    }
+  } catch {
+    // Best-effort — keeping the vault fresh must never break the session.
+  }
+}
+
+/**
  * Fire-once best-effort POST to `POST /api/sessions/:sessionId/headroom-budget-reached`
  * when the local Headroom proxy 429s a turn due to budget exhaustion.
  *

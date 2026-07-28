@@ -38,6 +38,7 @@ import {
 } from '../services/pairing.service';
 import { capture, identifyUser, shutdownTelemetry } from '../services/telemetry.service';
 import { provisionBeadsForStart } from '../beads/wiring';
+import { startClaudeCredentialSync } from '../agents/claude/credential-sync';
 import { ensureBeadsWorkflowHint } from '../beads/workflow-hint';
 import { buildMcpServersForStart } from '../integrations/provision';
 import { provisionSkillsForStart } from '../skills/provision';
@@ -204,6 +205,27 @@ export async function start(
     : null;
   process.once('exit', () => {
     localHeadroomReporter?.stop();
+  });
+
+  // Claude credential-sync — keep the VAULT current from THIS session's local
+  // credential as Claude rotates its OAuth token (Anthropic single-use refresh
+  // tokens), so a LATER deploy injects a currently-valid token instead of the
+  // stale link-time snapshot ("Claude creds expired on a new deploy"). Gated to
+  // Claude sessions with a plugin token. Fires once now → auto-captures for a
+  // user who has a working session but no LinkedAgent ("No LinkedAgent for
+  // claude_code"). The backend guards it (auto-create if missing, never clobber a
+  // durable non-rotating setup-token), so it's safe to run on any session shape.
+  const claudeCredentialSync =
+    session.agent === 'claude' && session.pluginAuthToken
+      ? startClaudeCredentialSync({
+          sessionId: session.id,
+          pluginId,
+          pluginAuthToken: session.pluginAuthToken,
+          pollSecret: session.pollSecret,
+        })
+      : null;
+  process.once('exit', () => {
+    void claudeCredentialSync?.stop();
   });
 
   // Cloud (codespace / self-hosted): pre-complete Claude's first-run onboarding
