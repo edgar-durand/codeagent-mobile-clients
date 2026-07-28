@@ -29,7 +29,8 @@ export type IntegrationId =
   | 'clickup'
   | 'n8n'
   | 'postman'
-  | 'mixpanel';
+  | 'mixpanel'
+  | 'supabase';
 
 /**
  * `derived` = no link flow of its own: the credential is BORROWED live from a
@@ -76,7 +77,8 @@ export type IntegrationCategory =
   | 'deployment'
   | 'automation'
   | 'analytics'
-  | 'api_tools';
+  | 'api_tools'
+  | 'database';
 
 /**
  * One user-entered field for an `api_key` integration (no browser OAuth — the
