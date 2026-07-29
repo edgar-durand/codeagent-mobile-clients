@@ -32,7 +32,6 @@ import { backupAgentHeadroomConfig } from './headroom-config';
 const PEP668_MARKER = 'externally-managed-environment';
 
 /** Timeout for each `python3 -m pip install ...` attempt. */
-const PIP_INSTALL_TIMEOUT_MS = 120_000;
 
 /** Timeout for the heavier Headroom-engine installs (PyTorch + the ML/AST
  *  extras are large — several minutes on a cold box). */
@@ -393,11 +392,16 @@ export async function setupHeadroomForSelfHosted(
   // (absent by design). The proxy eager-preloads the pre-downloaded model from
   // cache at bind time, so the first prompt is compressed without a stall.
   onProgress('proxy');
-  spawnHeadroomProxy({
-    tag: 'host-agent',
-    spawnErrorMsg: (detail) => `headroom proxy warm-start error (best-effort): ${detail}`,
-    failureMsg: (detail) => `headroom proxy warm-start failed (best-effort): ${detail}`,
-  });
+  spawnHeadroomProxy(
+    {
+      tag: 'host-agent',
+      spawnErrorMsg: (detail) => `headroom proxy warm-start error (best-effort): ${detail}`,
+      failureMsg: (detail) => `headroom proxy warm-start failed (best-effort): ${detail}`,
+    },
+    // First deliberate warm-start of the deploy — take priority over any
+    // supervisor tick racing it.
+    { force: true },
+  );
 
   onProgress('ready');
   return true;

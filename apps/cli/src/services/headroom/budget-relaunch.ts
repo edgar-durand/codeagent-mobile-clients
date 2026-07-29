@@ -216,11 +216,16 @@ function spawnProxyReal(_budget: BudgetSpec | null): void {
   // budget env vars have already been set/cleared on process.env by the handler
   // before calling applyBudgetToHeadroom — buildBudgetProxyArgs (inside the
   // shared spawnHeadroomProxy) reads them.
-  spawnHeadroomProxy({
-    tag: 'headroom-budget',
-    spawnErrorMsg: (detail) => `proxy relaunch error (best-effort): ${detail}`,
-    failureMsg: (detail) => `proxy relaunch failed (best-effort): ${detail}`,
-  });
+  spawnHeadroomProxy(
+    {
+      tag: 'headroom-budget',
+      spawnErrorMsg: (detail) => `proxy relaunch error (best-effort): ${detail}`,
+      failureMsg: (detail) => `proxy relaunch failed (best-effort): ${detail}`,
+    },
+    // Deliberate relaunch (killProxyReal already ran) — must never be swallowed
+    // by a lock a liveness supervisor happens to hold.
+    { force: true },
+  );
 }
 
 /** Real deps wired to actual fs + child_process. */
