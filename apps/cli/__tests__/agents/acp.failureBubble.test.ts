@@ -36,6 +36,10 @@ import {
   looksLikeBudgetExceeded,
   budgetBubbleMessage,
   startupFailureMessage,
+  looksLikeAuthFailure,
+  looksLikeHouseAgentLimit,
+  replyIsHouseAgentLimit,
+  houseAgentLimitMessage,
 } from '../../src/agents/acp/runner';
 
 describe('startupFailureMessage — agent-that-never-started surfaces an actionable reason', () => {
@@ -478,5 +482,78 @@ describe('failureBubble — budget-exceeded branch', () => {
         agent: 'claude',
       }),
     ).toBe(providerOutageMessage('claude'));
+  });
+});
+
+describe('house-agent 403 (CodeAgent Cloud ceiling) is NOT an auth failure', () => {
+  // The exact strings our agent-proxy returns (agent-proxy.controller.ts /
+  // agent-proxy-meter.service.ts), as Claude Code's SDK surfaces them:
+  // "Internal error: Failed to authenticate. API Error: 403 <body>".
+  const FREE_CEILING =
+    'Internal error: Failed to authenticate. API Error: 403 Daily CodeAgent Cloud usage ceiling reached. Upgrade to Pro for more.';
+  const PRO_CEILING =
+    'Internal error: Failed to authenticate. API Error: 403 Daily CodeAgent Cloud usage ceiling reached — resets at midnight UTC.';
+  const UNAVAILABLE =
+    'Internal error: Failed to authenticate. API Error: 403 CodeAgent Cloud is temporarily unavailable.';
+  const DISABLED =
+    'Internal error: Failed to authenticate. API Error: 403 CodeAgent Cloud is temporarily disabled.';
+
+  it('detector matches every house-proxy 403 variant', () => {
+    for (const t of [FREE_CEILING, PRO_CEILING, UNAVAILABLE, DISABLED]) {
+      expect(looksLikeHouseAgentLimit(t)).toBe(true);
+    }
+    // and the raw HOUSE_AGENT_CEILING code shape
+    expect(looksLikeHouseAgentLimit('code: HOUSE_AGENT_CEILING')).toBe(true);
+  });
+
+  it('the ceiling 403 is NOT classified as an auth failure (the whole bug)', () => {
+    // Without the guard, "failed to authenticate" would match AUTH_FAILURE_RE.
+    expect(looksLikeAuthFailure(FREE_CEILING)).toBe(false);
+    expect(looksLikeAuthFailure(PRO_CEILING)).toBe(false);
+    expect(looksLikeAuthFailure(UNAVAILABLE)).toBe(false);
+    // A genuine credential 401 still classifies as an auth failure.
+    expect(
+      looksLikeAuthFailure('API Error: 401 invalid authentication credentials'),
+    ).toBe(true);
+  });
+
+  it('failureBubble surfaces the daily-limit bubble, never the re-auth bubble', () => {
+    const bubble = failureBubble({
+      detail: PRO_CEILING,
+      recentStderr: '',
+      hadText: false,
+      agent: 'claude',
+    });
+    expect(bubble).toBe(houseAgentLimitMessage(PRO_CEILING));
+    expect(bubble).not.toBe(AUTH_FAILURE_MESSAGE);
+    expect(bubble).toMatch(/daily CodeAgent Cloud limit/i);
+    // Must NOT tell the user their login is broken.
+    expect(bubble).not.toMatch(/re-?authenticate|codeam:\/\/reauth/i);
+  });
+
+  it('FREE ceiling body keeps the upgrade CTA; PRO ceiling does not', () => {
+    expect(houseAgentLimitMessage(FREE_CEILING)).toMatch(/upgrade to \*\*pro\*\*/i);
+    expect(houseAgentLimitMessage(PRO_CEILING)).not.toMatch(/upgrade to \*\*pro\*\*/i);
+    expect(houseAgentLimitMessage(PRO_CEILING)).toMatch(/wait for the reset/i);
+  });
+
+  it('temporarily-unavailable gets the availability bubble, not the ceiling one', () => {
+    const msg = houseAgentLimitMessage(UNAVAILABLE);
+    expect(msg).toMatch(/temporarily unavailable/i);
+    expect(msg).not.toMatch(/daily/i);
+  });
+
+  it('the ceiling arriving as a COMPLETED reply is caught before replyIsAuthFailure', () => {
+    // Rafael's reply text — short, single line — must route to the house path,
+    // NOT the auth-in-reply path (which would fire reportCredentialInvalid).
+    expect(replyIsHouseAgentLimit(PRO_CEILING)).toBe(true);
+    expect(replyIsAuthFailure(PRO_CEILING)).toBe(false);
+  });
+
+  it('a long reply that merely mentions the product is not misclassified', () => {
+    const prose =
+      'CodeAgent Cloud is a great option. '.repeat(20) +
+      'You could hit a usage ceiling eventually.';
+    expect(replyIsHouseAgentLimit(prose)).toBe(false); // > 300 chars
   });
 });

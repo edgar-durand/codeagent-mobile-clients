@@ -51,7 +51,9 @@ import {
   ONE_M_CREDITS_MESSAGE,
   describeError,
   failureBubble,
+  houseAgentLimitMessage,
   replyIsAuthFailure,
+  replyIsHouseAgentLimit,
 } from './failure-messages';
 import { agentHooks } from './agent-hooks';
 import { postBudgetReached, reportCredentialInvalid } from './backend-reports';
@@ -339,6 +341,26 @@ async function startTaskH(ctx: AcpCommandContext): Promise<void> {
       void history.flush();
       log.info('acpRunner', `start_task ← cursor-plan-upgrade-required id=${cmd.id.slice(0, 8)}`);
       await relay.sendResult(cmd.id, 'failed', { error: 'cursor plan upgrade required' });
+    } else if (replyIsHouseAgentLimit(finalText)) {
+      // The turn COMPLETED but the reply IS a house-proxy 403 (CodeAgent Cloud
+      // daily usage ceiling / temporarily unavailable). Claude streams the
+      // wrapped "Failed to authenticate. API Error: 403 …" as plain reply text,
+      // which replyIsAuthFailure would otherwise misclassify as a bad
+      // credential → a pointless re-auth loop (2026-07-29 Rafael). It is a
+      // usage/availability limit — surface the accurate daily-limit bubble and
+      // DO NOT reportCredentialInvalid (the credential, if any, is fine; the
+      // house agent has none to renew).
+      const houseBubble = houseAgentLimitMessage(finalText);
+      await streaming.closeWithBubble(houseBubble);
+      history.appendAgentReply(houseBubble);
+      void history.flush();
+      turnFiles.flushTurn().catch((err) => {
+        log.warn('acpRunner', `turnFiles.flushTurn failed: ${describeError(err)}`);
+      });
+      log.info('acpRunner', `start_task ← house-agent-limit id=${cmd.id.slice(0, 8)}`);
+      await relay.sendResult(cmd.id, 'failed', {
+        error: 'house agent usage ceiling / temporarily unavailable',
+      });
     } else if (replyIsAuthFailure(finalText)) {
       // The agent COMPLETED the turn but its reply IS an auth-failure
       // notice ("Not logged in · Please run /login") — a missing/expired
