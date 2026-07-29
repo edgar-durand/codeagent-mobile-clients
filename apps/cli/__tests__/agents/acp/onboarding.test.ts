@@ -127,15 +127,35 @@ describe('maybeSendOnboardingWelcome', () => {
     );
   });
 
-  it('is a complete no-op when the kill-switch is set (never touches the marker)', () => {
+  it('never sends the welcome when the kill-switch is set, but WRITES the marker so a later resume also skips it', () => {
+    // Suppressed (CODEAM_ONBOARDING_DISABLED=1 on a task launch). We must not
+    // send the welcome live, and — unlike the old behavior — we now write the
+    // marker so a supervisor RESUME (which respawns without the flag) sees
+    // "already handled" and doesn't belatedly show the suppressed greeting.
     vi.spyOn(_onboardingSeam, 'disabled').mockReturnValue(true);
     const exists = vi.spyOn(_onboardingSeam, 'exists');
+    const write = vi.spyOn(_onboardingSeam, 'write').mockImplementation(() => {});
     const streaming = fakeStreaming();
     const history = fakeHistory();
 
     maybeSendOnboardingWelcome({ streaming, history, sessionId: 'sess-123', cwd: '/repo/acme' });
 
-    expect(exists).not.toHaveBeenCalled();
+    expect(write).toHaveBeenCalledTimes(1); // marker written → durable suppression
+    expect(exists).not.toHaveBeenCalled(); // short-circuits before the resume check
+    expect(streaming.beginTurn).not.toHaveBeenCalled(); // never sent live
+  });
+
+  it('kill-switch marker write throwing is non-fatal (no crash, no send)', () => {
+    vi.spyOn(_onboardingSeam, 'disabled').mockReturnValue(true);
+    vi.spyOn(_onboardingSeam, 'write').mockImplementation(() => {
+      throw new Error('EACCES');
+    });
+    const streaming = fakeStreaming();
+    const history = fakeHistory();
+
+    expect(() =>
+      maybeSendOnboardingWelcome({ streaming, history, sessionId: 'sess-123', cwd: '/repo/acme' }),
+    ).not.toThrow();
     expect(streaming.beginTurn).not.toHaveBeenCalled();
   });
 

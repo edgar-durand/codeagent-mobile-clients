@@ -400,6 +400,14 @@ interface DeployPayload {
    * Absent or empty = no integrations wired for this deploy.
    */
   integrations?: IntegrationsManifestEntry[];
+  /**
+   * When true, this deploy auto-dispatches a task right after pairing (SFWI /
+   * From-Conversation / Review / any confirm-launch), so the CLI's first-pair
+   * onboarding welcome is noise → the child is spawned with
+   * `CODEAM_ONBOARDING_DISABLED=1`. Absent/false = normal welcome. Mirrors the
+   * classic-codespace bootstrap's `CODEAM_ONBOARDING_DISABLED` export.
+   */
+  suppressOnboardingWelcome?: boolean;
 }
 
 /** The stop command payload (mirrors the backend `SelfHostedStopCommand`). */
@@ -464,6 +472,12 @@ function isDeployPayload(p: Record<string, unknown>): p is DeployPayload & Recor
     return false;
   }
   if (p.headroomAgent !== undefined && typeof p.headroomAgent !== 'string') {
+    return false;
+  }
+  if (
+    p.suppressOnboardingWelcome !== undefined &&
+    typeof p.suppressOnboardingWelcome !== 'boolean'
+  ) {
     return false;
   }
   if (p.headroomSavingsIngestUrl !== undefined && typeof p.headroomSavingsIngestUrl !== 'string') {
@@ -1794,6 +1808,16 @@ export class HostAgentSupervisor {
       if (payload.previewTunnelToken && payload.previewHostname) {
         childEnv.PREVIEW_TUNNEL_TOKEN = payload.previewTunnelToken;
         childEnv.PREVIEW_TUNNEL_HOSTNAME = payload.previewHostname;
+      }
+
+      // 1d) Task-launch deploys (SFWI / From-Conversation / Review) auto-dispatch
+      //     start_task after pairing, so the first-pair onboarding welcome is
+      //     noise — suppress it, same as the classic-codespace bootstrap's
+      //     CODEAM_ONBOARDING_DISABLED export. The child's onboarding seam reads
+      //     this env; the welcome marker is also written so a supervisor RESUME
+      //     (which respawns without this flag) still skips it.
+      if (payload.suppressOnboardingWelcome) {
+        childEnv.CODEAM_ONBOARDING_DISABLED = '1';
       }
 
       // 1d) Headroom local compression proxy — mirrors the codespace wiring.

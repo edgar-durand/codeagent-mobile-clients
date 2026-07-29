@@ -168,8 +168,21 @@ export async function maybeSendOnboardingWelcome(opts: {
   sessionId: string;
   cwd: string;
 }): Promise<void> {
-  if (_onboardingSeam.disabled()) return;
   const marker = _onboardingSeam.markerPath(opts.sessionId);
+  if (_onboardingSeam.disabled()) {
+    // Suppressed (task launch: CODEAM_ONBOARDING_DISABLED=1). Still write the
+    // marker so a later RESUME of THIS session — supervisor restart / auto-
+    // update / dormant-wake, which respawns WITHOUT the flag — also skips the
+    // welcome instead of belatedly showing the greeting that was intentionally
+    // suppressed on first pair. Best-effort: a marker-write failure just means
+    // the resume might re-welcome (the pre-existing behavior), never a crash.
+    try {
+      _onboardingSeam.write(marker);
+    } catch {
+      /* best-effort — worst case a resumed run shows the welcome */
+    }
+    return;
+  }
   try {
     if (_onboardingSeam.exists(marker)) {
       // Already welcomed in a PRIOR run — this is a RESUME (supervisor
