@@ -2059,7 +2059,15 @@ export class HostAgentSupervisor {
       const session = getActiveSession();
       if (!session || !session.pluginId || !session.pollSecret || !session.agent) return;
 
-      const cwd = process.cwd();
+      // ⚠️ Resume in the SESSION's original deploy workspace, not the
+      // host-agent's own cwd. On a warm codespace the host-agent runs in the
+      // wrapper repo root (`/workspaces/<wrapper>`), while the session's agent +
+      // its conversation live under the deploy workspace (`~/.codeam/self-hosted/
+      // <deployId>`). Resuming in the wrong cwd made CODEAM_RESUME_LATEST find no
+      // prior conversation → a fresh empty session with no project context
+      // (2026-07-29). Fall back to process.cwd() for older sessions with no
+      // persisted cwd (prior behavior).
+      const cwd = session.cwd && fs.existsSync(session.cwd) ? session.cwd : process.cwd();
       const proc = this.resumeSpawner({ ...readHeadroomChildEnv() }, cwd);
       const child: ChildSession = {
         deployId: session.id,

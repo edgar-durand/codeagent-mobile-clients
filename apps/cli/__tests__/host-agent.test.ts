@@ -699,6 +699,41 @@ describe('HostAgentSupervisor — control channel reuse', () => {
     sup.stop();
   });
 
+  // 2026-07-29: a warm-codespace wake resumed in the host-agent's own cwd (the
+  // wrapper repo root) → CODEAM_RESUME_LATEST found no prior conversation → a
+  // fresh empty session. The persisted session cwd (the deploy workspace) must
+  // be used so the real conversation resumes.
+  it('resumes the session in its persisted deploy-workspace cwd (not the host-agent cwd)', async () => {
+    const config = await import('../src/config');
+    const os = await import('os');
+    const workspaceCwd = os.tmpdir(); // an existing dir standing in for ~/.codeam/self-hosted/<deployId>
+    vi.mocked(config.getActiveSession).mockReturnValueOnce({
+      id: 'sess-1',
+      pluginId: 'plug-1',
+      pollSecret: 'sec',
+      agent: 'claude',
+      userName: 'u',
+      userEmail: 'e',
+      plan: 'pro',
+      pairedAt: 0,
+      pluginAuthToken: 't',
+      cwd: workspaceCwd,
+    } as never);
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => ({ success: true, data: {} }) }),
+    );
+    const fakeProc = { stdout: { on: vi.fn() }, stderr: { on: vi.fn() }, once: vi.fn(), kill: vi.fn() };
+    const resumeSpawner = vi.fn(() => fakeProc as never);
+    const sup = new HostAgentSupervisor(IDENTITY, {
+      makeRelay: () => ({ start: vi.fn(), stop: vi.fn(), sendResult: vi.fn() }),
+      resumeSpawner,
+    });
+    sup.start();
+    expect(resumeSpawner).toHaveBeenCalledWith(expect.anything(), workspaceCwd);
+    sup.stop();
+  });
+
   it('does NOT resume when there is no persisted session', async () => {
     // getActiveSession defaults to null via the module mock above.
     vi.stubGlobal(
