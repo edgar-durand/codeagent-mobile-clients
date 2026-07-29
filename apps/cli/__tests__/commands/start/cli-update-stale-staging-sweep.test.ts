@@ -9,6 +9,7 @@
  * sibling install's fresh staging dir is never disturbed.
  */
 import { describe, it, expect } from 'vitest';
+import * as path from 'path';
 import {
   resolveGlobalNodeModulesDir,
   sweepStaleCliStagingDirs,
@@ -55,12 +56,16 @@ describe('sweepStaleCliStagingDirs', () => {
       removed,
       deps: {
         readdirSync: (() => entries.map((e) => e.name)) as never,
+        // ⚠️ Use path.basename, NOT split('/') — the source builds `full` with
+        // path.join, which emits '\' on win32, so a '/'-only split leaves the
+        // whole path as the "name" → byName miss → the stale dir reads as fresh
+        // → the sweep no-ops (the windows-latest CI failure, 2026-07-29).
         statSync: ((full: string) => {
-          const name = full.split('/').pop() as string;
+          const name = path.basename(full);
           return { mtimeMs: byName.get(name) ?? NOW } as never;
         }) as never,
         rmSync: ((full: string) => {
-          removed.push(full.split('/').pop() as string);
+          removed.push(path.basename(full));
         }) as never,
       },
     };
