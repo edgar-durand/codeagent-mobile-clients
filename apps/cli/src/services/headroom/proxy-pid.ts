@@ -22,6 +22,14 @@ export function headroomProxyPidfilePath(): string {
   return path.join(os.homedir(), '.codeam', 'headroom-proxy.pid');
 }
 
+/** Cross-process single-flight spawn lock — sibling of the pidfile. Held (via
+ *  an O_EXCL create with a TTL) while a spawn is in flight so two CLI processes
+ *  (e.g. two relay supervisors on one box) can't both launch
+ *  `headroom proxy --port 8787` at once → EADDRINUSE → the respawn loop. */
+export function headroomProxySpawnLockPath(): string {
+  return path.join(os.homedir(), '.codeam', 'headroom-proxy.spawn.lock');
+}
+
 /**
  * Record the detached proxy's pid. Best-effort: a spawn that failed
  * asynchronously (ENOENT) has `pid === undefined` and is skipped; fs errors
@@ -57,6 +65,35 @@ function isPidAlive(pid: number): boolean {
     return true;
   } catch {
     return false;
+  }
+}
+
+/**
+ * Is the proxy recorded in the pidfile a live process? Used by the liveness
+ * supervisor to distinguish "proxy is genuinely dead → respawn" from "proxy
+ * is alive but /livez isn't answering yet" (it eager-loads the ONNX Kompress
+ * model at bind time — seconds during which the process is up but not ready).
+ * Respawning in that window races the starting proxy → a 2nd
+ * `headroom proxy --port 8787` → EADDRINUSE → the respawn loop.
+ */
+export function isHeadroomProxyProcessAlive(): boolean {
+  const pid = readHeadroomProxyPidfile();
+  return pid !== null && isPidAlive(pid);
+}
+
+/**
+ * Wall-clock ms since the pidfile was last written (i.e. since the last
+ * spawn), or `null` when there's no pidfile. The supervisor uses this as a
+ * cross-process startup grace: every relay supervisor sees the same pidfile
+ * mtime, so a proxy spawned by ANY process is given time to finish loading
+ * the model before ANY other process considers it dead.
+ */
+export function headroomProxyPidfileAgeMs(nowMs: number): number | null {
+  try {
+    const { mtimeMs } = fs.statSync(headroomProxyPidfilePath());
+    return Math.max(0, nowMs - mtimeMs);
+  } catch {
+    return null;
   }
 }
 

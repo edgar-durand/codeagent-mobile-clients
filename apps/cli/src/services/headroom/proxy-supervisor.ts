@@ -18,6 +18,7 @@ import * as os from 'os';
 import * as path from 'path';
 import { log } from '../logger';
 import { spawnHeadroomProxy } from './proxy-process';
+import { isHeadroomProxyProcessAlive, headroomProxyPidfileAgeMs } from './proxy-pid';
 
 export interface ProxySupervisorDeps {
   /** True when this box routes the agent through the Headroom proxy and
@@ -26,15 +27,37 @@ export interface ProxySupervisorDeps {
   isConfigured: () => boolean;
   /** GET http://127.0.0.1:8787/livez → true when the proxy answers. */
   probeAlive: () => Promise<boolean>;
+  /** Is the pid recorded in the pidfile a live OS process? Distinguishes a
+   *  genuinely-dead proxy (respawn) from one that's alive but still loading
+   *  the ONNX model, so /livez isn't answering yet (leave it be). */
+  proxyProcessAlive: () => boolean;
+  /** ms since the pidfile was last written (≈ since the last spawn), or null
+   *  when no proxy was ever spawned. Cross-process startup grace. */
+  proxyStartupAgeMs: () => number | null;
   /** (Re)spawn the detached proxy. */
   spawnProxy: () => void;
 }
 
-export type ProxyEnsureResult = 'skip' | 'alive' | 'respawned';
+export type ProxyEnsureResult = 'skip' | 'alive' | 'starting' | 'respawned';
+
+/**
+ * Grace after a spawn during which a proxy that isn't answering /livez is
+ * assumed to be loading the ONNX Kompress model (seconds of eager preload at
+ * bind time), NOT dead. Respawning inside this window is the bug that caused
+ * the respawn loop (EADDRINUSE storm every 15–75s, 2026-07-28): the model
+ * was still loading, /livez 2s-timed-out, the old supervisor respawned, the
+ * second `headroom proxy --port 8787` EADDRINUSE'd, and repeat. Must exceed a
+ * cold model load. Pidfile-mtime based, so it's shared across all supervisors.
+ */
+export const PROXY_STARTUP_GRACE_MS = 45_000;
 
 /**
  * One supervision pass. Pure orchestration (all I/O injected) so it's
  * unit-tested without a real proxy.
+ *
+ * `/livez` not answering is NOT proof the proxy is dead — it eager-loads the
+ * model at bind time. Only respawn a proxy that is BOTH pid-confirmed-dead AND
+ * past the startup grace; otherwise report `starting` and wait.
  */
 export async function ensureHeadroomProxy(
   deps: ProxySupervisorDeps,
@@ -47,7 +70,13 @@ export async function ensureHeadroomProxy(
     alive = false;
   }
   if (alive) return 'alive';
-  log.warn('headroom-supervisor', 'proxy :8787 is down — respawning');
+
+  // Not answering /livez. Before respawning, rule out "up but still warming".
+  if (deps.proxyProcessAlive()) return 'starting';
+  const ageMs = deps.proxyStartupAgeMs();
+  if (ageMs !== null && ageMs < PROXY_STARTUP_GRACE_MS) return 'starting';
+
+  log.warn('headroom-supervisor', 'proxy :8787 is confirmed down — respawning');
   deps.spawnProxy();
   return 'respawned';
 }
@@ -104,6 +133,8 @@ export function makeRealProxySupervisorDeps(): ProxySupervisorDeps {
   return {
     isConfigured: () => isHeadroomConfiguredReal(),
     probeAlive: probeProxyAliveReal,
+    proxyProcessAlive: () => isHeadroomProxyProcessAlive(),
+    proxyStartupAgeMs: () => headroomProxyPidfileAgeMs(Date.now()),
     spawnProxy: spawnProxyReal,
   };
 }

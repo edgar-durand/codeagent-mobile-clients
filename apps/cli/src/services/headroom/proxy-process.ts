@@ -13,9 +13,11 @@
 //
 // Only the log tag + messages differ per caller, so they're injected.
 import { spawn } from 'child_process';
+import * as fs from 'fs';
+import * as path from 'path';
 import { log } from '../logger';
 import { buildBudgetProxyArgs } from './budget-args';
-import { writeHeadroomProxyPidfile } from './proxy-pid';
+import { writeHeadroomProxyPidfile, headroomProxySpawnLockPath } from './proxy-pid';
 
 /** Per-caller log shape — tag + message builders for the two failure modes. */
 export interface HeadroomProxySpawnLogging {
@@ -27,14 +29,89 @@ export interface HeadroomProxySpawnLogging {
   failureMsg: (detail: string) => string;
 }
 
+/** Options controlling the single-flight spawn lock. */
+export interface HeadroomProxySpawnOpts {
+  /**
+   * Skip the single-flight guard. Deliberate one-shot callers that
+   * `killHeadroomProxy()` immediately before (budget-relaunch, bootstrap
+   * warm-start) pass `true` so their intentional relaunch is never swallowed
+   * by a lock a supervisor happens to hold. The repeating liveness supervisor
+   * leaves it `false` so two supervisors can't double-spawn.
+   */
+  force?: boolean;
+}
+
+/**
+ * How long a spawn lock stays valid. A stale lock (older than this — the
+ * spawning process died mid-launch) is stolen so the proxy can never get
+ * permanently wedged. Sized above a cold ONNX-model load so the window during
+ * which a starting proxy isn't answering /livez is covered by ONE spawn, not a
+ * storm. Left to expire (never explicitly released) → doubles as a cooldown.
+ */
+export const PROXY_SPAWN_LOCK_TTL_MS = 45_000;
+
+/**
+ * Try to take the cross-process spawn lock (atomic O_EXCL create). Returns
+ * true when acquired. If it already exists and is fresh, another process is
+ * mid-spawn → false. If it exists but is stale (> TTL), steal it. All fs
+ * errors degrade to "not acquired" — the lock is an optimization, never a
+ * reason to crash a launch.
+ */
+function acquireSpawnLock(nowMs: number): boolean {
+  const lockPath = headroomProxySpawnLockPath();
+  try {
+    fs.mkdirSync(path.dirname(lockPath), { recursive: true, mode: 0o700 });
+    fs.writeFileSync(lockPath, `${process.pid}\n`, { flag: 'wx', mode: 0o600 });
+    return true;
+  } catch {
+    try {
+      const { mtimeMs } = fs.statSync(lockPath);
+      if (nowMs - mtimeMs > PROXY_SPAWN_LOCK_TTL_MS) {
+        fs.writeFileSync(lockPath, `${process.pid}\n`, { mode: 0o600 }); // steal stale
+        return true;
+      }
+    } catch {
+      /* raced away between create + stat — treat as held by the winner */
+    }
+    return false;
+  }
+}
+
+/** Refresh the lock's mtime so a `force` spawn still blocks a concurrent
+ *  supervisor for the TTL window (records "a spawn just happened"). */
+function refreshSpawnLock(): void {
+  try {
+    const lockPath = headroomProxySpawnLockPath();
+    fs.mkdirSync(path.dirname(lockPath), { recursive: true, mode: 0o700 });
+    fs.writeFileSync(lockPath, `${process.pid}\n`, { mode: 0o600 });
+  } catch {
+    /* best-effort */
+  }
+}
+
 /**
  * Spawn the detached `headroom proxy --port 8787` best-effort — never throws.
  * Consumes the child's `error` event so Node doesn't raise an uncaught
  * exception when `headroom` is not on PATH (e.g. installed to a user-local
  * dir not yet on the current PATH); the try/catch only covers sync throws.
  */
-export function spawnHeadroomProxy(logging: HeadroomProxySpawnLogging): void {
+export function spawnHeadroomProxy(
+  logging: HeadroomProxySpawnLogging,
+  opts: HeadroomProxySpawnOpts = {},
+): void {
   try {
+    // Single-flight across processes. A repeating supervisor (force !== true)
+    // that loses the race backs off — another process already has a spawn in
+    // flight, so a second `headroom proxy --port 8787` would only EADDRINUSE.
+    // Deliberate one-shot callers (force === true) kill-then-spawn and must
+    // win, but still refresh the lock so a concurrent supervisor stands down.
+    const nowMs = Date.now();
+    if (opts.force) {
+      refreshSpawnLock();
+    } else if (!acquireSpawnLock(nowMs)) {
+      log.info(logging.tag, 'proxy spawn skipped — another spawn is in flight');
+      return;
+    }
     const proxyEnv: Record<string, string> = {
       ...(process.env as Record<string, string>),
       HEADROOM_KOMPRESS_BACKEND: 'onnx_cpu',
