@@ -409,6 +409,11 @@ export async function pairAuto(args: string[]): Promise<void> {
     // SEC crit1 (#813): persist so boot-time /reconnect proves possession.
     pollSecret,
     agent: claimed.agent,
+    // The pair-auto child runs IN the deploy workspace, so this is the cwd the
+    // agent's conversation lives under. Persist it so a supervisor-boot resume
+    // (warm-codespace wake / restart) re-spawns in the SAME dir and resumes the
+    // real conversation instead of a fresh one in the host-agent's cwd.
+    cwd: process.cwd(),
   };
   addSession(claimedSession);
 

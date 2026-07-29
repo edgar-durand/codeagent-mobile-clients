@@ -41,6 +41,17 @@ export interface SavedSession {
    * recurs for this session, even across a codeam restart.
    */
   disable1mContext?: boolean;
+  /**
+   * Working directory the session's agent ran in (the deploy workspace, e.g.
+   * `~/.codeam/self-hosted/<deployId>`). Persisted so a supervisor-boot resume
+   * (`resumePersistedSession`, warm-codespace wake / restart) re-spawns the
+   * child in the SAME cwd and `CODEAM_RESUME_LATEST` finds the session's
+   * conversation. Without it the resume ran in the host-agent's own cwd (the
+   * wrapper repo root on a warm codespace) → a FRESH empty conversation with no
+   * project context (2026-07-29). Absent on older sessions → resume falls back
+   * to `process.cwd()` (prior behavior).
+   */
+  cwd?: string;
 }
 
 export interface CliConfig {
