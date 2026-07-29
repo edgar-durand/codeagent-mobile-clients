@@ -1804,6 +1804,55 @@ describe('isDeployPayload — headroom fields back-compat', () => {
   });
 });
 
+describe('isDeployPayload — suppressOnboardingWelcome back-compat + env injection', () => {
+  async function deployAndCaptureEnv(
+    overrides: Record<string, unknown>,
+  ): Promise<Record<string, string>> {
+    const cwdTarget = fs.mkdtempSync(path.join(os.tmpdir(), 'codeam-ob-'));
+    const calls: Array<{ env: Record<string, string> }> = [];
+    const spawnChild: ChildSpawner = (env) => {
+      calls.push({ env });
+      return fakeChild();
+    };
+    const resolveAgentAuth = vi
+      .fn<(i: SealedHostIdentity, s: string) => Promise<AgentAuth>>()
+      .mockResolvedValue({ kind: 'oauth_token', value: '{"claudeAiOauth":{}}' });
+    const sup = new HostAgentSupervisor(IDENTITY, { spawnChild, resolveAgentAuth });
+
+    await sup.handleCommand(deployCmd({ repoOrPath: cwdTarget, ...overrides }));
+
+    fs.rmSync(cwdTarget, { recursive: true, force: true });
+    return calls[0]?.env ?? {};
+  }
+
+  it('omits CODEAM_ONBOARDING_DISABLED when the field is absent (older backend — back-compat)', async () => {
+    const env = await deployAndCaptureEnv({});
+    expect(env.CODEAM_ONBOARDING_DISABLED).toBeUndefined();
+  });
+
+  it('omits CODEAM_ONBOARDING_DISABLED when suppressOnboardingWelcome=false', async () => {
+    const env = await deployAndCaptureEnv({ suppressOnboardingWelcome: false });
+    expect(env.CODEAM_ONBOARDING_DISABLED).toBeUndefined();
+  });
+
+  it('sets CODEAM_ONBOARDING_DISABLED=1 on the child when suppressOnboardingWelcome=true', async () => {
+    const env = await deployAndCaptureEnv({ suppressOnboardingWelcome: true });
+    expect(env.CODEAM_ONBOARDING_DISABLED).toBe('1');
+  });
+
+  it('rejects a malformed suppressOnboardingWelcome (wrong type) → no child spawned', async () => {
+    const spawnChild = vi.fn<ChildSpawner>(() => fakeChild());
+    const resolveAgentAuth = vi
+      .fn<(i: SealedHostIdentity, s: string) => Promise<AgentAuth>>()
+      .mockResolvedValue({ kind: 'oauth_token', value: '{}' });
+    const sup = new HostAgentSupervisor(IDENTITY, { spawnChild, resolveAgentAuth });
+
+    await sup.handleCommand(deployCmd({ suppressOnboardingWelcome: 'yes' }));
+
+    expect(spawnChild).not.toHaveBeenCalled();
+  });
+});
+
 describe('agentIdToHeadroomKind', () => {
   it('maps claude / claude_code / claude-code → claude', () => {
     expect(agentIdToHeadroomKind('claude')).toBe('claude');
