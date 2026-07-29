@@ -46,7 +46,38 @@ export function describeError(err: unknown): string {
 const AUTH_FAILURE_RE =
   /invalid authentication credentials|failed to authenticate|authentication[_ ](?:error|required)|please run \/login|\bunauthorized\b|\binvalid x-api-key\b|oauth (?:token|session) (?:expired|revoked)|(?:session|token|credentials?|oauth)[^\n]{0,40}could not be refreshed|(?:api error|http|status)[:\s]+401|\b401\b[^\n]{0,40}(?:unauthor|authenticat|credential|api[_ ]?key|login)/i;
 
+/**
+ * The FREE/PRO "CodeAgent Cloud" HOUSE agent routes Anthropic calls through
+ * OUR agent-proxy, which returns a **403** with an actionable body in three
+ * server-side conditions — the daily usage ceiling (`HOUSE_AGENT_CEILING`,
+ * "Daily CodeAgent Cloud usage ceiling reached …") and the kill-switch /
+ * disabled states ("CodeAgent Cloud is temporarily unavailable/disabled").
+ *
+ * ⚠️ Claude Code's SDK wraps that 403 as "Failed to authenticate. API Error:
+ * 403 <body>" — so the `AUTH_FAILURE_RE` above (which matches "failed to
+ * authenticate") would MISCLASSIFY it as an invalid credential and send the
+ * user into a pointless re-auth loop (2026-07-29 Rafael incident: he re-linked
+ * Claude repeatedly, but the house agent has NO user credential to renew and
+ * the failure was a daily quota ceiling — re-auth can never fix it, and every
+ * turn re-flagged the credential EXPIRED). This detector lets every
+ * classification point treat a house-proxy 403 as a quota/availability
+ * condition, NOT a credential failure — so it never poisons the LinkedAgent
+ * credential state or shows the re-auth CTA.
+ */
+const HOUSE_AGENT_LIMIT_RE =
+  /HOUSE_AGENT_CEILING|CodeAgent Cloud[^\n]{0,60}(?:usage )?ceiling|CodeAgent Cloud is temporarily (?:unavailable|disabled)/i;
+
+export function looksLikeHouseAgentLimit(text: string): boolean {
+  return HOUSE_AGENT_LIMIT_RE.test(text);
+}
+
 export function looksLikeAuthFailure(text: string): boolean {
+  // A house-proxy 403 (usage ceiling / temporarily unavailable) arrives wrapped
+  // as "Failed to authenticate. API Error: 403 …" and would otherwise match
+  // AUTH_FAILURE_RE. It is a quota/availability condition, NOT a bad credential
+  // — never let it drive the re-auth path (which also fires
+  // reportCredentialInvalid). Checked first, everywhere, via this one guard.
+  if (looksLikeHouseAgentLimit(text)) return false;
   return AUTH_FAILURE_RE.test(text);
 }
 
@@ -63,6 +94,53 @@ export function looksLikeAuthFailure(text: string): boolean {
 export function replyIsAuthFailure(finalText: string): boolean {
   const t = finalText.trim();
   return t.length > 0 && t.length <= 200 && looksLikeAuthFailure(t);
+}
+
+/**
+ * True when an agent's COMPLETED-turn reply IS a house-proxy 403 notice (the
+ * CodeAgent Cloud daily ceiling or a temporary-unavailable/disabled state).
+ * Claude streams the wrapped 403 as a plain assistant reply and ends the turn
+ * cleanly (no throw), so the completed-reply path must catch it BEFORE
+ * {@link replyIsAuthFailure} — otherwise the "Failed to authenticate" wrapper
+ * routes it to the (wrong) re-auth bubble. Length-guarded like the auth variant
+ * so a long, substantive reply that merely mentions the product isn't
+ * misclassified — a genuine proxy 403 notice is a single short line.
+ */
+export function replyIsHouseAgentLimit(finalText: string): boolean {
+  const t = finalText.trim();
+  return t.length > 0 && t.length <= 300 && looksLikeHouseAgentLimit(t);
+}
+
+/**
+ * Accurate, actionable bubble for a house-proxy 403. Distinguishes the daily
+ * usage ceiling from a temporary server-side unavailability, and NEVER frames
+ * it as a login problem (the credential is fine — it's a usage/availability
+ * limit, so re-authenticating is useless). Plan-aware: the FREE ceiling body
+ * carries "Upgrade to Pro", the PRO/ENTERPRISE ceiling does not — we mirror
+ * that so we never tell a Pro user to "upgrade to Pro". Markdown (the chat
+ * renderer supports links/bold).
+ */
+export function houseAgentLimitMessage(text: string): string {
+  if (/temporarily (?:unavailable|disabled)/i.test(text)) {
+    return (
+      '⏳ **CodeAgent Cloud is temporarily unavailable.**\n\n' +
+      'The free CodeAgent Cloud agent is paused server-side right now — this isn’t a ' +
+      'problem with your login, so re-authenticating won’t help. Please send your message ' +
+      'again in a bit, or connect your own agent (Claude, Codex, …) in **Profile › Agents** ' +
+      'to run independently.'
+    );
+  }
+  const canUpgrade = /upgrade to pro/i.test(text);
+  return (
+    '📊 **You’ve reached your daily CodeAgent Cloud limit.**\n\n' +
+    'The free CodeAgent Cloud agent has a daily usage ceiling that resets at midnight UTC. ' +
+    'This is a usage limit, not a problem with your login — re-authenticating won’t change it. ' +
+    (canUpgrade
+      ? 'To keep going now, upgrade to **Pro** for a higher ceiling, or connect your own agent ' +
+        '(Claude, Codex, …) in **Profile › Agents** to run without this limit.'
+      : 'To keep going now, connect your own agent (Claude, Codex, …) in **Profile › Agents** ' +
+        'to run without this limit, or wait for the reset.')
+  );
 }
 
 /**
@@ -235,6 +313,15 @@ export function failureBubble(opts: {
   hadText: boolean;
   agent: string;
 }): string | null {
+  // House-proxy 403 (CodeAgent Cloud daily ceiling / temporarily unavailable)
+  // FIRST — before auth. Claude wraps it as "Failed to authenticate. API Error:
+  // 403 …", so without this it would fall into the auth branch, show the
+  // re-auth bubble, and fire reportCredentialInvalid on a credential that's
+  // perfectly valid (2026-07-29 Rafael false re-auth loop). It's a usage/
+  // availability limit, so surface the accurate daily-limit bubble instead.
+  if (looksLikeHouseAgentLimit(opts.detail) || looksLikeHouseAgentLimit(opts.recentStderr)) {
+    return houseAgentLimitMessage(`${opts.detail}\n${opts.recentStderr}`);
+  }
   if (looksLikeAuthFailure(opts.detail) || looksLikeAuthFailure(opts.recentStderr)) {
     return AUTH_FAILURE_MESSAGE;
   }

@@ -92,11 +92,14 @@ export {
   agentStatusPage,
   budgetBubbleMessage,
   failureBubble,
+  houseAgentLimitMessage,
   looksLikeAuthFailure,
+  looksLikeHouseAgentLimit,
   looksLikeProviderOutage,
   providerOutageMessage,
   replyIsAuthFailure,
   replyIsCursorUpgradeRequired,
+  replyIsHouseAgentLimit,
   startupFailureMessage,
 } from './failure-messages';
 export { postBudgetReached, reportCredentialInvalid } from './backend-reports';
