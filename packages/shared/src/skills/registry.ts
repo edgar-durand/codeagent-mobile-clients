@@ -6,11 +6,13 @@ import type { SkillDefinition, SkillId, SkillRail } from './types';
 import { codeReviewSkill } from './code-review';
 import { resolveConflictsSkill } from './resolve-conflicts';
 import { specDrivenDevelopmentSkill } from './spec-driven-development';
+import { codeNamingSkill } from './code-naming';
 
 export const SKILL_REGISTRY: Record<SkillId, SkillDefinition> = {
   'code-review': codeReviewSkill,
   'resolve-conflicts': resolveConflictsSkill,
   'spec-driven-development': specDrivenDevelopmentSkill,
+  'code-naming': codeNamingSkill,
 };
 
 export function isSkillId(id: string): id is SkillId {
