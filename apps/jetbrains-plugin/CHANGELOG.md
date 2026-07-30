@@ -4,6 +4,12 @@ All notable changes to the CodeAgent-Mobile JetBrains plugin are documented here
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.61.76] — 2026-07-30
+
+### Added
+
+- **shared:** Add code-naming Agent Skill (CodeAesthetic naming guidelines) (#572)
+
 ## [2.61.75] — 2026-07-29
 
 ### Fixed
