@@ -6,7 +6,11 @@
 // skills by id only.
 
 /** Curated skills shipped with the client. Grows over time. */
-export type SkillId = 'code-review' | 'resolve-conflicts' | 'spec-driven-development';
+export type SkillId =
+  | 'code-review'
+  | 'resolve-conflicts'
+  | 'spec-driven-development'
+  | 'code-naming';
 
 /** Delivery rails, twin of IntegrationDelivery's mcp/cliEnv. */
 export type SkillRail = 'skillFile' | 'instruction';
