@@ -955,28 +955,34 @@ export const INTEGRATION_REGISTRY: Record<IntegrationId, IntegrationDefinition> 
     name: 'Convex',
     icon: 'convex',
     category: 'database',
-    // LIVE — OAuth 2.0 (authorization code, Confidential). authorize
-    // dashboard.convex.dev/oauth/authorize/team (the scope is the URL PATH —
-    // `team` for team-wide access — NOT a query param); token
-    // api.convex.dev/oauth/token (form-urlencoded, client creds in the BODY).
-    // ⚠️ Convex issues NO refresh token and the team-scoped application token
-    // does not expire, so there is nothing to rotate (refresh() is a re-link
-    // surface). The OAuth app (Team Settings → OAuth Applications) is registered
-    // and CONVEX_OAUTH_CLIENT_ID/SECRET/REDIRECT_URI are in Secret Manager
-    // (prod+dev); the config-gated 503 keeps this safe mid-rollout.
+    // LIVE — api_key rail (the user pastes a Convex DEPLOY KEY).
+    // ⚠️ Convex's OAuth application token was tried first and DOES NOT WORK with
+    // the MCP: it's a narrow Management-API credential — verified live it fails
+    // `convex mcp start` as BOTH CONVEX_DEPLOY_KEY and CONVEX_OVERRIDE_ACCESS_TOKEN,
+    // and can't even enumerate the team's deployments ("requires a Personal
+    // Access Token"). The Convex MCP's DOCUMENTED headless credential is a
+    // DEPLOY KEY (CONVEX_DEPLOY_KEY=dev:…|… / prod:… / project:…), so the user
+    // pastes one (Convex Dashboard → Project Settings → Deploy Keys), exactly
+    // like Azure DevOps / Datadog / Trello. No OAuth app, no GSM secret.
     enabled: true,
     auth: {
-      kind: 'oauth_redirect',
-      // ⚠️ Convex's scope is the authorize URL path (`/team`), NOT sent in the
-      // authorize URL as a query param — this list is informational.
-      scopes: [],
+      kind: 'api_key',
+      fields: [
+        {
+          key: 'accessToken',
+          label: 'Convex deploy key',
+          placeholder: 'prod:happy-animal-123|eyJ2…',
+          secret: true,
+          help: 'Convex Dashboard → Project Settings → Deploy Keys → Generate a deploy key.',
+        },
+      ],
     },
     delivery: {
       mcp: {
         // Convex's OFFICIAL MCP server ships inside the `convex` npm package
-        // (`convex mcp start`). The team-scoped OAuth application token doubles
-        // as the CLI/MCP deploy key → fed via CONVEX_DEPLOY_KEY (env only, never
-        // argv). Version PINNED; bump only after re-verifying headless.
+        // (`convex mcp start`). The pasted deploy key is fed via CONVEX_DEPLOY_KEY
+        // (env only, never argv) — its documented non-interactive credential.
+        // Version PINNED; bump only after re-verifying headless.
         command: 'npx',
         args: ['-y', 'convex@1.42.3', 'mcp', 'start'],
         envMapping: {
