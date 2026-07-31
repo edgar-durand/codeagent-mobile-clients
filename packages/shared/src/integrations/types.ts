@@ -31,6 +31,7 @@ export type IntegrationId =
   | 'postman'
   | 'mixpanel'
   | 'supabase'
+  | 'convex'
   | 'confluence'
   | 'cloudflare';
 

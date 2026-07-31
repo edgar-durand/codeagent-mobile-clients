@@ -950,6 +950,41 @@ export const INTEGRATION_REGISTRY: Record<IntegrationId, IntegrationDefinition> 
       },
     },
   },
+  convex: {
+    id: 'convex',
+    name: 'Convex',
+    icon: 'convex',
+    category: 'database',
+    // LIVE — OAuth 2.0 (authorization code, Confidential). authorize
+    // dashboard.convex.dev/oauth/authorize/team (the scope is the URL PATH —
+    // `team` for team-wide access — NOT a query param); token
+    // api.convex.dev/oauth/token (form-urlencoded, client creds in the BODY).
+    // ⚠️ Convex issues NO refresh token and the team-scoped application token
+    // does not expire, so there is nothing to rotate (refresh() is a re-link
+    // surface). The OAuth app (Team Settings → OAuth Applications) is registered
+    // and CONVEX_OAUTH_CLIENT_ID/SECRET/REDIRECT_URI are in Secret Manager
+    // (prod+dev); the config-gated 503 keeps this safe mid-rollout.
+    enabled: true,
+    auth: {
+      kind: 'oauth_redirect',
+      // ⚠️ Convex's scope is the authorize URL path (`/team`), NOT sent in the
+      // authorize URL as a query param — this list is informational.
+      scopes: [],
+    },
+    delivery: {
+      mcp: {
+        // Convex's OFFICIAL MCP server ships inside the `convex` npm package
+        // (`convex mcp start`). The team-scoped OAuth application token doubles
+        // as the CLI/MCP deploy key → fed via CONVEX_DEPLOY_KEY (env only, never
+        // argv). Version PINNED; bump only after re-verifying headless.
+        command: 'npx',
+        args: ['-y', 'convex@1.42.3', 'mcp', 'start'],
+        envMapping: {
+          CONVEX_DEPLOY_KEY: 'accessToken',
+        },
+      },
+    },
+  },
   confluence: {
     id: 'confluence',
     name: 'Confluence',
