@@ -31,6 +31,14 @@ import { beadsActionFromPayload } from '../../beads/wiring';
 import { handleBeadsActionCommand, type StartedBeads } from '../../beads';
 import { configureSkill, type SkillsConfigureAction } from '../../skills/configure';
 import {
+  persistIntegrationsManifest,
+  readIntegrationsManifest,
+} from '../../integrations/manifest';
+import { buildMcpServersForStart } from '../../integrations/provision';
+import { detectRepoStack } from '../../integrations/detect-stack';
+import type { IntegrationsManifest } from '@codeam/shared';
+import { execFile } from 'node:child_process';
+import {
   handlers as legacyHandlers,
   dispatchCommand as legacyDispatchCommand,
   type BaseHandlerContext,
@@ -1062,6 +1070,94 @@ async function legacyOrUnsupportedH(ctx: AcpCommandContext): Promise<void> {
   return;
 }
 
+/** Warm the npm/uvx package cache for a NEW integration MCP server so its first
+ *  tool call doesn't race the cold download past the agent's MCP-init window
+ *  (the Sentry incident). Best-effort, bounded, parallel; HTTP-transport
+ *  integrations (empty command) are skipped. */
+async function prewarmNewMcpEntries(manifest: IntegrationsManifest, previousIds: Set<string>): Promise<void> {
+  const PREWARMABLE = new Set(['npx', 'uvx']);
+  const fresh = manifest.integrations.filter(
+    (e) => !previousIds.has(e.id) && e.delivery.mcp && PREWARMABLE.has(e.delivery.mcp.command),
+  );
+  await Promise.all(
+    fresh.map(
+      (e) =>
+        new Promise<void>((resolve) => {
+          const mcp = e.delivery.mcp!;
+          const child = execFile(
+            mcp.command,
+            [...mcp.args, '--help'],
+            { timeout: 90_000 },
+            () => resolve(),
+          );
+          child.on('error', () => resolve());
+        }),
+    ),
+  );
+}
+
+/**
+ * Session Tools — `integrations_sync`: the backend already persisted the new
+ * attached set and pushed the freshly-resolved manifest here. Rewrite the box
+ * manifest, warm any NEW MCP package, then re-register the agent's MCP servers on
+ * the live session (respawn-resume; degrades to "next restart" on failure). The
+ * ack is relay hygiene only — the backend fired this fire-and-forget and drives
+ * the UI off the persisted set + `session_integrations_changed`, so a slow
+ * prewarm/respawn never blocks the mobile.
+ */
+async function integrationsSyncH(ctx: AcpCommandContext): Promise<void> {
+  const { cmd, relay, opts, client } = ctx;
+  const manifest = (cmd.payload as { manifest?: IntegrationsManifest }).manifest;
+  if (!manifest || !Array.isArray(manifest.integrations)) {
+    await relay.sendResult(cmd.id, 'failed', { error: 'integrations_sync: missing manifest' });
+    return;
+  }
+  try {
+    const previousIds = new Set((readIntegrationsManifest()?.integrations ?? []).map((e) => e.id));
+    persistIntegrationsManifest(manifest);
+    await prewarmNewMcpEntries(manifest, previousIds);
+    const servers = buildMcpServersForStart({
+      sessionId: opts.sessionId,
+      pluginId: opts.pluginId,
+      pluginAuthToken: opts.pluginAuthToken,
+      pollSecret: opts.pollSecret,
+    });
+    const applied = await client.reprovisionMcp(servers);
+    await relay.sendResult(cmd.id, 'completed', {
+      synced: true,
+      applied, // 'reloaded' (live now) | 'deferred' (next restart)
+      attached: manifest.integrations.map((e) => e.id),
+    });
+  } catch (err) {
+    // The manifest is already persisted, so the tools still bind on the next
+    // re-establishment — report but never fail the session.
+    log.warn('acpRunner', `integrations_sync failed (tools apply next restart): ${describeError(err)}`);
+    await relay.sendResult(cmd.id, 'completed', { synced: false, error: describeError(err) });
+  }
+}
+
+/**
+ * Session Tools — `integrations_detect`: classify the repo stack + recommend
+ * integrations (deterministic dependency scan, agent one-shot fallback when the
+ * scan is empty). Pure request/response — the mobile sheet awaits the result.
+ */
+async function integrationsDetectH(ctx: AcpCommandContext): Promise<void> {
+  const { cmd, relay, opts } = ctx;
+  try {
+    const runtime = createInteractiveAgentStrategy(opts.agent, createOsStrategy());
+    const detection = await detectRepoStack(opts.cwd, runtime);
+    await relay.sendResult(cmd.id, 'completed', detection as unknown as Record<string, unknown>);
+  } catch (err) {
+    log.warn('acpRunner', `integrations_detect failed: ${describeError(err)}`);
+    await relay.sendResult(cmd.id, 'completed', {
+      stack: 'unknown',
+      detected: [],
+      recommended: [],
+      source: 'scan',
+    });
+  }
+}
+
 /**
  * Dispatch table — one entry per explicitly-handled relay command type.
  * Aliased types (stop_task/escape_key, set_keep_alive/get_context,
@@ -1069,6 +1165,8 @@ async function legacyOrUnsupportedH(ctx: AcpCommandContext): Promise<void> {
  * exactly as their switch cases shared a body/fall-through before.
  */
 export const ACP_COMMAND_HANDLERS: Record<string, AcpCommandHandler> = {
+  integrations_sync: integrationsSyncH,
+  integrations_detect: integrationsDetectH,
   beads_action: beadsActionH,
   start_task: startTaskH,
   group_mention_task: groupMentionTaskH,
