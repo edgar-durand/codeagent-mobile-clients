@@ -407,17 +407,20 @@ describe('integrations registry', () => {
     expect(gh.delivery.cliEnv).toBeUndefined();
   });
 
-  it('convex is a live database integration — OAuth (no refresh) + BYO-token stdio MCP delivery', () => {
+  it('convex is a live database integration — api_key (deploy key) + BYO-token stdio MCP delivery', () => {
     expect(isKnownIntegrationId('convex')).toBe(true);
     const convex = getIntegration('convex');
     expect(convex.name).toBe('Convex');
     expect(convex.icon).toBe('convex');
     expect(convex.category).toBe('database');
-    expect(convex.auth.kind).toBe('oauth_redirect');
-    // Convex's scope is the authorize URL PATH (`/team`), not a query param.
-    expect(convex.auth.scopes).toEqual([]);
-    // Convex's official MCP ships in the `convex` npm package; the OAuth team
-    // token authenticates it as CONVEX_DEPLOY_KEY (env only, never argv). PINNED.
+    // ⚠️ api_key, NOT oauth: the Convex OAuth application token is a narrow
+    // Management-API credential that the MCP rejects — the user pastes a DEPLOY
+    // KEY (Convex's documented CONVEX_DEPLOY_KEY headless credential).
+    expect(convex.auth.kind).toBe('api_key');
+    expect(convex.auth.fields?.map((f) => f.key)).toEqual(['accessToken']);
+    expect(convex.auth.fields?.find((f) => f.key === 'accessToken')?.secret).toBe(true);
+    // Convex's official MCP ships in the `convex` npm package; the deploy key
+    // authenticates it as CONVEX_DEPLOY_KEY (env only, never argv). PINNED.
     expect(convex.delivery.mcp?.command).toBe('npx');
     expect(convex.delivery.mcp?.args).toEqual(['-y', 'convex@1.42.3', 'mcp', 'start']);
     expect(convex.delivery.mcp?.envMapping).toEqual({ CONVEX_DEPLOY_KEY: 'accessToken' });
