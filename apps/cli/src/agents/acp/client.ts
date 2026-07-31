@@ -949,6 +949,53 @@ export class AcpClient {
     log.info('acpClient', `loadSession ← ok sessionId=${sessionId.slice(0, 8)}`);
   }
 
+  /** The conversation id the agent is currently serving (null before start). */
+  getActiveSessionId(): string | null {
+    return this.sessionId;
+  }
+
+  /**
+   * Re-register the agent's MCP servers on an ALREADY-RUNNING session (Session
+   * Tools — adding/removing an integration mid-session). MCP servers are bound
+   * at `session/new`, and `session/load` on the CURRENTLY-running session wedges
+   * Claude (the self-load guard in {@link loadSession}), so the only reliable way
+   * to add a server to a live session is a controlled RESPAWN that resumes the
+   * conversation: kill the agent → fresh `startOnce()` (a new session S2 bound to
+   * the new `mcpServers`) → `loadSession(prevConversationId)` (S1 ≠ S2, so the
+   * self-load guard doesn't fire) to resume the thread with the new tools live.
+   *
+   * Best-effort + degrade-safe: `this.opts.mcpServers` is updated FIRST (so even
+   * a failed respawn leaves the new set to bind on the next natural
+   * re-establishment — wake/resume/recovery), and any throw resolves to
+   * `'deferred'` rather than tearing down the session. Returns which happened so
+   * the caller can tell the user "active now" vs "active on next restart".
+   */
+  async reprovisionMcp(servers: McpServer[]): Promise<'reloaded' | 'deferred'> {
+    this.opts.mcpServers = servers;
+    const prevConversationId = this.sessionId;
+    if (!this.connection || !prevConversationId) return 'deferred';
+    try {
+      log.info(
+        'acpClient',
+        `reprovisionMcp → respawn to bind ${servers.length} MCP server(s), resuming ${prevConversationId.slice(0, 8)}`,
+      );
+      await this.stop();
+      this.stopping = false;
+      await this.startOnce();
+      if (this.supportsLoadSession && prevConversationId !== this.sessionId) {
+        await this.loadSession(prevConversationId);
+      }
+      log.info('acpClient', 'reprovisionMcp ← reloaded (tools live)');
+      return 'reloaded';
+    } catch (err) {
+      log.warn(
+        'acpClient',
+        `reprovisionMcp respawn failed — tools apply on next restart: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return 'deferred';
+    }
+  }
+
   /**
    * Enumerate the workspace's conversations via the ACP `session/list` RPC.
    * Agent-agnostic — works for ANY adapter that advertises

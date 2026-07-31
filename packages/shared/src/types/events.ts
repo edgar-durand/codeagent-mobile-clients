@@ -86,6 +86,14 @@ export const USER_EVENTS = {
   INTEGRATION_LINKED: 'integration_linked',
   INTEGRATION_UNLINKED: 'integration_unlinked',
   INTEGRATION_CREDENTIAL_INVALID: 'integration_credential_invalid',
+  // Session Tools — add/remove Agent Toolkit integrations on an ALREADY-ACTIVE
+  // session. The backend publishes SESSION_INTEGRATIONS_CHANGED after it persists
+  // the new attached set + relays `integrations_sync` to the box (the CLI rewrites
+  // the manifest + reprovisions the live agent, answered synchronously via the
+  // command result). Drives live UI on the sending device AND any other paired
+  // device on the same session. Mirrored in repo A. (`integrations_detect` is a
+  // pure request/response over the relay — no event.)
+  SESSION_INTEGRATIONS_CHANGED: 'session_integrations_changed',
   // CodeRabbit reviewer — the CLI posts these to /api/coderabbit/events; the
   // backend re-publishes them on the per-user SSE bus (mirrored in repo A).
   CODERABBIT_PROGRESS: 'coderabbit_progress',
