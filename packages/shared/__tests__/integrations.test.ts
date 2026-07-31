@@ -407,6 +407,30 @@ describe('integrations registry', () => {
     expect(gh.delivery.cliEnv).toBeUndefined();
   });
 
+  it('convex is a live database integration — OAuth (no refresh) + BYO-token stdio MCP delivery', () => {
+    expect(isKnownIntegrationId('convex')).toBe(true);
+    const convex = getIntegration('convex');
+    expect(convex.name).toBe('Convex');
+    expect(convex.icon).toBe('convex');
+    expect(convex.category).toBe('database');
+    expect(convex.auth.kind).toBe('oauth_redirect');
+    // Convex's scope is the authorize URL PATH (`/team`), not a query param.
+    expect(convex.auth.scopes).toEqual([]);
+    // Convex's official MCP ships in the `convex` npm package; the OAuth team
+    // token authenticates it as CONVEX_DEPLOY_KEY (env only, never argv). PINNED.
+    expect(convex.delivery.mcp?.command).toBe('npx');
+    expect(convex.delivery.mcp?.args).toEqual(['-y', 'convex@1.42.3', 'mcp', 'start']);
+    expect(convex.delivery.mcp?.envMapping).toEqual({ CONVEX_DEPLOY_KEY: 'accessToken' });
+    expect(convex.delivery.mcp?.staticEnv).toBeUndefined();
+    expect(convex.enabled).toBe(true);
+    expect(getEnabledIntegrations().map((m) => m.id)).toContain('convex');
+    // Database is a LIVE category with both Supabase + Convex.
+    expect(getIntegrationsByCategory('database').map((m) => m.id).sort()).toEqual([
+      'convex',
+      'supabase',
+    ]);
+  });
+
   it('declares the three integration USER_EVENTS names', () => {
     expect(USER_EVENTS.INTEGRATION_LINKED).toBe('integration_linked');
     expect(USER_EVENTS.INTEGRATION_UNLINKED).toBe('integration_unlinked');
@@ -432,6 +456,7 @@ describe('integrations registry', () => {
       n8n: 'automation',
       postman: 'api_tools',
       supabase: 'database',
+      convex: 'database',
       mixpanel: 'analytics',
       slack: 'comms',
       microsoft_teams: 'comms',
