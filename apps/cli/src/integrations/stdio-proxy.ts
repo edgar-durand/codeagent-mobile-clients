@@ -37,6 +37,22 @@ const RESTART_CHECK_INTERVAL_MS = 30_000;
 const SIGKILL_ESCALATION_MS = 2_000;
 
 /**
+ * Hard ceiling on a single `tools/call`. A wrapped MCP server can hang
+ * INDEFINITELY on a tool — e.g. Convex's `tables`/`data`/`functionSpec` open a
+ * live connection to a *dev* deployment that only answers while `convex dev` is
+ * running, and never return otherwise. With no response the agent's turn wedges
+ * forever with NO Stop button (2026-08-03 Rafael incident). On timeout we
+ * synthesize a JSON-RPC error for that request id so the agent unblocks with a
+ * clean tool error instead of hanging. Legit long tools (big queries, installs)
+ * finish well under this; overridable via `CODEAM_MCP_TOOL_TIMEOUT_MS` for an
+ * outlier server.
+ */
+const TOOL_CALL_TIMEOUT_MS = (() => {
+  const raw = Number(process.env.CODEAM_MCP_TOOL_TIMEOUT_MS);
+  return Number.isFinite(raw) && raw > 0 ? raw : 120_000;
+})();
+
+/**
  * Sentinel id used when replaying the recorded `initialize` to a freshly
  * swapped-in child. MCP clients recycle numeric request ids across a session,
  * so replaying under the CLIENT's original id risks swallowing a legitimate
@@ -50,6 +66,9 @@ export class RestartableStdioProxy {
   private childRl: readline.Interface | null = null;
   private initializeLine: string | null = null;
   private inflight = new Set<string | number>();
+  /** Per-`tools/call` request-id watchdog timers (see TOOL_CALL_TIMEOUT_MS). */
+  private toolTimers = new Map<string | number, NodeJS.Timeout>();
+  private stdout: NodeJS.WritableStream | null = null;
   private swapping = false;
   private pendingClientLines: string[] = [];
   private ended: (code: number) => void = () => undefined;
@@ -59,6 +78,7 @@ export class RestartableStdioProxy {
   async start(): Promise<void> {
     const stdin = this.opts.stdin ?? process.stdin;
     const stdout = this.opts.stdout ?? process.stdout;
+    this.stdout = stdout;
     await this.spawnChild(stdout);
 
     const rl = readline.createInterface({ input: stdin, crlfDelay: Infinity });
@@ -97,9 +117,17 @@ export class RestartableStdioProxy {
         // pins `inflight` > 0 forever and blocks every future token-refresh
         // restart for the rest of the session.
         const requestId = msg.params?.requestId;
-        if (requestId !== undefined) this.inflight.delete(requestId);
+        if (requestId !== undefined) {
+          this.inflight.delete(requestId);
+          this.clearToolTimeout(requestId);
+        }
       }
-      if (msg.id !== undefined && msg.method !== undefined) this.inflight.add(msg.id);
+      if (msg.id !== undefined && msg.method !== undefined) {
+        this.inflight.add(msg.id);
+        // Only `tools/call` gets a watchdog — a hung tool is the wedge case;
+        // `initialize`/`tools/list`/etc. are fast handshake calls.
+        if (msg.method === 'tools/call') this.armToolTimeout(msg.id);
+      }
     } catch {
       /* forward non-JSON verbatim */
     }
@@ -114,12 +142,58 @@ export class RestartableStdioProxy {
           return; // response to OUR replayed initialize: the client already has one
         }
         this.inflight.delete(msg.id);
+        this.clearToolTimeout(msg.id);
       }
     } catch {
       /* forward verbatim */
     }
     stdout.write(line + '\n');
     if (this.inflight.size === 0) this.checkRestart(stdout);
+  }
+
+  /**
+   * Arm a per-`tools/call` watchdog. If the server never answers this request
+   * id within {@link TOOL_CALL_TIMEOUT_MS}, synthesize a JSON-RPC error response
+   * to the client so the agent's turn unblocks (clean tool error) instead of
+   * hanging forever with no Stop. Idempotent per id.
+   */
+  private armToolTimeout(id: string | number): void {
+    const existing = this.toolTimers.get(id);
+    if (existing) clearTimeout(existing);
+    const t = setTimeout(() => {
+      this.toolTimers.delete(id);
+      if (!this.inflight.has(id)) return; // already answered — nothing to do
+      this.inflight.delete(id);
+      process.stderr.write(
+        `[codeam mcp-run] tools/call id=${String(id)} timed out after ${TOOL_CALL_TIMEOUT_MS}ms — server did not respond; failing the call so the turn can proceed\n`,
+      );
+      const errResponse = {
+        jsonrpc: '2.0',
+        id,
+        error: {
+          code: -32001,
+          message:
+            `MCP tool call timed out after ${Math.round(TOOL_CALL_TIMEOUT_MS / 1000)}s — the server did not respond. ` +
+            `The target service/deployment may be unreachable (e.g. a Convex dev deployment is only reachable while \`convex dev\` is running — use a production deploy key or start \`convex dev\`).`,
+        },
+      };
+      (this.stdout ?? process.stdout).write(JSON.stringify(errResponse) + '\n');
+    }, TOOL_CALL_TIMEOUT_MS);
+    t.unref();
+    this.toolTimers.set(id, t);
+  }
+
+  private clearToolTimeout(id: string | number): void {
+    const t = this.toolTimers.get(id);
+    if (t) {
+      clearTimeout(t);
+      this.toolTimers.delete(id);
+    }
+  }
+
+  private clearAllToolTimeouts(): void {
+    for (const t of this.toolTimers.values()) clearTimeout(t);
+    this.toolTimers.clear();
   }
 
   /**
@@ -209,6 +283,7 @@ export class RestartableStdioProxy {
       // ignored — while a freshly-spawned child dying mid-swap IS current
       // and must fail fast rather than hang the session.
       if (child !== this.child) return;
+      this.clearAllToolTimeouts();
       this.ended(code ?? 1);
     });
   }
