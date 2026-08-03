@@ -420,10 +420,13 @@ describe('integrations registry', () => {
     expect(convex.auth.fields?.map((f) => f.key)).toEqual(['accessToken']);
     expect(convex.auth.fields?.find((f) => f.key === 'accessToken')?.secret).toBe(true);
     // Convex's official MCP ships in the `convex` npm package; the deploy key
-    // authenticates it as CONVEX_DEPLOY_KEY (env only, never argv). PINNED.
-    expect(convex.delivery.mcp?.command).toBe('npx');
-    expect(convex.delivery.mcp?.args).toEqual(['-y', 'convex@1.42.3', 'mcp', 'start']);
-    expect(convex.delivery.mcp?.envMapping).toEqual({ CONVEX_DEPLOY_KEY: 'accessToken' });
+    // BUILT-IN MCP: Convex's own `convex mcp start` rejects all headless creds,
+    // so the CLI serves the tools itself against the deployment admin REST API.
+    // No spawned child (command/args/envMapping empty).
+    expect(convex.delivery.mcp?.builtin).toBe('convex-admin');
+    expect(convex.delivery.mcp?.command).toBe('');
+    expect(convex.delivery.mcp?.args).toEqual([]);
+    expect(convex.delivery.mcp?.envMapping).toEqual({});
     expect(convex.delivery.mcp?.staticEnv).toBeUndefined();
     expect(convex.enabled).toBe(true);
     expect(getEnabledIntegrations().map((m) => m.id)).toContain('convex');

@@ -148,6 +148,23 @@ export async function mcpRun(args: string[]): Promise<void> {
     process.exit(1);
   }
 
+  // Built-in delivery — a codeam-authored MCP server (not a spawned child, not
+  // a remote relay). Convex needs this: its own `convex mcp start` rejects every
+  // headless credential (interactive login only), so we serve the Convex tools
+  // ourselves against the deployment's admin REST API with the brokered deploy
+  // key. `command`/`args` are empty for these.
+  if (delivery.builtin === 'convex-admin') {
+    const client = new IntegrationTokenClient({
+      sessionId,
+      pluginId,
+      pluginAuthToken,
+      pollSecret: process.env.CODEAM_MCP_POLL_SECRET,
+    });
+    const { runConvexAdminMcp } = await import('./convex-admin-mcp');
+    await runConvexAdminMcp(client, id);
+    return;
+  }
+
   // HTTP-transport delivery (a hosted remote MCP, e.g. PostHog) — relay to it
   // over Streamable HTTP with the brokered token as a header, instead of
   // spawning a stdio child. `command` is empty for these.
