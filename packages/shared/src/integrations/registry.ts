@@ -955,15 +955,19 @@ export const INTEGRATION_REGISTRY: Record<IntegrationId, IntegrationDefinition> 
     name: 'Convex',
     icon: 'convex',
     category: 'database',
-    // LIVE — api_key rail (the user pastes a Convex DEPLOY KEY).
-    // ⚠️ Convex's OAuth application token was tried first and DOES NOT WORK with
-    // the MCP: it's a narrow Management-API credential — verified live it fails
-    // `convex mcp start` as BOTH CONVEX_DEPLOY_KEY and CONVEX_OVERRIDE_ACCESS_TOKEN,
-    // and can't even enumerate the team's deployments ("requires a Personal
-    // Access Token"). The Convex MCP's DOCUMENTED headless credential is a
-    // DEPLOY KEY (CONVEX_DEPLOY_KEY=dev:…|… / prod:… / project:…), so the user
-    // pastes one (Convex Dashboard → Project Settings → Deploy Keys), exactly
-    // like Azure DevOps / Datadog / Trello. No OAuth app, no GSM secret.
+    // LIVE — api_key rail (the user pastes a Convex DEPLOY KEY) + a BUILT-IN MCP.
+    // ⚠️ Convex's OWN `convex mcp start` server CANNOT work headlessly: it
+    // categorically requires an INTERACTIVE `npx convex dev`/`login`
+    // personal-access-token and REJECTS every headless credential — OAuth token,
+    // dev/prod deploy key, self-hosted admin key, with every flag
+    // (--deployment/--prod/--project-dir) — all return "Not Authorized: Run
+    // `npx convex dev` to login" (verified LIVE, exhaustively, 2026-08-03; it
+    // also HANGS on the failed auth = the mareado/no-Stop wedge). BUT the
+    // deployment's own HTTP admin API accepts the deploy key directly
+    // (`Authorization: Convex <deployKey>` → 200; verified). So we serve Convex's
+    // tools ourselves via a BUILT-IN MCP (delivery.builtin) against that admin
+    // API — see apps/cli/src/integrations/convex-admin-mcp.ts. The user still
+    // pastes a deploy key (Dashboard → Project Settings → Deploy Keys).
     enabled: true,
     auth: {
       kind: 'api_key',
@@ -979,15 +983,14 @@ export const INTEGRATION_REGISTRY: Record<IntegrationId, IntegrationDefinition> 
     },
     delivery: {
       mcp: {
-        // Convex's OFFICIAL MCP server ships inside the `convex` npm package
-        // (`convex mcp start`). The pasted deploy key is fed via CONVEX_DEPLOY_KEY
-        // (env only, never argv) — its documented non-interactive credential.
-        // Version PINNED; bump only after re-verifying headless.
-        command: 'npx',
-        args: ['-y', 'convex@1.42.3', 'mcp', 'start'],
-        envMapping: {
-          CONVEX_DEPLOY_KEY: 'accessToken',
-        },
+        // BUILT-IN MCP: the CLI serves Convex's tools itself against the
+        // deployment admin REST API with the brokered deploy key (Convex's own
+        // `convex mcp start` rejects all headless creds — see the note above).
+        // No spawned child, no npx. command/args/envMapping are empty.
+        builtin: 'convex-admin',
+        command: '',
+        args: [],
+        envMapping: {},
       },
     },
   },

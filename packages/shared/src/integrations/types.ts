@@ -134,6 +134,13 @@ export interface IntegrationMcpDelivery {
    *  `{ 'DD-API-KEY': '{accessToken}', 'DD-APPLICATION-KEY': '{appKey}' }`). The
    *  token stays server-side of the shim — never on argv. */
   httpHeaders?: Record<string, string>;
+  /** BUILT-IN transport — a codeam-authored MCP server (not a spawned `command`,
+   *  not a remote `httpUrl` relay). The shim dispatches to the named internal
+   *  server, which fulfils the tools itself with the brokered credential.
+   *  `command`/`args`/`envMapping` are empty. Used by Convex (`'convex-admin'`),
+   *  whose own MCP rejects every headless credential — we serve its tools
+   *  against the deployment admin REST API instead. */
+  builtin?: 'convex-admin';
 }
 
 export interface IntegrationDelivery {
