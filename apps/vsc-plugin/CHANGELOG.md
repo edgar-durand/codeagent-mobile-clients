@@ -4,6 +4,12 @@ All notable changes to the CodeAgent Mobile VS Code extension are documented her
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.61.81] — 2026-08-03
+
+### Added
+
+- Convex works headlessly via a built-in admin-API MCP
+
 ## [2.61.80] — 2026-08-03
 
 ### Fixed
