@@ -4,6 +4,17 @@ All notable changes to the CodeAgent-Mobile JetBrains plugin are documented here
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.61.82] — 2026-08-04
+
+### Added
+
+- **cli:** Host-allow preview dev servers behind the Cloudflare tunnel (#582)
+- **cli:** Reuse the project .env across sessions of the same repo (#583)
+
+### Fixed
+
+- **cli:** Don't clobber a delivered reply when the completion ACK 404s (#584)
+
 ## [2.61.81] — 2026-08-03
 
 ### Added
