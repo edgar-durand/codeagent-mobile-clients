@@ -24,6 +24,7 @@ import { USER_EVENTS, type PreviewDetection } from '@codeam/shared';
 import { log } from '../logger';
 import { killQuiet } from '../../lib/quiet';
 import * as previewSvc from './index';
+import { applyPreviewHostAllow } from './host-allow';
 
 /**
  * Time budgets for the preview bring-up's blocking command steps
@@ -313,6 +314,7 @@ export async function runPreviewStart(args: PreviewStartArgs): Promise<void> {
     url: tun.url,
     framework: detection.framework,
     detection,
+    cwd: ctx.cwd,
   });
   // Persist port ownership so a FRESH CLI (after a relay restart / hard-kill
   // that orphaned this dev server) can reclaim it instead of dead-ending on
@@ -589,6 +591,13 @@ async function startDevServer(ctx: StageCtx): Promise<DevServerUp | null> {
       return null;
     }
   }
+
+  // Make the framework's dev server trust our Cloudflare tunnel domains
+  // (Next `allowedDevOrigins` / Vite `server.allowedHosts`) BEFORE it spawns —
+  // otherwise a login/API request from the public tunnel URL is rejected as a
+  // cross-origin dev request (Rafael, 2026-08-04). Best-effort + crash-safe:
+  // the user's config is moved aside, never mutated, and restored on teardown.
+  await applyPreviewHostAllow(cwd);
 
   const spawnable = normalizeDetectionForSpawn(detection, cwd);
   emitProgress('BOOT_SEQUENCE', `${spawnable.command} ${spawnable.args.join(' ')}`);

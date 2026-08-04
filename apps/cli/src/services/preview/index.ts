@@ -1,5 +1,6 @@
 import type { ChildProcess } from 'child_process';
 import { forgetPreviewPort } from './port-registry';
+import { restorePreviewHostAllow } from './host-allow';
 import type { PreviewDetection } from '@codeam/shared';
 
 export * from './cloudflared';
@@ -30,6 +31,9 @@ export interface ActivePreview {
   /** The detection this preview was started from, so a restart can
    *  re-spawn it without re-reading `.codeam/preview.json`. */
   detection: PreviewDetection;
+  /** The project cwd this preview runs in — needed to restore the
+   *  dev-server host-allow config edit (`host-allow.ts`) on teardown. */
+  cwd: string;
 }
 
 export const activePreviews = new Map<string, ActivePreview>();
@@ -107,6 +111,11 @@ export async function killPreview(sessionId: string): Promise<void> {
   }, 250);
   // Don't block process exit on this safety timer.
   sigkillTimer.unref?.();
+
+  // Restore the user's dev-server config that we wrapped to trust the tunnel
+  // domains (Next `allowedDevOrigins` / Vite `server.allowedHosts`). Best-effort
+  // — a leftover also self-heals on the next preview bring-up.
+  await restorePreviewHostAllow(preview.cwd);
 
   activePreviews.delete(sessionId);
 }
