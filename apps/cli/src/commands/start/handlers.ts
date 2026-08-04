@@ -61,6 +61,10 @@ import { AGENT_REGISTRY, isKnownAgentId, normalizeAgentId, PREVIEW_DETECT_PROMPT
 import * as previewSvc from '../../services/preview';
 import { runPreviewStart, type EmitPreviewEvent } from '../../services/preview/start-orchestrator';
 import {
+  restoreProjectEnvIfMissing,
+  syncProjectEnvUp,
+} from '../../services/project-env';
+import {
   activePreviews,
   killPreview,
   parseDotenv,
@@ -459,6 +463,10 @@ const listFiles: CommandHandler = async (ctx, cmd, parsed) => {
 
 const envReadH: CommandHandler = async (ctx, cmd) => {
   const envPath = path.join(process.cwd(), '.env');
+  // Reuse: on a fresh session of a repo whose `.env` we've stored before,
+  // restore it first so the Environment Variables screen shows the saved vars
+  // (and the dev server later picks them up). No-op if a `.env` already exists.
+  await restoreProjectEnvIfMissing(process.cwd(), ctx);
   try {
     const raw = await fs.promises.readFile(envPath, 'utf8');
     await ctx.relay.sendResult(cmd.id, 'completed', {
@@ -498,6 +506,10 @@ const envWriteH: CommandHandler = async (ctx, cmd, parsed) => {
     await fs.promises.writeFile(tmpPath, serializeDotenv(vars), 'utf8');
     await fs.promises.rename(tmpPath, envPath); // atomic replace
     await ctx.relay.sendResult(cmd.id, 'completed', { ok: true, count: vars.length });
+    // Persist the latest `.env` to the backend vault so a future session of the
+    // same repo (fresh codespace / box / machine) can restore it. Best-effort,
+    // fire-and-forget — never blocks or fails the local write.
+    void syncProjectEnvUp(process.cwd(), ctx);
   } catch (err) {
     await fs.promises.rm(tmpPath, { force: true }).catch(() => undefined);
     await ctx.relay.sendResult(cmd.id, 'failed', { error: (err as Error).message });
@@ -2094,6 +2106,11 @@ export function startPreviewFromDetection(
     detection,
     cwd: process.cwd(),
     emit,
+    // Auth for the per-repo `.env` vault restore, performed INSIDE the bring-up
+    // (provisionDeps stage, after the reuse short-circuit) so a fresh session of
+    // this repo picks up its saved `.env` before the dev server spawns. Optional
+    // — a caller without a token just skips the restore.
+    projectEnvAuth: { pluginId: ctx.pluginId, pluginAuthToken },
   }).catch((err) => {
     // Safety net: any UNEXPECTED throw in the detached bring-up (a malformed
     // detection field, a parser bug, etc.) must NOT become a silent unhandled

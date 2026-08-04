@@ -398,6 +398,79 @@ export async function postPreviewEvent(input: {
 }
 
 /**
+ * Push the serialized `.env` for a repo into the backend vault so a future
+ * session of the SAME repo (fresh codespace / box / machine) can restore it.
+ * Keyed by the stable `projectKey` (git-origin-derived, same as Beads). The
+ * contents are sealed server-side; this call sends them over the authed channel
+ * only. Fire-and-forget — a vault failure must never break the local `.env`
+ * write. Mirrors `postPreviewEvent`.
+ */
+export async function pushProjectEnv(input: {
+  sessionId: string;
+  pluginId: string;
+  pluginAuthToken: string;
+  projectKey: string;
+  projectLabel?: string;
+  content: string;
+  keyCount?: number;
+}): Promise<{ ok: true } | { ok: false; status: number; message: string }> {
+  try {
+    await _transport.postJsonAuthed(
+      `${API_BASE}/api/project-env/push`,
+      {
+        sessionId: input.sessionId,
+        pluginId: input.pluginId,
+        projectKey: input.projectKey,
+        projectLabel: input.projectLabel,
+        content: input.content,
+        keyCount: input.keyCount,
+      },
+      input.pluginAuthToken,
+    );
+    return { ok: true };
+  } catch (err) {
+    const e = err as Error & { statusCode?: number };
+    return {
+      ok: false,
+      status: typeof e.statusCode === 'number' ? e.statusCode : 0,
+      message: e.message || 'unknown',
+    };
+  }
+}
+
+/**
+ * Pull the stored `.env` for a repo from the backend vault. Returns the
+ * serialized contents when the server has one for this (user, projectKey), or
+ * `null` on a miss / any error (so the caller silently falls back to its normal
+ * `.env` generation). Mirrors `postPreviewEvent`.
+ */
+export async function pullProjectEnv(input: {
+  sessionId: string;
+  pluginId: string;
+  pluginAuthToken: string;
+  projectKey: string;
+}): Promise<{ content: string; keyCount: number } | null> {
+  try {
+    const res = await _transport.postJsonAuthed(
+      `${API_BASE}/api/project-env/pull`,
+      {
+        sessionId: input.sessionId,
+        pluginId: input.pluginId,
+        projectKey: input.projectKey,
+      },
+      input.pluginAuthToken,
+    );
+    if (res && res.exists === true && typeof res.content === 'string') {
+      const keyCount = typeof res.keyCount === 'number' ? res.keyCount : 0;
+      return { content: res.content, keyCount };
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Post a session-baton driver-state event to the backend so the mobile /
  * web SessionDetail can render "Take Control" / handoff state without
  * polling. Mirrors `postPreviewEvent` — fire-and-forget, non-fatal.

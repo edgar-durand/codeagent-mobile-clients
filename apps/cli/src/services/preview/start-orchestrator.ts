@@ -25,6 +25,7 @@ import { log } from '../logger';
 import { killQuiet } from '../../lib/quiet';
 import * as previewSvc from './index';
 import { applyPreviewHostAllow } from './host-allow';
+import { restoreProjectEnvIfMissing } from '../project-env';
 
 /**
  * Time budgets for the preview bring-up's blocking command steps
@@ -67,6 +68,13 @@ export interface PreviewStartArgs {
   detection: PreviewDetection;
   cwd: string;
   emit: EmitPreviewEvent;
+  /**
+   * Optional plugin auth for the per-repo `.env` vault restore. When present,
+   * the provisionDeps stage restores a previously-saved `.env` for this repo
+   * (if the working copy has none) before the dev server spawns. Omitted →
+   * restore is skipped (older/unauthed callers, tests).
+   */
+  projectEnvAuth?: { pluginId: string; pluginAuthToken?: string };
 }
 
 /** Internal per-run context threaded through the stages. */
@@ -337,6 +345,18 @@ export async function runPreviewStart(args: PreviewStartArgs): Promise<void> {
  */
 async function provisionDeps(ctx: StageCtx): Promise<boolean> {
   const { detection, cwd, emit, emitProgress } = ctx;
+
+  // 0a. Reusable per-repo `.env`: on a fresh session of a repo we've stored a
+  //     `.env` for, restore it BEFORE the dev server (and before ensureEnvFile
+  //     generates a fresh one). Never overwrites a `.env` already on disk. Only
+  //     runs when the caller passed plugin auth. Best-effort — never blocks.
+  if (ctx.projectEnvAuth?.pluginAuthToken) {
+    await restoreProjectEnvIfMissing(cwd, {
+      sessionId: ctx.sessionId,
+      pluginId: ctx.projectEnvAuth.pluginId,
+      pluginAuthToken: ctx.projectEnvAuth.pluginAuthToken,
+    });
+  }
 
   // 0. Pre-flight: install Node deps if `package.json` exists but
   //    `node_modules/` is missing. Safety net for when the agent's
