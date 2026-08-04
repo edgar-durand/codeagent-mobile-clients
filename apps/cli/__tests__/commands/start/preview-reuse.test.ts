@@ -173,6 +173,7 @@ describe('previewStartH — reuse guard', () => {
       tunnel: null,
       url: 'https://already-running.trycloudflare.com',
       framework: 'Next.js',
+      cwd: '/tmp/repo',
       detection: {
         framework: 'Next.js',
         port: 3000,
@@ -226,6 +227,7 @@ describe('previewStartH — reuse guard', () => {
       tunnel: null,
       url: 'https://dead.trycloudflare.com',
       framework: 'Next.js',
+      cwd: '/tmp/repo',
       detection: {
         framework: 'Next.js',
         port: 3000,
