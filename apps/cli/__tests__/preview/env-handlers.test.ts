@@ -118,6 +118,7 @@ describe('preview_restart', () => {
       tunnel: null,
       url: 'https://x.trycloudflare.com',
       framework: 'Vite',
+      cwd: '/tmp/repo',
       detection: det,
     });
     const sendResult = vi.fn();
@@ -134,6 +135,7 @@ describe('preview_restart', () => {
       tunnel: null,
       url: 'https://x.trycloudflare.com',
       framework: 'Vite',
+      cwd: '/tmp/repo',
       detection: det,
     });
     const kill = vi.spyOn(preview, 'killPreview').mockResolvedValue(undefined);

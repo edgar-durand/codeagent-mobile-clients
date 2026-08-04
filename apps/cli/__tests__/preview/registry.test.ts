@@ -30,6 +30,7 @@ function makePreview(sessionId: string, opts: { withTunnel: boolean }): ActivePr
       : null,
     url: opts.withTunnel ? 'https://x.trycloudflare.com' : '',
     framework: 'Vite',
+    cwd: '/tmp/repo',
     detection: {
       framework: 'Vite',
       command: 'npm',
