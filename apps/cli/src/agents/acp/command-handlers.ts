@@ -330,6 +330,13 @@ async function startTaskH(ctx: AcpCommandContext): Promise<void> {
   // the first streaming text overwrites it, which races visibly.
   await streaming.beginTurn();
   history.appendUserPrompt(promptText);
+  // Tracks whether the turn already reached a terminal, VISIBLE close (reply
+  // delivered + "Thinking…" cleared). Once true, the only awaited work left is
+  // the command ACK — and a long (>10 min) turn's `command:<id>` record can
+  // expire on the backend (COMMAND_TTL) so `sendResult` 404s. That POST-CLOSE
+  // ack failure must NOT be caught and turned into a "couldn't finish" bubble
+  // that CLOBBERS the already-delivered reply (2026-08-04, codeagent-dtz7).
+  let turnClosed = false;
   try {
     const reply = await client.prompt(blocks);
     // Close with interactive-detection so a trailing
@@ -345,6 +352,7 @@ async function startTaskH(ctx: AcpCommandContext): Promise<void> {
       // actionable bubble linking to the user's Cursor account upgrade page.
       // Do NOT reportCredentialInvalid (the login is valid).
       await streaming.closeWithBubble(CURSOR_UPGRADE_MESSAGE);
+      turnClosed = true;
       history.appendAgentReply(CURSOR_UPGRADE_MESSAGE);
       void history.flush();
       log.info('acpRunner', `start_task ← cursor-plan-upgrade-required id=${cmd.id.slice(0, 8)}`);
@@ -360,6 +368,7 @@ async function startTaskH(ctx: AcpCommandContext): Promise<void> {
       // house agent has none to renew).
       const houseBubble = houseAgentLimitMessage(finalText);
       await streaming.closeWithBubble(houseBubble);
+      turnClosed = true;
       history.appendAgentReply(houseBubble);
       void history.flush();
       turnFiles.flushTurn().catch((err) => {
@@ -377,6 +386,7 @@ async function startTaskH(ctx: AcpCommandContext): Promise<void> {
       // the LinkedAgent credential invalid so Profile › Agents shows
       // EXPIRED + the re-link CTA, identical to the throw/exit auth paths.
       await streaming.closeWithBubble(AUTH_FAILURE_MESSAGE);
+      turnClosed = true;
       history.appendAgentReply(AUTH_FAILURE_MESSAGE);
       void history.flush();
       // Symmetry with the happy path: flush any file changeset the agent
@@ -399,6 +409,7 @@ async function startTaskH(ctx: AcpCommandContext): Promise<void> {
       // OAuth. Surface the reconnect bubble + flag the credential so
       // Profile › Agents shows the reconnect CTA, mirroring the auth path.
       await streaming.closeWithBubble(ONE_M_CREDITS_MESSAGE);
+      turnClosed = true;
       history.appendAgentReply(ONE_M_CREDITS_MESSAGE);
       void history.flush();
       turnFiles.flushTurn().catch((err) => {
@@ -411,6 +422,7 @@ async function startTaskH(ctx: AcpCommandContext): Promise<void> {
       });
     } else {
       await streaming.closeTurnWithInteractiveDetection();
+      turnClosed = true;
       const replyLine = formatAgentReplyLine(finalText);
       if (replyLine.length > 0) {
         showInfo(replyLine);
@@ -442,6 +454,24 @@ async function startTaskH(ctx: AcpCommandContext): Promise<void> {
       await relay.sendResult(cmd.id, 'completed', { stopReason: reply.stopReason });
     }
   } catch (err) {
+    // POST-CLOSE ACK GUARD: if the turn already reached a terminal, visible
+    // close, the reply was delivered and "Thinking…" cleared — the only awaited
+    // work that can throw after that is the command ACK (`sendResult`). On a
+    // turn that ran longer than the backend's COMMAND_TTL (10 min), the
+    // `command:<id>` record has expired so `sendResult` 404s. Treating that as a
+    // turn failure fired the generic "The agent hit an error and couldn't finish
+    // this turn" bubble which `closeWithBubble` used to OVERWRITE the finished
+    // reply — a FALSE failure on a succeeded turn (2026-08-04, codeagent-dtz7:
+    // confirmed live on Rafael's 18-min turn, `prompt ← ok` then `prompt
+    // failed: HTTP 404` on the ack). The turn already succeeded — log the ack
+    // miss and stop; do NOT cancel (nothing is stuck) or synthesize a bubble.
+    if (turnClosed) {
+      log.warn(
+        'acpRunner',
+        `post-close ack failed (turn already delivered) id=${cmd.id.slice(0, 8)}: ${describeError(err)}`,
+      );
+      return;
+    }
     // Whether the turn ALREADY streamed VISIBLE progress before it threw —
     // assistant text OR thinking/tool activity (`hasVisibleProgress`, NOT
     // `getCurrentText` alone). When it did, `closeAll` finalises that partial
