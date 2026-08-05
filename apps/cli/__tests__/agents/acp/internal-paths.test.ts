@@ -12,9 +12,21 @@ describe('internal-paths — CodeAgent internals guard predicates', () => {
   describe('textReferencesInternal (bash command / tool input)', () => {
     it('flags references to ~/.codeam and house-claude', () => {
       expect(textReferencesInternal('cat ~/.codeam/host-agent.json')).toBe(true);
-      expect(textReferencesInternal('ls /home/box/.codeam/self-hosted')).toBe(true);
       expect(textReferencesInternal('cat ~/.codeam/house-claude/x/.claude.json')).toBe(true);
       expect(textReferencesInternal('cat .codeam-host.log')).toBe(true);
+    });
+    it('does NOT flag the self-hosted workspace subtree (the user\'s cloned project)', () => {
+      // Rafael 2026-08-05: warm-codespace/self-hosted repos live at
+      // ~/.codeam/self-hosted/<deployId>/ — that path contains ".codeam" but is
+      // the USER's project, not an internal. Every tool call inside it (git,
+      // edits, reads) was denied in manual permission mode before this fix.
+      expect(textReferencesInternal('git commit -m "x" (cwd /home/box/.codeam/self-hosted/dep-1)')).toBe(false);
+      expect(textReferencesInternal('/home/box/.codeam/self-hosted/dep-1/src/app.ts')).toBe(false);
+      expect(textReferencesInternal('ls /home/box/.codeam/self-hosted')).toBe(false);
+      // …but a REAL internal referenced alongside the workspace still trips it.
+      expect(
+        textReferencesInternal('cd /home/box/.codeam/self-hosted/dep-1 && cat ~/.codeam/host-agent.json'),
+      ).toBe(true);
     });
     it('does NOT flag the bootstrap node dir or normal commands', () => {
       expect(textReferencesInternal('/tmp/codeam-node20/bin/node')).toBe(false); // no leading dot
@@ -34,10 +46,18 @@ describe('internal-paths — CodeAgent internals guard predicates', () => {
       expect(pathIsInternal(`${HOME}/.codeam/house-claude/dep/x`, HOME)).toBe(true);
     });
     it('does NOT flag the project or its own ./.beads', () => {
-      expect(pathIsInternal(`${HOME}/.codeam/self-hosted/dep/repo/src/index.ts`, HOME)).toBe(true); // still internal (under .codeam)
+      // The self-hosted workspace (a cloned repo at ~/.codeam/self-hosted/<id>/)
+      // is the USER's project, NOT an internal — must be allowed even though its
+      // path contains ".codeam" (Rafael 2026-08-05: manual-mode tool calls denied).
+      expect(pathIsInternal(`${HOME}/.codeam/self-hosted/dep/repo/src/index.ts`, HOME)).toBe(false);
+      expect(pathIsInternal(`${HOME}/.codeam/self-hosted`, HOME)).toBe(false);
       expect(pathIsInternal('/workspaces/project/.beads/config.yaml', HOME)).toBe(false); // project beads, not home
       expect(pathIsInternal('/workspaces/project/src/index.ts', HOME)).toBe(false);
       expect(pathIsInternal(null, HOME)).toBe(false);
+    });
+    it('STILL flags real internals even when the home has a self-hosted subtree', () => {
+      expect(pathIsInternal(`${HOME}/.codeam/host-agent.json`, HOME)).toBe(true);
+      expect(pathIsInternal(`${HOME}/.codeam/house-claude/dep/x`, HOME)).toBe(true);
     });
     it('is not fooled by a sibling prefix (.codeam-extra)', () => {
       expect(pathIsInternal(`${HOME}/.codeam-extra/x`, HOME)).toBe(false);

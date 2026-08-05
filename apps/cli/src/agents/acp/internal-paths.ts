@@ -38,10 +38,24 @@ import * as os from 'node:os';
  */
 const INTERNAL_TOKENS = ['.codeam', 'house-claude'];
 
+/**
+ * The per-deploy WORKSPACE lives at `~/.codeam/self-hosted/<deployId>/` — that
+ * subtree is the USER's cloned project (a warm codespace / self-hosted box
+ * clones repos there), NOT a CodeAgent internal. Its path literally contains
+ * `.codeam`, so the naive `.codeam` substring token would false-flag EVERY tool
+ * call whose cwd/paths sit inside the workspace. ⚠️ Rafael, 2026-08-05: in a warm
+ * codespace, every `git commit` / edit / read was denied in MANUAL permission
+ * mode (in AUTO the agent uses `bypassPermissions` and never asks the client, so
+ * the guard never ran — hence "manual denies, auto works"). Neutralize the
+ * self-hosted workspace prefix before the internal-token scan.
+ */
+const SELF_HOSTED_WORKSPACE_RE = /\.codeam[/\\]self-hosted/gi;
+
 /** True if arbitrary text (bash command, serialized tool input) references an internal path. */
 export function textReferencesInternal(text: string | null | undefined): boolean {
   if (!text) return false;
-  return INTERNAL_TOKENS.some((t) => text.includes(t));
+  const scrubbed = text.replace(SELF_HOSTED_WORKSPACE_RE, ' ');
+  return INTERNAL_TOKENS.some((t) => scrubbed.includes(t));
 }
 
 /**
@@ -53,6 +67,10 @@ export function pathIsInternal(p: string | null | undefined, homeDir: string = o
   const abs = path.resolve(p);
   const home = path.resolve(homeDir);
   const within = (root: string) => abs === root || abs.startsWith(root + path.sep);
+  // The user's cloned project lives under ~/.codeam/self-hosted/<deployId>/ — it
+  // is NOT an internal (see SELF_HOSTED_WORKSPACE_RE). Must be checked BEFORE the
+  // ~/.codeam catch-all below, which would otherwise swallow the whole workspace.
+  if (within(path.join(home, '.codeam', 'self-hosted'))) return false;
   return (
     within(path.join(home, '.codeam')) ||
     within(path.join(home, '.beads')) ||
