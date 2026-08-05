@@ -112,6 +112,11 @@ import {
   type HeadroomConfig,
 } from './host/headroom-config';
 import {
+  persistHouseProxyConfig,
+  clearHouseProxyConfig,
+  readHouseProxyChildEnv,
+} from './host/house-proxy-config';
+import {
   runSelfUpdate,
   SELF_UPDATE_INTERVAL_MS,
   type SelfUpdater,
@@ -1722,6 +1727,17 @@ export class HostAgentSupervisor {
         }
         childEnv.CLAUDE_CONFIG_DIR = houseConfigDir;
         extraArgs = [`--agent=${agentKind || 'claude'}`];
+        // Persist the house-proxy env so a RESUME after a codespace sleep/wake
+        // (or a supervisor restart) re-injects it — otherwise the woken bare
+        // `codeam` resume had no ANTHROPIC_BASE_URL/AUTH_TOKEN and every prompt
+        // failed with "Authentication required" (Rafael, 2026-08-05). Mirrors
+        // the Headroom `persistHeadroomConfig` → `readHeadroomChildEnv` pattern.
+        persistHouseProxyConfig({
+          baseUrl,
+          token,
+          openRouter: !!openRouter,
+          claudeConfigDir: houseConfigDir,
+        });
       } else {
         // Non-house path: `sealedAgentAuth` is guaranteed present by
         // isDeployPayload (exactly one of houseProxy / sealedAgentAuth).
@@ -1731,6 +1747,10 @@ export class HostAgentSupervisor {
           ...credEnv,
           CODEAM_AUTO_TOKEN: payload.autoPairToken,
         };
+        // A BYO-credential deploy takes over the box — drop any persisted
+        // house-proxy env so a later RESUME can't re-inject a stale house proxy
+        // on top of this agent's own credential.
+        clearHouseProxyConfig();
       }
 
       // A self-hosted deploy is an AUTONOMOUS, headless session — the user
@@ -2068,7 +2088,17 @@ export class HostAgentSupervisor {
       // (2026-07-29). Fall back to process.cwd() for older sessions with no
       // persisted cwd (prior behavior).
       const cwd = session.cwd && fs.existsSync(session.cwd) ? session.cwd : process.cwd();
-      const proc = this.resumeSpawner({ ...readHeadroomChildEnv() }, cwd);
+      // Re-inject BOTH the Headroom env AND the house-proxy env
+      // (ANTHROPIC_BASE_URL + AUTH_TOKEN + model pins + CLAUDE_CONFIG_DIR). The
+      // resume is a bare `codeam` that does NOT re-process the deploy, so
+      // without this the house agent woke without its proxy auth → every prompt
+      // failed locally with "Authentication required" (Rafael, 2026-08-05).
+      // Returns `{}` when the box has no persisted house config (BYO deploy →
+      // its own credential path is used instead).
+      const proc = this.resumeSpawner(
+        { ...readHeadroomChildEnv(), ...readHouseProxyChildEnv() },
+        cwd,
+      );
       const child: ChildSession = {
         deployId: session.id,
         proc,
