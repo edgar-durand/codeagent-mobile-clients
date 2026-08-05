@@ -71,6 +71,14 @@ vi.mock('../src/commands/host/git-tooling', async (importActual) => {
   };
 });
 
+// House-proxy config: default `readHouseProxyChildEnv` → {} so existing tests are
+// unchanged; the resume-env test below opts in via mockReturnValueOnce.
+vi.mock('../src/commands/host/house-proxy-config', () => ({
+  readHouseProxyChildEnv: vi.fn(() => ({})),
+  persistHouseProxyConfig: vi.fn(),
+  clearHouseProxyConfig: vi.fn(),
+}));
+
 // getActiveSession reads the real ~/.codeam config — default it to "no session"
 // so start()'s auto-resume is a deterministic no-op unless a test opts in. Without
 // this, a dev machine with real sessions would spawn a resume child (and fork a
@@ -731,6 +739,49 @@ describe('HostAgentSupervisor — control channel reuse', () => {
     });
     sup.start();
     expect(resumeSpawner).toHaveBeenCalledWith(expect.anything(), workspaceCwd);
+    sup.stop();
+  });
+
+  // Regression (Rafael, 2026-08-05): a warm-codespace HOUSE-agent session broke
+  // after sleep/wake with "Authentication required" because the resume re-injected
+  // the Headroom env but NOT the house-proxy env (ANTHROPIC_BASE_URL/AUTH_TOKEN).
+  // The resume MUST carry the persisted house-proxy env so the woken agent still
+  // authenticates through the proxy. (Previously the resume passed only
+  // readHeadroomChildEnv() → this assertion would have caught it.)
+  it('re-injects the persisted house-proxy env into the resume (survives sleep/wake)', async () => {
+    const config = await import('../src/config');
+    const houseCfg = await import('../src/commands/host/house-proxy-config');
+    vi.mocked(houseCfg.readHouseProxyChildEnv).mockReturnValueOnce({
+      ANTHROPIC_BASE_URL: 'https://api.codeagent-mobile.com/api/v1/agent-proxy',
+      ANTHROPIC_AUTH_TOKEN: 'HOUSE-TOK',
+      ANTHROPIC_MODEL: 'MiniMax-M3',
+    });
+    vi.mocked(config.getActiveSession).mockReturnValueOnce({
+      id: 'sess-1',
+      pluginId: 'plug-1',
+      pollSecret: 'sec',
+      agent: 'claude',
+      userName: 'u',
+      userEmail: 'e',
+      plan: 'pro',
+      pairedAt: 0,
+      pluginAuthToken: 't',
+    } as never);
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => ({ success: true, data: {} }) }),
+    );
+    const fakeProc = { stdout: { on: vi.fn() }, stderr: { on: vi.fn() }, once: vi.fn(), kill: vi.fn() };
+    const resumeSpawner = vi.fn(() => fakeProc as never);
+    const sup = new HostAgentSupervisor(IDENTITY, {
+      makeRelay: () => ({ start: vi.fn(), stop: vi.fn(), sendResult: vi.fn() }),
+      resumeSpawner,
+    });
+    sup.start();
+    const firstCall = resumeSpawner.mock.calls[0] as unknown as [Record<string, string>, string];
+    const envArg = firstCall[0];
+    expect(envArg.ANTHROPIC_BASE_URL).toBe('https://api.codeagent-mobile.com/api/v1/agent-proxy');
+    expect(envArg.ANTHROPIC_AUTH_TOKEN).toBe('HOUSE-TOK');
     sup.stop();
   });
 
