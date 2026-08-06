@@ -72,7 +72,7 @@
     "node": ">=22.0.0"
   },
   "dependencies": {
-    "@agentclientprotocol/claude-agent-acp": "0.59.0",
+    "@agentclientprotocol/claude-agent-acp": "0.64.2",
     "@agentclientprotocol/codex-acp": "1.1.4",
     "@agentclientprotocol/sdk": "1.2.1",
     "@clack/prompts": "^1.2.0",
