@@ -98,6 +98,7 @@ import {
   type StatsShape,
 } from '../services/headroom/stats-reporter';
 import { defaultHeadroomRunner } from './host/os-packages';
+import { encodeCwd } from '../agents/claude/history';
 import {
   agentIdToHeadroomKind,
   getFreeDiskBytes,
@@ -1949,6 +1950,39 @@ export class HostAgentSupervisor {
       persistOrClearSkillsFromPayload(
         (payload as { skills?: SkillsManifestEntry[] }).skills,
       );
+
+      // 1g) Conversation continuity across a warm reconnect. The backend now
+      //     derives a STABLE deployId per (host, repo, branch), so a plain
+      //     re-launch lands back in the SAME workspace `cwd`. But `client.start()`
+      //     always mints a FRESH ACP session — a stable cwd ALONE still opens an
+      //     empty chat and strands the prior conversation. So when a prior
+      //     conversation already exists in this cwd's namespace, resume the
+      //     latest one (CODEAM_RESUME_LATEST, same mechanism as the wake path).
+      //     Gated to a PLAIN re-launch: a task-dispatch deploy (PR review /
+      //     work-item / conversation — `suppressOnboardingWelcome`) wants a
+      //     focused fresh session, and PR reviews are already branch-isolated by
+      //     the deployId key. A FIRST deploy has no prior → stays fresh. The
+      //     runner's handler is best-effort (resume latest OTHER, else keep
+      //     fresh), so this never breaks a deploy. (Rafael/Stefano "history gone
+      //     on reconnect", 2026-08-06.)
+      if (!payload.suppressOnboardingWelcome) {
+        try {
+          const cfgDir = childEnv.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude');
+          const projectDir = path.join(cfgDir, 'projects', encodeCwd(cwd));
+          const hasPriorConversation =
+            fs.existsSync(projectDir) &&
+            fs.readdirSync(projectDir).some((f) => f.endsWith('.jsonl'));
+          if (hasPriorConversation) {
+            childEnv.CODEAM_RESUME_LATEST = '1';
+            log.info(
+              'host-agent',
+              `deploy: prior conversation in ${projectDir} — resuming latest for continuity`,
+            );
+          }
+        } catch {
+          /* best-effort — a detection failure just means a fresh session, never a broken deploy */
+        }
+      }
 
       // 2) Spawn the supervised `pair-auto` child. Routed through
       //    spawnSessionChild so the persisted HEADROOM_* env (the source of
