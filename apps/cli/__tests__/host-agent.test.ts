@@ -7,6 +7,7 @@ import type { ChildProcess } from 'node:child_process';
 import * as childProcessModule from 'node:child_process';
 import type { AgentAuth, AgentMetadata } from '@codeam/shared';
 import { isOwnerOnly } from '../src/lib/restrict-to-owner';
+import { encodeCwd } from '../src/agents/claude/history';
 
 import {
   HostAgentSupervisor,
@@ -964,6 +965,64 @@ describe('HostAgentSupervisor — command routing', () => {
     expect(fs.existsSync(credFile)).toBe(true);
     expect(isOwnerOnly(credFile)).toBe(true);
 
+    fs.rmSync(cwdTarget, { recursive: true, force: true });
+  });
+
+  // Conversation continuity across a warm reconnect (Rafael/Stefano, 2026-08-06):
+  // with the backend now deriving a STABLE deployId per (host, repo, branch), a
+  // re-launch lands back in the SAME workspace cwd. The CLI must RESUME the prior
+  // conversation there (else `client.start()` opens an empty chat and the history
+  // looks gone).
+  it('self_hosted_deploy resumes the latest conversation when the workspace already has one', async () => {
+    const cwdTarget = fs.mkdtempSync(path.join(os.tmpdir(), 'codeam-ws-'));
+    // Seed a prior conversation in this cwd's Claude namespace (BYO → ~/.claude).
+    const projDir = path.join(tmpHome, '.claude', 'projects', encodeCwd(cwdTarget));
+    fs.mkdirSync(projDir, { recursive: true });
+    fs.writeFileSync(path.join(projDir, 'prior-abc.jsonl'), '{"type":"user"}\n');
+    const calls: Array<{ env: Record<string, string> }> = [];
+    const spawnChild: ChildSpawner = (env) => {
+      calls.push({ env });
+      return fakeChild();
+    };
+    const { sup } = makeSupervisor(spawnChild);
+
+    await sup.handleCommand(deployCmd({ repoOrPath: cwdTarget }));
+
+    expect(calls[0].env.CODEAM_RESUME_LATEST).toBe('1');
+    fs.rmSync(cwdTarget, { recursive: true, force: true });
+  });
+
+  it('self_hosted_deploy does NOT resume on a first deploy (no prior conversation → fresh session)', async () => {
+    const cwdTarget = fs.mkdtempSync(path.join(os.tmpdir(), 'codeam-ws-'));
+    const calls: Array<{ env: Record<string, string> }> = [];
+    const spawnChild: ChildSpawner = (env) => {
+      calls.push({ env });
+      return fakeChild();
+    };
+    const { sup } = makeSupervisor(spawnChild);
+
+    await sup.handleCommand(deployCmd({ repoOrPath: cwdTarget }));
+
+    expect(calls[0].env.CODEAM_RESUME_LATEST).toBeUndefined();
+    fs.rmSync(cwdTarget, { recursive: true, force: true });
+  });
+
+  it('a task-dispatch deploy (suppressOnboardingWelcome) stays fresh even with a prior conversation', async () => {
+    const cwdTarget = fs.mkdtempSync(path.join(os.tmpdir(), 'codeam-ws-'));
+    const projDir = path.join(tmpHome, '.claude', 'projects', encodeCwd(cwdTarget));
+    fs.mkdirSync(projDir, { recursive: true });
+    fs.writeFileSync(path.join(projDir, 'prior-abc.jsonl'), '{"type":"user"}\n');
+    const calls: Array<{ env: Record<string, string> }> = [];
+    const spawnChild: ChildSpawner = (env) => {
+      calls.push({ env });
+      return fakeChild();
+    };
+    const { sup } = makeSupervisor(spawnChild);
+
+    await sup.handleCommand(deployCmd({ repoOrPath: cwdTarget, suppressOnboardingWelcome: true }));
+
+    // PR-review / work-item / conversation deploys want a focused fresh session.
+    expect(calls[0].env.CODEAM_RESUME_LATEST).toBeUndefined();
     fs.rmSync(cwdTarget, { recursive: true, force: true });
   });
 
