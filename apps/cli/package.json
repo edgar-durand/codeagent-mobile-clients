@@ -76,7 +76,7 @@
     "@agentclientprotocol/codex-acp": "1.1.4",
     "@agentclientprotocol/sdk": "1.2.1",
     "@clack/prompts": "^1.2.0",
-    "@modelcontextprotocol/sdk": "1.29.0",
+    "@modelcontextprotocol/sdk": "1.30.0",
     "chokidar": "^3.6.0",
     "ignore": "^7.0.6",
     "picocolors": "^1.1.0",
