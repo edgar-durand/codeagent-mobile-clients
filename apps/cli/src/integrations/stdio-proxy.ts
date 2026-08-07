@@ -47,7 +47,7 @@ const SIGKILL_ESCALATION_MS = 2_000;
  * finish well under this; overridable via `CODEAM_MCP_TOOL_TIMEOUT_MS` for an
  * outlier server.
  */
-const TOOL_CALL_TIMEOUT_MS = (() => {
+export const TOOL_CALL_TIMEOUT_MS = (() => {
   const raw = Number(process.env.CODEAM_MCP_TOOL_TIMEOUT_MS);
   return Number.isFinite(raw) && raw > 0 ? raw : 120_000;
 })();
