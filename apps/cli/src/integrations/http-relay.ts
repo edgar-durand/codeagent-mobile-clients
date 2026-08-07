@@ -9,6 +9,8 @@
 // remote MCP over Streamable HTTP, with the brokered credential injected as a
 // header (never on argv, never in the agent's env).
 import { IntegrationTokenClient } from './token-client';
+import { TOOL_CALL_TIMEOUT_MS } from './stdio-proxy';
+import { createToolCallWatchdog } from './mcp-tool-watchdog';
 import type { BrokeredIntegrationToken, IntegrationMcpDelivery } from '@codeam/shared';
 
 /** Fill `{field}` placeholders in a template from the brokered token (e.g.
@@ -60,9 +62,26 @@ export async function runHttpRelay(
 
   await new Promise<void>((resolve, reject) => {
     let done = false;
+    // ⚠️ Per-`tools/call` watchdog — the ROOT of the "agent hangs forever, my
+    // message vanishes / no activity" bug (Rafael, 2026-08-07; live-confirmed:
+    // `mcp__vercel__list_deployments` never returned, the turn wedged with no
+    // `done`/error, nothing persisted to the JSONL). A REMOTE MCP over Streamable
+    // HTTP (mcp.vercel.com) can accept a `tools/call` and never respond; this
+    // relay is byte-level with NO per-request timeout, so the agent waits
+    // indefinitely. The stdio path got this watchdog on 2026-08-03; the httpUrl
+    // path (vercel/posthog/…) was never covered — this closes that gap.
+    const watchdog = createToolCallWatchdog({
+      timeoutMs: TOOL_CALL_TIMEOUT_MS,
+      integrationId: id,
+      sendToAgent: (m) =>
+        void stdioTransport
+          .send(m as Parameters<typeof stdioTransport.send>[0])
+          .catch(() => undefined),
+    });
     const finish = (err?: Error) => {
       if (done) return;
       done = true;
+      watchdog.dispose();
       void httpTransport.close().catch(() => undefined);
       void stdioTransport.close().catch(() => undefined);
       if (err) reject(err);
@@ -71,11 +90,14 @@ export async function runHttpRelay(
 
     // Method-agnostic byte-level relay: whatever one side emits, forward verbatim.
     stdioTransport.onmessage = (msg) => {
+      watchdog.onClientMessage(msg);
       void httpTransport.send(msg).catch((e) => {
         process.stderr.write(`[mcp-run http] send→remote failed: ${String(e)}\n`);
       });
     };
     httpTransport.onmessage = (msg) => {
+      // Drop a late reply to an id the watchdog already answered with a timeout.
+      if (watchdog.onServerMessage(msg)) return;
       void stdioTransport.send(msg).catch(() => undefined);
     };
     stdioTransport.onclose = () => finish();
