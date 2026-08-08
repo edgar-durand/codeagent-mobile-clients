@@ -54,6 +54,10 @@ import { ADAPTER_MODULE_LOAD_ERROR_RE } from './agent-binary';
 import type { PromptBlock } from './buildAcpPromptBlocks';
 import { createIdleTimeout, type IdleTimeout } from './idleTimeout';
 import { pathIsInternal, INTERNAL_BLOCK_REASON } from './internal-paths';
+import {
+  ensureHeadroomProxyReady,
+  makeRealProxySupervisorDeps,
+} from '../../services/headroom/proxy-supervisor';
 import { toolPathIsSecret, GUARDRAIL_SECRET_READ_BLOCK_REASON } from './guardrails';
 import { getGuardrailPolicy } from './guardrail-config';
 import { isLocalSession } from '../../baton/gate';
@@ -714,6 +718,15 @@ export class AcpClient {
     if (!this.connection || !this.sessionId) {
       throw new Error('AcpClient.prompt called before start()');
     }
+    // Self-heal the shared Headroom proxy BEFORE every turn (best-effort). On a
+    // codespace resume / host-agent restart the detached :8787 proxy can be
+    // SIGTERM'd and never relaunched, leaving ANTHROPIC_BASE_URL pointing at a
+    // dead port → every turn fails "API Error: ConnectionRefused" until the 30 s
+    // heartbeat supervisor happens to respawn it (Rafael, 2026-08-08 — the proxy
+    // stayed dead ~9 min). A cheap `/livez` probe (no-op when alive OR Headroom
+    // isn't configured — the common case) respawns + waits when it's down, so the
+    // user's turn recovers on the spot instead of erroring. Never throws.
+    await ensureHeadroomProxyReady(makeRealProxySupervisorDeps()).catch(() => undefined);
     // Normalise: plain string callers (slash commands, free-form
     // replies) shouldn't have to build a single-block array; the
     // start_task path with image attachments passes the array directly
