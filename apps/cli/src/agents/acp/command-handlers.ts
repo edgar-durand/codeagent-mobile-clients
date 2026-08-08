@@ -46,6 +46,7 @@ import {
 import type { AcpClient } from './client';
 import type { AcpPublisher } from './publisher';
 import { buildAcpPromptBlocks, type PromptBlock } from './buildAcpPromptBlocks';
+import { maybePrefaceAgentStandard } from '../agent-standard';
 import { shouldOfferOneMRecovery } from './oneMContextRecovery';
 import {
   looksLikeBudgetExceeded,
@@ -330,6 +331,11 @@ async function startTaskH(ctx: AcpCommandContext): Promise<void> {
   // the first streaming text overwrites it, which races visibly.
   await streaming.beginTurn();
   history.appendUserPrompt(promptText);
+  // Non-Claude ACP agents get the always-on Agent Standard as a one-time preface
+  // on the first turn of a new conversation (Claude gets it via ~/.claude/CLAUDE.md).
+  // Prepended AFTER recording the user prompt + echo, so it rides the agent prompt
+  // only and never shows as part of the user's message. Managed deploys only.
+  maybePrefaceAgentStandard(blocks, opts.agent, opts.sessionId);
   // Tracks whether the turn already reached a terminal, VISIBLE close (reply
   // delivered + "Thinking…" cleared). Once true, the only awaited work left is
   // the command ACK — and a long (>10 min) turn's `command:<id>` record can
