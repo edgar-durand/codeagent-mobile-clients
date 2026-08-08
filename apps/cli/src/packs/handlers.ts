@@ -41,7 +41,13 @@ export function buildPackRunnerDeps(ctx: AcpCommandContext): PackRunnerDeps {
         // The resume rail's exact switch: fresh conversation → re-point the
         // history anchor → re-point the runner's active id so later commands
         // (get_conversation, uploads) target the stage's conversation.
-        const id = await ctx.client.newConversation();
+        // Managed sessions run auto-approve; a fresh conversation must re-assert
+        // the agent's full-bypass mode or the stage's writes abort at the
+        // permission layer (a fresh session/new doesn't inherit the initial
+        // INITIAL_AGENT_MODE=agent-full-access env). Mirror the session posture.
+        const id = await ctx.client.newConversation({
+          ensureFullAutoMode: ctx.opts.autoApprovePermissions === true,
+        });
         ctx.history.switchActiveSession(id);
         ctx.onActiveSessionChanged?.(id);
         return id;
