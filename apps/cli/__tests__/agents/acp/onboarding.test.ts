@@ -21,7 +21,7 @@ describe('buildOnboardingWelcome', () => {
     expect(w).toMatch(/Team Spaces/);
     // Collaboration / feedback channels — full URLs so they render tappable.
     expect(w).toContain('https://github.com/edgar-durand/codeagent-mobile-clients/issues');
-    expect(w).toContain('https://discord.gg/ADMKwGAB');
+    expect(w).toContain('https://discord.gg/Np2pbMrV9f');
   });
 
   it('falls back to a generic project label when cwd has no basename', () => {
