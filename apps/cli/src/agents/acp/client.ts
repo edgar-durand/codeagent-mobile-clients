@@ -879,6 +879,29 @@ export class AcpClient {
    * reply cleanly. The `finally` guarantees the guard clears even if the load
    * throws, so a failed recovery can't wedge streaming off.
    */
+  /**
+   * Start a BRAND-NEW conversation on the SAME running adapter process and make
+   * it the active session. Agent Packs' stage boundary: each pipeline role runs
+   * in a fresh conversation (fresh context — the reviewer must not see the
+   * coder's conversation), so the pack runner calls this between stages instead
+   * of respawning the agent. Same `session/new` the startup handshake and
+   * {@link reestablishSession} send; callers own re-pointing the history anchor
+   * (`AcpHistory.switchActiveSession` + `onActiveSessionChanged`), exactly like
+   * the `resume_session` rail.
+   */
+  async newConversation(): Promise<string> {
+    if (!this.connection) {
+      throw new Error('AcpClient.newConversation called before start()');
+    }
+    const ns = await this.connection.newSession({
+      cwd: this.opts.cwd,
+      mcpServers: this.opts.mcpServers ?? [],
+    });
+    this.sessionId = ns.sessionId;
+    log.info('acpClient', `newConversation ← ok sid=${ns.sessionId.slice(0, 8)}`);
+    return ns.sessionId;
+  }
+
   private async reestablishSession(): Promise<void> {
     if (!this.connection) throw new Error('AcpClient.reestablishSession: no connection');
     const cwd = this.opts.cwd;

@@ -30,6 +30,7 @@ import type { TurnFileAggregator } from '../../services/turn-files/turn-file-agg
 import { beadsActionFromPayload } from '../../beads/wiring';
 import { handleBeadsActionCommand, type StartedBeads } from '../../beads';
 import { configureSkill, type SkillsConfigureAction } from '../../skills/configure';
+import { packStartH, packActionH, packStatusH } from '../../packs/handlers';
 import {
   persistIntegrationsManifest,
   readIntegrationsManifest,
@@ -1253,6 +1254,9 @@ export const ACP_COMMAND_HANDLERS: Record<string, AcpCommandHandler> = {
   preview_stop: previewH,
   save_preview_config: previewH,
   skills_configure: skillsConfigureH,
+  pack_start: packStartH,
+  pack_action: packActionH,
+  pack_status: packStatusH,
 };
 
 /**
