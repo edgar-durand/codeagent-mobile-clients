@@ -4,6 +4,12 @@ All notable changes to the CodeAgent Mobile VS Code extension are documented her
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.61.88] — 2026-08-08
+
+### Fixed
+
+- **cli:** Update onboarding Discord invite to the never-expiring link (#594)
+
 ## [2.61.87] — 2026-08-08
 
 ### Fixed
