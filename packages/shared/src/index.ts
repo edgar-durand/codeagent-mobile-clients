@@ -7,6 +7,7 @@ export * from './agents';
 export * from './integrations';
 export * from './skills';
 export * from './guardrails';
+export * from './packs';
 export * from './types/file-change';
 export * from './types/streaming';
 export * from './api-url';

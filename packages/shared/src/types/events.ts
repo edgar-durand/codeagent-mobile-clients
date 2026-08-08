@@ -109,6 +109,11 @@ export const USER_EVENTS = {
    *  produced by api-v2 (the CLI neither produces nor consumes it). Mirrored in
    *  repo A. */
   PR_REVIEW_LAUNCH: 'pr_review_launch',
+  /** Agent Packs — full `PackRunState` republished by the backend on every
+   *  pipeline transition (stage start/done, pause, stall, completion). CLI
+   *  posts to /api/packs/events; mobile's pack.store renders the pipeline.
+   *  Mirrored in repo A's app-shared events.ts. */
+  PACK_STATE: 'pack_state',
 } as const;
 
 export type UserEventName = (typeof USER_EVENTS)[keyof typeof USER_EVENTS];
