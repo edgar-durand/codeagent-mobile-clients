@@ -109,6 +109,12 @@ export function toolPathIsSecret(p: string | null | undefined): boolean {
   return !!p && SECRET_RE.test(p);
 }
 
+/** Surfaced to the agent when the fs-seam belt blocks a secret read under
+ *  `secretRead: 'deny'`. */
+export const GUARDRAIL_SECRET_READ_BLOCK_REASON =
+  "Reading this secret file is blocked by this session's guardrails " +
+  '(Reading secrets = Deny). Adjust it in the session Guardrails settings if intended.';
+
 export function guardrailDecision(
   request: GuardrailPermissionRequest,
   policy: GuardrailPolicy,

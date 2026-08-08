@@ -52,6 +52,8 @@ import {
 } from '../../services/terminal-ops.service';
 import { mapSessionUpdate, mapPermissionRequest } from './mappers';
 import { internalPathPermissionOutcome } from './internal-paths';
+import { guardrailDecision } from './guardrails';
+import { getGuardrailPolicy } from './guardrail-config';
 import { isLocalSession } from '../../baton/gate';
 import { extractSelectPrompt } from './selectPromptExtractor';
 import { prewarmPreviewDetection } from '../../commands/start/handlers';
@@ -1096,6 +1098,7 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
       // client here — so this covers claude/codex/gemini/cursor/opencode without
       // any Claude-specific settings. Not applied on a local session (there
       // ~/.codeam is the user's own config). See ./internal-paths.ts.
+      let guardrailConfirm = false;
       if (!isLocalSession()) {
         const denied = internalPathPermissionOutcome(request);
         if (denied) {
@@ -1105,12 +1108,25 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
           );
           return denied;
         }
+        // Native ACP guardrails (MANAGED only): classify the tool call against
+        // the session policy. `deny` blocks it here; `confirm` skips the AUTO
+        // auto-approve below and routes to the interactive approve/deny prompt.
+        const g = guardrailDecision(request, getGuardrailPolicy());
+        if (g?.kind === 'deny') {
+          log.warn('acpRunner', `guardrail [${g.category}] — denying tool call`);
+          return g.outcome;
+        }
+        if (g?.kind === 'confirm') {
+          guardrailConfirm = true;
+          log.info('acpRunner', `guardrail [${g.category}] — requiring confirmation`);
+        }
       }
       // AUTO mode (headless / codespace): no human at the phone to answer, so
       // auto-pick an "allow" option instead of stalling the turn forever. Pick
       // the broadest grant available (allow_always > allow_once). If the agent
       // somehow offers no allow option, fall through to the interactive flow.
-      if (opts.autoApprovePermissions) {
+      // A guardrail `confirm` overrides AUTO — the user must tap.
+      if (opts.autoApprovePermissions && !guardrailConfirm) {
         const allow = pickAllowOption(request.options);
         if (allow) {
           log.info(

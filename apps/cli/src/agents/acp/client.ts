@@ -54,6 +54,8 @@ import { ADAPTER_MODULE_LOAD_ERROR_RE } from './agent-binary';
 import type { PromptBlock } from './buildAcpPromptBlocks';
 import { createIdleTimeout, type IdleTimeout } from './idleTimeout';
 import { pathIsInternal, INTERNAL_BLOCK_REASON } from './internal-paths';
+import { toolPathIsSecret, GUARDRAIL_SECRET_READ_BLOCK_REASON } from './guardrails';
+import { getGuardrailPolicy } from './guardrail-config';
 import { isLocalSession } from '../../baton/gate';
 import { log } from '../../services/logger';
 import { killQuiet } from '../../lib/quiet';
@@ -1310,6 +1312,17 @@ export class AcpClient {
         // of exposing the file. Not applied locally (there it's the user's own).
         if (!isLocalSession() && pathIsInternal(params.path)) {
           throw new RequestError(-32002, INTERNAL_BLOCK_REASON, { uri: params.path });
+        }
+        // Guardrail belt (MANAGED only): the fs seam has no interactive channel,
+        // so it enforces secretRead only when set to `deny` (a delegated read of
+        // a .env/key/credential file). `confirm`/`off` there degrade to allow —
+        // the primary secretRead enforcement is the permission-request path.
+        if (
+          !isLocalSession() &&
+          getGuardrailPolicy().secretRead === 'deny' &&
+          toolPathIsSecret(params.path)
+        ) {
+          throw new RequestError(-32002, GUARDRAIL_SECRET_READ_BLOCK_REASON, { uri: params.path });
         }
         try {
           const content = await fs.readFile(params.path, 'utf8');
