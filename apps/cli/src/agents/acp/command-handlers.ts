@@ -708,6 +708,18 @@ async function listModesH(ctx: AcpCommandContext): Promise<void> {
   return;
 }
 
+/**
+ * A native ACP mode where the AGENT ITSELF skips every permission prompt —
+ * Claude `bypassPermissions`, plus the yolo/danger/full-access/skip aliases other
+ * agents use. In every OTHER mode (`default`, `plan`, `acceptEdits`, …) the agent
+ * asks per-tool, so the CLI must RELAY those prompts to mobile rather than
+ * auto-approve. Keeps `autoApprovePermissions` in sync with the chosen mode.
+ */
+const FULL_AUTO_MODE_RE = /bypass|yolo|danger|full.?access|skip.?perm|auto.?approve/i;
+export function modeIsFullAutoApprove(modeId: string): boolean {
+  return FULL_AUTO_MODE_RE.test(modeId);
+}
+
 async function setModeH(ctx: AcpCommandContext): Promise<void> {
   const { cmd, client, relay, opts } = ctx;
   // client.setMode drives the NATIVE `session/set_mode` RPC against the agent's
@@ -722,6 +734,21 @@ async function setModeH(ctx: AcpCommandContext): Promise<void> {
   }
   try {
     await client.setMode(modeId);
+    // Keep the CLI's auto-approve IN SYNC with the chosen mode. On a MANAGED
+    // session (codespace / self-hosted) `autoApprovePermissions` starts true
+    // (CODESPACES / CODEAM_AUTO_APPROVE at spawn) so headless turns never stall.
+    // But that made the mobile mode toggle a NO-OP: switching to a manual "ask"
+    // mode still auto-approved every tool, because onRequestPermission only reads
+    // this flag — the agent's native mode changed but the CLI kept auto-approving
+    // (Rafael, 2026-08-08 — "en manual no pregunta yes/no, deniega solo"). Only a
+    // full-bypass mode keeps auto-approve; every ask-mode flips it false so the
+    // agent's permission prompts RELAY to mobile. A headless session never sends
+    // set_mode, so it stays auto.
+    opts.autoApprovePermissions = modeIsFullAutoApprove(modeId);
+    log.info(
+      'acpRunner',
+      `set_mode → ${modeId} (autoApprovePermissions=${opts.autoApprovePermissions})`,
+    );
     await relay.sendResult(cmd.id, 'completed', { modeId });
   } catch (err) {
     log.warn('acpRunner', `set_mode failed: ${describeError(err)}`);
