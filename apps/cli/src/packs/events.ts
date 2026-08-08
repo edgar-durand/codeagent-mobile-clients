@@ -18,7 +18,7 @@ export async function postPackState(
   state: PackRunState,
   fetchImpl: typeof fetch = fetch,
 ): Promise<void> {
-  const url = `${resolveApiBaseUrl()}/api/packs/events`;
+  const url = `${resolveApiBaseUrl()}/api/agent-packs/events`;
   const body = JSON.stringify({ sessionId: opts.sessionId, pluginId: opts.pluginId, state });
   try {
     const makeHeaders = (token: string): Record<string, string> => ({
