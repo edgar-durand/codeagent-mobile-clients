@@ -4,6 +4,13 @@ All notable changes to `codeam-cli` are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.61.89] — 2026-08-08
+
+### Added
+
+- **cli:** Always-on Agent Standard injected into managed deployed sessions (#595)
+- Native ACP guardrails — configurable, default-on safety (Phase 3) (#596)
+
 ## [2.61.88] — 2026-08-08
 
 ### Fixed
