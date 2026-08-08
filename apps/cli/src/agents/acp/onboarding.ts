@@ -139,7 +139,7 @@ export function buildOnboardingWelcome(cwd: string): string {
     '',
     'Found a bug or have feedback? Reach us at:',
     '- GitHub: https://github.com/edgar-durand/codeagent-mobile-clients/issues',
-    '- Discord: https://discord.gg/ADMKwGAB',
+    '- Discord: https://discord.gg/Np2pbMrV9f',
     '',
     `Ready when you are — try **"explain ${repo}"** or **"what should I work on first?"**`,
   ].join('\n');
