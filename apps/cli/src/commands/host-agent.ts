@@ -764,8 +764,21 @@ export interface DockerRunner {
   ): Promise<{ code: number | null; stderr: string; stdout: string }>;
 }
 
-/** Advisory bound for a fleet `docker` invocation before the runner kills it. */
+/** Advisory bound for a fast fleet `docker` invocation (rm/stop/start/inspect). */
 const DOCKER_RUN_TIMEOUT_MS = 120_000;
+
+/**
+ * Bound for a fleet `docker run` that PULLS the box image inline (`--pull=always`).
+ * A cold pull of the ~1 GB codeam-box image on a shared host regularly exceeds
+ * the 120 s fast bound → the runner SIGTERM'd the `docker run` mid-pull
+ * ("Download complete" then killed, code=143) → the box never enrolled →
+ * PROVISIONING-timeout → FAILED (observed 2026-08-08, the recurring failed
+ * creates). 10 min gives a cold pull generous headroom while staying under the
+ * backend's 15-min provisioning-timeout sweep so a genuinely wedged run still
+ * gets reaped. Applies ONLY to the create + wake-recreate runs (the ones that
+ * pull); rm/stop/start stay on the fast bound.
+ */
+const DOCKER_RUN_WITH_PULL_TIMEOUT_MS = 600_000;
 
 /** Default runner: spawn the real `docker` binary (argv only, no shell). */
 export const defaultDockerRunner: DockerRunner = {
@@ -1472,7 +1485,9 @@ export class HostAgentSupervisor {
     }
     const args = buildFleetBoxRunArgs(payload);
     const res = await this.docker.run(args, {
-      timeoutMs: DOCKER_RUN_TIMEOUT_MS,
+      // `--pull=always` pulls the ~1 GB image inline — needs the pull bound, not
+      // the 120 s fast bound (which SIGTERM'd the create mid-pull, code=143).
+      timeoutMs: DOCKER_RUN_WITH_PULL_TIMEOUT_MS,
       env: { CODEAM_ENROLL_TOKEN: payload.enrollToken },
     });
     if (res.code === 0) {
@@ -1527,7 +1542,8 @@ export class HostAgentSupervisor {
         limits: payload.limits,
       });
       const res = await this.docker.run(args, {
-        timeoutMs: DOCKER_RUN_TIMEOUT_MS,
+        // Recreate also pulls `:latest` inline — use the pull bound, not 120 s.
+        timeoutMs: DOCKER_RUN_WITH_PULL_TIMEOUT_MS,
         env: { CODEAM_ENROLL_TOKEN: payload.enrollToken },
       });
       if (res.code === 0) {
