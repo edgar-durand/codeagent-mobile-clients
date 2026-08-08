@@ -262,12 +262,39 @@ export class PackRunner {
         return false;
       }
 
+      // A review-style stage (requiresCommit === false) legitimately approves
+      // clean with NO change — treat a substantive no-commit reply as a
+      // "reviewed, no changes" handoff against the commit it reviewed, rather
+      // than nudging/stalling it for a commit that shouldn't exist.
+      const commitOptional = stageDef.requiresCommit === false;
+
       let endSha = await this.deps.gates.head();
       if (!endSha || endSha === startSha) {
+        if (commitOptional && reply.trim().length > 0) {
+          const reviewedCommit = startSha ? await this.deps.gates.canonicalCommit(startSha) : null;
+          const handoff: PackHandoffRecord = {
+            commit: reviewedCommit ?? '(no changes)',
+            summary: reply.trim().slice(-SUMMARY_MAX_CHARS),
+            diffStat: 'reviewed — no changes needed',
+            durationMs: Date.now() - startedMs,
+          };
+          return this.recordHandoff(index, stageDef.role, handoff);
+        }
         // ONE bounded nudge — then the run stalls honestly (never loop forever).
         reply = await this.deps.driver.runTurn(NUDGE_PROMPT, '▶ Waiting for the stage commit…');
         endSha = await this.deps.gates.head();
         if (!endSha || endSha === startSha) {
+          // A commit-optional stage that STILL produced nothing meaningful is a
+          // real stall (empty reply / crash), not a clean approval.
+          if (commitOptional && reply.trim().length > 0) {
+            const reviewedCommit = startSha ? await this.deps.gates.canonicalCommit(startSha) : null;
+            return this.recordHandoff(index, stageDef.role, {
+              commit: reviewedCommit ?? '(no changes)',
+              summary: reply.trim().slice(-SUMMARY_MAX_CHARS),
+              diffStat: 'reviewed — no changes needed',
+              durationMs: Date.now() - startedMs,
+            });
+          }
           return this.stall(index, 'stage produced no commit', reply);
         }
       }
@@ -283,16 +310,7 @@ export class PackRunner {
         durationMs: Date.now() - startedMs,
       };
 
-      stages = this.state.stages.slice();
-      stages[index] = { ...stages[index], status: 'done', handoff };
-      this.state = { ...this.state, stages, currentStage: index + 1 };
-      try {
-        this.deps.ledger.saveStageHandoff(this.state.runId, index, stageDef.role, handoff);
-      } catch (err) {
-        this.deps.log(`pack handoff save failed: ${(err as Error).message}`);
-      }
-      await this.publish();
-      return true;
+      return this.recordHandoff(index, stageDef.role, handoff);
     } catch (err) {
       if (this.control === 'abort') {
         await this.settle('aborted');
@@ -300,6 +318,24 @@ export class PackRunner {
       }
       return this.stall(index, (err as Error).message);
     }
+  }
+
+  /** Mark a stage `done` with its handoff, persist, and advance. */
+  private async recordHandoff(
+    index: number,
+    role: string,
+    handoff: PackHandoffRecord,
+  ): Promise<true> {
+    const stages = this.state.stages.slice();
+    stages[index] = { ...stages[index], status: 'done', handoff };
+    this.state = { ...this.state, stages, currentStage: index + 1 };
+    try {
+      this.deps.ledger.saveStageHandoff(this.state.runId, index, role, handoff);
+    } catch (err) {
+      this.deps.log(`pack handoff save failed: ${(err as Error).message}`);
+    }
+    await this.publish();
+    return true;
   }
 
   private async stall(index: number, reason: string, lastReply?: string): Promise<false> {

@@ -27,6 +27,8 @@ export const PACK_REGISTRY: Record<PackId, PackDefinition> = {
         description: 'Skeptical review in a fresh context — finds and fixes what the coder missed.',
         skillIds: ['code-review', 'code-naming'],
         prompt: REVIEWER_PROMPT,
+        // Review-only: approving clean with no change is success, not a stall.
+        requiresCommit: false,
       },
     ],
   },
@@ -56,6 +58,8 @@ export const PACK_REGISTRY: Record<PackId, PackDefinition> = {
         description: 'Audits correctness, scope, design, and conventions with fresh eyes.',
         skillIds: ['code-review', 'code-naming'],
         prompt: REVIEWER_PROMPT,
+        // Review-only: approving clean with no change is success, not a stall.
+        requiresCommit: false,
       },
       {
         role: 'qa',

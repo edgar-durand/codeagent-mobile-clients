@@ -22,6 +22,16 @@ export interface PackStageDef {
   /** The full role prompt sent (with the pack workflow article + task +
    *  previous handoff) as the stage's opening prompt. Read-only in the app. */
   prompt: string;
+  /**
+   * Whether this stage MUST end in a new commit to hand off. Defaults to `true`
+   * (undefined = true) — a Specifier/Coder/QA produces an artifact (spec, code,
+   * report) and a no-commit stage is a stall. Set `false` for review-style
+   * stages that legitimately approve clean with NO change: a Reviewer that finds
+   * nothing to fix should hand off "reviewed, no changes needed" against the
+   * commit it reviewed, not stall the pipeline. (Agent Packs live-run finding,
+   * 2026-08-08 — a clean Reviewer was mis-treated as "stage produced no commit".)
+   */
+  requiresCommit?: boolean;
 }
 
 export interface PackDefinition {
