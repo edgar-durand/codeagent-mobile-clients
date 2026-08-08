@@ -21,6 +21,9 @@ import { resolveApiBaseUrl } from '@codeam/shared';
 import { showInfo } from '../../ui/banner';
 import { createOsStrategy } from '../../os';
 import { createInteractiveAgentStrategy } from '../registry';
+import { modeIsFullAutoApprove } from './modes';
+// Re-exported for back-compat: the set-mode auto-approve spec imports it from here.
+export { modeIsFullAutoApprove } from './modes';
 import type { RuntimeStrategy } from '../strategy';
 import { removeSession } from '../../config';
 import { closeAllTerminals } from '../../services/terminal-ops.service';
@@ -707,18 +710,6 @@ async function listModesH(ctx: AcpCommandContext): Promise<void> {
     currentModeId: client.getCurrentModeId(),
   });
   return;
-}
-
-/**
- * A native ACP mode where the AGENT ITSELF skips every permission prompt —
- * Claude `bypassPermissions`, plus the yolo/danger/full-access/skip aliases other
- * agents use. In every OTHER mode (`default`, `plan`, `acceptEdits`, …) the agent
- * asks per-tool, so the CLI must RELAY those prompts to mobile rather than
- * auto-approve. Keeps `autoApprovePermissions` in sync with the chosen mode.
- */
-const FULL_AUTO_MODE_RE = /bypass|yolo|danger|full.?access|skip.?perm|auto.?approve/i;
-export function modeIsFullAutoApprove(modeId: string): boolean {
-  return FULL_AUTO_MODE_RE.test(modeId);
 }
 
 async function setModeH(ctx: AcpCommandContext): Promise<void> {

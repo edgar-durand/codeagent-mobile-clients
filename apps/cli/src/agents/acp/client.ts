@@ -60,6 +60,7 @@ import {
 } from '../../services/headroom/proxy-supervisor';
 import { toolPathIsSecret, GUARDRAIL_SECRET_READ_BLOCK_REASON } from './guardrails';
 import { getGuardrailPolicy } from './guardrail-config';
+import { modeIsFullAutoApprove } from './modes';
 import { isLocalSession } from '../../baton/gate';
 import { log } from '../../services/logger';
 import { killQuiet } from '../../lib/quiet';
@@ -889,7 +890,7 @@ export class AcpClient {
    * (`AcpHistory.switchActiveSession` + `onActiveSessionChanged`), exactly like
    * the `resume_session` rail.
    */
-  async newConversation(): Promise<string> {
+  async newConversation(opts?: { ensureFullAutoMode?: boolean }): Promise<string> {
     if (!this.connection) {
       throw new Error('AcpClient.newConversation called before start()');
     }
@@ -898,6 +899,34 @@ export class AcpClient {
       mcpServers: this.opts.mcpServers ?? [],
     });
     this.sessionId = ns.sessionId;
+    // Re-capture the fresh session's native config — a `session/new` is a
+    // brand-new SessionModeState, NOT a clone of the initial session's.
+    this.captureModelConfig(ns.configOptions ?? []);
+    this.captureModes(ns.modes ?? null);
+    // ⚠️ A fresh `session/new` starts in the agent's DEFAULT (ask-per-tool) mode
+    // — it does NOT inherit the initial session's `INITIAL_AGENT_MODE=agent-full-
+    // access` env (that env is applied by the agent only to its first session).
+    // On a managed (codespace / self-hosted, auto-approve) session that means the
+    // agent's writes hit an ACP permission prompt with no human to answer → the
+    // turn aborts "at the permission layer" and the stage produces no commit
+    // (Agent Packs incident, 2026-08-08). Re-assert the agent's full-bypass mode
+    // so the fresh conversation behaves identically to the initial session. The
+    // caller passes `ensureFullAutoMode` only when the session is managed; a local
+    // session leaves the fresh session in its default ask-mode. Best-effort —
+    // agents that advertise no matching mode just proceed as before.
+    if (opts?.ensureFullAutoMode && this.availableModes.length > 0) {
+      const full = this.availableModes.find((m) => modeIsFullAutoApprove(m.id));
+      if (full && this.currentModeId !== full.id) {
+        try {
+          await this.connection.setSessionMode({ sessionId: ns.sessionId, modeId: full.id });
+          this.currentModeId = full.id;
+          log.info('acpClient', `newConversation → re-asserted full-auto mode ${full.id}`);
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          log.warn('acpClient', `newConversation — could not re-assert full-auto mode: ${msg}`);
+        }
+      }
+    }
     log.info('acpClient', `newConversation ← ok sid=${ns.sessionId.slice(0, 8)}`);
     return ns.sessionId;
   }
