@@ -40,6 +40,7 @@ import { capture, identifyUser, shutdownTelemetry } from '../services/telemetry.
 import { provisionBeadsForStart } from '../beads/wiring';
 import { startClaudeCredentialSync } from '../agents/claude/credential-sync';
 import { ensureBeadsWorkflowHint } from '../beads/workflow-hint';
+import { ensureAgentStandard } from '../agents/agent-standard';
 import { buildMcpServersForStart } from '../integrations/provision';
 import { provisionSkillsForStart } from '../skills/provision';
 import type { StartedBeads } from '../beads';
@@ -252,6 +253,13 @@ export async function start(
   // spawn, DB-independent) so the agent learns to use beads immediately even
   // though beads provisioning (below) is no longer gated. See ensureBeadsWorkflowHint.
   ensureBeadsWorkflowHint();
+  // Always-on Agent Standard (baseline working + safety guidance) — Claude rail:
+  // append to ~/.claude/CLAUDE.md so it's always in context. MANAGED deploys only
+  // (a local `codeam start` keeps the user's own global config untouched); other
+  // ACP agents get it as a one-time prompt preface in the runner. Best-effort.
+  if (!isLocalSession() && session.agent === 'claude') {
+    ensureAgentStandard();
+  }
   const beadsReady = provisionBeadsForStart({
     sessionId: session.id,
     pluginId,
