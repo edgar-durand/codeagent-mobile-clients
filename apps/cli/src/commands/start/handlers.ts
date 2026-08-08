@@ -57,6 +57,7 @@ import { configureHeadroom } from '../../services/headroom/configure';
 import { applyBudgetToHeadroom, makeRealApplyBudgetDeps, type BudgetSpec } from '../../services/headroom/budget-relaunch';
 import { fetchWithTimeout, HeadroomStatsReporter, mapStatsToSavings, type StatsShape, type Savings } from '../../services/headroom/stats-reporter';
 import { killHeadroomProxy } from '../../services/headroom/proxy-pid';
+import { getGuardrailPolicy, setGuardrailPolicy } from '../../agents/acp/guardrail-config';
 import { AGENT_REGISTRY, isKnownAgentId, normalizeAgentId, PREVIEW_DETECT_PROMPT, USER_EVENTS, type PreviewDetection, type HeadroomBudgetCommand } from '@codeam/shared';
 import * as previewSvc from '../../services/preview';
 import { runPreviewStart, type EmitPreviewEvent } from '../../services/preview/start-orchestrator';
@@ -2192,6 +2193,24 @@ const savePreviewConfigH: CommandHandler = (_ctx, _cmd, parsed) => {
 // preview on session shutdown.
 export { activePreviews };
 
+/**
+ * Native ACP guardrails — read or update this session's policy live.
+ *  - `{action:'read'}`  → returns the current policy (default-on if none set).
+ *  - `{action:'write', policy}` → normalizes + persists (~/.codeam/guardrails.json)
+ *    + updates the in-memory policy the runner/client read; returns the applied
+ *    policy. Untrusted input is coerced by `normalizeGuardrailPolicy`.
+ * Agnostic to agent/plan — safety is free and applies to every managed session.
+ */
+const guardrailConfigureH: CommandHandler = async (ctx, cmd) => {
+  const payload = cmd.payload as { action?: 'read' | 'write'; policy?: unknown } | undefined;
+  if (payload?.action === 'write') {
+    const policy = setGuardrailPolicy(payload.policy);
+    await ctx.relay.sendResult(cmd.id, 'completed', { policy });
+    return;
+  }
+  await ctx.relay.sendResult(cmd.id, 'completed', { policy: getGuardrailPolicy() });
+};
+
 export const handlers: Record<string, CommandHandler> = {
   start_task: startTask,
   provide_input: provideInput,
@@ -2243,6 +2262,7 @@ export const handlers: Record<string, CommandHandler> = {
   vcs_agent_review: vcsAgentReviewH,
   headroom_budget: headroomBudgetH,
   beads_configure: beadsConfigureH,
+  guardrail_configure: guardrailConfigureH,
   cli_self_update: cliSelfUpdateH(),
 };
 

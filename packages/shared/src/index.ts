@@ -6,6 +6,7 @@ export * from './models/pricing';
 export * from './agents';
 export * from './integrations';
 export * from './skills';
+export * from './guardrails';
 export * from './types/file-change';
 export * from './types/streaming';
 export * from './api-url';
