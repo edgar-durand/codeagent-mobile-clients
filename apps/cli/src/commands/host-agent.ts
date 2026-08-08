@@ -97,6 +97,10 @@ import {
   type Savings,
   type StatsShape,
 } from '../services/headroom/stats-reporter';
+import {
+  ensureHeadroomProxyReady,
+  makeRealProxySupervisorDeps,
+} from '../services/headroom/proxy-supervisor';
 import { defaultHeadroomRunner } from './host/os-packages';
 import { encodeCwd } from '../agents/claude/history';
 import {
@@ -1123,6 +1127,17 @@ export class HostAgentSupervisor {
     // codespace sessions are ACP-only — CODEAM_AUTO_APPROVE keeps the baton /
     // native-TUI path OFF, exactly like a deploy child's CODEAM_AUTO_TOKEN).
     this.resumePersistedSession();
+
+    // Proactively warm the Headroom proxy on boot/resume. A codespace resume /
+    // container restart kills the detached :8787 proxy, and the resume path never
+    // relaunches it (readHeadroomChildEnv re-injects only the ENV, pointing the
+    // agent at a dead port), so the resumed session's FIRST turn would otherwise
+    // fail "API Error: ConnectionRefused" (Rafael, 2026-08-08). ensureHeadroom-
+    // ProxyReady no-ops when Headroom isn't configured; when it is + :8787 is
+    // down it respawns + warms the ONNX model NOW, so the user's first message
+    // doesn't pay the respawn latency mid-turn (the per-turn ensure in
+    // AcpClient.runPrompt is the reactive belt; this is the proactive one).
+    void ensureHeadroomProxyReady(makeRealProxySupervisorDeps()).catch(() => undefined);
 
     // Boot reconcile: a fresh supervisor owns NO children yet (a restart /
     // crash / reboot killed any previous ones), so the authoritative live

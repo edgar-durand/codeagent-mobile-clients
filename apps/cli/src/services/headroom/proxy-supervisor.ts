@@ -18,7 +18,11 @@ import * as os from 'os';
 import * as path from 'path';
 import { log } from '../logger';
 import { spawnHeadroomProxy } from './proxy-process';
-import { isHeadroomProxyProcessAlive, headroomProxyPidfileAgeMs } from './proxy-pid';
+import {
+  isHeadroomProxyProcessAlive,
+  headroomProxyPidfileAgeMs,
+  killHeadroomProxy,
+} from './proxy-pid';
 
 export interface ProxySupervisorDeps {
   /** True when this box routes the agent through the Headroom proxy and
@@ -77,12 +81,19 @@ export async function ensureHeadroomProxy(
   if (alive) return 'alive';
 
   // Not answering /livez. Before respawning, rule out "up but still warming".
+  // ⚠️ This guard is only SOUND because isHeadroomProxyProcessAlive() now
+  // verifies the pid is ACTUALLY our headroom proxy (cmdline), not just that
+  // SOME process holds that pid. Pre-fix, a zombie/reused pid (common after a
+  // codespace resume/container restart) reported "alive" here → 'starting'
+  // FOREVER → the supervisor never respawned (Rafael 2026-08-08, dead ~9 min).
   if (deps.proxyProcessAlive()) return 'starting';
   const ageMs = deps.proxyStartupAgeMs();
   if (ageMs !== null && ageMs < PROXY_STARTUP_GRACE_MS) return 'starting';
 
   log.warn('headroom-supervisor', 'proxy :8787 is confirmed down — respawning');
-  deps.spawnProxy();
+  // Force (kill-then-spawn) so a WEDGED proxy still holding :8787 can't
+  // EADDRINUSE the respawn. Falls back to the plain spawn when no force dep.
+  (deps.spawnProxyForce ?? deps.spawnProxy)();
   return 'respawned';
 }
 
@@ -185,7 +196,11 @@ export function makeRealProxySupervisorDeps(): ProxySupervisorDeps {
     proxyProcessAlive: () => isHeadroomProxyProcessAlive(),
     proxyStartupAgeMs: () => headroomProxyPidfileAgeMs(Date.now()),
     spawnProxy: spawnProxyReal,
-    spawnProxyForce: () =>
+    spawnProxyForce: () => {
+      // Kill any wedged/zombie holder FIRST so the fresh proxy can bind :8787
+      // (a wedged process still holding the port would otherwise EADDRINUSE the
+      // respawn). Best-effort + synchronous; then force-spawn past the lock.
+      killHeadroomProxy();
       spawnHeadroomProxy(
         {
           tag: 'headroom-supervisor',
@@ -193,6 +208,7 @@ export function makeRealProxySupervisorDeps(): ProxySupervisorDeps {
           failureMsg: (detail) => `force-respawn failed (best-effort): ${detail}`,
         },
         { force: true },
-      ),
+      );
+    },
   };
 }

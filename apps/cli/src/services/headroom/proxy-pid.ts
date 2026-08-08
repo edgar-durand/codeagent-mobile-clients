@@ -69,16 +69,42 @@ function isPidAlive(pid: number): boolean {
 }
 
 /**
- * Is the proxy recorded in the pidfile a live process? Used by the liveness
- * supervisor to distinguish "proxy is genuinely dead → respawn" from "proxy
- * is alive but /livez isn't answering yet" (it eager-loads the ONNX Kompress
- * model at bind time — seconds during which the process is up but not ready).
- * Respawning in that window races the starting proxy → a 2nd
- * `headroom proxy --port 8787` → EADDRINUSE → the respawn loop.
+ * Does the pid's /proc/<pid>/cmdline actually look like the Headroom proxy?
+ * The pidfile pid alone is NOT trustworthy across a codespace resume / container
+ * restart: (a) the pid can be REUSED by an unrelated process (a bare
+ * `process.kill(pid,0)` then reports "alive" for something that isn't our proxy),
+ * and (b) a SIGTERM'd-but-unreaped proxy lingers as a ZOMBIE that `kill(pid,0)`
+ * also reports "alive" (its cmdline is empty). Both made the liveness supervisor
+ * return 'starting' FOREVER and never respawn — the Rafael 2026-08-08 "dead 9 min"
+ * bug. Verifying the cmdline mentions `headroom` + `proxy` rules out both. Linux
+ * only (/proc); other platforms fall back to the bare pid probe (best-effort).
+ */
+function pidLooksLikeProxy(pid: number): boolean {
+  try {
+    const cmd = fs.readFileSync(`/proc/${pid}/cmdline`, 'utf8').replace(/\0/g, ' ').toLowerCase();
+    if (cmd.trim() === '') return false; // zombie/defunct → not serving
+    return cmd.includes('headroom') && cmd.includes('proxy');
+  } catch {
+    // No /proc (macOS/Windows) or the pid is gone. If the pid is gone,
+    // isPidAlive already returns false; when /proc is simply absent we can't
+    // verify the cmdline, so trust the bare probe (dev machines, not the
+    // codespace/self-hosted boxes this guard protects).
+    return isPidAlive(pid);
+  }
+}
+
+/**
+ * Is the proxy recorded in the pidfile a live process that is ACTUALLY our
+ * Headroom proxy? Used by the liveness supervisor to distinguish "proxy is
+ * genuinely dead / gone / a reused pid → respawn" from "proxy is alive but
+ * /livez isn't answering yet" (it eager-loads the ONNX Kompress model at bind
+ * time — seconds during which the process is up but not ready). Respawning in
+ * that window races the starting proxy → a 2nd `headroom proxy --port 8787` →
+ * EADDRINUSE → the respawn loop.
  */
 export function isHeadroomProxyProcessAlive(): boolean {
   const pid = readHeadroomProxyPidfile();
-  return pid !== null && isPidAlive(pid);
+  return pid !== null && isPidAlive(pid) && pidLooksLikeProxy(pid);
 }
 
 /**
