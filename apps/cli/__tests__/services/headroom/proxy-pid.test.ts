@@ -24,7 +24,7 @@ const { spawnMock } = vi.hoisted(() => ({
 }));
 vi.mock('node:child_process', () => ({ spawn: spawnMock }));
 
-import {
+import { isHeadroomProxyProcessAlive,
   headroomProxyPidfilePath,
   killHeadroomProxy,
   readHeadroomProxyPidfile,
@@ -133,5 +133,28 @@ describe('killHeadroomProxy', () => {
       throw new Error('spawn EPERM');
     });
     expect(() => killHeadroomProxy()).not.toThrow();
+  });
+});
+
+// Regression (Rafael 2026-08-08): after a codespace resume/container restart the
+// pidfile pid can be REUSED by an unrelated process (or linger as a zombie),
+// which a bare process.kill(pid,0) reports "alive" → the liveness supervisor
+// returned 'starting' FOREVER and never respawned the dead proxy. isHeadroom-
+// ProxyProcessAlive now verifies /proc/<pid>/cmdline is actually our proxy.
+describe('isHeadroomProxyProcessAlive — pid must actually BE the headroom proxy', () => {
+  const onLinux = process.platform === 'linux';
+  (onLinux ? it : it.skip)(
+    'treats a LIVE pid whose cmdline is NOT "headroom proxy" as dead (reused-pid/zombie fix)',
+    () => {
+      // The test runner itself: a genuinely-alive pid whose cmdline is node/vitest,
+      // never "headroom ... proxy" → must be reported dead, not "still starting".
+      writeHeadroomProxyPidfile(process.pid);
+      expect(isHeadroomProxyProcessAlive()).toBe(false);
+    },
+  );
+
+  it('is dead when the pidfile is absent', () => {
+    rmSync(headroomProxyPidfilePath(), { force: true });
+    expect(isHeadroomProxyProcessAlive()).toBe(false);
   });
 });
