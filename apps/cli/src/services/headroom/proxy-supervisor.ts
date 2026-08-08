@@ -36,6 +36,11 @@ export interface ProxySupervisorDeps {
   proxyStartupAgeMs: () => number | null;
   /** (Re)spawn the detached proxy. */
   spawnProxy: () => void;
+  /** Force-(re)spawn, bypassing the single-flight backoff — used by the
+   *  pre-turn readiness ensure when the proxy is CONFIRMED down (a backed-off
+   *  no-op there would leave the turn hitting a dead port). Optional: falls back
+   *  to spawnProxy when absent. */
+  spawnProxyForce?: () => void;
 }
 
 export type ProxyEnsureResult = 'skip' | 'alive' | 'starting' | 'respawned';
@@ -79,6 +84,50 @@ export async function ensureHeadroomProxy(
   log.warn('headroom-supervisor', 'proxy :8787 is confirmed down — respawning');
   deps.spawnProxy();
   return 'respawned';
+}
+
+/**
+ * PRE-TURN readiness ensure. Unlike {@link ensureHeadroomProxy} (a
+ * fire-and-forget supervision tick on the heartbeat), this is called right
+ * before a turn is sent and WAITS: if the proxy is configured but not answering
+ * `/livez`, it FORCE-respawns and polls `/livez` until ready (bounded). This is
+ * the self-heal for the Rafael 2026-08-08 incident — on a codespace resume /
+ * host-agent restart the detached :8787 proxy can be SIGTERM'd and NOT
+ * relaunched, leaving the agent's `ANTHROPIC_BASE_URL` pointing at a dead port,
+ * so every turn fails "API Error: Unable to connect to API (ConnectionRefused)".
+ * The 30 s heartbeat supervisor eventually respawns it, but a turn fired inside
+ * that window still fails; ensuring readiness AT THE TURN closes the gap.
+ *
+ * Cheap no-op (one `/livez`) when the proxy already answers OR Headroom isn't
+ * configured. Never throws — a failed ensure degrades to the normal turn path
+ * (which then surfaces the real error). Bounded by a poll COUNT (not wall-clock)
+ * so it's deterministic under an injected clock in tests.
+ */
+export async function ensureHeadroomProxyReady(
+  deps: ProxySupervisorDeps,
+  opts: { timeoutMs?: number; pollMs?: number; sleep?: (ms: number) => Promise<void> } = {},
+): Promise<boolean> {
+  if (!deps.isConfigured()) return true;
+  if (await deps.probeAlive().catch(() => false)) return true;
+
+  log.warn(
+    'headroom-supervisor',
+    'proxy :8787 not answering before a turn — force-respawning + waiting for readiness',
+  );
+  (deps.spawnProxyForce ?? deps.spawnProxy)();
+
+  const sleep = opts.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+  const pollMs = opts.pollMs ?? 1500;
+  const maxPolls = Math.max(1, Math.ceil((opts.timeoutMs ?? 60_000) / pollMs));
+  for (let i = 0; i < maxPolls; i += 1) {
+    await sleep(pollMs);
+    if (await deps.probeAlive().catch(() => false)) {
+      log.info('headroom-supervisor', `proxy :8787 ready after ~${((i + 1) * pollMs) / 1000}s`);
+      return true;
+    }
+  }
+  log.warn('headroom-supervisor', 'proxy :8787 still not ready after respawn wait — proceeding anyway');
+  return false;
 }
 
 /** Does this box route the agent through Headroom :8787? Any one signal
@@ -136,5 +185,14 @@ export function makeRealProxySupervisorDeps(): ProxySupervisorDeps {
     proxyProcessAlive: () => isHeadroomProxyProcessAlive(),
     proxyStartupAgeMs: () => headroomProxyPidfileAgeMs(Date.now()),
     spawnProxy: spawnProxyReal,
+    spawnProxyForce: () =>
+      spawnHeadroomProxy(
+        {
+          tag: 'headroom-supervisor',
+          spawnErrorMsg: (detail) => `force-respawn error (best-effort): ${detail}`,
+          failureMsg: (detail) => `force-respawn failed (best-effort): ${detail}`,
+        },
+        { force: true },
+      ),
   };
 }
