@@ -105,6 +105,24 @@ describe('PackRunner — the sequential pipeline', () => {
     expect(s.stalledReason).toContain('no commit');
   });
 
+  it('a review-only stage that approves clean (no commit) is DONE, not a stall', async () => {
+    const w = fakeWorld();
+    // Coder (stage 0) commits; Reviewer (stage 1, requiresCommit:false) approves
+    // clean with no commit — the pipeline must complete, not stall.
+    w.setTurnBehavior((i) => (i === 0 ? 'commit' : 'no-commit'));
+    const runner = PackRunner.create(w.deps, 'quick-pack', 't', 'run-clean-review');
+    await runner.run();
+
+    const s = runner.getState();
+    expect(s.status).toBe('completed');
+    expect(s.stages.map((x) => x.status)).toEqual(['done', 'done']);
+    // The reviewer hands off against the commit it reviewed, no diff.
+    expect(s.stages[1].handoff?.diffStat).toBe('reviewed — no changes needed');
+    expect(s.stages[1].handoff?.commit).toHaveLength(10);
+    // No nudge was needed for the clean approval (coder=turn0, reviewer=turn1 only).
+    expect(w.turns).toHaveLength(2);
+  });
+
   it('a thrown turn stalls the run with the real error', async () => {
     const w = fakeWorld();
     w.setTurnBehavior(() => 'throw');
