@@ -46,6 +46,7 @@ import { provisionSkillsForStart } from '../skills/provision';
 import type { StartedBeads } from '../beads';
 import { isLocalSession, runtimeSupportsBaton } from '../baton/gate';
 import { runBatonSession } from '../baton/wire-baton';
+import { keepDeviceAwake } from '../services/keep-awake';
 import { ensureClaudeOnboarded } from '../agents/claude/onboarding';
 import { log } from '../services/logger';
 
@@ -397,6 +398,17 @@ export async function start(
   // Agents WITHOUT an adapter (aider, cursor, coderabbit) keep using
   // the generic PTY runtime below.
   //
+  // Keep the machine awake for the LIFETIME of this local session: a local
+  // `codeam` session is a long-running process the paired mobile app talks to,
+  // so an idle laptop going to sleep freezes it and drops the session until the
+  // user physically wakes the machine. Hold an OS-native power assertion
+  // (caffeinate / systemd-inhibit / SetThreadExecutionState) tied to this CLI
+  // pid. No-op off a local session or an unsupported OS; auto-releases when the
+  // CLI exits (even on a crash). (Edgar 2026-08-10.) Placed BEFORE every session
+  // branch below so baton / ACP / PTY local sessions are all covered.
+  const releaseKeepAwake = keepDeviceAwake();
+  process.once('exit', releaseKeepAwake);
+
   // LOCAL session baton (local-only) — branches BEFORE the ACP fork so
   // codespaces/self-hosted fall through UNCHANGED. Only a local session
   // (`isLocalSession()`) with an ACP-capable agent takes this path; it
