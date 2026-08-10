@@ -396,3 +396,38 @@ describe('findInPath backward-compat re-export', () => {
     }
   });
 });
+
+// ─── keepAwakeCommand — per-OS "prevent sleep" argv (Edgar 2026-08-10) ──────
+describe('OsStrategy.keepAwakeCommand — prevent-sleep while a local session runs', () => {
+  it('darwin → caffeinate tied to the CLI pid (auto-release on exit)', () => {
+    expect(new DarwinOsStrategy().keepAwakeCommand(4321)).toEqual({
+      cmd: 'caffeinate',
+      args: ['-i', '-s', '-w', '4321'],
+    });
+  });
+
+  it('linux → systemd-inhibit holding a sleep:idle lock until the pid exits', () => {
+    const c = new LinuxOsStrategy().keepAwakeCommand(99);
+    expect(c?.cmd).toBe('systemd-inhibit');
+    expect(c?.args).toEqual([
+      '--what=sleep:idle',
+      '--why=CodeAgent local session active',
+      '--mode=block',
+      'tail',
+      '--pid=99',
+      '-f',
+      '/dev/null',
+    ]);
+  });
+
+  it('win32 → powershell SetThreadExecutionState + WaitForExit(pid)', () => {
+    const c = new Win32OsStrategy().keepAwakeCommand(777);
+    expect(c?.cmd).toBe('powershell');
+    const script = c?.args[c.args.length - 1] ?? '';
+    // ES_CONTINUOUS|ES_SYSTEM_REQUIRED set, tied to the pid, cleared on the way out.
+    expect(script).toContain('SetThreadExecutionState(2147483649)');
+    expect(script).toContain('Get-Process -Id 777');
+    expect(script).toContain('WaitForExit()');
+    expect(script).toContain('SetThreadExecutionState(2147483648)');
+  });
+})

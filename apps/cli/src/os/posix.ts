@@ -2,7 +2,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { randomBytes } from 'node:crypto';
-import { findInPathFor, type OsStrategy } from './strategy';
+import { findInPathFor, type OsStrategy, type KeepAwakeCommand } from './strategy';
 import { UnixPtyStrategy } from '../services/pty/unix.strategy';
 import type { IPtyStrategy, PtyStrategyOptions } from '../services/pty/types';
 
@@ -75,12 +75,42 @@ export abstract class PosixOsStrategy implements OsStrategy {
     // UX than a clean failure that tells the user "install Python 3".
     return [new UnixPtyStrategy(opts)];
   }
+
+  // darwin + linux diverge here (caffeinate vs systemd-inhibit), so the base
+  // leaves it abstract and each subclass supplies its own.
+  abstract keepAwakeCommand(pid: number): KeepAwakeCommand | null;
 }
 
 export class DarwinOsStrategy extends PosixOsStrategy {
   readonly id = 'darwin' as const;
+
+  keepAwakeCommand(pid: number): KeepAwakeCommand {
+    // -i prevent idle sleep, -s prevent system sleep (on AC), -w exit when the
+    // CLI pid exits (auto-release). caffeinate ships with macOS (/usr/bin).
+    return { cmd: 'caffeinate', args: ['-i', '-s', '-w', String(pid)] };
+  }
 }
 
 export class LinuxOsStrategy extends PosixOsStrategy {
   readonly id = 'linux' as const;
+
+  keepAwakeCommand(pid: number): KeepAwakeCommand {
+    // Hold a logind sleep+idle inhibitor for as long as the CLI pid lives:
+    // `tail --pid=<pid> -f /dev/null` blocks until that pid exits, then
+    // systemd-inhibit releases the lock. --mode=block = a hard inhibitor.
+    // Absent on a non-systemd box → the spawn just errors and no-ops (the
+    // service swallows it).
+    return {
+      cmd: 'systemd-inhibit',
+      args: [
+        '--what=sleep:idle',
+        '--why=CodeAgent local session active',
+        '--mode=block',
+        'tail',
+        `--pid=${pid}`,
+        '-f',
+        '/dev/null',
+      ],
+    };
+  }
 }

@@ -2,7 +2,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { randomBytes } from 'node:crypto';
-import { findInPathFor, type OsStrategy } from './strategy';
+import { findInPathFor, type OsStrategy, type KeepAwakeCommand } from './strategy';
 import { WindowsConPtyStrategy } from '../services/pty/windows-conpty.strategy';
 import { WindowsPtyStrategy } from '../services/pty/windows.strategy';
 import type { IPtyStrategy, PtyStrategyOptions } from '../services/pty/types';
@@ -146,5 +146,24 @@ export class Win32OsStrategy implements OsStrategy {
     if (conpty) list.push(conpty);
     list.push(new WindowsPtyStrategy(opts));
     return list;
+  }
+
+  keepAwakeCommand(pid: number): KeepAwakeCommand {
+    // ES_CONTINUOUS (0x80000000) | ES_SYSTEM_REQUIRED (0x00000001) = 2147483649.
+    // The assertion holds while this PowerShell process lives; WaitForExit ties
+    // that to the CLI pid, and the flag is released when PowerShell exits (on
+    // the wait returning, on our SIGTERM, or on a CLI crash). ES_CONTINUOUS
+    // alone (2147483648) clears it on the way out.
+    const script = [
+      '$s=Add-Type -Name P -Namespace W -PassThru -MemberDefinition',
+      "'[DllImport(\"kernel32.dll\")] public static extern uint SetThreadExecutionState(uint e);';",
+      '$s::SetThreadExecutionState(2147483649) | Out-Null;',
+      `try { (Get-Process -Id ${pid} -ErrorAction Stop).WaitForExit() } catch {};`,
+      '$s::SetThreadExecutionState(2147483648) | Out-Null;',
+    ].join(' ');
+    return {
+      cmd: 'powershell',
+      args: ['-NoProfile', '-NonInteractive', '-Command', script],
+    };
   }
 }

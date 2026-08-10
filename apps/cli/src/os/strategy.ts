@@ -107,6 +107,32 @@ export interface OsStrategy {
    * want the empty-list ambiguity to silently produce a non-spawn).
    */
   createPtyStrategies(opts: PtyStrategyOptions): IPtyStrategy[];
+
+  // ─── Power management ────────────────────────────────────────────
+
+  /**
+   * The OS-native command that PREVENTS the machine from going to idle /
+   * system sleep while a LOCAL session runs, tied to `pid` so the assertion
+   * auto-releases when that process exits (even on a hard crash — no leaked
+   * "computer won't sleep"). A long-running local `codeam` session is frozen by
+   * an idle laptop sleeping, which drops the paired mobile app until the user
+   * physically wakes the machine; holding this assertion keeps it alive.
+   *
+   * Per-OS equivalent:
+   *   - darwin → `caffeinate -i -s -w <pid>`
+   *   - linux  → `systemd-inhibit --what=sleep:idle --mode=block tail --pid=<pid> -f /dev/null`
+   *   - win32  → powershell `SetThreadExecutionState(ES_CONTINUOUS|ES_SYSTEM_REQUIRED)` + WaitForExit(<pid>)
+   *
+   * `null` when the OS exposes no such mechanism. Pure — returns the argv, spawns
+   * nothing; `services/keep-awake.ts` owns the (best-effort) spawn + teardown.
+   */
+  keepAwakeCommand(pid: number): KeepAwakeCommand | null;
+}
+
+/** A `(cmd, args)` pair for a raw (array-args, no shell) spawn. */
+export interface KeepAwakeCommand {
+  cmd: string;
+  args: string[];
 }
 
 // ─── Shared helpers (used by all concrete impls) ────────────────────
