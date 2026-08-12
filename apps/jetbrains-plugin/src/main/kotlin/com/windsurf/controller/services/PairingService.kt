@@ -26,6 +26,11 @@ class PairingService {
         .build()
     private var pollingTimer: Timer? = null
 
+    /** Back-to-back throttled/failed polls; drives the exponential backoff. */
+    private var consecutiveThrottles = 0
+
+    /** Epoch ms at which this pairing attempt gives up (replaces a leaked Timer). */
+    private var pollingDeadlineAt = 0L
     data class PairedUserInfo(
         val name: String,
         val email: String,
@@ -140,22 +145,62 @@ class PairingService {
 
     private fun startPollingForPairing() {
         stopPolling()
-        pollingTimer = Timer("pairing-poll", true).apply {
-            scheduleAtFixedRate(object : TimerTask() {
-                override fun run() {
-                    checkPairingStatus()
-                }
-            }, 2000, 3000)
-        }
-
-        Timer("pairing-poll-timeout", true).schedule(object : TimerTask() {
-            override fun run() {
-                stopPolling()
-            }
-        }, 300_000)
+        consecutiveThrottles = 0
+        pollingDeadlineAt = System.currentTimeMillis() + POLL_WINDOW_MS
+        pollingTimer = Timer("pairing-poll", true)
+        schedulePoll(2000)
     }
 
-    private fun checkPairingStatus() {
+    /**
+     * Schedule ONE poll, `delayMs` from now.
+     *
+     * Deliberately a single-shot `schedule` that re-arms itself rather than
+     * `scheduleAtFixedRate`: the HTTP call below is synchronous inside the
+     * TimerTask, and fixed-RATE scheduling fires catch-up executions
+     * back-to-back whenever a response is slower than the period — so a slow or
+     * rate-limited backend turned this loop into a burst generator. Fixed
+     * DELAY also lets each poll pick its own wait, which is what honouring
+     * `Retry-After` requires.
+     *
+     * The old code additionally leaked one `Timer` per pairing attempt for the
+     * 5-minute cutoff; the deadline is now just a timestamp checked here.
+     */
+    private fun schedulePoll(delayMs: Long) {
+        val timer = pollingTimer ?: return
+        if (System.currentTimeMillis() >= pollingDeadlineAt) {
+            stopPolling()
+            return
+        }
+        try {
+            timer.schedule(object : TimerTask() {
+                override fun run() {
+                    val outcome = checkPairingStatus()
+                    if (outcome == null) return // paired → polling already stopped
+                    consecutiveThrottles =
+                        if (outcome.throttled) consecutiveThrottles + 1 else 0
+                    schedulePoll(
+                        nextPollDelayMs(
+                            status = outcome.status,
+                            retryAfterSeconds = outcome.retryAfterSeconds,
+                            consecutiveThrottles = consecutiveThrottles,
+                        ),
+                    )
+                }
+            }, delayMs)
+        } catch (e: IllegalStateException) {
+            // Timer was cancelled between the null-check and the schedule.
+            logger.debug("[pairing] poll timer already cancelled: ${e.message}")
+        }
+    }
+
+    /** One poll's outcome, or null once pairing completed (loop stopped). */
+    private data class PollOutcome(
+        val status: Int,
+        val retryAfterSeconds: Int?,
+        val throttled: Boolean,
+    )
+
+    private fun checkPairingStatus(): PollOutcome? {
         val settings = SettingsService.getInstance()
         val pluginId = settings.ensurePluginId()
 
@@ -169,7 +214,18 @@ class PairingService {
 
         try {
             val response = httpClient.newCall(request).execute()
-            val body = response.body?.string() ?: return
+            val status = response.code
+            // `Retry-After` is what the backend's throttler sends with a 429.
+            // Ignoring it is exactly how this loop turned into a request flood.
+            val retryAfterSeconds = response.header("Retry-After")?.trim()?.toIntOrNull()
+            val throttled = status == 429 || status >= 500
+            if (throttled) {
+                response.close()
+                logger.debug("[pairing] status poll throttled ($status) — backing off")
+                return PollOutcome(status, retryAfterSeconds, throttled = true)
+            }
+            val body = response.body?.string()
+                ?: return PollOutcome(status, retryAfterSeconds, throttled = false)
 
             if (response.isSuccessful) {
                 val json = gson.fromJson(body, JsonObject::class.java)
@@ -205,10 +261,15 @@ class PairingService {
                     stopPolling()
                     saveCurrentSession()
                     listeners.forEach { it.onPaired(sessionId) }
+                    return null
                 }
             }
+            return PollOutcome(status, retryAfterSeconds, throttled = false)
         } catch (e: Exception) {
+            // Transport failure (no HTTP response): status 0 → treated as
+            // throttle-worthy so a dead network doesn't spin at full speed.
             logger.debug("Polling error: ${e.message}")
+            return PollOutcome(status = 0, retryAfterSeconds = null, throttled = true)
         }
     }
 
@@ -255,6 +316,9 @@ class PairingService {
     }
 
     companion object {
+        /** How long one pairing attempt keeps polling before giving up. */
+        private const val POLL_WINDOW_MS = 300_000L
+
         fun getInstance(): PairingService =
             ApplicationManager.getApplication().getService(PairingService::class.java)
     }
