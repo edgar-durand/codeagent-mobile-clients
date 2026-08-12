@@ -4,6 +4,16 @@ All notable changes to the CodeAgent-Mobile JetBrains plugin are documented here
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.61.98] — 2026-08-12
+
+### Fixed
+
+- **jetbrains-plugin:** Pairing poll flooded /api/pairing/status and ignored 429s
+
+### Tests
+
+- **cli:** Integration test for the command-relay SSE primary channel (#608)
+
 ## [2.61.97] — 2026-08-10
 
 ### Added
