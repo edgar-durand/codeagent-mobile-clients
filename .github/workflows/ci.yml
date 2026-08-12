@@ -5,10 +5,16 @@ on:
     branches: [main]
   pull_request:
   schedule:
-    # Nightly full cross-OS matrix at 06:00 UTC. PRs run Linux-only for a fast,
-    # cheap signal; macOS/Windows coverage (10×/2× the Linux cost) runs here and
-    # on merges to main — see the `matrix-setup` job. Manual runs get it too.
-    - cron: '0 6 * * *'
+    # WEEKLY full cross-OS matrix (Mondays 06:00 UTC), not nightly.
+    #
+    # Every merge to main ALREADY runs the full macOS/Windows matrix (see
+    # `matrix-setup`), so a nightly run mostly re-tests a commit that was
+    # already covered when it merged. Its unique value is catching runner-image
+    # DRIFT — a new macOS/Windows image breaking us with no code change — and
+    # that does not need daily sampling. macOS bills 10× Linux and Windows 2×,
+    # which made this the most expensive scheduled job across the repos.
+    # (2026-08-12 cost pass; PRs are unchanged and still Linux-only.)
+    - cron: '0 6 * * 1'
   workflow_dispatch:
 
 concurrency:
