@@ -3,6 +3,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import {
+  ensureHeadroomProxyReady,
   isHeadroomConfiguredReal,
   ensureHeadroomProxy,
   type ProxySupervisorDeps,
@@ -125,5 +126,50 @@ describe('ensureHeadroomProxy — adopt a healthy proxy instead of killing it', 
     const result = await ensureHeadroomProxy(deps({ probeAlive: async () => true, adoptRunningProxy }));
     expect(result).toBe('alive');
     expect(adoptRunningProxy).not.toHaveBeenCalled();
+  });
+});
+
+describe('ensureHeadroomProxyReady — release on an ACCEPTING SOCKET, not just /livez', () => {
+  const base = {
+    isConfigured: () => true,
+    proxyProcessAlive: () => false,
+    proxyStartupAgeMs: () => null,
+    spawnProxy: vi.fn(),
+    spawnProxyForce: vi.fn(),
+  };
+  const nosleep = async () => undefined;
+
+  it('proceeds as soon as the port accepts, even while the model is still loading', async () => {
+    // THE RESIDUAL (observed live 2026-08-13): a cold ONNX load on a busy box
+    // outlasted the wait, which polled ONLY /livez → "still not ready …
+    // proceeding anyway" while the socket was already accepting. An accepting
+    // socket is exactly the condition under which ConnectionRefused — the error
+    // the user sees — is impossible, so it must release the turn.
+    let polls = 0;
+    const ready = await ensureHeadroomProxyReady(
+      {
+        ...base,
+        probeAlive: async () => false, // never fully ready within the window
+        probePortOpen: async () => ++polls >= 2, // socket accepts on the 2nd poll
+      },
+      { pollMs: 1, timeoutMs: 100, sleep: nosleep },
+    );
+    expect(ready).toBe(true);
+  });
+
+  it('still prefers /livez when the proxy is genuinely ready', async () => {
+    const ready = await ensureHeadroomProxyReady(
+      { ...base, probeAlive: vi.fn().mockResolvedValueOnce(false).mockResolvedValue(true), probePortOpen: async () => false },
+      { pollMs: 1, timeoutMs: 100, sleep: nosleep },
+    );
+    expect(ready).toBe(true);
+  });
+
+  it('reports failure only when NEITHER signal ever comes up', async () => {
+    const ready = await ensureHeadroomProxyReady(
+      { ...base, probeAlive: async () => false, probePortOpen: async () => false },
+      { pollMs: 1, timeoutMs: 5, sleep: nosleep },
+    );
+    expect(ready).toBe(false);
   });
 });
