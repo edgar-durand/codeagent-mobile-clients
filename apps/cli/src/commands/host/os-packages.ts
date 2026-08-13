@@ -195,6 +195,36 @@ export function detectPackageManager(runner: Pick<HeadroomRunner, 'which'>): Pac
 }
 
 /**
+ * Per-manager "install these package names" argv prefix (WITHOUT sudo). Kept
+ * separate from {@link PROVISION_RECIPES} (which is the fixed Headroom
+ * toolchain) so callers that need an ARBITRARY package — e.g. the CodeRabbit
+ * installer's `unzip`/`git` prerequisites — can reuse the same manager
+ * detection instead of hand-rolling a second table.
+ */
+const INSTALL_ARGV_PREFIX: Record<PackageManager, string[]> = {
+  'apt-get': ['apt-get', 'install', '-y', '--no-install-recommends'],
+  apk: ['apk', 'add', '--no-cache'],
+  dnf: ['dnf', 'install', '-y'],
+  yum: ['yum', 'install', '-y'],
+  pacman: ['pacman', '-Sy', '--noconfirm'],
+  zypper: ['zypper', '--non-interactive', 'install'],
+};
+
+/**
+ * Build the (sudo-less) argv that installs `packages` with the given package
+ * manager. Returns null when no manager was detected or no packages were
+ * requested, so callers can degrade to an actionable "install it yourself"
+ * message rather than guessing.
+ */
+export function osPackageInstallArgv(
+  pm: PackageManager | null,
+  packages: string[],
+): string[] | null {
+  if (pm === null || packages.length === 0) return null;
+  return [...INSTALL_ARGV_PREFIX[pm], ...packages];
+}
+
+/**
  * Prefix a command + args with `sudo` only when NOT running as root. Shared by
  * the bare-box provision (`ensurePip`) and the modern-Python auto-install
  * (`ensureModernPython`) so the sudo policy lives in exactly one place.
