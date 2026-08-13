@@ -25,6 +25,7 @@ const { spawnMock } = vi.hoisted(() => ({
 vi.mock('node:child_process', () => ({ spawn: spawnMock }));
 
 import { isHeadroomProxyProcessAlive,
+  findRunningProxyPid,
   headroomProxyPidfilePath,
   killHeadroomProxy,
   readHeadroomProxyPidfile,
@@ -128,6 +129,21 @@ describe('killHeadroomProxy', () => {
     });
   });
 
+  // Regression (2026-08-13, caught by a Linux-only CI failure): with a live-pid
+  // probe that says "yes" (the scan's lenient cmdline fallback), the /proc sweep
+  // adopted the FIRST unreadable pid as "the proxy" and SIGTERM'd it. On a
+  // shared host (fleet-1 runs several users' host-agents) that is someone else's
+  // process. A scan must only ever act on a POSITIVELY identified proxy.
+  it('does NOT kill an unidentified pid when scanning /proc (strict identification)', () => {
+    const killSpy = vi.spyOn(process, 'kill').mockImplementation(() => true);
+    killHeadroomProxy(); // no pidfile → scan → must find nothing here
+    expect(killSpy).not.toHaveBeenCalled();
+    expect(spawnMock).toHaveBeenCalledWith('pkill', ['-TERM', '-f', 'headroom.*proxy'], {
+      detached: true,
+      stdio: 'ignore',
+    });
+  });
+
   it('never throws when the pkill fallback spawn itself throws synchronously', () => {
     spawnMock.mockImplementationOnce(() => {
       throw new Error('spawn EPERM');
@@ -156,5 +172,15 @@ describe('isHeadroomProxyProcessAlive — pid must actually BE the headroom prox
   it('is dead when the pidfile is absent', () => {
     rmSync(headroomProxyPidfilePath(), { force: true });
     expect(isHeadroomProxyProcessAlive()).toBe(false);
+  });
+});
+
+describe('findRunningProxyPid — strict identification', () => {
+  it('never adopts a pid it could not positively identify', () => {
+    // A liveness probe that always says "alive" must NOT be enough: every pid on
+    // the box would qualify. Only a readable /proc cmdline naming headroom+proxy
+    // may match — and this test runner is not one.
+    vi.spyOn(process, 'kill').mockImplementation(() => true);
+    expect(findRunningProxyPid()).toBeNull();
   });
 });
