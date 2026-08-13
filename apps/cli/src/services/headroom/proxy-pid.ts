@@ -146,6 +146,50 @@ function pkillFallback(): void {
  * pidfile and fall back to the legacy `pkill -TERM -f 'headroom.*proxy'`.
  * Best-effort and synchronous at every call site — never throws.
  */
+/**
+ * Scan for a LIVE `headroom proxy` process we may not have spawned ourselves
+ * (the codespace bootstrap launches it from a shell, and a previous CLI
+ * generation left no pidfile). Returns its pid, or null.
+ *
+ * This exists so the supervisor can ADOPT a healthy proxy instead of killing
+ * it. Without adoption, a proxy with no matching pidfile reads as
+ * "confirmed down" → `killHeadroomProxy()` → the blind
+ * `pkill -f 'headroom.*proxy'` fallback SIGTERMs a perfectly healthy proxy —
+ * the same "we were killing it ourselves" failure the runbook recorded on
+ * 2026-07-04, re-entering through a different door (2026-08-13).
+ *
+ * /proc-only by design: no `pgrep`/`pkill` dependency (absent on minimal
+ * boxes) and no pattern that could match an unrelated process — we require
+ * BOTH `headroom` and `proxy` in the cmdline, the same predicate
+ * {@link isHeadroomProxyProcessAlive} uses.
+ */
+export function findRunningProxyPid(): number | null {
+  let entries: string[];
+  try {
+    entries = fs.readdirSync('/proc');
+  } catch {
+    return null; // no /proc (macOS/Windows dev machines) → nothing to adopt
+  }
+  for (const name of entries) {
+    if (!/^\d+$/.test(name)) continue;
+    const pid = Number(name);
+    if (pid === process.pid) continue;
+    if (pidLooksLikeProxy(pid)) return pid;
+  }
+  return null;
+}
+
+/**
+ * Make a proxy we did NOT spawn supervisable: record its pid in our pidfile so
+ * every liveness check treats it as ours. Returns the adopted pid, or null.
+ */
+export function adoptRunningProxy(): number | null {
+  const pid = findRunningProxyPid();
+  if (pid === null) return null;
+  writeHeadroomProxyPidfile(pid);
+  return pid;
+}
+
 export function killHeadroomProxy(): void {
   const pid = readHeadroomProxyPidfile();
   if (pid !== null && isPidAlive(pid)) {
@@ -166,6 +210,20 @@ export function killHeadroomProxy(): void {
       fs.rmSync(headroomProxyPidfilePath(), { force: true });
     } catch {
       /* best-effort */
+    }
+  }
+  // No usable pidfile. Prefer a TARGETED kill of a positively-identified
+  // headroom proxy (/proc cmdline verified) over the blind pattern kill —
+  // `pkill -f 'headroom.*proxy'` cannot tell "the wedged proxy I meant" from
+  // "a healthy proxy someone else launched", and killing the latter is how a
+  // working session gets broken (2026-08-13).
+  const found = findRunningProxyPid();
+  if (found !== null) {
+    try {
+      process.kill(found, 'SIGTERM');
+      return;
+    } catch {
+      /* raced away — fall through */
     }
   }
   pkillFallback();

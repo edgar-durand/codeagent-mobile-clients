@@ -22,6 +22,7 @@ import {
   isHeadroomProxyProcessAlive,
   headroomProxyPidfileAgeMs,
   killHeadroomProxy,
+  adoptRunningProxy,
 } from './proxy-pid';
 
 export interface ProxySupervisorDeps {
@@ -40,6 +41,11 @@ export interface ProxySupervisorDeps {
   proxyStartupAgeMs: () => number | null;
   /** (Re)spawn the detached proxy. */
   spawnProxy: () => void;
+  /** Claim a live `headroom proxy` we did not spawn into our pidfile so it
+   *  becomes supervisable instead of being killed as an unknown. Returns the
+   *  adopted pid, or null when there is nothing to adopt. Optional so existing
+   *  test doubles keep compiling (absent → no adoption, prior behavior). */
+  adoptRunningProxy?: () => number | null;
   /** Force-(re)spawn, bypassing the single-flight backoff — used by the
    *  pre-turn readiness ensure when the proxy is CONFIRMED down (a backed-off
    *  no-op there would leave the turn hitting a dead port). Optional: falls back
@@ -89,6 +95,17 @@ export async function ensureHeadroomProxy(
   if (deps.proxyProcessAlive()) return 'starting';
   const ageMs = deps.proxyStartupAgeMs();
   if (ageMs !== null && ageMs < PROXY_STARTUP_GRACE_MS) return 'starting';
+
+  // ADOPT before declaring death. A proxy launched by the codespace bootstrap
+  // shell (or by a previous CLI generation) has no pidfile of ours, so every
+  // check above reads "dead" even though it is healthy and serving — and the
+  // respawn path would then SIGTERM it. Claiming it into our pidfile makes it
+  // supervisable instead of collateral damage. (2026-08-13.)
+  const adopted = deps.adoptRunningProxy?.() ?? null;
+  if (adopted !== null) {
+    log.info('headroom-supervisor', `adopted an already-running proxy (pid ${adopted})`);
+    return 'starting';
+  }
 
   log.warn('headroom-supervisor', 'proxy :8787 is confirmed down — respawning');
   // Force (kill-then-spawn) so a WEDGED proxy still holding :8787 can't
@@ -141,10 +158,42 @@ export async function ensureHeadroomProxyReady(
   return false;
 }
 
-/** Does this box route the agent through Headroom :8787? Any one signal
- *  is enough: the explicit env flag, the codespace bootstrap env file, or
- *  a claude settings.json that points ANTHROPIC_BASE_URL at :8787. */
+/**
+ * Does this box route the agent through Headroom :8787? Any one signal is
+ * enough.
+ *
+ * ⚠️ ORDER OF TRUST — `~/.codeam/headroom-config.json` FIRST. That file is
+ * OUR OWN persisted state, written by `setupHeadroomForSelfHosted` /
+ * `configureHeadroom` the moment we enable Headroom on this box, so it is the
+ * only signal that is authoritative and version-independent.
+ *
+ * Every other signal is an inference about a THIRD-PARTY tool's config layout
+ * and each has already gone stale once:
+ *  - `~/.claude/settings.json` containing `127.0.0.1:8787` — **headroom ≥ 0.33
+ *    no longer writes a base URL there**; it routes via a `PreToolUse` hook
+ *    (`headroom init hook ensure`). A box on 0.33 therefore looked
+ *    "not configured" to the pre-turn self-heal, which then silently no-op'd
+ *    while every turn failed `ConnectionRefused` (Edgar, codespace
+ *    `codeagent-mobile-gp596vpwgr9fggp`, 2026-08-13: 6 prompts, 3
+ *    ConnectionRefused, `pre-turn heals: 0` in the ACP process's debug log).
+ *  - `codespace-env.json` `HEADROOM_ENABLED` — only written on the codespace
+ *    bootstrap rail, absent on the self-hosted/wrapper rail.
+ *  - `HEADROOM_ENABLED=1` in env — only present in processes the host-agent
+ *    spawned with `readHeadroomChildEnv()`, not in every relay child.
+ *
+ * Consequence to preserve: a FALSE here disables the proxy self-heal, so the
+ * agent talks to a dead port with no recovery. Bias the predicate toward
+ * "configured" — a false positive only costs one cheap `/livez` probe.
+ */
 export function isHeadroomConfiguredReal(homeDir = os.homedir()): boolean {
+  // 1. Our own persisted state — authoritative, survives Headroom upgrades.
+  const ownConfig = path.join(homeDir, '.codeam', 'headroom-config.json');
+  try {
+    const j = JSON.parse(fs.readFileSync(ownConfig, 'utf8')) as { enabled?: unknown };
+    if (j.enabled === true) return true;
+  } catch {
+    /* absent / unreadable → fall through to the inferred signals */
+  }
   if (process.env.HEADROOM_ENABLED === '1') return true;
   const csEnv = path.join(homeDir, '.codeam', 'codespace-env.json');
   try {
@@ -153,9 +202,12 @@ export function isHeadroomConfiguredReal(homeDir = os.homedir()): boolean {
   } catch {
     /* absent / unreadable → not a signal */
   }
+  // Legacy/base-URL layouts (headroom < 0.33) AND the hook layout (>= 0.33):
+  // either mention is proof this box's Claude is wired to Headroom.
   const settings = path.join(homeDir, '.claude', 'settings.json');
   try {
-    if (fs.readFileSync(settings, 'utf8').includes('127.0.0.1:8787')) return true;
+    const raw = fs.readFileSync(settings, 'utf8');
+    if (raw.includes('127.0.0.1:8787') || raw.includes('headroom init hook')) return true;
   } catch {
     /* absent → not a signal */
   }
@@ -195,6 +247,7 @@ export function makeRealProxySupervisorDeps(): ProxySupervisorDeps {
     probeAlive: probeProxyAliveReal,
     proxyProcessAlive: () => isHeadroomProxyProcessAlive(),
     proxyStartupAgeMs: () => headroomProxyPidfileAgeMs(Date.now()),
+    adoptRunningProxy: () => adoptRunningProxy(),
     spawnProxy: spawnProxyReal,
     spawnProxyForce: () => {
       // Kill any wedged/zombie holder FIRST so the fresh proxy can bind :8787

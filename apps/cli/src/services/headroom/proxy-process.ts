@@ -14,6 +14,7 @@
 // Only the log tag + messages differ per caller, so they're injected.
 import { spawn } from 'child_process';
 import * as fs from 'fs';
+import * as os from 'os';
 import * as path from 'path';
 import { log } from '../logger';
 import { buildBudgetProxyArgs } from './budget-args';
@@ -89,6 +90,37 @@ function refreshSpawnLock(): void {
   }
 }
 
+/** Where the spawned proxy's stdout+stderr land. Next to the relay's own
+ *  debug logs so any incident triage finds it in the same directory. */
+export function headroomProxyLogPath(): string {
+  return path.join(os.homedir(), '.codeam', 'headroom-proxy.log');
+}
+
+/** Keep the captured log bounded — a long-lived box must never fill its disk
+ *  with proxy chatter. Truncated (not rotated) once past the cap; the tail of
+ *  the CURRENT boot is what matters for triage. */
+const PROXY_LOG_MAX_BYTES = 2 * 1024 * 1024;
+
+/**
+ * Open the append fd for the proxy log, truncating first when it has grown
+ * past the cap. Returns `null` when the log can't be opened — callers then
+ * fall back to `'ignore'` so an unwritable HOME can never block a respawn.
+ */
+function openProxyLogFd(): number | null {
+  try {
+    const p = headroomProxyLogPath();
+    fs.mkdirSync(path.dirname(p), { recursive: true, mode: 0o700 });
+    try {
+      if (fs.statSync(p).size > PROXY_LOG_MAX_BYTES) fs.truncateSync(p, 0);
+    } catch {
+      /* absent → nothing to truncate */
+    }
+    return fs.openSync(p, 'a', 0o600);
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Spawn the detached `headroom proxy --port 8787` best-effort — never throws.
  * Consumes the child's `error` event so Node doesn't raise an uncaught
@@ -116,15 +148,32 @@ export function spawnHeadroomProxy(
       ...(process.env as Record<string, string>),
       HEADROOM_KOMPRESS_BACKEND: 'onnx_cpu',
     };
+    // ⚠️ NEVER `stdio: 'ignore'` here. A proxy that fails to start (bad flag,
+    // EADDRINUSE, missing model cache, python traceback) then dies INVISIBLY:
+    // the supervisor logs "confirmed down — respawning" forever with zero
+    // diagnostics and the agent talks to a dead port. That is exactly what
+    // made the 2026-08-13 incident undiagnosable from the box (12 respawns,
+    // no trace, `~/.headroom.proxy.log` never even created). Capture both
+    // streams to a bounded log instead — the cost is one fd.
+    const logFd = openProxyLogFd();
     const proxy = spawn(
       'headroom',
       ['proxy', '--port', '8787', ...buildBudgetProxyArgs(proxyEnv)],
       {
-        stdio: 'ignore',
+        stdio: logFd === null ? 'ignore' : ['ignore', logFd, logFd],
         detached: true,
         env: proxyEnv,
       },
     );
+    // The child owns the fd once spawned; close our copy so we don't leak one
+    // per respawn in a long-lived relay.
+    if (logFd !== null) {
+      try {
+        fs.closeSync(logFd);
+      } catch {
+        /* best-effort */
+      }
+    }
     proxy.once('error', (e: Error) => {
       log.warn(logging.tag, logging.spawnErrorMsg(e.message));
     });
