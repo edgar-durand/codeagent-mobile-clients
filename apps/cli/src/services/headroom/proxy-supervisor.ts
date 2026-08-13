@@ -16,6 +16,7 @@
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+import * as net from 'net';
 import { log } from '../logger';
 import { spawnHeadroomProxy } from './proxy-process';
 import {
@@ -32,6 +33,15 @@ export interface ProxySupervisorDeps {
   isConfigured: () => boolean;
   /** GET http://127.0.0.1:8787/livez → true when the proxy answers. */
   probeAlive: () => Promise<boolean>;
+  /**
+   * Can a TCP connection be established to :8787? This is a WEAKER signal than
+   * `/livez` and that is exactly the point: `ConnectionRefused` — the error the
+   * user actually sees — happens if and only if nothing is LISTENING. Once the
+   * socket accepts, the agent's request is queued/served instead of refused,
+   * even while the proxy is still eager-loading the ONNX model. Optional so
+   * existing test doubles keep compiling (absent → `/livez` only, prior behavior).
+   */
+  probePortOpen?: () => Promise<boolean>;
   /** Is the pid recorded in the pidfile a live OS process? Distinguishes a
    *  genuinely-dead proxy (respawn) from one that's alive but still loading
    *  the ONNX model, so /livez isn't answering yet (leave it be). */
@@ -65,6 +75,15 @@ export type ProxyEnsureResult = 'skip' | 'alive' | 'starting' | 'respawned';
  * cold model load. Pidfile-mtime based, so it's shared across all supervisors.
  */
 export const PROXY_STARTUP_GRACE_MS = 45_000;
+
+/**
+ * How long the PRE-TURN ensure waits for a respawned proxy. Must exceed a COLD
+ * ONNX Kompress load on a BUSY box: 60 s was not enough live (2026-08-13 — the
+ * wait expired and the turn was sent at a still-refusing port). The wait now
+ * also releases on an accepting socket, so this ceiling is only the backstop
+ * for a proxy that never binds at all.
+ */
+export const PRE_TURN_READY_TIMEOUT_MS = 150_000;
 
 /**
  * One supervision pass. Pure orchestration (all I/O injected) so it's
@@ -146,11 +165,24 @@ export async function ensureHeadroomProxyReady(
 
   const sleep = opts.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
   const pollMs = opts.pollMs ?? 1500;
-  const maxPolls = Math.max(1, Math.ceil((opts.timeoutMs ?? 60_000) / pollMs));
+  const maxPolls = Math.max(1, Math.ceil((opts.timeoutMs ?? PRE_TURN_READY_TIMEOUT_MS) / pollMs));
   for (let i = 0; i < maxPolls; i += 1) {
     await sleep(pollMs);
+    // Release on EITHER signal. `/livez` means fully ready; an accepting SOCKET
+    // means the turn can no longer be refused, which is the actual failure we
+    // are preventing. Requiring the stricter one made a cold ONNX load on a
+    // busy box blow the budget ("still not ready … proceeding anyway",
+    // observed live 2026-08-13) even though the port was already accepting.
+    const elapsed = ((i + 1) * pollMs) / 1000;
     if (await deps.probeAlive().catch(() => false)) {
-      log.info('headroom-supervisor', `proxy :8787 ready after ~${((i + 1) * pollMs) / 1000}s`);
+      log.info('headroom-supervisor', `proxy :8787 ready after ~${elapsed}s`);
+      return true;
+    }
+    if (await (deps.probePortOpen?.() ?? Promise.resolve(false)).catch(() => false)) {
+      log.info(
+        'headroom-supervisor',
+        `proxy :8787 accepting connections after ~${elapsed}s (still warming — turn is safe to send)`,
+      );
       return true;
     }
   }
@@ -230,6 +262,26 @@ export async function probeProxyAliveReal(): Promise<boolean> {
   }
 }
 
+/**
+ * Can we open a TCP connection to :8787? True the instant the proxy's socket
+ * accepts — which is precisely when `ConnectionRefused` becomes impossible,
+ * regardless of whether the model has finished loading.
+ */
+export async function probeProxyPortOpenReal(): Promise<boolean> {
+  return new Promise<boolean>((resolve) => {
+    const socket = net.connect({ host: '127.0.0.1', port: 8787 });
+    const done = (ok: boolean) => {
+      socket.removeAllListeners();
+      socket.destroy();
+      resolve(ok);
+    };
+    socket.setTimeout(2000);
+    socket.once('connect', () => done(true));
+    socket.once('timeout', () => done(false));
+    socket.once('error', () => done(false));
+  });
+}
+
 /** Detached respawn — the shared spawnHeadroomProxy (setsid-like via
  *  detached+unref), re-deriving budget flags from the env so a capped
  *  user stays capped after a respawn. */
@@ -245,6 +297,7 @@ export function makeRealProxySupervisorDeps(): ProxySupervisorDeps {
   return {
     isConfigured: () => isHeadroomConfiguredReal(),
     probeAlive: probeProxyAliveReal,
+    probePortOpen: probeProxyPortOpenReal,
     proxyProcessAlive: () => isHeadroomProxyProcessAlive(),
     proxyStartupAgeMs: () => headroomProxyPidfileAgeMs(Date.now()),
     adoptRunningProxy: () => adoptRunningProxy(),
