@@ -1,4 +1,7 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { configureCoderabbit } from '../../../src/agents/coderabbit/configure';
 import type { OsStrategy } from '../../../src/os';
 
@@ -73,7 +76,7 @@ describe('configureCoderabbit — link_oauth', () => {
       { action: 'link_oauth' },
       {
         os: fakeOs(true),
-        ensureInstalled: async () => true,
+        ensureInstalled: async () => ({ ok: true }),
         runOAuthLogin: async (deps) => {
           deps.onEvent?.({ kind: 'awaiting_browser', authUrl: 'https://app.coderabbit.ai/login?x' });
           return { ok: true, user: { username: 'edgar' }, provider: 'github', org: 'Acme' };
@@ -103,7 +106,7 @@ describe('configureCoderabbit — link_oauth', () => {
       { action: 'link_oauth' },
       {
         os: fakeOs(true),
-        ensureInstalled: async () => true,
+        ensureInstalled: async () => ({ ok: true }),
         runOAuthLogin: async (deps) => {
           seenTimeout = deps.timeoutMs;
           return { ok: true, user: { username: 'edgar' } };
@@ -123,7 +126,7 @@ describe('configureCoderabbit — link_oauth', () => {
       { action: 'link_oauth' },
       {
         os: fakeOs(true),
-        ensureInstalled: async () => true,
+        ensureInstalled: async () => ({ ok: true }),
         runOAuthLogin: async () => ({ ok: false, error: 'Failed to fetch user data' }),
         snapshotDir: () => ({}),
         captureCredential: () => null,
@@ -140,7 +143,7 @@ describe('configureCoderabbit — link_oauth', () => {
       { action: 'link_oauth' },
       {
         os: fakeOs(true),
-        ensureInstalled: async () => true,
+        ensureInstalled: async () => ({ ok: true }),
         runOAuthLogin: async () => ({ ok: true, user: { username: 'e' } }),
         snapshotDir: () => ({}),
         captureCredential: () => null, // couldn't identify the written file
@@ -207,5 +210,85 @@ describe('configureCoderabbit — provision (from vault, no re-login)', () => {
     const res = await configureCoderabbit({ action: 'provision' }, { os: fakeOs(true) });
     expect(res.linked).toBeUndefined();
     expect(res.error).toMatch(/no vaulted/i);
+  });
+});
+
+describe('configureCoderabbit — install failures are ACTIONABLE, never generic', () => {
+  // 2026-08-13: `provision` on a box without `unzip` reported the opaque
+  // "CodeRabbit CLI could not be installed", so neither the user nor the logs
+  // ever learned the real blocker. The installer's reason must survive intact.
+  const REASON =
+    "CodeRabbit's installer needs unzip on this machine, and it couldn't be installed automatically";
+
+  it('provision surfaces the installer reason', async () => {
+    const res = await configureCoderabbit(
+      {
+        action: 'provision',
+        provisionCredential: { method: 'oauth', credential: '{"file":"auth.json","contents":"x"}' },
+      },
+      { os: fakeOs(false), ensureInstalled: async () => ({ ok: false, error: REASON }) },
+    );
+    expect(res.linked).toBeFalsy();
+    expect(res.error).toBe(REASON);
+  });
+
+  it('link_oauth surfaces the installer reason', async () => {
+    const res = await configureCoderabbit(
+      { action: 'link_oauth' },
+      { os: fakeOs(false), ensureInstalled: async () => ({ ok: false, error: REASON }) },
+    );
+    expect(res.error).toBe(REASON);
+  });
+
+  it('review surfaces the installer reason', async () => {
+    const res = await configureCoderabbit(
+      { action: 'review' },
+      { os: fakeOs(false), ensureInstalled: async () => ({ ok: false, error: REASON }) },
+    );
+    expect(res.error).toBe(REASON);
+  });
+
+  it('falls back to a generic message only when the installer gives no reason', async () => {
+    const res = await configureCoderabbit(
+      { action: 'link_apikey', apiKey: 'cr-abc' },
+      { os: fakeOs(false), ensureInstalled: async () => ({ ok: false }) },
+    );
+    expect(res.error).toBe('CodeRabbit CLI could not be installed');
+  });
+});
+
+describe('configureCoderabbit — provision VERIFIES the restored credential', () => {
+  // Writing the vaulted blob to disk proves nothing about its validity: a
+  // revoked/rotated CodeRabbit login restores fine and then 401s on the first
+  // review, while the app happily showed "linked". Provision must agree with
+  // `coderabbit auth status` before claiming success.
+  const BLOB = JSON.stringify({ file: 'auth.json', contents: 'opaque' });
+
+  // Hermetic HOME — the restore writes `<home>/.coderabbit/auth.json`, and it
+  // must never reach the developer's real credential file.
+  let home: string;
+  const sandboxOs = (): OsStrategy =>
+    ({ ...fakeOs(true), homeDir: () => home }) as unknown as OsStrategy;
+  beforeEach(() => {
+    home = mkdtempSync(join(tmpdir(), 'codeam-cr-home-'));
+  });
+  afterEach(() => rmSync(home, { recursive: true, force: true }));
+
+  it('reports linked when CodeRabbit confirms the restored session', async () => {
+    const res = await configureCoderabbit(
+      { action: 'provision', provisionCredential: { method: 'oauth', credential: BLOB } },
+      { os: sandboxOs(), isLoggedIn: () => true },
+    );
+    expect(res).toMatchObject({ loggedIn: true, linked: true });
+    expect(res.error).toBeUndefined();
+  });
+
+  it('reports a re-link error when the restored credential is rejected', async () => {
+    const res = await configureCoderabbit(
+      { action: 'provision', provisionCredential: { method: 'oauth', credential: BLOB } },
+      { os: sandboxOs(), isLoggedIn: () => false },
+    );
+    expect(res).toMatchObject({ loggedIn: false, linked: false });
+    expect(res.error).toMatch(/couldn't be confirmed/i);
   });
 });

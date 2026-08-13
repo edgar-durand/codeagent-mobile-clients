@@ -49,7 +49,12 @@ export function coderabbitCredentialLocator(): AgentCredentialLocator {
 export function coderabbitLoginLauncher(os: OsStrategy): AgentLoginLauncher {
   return {
     async ensureInstalled(): Promise<boolean> {
-      return ensureCoderabbitInstalled(os);
+      const result = await ensureCoderabbitInstalled(os);
+      // Interactive `codeam link coderabbit` — there IS a terminal here, so
+      // print the installer's actionable reason (missing `unzip`, …) instead
+      // of letting the caller render a bare "not installed".
+      if (!result.ok && result.error) console.error(`\n  ✗ ${result.error}\n`);
+      return result.ok;
     },
     launch(): ChildProcess {
       // CodeRabbit's sign-in is `coderabbit auth login` (NOT `coderabbit

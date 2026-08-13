@@ -17,7 +17,6 @@
  */
 
 import { spawnSync } from 'node:child_process';
-import { homedir } from 'node:os';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import * as path from 'node:path';
 import {
@@ -29,7 +28,7 @@ import {
   type DirSnapshot,
   type CapturedCredential,
 } from './oauth';
-import { ensureCoderabbitInstalled } from './installer';
+import { ensureCoderabbitInstalled, type CoderabbitInstallResult } from './installer';
 import { createOsStrategy, type OsStrategy } from '../../os';
 import type { BatchInvocationInput, BatchInvocationOutput } from '../strategy';
 
@@ -76,8 +75,11 @@ export interface CoderabbitConfigureInput {
 
 export interface CoderabbitConfigureDeps {
   os?: OsStrategy;
-  /** Install the CLI on demand (link/review). Defaults to the real installer. */
-  ensureInstalled?: (os: OsStrategy) => Promise<boolean>;
+  /** Install the CLI on demand (link/review). Defaults to the real installer.
+   *  ⚠️ Returns a RESULT, not a bare boolean: the failure reason (missing
+   *  `unzip`, no egress, …) is surfaced verbatim to the user, so it must not
+   *  be flattened into a generic "could not be installed". */
+  ensureInstalled?: (os: OsStrategy) => Promise<CoderabbitInstallResult>;
   /** True when `coderabbit auth status --agent` reports authenticated. */
   isLoggedIn?: () => boolean;
   runOAuthLogin?: typeof runCoderabbitOAuthLogin;
@@ -192,9 +194,14 @@ function collectChangedFiles(cwd: string): CoderabbitReviewFileInfo[] {
  * blob is the filename-agnostic `{file, contents}` envelope captured at link
  * time; write it VERBATIM (never parse the opaque token). Mirrors the
  * codespace-deploy `coderabbitProvisioner.write`.
+ *
+ * ⚠️ Home comes from the injected `OsStrategy`, NOT `os.homedir()` — the
+ * strategy is the single home-resolution seam (the same one the PATH augment
+ * uses), which also keeps this write out of the developer's real `~/.coderabbit`
+ * under test.
  */
-function restoreCoderabbitOauthBlob(value: string): void {
-  const dir = path.join(homedir(), '.coderabbit');
+function restoreCoderabbitOauthBlob(os: OsStrategy, value: string): void {
+  const dir = path.join(os.homeDir(), '.coderabbit');
   mkdirSync(dir, { recursive: true });
   let file = 'auth.json';
   let contents = value.trim();
@@ -210,6 +217,17 @@ function restoreCoderabbitOauthBlob(value: string): void {
     }
   }
   writeFileSync(path.join(dir, file), contents, { mode: 0o600 });
+}
+
+/**
+ * The user-facing text for a failed install. The installer already produces an
+ * ACTIONABLE reason (missing `unzip`, no egress, …); we only supply a floor for
+ * the case where it couldn't determine one. ⚠️ Never replace a real reason with
+ * a generic string — the opaque "CodeRabbit CLI could not be installed" is
+ * precisely what made this undiagnosable in the field.
+ */
+function installFailureMessage(result: CoderabbitInstallResult): string {
+  return result.error ?? 'CodeRabbit CLI could not be installed';
 }
 
 export async function configureCoderabbit(
@@ -263,9 +281,9 @@ export async function configureCoderabbit(
     const key = (input.apiKey ?? '').trim();
     if (!key) return { ...res, error: 'No API key provided' };
     if (!res.installed) {
-      const ok = await ensureInstalled(os);
-      res.installed = ok;
-      if (!ok) return { ...res, error: 'CodeRabbit CLI could not be installed' };
+      const inst = await ensureInstalled(os);
+      res.installed = inst.ok;
+      if (!inst.ok) return { ...res, error: installFailureMessage(inst) };
     }
     // Authenticate the session with the key — the OFFICIAL headless method. Just
     // vaulting the key does NOT authenticate `coderabbit review` (the CLI reads
@@ -294,9 +312,9 @@ export async function configureCoderabbit(
     }
     if (!res.installed) {
       deps.onEvent?.({ kind: 'installing' });
-      const ok = await ensureInstalled(os);
-      res.installed = ok;
-      if (!ok) return { ...res, error: 'CodeRabbit CLI could not be installed' };
+      const inst = await ensureInstalled(os);
+      res.installed = inst.ok;
+      if (!inst.ok) return { ...res, error: installFailureMessage(inst) };
     }
     if (cred.method === 'api_key') {
       const login = loginWithApiKey(cred.credential.trim());
@@ -313,11 +331,28 @@ export async function configureCoderabbit(
     // oauth — restore the {file,contents} login-state blob verbatim (mirrors the
     // codespace-deploy coderabbitProvisioner); `coderabbit review` then reads it.
     try {
-      restoreCoderabbitOauthBlob(cred.credential);
+      restoreCoderabbitOauthBlob(os, cred.credential);
     } catch (err) {
       return {
         ...res,
         error: err instanceof Error ? err.message : 'Failed to restore the vaulted credential',
+      };
+    }
+    // ⚠️ VERIFY, don't assume. A successful file write proves nothing about the
+    // credential — a revoked/rotated blob restores just fine and then 401s on
+    // the first review. The api_key branch above already validates through
+    // `auth login --api-key`; this is the oauth equivalent (`auth status`), so
+    // both branches only report `linked` when CodeRabbit itself agrees.
+    if (!isLoggedIn()) {
+      return {
+        ...res,
+        loggedIn: false,
+        linked: false,
+        // Deliberately phrased as "couldn't confirm", not "is invalid": a
+        // transient `coderabbit auth status` failure is not proof the credential
+        // is dead, and both remedies (retry / re-link) are offered.
+        error:
+          "Your saved CodeRabbit sign-in couldn't be confirmed on this machine — try again, or sign in with your browser to refresh it.",
       };
     }
     return { ...res, loggedIn: true, linked: true };
@@ -332,9 +367,9 @@ export async function configureCoderabbit(
       // `installing` phase so the app can show real progress instead of a blank
       // spinner.
       deps.onEvent?.({ kind: 'installing' });
-      const ok = await ensureInstalled(os);
-      res.installed = ok;
-      if (!ok) return { ...res, error: 'CodeRabbit CLI could not be installed' };
+      const inst = await ensureInstalled(os);
+      res.installed = inst.ok;
+      if (!inst.ok) return { ...res, error: installFailureMessage(inst) };
     }
     // Fingerprint ~/.coderabbit BEFORE login so we can capture the exact file
     // the CLI writes on success.
@@ -388,9 +423,9 @@ export async function configureCoderabbit(
   // review
   const res = base();
   if (!res.installed) {
-    const ok = await ensureInstalled(os);
-    res.installed = ok;
-    if (!ok) return { ...res, error: 'CodeRabbit CLI is not installed' };
+    const inst = await ensureInstalled(os);
+    res.installed = inst.ok;
+    if (!inst.ok) return { ...res, error: installFailureMessage(inst) };
   }
   if (!deps.runReview) return { ...res, error: 'No reviewer available' };
   const out = await deps.runReview(input.review ?? {});
