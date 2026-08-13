@@ -178,7 +178,9 @@ describe('ensureCoderabbitInstalled', () => {
       }),
     });
     expect(res.ok).toBe(false);
-    expect(res.error).toBe('CodeRabbit CLI install failed: Missing required tools: - unzip');
+    expect(res.error).toBe(
+      'CodeRabbit CLI install failed (exit 1): Missing required tools: - unzip',
+    );
   });
 
   it('fails honestly when the script exits 0 but produces no binary', async () => {
@@ -187,6 +189,9 @@ describe('ensureCoderabbitInstalled', () => {
       runInstallScript: async () => ({ code: 0, output: 'done\n' }),
     });
     expect(res.ok).toBe(false);
-    expect(res.error).toMatch(/did not produce a binary|no `coderabbit` binary/);
+    // Exit 0 but nothing on PATH is still a failure — and it names the exit code
+    // so the next person can tell "script died" from "script lied".
+    expect(res.error).toContain('(exit 0)');
+    expect(res.error).toContain('done');
   });
 });
