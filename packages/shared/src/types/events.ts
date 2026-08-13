@@ -100,6 +100,12 @@ export const USER_EVENTS = {
   CODERABBIT_STATUS: 'coderabbit_status',
   CODERABBIT_REVIEW: 'coderabbit_review',
 
+  // Session agent switch — the CLI posts these to /api/agent-switch/events
+  // while a `switch_agent` relay command swaps the session's agent in-process;
+  // the backend re-publishes them on the per-user SSE bus (mirrored in repo A).
+  SWITCH_AGENT_PROGRESS: 'switch_agent_progress',
+  SWITCH_AGENT_STATUS: 'switch_agent_status',
+
   // VCS / PR Command Center — the backend publishes this after an agent finishes
   // reviewing a PR (verdict + comment count + findings), driving the mobile
   // completion screen + push. Mirrored in repo A's app-shared events.ts.
