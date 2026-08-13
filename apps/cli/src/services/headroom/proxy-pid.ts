@@ -79,12 +79,20 @@ function isPidAlive(pid: number): boolean {
  * bug. Verifying the cmdline mentions `headroom` + `proxy` rules out both. Linux
  * only (/proc); other platforms fall back to the bare pid probe (best-effort).
  */
-function pidLooksLikeProxy(pid: number): boolean {
+function pidLooksLikeProxy(pid: number, opts: { strict?: boolean } = {}): boolean {
   try {
     const cmd = fs.readFileSync(`/proc/${pid}/cmdline`, 'utf8').replace(/\0/g, ' ').toLowerCase();
     if (cmd.trim() === '') return false; // zombie/defunct → not serving
     return cmd.includes('headroom') && cmd.includes('proxy');
   } catch {
+    // ⚠️ STRICT is for SCANNING every pid on the box (findRunningProxyPid).
+    // There, "I couldn't read the cmdline" must mean NO — the lenient fallback
+    // below degenerates to a bare liveness probe, which every live pid passes,
+    // so the first unreadable /proc entry (EACCES under hidepid, or a pid that
+    // exited mid-scan) would be adopted as "the proxy" and SIGTERM'd. On a
+    // shared host that is someone else's process. A scan may only ever act on a
+    // POSITIVELY identified proxy.
+    if (opts.strict) return false;
     // No /proc (macOS/Windows) or the pid is gone. If the pid is gone,
     // isPidAlive already returns false; when /proc is simply absent we can't
     // verify the cmdline, so trust the bare probe (dev machines, not the
@@ -174,7 +182,7 @@ export function findRunningProxyPid(): number | null {
     if (!/^\d+$/.test(name)) continue;
     const pid = Number(name);
     if (pid === process.pid) continue;
-    if (pidLooksLikeProxy(pid)) return pid;
+    if (pidLooksLikeProxy(pid, { strict: true })) return pid;
   }
   return null;
 }
