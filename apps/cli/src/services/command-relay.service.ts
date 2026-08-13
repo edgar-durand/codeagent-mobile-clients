@@ -132,8 +132,13 @@ export class CommandRelayService {
      * code (start.ts has always passed an explicit meta since #50)
      * and it silently mis-labelled non-Claude sessions when tests
      * forgot to pass one.
+     *
+     * Mutable (not `readonly`) since the in-session agent switch:
+     * `switch_agent` swaps the running agent on the SAME relay instance
+     * (keeping SSE + the pending command's ack path alive) and calls
+     * {@link setAgentMeta} + {@link reannounceAgents} to re-register.
      */
-    private readonly agentMeta: AgentMetadata,
+    private agentMeta: AgentMetadata,
     /**
      * When set, `reportAgents` posts THIS list to
      * `/api/plugin/agents` instead of the single-entry default
@@ -613,6 +618,25 @@ export class CommandRelayService {
     })
       .then(() => { this.agentsRegistered = true; })
       .catch(() => { /* retry via agentsTimer */ });
+  }
+
+  /**
+   * Swap the agent this relay reports for the session (in-session agent
+   * switch). Heartbeats pick the new id up on their next tick; call
+   * {@link reannounceAgents} to push the new `/api/plugin/agents` entry.
+   */
+  setAgentMeta(meta: AgentMetadata): void {
+    this.agentMeta = meta;
+  }
+
+  /**
+   * Re-register the (possibly swapped) agent with the backend. Resets
+   * `agentsRegistered` so the 5 s retry timer keeps trying until a POST
+   * lands — same at-least-once semantics as the initial registration.
+   */
+  reannounceAgents(): void {
+    this.agentsRegistered = false;
+    this.reportAgents();
   }
 
   // ─── Lifecycle ───────────────────────────────────────────────────

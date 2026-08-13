@@ -60,6 +60,7 @@ function resolveInputPricePerMillion(agentId: string): number {
   return getPricing(model).input;
 }
 import { log } from '../services/logger';
+import { runAgentInstallScript } from './host/agent-install';
 import { killQuiet } from '../lib/quiet';
 import { getActiveSession } from '../config';
 import { installRelayCrashGuards } from '../lib/process-guards';
@@ -2208,55 +2209,17 @@ export class HostAgentSupervisor {
    * HOME is forced so the installer's `~/.local/bin` resolves on a detached
    * host-agent whose env may lack it.
    */
-  private runAgentInstall(script: string): Promise<void> {
-    return new Promise((resolve) => {
-      const home = process.env.HOME || os.homedir();
-      const child = spawn('sh', ['-c', script], {
-        env: { ...process.env, HOME: home },
-        stdio: ['ignore', 'pipe', 'pipe'],
-      });
-      const onData = (b: Buffer): void => {
-        const line = b.toString().replace(/\n+$/g, '');
-        if (line) log.info('host-agent', `agent-install: ${line}`);
-      };
-      child.stdout?.on('data', onData);
-      child.stderr?.on('data', onData);
-      let settled = false;
-      const done = (): void => {
-        if (settled) return;
-        settled = true;
-        resolve();
-      };
-      const timer = setTimeout(() => {
-        log.warn(
-          'host-agent',
-          'agent install timed out (180s) — preview detection may be unavailable',
-        );
-        try {
-          child.kill('SIGTERM');
-        } catch {
-          /* already dead */
-        }
-        done();
-      }, 180_000);
-      child.once('exit', (code) => {
-        clearTimeout(timer);
-        if (code !== 0) {
-          log.warn(
-            'host-agent',
-            `agent install exited code=${code} — preview detection may be unavailable; agent still runs`,
-          );
-        } else {
-          log.info('host-agent', 'agent CLI installed');
-        }
-        done();
-      });
-      child.once('error', (e) => {
-        clearTimeout(timer);
-        log.warn('host-agent', `agent install spawn error: ${e.message}`);
-        done();
-      });
-    });
+  private async runAgentInstall(script: string): Promise<void> {
+    // Delegates to the shared runner (also used by the in-session
+    // `switch_agent` flow). Best-effort here by design — a failed install
+    // only degrades `claude -p` / `codex` preview detection.
+    const res = await runAgentInstallScript(script, { logScope: 'host-agent' });
+    if (!res.ok) {
+      log.warn(
+        'host-agent',
+        'agent install failed — preview detection may be unavailable; agent still runs',
+      );
+    }
   }
 
   /**

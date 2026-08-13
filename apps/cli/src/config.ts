@@ -199,6 +199,21 @@ export function makeConfig(baseDir?: string) {
     save(c);
   }
 
+  /**
+   * Persist the session's agent after an in-session `switch_agent` swap, so a
+   * later `codeam start` / supervisor restart resumes on the NEW agent. Looked
+   * up by pluginId (the relay's stable session key); deliberately does NOT
+   * touch `activeSessionId` (unlike `addSession`) — a background swap must not
+   * reorder which session `codeam start` picks by default.
+   */
+  function setSessionAgent(pluginId: string, agent: AgentId): void {
+    const c = load();
+    const s = c.sessions.find(x => x.pluginId === pluginId);
+    if (!s) return;
+    s.agent = agent;
+    save(c);
+  }
+
   function clearAll(): void {
     try {
       fs.unlinkSync(file);
@@ -215,7 +230,7 @@ export function makeConfig(baseDir?: string) {
     return load();
   }
 
-  return { getConfig, ensurePluginId, addSession, removeSession, setActiveSession, getActiveSession, getActiveSessionForAgent, setDisable1mContext, clearAll, saveCliConfig, loadCliConfig };
+  return { getConfig, ensurePluginId, addSession, removeSession, setActiveSession, getActiveSession, getActiveSessionForAgent, setDisable1mContext, setSessionAgent, clearAll, saveCliConfig, loadCliConfig };
 }
 
 /**
@@ -271,5 +286,5 @@ export function loadCodespaceEnv(): void {
 
 // Default instance — uses ~/.codeam/config.json
 const _default = makeConfig();
-export const { getConfig, ensurePluginId, addSession, removeSession, setActiveSession, getActiveSession, getActiveSessionForAgent, setDisable1mContext, clearAll, saveCliConfig, loadCliConfig } =
+export const { getConfig, ensurePluginId, addSession, removeSession, setActiveSession, getActiveSession, getActiveSessionForAgent, setDisable1mContext, setSessionAgent, clearAll, saveCliConfig, loadCliConfig } =
   _default;

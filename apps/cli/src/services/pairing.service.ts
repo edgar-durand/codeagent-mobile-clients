@@ -560,25 +560,78 @@ export async function fetchProvisionCredential(input: {
   sessionId: string;
   pluginId: string;
   pluginAuthToken: string;
-}): Promise<{ method: 'api_key' | 'oauth'; credential: string } | null> {
+  /**
+   * When true, ask the backend to also return the agent's idempotent
+   * install snippet (`ProvisioningStrategy.getInstallSnippet()`), so the
+   * in-session agent switch can install a missing binary. Older backends
+   * ignore the flag and simply omit `installScript`.
+   */
+  includeInstallScript?: boolean;
+}): Promise<{ method: 'api_key' | 'oauth'; credential: string; installScript?: string } | null> {
   try {
     const res = await _transport.postJsonAuthed(
       `${API_BASE}/api/plugin/agents/${input.agentId}/provision-credential`,
-      { sessionId: input.sessionId, pluginId: input.pluginId },
+      {
+        sessionId: input.sessionId,
+        pluginId: input.pluginId,
+        ...(input.includeInstallScript ? { includeInstallScript: true } : {}),
+      },
       input.pluginAuthToken,
     );
-    const data = (res as { data?: { method?: unknown; credential?: unknown } } | null)?.data;
+    const data = (
+      res as { data?: { method?: unknown; credential?: unknown; installScript?: unknown } } | null
+    )?.data;
     if (
       data &&
       (data.method === 'api_key' || data.method === 'oauth') &&
       typeof data.credential === 'string' &&
       data.credential.length > 0
     ) {
-      return { method: data.method, credential: data.credential };
+      return {
+        method: data.method,
+        credential: data.credential,
+        ...(typeof data.installScript === 'string' && data.installScript.length > 0
+          ? { installScript: data.installScript }
+          : {}),
+      };
     }
     return null;
   } catch {
     return null;
+  }
+}
+
+/**
+ * Post an agent-switch lifecycle event (progress step / terminal status) to
+ * the backend. Mirrors `postHeadroomEvent` — non-fatal; callers serialize the
+ * POSTs (emit-chain) so the backend receives them strictly in emit order.
+ */
+export async function postAgentSwitchEvent(input: {
+  sessionId: string;
+  pluginId: string;
+  pluginAuthToken: string;
+  type: 'switch_agent_progress' | 'switch_agent_status';
+  payload?: Record<string, unknown>;
+}): Promise<{ ok: true } | { ok: false; status: number; message: string }> {
+  try {
+    await _transport.postJsonAuthed(
+      `${API_BASE}/api/agent-switch/events`,
+      {
+        sessionId: input.sessionId,
+        pluginId: input.pluginId,
+        type: input.type,
+        payload: input.payload ?? {},
+      },
+      input.pluginAuthToken,
+    );
+    return { ok: true };
+  } catch (err) {
+    const e = err as Error & { statusCode?: number };
+    return {
+      ok: false,
+      status: typeof e.statusCode === 'number' ? e.statusCode : 0,
+      message: e.message || 'unknown',
+    };
   }
 }
 
