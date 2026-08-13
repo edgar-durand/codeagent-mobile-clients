@@ -34,12 +34,18 @@ function opencodeRuns(): boolean {
 
 /** Add the installer's target dir to THIS process's PATH so the immediate ACP
  *  spawn resolves `opencode` without a shell restart (the installer persists it
- *  to the shell rc, which a non-interactive spawn won't have sourced). */
-function augmentPath(): void {
+ *  to the shell rc, which a non-interactive spawn won't have sourced).
+ *
+ *  Exported for the ACP adapter's `waitForBinary` — called unconditionally so
+ *  an in-session agent switch that installs opencode mid-run is visible to the
+ *  long-running CLI process (same stale-PATH class as kimi's
+ *  `augmentKimiPath`; see that doc for the 2026-08-13 fleet-1 incident). */
+export function augmentOpencodePath(): void {
   const dir = opencodeBinDir();
   const parts = (process.env.PATH ?? '').split(':');
   if (!parts.includes(dir)) process.env.PATH = `${dir}:${process.env.PATH ?? ''}`;
 }
+const augmentPath = augmentOpencodePath;
 
 async function runInstaller(): Promise<boolean> {
   return new Promise<boolean>((resolve) => {

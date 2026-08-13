@@ -220,6 +220,10 @@ export async function performAgentSwitch(
   const emitStep = (step: SwitchAgentStep): Promise<unknown> =>
     deps.postEvent('switch_agent_progress', { step, agentId });
   const fail = (error: string): SwitchAgentResult => {
+    // ALWAYS leave a local log line — the 2026-08-13 fleet-1 kimi failure
+    // was only diagnosable from the wire because the fail path logged
+    // nothing on the box.
+    log.warn('switchAgent', `switch ${from} → ${agentId} failed: ${error}`);
     void emitStatus({ state: 'error', agentId, fromAgentId: from, error });
     return { ok: false, agentId, error };
   };
