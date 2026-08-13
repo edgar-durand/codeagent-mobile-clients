@@ -4,6 +4,13 @@ All notable changes to the CodeAgent-Mobile JetBrains plugin are documented here
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.62.2] — 2026-08-13
+
+### Fixed
+
+- **cli:** The /proc proxy scan must positively identify a proxy before killing it (#617)
+- **cli:** CodeRabbit install provisions its prerequisites and reports why it failed
+
 ## [2.62.1] — 2026-08-13
 
 ### Fixed
