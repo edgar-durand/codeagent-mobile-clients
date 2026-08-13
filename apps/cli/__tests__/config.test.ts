@@ -44,6 +44,26 @@ describe('makeConfig', () => {
     expect(s?.disable1mContext).toBe(true);
   });
 
+  it('setSessionAgent persists the switched agent by pluginId WITHOUT touching activeSessionId', () => {
+    // In-session agent switch (`switch_agent`): a background swap must make a
+    // later `codeam start` resume on the NEW agent, but must never reorder
+    // which session is globally active (unlike addSession).
+    cfg.addSession({ id: 's1', pluginId: 'p1', userName: 'A', userEmail: 'a@a.com', plan: 'PRO', pairedAt: 1000, agent: 'claude' });
+    cfg.addSession({ id: 's2', pluginId: 'p2', userName: 'B', userEmail: 'b@b.com', plan: 'PRO', pairedAt: 2000, agent: 'claude' });
+    expect(cfg.getConfig().activeSessionId).toBe('s2');
+    cfg.setSessionAgent('p1', 'codex');
+    const config = cfg.getConfig();
+    expect(config.sessions.find((x) => x.pluginId === 'p1')?.agent).toBe('codex');
+    expect(config.sessions.find((x) => x.pluginId === 'p2')?.agent).toBe('claude');
+    expect(config.activeSessionId).toBe('s2');
+  });
+
+  it('setSessionAgent is a no-op for an unknown pluginId', () => {
+    cfg.addSession({ id: 's1', pluginId: 'p1', userName: 'A', userEmail: 'a@a.com', plan: 'PRO', pairedAt: 1000, agent: 'claude' });
+    cfg.setSessionAgent('nope', 'codex');
+    expect(cfg.getConfig().sessions.find((x) => x.pluginId === 'p1')?.agent).toBe('claude');
+  });
+
   it('addSession promotes the newly paired session to active', () => {
     // Rationale: pair → start should use the most recently paired session's
     // pluginId, so each addSession takes over as the active one (see

@@ -74,6 +74,61 @@ describe('CommandRelayService', () => {
     relay.stop();
   });
 
+  it('setAgentMeta + reannounceAgents re-registers the switched agent and heartbeats it', async () => {
+    // In-session agent switch: the SAME relay instance must re-report the
+    // NEW agent (POST /api/plugin/agents) and heartbeat with the new id —
+    // recreating the relay would drop the pending switch command's ack path.
+    const relay = new CommandRelayService('plugin-sw', vi.fn(), META);
+    relay.start();
+    await vi.advanceTimersByTimeAsync(10);
+    expect(pairing._postJson).toHaveBeenCalledWith(
+      expect.stringContaining('/api/plugin/agents'),
+      expect.objectContaining({
+        pluginId: 'plugin-sw',
+        agents: [expect.objectContaining({ id: 'claude' })],
+      }),
+    );
+    vi.mocked(pairing._postJson).mockClear();
+
+    relay.setAgentMeta({ id: 'codex', name: 'codex', displayName: 'Codex CLI' } as never);
+    relay.reannounceAgents();
+    await vi.advanceTimersByTimeAsync(10);
+    expect(pairing._postJson).toHaveBeenCalledWith(
+      expect.stringContaining('/api/plugin/agents'),
+      expect.objectContaining({
+        pluginId: 'plugin-sw',
+        agents: [expect.objectContaining({ id: 'codex', name: 'Codex CLI' })],
+      }),
+    );
+    // The next heartbeat carries the new agent id too.
+    await vi.advanceTimersByTimeAsync(20_000 + 100);
+    expect(pairing._postJson).toHaveBeenCalledWith(
+      expect.stringContaining('/api/plugin/heartbeat'),
+      expect.objectContaining({ agentId: 'codex' }),
+    );
+    relay.stop();
+  });
+
+  it('reannounceAgents keeps retrying via the agents timer until a POST lands', async () => {
+    const relay = new CommandRelayService('plugin-rt', vi.fn(), META);
+    relay.start();
+    await vi.advanceTimersByTimeAsync(10);
+    vi.mocked(pairing._postJson).mockClear();
+    // First re-announce POST fails → agentsRegistered stays false → the 5 s
+    // timer retries until one succeeds (at-least-once semantics).
+    vi.mocked(pairing._postJson).mockRejectedValueOnce(new Error('network'));
+    relay.reannounceAgents();
+    await vi.advanceTimersByTimeAsync(10);
+    const agentsPosts = () =>
+      vi
+        .mocked(pairing._postJson)
+        .mock.calls.filter(([url]) => String(url).includes('/api/plugin/agents')).length;
+    expect(agentsPosts()).toBe(1);
+    await vi.advanceTimersByTimeAsync(5_100);
+    expect(agentsPosts()).toBeGreaterThanOrEqual(2);
+    relay.stop();
+  });
+
   it('polls for commands with idle backoff after empty responses', async () => {
     // After the idle-streak backoff landed, an idle CLI no longer
     // hits the API every 2 s — empty responses widen the delay

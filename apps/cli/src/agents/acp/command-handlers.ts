@@ -108,6 +108,19 @@ export interface AcpSessionContext {
    * owns its ids differently and may not wire it.
    */
   onActiveSessionChanged?: (id: string) => void;
+  /**
+   * In-session agent switch — the runner-owned orchestration
+   * (`performAgentSwitch` wired over its swappable locals). Absent on the
+   * baton AcpDriver (local TUI sessions can't swap agents) → the
+   * `switch_agent` handler acks an honest "not supported here" failure.
+   */
+  switchAgent?: (agentId: unknown) => Promise<import('@codeam/shared').SwitchAgentResult>;
+  /**
+   * Context-handoff slot: the switch stores the OLD conversation's bounded
+   * tail here; `start_task` prefixes it to the FIRST post-switch prompt and
+   * clears it, so the new agent inherits the session's context.
+   */
+  pendingHandoff?: { current: string | null };
 }
 
 /**
@@ -340,6 +353,14 @@ async function startTaskH(ctx: AcpCommandContext): Promise<void> {
   // Prepended AFTER recording the user prompt + echo, so it rides the agent prompt
   // only and never shows as part of the user's message. Managed deploys only.
   maybePrefaceAgentStandard(blocks, opts.agent, opts.sessionId);
+  // Agent-switch context handoff: the FIRST prompt after a `switch_agent`
+  // carries the OLD conversation's bounded tail so the new agent continues
+  // with the session's context instead of starting cold. Rides the agent
+  // prompt only (recorded/echoed prompt stays the user's own words); one-shot.
+  if (ctx.pendingHandoff?.current) {
+    blocks.unshift({ type: 'text', text: ctx.pendingHandoff.current });
+    ctx.pendingHandoff.current = null;
+  }
   // Tracks whether the turn already reached a terminal, VISIBLE close (reply
   // delivered + "Thinking…" cleared). Once true, the only awaited work left is
   // the command ACK — and a long (>10 min) turn's `command:<id>` record can
@@ -1214,6 +1235,36 @@ async function integrationsDetectH(ctx: AcpCommandContext): Promise<void> {
 }
 
 /**
+ * Session agent switch — `switch_agent { agentId }`. All the real work
+ * (credential pull, binary install, adapter restart, revert-on-failure,
+ * progress events) lives in the runner-provided `ctx.switchAgent`
+ * orchestration; this handler only validates presence and acks. Sessions
+ * without the capability (baton/local TUI, PTY agents) get an honest,
+ * immediate failure instead of a hung spinner.
+ */
+async function switchAgentH(ctx: AcpCommandContext): Promise<void> {
+  const { cmd, relay } = ctx;
+  if (!ctx.switchAgent) {
+    await relay.sendResult(cmd.id, 'failed', {
+      error: 'Switching agents is not supported on this session.',
+    });
+    return;
+  }
+  const rawAgentId = (cmd.payload as { agentId?: unknown } | undefined)?.agentId;
+  try {
+    const result = await ctx.switchAgent(rawAgentId);
+    await relay.sendResult(
+      cmd.id,
+      result.ok ? 'completed' : 'failed',
+      result as unknown as Record<string, unknown>,
+    );
+  } catch (err) {
+    log.warn('acpRunner', `switch_agent failed: ${describeError(err)}`);
+    await relay.sendResult(cmd.id, 'failed', { error: describeError(err) });
+  }
+}
+
+/**
  * Dispatch table — one entry per explicitly-handled relay command type.
  * Aliased types (stop_task/escape_key, set_keep_alive/get_context,
  * session_terminated/shutdown_session, the preview family) share one handler,
@@ -1236,6 +1287,7 @@ export const ACP_COMMAND_HANDLERS: Record<string, AcpCommandHandler> = {
   select_option: selectOptionH,
   provide_input: provideInputH,
   resume_session: resumeSessionH,
+  switch_agent: switchAgentH,
   change_model: changeModelH,
   summarize: summarizeH,
   session_terminated: sessionShutdownH,

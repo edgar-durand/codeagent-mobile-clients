@@ -29,17 +29,33 @@
 
 import { randomUUID } from 'node:crypto';
 import { CommandRelayService, type RemoteCommand } from '../../services/command-relay.service';
-import { fetchCurrentPluginAuthToken } from '../../services/pairing.service';
+import {
+  fetchCurrentPluginAuthToken,
+  fetchProvisionCredential,
+  postAgentSwitchEvent,
+} from '../../services/pairing.service';
 import { log } from '../../services/logger';
 import { HistoryService } from '../../services/history.service';
 import { showInfo, showSuccess, showRelayNotice } from '../../ui/banner';
-import { AGENT_REGISTRY, type AgentId, type StreamingChunkKind } from '@codeam/shared';
+import {
+  AGENT_REGISTRY,
+  type AgentId,
+  type StreamingChunkKind,
+  type SwitchAgentResult,
+} from '@codeam/shared';
 import type { McpServer, RequestPermissionResponse } from '@agentclientprotocol/sdk';
 import { createOsStrategy } from '../../os';
 import { createInteractiveAgentStrategy } from '../registry';
 import { AcpClient, type AcpClientOptions } from './client';
 import { relaunchProxyWithoutBudget } from './headroom-budget-proxy';
-import type { AdapterSpec } from './adapters';
+import { resolveAcpAdapterWithRetry, type AdapterSpec } from './adapters';
+import {
+  buildHandoffPreamble,
+  ensureAgentBinaryForSwitch,
+  makeSerializedSwitchEmitter,
+  performAgentSwitch,
+} from './switch-agent';
+import { provisionAgentCredentials } from '../../commands/host/agent-provisioning';
 import { AcpPublisher } from './publisher';
 import type { PromptBlock } from './buildAcpPromptBlocks';
 import { createBudgetRecovery, type BudgetRecovery } from './budgetRecovery';
@@ -57,7 +73,7 @@ import { getGuardrailPolicy } from './guardrail-config';
 import { isLocalSession } from '../../baton/gate';
 import { extractSelectPrompt } from './selectPromptExtractor';
 import { prewarmPreviewDetection } from '../../commands/start/handlers';
-import { loadCliConfig } from '../../config';
+import { loadCliConfig, setSessionAgent } from '../../config';
 import { FileWatcherService } from '../../services/file-watcher.service';
 import { TurnFileAggregator } from '../../services/turn-files/turn-file-aggregator';
 import type { StartedBeads } from '../../beads';
@@ -787,6 +803,28 @@ export class AcpHistory {
     this.summary = null;
   }
 
+  /**
+   * Render the TAIL of the buffered conversation as plain text, bounded to
+   * `maxChars` — the in-session agent switch captures this right before the
+   * old client stops and prefixes it to the first post-switch prompt, so the
+   * NEW agent inherits the session's context (a cross-agent `session/load`
+   * is impossible; this handoff is the continuity mechanism). Walks newest →
+   * oldest so the most recent turns always survive the cap, then restores
+   * chronological order.
+   */
+  recentTranscript(maxChars: number): string {
+    const lines: string[] = [];
+    let used = 0;
+    for (let i = this.messages.length - 1; i >= 0; i--) {
+      const m = this.messages[i];
+      const line = `${m.role === 'user' ? 'User' : 'Agent'}: ${m.text.trim()}`;
+      if (used + line.length > maxChars) break;
+      lines.push(line);
+      used += line.length + 2;
+    }
+    return lines.reverse().join('\n\n');
+  }
+
   appendUserPrompt(text: string): void {
     if (this.summary === null) {
       // Trim newlines/whitespace and cap at 120 chars so the RECENT
@@ -1208,10 +1246,12 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
       })();
     },
   };
-  // `client` is never re-spawned in-session: the old on-demand 1M-context
-  // disable/re-spawn recovery was removed (the fix for a 1M-credits gate is to
-  // RECONNECT the subscription, not disable 1M — see failure-messages.ts).
-  const client = new AcpClient(clientOptions);
+  // `let`, not `const`: the in-session agent switch (`switch_agent`) stops
+  // this client and replaces it with one spawned on the NEW agent's adapter
+  // (see `relaunchWith` below). The old on-demand 1M-context disable/re-spawn
+  // recovery stays removed (the fix for a 1M-credits gate is to RECONNECT the
+  // subscription, not disable 1M — see failure-messages.ts).
+  let client = new AcpClient(clientOptions);
 
   // ─── On-demand Headroom budget-exceeded recovery ──────────────────────────
   // When the local Headroom proxy 429s due to budget exhaustion, offer two
@@ -1224,27 +1264,33 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
   // backend endpoint. Subsequent occurrences still surface the recovery bubble.
   let _budgetReachedPosted = false;
 
-  const budgetRecovery = createBudgetRecovery<PromptBlock>({
-    publishText: (text) => publisher.publishOutput({ type: 'text', content: text, done: true }),
-    publishSelectPrompt: (question, options) =>
-      publisher.publishOutput({
-        type: 'select_prompt',
-        content: question,
-        options,
-        optionDescriptions: options.map(() => ''),
-        currentIndex: 0,
-        done: true,
-      }),
-    publishAwaitingAnswer: (prompt, options) =>
-      publisher.publishAwaitingAnswer({ questionId: randomUUID(), prompt, options }),
-    publishRawChunk: (chunk) => publisher.publishOutput(chunk),
-    sendResult: (commandId, status, result) => relay.sendResult(commandId, status, result),
-    appendAgentReply: (text) => history.appendAgentReply(text),
-    flushHistory: () => void history.flush(),
-    relaunchProxyWithoutBudget,
-    agentId: opts.agent,
-    log: (msg) => log.info('acpRunner', msg),
-  });
+  // Factory (not a bare const) so the agent switch can rebuild it — the
+  // `agentId` is captured at construction, and every closure reads the
+  // CURRENT `history`/`relay` bindings, so a rebuilt instance stays correct
+  // after the swap reassigns those `let`s.
+  const makeBudgetRecovery = (): BudgetRecovery<PromptBlock> =>
+    createBudgetRecovery<PromptBlock>({
+      publishText: (text) => publisher.publishOutput({ type: 'text', content: text, done: true }),
+      publishSelectPrompt: (question, options) =>
+        publisher.publishOutput({
+          type: 'select_prompt',
+          content: question,
+          options,
+          optionDescriptions: options.map(() => ''),
+          currentIndex: 0,
+          done: true,
+        }),
+      publishAwaitingAnswer: (prompt, options) =>
+        publisher.publishAwaitingAnswer({ questionId: randomUUID(), prompt, options }),
+      publishRawChunk: (chunk) => publisher.publishOutput(chunk),
+      sendResult: (commandId, status, result) => relay.sendResult(commandId, status, result),
+      appendAgentReply: (text) => history.appendAgentReply(text),
+      flushHistory: () => void history.flush(),
+      relaunchProxyWithoutBudget,
+      agentId: opts.agent,
+      log: (msg) => log.info('acpRunner', msg),
+    });
+  let budgetRecovery = makeBudgetRecovery();
 
   showInfo(`Starting ${opts.agent} via ACP adapter (${opts.adapter.requiresAgentBinary})…`);
   let handshake: Awaited<ReturnType<typeof client.start>>;
@@ -1269,6 +1315,8 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
   }
   let acpSessionId = handshake.sessionId;
   const { initialize, model: handshakeModel, tier: handshakeTier } = handshake;
+  // Swappable on agent switch — the new adapter's handshake replaces them.
+  let agentCaps = initialize.agentCapabilities;
   log.trace(
     'acpRunner',
     `adapter handshake ok protocolVersion=${initialize.protocolVersion} sessionId=${acpSessionId.slice(0, 8)}`,
@@ -1326,13 +1374,14 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
   // one-shots), but NOT for model listing: `list_models` reads the NATIVE ACP
   // model config option off the AcpClient (single source of truth), never a
   // hardcoded strategy catalog.
-  const runtime = createInteractiveAgentStrategy(opts.agent, createOsStrategy());
+  let runtime = createInteractiveAgentStrategy(opts.agent, createOsStrategy());
 
   // Conversation history accumulator — pushes session list +
   // messages to the backend after each turn so mobile's RECENT
   // sheet renders past conversations even though ACP has no on-disk
-  // JSONL the legacy HistoryService can scan.
-  const history = new AcpHistory(publisher, {
+  // JSONL the legacy HistoryService can scan. `let`: rebuilt per-agent
+  // on an in-session switch (the buffer belongs to the OLD conversation).
+  let history = new AcpHistory(publisher, {
     agent: opts.agent,
     acpSessionId,
     // Agent-agnostic RECENT list: enumerate via the ACP session/list RPC (any
@@ -1351,7 +1400,7 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
   // HistoryService so the app can fetch the full transcript and replace a
   // truncated turn. `runtime` is the per-agent strategy (still used for the
   // JSONL history uploader + one-shots), NOT for model listing.
-  const jsonlHistory = new HistoryService(runtime, opts.pluginId, opts.cwd, {
+  let jsonlHistory = new HistoryService(runtime, opts.pluginId, opts.cwd, {
     pluginAuthToken: opts.pluginAuthToken,
   });
 
@@ -1487,7 +1536,7 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
         opts,
         history,
         jsonlHistory,
-        initialize.agentCapabilities,
+        agentCaps,
         turnFiles,
         getBeads,
         publisher,
@@ -1502,10 +1551,125 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
         (id: string) => {
           acpSessionId = id;
         },
+        switchAgentForSession,
+        pendingHandoff,
       );
     },
     { id: opts.agent, name: opts.agent, displayName: opts.agent } as never,
   );
+
+  // ─── In-session agent switch (`switch_agent`) ─────────────────────────────
+  // Context handoff: the tail of the OLD conversation, captured at swap time
+  // and prefixed to the FIRST post-switch prompt (startTaskH consumes it) so
+  // the new agent inherits the session's context — a cross-agent
+  // `session/load` is impossible, this is the continuity mechanism.
+  const HANDOFF_MAX_CHARS = 16_000;
+  const pendingHandoff: { current: string | null } = { current: null };
+  // Env vars produced by the api_key-path credential provisioner (e.g.
+  // OPENAI_API_KEY) — merged into the adapter spawn env; the oauth path
+  // writes login-state files and yields {}.
+  let switchCredentialEnv: Record<string, string> = {};
+
+  /**
+   * Tear down the current adapter and bring `nextAgent` fully up. Shared by
+   * the forward swap AND the revert path (relaunching the prior agent uses
+   * the exact same sequence). Mutates the runner's swappable `let`s only
+   * AFTER the new adapter's start() succeeded, so a failed start leaves the
+   * old references intact for the revert.
+   */
+  const relaunchWith = async (nextAgent: AgentId): Promise<void> => {
+    // Same teardown stop_task uses: cancel any in-flight turn, then flush
+    // the streaming state so mobile never wedges on "Thinking…".
+    try {
+      await client.cancel();
+    } catch {
+      /* no active turn / already stopped */
+    }
+    await streaming.closeAll();
+    const prevAgent = opts.agent;
+    const transcript = history.recentTranscript(HANDOFF_MAX_CHARS);
+    // stop() suppresses onUnexpectedExit for its own kill — without that the
+    // swap's teardown would process.exit(1) the whole session.
+    await client.stop();
+    const adapter = await resolveAcpAdapterWithRetry(nextAgent);
+    if (!adapter) throw new Error(`no ACP adapter available for ${nextAgent}`);
+    const disable1m =
+      loadCliConfig().sessions.find((s) => s.pluginId === opts.pluginId)?.disable1mContext === true;
+    clientOptions.adapter = adapter;
+    clientOptions.extraEnv = {
+      ...computeAdapterExtraEnv({
+        agent: nextAgent,
+        autoApprovePermissions: opts.autoApprovePermissions,
+        disable1mContext: disable1m,
+      }),
+      ...switchCredentialEnv,
+    };
+    const next = new AcpClient(clientOptions);
+    const hs = await next.start();
+    // Success — only now swap the shared state over.
+    client = next;
+    opts.agent = nextAgent;
+    opts.adapter = adapter;
+    acpSessionId = hs.sessionId;
+    agentCaps = hs.initialize.agentCapabilities;
+    runtime = createInteractiveAgentStrategy(nextAgent, createOsStrategy());
+    history = new AcpHistory(publisher, {
+      agent: nextAgent,
+      acpSessionId,
+      listSessions: () => client.listSessions(),
+    });
+    jsonlHistory = new HistoryService(runtime, opts.pluginId, opts.cwd, {
+      pluginAuthToken: opts.pluginAuthToken,
+    });
+    budgetRecovery = makeBudgetRecovery();
+    pendingHandoff.current = buildHandoffPreamble(prevAgent, nextAgent, transcript);
+    // Fresh welcome card so the mobile chat flips to the new agent's brand.
+    void publisher.publishOutput({
+      type: 'agent_banner',
+      agentId: nextAgent,
+      title: 'Welcome back!',
+      subtitle: buildBannerSubtitle(nextAgent, hs.sessionId, hs.model, hs.tier),
+      path: opts.cwd,
+      done: true,
+    });
+  };
+
+  const emitSwitchEvent = makeSerializedSwitchEmitter((type, payload) =>
+    postAgentSwitchEvent({
+      sessionId: opts.sessionId,
+      pluginId: opts.pluginId,
+      pluginAuthToken: opts.pluginAuthToken,
+      type,
+      payload,
+    }),
+  );
+  const switchAgentForSession = (rawAgentId: unknown): Promise<SwitchAgentResult> =>
+    performAgentSwitch(
+      {
+        currentAgent: () => opts.agent,
+        postEvent: emitSwitchEvent,
+        fetchCredential: (agentId) =>
+          fetchProvisionCredential({
+            agentId,
+            sessionId: opts.sessionId,
+            pluginId: opts.pluginId,
+            pluginAuthToken: opts.pluginAuthToken,
+            includeInstallScript: true,
+          }),
+        provisionCredential: (agentId, auth) => {
+          switchCredentialEnv = provisionAgentCredentials(agentId, auth);
+        },
+        ensureBinary: (agentId, installScript) => ensureAgentBinaryForSwitch(agentId, installScript),
+        swapRuntime: relaunchWith,
+        revertRuntime: relaunchWith,
+        persistAgent: (agentId) => setSessionAgent(opts.pluginId, agentId),
+        reannounce: (agentId) => {
+          relay.setAgentMeta({ id: agentId, name: agentId, displayName: agentId } as never);
+          relay.reannounceAgents();
+        },
+      },
+      rawAgentId,
+    );
   // Serialize against the onboarding welcome (#339): wait for its turn to
   // fully close before the relay can start a command turn on the shared
   // StreamingState. Non-fatal internally, so this never rejects.
@@ -1593,6 +1757,12 @@ export async function handleCommand(
   /** resume_session re-points the owner's active-conversation id here —
    *  see AcpSessionContext.onActiveSessionChanged. Optional (tests / baton). */
   onActiveSessionChanged?: (id: string) => void,
+  /** In-session agent switch — provided by runAcpSession only; absent on the
+   *  baton driver (switch is unsupported on local TUI sessions) and in the
+   *  legacy tests. See AcpSessionContext.switchAgent. */
+  switchAgent?: (agentId: unknown) => Promise<SwitchAgentResult>,
+  /** Context-handoff slot the switch fills and start_task consumes. */
+  pendingHandoff?: { current: string | null },
 ): Promise<void> {
   const session: AcpSessionContext = {
     client,
@@ -1610,6 +1780,8 @@ export async function handleCommand(
     budgetRecovery,
     budgetReachedFlag,
     onActiveSessionChanged,
+    switchAgent,
+    pendingHandoff,
   };
   await dispatchAcpCommand(assembleAcpCommandContext(session, cmd));
 }
