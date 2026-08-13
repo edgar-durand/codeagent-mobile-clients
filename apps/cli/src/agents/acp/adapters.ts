@@ -31,8 +31,8 @@ import {
   waitForCursorAgent,
   type WaitForClaudeBinaryOptions,
 } from './agent-binary';
-import { ensureKimiInstalled } from '../kimi/installer';
-import { ensureOpencodeInstalled } from '../opencode/installer';
+import { ensureKimiInstalled, augmentKimiPath } from '../kimi/installer';
+import { ensureOpencodeInstalled, augmentOpencodePath } from '../opencode/installer';
 import { isLocalSession } from '../../baton/gate';
 
 // CommonJS module — `require` is already in scope. Aliased so we
@@ -181,6 +181,13 @@ const REGISTRY: Partial<Record<AgentId, () => AdapterSpec | null>> = {
     // provisions it, so there we just wait for the binary to appear.
     waitForBinary: async (o) => {
       if (isLocalSession()) await ensureKimiInstalled();
+      // ALWAYS fold ~/.kimi-code/bin into this process's PATH before probing:
+      // on a self-hosted box the in-session agent switch installs kimi
+      // mid-run, and the long-running process's PATH predates that dir — a
+      // bare PATH probe (and the later `spawn('kimi')`) would never see the
+      // binary (2026-08-13 fleet-1 live-switch failure). Idempotent no-op
+      // when the dir is already present or kimi isn't installed there.
+      augmentKimiPath();
       return waitForCommandOnPath('kimi', o);
     },
   }),
@@ -196,6 +203,8 @@ const REGISTRY: Partial<Record<AgentId, () => AdapterSpec | null>> = {
     requiresAgentBinary: 'opencode',
     waitForBinary: async (o) => {
       if (isLocalSession()) await ensureOpencodeInstalled();
+      // Same stale-PATH guard as kimi above (~/.opencode/bin).
+      augmentOpencodePath();
       return waitForCommandOnPath('opencode', o);
     },
   }),

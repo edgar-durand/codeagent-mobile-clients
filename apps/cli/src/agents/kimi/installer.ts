@@ -34,12 +34,22 @@ function kimiRuns(): boolean {
 
 /** Add the installer's target dir to THIS process's PATH so the immediate ACP
  *  spawn resolves `kimi` without a shell restart (the installer persists it to
- *  ~/.bashrc, which a non-interactive spawn won't have sourced). */
-function augmentPath(): void {
+ *  ~/.bashrc, which a non-interactive spawn won't have sourced).
+ *
+ *  Exported: the ACP adapter's `waitForBinary` calls this UNCONDITIONALLY
+ *  (not just on local sessions) — on a self-hosted box the in-session agent
+ *  switch installs kimi into `~/.kimi-code/bin` mid-run, and the long-running
+ *  CLI process's PATH predates that dir, so a bare `waitForCommandOnPath`
+ *  probe (and the later `spawn('kimi')`) would never see the binary — the
+ *  2026-08-13 fleet-1 live-switch failure ("installed but never appeared on
+ *  PATH"). Same stale-PATH class `resolveCursorAgentBinary` guards on
+ *  Windows. Idempotent + cheap. */
+export function augmentKimiPath(): void {
   const dir = kimiBinDir();
   const parts = (process.env.PATH ?? '').split(':');
   if (!parts.includes(dir)) process.env.PATH = `${dir}:${process.env.PATH ?? ''}`;
 }
+const augmentPath = augmentKimiPath;
 
 async function runInstaller(): Promise<boolean> {
   return new Promise<boolean>((resolve) => {
