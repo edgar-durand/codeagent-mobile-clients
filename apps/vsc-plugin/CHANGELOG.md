@@ -4,6 +4,16 @@ All notable changes to the CodeAgent Mobile VS Code extension are documented her
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.61.99] — 2026-08-13
+
+### Added
+
+- **cli:** Headroom_usage — relay Headroom's durable token-usage history (#612)
+
+### CI
+
+- Run the full cross-OS matrix weekly, not nightly
+
 ## [2.61.98] — 2026-08-12
 
 ### Fixed
