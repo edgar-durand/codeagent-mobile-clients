@@ -57,6 +57,7 @@ import { configureHeadroom } from '../../services/headroom/configure';
 import { applyBudgetToHeadroom, makeRealApplyBudgetDeps, type BudgetSpec } from '../../services/headroom/budget-relaunch';
 import { fetchWithTimeout, HeadroomStatsReporter, mapStatsToSavings, type StatsShape, type Savings } from '../../services/headroom/stats-reporter';
 import { killHeadroomProxy } from '../../services/headroom/proxy-pid';
+import { readUsageReport } from '../../services/headroom/usage-report';
 import { getGuardrailPolicy, setGuardrailPolicy } from '../../agents/acp/guardrail-config';
 import { AGENT_REGISTRY, isKnownAgentId, normalizeAgentId, PREVIEW_DETECT_PROMPT, USER_EVENTS, type PreviewDetection, type HeadroomBudgetCommand } from '@codeam/shared';
 import * as previewSvc from '../../services/preview';
@@ -1025,6 +1026,36 @@ const vcsAgentReviewH: CommandHandler = async (ctx, cmd, parsed) => {
  *
  * Otherwise: no-op → `{ applied: false }` (no proxy restart, no env mutation).
  */
+/**
+ * `headroom_usage` — return the session's token-usage report, read from the
+ * local Headroom proxy's durable `/stats-history` and trimmed on-box (see
+ * services/headroom/usage-report.ts for the size/fidelity/privacy rationale).
+ *
+ * Read-only and unconditional: it never mutates the proxy and it does NOT gate
+ * on the agent, because the report is about the proxy running HERE. When
+ * Headroom isn't active the proxy simply isn't listening and we answer
+ * `{ available: false }` — an honest empty state instead of an error. The app
+ * only offers the entry point for Headroom-capable agents anyway.
+ */
+const headroomUsageH: CommandHandler = async (ctx, cmd) => {
+  try {
+    const report = await readUsageReport();
+    if (!report) {
+      await ctx.relay.sendResult(cmd.id, 'completed', {
+        available: false,
+        error: 'Headroom is not running in this session.',
+      });
+      return;
+    }
+    await ctx.relay.sendResult(cmd.id, 'completed', { available: true, report });
+  } catch (err) {
+    await ctx.relay.sendResult(cmd.id, 'completed', {
+      available: false,
+      error: (err as Error).message,
+    });
+  }
+};
+
 const headroomBudgetH: CommandHandler = async (ctx, cmd) => {
   const payload = cmd.payload as unknown as HeadroomBudgetCommand;
 
@@ -2258,6 +2289,7 @@ export const handlers: Record<string, CommandHandler> = {
   take_control: takeControlH,
   handback: handbackH,
   headroom_configure: headroomConfigureH,
+  headroom_usage: headroomUsageH,
   coderabbit_configure: coderabbitConfigureH,
   vcs_agent_review: vcsAgentReviewH,
   headroom_budget: headroomBudgetH,

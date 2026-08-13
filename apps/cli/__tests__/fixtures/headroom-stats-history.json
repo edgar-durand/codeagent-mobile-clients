@@ -1,0 +1,282 @@
+{
+  "schema_version": 3,
+  "generated_at": "2026-08-13T11:11:27Z",
+  "storage_path": "/Users/edgardurand/.headroom/proxy_savings.json",
+  "lifetime": {
+    "requests": 29635,
+    "tokens_saved": 274096757,
+    "compression_savings_usd": 1550.712401,
+    "total_input_tokens": 4321853406,
+    "total_input_cost_usd": 6622.807342
+  },
+  "display_session": {
+    "requests": 0,
+    "tokens_saved": 0,
+    "compression_savings_usd": 0,
+    "total_input_tokens": 0,
+    "total_input_cost_usd": 0,
+    "savings_percent": 0,
+    "started_at": null,
+    "last_activity_at": null
+  },
+  "display_session_policy": {
+    "rollover_inactivity_minutes": 60
+  },
+  "history": [
+    {
+      "timestamp": "2026-07-07T20:58:21Z",
+      "provider": "anthropic",
+      "model": "claude-opus-4-8",
+      "total_tokens_saved": 210222770,
+      "compression_savings_usd": 1260.371415,
+      "total_input_tokens": 3257503423,
+      "total_input_cost_usd": 5339.510838
+    },
+    {
+      "timestamp": "2026-07-07T20:59:23Z",
+      "provider": "anthropic",
+      "model": "claude-opus-4-8",
+      "total_tokens_saved": 210256831,
+      "compression_savings_usd": 1260.54172,
+      "total_input_tokens": 3259396990,
+      "total_input_cost_usd": 5343.873803
+    }
+  ],
+  "series": {
+    "hourly": [
+      {
+        "timestamp": "2026-07-15T01:00:00Z",
+        "tokens_saved": 820732,
+        "compression_savings_usd_delta": 4.10366,
+        "total_tokens_saved": 273556716,
+        "compression_savings_usd": 1548.012196,
+        "total_input_tokens_delta": 11556342,
+        "total_input_tokens": 4308240391,
+        "total_input_cost_usd_delta": 22.791621,
+        "total_input_cost_usd": 6587.079673,
+        "by_provider": {
+          "anthropic": {
+            "tokens_saved": 820732,
+            "compression_savings_usd_delta": 4.10366,
+            "total_input_tokens_delta": 11556342,
+            "total_input_cost_usd_delta": 22.791621
+          }
+        },
+        "by_model": {
+          "claude-opus-4-8": {
+            "tokens_saved": 820732,
+            "compression_savings_usd_delta": 4.10366,
+            "total_input_tokens_delta": 11556342,
+            "total_input_cost_usd_delta": 22.791621
+          }
+        }
+      },
+      {
+        "timestamp": "2026-07-15T13:00:00Z",
+        "tokens_saved": 454069,
+        "compression_savings_usd_delta": 2.270345,
+        "total_tokens_saved": 274010785,
+        "compression_savings_usd": 1550.282541,
+        "total_input_tokens_delta": 7103752,
+        "total_input_tokens": 4315344143,
+        "total_input_cost_usd_delta": 13.363377,
+        "total_input_cost_usd": 6600.44305,
+        "by_provider": {
+          "anthropic": {
+            "tokens_saved": 454069,
+            "compression_savings_usd_delta": 2.270345,
+            "total_input_tokens_delta": 7103752,
+            "total_input_cost_usd_delta": 13.363377
+          }
+        },
+        "by_model": {
+          "claude-opus-4-8": {
+            "tokens_saved": 454069,
+            "compression_savings_usd_delta": 2.270345,
+            "total_input_tokens_delta": 7103752,
+            "total_input_cost_usd_delta": 13.363377
+          }
+        }
+      },
+      {
+        "timestamp": "2026-07-15T17:00:00Z",
+        "tokens_saved": 85972,
+        "compression_savings_usd_delta": 0.42986,
+        "total_tokens_saved": 274096757,
+        "compression_savings_usd": 1550.712401,
+        "total_input_tokens_delta": 4501632,
+        "total_input_tokens": 4319845775,
+        "total_input_cost_usd_delta": 21.005722,
+        "total_input_cost_usd": 6621.448772,
+        "by_provider": {
+          "anthropic": {
+            "tokens_saved": 85972,
+            "compression_savings_usd_delta": 0.42986,
+            "total_input_tokens_delta": 4501632,
+            "total_input_cost_usd_delta": 21.005722
+          }
+        },
+        "by_model": {
+          "claude-opus-4-8": {
+            "tokens_saved": 85972,
+            "compression_savings_usd_delta": 0.42986,
+            "total_input_tokens_delta": 4501632,
+            "total_input_cost_usd_delta": 21.005722
+          }
+        }
+      }
+    ],
+    "daily": [
+      {
+        "timestamp": "2026-07-13T00:00:00Z",
+        "tokens_saved": 4127242,
+        "compression_savings_usd_delta": 20.63621,
+        "total_tokens_saved": 272296160,
+        "compression_savings_usd": 1541.709416,
+        "total_input_tokens_delta": 37943589,
+        "total_input_tokens": 4290471371,
+        "total_input_cost_usd_delta": 97.02673,
+        "total_input_cost_usd": 6552.440386,
+        "by_provider": {
+          "anthropic": {
+            "tokens_saved": 4127242,
+            "compression_savings_usd_delta": 20.63621,
+            "total_input_tokens_delta": 37943589,
+            "total_input_cost_usd_delta": 97.02673
+          }
+        },
+        "by_model": {
+          "claude-opus-4-8": {
+            "tokens_saved": 4127242,
+            "compression_savings_usd_delta": 20.63621,
+            "total_input_tokens_delta": 37943589,
+            "total_input_cost_usd_delta": 97.02673
+          }
+        }
+      },
+      {
+        "timestamp": "2026-07-15T00:00:00Z",
+        "tokens_saved": 1800597,
+        "compression_savings_usd_delta": 9.002985,
+        "total_tokens_saved": 274096757,
+        "compression_savings_usd": 1550.712401,
+        "total_input_tokens_delta": 29374404,
+        "total_input_tokens": 4319845775,
+        "total_input_cost_usd_delta": 69.008386,
+        "total_input_cost_usd": 6621.448772,
+        "by_provider": {
+          "anthropic": {
+            "tokens_saved": 1800597,
+            "compression_savings_usd_delta": 9.002985,
+            "total_input_tokens_delta": 29374404,
+            "total_input_cost_usd_delta": 69.008386
+          }
+        },
+        "by_model": {
+          "claude-opus-4-8": {
+            "tokens_saved": 1800597,
+            "compression_savings_usd_delta": 9.002985,
+            "total_input_tokens_delta": 29374404,
+            "total_input_cost_usd_delta": 69.008386
+          }
+        }
+      }
+    ],
+    "weekly": [
+      {
+        "timestamp": "2026-07-13T00:00:00Z",
+        "tokens_saved": 5927839,
+        "compression_savings_usd_delta": 29.639195,
+        "total_tokens_saved": 274096757,
+        "compression_savings_usd": 1550.712401,
+        "total_input_tokens_delta": 67317993,
+        "total_input_tokens": 4319845775,
+        "total_input_cost_usd_delta": 166.035116,
+        "total_input_cost_usd": 6621.448772,
+        "by_provider": {
+          "anthropic": {
+            "tokens_saved": 5927839,
+            "compression_savings_usd_delta": 29.639195,
+            "total_input_tokens_delta": 67317993,
+            "total_input_cost_usd_delta": 166.035116
+          }
+        },
+        "by_model": {
+          "claude-opus-4-8": {
+            "tokens_saved": 5927839,
+            "compression_savings_usd_delta": 29.639195,
+            "total_input_tokens_delta": 67317993,
+            "total_input_cost_usd_delta": 166.035116
+          }
+        }
+      }
+    ],
+    "monthly": [
+      {
+        "timestamp": "2026-07-01T00:00:00Z",
+        "tokens_saved": 274096757,
+        "compression_savings_usd_delta": 1550.712401,
+        "total_tokens_saved": 274096757,
+        "compression_savings_usd": 1550.712401,
+        "total_input_tokens_delta": 4319845775,
+        "total_input_tokens": 4319845775,
+        "total_input_cost_usd_delta": 6621.448772,
+        "total_input_cost_usd": 6621.448772,
+        "by_provider": {
+          "anthropic": {
+            "tokens_saved": 274096757,
+            "compression_savings_usd_delta": 1550.712401,
+            "total_input_tokens_delta": 4319845775,
+            "total_input_cost_usd_delta": 6621.448772
+          }
+        },
+        "by_model": {
+          "claude-opus-4-8": {
+            "tokens_saved": 264425224,
+            "compression_savings_usd_delta": 1531.383685,
+            "total_input_tokens_delta": 4233671576,
+            "total_input_cost_usd_delta": 6580.84345
+          },
+          "claude-sonnet-5": {
+            "tokens_saved": 9657183,
+            "compression_savings_usd_delta": 19.314366,
+            "total_input_tokens_delta": 85956761,
+            "total_input_cost_usd_delta": 40.510597
+          },
+          "claude-haiku-4-5-20251001": {
+            "tokens_saved": 14350,
+            "compression_savings_usd_delta": 0.01435,
+            "total_input_tokens_delta": 217438,
+            "total_input_cost_usd_delta": 0.094725
+          }
+        }
+      }
+    ]
+  },
+  "exports": {
+    "default_format": "json",
+    "available_formats": [
+      "json",
+      "csv"
+    ],
+    "available_series": [
+      "history",
+      "hourly",
+      "daily",
+      "weekly",
+      "monthly"
+    ]
+  },
+  "retention": {
+    "max_history_points": 5000,
+    "max_history_age_days": 365,
+    "max_response_history_points": 500
+  },
+  "projects": {},
+  "history_summary": {
+    "mode": "compact",
+    "stored_points": 5000,
+    "returned_points": 499,
+    "compacted": true
+  }
+}
