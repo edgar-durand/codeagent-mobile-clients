@@ -98,6 +98,8 @@ export function readLocalMcpServers(): McpServer[] {
   const servers: McpServer[] = [];
   let sawInvalid = false;
   let sawTruncated = false;
+  let sawDuplicate = false;
+  const seenNames = new Set<string>();
   for (const entry of parsed as RawLocalMcpServer[]) {
     if (servers.length >= MAX_LOCAL_MCP_SERVERS) {
       sawTruncated = true;
@@ -112,7 +114,21 @@ export function readLocalMcpServers(): McpServer[] {
       sawInvalid = true;
       continue;
     }
+    if (seenNames.has(entry.name)) {
+      // Within-file name collision: keep the first, skip the rest (mirrors the
+      // integration-wins rule at the merge layer).
+      sawDuplicate = true;
+      continue;
+    }
+    seenNames.add(entry.name);
     servers.push({ name: entry.name, command: entry.command, args: entry.args, env });
+  }
+
+  if (sawDuplicate) {
+    log.warn(
+      'localMcp',
+      '~/.codeam/mcp-servers.json has duplicate server names — kept the first of each',
+    );
   }
 
   if (sawInvalid) {

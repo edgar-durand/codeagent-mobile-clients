@@ -162,3 +162,19 @@ describe('mergeWithLocalMcpServers', () => {
     expect(warnSpy).toHaveBeenCalledWith('localMcp', expect.stringContaining('collides'));
   });
 });
+
+describe('readLocalMcpServers — within-file duplicate names', () => {
+  it('keeps the first entry of a duplicated name and warns', () => {
+    writeConfig(
+      JSON.stringify([
+        { name: 'dup', command: '/bin/first', args: [] },
+        { name: 'dup', command: '/bin/second', args: [] },
+        { name: 'other', command: '/bin/other', args: [] },
+      ]),
+    );
+    const servers = readLocalMcpServers();
+    expect(servers.map((s) => s.name)).toEqual(['dup', 'other']);
+    expect((servers[0] as McpServerStdio).command).toBe('/bin/first');
+    expect(warnSpy).toHaveBeenCalledWith('localMcp', expect.stringContaining('duplicate'));
+  });
+});
