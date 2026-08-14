@@ -34,6 +34,71 @@ export interface HandoffProposal {
   toAgentId: string;
   reason: string;
   prompt: string;
+  /**
+   * Autonomous mode (P2-2): the CLI accepted this proposal ITSELF instead of
+   * emitting the tap-to-accept card. Mobile renders a passive timeline notice
+   * for `auto: true`, never the accept card. Absent = the v1 card flow.
+   */
+  auto?: boolean;
+  /** Hops still available in the current chain when this fired (`auto` only). */
+  hopsRemaining?: number;
+}
+
+/** `handoff_resolved` event payload. `auto` mirrors {@link HandoffProposal}. */
+export interface HandoffResolution {
+  proposalId: string;
+  accepted: boolean;
+  auto?: boolean;
+}
+
+// ─── Autonomous chained handoffs (P2-2, PRO) ───────────────────────────────
+
+/** Relay command: read/write the session's autonomous-handoff mode. */
+export const SQUAD_CONFIGURE_COMMAND = 'squad_configure';
+/** Relay command: per-member activity for the "Squad activity" screen. */
+export const SQUAD_STATS_COMMAND = 'squad_stats';
+
+export const SQUAD_HOP_BUDGET_DEFAULT = 3;
+export const SQUAD_HOP_BUDGET_MIN = 1;
+export const SQUAD_HOP_BUDGET_MAX = 10;
+
+/**
+ * Clamp a caller-supplied hop budget into the supported range, falling back to
+ * the default for a missing / non-finite value. The ONE place the bound lives —
+ * the CLI's config mutator and its `squad_configure` handler both call it.
+ */
+export function clampHopBudget(value: unknown): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return SQUAD_HOP_BUDGET_DEFAULT;
+  return Math.min(SQUAD_HOP_BUDGET_MAX, Math.max(SQUAD_HOP_BUDGET_MIN, Math.round(value)));
+}
+
+/** Persisted per-session autonomous-handoff mode. Default OFF. */
+export interface SquadAutoConfig {
+  enabled: boolean;
+  hopBudget: number;
+}
+
+export type SquadConfigurePayload =
+  { action: 'set'; autoHandoffs: boolean; hopBudget?: number } | { action: 'status' };
+
+/** Ack of {@link SQUAD_CONFIGURE_COMMAND} — the state AFTER the command. */
+export interface SquadConfigureResult extends SquadAutoConfig {
+  /** Hops left in the current chain (resets on every user prompt). */
+  hopsRemaining: number;
+}
+
+export interface SquadMemberActivity {
+  agentId: string;
+  turns: number;
+  /** DISTINCT paths this member touched across its journaled turns. */
+  filesTouched: number;
+}
+
+/** Ack of {@link SQUAD_STATS_COMMAND}. No cost attribution in v1. */
+export interface SquadStatsResult {
+  members: SquadMemberActivity[];
+  handoffs: { proposed: number; accepted: number; auto: number };
+  sinceTurn: number;
 }
 
 /** Per-agent specialty blurbs for the team preamble. Copy, not routing. */

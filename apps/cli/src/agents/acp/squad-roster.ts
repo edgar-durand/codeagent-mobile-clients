@@ -18,7 +18,16 @@
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { HANDOFF_FENCE_TAG, SQUAD_SPECIALTIES, type SquadRosterData } from '@codeam/shared';
+import {
+  HANDOFF_FENCE_TAG,
+  SQUAD_HOP_BUDGET_DEFAULT,
+  SQUAD_SPECIALTIES,
+  clampHopBudget,
+  type SquadAutoConfig,
+  type SquadMemberActivity,
+  type SquadRosterData,
+  type SquadStatsResult,
+} from '@codeam/shared';
 
 export interface SquadMemberState {
   /** The agent's OWN conversation id, for --resume via loadSession. */
@@ -92,13 +101,94 @@ export class SquadState {
   /** Set by the caller after fetchSquadRoster; null until then. */
   roster: SquadRosterData | null = null;
 
+  /**
+   * Autonomous chained handoffs (P2-2, PRO). Seeded from the persisted
+   * `SavedSession.squadAuto` at session start and rewritten by
+   * `squad_configure`. Read-only to callers — mutate via {@link setAuto}, which
+   * clamps the budget and re-arms the chain.
+   */
+  private autoConfig: SquadAutoConfig = { enabled: false, hopBudget: SQUAD_HOP_BUDGET_DEFAULT };
+
+  /**
+   * Hops left in the CURRENT chain. Reset to the budget on every USER-initiated
+   * prompt (so a user turn always interrupts and re-arms) and decremented by
+   * each self-accepted handoff.
+   */
+  private hopsLeft = 0;
+
+  /** Lifetime handoff counters for `squad_stats` (in-memory, this process). */
+  private readonly handoffCounters = { proposed: 0, accepted: 0, auto: 0 };
+
   private readonly journalPath: string;
   private turns: SquadJournalEntry[];
   private readonly members = new Map<string, SquadMemberState>();
 
-  constructor(opts: { sessionId: string; homeDir?: string }) {
+  constructor(opts: { sessionId: string; homeDir?: string; auto?: SquadAutoConfig | null }) {
     this.journalPath = journalPathFor(opts.homeDir ?? os.homedir(), opts.sessionId);
     this.turns = loadJournal(this.journalPath);
+    if (opts.auto) this.setAuto(opts.auto);
+  }
+
+  get auto(): Readonly<SquadAutoConfig> {
+    return this.autoConfig;
+  }
+
+  /** Apply a new mode (clamping the budget) and re-arm the chain. */
+  setAuto(value: SquadAutoConfig): SquadAutoConfig {
+    this.autoConfig = {
+      enabled: value.enabled === true,
+      hopBudget: clampHopBudget(value.hopBudget),
+    };
+    this.resetHops();
+    return this.autoConfig;
+  }
+
+  hopsRemaining(): number {
+    return this.hopsLeft;
+  }
+
+  /** Re-arm the chain — called at the start of every USER-initiated turn. */
+  resetHops(): void {
+    this.hopsLeft = this.autoConfig.enabled ? this.autoConfig.hopBudget : 0;
+  }
+
+  /** Spend one hop on a self-accepted handoff. */
+  consumeHop(): void {
+    if (this.hopsLeft > 0) this.hopsLeft -= 1;
+  }
+
+  countProposal(opts: { auto: boolean }): void {
+    this.handoffCounters.proposed += 1;
+    if (opts.auto) this.handoffCounters.auto += 1;
+  }
+
+  countAccepted(): void {
+    this.handoffCounters.accepted += 1;
+  }
+
+  /**
+   * Per-member activity for the `squad_stats` relay command, derived from the
+   * journal (the same shared history the delta briefing reads) plus the
+   * in-memory handoff counters. `filesTouched` counts DISTINCT paths — a member
+   * that edited the same file across three turns touched ONE file.
+   */
+  stats(): SquadStatsResult {
+    const byAgent = new Map<string, { turns: number; files: Set<string> }>();
+    for (const t of this.turns) {
+      let row = byAgent.get(t.agentId);
+      if (!row) {
+        row = { turns: 0, files: new Set() };
+        byAgent.set(t.agentId, row);
+      }
+      row.turns += 1;
+      for (const f of t.filesTouched) row.files.add(f);
+    }
+    const members: SquadMemberActivity[] = [...byAgent.entries()].map(([agentId, row]) => ({
+      agentId,
+      turns: row.turns,
+      filesTouched: row.files.size,
+    }));
+    return { members, handoffs: { ...this.handoffCounters }, sinceTurn: 1 };
   }
 
   /** Returns (creating on first access) the mutable per-agent state. */

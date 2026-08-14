@@ -75,7 +75,7 @@ import { getGuardrailPolicy } from './guardrail-config';
 import { isLocalSession } from '../../baton/gate';
 import { extractSelectPrompt } from './selectPromptExtractor';
 import { prewarmPreviewDetection } from '../../commands/start/handlers';
-import { loadCliConfig, setSessionAgent } from '../../config';
+import { getSquadAuto, loadCliConfig, setSessionAgent } from '../../config';
 import { FileWatcherService } from '../../services/file-watcher.service';
 import { TurnFileAggregator } from '../../services/turn-files/turn-file-aggregator';
 import type { StartedBeads } from '../../beads';
@@ -1646,7 +1646,12 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
   // ─── Agent Squad (@-mention routing + agent-proposed handoffs) ────────────
   // Per-agent provisioning/conversation bookkeeping + the shared turn journal
   // (persisted under ~/.codeam so a CLI restart keeps the team's history).
-  const squad = new SquadState({ sessionId: opts.sessionId });
+  // Seeded with the session's PERSISTED autonomous-handoff mode so a CLI
+  // restart resumes in the mode the user chose (default OFF when unset).
+  const squad = new SquadState({
+    sessionId: opts.sessionId,
+    auto: getSquadAuto(opts.pluginId),
+  });
   // The roster is a BACKEND fact (which agents the user linked + whether the
   // plan allows handoffs). Fire-and-forget at session start so a slow/offline
   // roster fetch never delays the first turn; every squad feature no-ops
