@@ -98,6 +98,8 @@ import {
   dispatchAcpCommand,
   recoverFromFailedTurn,
   type AcpSessionContext,
+  type AcpSessionHandles,
+  type SquadRouteOutcome,
 } from './command-handlers';
 
 // ─── Re-exports (Phase 3 extraction, bd codeagent-2sa) ────────────────────
@@ -1739,8 +1741,25 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
       relay.reannounceAgents();
     },
   };
-  const switchAgentForSession = (rawAgentId: unknown): Promise<SwitchAgentResult> =>
-    performAgentSwitch(switchDeps, rawAgentId);
+  const switchAgentForSession = async (rawAgentId: unknown): Promise<SwitchAgentResult> => {
+    const result = await performAgentSwitch(switchDeps, rawAgentId);
+    // Same reason routeToAgent re-fetches: the squad's membership/plan can
+    // change mid-session, and the agent that just took over reads the roster
+    // for its team preamble on its first turn.
+    if (result.ok) refreshSquadRoster();
+    return result;
+  };
+
+  /** Snapshot of the runner's swappable session handles — what a command
+   *  context must rebind to after a swap (see AcpSessionHandles). */
+  const sessionHandles = (): AcpSessionHandles => ({
+    client,
+    acpSessionId,
+    history,
+    jsonlHistory,
+    agentCaps,
+    budgetRecovery,
+  });
 
   /**
    * Agent Squad routing: swap onto `target` for ONE relayed `start_task`.
@@ -1758,11 +1777,16 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
    *     so it continues with its own memory and needs no handoff preamble.
    *     Agents without `loadSession`, or a failed load, keep the fresh
    *     `session/new` + preamble the switch already prepared.
+   *
+   * ⚠️ ALWAYS returns the post-swap {@link AcpSessionHandles} — on failure too
+   * (the revert relaunches the prior agent, replacing the same handles). The
+   * caller's command context is a snapshot and MUST rebind to them, or the
+   * turn runs against the adapter this swap already stopped.
    */
   const routeToAgent = async (
     target: string,
     routeOpts: { skipFastPath?: boolean } = {},
-  ): Promise<SwitchAgentResult> => {
+  ): Promise<SquadRouteOutcome> => {
     const m = squad.member(target);
     const fast = routeOpts.skipFastPath !== true;
     const result = await performAgentSwitch(switchDeps, target, {
@@ -1776,7 +1800,7 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
         m.provisioned = false;
         m.binaryVerified = false;
       }
-      return result;
+      return { result, handles: sessionHandles() };
     }
     m.provisioned = true;
     m.binaryVerified = true;
@@ -1803,7 +1827,9 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
     }
     // Membership/plan can change mid-session (a teammate linked, PRO started).
     refreshSquadRoster();
-    return result;
+    // Handles are read AFTER relaunchWith + the optional resume, so they are
+    // the new agent's client/history/caps and the resumed conversation id.
+    return { result, handles: sessionHandles() };
   };
   // Serialize against the onboarding welcome (#339): wait for its turn to
   // fully close before the relay can start a command turn on the shared
@@ -1901,10 +1927,7 @@ export async function handleCommand(
   /** Agent Squad roster + turn journal. See AcpSessionContext.squad. */
   squad?: SquadState,
   /** Agent Squad @-mention routing. See AcpSessionContext.routeToAgent. */
-  routeToAgent?: (
-    agentId: string,
-    opts?: { skipFastPath?: boolean },
-  ) => Promise<SwitchAgentResult>,
+  routeToAgent?: (agentId: string, opts?: { skipFastPath?: boolean }) => Promise<SquadRouteOutcome>,
   /** Single-slot agent-proposed handoff. See AcpSessionContext.pendingProposal. */
   pendingProposal?: { current: HandoffProposal | null },
   /** Serialized squad/handoff event emitter. See AcpSessionContext.postSquadEvent. */

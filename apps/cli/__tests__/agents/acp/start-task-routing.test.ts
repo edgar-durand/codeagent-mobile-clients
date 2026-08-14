@@ -56,14 +56,39 @@ function makeCtx(over: CtxOverrides = {}) {
   const replyText = over.replyText ?? 'All done.';
   const routeResults = [...(over.routeResults ?? [])];
 
-  const client = {
-    prompt: vi.fn(async (blocks: Array<{ type: string; text?: string }>) => {
-      calls.push('prompt');
-      promptedBlocks.push(blocks);
-      return { stopReason: 'end_turn' };
-    }),
-    cancel: vi.fn(async () => undefined),
+  /**
+   * A swap REPLACES the client: `relaunchWith` stops the old adapter — which
+   * nulls its connection + session id — and spawns a new one. So the fake
+   * models a real AcpClient: once stopped, `prompt` throws exactly what the
+   * SDK-backed client throws, and the routed turn MUST land on the new
+   * instance. (A fake that only mutated `opts.agent` hid the real bug.)
+   */
+  const makeClient = (label: string) => {
+    let stopped = false;
+    return {
+      label,
+      stop: () => {
+        stopped = true;
+      },
+      prompt: vi.fn(async (blocks: Array<{ type: string; text?: string }>) => {
+        if (stopped) throw new Error('AcpClient.prompt called before start()');
+        calls.push(`prompt@${label}`);
+        promptedBlocks.push(blocks);
+        return { stopReason: 'end_turn' };
+      }),
+      cancel: vi.fn(async () => undefined),
+    };
   };
+  const makeHistory = (label: string) => ({
+    label,
+    appendUserPrompt: vi.fn(),
+    appendAgentReply: vi.fn(),
+    flush: vi.fn(async () => undefined),
+  });
+
+  const client = makeClient('claude');
+  /** Every client/history the fake swap has produced, oldest first. */
+  const clients = [client];
   const relay = {
     sendResult: vi.fn(async (_id: string, status: string) => {
       calls.push(`ack:${status}`);
@@ -77,17 +102,43 @@ function makeCtx(over: CtxOverrides = {}) {
     closeWithBubble: vi.fn(async () => undefined),
     closeAll: vi.fn(async () => undefined),
   };
-  const history = {
-    appendUserPrompt: vi.fn(),
-    appendAgentReply: vi.fn(),
-    flush: vi.fn(async () => undefined),
-  };
+  const history = makeHistory('claude');
+  const histories = [history];
   const opts = { agent: over.agent ?? 'claude', sessionId: 's1', pluginId: 'p1' };
+  /**
+   * Mirrors `runAcpSession`'s `routeToAgent` faithfully: it tears the old
+   * adapter down and hands back the POST-SWAP handles the caller must rebind
+   * onto its (snapshot) command context — on failure too, since the revert
+   * relaunches the prior agent and replaces the same handles.
+   */
   const routeToAgent = vi.fn(async (agentId: string, o?: { skipFastPath?: boolean }) => {
     calls.push(`route:${agentId}${o?.skipFastPath ? ':full' : ':fast'}`);
-    const next = routeResults.shift() ?? { ok: true, agentId };
-    if (next.ok) opts.agent = agentId; // mirror the runner's swap of the live agent
-    return next;
+    const result = routeResults.shift() ?? { ok: true, agentId };
+    // Both the swap and its revert stop the running client and spawn a new one.
+    clients[clients.length - 1].stop();
+    const nextAgent = result.ok ? agentId : opts.agent;
+    const nextClient = makeClient(nextAgent);
+    const nextHistory = makeHistory(nextAgent);
+    clients.push(nextClient);
+    histories.push(nextHistory);
+    if (result.ok) opts.agent = agentId;
+    return {
+      // Spread the SwitchAgentResult alongside the outcome so this fake also
+      // satisfies the pre-rebind contract (`{ok, agentId, error}`). That's
+      // what makes the tests below a regression guard for the STALE-HANDLE
+      // bug specifically — against the old handler they get past the route
+      // and then prompt the stopped client, exactly as production did.
+      ...result,
+      result,
+      handles: {
+        client: nextClient,
+        acpSessionId: `conv-${clients.length}`,
+        history: nextHistory,
+        jsonlHistory: {},
+        agentCaps: { loadSession: true },
+        budgetRecovery: { offer: vi.fn(), tryRecover: vi.fn(async () => false) },
+      },
+    };
   });
   const squad = over.squad ?? new SquadState({ sessionId: 's1', homeDir });
   if (over.roster !== null) squad.roster = over.roster ?? ROSTER;
@@ -122,6 +173,9 @@ function makeCtx(over: CtxOverrides = {}) {
     session,
     calls,
     client,
+    clients,
+    history,
+    histories,
     relay,
     routeToAgent,
     squad,
@@ -150,14 +204,56 @@ function texts(blocks: Array<{ type: string; text?: string }>): string[] {
 
 describe('start_task — agentId routing', () => {
   it('swaps onto the mentioned agent BEFORE prompting', async () => {
-    const { session, calls, routeToAgent, client } = makeCtx();
+    const { session, calls, routeToAgent, clients } = makeCtx();
     await dispatchAcpCommand(
       assembleAcpCommandContext(session, startTask({ prompt: 'fix the test', agentId: 'codex' })),
     );
     expect(routeToAgent).toHaveBeenCalledWith('codex');
-    expect(client.prompt).toHaveBeenCalledOnce();
-    expect(calls.indexOf('route:codex:fast')).toBeLessThan(calls.indexOf('prompt'));
+    expect(calls.indexOf('route:codex:fast')).toBeLessThan(calls.indexOf('prompt@codex'));
     expect(calls).toContain('ack:completed');
+  });
+
+  it('prompts the POST-SWAP client, never the one the swap stopped', async () => {
+    // The command context is a `{...session, cmd}` SNAPSHOT: without rebinding
+    // it to the runner's new handles, this turn talks to the stopped adapter
+    // and dies with "AcpClient.prompt called before start()".
+    const { session, clients, histories, relay } = makeCtx();
+    await dispatchAcpCommand(
+      assembleAcpCommandContext(session, startTask({ prompt: 'fix the test', agentId: 'codex' })),
+    );
+    const [stopped, live] = clients;
+    expect(clients).toHaveLength(2);
+    expect(stopped.prompt).not.toHaveBeenCalled();
+    expect(live.prompt).toHaveBeenCalledOnce();
+    expect(relay.sendResult).toHaveBeenCalledWith('cmd-1', 'completed', {
+      stopReason: 'end_turn',
+    });
+    // …and the conversation is recorded in the NEW agent's accumulator, not
+    // the discarded one.
+    const [discarded, current] = histories;
+    expect(discarded.appendUserPrompt).not.toHaveBeenCalled();
+    expect(discarded.appendAgentReply).not.toHaveBeenCalled();
+    expect(current.appendUserPrompt).toHaveBeenCalledWith('fix the test');
+    expect(current.appendAgentReply).toHaveBeenCalledWith('All done.');
+  });
+
+  it('rebinds again after the full-path retry (the SECOND new client prompts)', async () => {
+    const squad = new SquadState({ sessionId: 's1', homeDir });
+    squad.member('codex').provisioned = true;
+    const { session, clients } = makeCtx({
+      squad,
+      routeResults: [
+        { ok: false, agentId: 'codex', error: 'expired credential' },
+        { ok: true, agentId: 'codex' },
+      ],
+    });
+    await dispatchAcpCommand(
+      assembleAcpCommandContext(session, startTask({ prompt: 'go', agentId: 'codex' })),
+    );
+    expect(clients).toHaveLength(3); // original + revert + retry
+    expect(clients[0].prompt).not.toHaveBeenCalled();
+    expect(clients[1].prompt).not.toHaveBeenCalled();
+    expect(clients[2].prompt).toHaveBeenCalledOnce();
   });
 
   it('does not route when the mentioned agent IS the current one', async () => {
@@ -227,7 +323,7 @@ describe('start_task — agentId routing', () => {
   it('a recovered fast-path failure still runs the prompt on the routed agent', async () => {
     const squad = new SquadState({ sessionId: 's1', homeDir });
     squad.member('codex').provisioned = true;
-    const { session, calls, client } = makeCtx({
+    const { session, calls, clients } = makeCtx({
       squad,
       routeResults: [
         { ok: false, agentId: 'codex', error: 'expired credential' },
@@ -237,8 +333,13 @@ describe('start_task — agentId routing', () => {
     await dispatchAcpCommand(
       assembleAcpCommandContext(session, startTask({ prompt: 'go', agentId: 'codex' })),
     );
-    expect(client.prompt).toHaveBeenCalledOnce();
-    expect(calls).toEqual(['route:codex:fast', 'route:codex:full', 'prompt', 'ack:completed']);
+    expect(clients.at(-1)?.prompt).toHaveBeenCalledOnce();
+    expect(calls).toEqual([
+      'route:codex:fast',
+      'route:codex:full',
+      'prompt@codex',
+      'ack:completed',
+    ]);
   });
 });
 

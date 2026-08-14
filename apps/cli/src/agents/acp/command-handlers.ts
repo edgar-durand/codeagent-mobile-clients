@@ -133,11 +133,11 @@ export interface AcpSessionContext {
    * conversation resume when the member has its own transcript).
    * `skipFastPath` forces the full credential/install sequence — the ONE
    * retry after a fast-path failure (an expired credential).
+   *
+   * ⚠️ Returns the runner's POST-SWAP {@link AcpSessionHandles} alongside the
+   * result — see {@link SquadRouteOutcome} for why the caller MUST rebind.
    */
-  routeToAgent?: (
-    agentId: string,
-    opts?: { skipFastPath?: boolean },
-  ) => Promise<import('@codeam/shared').SwitchAgentResult>;
+  routeToAgent?: (agentId: string, opts?: { skipFastPath?: boolean }) => Promise<SquadRouteOutcome>;
   /** At most ONE un-resolved agent-proposed handoff at a time. */
   pendingProposal?: { current: HandoffProposal | null };
   /** Serialized emitter — the SAME chain the switch events ride, so a
@@ -146,6 +146,32 @@ export interface AcpSessionContext {
     type: 'handoff_proposed' | 'handoff_resolved',
     payload: Record<string, unknown>,
   ) => Promise<unknown>;
+}
+
+/**
+ * The session handles an agent swap REPLACES. `relaunchWith` stops the old
+ * adapter (which nulls its connection + session id) and reassigns the runner's
+ * swappable `let`s — but an {@link AcpCommandContext} is a plain `{...session,
+ * cmd}` SNAPSHOT taken before the command ran, so a handler that swapped
+ * mid-command still holds the DEAD ones. Every one of these must be rebound
+ * after a successful route or the turn runs against a stopped client
+ * ("AcpClient.prompt called before start()"), writes history into a discarded
+ * accumulator, and loses the freshly-built handoff preamble.
+ */
+export type AcpSessionHandles = Pick<
+  AcpSessionContext,
+  'client' | 'acpSessionId' | 'history' | 'jsonlHistory' | 'agentCaps' | 'budgetRecovery'
+>;
+
+/**
+ * Result of a squad route: the switch outcome PLUS the post-swap handles the
+ * caller must rebind onto its context. `handles` is returned on FAILURE too —
+ * a failed swap runs the revert, which relaunches the prior agent and
+ * therefore replaces the same handles.
+ */
+export interface SquadRouteOutcome {
+  result: import('@codeam/shared').SwitchAgentResult;
+  handles: AcpSessionHandles;
 }
 
 /**
@@ -334,6 +360,19 @@ async function beadsActionH(ctx: AcpCommandContext): Promise<void> {
  * retried — an identical second attempt only costs another adapter restart
  * (and another revert) for the same failure.
  */
+/**
+ * Point the live command context at the post-swap session handles. The
+ * context is a snapshot, so this is the ONLY thing that keeps a routed turn
+ * talking to the agent that is actually running (see {@link AcpSessionHandles}).
+ */
+function rebindSessionHandles(
+  ctx: AcpCommandContext,
+  outcome: SquadRouteOutcome,
+): SquadRouteOutcome {
+  Object.assign(ctx, outcome.handles);
+  return outcome;
+}
+
 async function routeSquadTask(
   ctx: AcpCommandContext,
   target: string,
@@ -351,13 +390,16 @@ async function routeSquadTask(
   }
   const member = squad?.member(target);
   const fastPathArmed = Boolean(member && (member.provisioned || member.binaryVerified));
-  let result = await routeToAgent(target);
+  // REBIND after every attempt (including failures — the revert relaunches the
+  // prior agent, replacing the same handles). Without this the rest of the
+  // command runs against the client the swap already stopped.
+  let { result } = rebindSessionHandles(ctx, await routeToAgent(target));
   if (!result.ok && fastPathArmed) {
     log.warn(
       'acpRunner',
       `squad: fast-path route to ${target} failed (${result.error}) — retrying full path`,
     );
-    result = await routeToAgent(target, { skipFastPath: true });
+    ({ result } = rebindSessionHandles(ctx, await routeToAgent(target, { skipFastPath: true })));
   }
   if (!result.ok) {
     // `SwitchAgentResult.error` is optional on the wire type; every failure
@@ -494,19 +536,13 @@ function emitHandoffProposal(
 }
 
 async function startTaskH(ctx: AcpCommandContext): Promise<void> {
-  const {
-    cmd,
-    client,
-    relay,
-    streaming,
-    opts,
-    history,
-    turnFiles,
-    publisher,
-    recentStderr,
-    budgetRecovery,
-    budgetReachedFlag,
-  } = ctx;
+  // Only the handles a swap can NEVER replace are destructured up front —
+  // `relaunchWith` reassigns client / history / jsonlHistory / agentCaps /
+  // budgetRecovery, so those are read from `ctx` AFTER the routing block below
+  // (see {@link AcpSessionHandles}); destructuring them here would pin this
+  // turn to the adapter the swap just stopped.
+  const { cmd, relay, streaming, opts, turnFiles, publisher, recentStderr, budgetReachedFlag } =
+    ctx;
   const payload = cmd.payload as StartTaskPayload | undefined;
   const blocks = buildAcpPromptBlocks(payload ?? {});
   if (blocks.length === 0) {
@@ -531,6 +567,9 @@ async function startTaskH(ctx: AcpCommandContext): Promise<void> {
       return;
     }
   }
+  // Post-routing handles: on a routed turn these are the NEW agent's (the
+  // routing block rebound `ctx`); on a normal turn they're unchanged.
+  const { client, history, budgetRecovery } = ctx;
   const promptText = blocks
     .filter((b): b is { type: 'text'; text: string } => b.type === 'text')
     .map((b) => b.text)
