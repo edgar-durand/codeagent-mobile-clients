@@ -40,8 +40,8 @@ import {
 } from '../../integrations/manifest';
 import { buildMcpServersForStart } from '../../integrations/provision';
 import { detectRepoStack } from '../../integrations/detect-stack';
-import type { HandoffProposal, IntegrationsManifest } from '@codeam/shared';
-import type { SquadState } from './squad-roster';
+import type { HandoffProposal, IntegrationsManifest, StartTaskPayload } from '@codeam/shared';
+import { buildDeltaBriefing, buildTeamPreamble, type SquadState } from './squad-roster';
 import { execFile } from 'node:child_process';
 import {
   handlers as legacyHandlers,
@@ -320,6 +320,111 @@ async function beadsActionH(ctx: AcpCommandContext): Promise<void> {
   return;
 }
 
+// ─── Agent Squad helpers (start_task routing / prefixes / journal) ─────────
+
+/**
+ * Swap the live session onto the @-mentioned squad member before its task
+ * runs. Refuses honestly instead of silently answering with the WRONG agent —
+ * a mention that lands on the current agent is the caller's business (no-op).
+ *
+ * A fast-path swap (member already provisioned + binary-verified THIS process)
+ * can fail on a credential that expired since then; that is retried ONCE on
+ * the full path. A first attempt that already ran the full sequence is NOT
+ * retried — an identical second attempt only costs another adapter restart
+ * (and another revert) for the same failure.
+ */
+async function routeSquadTask(
+  ctx: AcpCommandContext,
+  target: string,
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  const { squad, routeToAgent } = ctx;
+  if (!routeToAgent) {
+    return { ok: false, error: 'Routing to another agent is not supported on this session.' };
+  }
+  // The roster is the authority on membership when we have one. Without it
+  // (old backend / offline) `performAgentSwitch`'s own validation still
+  // rejects unknown / non-switchable ids honestly.
+  const roster = squad?.roster;
+  if (roster && !roster.agents.some((a) => a.agentId === target)) {
+    return { ok: false, error: `Unknown agent '${target}' — not in your squad.` };
+  }
+  const member = squad?.member(target);
+  const fastPathArmed = Boolean(member && (member.provisioned || member.binaryVerified));
+  let result = await routeToAgent(target);
+  if (!result.ok && fastPathArmed) {
+    log.warn(
+      'acpRunner',
+      `squad: fast-path route to ${target} failed (${result.error}) — retrying full path`,
+    );
+    result = await routeToAgent(target, { skipFastPath: true });
+  }
+  if (!result.ok) {
+    // `SwitchAgentResult.error` is optional on the wire type; every failure
+    // path in performAgentSwitch sets it, so the fallback is belt-and-braces
+    // against an empty ack the mobile would render as a blank error.
+    return { ok: false, error: result.error ?? `Couldn't switch to ${target}.` };
+  }
+  return { ok: true };
+}
+
+/**
+ * Prefix the squad context blocks onto a turn, in the order the agent reads
+ * them: `[team preamble?, delta briefing?, pending handoff?, ...user blocks]`
+ * (composed by unshifting in reverse). Each piece is conditional:
+ *
+ *  - **team preamble** — once per member, on its FIRST turn this process
+ *    (`lastTurnIndex === 0`); tells it who else is on the squad and, when the
+ *    plan allows, how to propose a handoff.
+ *  - **delta briefing** — only when OTHER agents journaled turns this member
+ *    hasn't seen (`turnCount() > lastTurnIndex`).
+ *  - **pending handoff** — the existing switch mechanism (one-shot).
+ *
+ * All of it rides the AGENT prompt only: the recorded/echoed user prompt stays
+ * the user's own words.
+ */
+function prefixSquadContext(ctx: AcpCommandContext, blocks: PromptBlock[]): void {
+  if (ctx.pendingHandoff?.current) {
+    blocks.unshift({ type: 'text', text: ctx.pendingHandoff.current });
+    ctx.pendingHandoff.current = null;
+  }
+  const { squad, opts } = ctx;
+  if (!squad) return;
+  const member = squad.member(opts.agent);
+  if (squad.turnCount() > member.lastTurnIndex) {
+    const briefing = buildDeltaBriefing(squad.entriesSince(member.lastTurnIndex));
+    if (briefing) blocks.unshift({ type: 'text', text: briefing });
+  }
+  const roster = squad.roster;
+  if (roster && member.lastTurnIndex === 0) {
+    const preamble = buildTeamPreamble(roster, opts.agent, {
+      handoffInstructions: roster.handoffsEnabled === true,
+    });
+    if (preamble) blocks.unshift({ type: 'text', text: preamble });
+  }
+}
+
+/**
+ * Append the finished turn to the squad journal so the NEXT agent to take
+ * over gets it in its delta briefing. Order matters: record first, THEN
+ * advance this agent's `lastTurnIndex` to the new turn count — otherwise the
+ * agent would be briefed on its own turn.
+ */
+function recordSquadTurn(ctx: AcpCommandContext, prompt: string, replySummary: string): void {
+  const { squad, opts } = ctx;
+  if (!squad) return;
+  squad.recordTurn({
+    agentId: opts.agent,
+    prompt,
+    replySummary,
+    // TurnFileAggregator owns per-turn file changesets end-to-end (git diff →
+    // outbox POST) and exposes no path list, and its flush is fire-and-forget,
+    // so there is nothing accurate to attribute synchronously here. The
+    // briefing renders "files: none" rather than a guess.
+    filesTouched: [],
+  });
+  squad.member(opts.agent).lastTurnIndex = squad.turnCount();
+}
+
 async function startTaskH(ctx: AcpCommandContext): Promise<void> {
   const {
     cmd,
@@ -334,17 +439,25 @@ async function startTaskH(ctx: AcpCommandContext): Promise<void> {
     budgetRecovery,
     budgetReachedFlag,
   } = ctx;
-  const payload = cmd.payload as
-    | {
-        prompt?: string;
-        files?: Array<{ filename: string; base64?: string; mimeType?: string }>;
-      }
-    | undefined;
+  const payload = cmd.payload as StartTaskPayload | undefined;
   const blocks = buildAcpPromptBlocks(payload ?? {});
   if (blocks.length === 0) {
     log.warn('acpRunner', 'start_task with empty prompt + no attachments; ignoring');
     await relay.sendResult(cmd.id, 'failed', { error: 'empty prompt' });
     return;
+  }
+  // Agent Squad @-mention routing: the task carries the MENTIONED agent's id.
+  // Swap onto it BEFORE anything else runs — a failed swap fails the TASK
+  // (never silently answers with the agent the user didn't mention). An id
+  // equal to the current agent (or absent) is a plain no-op: run as normal.
+  const requestedAgentId = typeof payload?.agentId === 'string' ? payload.agentId.trim() : '';
+  if (requestedAgentId.length > 0 && requestedAgentId !== opts.agent) {
+    const routed = await routeSquadTask(ctx, requestedAgentId);
+    if (!routed.ok) {
+      log.warn('acpRunner', `start_task routing to ${requestedAgentId} failed: ${routed.error}`);
+      await relay.sendResult(cmd.id, 'failed', { error: routed.error });
+      return;
+    }
   }
   const promptText = blocks
     .filter((b): b is { type: 'text'; text: string } => b.type === 'text')
@@ -377,14 +490,13 @@ async function startTaskH(ctx: AcpCommandContext): Promise<void> {
   // Prepended AFTER recording the user prompt + echo, so it rides the agent prompt
   // only and never shows as part of the user's message. Managed deploys only.
   maybePrefaceAgentStandard(blocks, opts.agent, opts.sessionId);
-  // Agent-switch context handoff: the FIRST prompt after a `switch_agent`
-  // carries the OLD conversation's bounded tail so the new agent continues
-  // with the session's context instead of starting cold. Rides the agent
-  // prompt only (recorded/echoed prompt stays the user's own words); one-shot.
-  if (ctx.pendingHandoff?.current) {
-    blocks.unshift({ type: 'text', text: ctx.pendingHandoff.current });
-    ctx.pendingHandoff.current = null;
-  }
+  // Squad context prefixes, composed onto the AGENT prompt only:
+  //   [team preamble?, delta briefing?, pending handoff?, ...user blocks]
+  // The handoff slot is the existing `switch_agent` continuity mechanism — the
+  // FIRST prompt after a swap carries the OLD conversation's bounded tail so
+  // the new agent continues with the session's context instead of starting
+  // cold (one-shot). See {@link prefixSquadContext}.
+  prefixSquadContext(ctx, blocks);
   // Tracks whether the turn already reached a terminal, VISIBLE close (reply
   // delivered + "Thinking…" cleared). Once true, the only awaited work left is
   // the command ACK — and a long (>10 min) turn's `command:<id>` record can
@@ -484,6 +596,10 @@ async function startTaskH(ctx: AcpCommandContext): Promise<void> {
       }
       history.appendAgentReply(finalText);
       void history.flush();
+      // Journal the turn for the squad's shared memory — the NEXT agent to
+      // take over receives it in its delta briefing. `opts.agent` is the
+      // ROUTED agent here (the swap above already moved it).
+      recordSquadTurn(ctx, promptText, finalText);
       // Emit static quick-reply chips so the mobile UI has
       // one-tap continuation prompts after every ACP turn.
       // PTY agents emit a single-string `input_suggestion` via
