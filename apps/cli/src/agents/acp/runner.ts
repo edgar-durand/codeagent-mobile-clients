@@ -61,6 +61,7 @@ import type { PromptBlock } from './buildAcpPromptBlocks';
 import { createBudgetRecovery, type BudgetRecovery } from './budgetRecovery';
 import { createWakeCredentialProbe, localCredentialExpiryStatus } from './wakeCredentialProbe';
 import { reconcileCumulative } from './reconcileDelta';
+import { handoffFenceStart } from './handoff-protocol';
 import { maybeSendOnboardingWelcome } from './onboarding';
 import {
   registerTerminalHandlers,
@@ -506,24 +507,42 @@ export class StreamingState {
     const cumulativeContent = reconcileCumulative(existing?.content ?? '', delta.delta);
     this.streamingChunks.set(chunkId, { kind: delta.kind, content: cumulativeContent });
 
+    // A ```codeam-handoff fence proposed at the tail of a reply is protocol
+    // litter, not user-visible prose — it must never render mid-stream (the
+    // app shows the proposal as a card once the turn closes and the fence is
+    // extracted, see Task 6). `fenceCut` is the index of the fence START in
+    // the FULL cumulative text, or -1 if none has arrived yet; both live
+    // publish paths below truncate to it. Internal buffers (`this.text`,
+    // `streamingChunks`) stay untouched — this is presentation-only.
+    let fenceCut = -1;
+
     // 1) Chat pipe (legacy `/api/commands/output`) — text only. The
     //    bubble body is the ordered concatenation of every text chunk's
     //    reconciled content, recomputed from the per-chunkId buffers so
     //    a snapshot re-send can never concatenate the reply with itself.
     if (delta.kind === 'text') {
       this.recomputeText();
-      void this.publisher.publishOutput({ type: 'text', content: this.text, done: false });
+      fenceCut = handoffFenceStart(this.text);
+      const visibleText = fenceCut === -1 ? this.text : this.text.slice(0, fenceCut).trimEnd();
+      void this.publisher.publishOutput({ type: 'text', content: visibleText, done: false });
     }
     // 2) Epic C streaming-chunk feed (`/api/sessions/:id/streaming-chunk`)
     //    — all four kinds (text, thinking, tool_use, tool_result),
     //    cumulative per chunkId. Drives SessionDetailScreen's rich
     //    THINKING / tool-pill / tool-result bubbles. Both feeds run
     //    in parallel so the redesigned mobile surface stays in sync
-    //    with the legacy chat surface.
+    //    with the legacy chat surface. The text kind reuses `fenceCut`
+    //    computed above — the turn's text always collapses onto a single
+    //    chunkId (see `turnTextChunkId`), so `cumulativeContent` here is
+    //    the same string as `this.text`.
+    const visibleChunkContent =
+      delta.kind === 'text' && fenceCut !== -1
+        ? cumulativeContent.slice(0, fenceCut).trimEnd()
+        : cumulativeContent;
     void this.publisher.publishStreamingChunk({
       chunkId,
       kind: delta.kind,
-      content: cumulativeContent,
+      content: visibleChunkContent,
       isFinal: false,
     });
   }
