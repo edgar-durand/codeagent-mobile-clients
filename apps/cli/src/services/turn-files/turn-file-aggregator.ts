@@ -98,6 +98,18 @@ export class TurnFileAggregator {
   private baselineByKey: Map<string, ChangesetEntry> = new Map();
   private baselineCaptured = false;
 
+  /**
+   * The file paths (relative to their repo root) that the MOST RECENT
+   * `flushTurn()` call found novel — i.e. what it just enqueued (or would
+   * have enqueued had the batch not exactly matched the baseline). Updated
+   * unconditionally on every flush, including a no-op one (empties back
+   * out), so `peekTurnPaths()` never returns paths from more than one
+   * flush cycle ago. Not touched by the baseline-capture flush (it returns
+   * before `novel` is computed), which is correct — pre-pair files aren't
+   * "this session's" changes.
+   */
+  private lastTurnPaths: string[] = [];
+
   constructor(private readonly opts: TurnFileAggregatorOptions) {
     this.apiBase = opts.apiBaseUrl ?? API_BASE;
     this.outbox = new FilesOutbox({
@@ -129,6 +141,19 @@ export class TurnFileAggregator {
   stop(): void {
     this.stopped = true;
     this.outbox.stop();
+  }
+
+  /**
+   * Non-destructive read of the paths the MOST RECENT `flushTurn()` call
+   * found novel — does NOT trigger a scan or clear anything itself. The
+   * squad journal (`recordSquadTurn` in `command-handlers.ts`) `await`s
+   * `flushTurn()` for the turn it's about to record BEFORE calling this, so
+   * the read reflects THAT turn's paths, not a stale one left over from
+   * whatever flushed previously. Empty on a session's very first turn
+   * (still capturing the pre-pair baseline) or a chat-only turn.
+   */
+  peekTurnPaths(): string[] {
+    return [...this.lastTurnPaths];
   }
 
   /**
@@ -193,6 +218,7 @@ export class TurnFileAggregator {
           base.fileStatus !== f.fileStatus
         );
       });
+      this.lastTurnPaths = novel.map((f) => f.filePath);
 
       if (novel.length === 0) {
         log.trace(
@@ -218,10 +244,7 @@ export class TurnFileAggregator {
         await this.outbox.enqueue(entry);
       }
     } catch (err) {
-      log.warn(
-        'turnFiles',
-        `flushTurn failed: ${(err as Error).message ?? String(err)}`,
-      );
+      log.warn('turnFiles', `flushTurn failed: ${(err as Error).message ?? String(err)}`);
     }
   }
 
@@ -239,9 +262,7 @@ export class TurnFileAggregator {
     return this.repos.filter((repo) => dirty.has(repo.repoRoot));
   }
 
-  private async postEntry(
-    entry: OutboxEntry,
-  ): Promise<{ ok: boolean; statusCode: number }> {
+  private async postEntry(entry: OutboxEntry): Promise<{ ok: boolean; statusCode: number }> {
     const url = `${this.apiBase}${ENDPOINT}`;
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
@@ -261,9 +282,7 @@ export class TurnFileAggregator {
     } catch (err) {
       log.trace(
         'turnFiles',
-        `batch POST threw turnId=${entry.turnId.slice(0, 8)}: ${
-          (err as Error).message
-        }`,
+        `batch POST threw turnId=${entry.turnId.slice(0, 8)}: ${(err as Error).message}`,
       );
       return { ok: false, statusCode: 0 };
     }

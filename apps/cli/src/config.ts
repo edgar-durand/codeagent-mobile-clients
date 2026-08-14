@@ -2,7 +2,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import * as crypto from 'crypto';
-import type { AgentId } from '@codeam/shared';
+import { clampHopBudget, type AgentId, type SquadAutoConfig } from '@codeam/shared';
 import { rmIfExistsQuiet } from './lib/quiet';
 
 export interface SavedSession {
@@ -52,6 +52,12 @@ export interface SavedSession {
    * to `process.cwd()` (prior behavior).
    */
   cwd?: string;
+  /**
+   * Agent Squad autonomous chained handoffs (PRO), toggled from the app via
+   * the `squad_configure` relay command. Persisted per session so the mode
+   * survives a CLI restart. Absent = OFF (the tap-to-accept card flow).
+   */
+  squadAuto?: SquadAutoConfig;
 }
 
 export interface CliConfig {
@@ -214,6 +220,33 @@ export function makeConfig(baseDir?: string) {
     save(c);
   }
 
+  /**
+   * Persist the session's Agent Squad autonomous-handoff mode. Looked up by
+   * pluginId (the relay's stable session key), same discipline as
+   * {@link setSessionAgent}: never touches `activeSessionId`. The hop budget is
+   * clamped to the supported range here so a malformed relay payload can never
+   * persist an unbounded chain. Returns the value actually stored (the caller
+   * acks THAT, not what it asked for); null when the session isn't found.
+   */
+  function setSquadAuto(pluginId: string, value: SquadAutoConfig): SquadAutoConfig | null {
+    const stored: SquadAutoConfig = {
+      enabled: value.enabled === true,
+      hopBudget: clampHopBudget(value.hopBudget),
+    };
+    const c = load();
+    const s = c.sessions.find(x => x.pluginId === pluginId);
+    if (!s) return null;
+    s.squadAuto = stored;
+    save(c);
+    return stored;
+  }
+
+  /** The session's persisted squad-auto mode, or null when unset/unknown. */
+  function getSquadAuto(pluginId: string): SquadAutoConfig | null {
+    const s = load().sessions.find(x => x.pluginId === pluginId);
+    return s?.squadAuto ?? null;
+  }
+
   function clearAll(): void {
     try {
       fs.unlinkSync(file);
@@ -230,7 +263,7 @@ export function makeConfig(baseDir?: string) {
     return load();
   }
 
-  return { getConfig, ensurePluginId, addSession, removeSession, setActiveSession, getActiveSession, getActiveSessionForAgent, setDisable1mContext, setSessionAgent, clearAll, saveCliConfig, loadCliConfig };
+  return { getConfig, ensurePluginId, addSession, removeSession, setActiveSession, getActiveSession, getActiveSessionForAgent, setDisable1mContext, setSessionAgent, setSquadAuto, getSquadAuto, clearAll, saveCliConfig, loadCliConfig };
 }
 
 /**
@@ -286,5 +319,5 @@ export function loadCodespaceEnv(): void {
 
 // Default instance — uses ~/.codeam/config.json
 const _default = makeConfig();
-export const { getConfig, ensurePluginId, addSession, removeSession, setActiveSession, getActiveSession, getActiveSessionForAgent, setDisable1mContext, setSessionAgent, clearAll, saveCliConfig, loadCliConfig } =
+export const { getConfig, ensurePluginId, addSession, removeSession, setActiveSession, getActiveSession, getActiveSessionForAgent, setDisable1mContext, setSessionAgent, setSquadAuto, getSquadAuto, clearAll, saveCliConfig, loadCliConfig } =
   _default;

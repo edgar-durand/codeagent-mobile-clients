@@ -220,6 +220,80 @@ describe('StreamingState.append — codeam-handoff fence suppressed from the liv
     }
   });
 
+  it('a quoted codeam-handoff example inside a 4+-backtick block streams through UNTRUNCATED live', () => {
+    const { state, publishOutput, publishStreamingChunk } = makeState();
+    const quotedExample = [
+      "Here's how the handoff protocol works, for reference:",
+      '',
+      '````',
+      'To hand off, end your reply with:',
+      '```' + HANDOFF_FENCE_TAG,
+      '{"to":"reviewer","reason":"example only","prompt":"do not run this"}',
+      '```',
+      '````',
+      '',
+    ].join('\n');
+
+    // Single delta arrival is enough to prove the LIVE (non-terminal) path
+    // no longer truncates at the quoted fence-open marker — before the fix,
+    // `handoffFenceStart` (unmasked) would cut right there and every
+    // publish after would be stuck showing only the prose that precedes the
+    // example, for the rest of the turn.
+    state.append({ chunkId: 'msg-1', kind: 'text', delta: quotedExample });
+
+    const publishedTexts = allContents(publishOutput);
+    const publishedChunks = allContents(publishStreamingChunk);
+    expect(publishedTexts.at(-1)).toBe(quotedExample);
+    expect(publishedChunks.at(-1)).toBe(quotedExample);
+    for (const content of [...publishedTexts, ...publishedChunks]) {
+      expect(content).toContain('````');
+      expect(content).toContain(HANDOFF_FENCE_TAG);
+      expect(content).toContain('do not run this');
+    }
+  });
+
+  it('a REAL fence after a quoted example is still truncated LIVE (example untouched, real fence cut)', () => {
+    const { state, publishOutput, publishStreamingChunk } = makeState();
+    const prefix = [
+      "Here's how the handoff protocol works, for reference:",
+      '',
+      '````',
+      'To hand off, end your reply with:',
+      '```' + HANDOFF_FENCE_TAG,
+      '{"to":"reviewer","reason":"example only","prompt":"do not run this"}',
+      '```',
+      '````',
+      '',
+      'Given that, I am handing off now.',
+      '',
+    ].join('\n');
+    const realFenceOpen = '```' + HANDOFF_FENCE_TAG + '\n';
+    const realJsonBody = '{"to":"reviewer","reason":"real handoff","prompt":"do the real thing"}\n';
+
+    // Stream the quoted example first — must render live, untruncated.
+    state.append({ chunkId: 'msg-1', kind: 'text', delta: prefix });
+    expect(allContents(publishOutput).at(-1)).toBe(prefix);
+
+    // Then the REAL fence starts arriving — the live view must now cut
+    // right before it and stay pinned there as the JSON body streams in.
+    state.append({ chunkId: 'msg-1', kind: 'text', delta: realFenceOpen });
+    state.append({ chunkId: 'msg-1', kind: 'text', delta: realJsonBody });
+
+    const publishedTexts = allContents(publishOutput);
+    const publishedChunks = allContents(publishStreamingChunk);
+    const expectedVisible = prefix.trimEnd();
+    expect(publishedTexts.at(-1)).toBe(expectedVisible);
+    expect(publishedChunks.at(-1)).toBe(expectedVisible);
+    for (const content of [...publishedTexts, ...publishedChunks]) {
+      // The quoted example's nested fence survives — only the REAL tail
+      // fence is suppressed.
+      expect(content).not.toContain('do the real thing');
+    }
+    // Raw text still carries everything, real fence included, for turn-close
+    // extraction.
+    expect(state.getCurrentText()).toBe(prefix + realFenceOpen + realJsonBody);
+  });
+
   it('publishes identically to before when no fence is present (regression guard)', () => {
     const { state, publishOutput, publishStreamingChunk } = makeState();
     state.append({ chunkId: 'msg-1', kind: 'text', delta: 'The ' });

@@ -65,12 +65,9 @@ import type { PromptBlock } from './buildAcpPromptBlocks';
 import { createBudgetRecovery, type BudgetRecovery } from './budgetRecovery';
 import { createWakeCredentialProbe, localCredentialExpiryStatus } from './wakeCredentialProbe';
 import { reconcileCumulative } from './reconcileDelta';
-import { handoffFenceStart, stripHandoffFences } from './handoff-protocol';
+import { handoffFenceStartMasked, stripHandoffFences } from './handoff-protocol';
 import { maybeSendOnboardingWelcome } from './onboarding';
-import {
-  registerTerminalHandlers,
-  closeAllTerminals,
-} from '../../services/terminal-ops.service';
+import { registerTerminalHandlers, closeAllTerminals } from '../../services/terminal-ops.service';
 import { mapSessionUpdate, mapPermissionRequest } from './mappers';
 import { internalPathPermissionOutcome } from './internal-paths';
 import { guardrailDecision } from './guardrails';
@@ -78,7 +75,7 @@ import { getGuardrailPolicy } from './guardrail-config';
 import { isLocalSession } from '../../baton/gate';
 import { extractSelectPrompt } from './selectPromptExtractor';
 import { prewarmPreviewDetection } from '../../commands/start/handlers';
-import { loadCliConfig, setSessionAgent } from '../../config';
+import { getSquadAuto, loadCliConfig, setSessionAgent } from '../../config';
 import { FileWatcherService } from '../../services/file-watcher.service';
 import { TurnFileAggregator } from '../../services/turn-files/turn-file-aggregator';
 import type { StartedBeads } from '../../beads';
@@ -360,7 +357,9 @@ export class StreamingState {
    *   - 'none' — nothing pending; the runner acks the command as
    *     failed so mobile shows a stale-question affordance.
    */
-  resolveSelection(index: number): { kind: 'resolved' } | { kind: 'reprompt'; text: string } | { kind: 'none' } {
+  resolveSelection(
+    index: number,
+  ): { kind: 'resolved' } | { kind: 'reprompt'; text: string } | { kind: 'none' } {
     if (!this.pending) return { kind: 'none' };
     if (this.pending.kind === 'permission') {
       const label = this.pending.labels[index];
@@ -520,6 +519,10 @@ export class StreamingState {
     // the FULL cumulative text, or -1 if none has arrived yet; both live
     // publish paths below truncate to it. Internal buffers (`this.text`,
     // `streamingChunks`) stay untouched — this is presentation-only.
+    // Masked-aware (`handoffFenceStartMasked`): an agent quoting the
+    // protocol as a worked example inside a closed 4+-backtick block must
+    // stream through untruncated — an unmasked cut would match the quoted
+    // fence-open marker and truncate the live view for the rest of the turn.
     let fenceCut = -1;
 
     // 1) Chat pipe (legacy `/api/commands/output`) — text only. The
@@ -528,7 +531,7 @@ export class StreamingState {
     //    a snapshot re-send can never concatenate the reply with itself.
     if (delta.kind === 'text') {
       this.recomputeText();
-      fenceCut = handoffFenceStart(this.text);
+      fenceCut = handoffFenceStartMasked(this.text);
       const visibleText = fenceCut === -1 ? this.text : this.text.slice(0, fenceCut).trimEnd();
       void this.publisher.publishOutput({ type: 'text', content: visibleText, done: false });
     }
@@ -590,11 +593,12 @@ export class StreamingState {
    * {@link getCurrentText} keeps returning the RAW text so the turn-close
    * extraction can parse the proposal out of it.
    *
-   * Masked-aware (`stripHandoffFences`), unlike the live-stream `append()`
-   * cut (`handoffFenceStart`, unmasked): a TERMINAL frame is the one that
+   * Masked-aware (`stripHandoffFences`), same as the live-stream `append()`
+   * cut (`handoffFenceStartMasked`): a TERMINAL frame is the one that
    * PERSISTS, so cutting on a fence quoted as an example inside a
-   * 4+-backtick block here would permanently truncate the bubble. The live
-   * cut stays unmasked/cheap — a mid-stream example is never terminal.
+   * 4+-backtick block here would permanently truncate the bubble — and an
+   * unmasked live cut would truncate the LIVE view for the rest of the turn
+   * the moment the quoted example's fence-open marker streams in.
    */
   private visible(text: string): string {
     return stripHandoffFences(text);
@@ -815,6 +819,10 @@ export class AcpHistory {
     role: 'user' | 'agent';
     text: string;
     timestamp: number;
+    /** The agent that produced this turn — stamped at record time, so a
+     *  session that swapped agents keeps per-turn attribution when mobile
+     *  reloads the history (codeagent-egai). */
+    agentId: AgentId;
   }> = [];
   private summary: string | null = null;
 
@@ -830,7 +838,11 @@ export class AcpHistory {
        * one (which the SET-replace backend would otherwise clobber each turn).
        * Absent / returns null → fall back to pushing only the current session.
        */
-      listSessions?: () => Promise<Array<{ id: string; summary: string; timestamp: number }> | null>;
+      listSessions?: () => Promise<Array<{
+        id: string;
+        summary: string;
+        timestamp: number;
+      }> | null>;
     },
   ) {}
 
@@ -884,16 +896,24 @@ export class AcpHistory {
       role: 'user',
       text,
       timestamp: Date.now(),
+      agentId: this.opts.agent,
     });
   }
 
-  appendAgentReply(text: string): void {
+  /**
+   * `agentId` overrides the producing agent for a turn this session's RESIDENT
+   * agent did not author — today only the `@coderabbit` one-shot review, which
+   * runs the batch reviewer inside the session without ever swapping. Defaults
+   * to the resident agent.
+   */
+  appendAgentReply(text: string, agentId: AgentId = this.opts.agent): void {
     if (text.length === 0) return;
     this.messages.push({
       id: randomUUID(),
       role: 'agent',
       text,
       timestamp: Date.now(),
+      agentId,
     });
   }
 
@@ -1127,7 +1147,8 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
     mcpServers: opts.mcpServers,
     onSessionUpdate: (notification) => {
       updateCount += 1;
-      const variant = (notification.update as { sessionUpdate?: string })?.sessionUpdate ?? 'unknown';
+      const variant =
+        (notification.update as { sessionUpdate?: string })?.sessionUpdate ?? 'unknown';
       const deltas = mapSessionUpdate(notification);
       // Info-level so it appears with CODEAM_DEBUG=1 (the canonical
       // smoke-test invocation) without needing trace. Includes a
@@ -1135,12 +1156,12 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
       // notification but my mapper ignored it" apart from "SDK
       // never delivered anything" — those are different bugs.
       // Preview first 120 chars of each delta (text + dropped
-       // kinds) so we can spot "agent emitted something but we
-       // dropped it silently" bugs in smoke tests without raw stdio
-       // tracing. Tool-use info is especially load-bearing — if
-       // Gemini ever asks the user something via a custom tool call
-       // instead of session/request_permission, we'd miss the
-       // interactive prompt without this breadcrumb.
+      // kinds) so we can spot "agent emitted something but we
+      // dropped it silently" bugs in smoke tests without raw stdio
+      // tracing. Tool-use info is especially load-bearing — if
+      // Gemini ever asks the user something via a custom tool call
+      // instead of session/request_permission, we'd miss the
+      // interactive prompt without this breadcrumb.
       const previews = deltas
         .map((d) => `${d.kind}:"${d.delta.slice(0, 120).replace(/\n/g, '\\n')}"`)
         .join(' | ');
@@ -1515,6 +1536,16 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
     pluginAuthToken: opts.pluginAuthToken,
     agentId: opts.agent,
   });
+  // Prime the pre-session baseline so turn 1's end-of-turn flush is a REAL
+  // flush (else turn 1's edits are swallowed as pre-existing dirt). The
+  // aggregator's FIRST-ever `flushTurn()` call captures whatever the
+  // worktree looks like at that moment as the baseline and returns without
+  // recording any paths — nothing in production called `flushTurn()` before
+  // turn 1's own end-of-turn flush, so turn 1's own edits WERE that first
+  // (baseline) call, and its journal entry always read empty. Fire-and-forget
+  // — this must not delay session start; it only needs to land before turn 1
+  // ENDS, which takes at least seconds.
+  void turnFiles.flushTurn().catch(() => {});
   // Debounced repo-dirty → flushTurn hook. In legacy PTY mode every
   // user-visible turn ended with `flushTurn()` and that was the
   // only way hunks landed. ACP sessions edit files via tool calls
@@ -1589,7 +1620,12 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
         publisher,
         recentStderr,
         budgetRecovery,
-        { get: () => _budgetReachedPosted, set: (v: boolean) => { _budgetReachedPosted = v; } },
+        {
+          get: () => _budgetReachedPosted,
+          set: (v: boolean) => {
+            _budgetReachedPosted = v;
+          },
+        },
         // resume_session re-points the runner's active conversation: the
         // relay callback reads `acpSessionId` per command, so every FUTURE
         // get_conversation / upload / one-shot serves the RESUMED id — not
@@ -1622,7 +1658,12 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
   // ─── Agent Squad (@-mention routing + agent-proposed handoffs) ────────────
   // Per-agent provisioning/conversation bookkeeping + the shared turn journal
   // (persisted under ~/.codeam so a CLI restart keeps the team's history).
-  const squad = new SquadState({ sessionId: opts.sessionId });
+  // Seeded with the session's PERSISTED autonomous-handoff mode so a CLI
+  // restart resumes in the mode the user chose (default OFF when unset).
+  const squad = new SquadState({
+    sessionId: opts.sessionId,
+    auto: getSquadAuto(opts.pluginId),
+  });
   // The roster is a BACKEND fact (which agents the user linked + whether the
   // plan allows handoffs). Fire-and-forget at session start so a slow/offline
   // roster fetch never delays the first turn; every squad feature no-ops

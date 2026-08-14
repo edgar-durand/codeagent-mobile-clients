@@ -151,3 +151,39 @@ export function stripHandoffFences(text: string): string {
 export function handoffFenceStart(text: string): number {
   return text.indexOf(FENCE_OPEN);
 }
+
+/**
+ * Masked-aware version of {@link handoffFenceStart} — the live-stream cut
+ * point. `handoffFenceStart` cuts on the RAW text, so a `codeam-handoff`
+ * fence-open marker the agent is merely QUOTING as a worked example inside a
+ * closed 4+-backtick block (see `maskOuterFences`) gets mistaken for a real
+ * proposal and truncates the live view for the rest of the turn — the
+ * example never "closes" from the live cut's perspective because the real
+ * fence-open substring already matched. This masks outer-fenced spans first,
+ * so only a fence-open OUTSIDE one of them can trigger a live cut.
+ *
+ * Placeholders (`@@HANDOFF_MASK_<n>@@`) can never contain the fence-open
+ * marker themselves, so `masked` containing NO `FENCE_OPEN` means every raw
+ * occurrence is quoted inside a masked span — nothing to cut on. Otherwise
+ * we re-scan the RAW text directly for the first `FENCE_OPEN` that does NOT
+ * fall inside an outer-fence span; that's guaranteed to exist (it's exactly
+ * what made `masked` contain one) and is the fence to cut at.
+ */
+export function handoffFenceStartMasked(text: string): number {
+  const { masked } = maskOuterFences(text);
+  if (masked.indexOf(FENCE_OPEN) === -1) return -1;
+
+  // Outer-fence spans in the RAW text — a `FENCE_OPEN` match inside one of
+  // these is a quoted example, not a real fence.
+  const spans: Array<{ start: number; end: number }> = [];
+  for (const m of text.matchAll(OUTER_FENCE_RE)) {
+    const start = m.index ?? 0;
+    spans.push({ start, end: start + m[0].length });
+  }
+  const insideSpan = (idx: number): boolean => spans.some((s) => idx >= s.start && idx < s.end);
+
+  for (let i = text.indexOf(FENCE_OPEN); i !== -1; i = text.indexOf(FENCE_OPEN, i + 1)) {
+    if (!insideSpan(i)) return i;
+  }
+  return -1;
+}

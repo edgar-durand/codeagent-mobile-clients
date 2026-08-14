@@ -16,7 +16,7 @@
  */
 
 import { log } from '../../services/logger';
-import { _postJsonAuthed } from '../../services/pairing.service';
+import { _postJsonAuthed, fetchProvisionCredential } from '../../services/pairing.service';
 import { resolveApiBaseUrl } from '@codeam/shared';
 import { showInfo } from '../../ui/banner';
 import { createOsStrategy } from '../../os';
@@ -25,7 +25,7 @@ import { modeIsFullAutoApprove } from './modes';
 // Re-exported for back-compat: the set-mode auto-approve spec imports it from here.
 export { modeIsFullAutoApprove } from './modes';
 import type { RuntimeStrategy } from '../strategy';
-import { removeSession } from '../../config';
+import { removeSession, setSquadAuto } from '../../config';
 import { closeAllTerminals } from '../../services/terminal-ops.service';
 import type { CommandRelayService, RemoteCommand } from '../../services/command-relay.service';
 import type { HistoryService } from '../../services/history.service';
@@ -34,15 +34,36 @@ import { beadsActionFromPayload } from '../../beads/wiring';
 import { handleBeadsActionCommand, type StartedBeads } from '../../beads';
 import { configureSkill, type SkillsConfigureAction } from '../../skills/configure';
 import { packStartH, packActionH, packStatusH } from '../../packs/handlers';
-import {
-  persistIntegrationsManifest,
-  readIntegrationsManifest,
-} from '../../integrations/manifest';
+import { persistIntegrationsManifest, readIntegrationsManifest } from '../../integrations/manifest';
 import { buildMcpServersForStart } from '../../integrations/provision';
 import { detectRepoStack } from '../../integrations/detect-stack';
-import type { HandoffProposal, IntegrationsManifest, StartTaskPayload } from '@codeam/shared';
+import {
+  SQUAD_CONFIGURE_COMMAND,
+  SQUAD_STATS_COMMAND,
+  clampHopBudget,
+  type HandoffProposal,
+  type HandoffResolution,
+  type IntegrationsManifest,
+  type SquadConfigurePayload,
+  type SquadConfigureResult,
+  type SquadStatsResult,
+  type StartTaskPayload,
+} from '@codeam/shared';
 import { buildDeltaBriefing, buildTeamPreamble, type SquadState } from './squad-roster';
+import {
+  buildSquadContextBlock,
+  isSquadContextBlock,
+  looksLikeUnsupportedPromptShape,
+} from './squad-context';
 import { extractHandoffProposal } from './handoff-protocol';
+import {
+  CODERABBIT_AGENT_ID,
+  composeReviewOutput,
+  hasCustomInstructions,
+  logMentionOutcome,
+  runCoderabbitMentionReview,
+} from './coderabbit-mention';
+import type { PromptResponse } from '@agentclientprotocol/sdk';
 import { execFile } from 'node:child_process';
 import {
   handlers as legacyHandlers,
@@ -411,9 +432,9 @@ async function routeSquadTask(
 }
 
 /**
- * Prefix the squad context blocks onto a turn, in the order the agent reads
- * them: `[team preamble?, delta briefing?, pending handoff?, ...user blocks]`
- * (composed by unshifting in reverse). Each piece is conditional:
+ * Collect the squad context pieces for THIS turn, in the order the agent reads
+ * them: `[team preamble?, delta briefing?, pending handoff?]`. Each piece is
+ * conditional:
  *
  *  - **team preamble** — once per member, on its FIRST turn this process
  *    (`lastTurnIndex === 0`); tells it who else is on the squad and, when the
@@ -422,33 +443,105 @@ async function routeSquadTask(
  *    hasn't seen (`turnCount() > lastTurnIndex`).
  *  - **pending handoff** — the existing switch mechanism (one-shot).
  *
- * All of it rides the AGENT prompt only: the recorded/echoed user prompt stays
- * the user's own words.
+ * Consumes the one-shot handoff slot, so it must be called exactly once per
+ * turn. All of it rides the AGENT prompt only: the recorded/echoed user prompt
+ * stays the user's own words.
  */
-function prefixSquadContext(ctx: AcpCommandContext, blocks: PromptBlock[]): void {
+function collectSquadContext(ctx: AcpCommandContext): string[] {
+  const pieces: string[] = [];
+  const { squad, opts } = ctx;
+  if (squad) {
+    const member = squad.member(opts.agent);
+    const roster = squad.roster;
+    if (roster && member.lastTurnIndex === 0) {
+      const preamble = buildTeamPreamble(roster, opts.agent, {
+        handoffInstructions: roster.handoffsEnabled === true,
+      });
+      if (preamble) pieces.push(preamble);
+    }
+    if (squad.turnCount() > member.lastTurnIndex) {
+      // Exclude this agent's OWN prior turns — after a CLI restart lastTurnIndex
+      // resets to 0 while the journal persists, so without this filter an agent
+      // gets briefed on work it already did itself.
+      const otherEntries = squad
+        .entriesSince(member.lastTurnIndex)
+        .filter((e) => e.agentId !== opts.agent);
+      const briefing = buildDeltaBriefing(otherEntries);
+      if (briefing) pieces.push(briefing);
+    }
+  }
   if (ctx.pendingHandoff?.current) {
-    blocks.unshift({ type: 'text', text: ctx.pendingHandoff.current });
+    pieces.push(ctx.pendingHandoff.current);
     ctx.pendingHandoff.current = null;
   }
-  const { squad, opts } = ctx;
-  if (!squad) return;
-  const member = squad.member(opts.agent);
-  if (squad.turnCount() > member.lastTurnIndex) {
-    // Exclude this agent's OWN prior turns — after a CLI restart lastTurnIndex
-    // resets to 0 while the journal persists, so without this filter an agent
-    // gets briefed on work it already did itself.
-    const otherEntries = squad
-      .entriesSince(member.lastTurnIndex)
-      .filter((e) => e.agentId !== opts.agent);
-    const briefing = buildDeltaBriefing(otherEntries);
-    if (briefing) blocks.unshift({ type: 'text', text: briefing });
+  return pieces;
+}
+
+/**
+ * Prepend the collected squad context onto the prompt blocks.
+ *
+ * **NATIVE by default:** ONE `ContentBlock::Resource` carrying all the pieces
+ * joined — semantically context, never user words, so the agent's own JSONL
+ * doesn't record it as part of the user's message and the hydration path can't
+ * replay it as a visible bubble (the P0 the addendum fixes). `text` mode is
+ * the per-agent fallback for an adapter that rejects resource blocks; it
+ * reproduces the pre-fix layout (one text block per piece).
+ */
+/** Native resource delivery unless THIS agent's adapter already rejected it. */
+function squadContextMode(ctx: AcpCommandContext): 'resource' | 'text' {
+  return ctx.squad?.member(ctx.opts.agent).contextTextFallback === true ? 'text' : 'resource';
+}
+
+function applySquadContext(
+  blocks: PromptBlock[],
+  pieces: readonly string[],
+  mode: 'resource' | 'text',
+): void {
+  if (pieces.length === 0) return;
+  if (mode === 'resource') {
+    blocks.unshift(buildSquadContextBlock(pieces.join('\n\n')));
+    return;
   }
-  const roster = squad.roster;
-  if (roster && member.lastTurnIndex === 0) {
-    const preamble = buildTeamPreamble(roster, opts.agent, {
-      handoffInstructions: roster.handoffsEnabled === true,
-    });
-    if (preamble) blocks.unshift({ type: 'text', text: preamble });
+  for (let i = pieces.length - 1; i >= 0; i--) blocks.unshift({ type: 'text', text: pieces[i] });
+}
+
+/**
+ * Run the turn's prompt, with a ONE-shot per-agent downgrade to legacy text
+ * blocks when the adapter can't accept the native resource block.
+ *
+ * The retry is gated on {@link looksLikeUnsupportedPromptShape} (an
+ * invalid-params-shaped rejection) — anything else propagates untouched, so a
+ * genuinely failed turn is never silently re-run. The decision is remembered
+ * on the squad member so the rest of the session goes straight to text.
+ * `blocks` is mutated in place: downstream consumers (budget recovery) must
+ * see the array the agent actually received.
+ */
+async function promptWithContextFallback(
+  ctx: AcpCommandContext,
+  client: AcpClient,
+  blocks: PromptBlock[],
+  pieces: readonly string[],
+): Promise<PromptResponse> {
+  try {
+    return await client.prompt(blocks);
+  } catch (err) {
+    if (
+      pieces.length === 0 ||
+      blocks.length === 0 ||
+      !isSquadContextBlock(blocks[0]) ||
+      !looksLikeUnsupportedPromptShape(err)
+    ) {
+      throw err;
+    }
+    log.warn(
+      'acpRunner',
+      `squad: ${ctx.opts.agent} rejected the native squad-context resource block ` +
+        `(${describeError(err)}) — retrying once with legacy text blocks`,
+    );
+    if (ctx.squad) ctx.squad.member(ctx.opts.agent).contextTextFallback = true;
+    blocks.shift();
+    applySquadContext(blocks, pieces, 'text');
+    return await client.prompt(blocks);
   }
 }
 
@@ -459,17 +552,19 @@ function prefixSquadContext(ctx: AcpCommandContext, blocks: PromptBlock[]): void
  * agent would be briefed on its own turn.
  */
 function recordSquadTurn(ctx: AcpCommandContext, prompt: string, replySummary: string): void {
-  const { squad, opts } = ctx;
+  const { squad, opts, turnFiles } = ctx;
   if (!squad) return;
   squad.recordTurn({
     agentId: opts.agent,
     prompt,
     replySummary,
     // TurnFileAggregator owns per-turn file changesets end-to-end (git diff →
-    // outbox POST) and exposes no path list, and its flush is fire-and-forget,
-    // so there is nothing accurate to attribute synchronously here. The
-    // briefing simply omits the files clause rather than guessing.
-    filesTouched: [],
+    // outbox POST). The caller (`startTaskH`) AWAITS `turnFiles.flushTurn()`
+    // for THIS turn before calling recordSquadTurn precisely so
+    // `peekTurnPaths()` reflects THIS turn's novel files, not a stale read
+    // of whatever the aggregator's PREVIOUS flush happened to find. Capped
+    // so a pathological turn (mass refactor) doesn't bloat the journal.
+    filesTouched: turnFiles.peekTurnPaths().slice(0, 20),
   });
   squad.member(opts.agent).lastTurnIndex = squad.turnCount();
 }
@@ -499,14 +594,24 @@ function resolvePendingProposal(ctx: AcpCommandContext, requestedAgentId: string
   if (!slot || !pending) return;
   slot.current = null;
   const accepted = requestedAgentId === pending.toAgentId;
+  if (accepted) ctx.squad?.countAccepted();
   log.info(
     'acpRunner',
     `squad: handoff ${pending.proposalId} ${accepted ? 'accepted' : 'declined'}`,
   );
-  void ctx.postSquadEvent?.('handoff_resolved', {
-    proposalId: pending.proposalId,
-    accepted,
-  });
+  const resolution: HandoffResolution = { proposalId: pending.proposalId, accepted };
+  void ctx.postSquadEvent?.('handoff_resolved', { ...resolution });
+}
+
+/**
+ * `proposalId` for a proposal raised on hop `hop` of this command's chain.
+ * Derived from the command id + hop index, so it is stable and collision-free
+ * WITHOUT a clock (a retried ack for the same turn resolves the same
+ * proposal). Bounded at 128 chars — the wire field's ceiling.
+ */
+function proposalIdFor(commandId: string, hop: number): string {
+  const id = hop <= 1 ? `hp-${commandId}` : `hp-${commandId}-h${hop}`;
+  return id.length > 128 ? id.slice(0, 128) : id;
 }
 
 /**
@@ -515,30 +620,149 @@ function resolvePendingProposal(ctx: AcpCommandContext, requestedAgentId: string
  * and capped at ONE open proposal — a second one while the first is
  * un-resolved is dropped rather than racing two cards onto the app.
  *
- * `proposalId` is derived from the command id, so it's stable + collision-free
- * without a clock: a retried ack for the same turn resolves the same proposal.
+ * **Autonomous mode (P2-2):** when the session opted in AND the chain has hops
+ * left, the proposal is SELF-ACCEPTED instead of carded — `handoff_proposed`
+ * carries `auto: true` + `hopsRemaining`, `handoff_resolved` follows
+ * immediately with `accepted: true, auto: true`, and the record is RETURNED so
+ * the caller runs it as the next turn. The slot is deliberately left empty in
+ * that case: there is no card for the user to answer. Returns `null` for the
+ * normal card flow (and for no proposal at all).
  */
 function emitHandoffProposal(
   ctx: AcpCommandContext,
   proposal: { to: string; reason: string; prompt: string } | null,
-): void {
+  hop: number,
+): HandoffProposal | null {
   const { squad, pendingProposal, postSquadEvent, opts, cmd } = ctx;
-  if (!proposal || !pendingProposal || !postSquadEvent) return;
-  if (squad?.roster?.handoffsEnabled !== true) return;
+  if (!proposal || !pendingProposal || !postSquadEvent) return null;
+  if (squad?.roster?.handoffsEnabled !== true) return null;
   if (pendingProposal.current) {
     log.info('acpRunner', 'squad: dropping handoff proposal — one is already pending');
-    return;
+    return null;
   }
+  // Budget exhausted (or auto off) → the v1 card flow, untouched.
+  const auto = squad.auto.enabled && squad.hopsRemaining() > 0;
+  // Spend the hop BEFORE emitting and before the route attempt, for two
+  // reasons: `hopsRemaining` on the wire is the count left AFTER this hop
+  // (mobile renders it as "<n> hops left"), and charging up-front means a hop
+  // that fails to route still costs budget — a repeatedly-failing target can't
+  // retry its way around the bound.
+  if (auto) squad.consumeHop();
   const record: HandoffProposal = {
-    proposalId: `hp-${cmd.id}`,
+    proposalId: proposalIdFor(cmd.id, hop),
     fromAgentId: opts.agent,
     toAgentId: proposal.to,
     reason: proposal.reason,
     prompt: proposal.prompt,
+    ...(auto ? { auto: true, hopsRemaining: squad.hopsRemaining() } : {}),
   };
-  pendingProposal.current = record;
-  log.info('acpRunner', `squad: handoff proposed ${opts.agent} → ${record.toAgentId}`);
+  squad.countProposal({ auto });
+  log.info(
+    'acpRunner',
+    `squad: handoff proposed ${opts.agent} → ${record.toAgentId}${auto ? ' (auto)' : ''}`,
+  );
   void postSquadEvent('handoff_proposed', { ...record });
+  if (!auto) {
+    pendingProposal.current = record;
+    return null;
+  }
+  // NOT resolved yet — the caller routes first. Reporting `accepted: true` here
+  // would claim a handoff that may still fail to swap, and would inflate the
+  // `accepted` stat for a hop that never ran. See {@link resolveAutoHandoff}.
+  return record;
+}
+
+/**
+ * Confirm a self-accepted handoff — ONLY once its route actually succeeded, so
+ * `handoff_resolved{accepted:true}` and the `accepted` counter always describe
+ * a hop that really ran. A failed route emits nothing: an `auto` proposal is a
+ * passive timeline notice on mobile, never a card left awaiting an answer.
+ */
+function resolveAutoHandoff(ctx: AcpCommandContext, record: HandoffProposal): void {
+  ctx.squad?.countAccepted();
+  const resolution: HandoffResolution = {
+    proposalId: record.proposalId,
+    accepted: true,
+    auto: true,
+  };
+  void ctx.postSquadEvent?.('handoff_resolved', { ...resolution });
+}
+
+/**
+ * `@coderabbit <ask>` — ONE review turn inside the current session, WITHOUT a
+ * swap.
+ *
+ * CodeRabbit has no ACP adapter and its runtime is a `BatchAgentStrategy`
+ * (`mode: 'batch'`), so it can never be the session's live agent — the swap
+ * machinery every other mention uses simply does not apply (see
+ * `coderabbit-mention.ts`). Instead the existing batch review path runs as a
+ * synthetic turn: the user's message echoes as THEIR words, the review
+ * publishes as one agent turn attributed to `coderabbit` (and journaled under
+ * it), and the resident agent is untouched throughout — nothing to revert,
+ * nothing to wedge.
+ *
+ * FREE: a mention is not a handoff, so no PRO gate applies here.
+ */
+async function runCoderabbitMention(ctx: AcpCommandContext, promptText: string): Promise<void> {
+  const { cmd, relay, streaming, opts, turnFiles } = ctx;
+  // A BARE `@coderabbit` arrives with an empty prompt (mobile lifts the mention
+  // out of the text). Recording '' would render a blank user bubble AND latch
+  // `AcpHistory.summary` to '' — the RECENT row's label is derived from the
+  // FIRST user prompt and never re-derived, so the session would show a blank
+  // summary forever. Fall back to the mention itself: what the user actually sent.
+  const userText = promptText.length > 0 ? promptText : `@${CODERABBIT_AGENT_ID}`;
+  await streaming.beginTurn();
+  ctx.history.appendUserPrompt(userText);
+  log.info('acpRunner', `squad: coderabbit one-shot review id=${cmd.id.slice(0, 8)}`);
+
+  const review = await runCoderabbitMentionReview({
+    fetchCredential: () =>
+      fetchProvisionCredential({
+        agentId: CODERABBIT_AGENT_ID,
+        sessionId: opts.sessionId,
+        pluginId: opts.pluginId,
+        pluginAuthToken: opts.pluginAuthToken,
+      }),
+  });
+  logMentionOutcome(review);
+
+  if (!review.ok) {
+    // Honest failure as the turn's single terminal frame; the session's own
+    // agent never moved, so there is nothing to restore.
+    await streaming.closeWithBubble(review.error);
+    ctx.history.appendAgentReply(review.error, CODERABBIT_AGENT_ID);
+    void ctx.history.flush();
+    await relay.sendResult(cmd.id, 'failed', { error: review.error });
+    return;
+  }
+
+  const output = composeReviewOutput(review.markdown, hasCustomInstructions(promptText));
+  await streaming.closeWithBubble(output);
+  ctx.history.appendAgentReply(output, CODERABBIT_AGENT_ID);
+  void ctx.history.flush();
+  // The reviewer edits nothing, but the flush keeps `peekTurnPaths()` aligned
+  // with the turn boundary for whatever the RESIDENT agent does next — and
+  // gives the journal entry the same shape every other turn has.
+  await turnFiles.flushTurn().catch((err) => {
+    log.warn('acpRunner', `turnFiles.flushTurn failed: ${describeError(err)}`);
+  });
+  recordCoderabbitTurn(ctx, userText, output);
+  await relay.sendResult(cmd.id, 'completed', { agentId: CODERABBIT_AGENT_ID });
+}
+
+/**
+ * Journal the review under `coderabbit` — NOT under the resident agent (which
+ * never ran this turn), and without advancing any member's `lastTurnIndex`: the
+ * resident agent HASN'T seen the review, so it must still receive it in its
+ * next delta briefing.
+ */
+function recordCoderabbitTurn(ctx: AcpCommandContext, prompt: string, replySummary: string): void {
+  ctx.squad?.recordTurn({
+    agentId: CODERABBIT_AGENT_ID,
+    prompt,
+    replySummary,
+    filesTouched: [],
+  });
 }
 
 async function startTaskH(ctx: AcpCommandContext): Promise<void> {
@@ -550,12 +774,6 @@ async function startTaskH(ctx: AcpCommandContext): Promise<void> {
   const { cmd, relay, streaming, opts, turnFiles, publisher, recentStderr, budgetReachedFlag } =
     ctx;
   const payload = cmd.payload as StartTaskPayload | undefined;
-  const blocks = buildAcpPromptBlocks(payload ?? {});
-  if (blocks.length === 0) {
-    log.warn('acpRunner', 'start_task with empty prompt + no attachments; ignoring');
-    await relay.sendResult(cmd.id, 'failed', { error: 'empty prompt' });
-    return;
-  }
   // Agent Squad @-mention routing: the task carries the MENTIONED agent's id.
   // Swap onto it BEFORE anything else runs — a failed swap fails the TASK
   // (never silently answers with the agent the user didn't mention). An id
@@ -565,6 +783,25 @@ async function startTaskH(ctx: AcpCommandContext): Promise<void> {
   // proposed agent accepts, anything else declines. Runs before the routing so
   // the resolution reflects what the user actually asked for.
   resolvePendingProposal(ctx, requestedAgentId);
+  // `@coderabbit` is the ONE mention that never swaps — it is a batch reviewer,
+  // not an ACP agent. Intercepted BEFORE the roster/route check (so it works
+  // regardless of whether the backend lists it in the switch-capable roster)
+  // AND before the empty-prompt guard: a BARE `@coderabbit` is the primary way
+  // to use it, and mobile lifts the mention out of the text, so the prompt
+  // legitimately arrives empty. There is nothing to send an agent here.
+  if (requestedAgentId === CODERABBIT_AGENT_ID) {
+    await runCoderabbitMention(ctx, (payload?.prompt ?? '').trim());
+    return;
+  }
+  const blocks = buildAcpPromptBlocks(payload ?? {});
+  if (blocks.length === 0) {
+    // `resolvePendingProposal` already ran, so an empty/malformed task still
+    // DECLINES and clears any open proposal — intentional: the user acted, so
+    // the proposal is stale and must not outlive the turn that followed it.
+    log.warn('acpRunner', 'start_task with empty prompt + no attachments; ignoring');
+    await relay.sendResult(cmd.id, 'failed', { error: 'empty prompt' });
+    return;
+  }
   if (requestedAgentId.length > 0 && requestedAgentId !== opts.agent) {
     const routed = await routeSquadTask(ctx, requestedAgentId);
     if (!routed.ok) {
@@ -573,9 +810,6 @@ async function startTaskH(ctx: AcpCommandContext): Promise<void> {
       return;
     }
   }
-  // Post-routing handles: on a routed turn these are the NEW agent's (the
-  // routing block rebound `ctx`); on a normal turn they're unchanged.
-  const { client, history, budgetRecovery } = ctx;
   const promptText = blocks
     .filter((b): b is { type: 'text'; text: string } => b.type === 'text')
     .map((b) => b.text)
@@ -601,287 +835,415 @@ async function startTaskH(ctx: AcpCommandContext): Promise<void> {
   // this, mobile keeps showing the previous turn's bubble until
   // the first streaming text overwrites it, which races visibly.
   await streaming.beginTurn();
-  history.appendUserPrompt(promptText);
+  // Post-routing handles: on a routed turn `ctx` was rebound to the NEW
+  // agent's client/history by the routing block above, so every handle is read
+  // from `ctx` (never destructured before the swap could replace it).
+  ctx.history.appendUserPrompt(promptText);
   // Non-Claude ACP agents get the always-on Agent Standard as a one-time preface
   // on the first turn of a new conversation (Claude gets it via ~/.claude/CLAUDE.md).
   // Prepended AFTER recording the user prompt + echo, so it rides the agent prompt
   // only and never shows as part of the user's message. Managed deploys only.
   maybePrefaceAgentStandard(blocks, opts.agent, opts.sessionId);
-  // Squad context prefixes, composed onto the AGENT prompt only:
-  //   [team preamble?, delta briefing?, pending handoff?, ...user blocks]
-  // The handoff slot is the existing `switch_agent` continuity mechanism — the
+  // Squad context, composed onto the AGENT prompt only, as ONE native ACP
+  // resource block ahead of the user's blocks:
+  //   [codeam://squad-context {preamble?, briefing?, handoff?}, ...user blocks]
+  // The handoff piece is the existing `switch_agent` continuity mechanism — the
   // FIRST prompt after a swap carries the OLD conversation's bounded tail so
   // the new agent continues with the session's context instead of starting
-  // cold (one-shot). See {@link prefixSquadContext}.
-  prefixSquadContext(ctx, blocks);
-  // Tracks whether the turn already reached a terminal, VISIBLE close (reply
-  // delivered + "Thinking…" cleared). Once true, the only awaited work left is
-  // the command ACK — and a long (>10 min) turn's `command:<id>` record can
-  // expire on the backend (COMMAND_TTL) so `sendResult` 404s. That POST-CLOSE
-  // ack failure must NOT be caught and turned into a "couldn't finish" bubble
-  // that CLOBBERS the already-delivered reply (2026-08-04, codeagent-dtz7).
-  let turnClosed = false;
-  try {
-    const reply = await client.prompt(blocks);
-    // Close with interactive-detection so a trailing
-    // "question + numbered options" pattern in the reply gets
-    // surfaced as a tappable select_prompt chunk on mobile
-    // instead of staying as plain text (Gemini's typical shape
-    // for "¿continuar? 1. sí 2. no").
-    const finalText = streaming.getCurrentText();
-    if (agentHooks(opts.agent)?.classifyCompletedReply?.(finalText) === 'upgrade_required') {
-      // Cursor's OWN plan paywall ("Upgrade your plan to continue"): the
-      // user's Cursor account is on Free, which doesn't include the headless
-      // Agent. NOT a credential problem — swap the bare text for an
-      // actionable bubble linking to the user's Cursor account upgrade page.
-      // Do NOT reportCredentialInvalid (the login is valid).
-      await streaming.closeWithBubble(CURSOR_UPGRADE_MESSAGE);
-      turnClosed = true;
-      history.appendAgentReply(CURSOR_UPGRADE_MESSAGE);
-      void history.flush();
-      log.info('acpRunner', `start_task ← cursor-plan-upgrade-required id=${cmd.id.slice(0, 8)}`);
-      await relay.sendResult(cmd.id, 'failed', { error: 'cursor plan upgrade required' });
-    } else if (replyIsHouseAgentLimit(finalText)) {
-      // The turn COMPLETED but the reply IS a house-proxy 403 (CodeAgent Cloud
-      // daily usage ceiling / temporarily unavailable). Claude streams the
-      // wrapped "Failed to authenticate. API Error: 403 …" as plain reply text,
-      // which replyIsAuthFailure would otherwise misclassify as a bad
-      // credential → a pointless re-auth loop (2026-07-29 Rafael). It is a
-      // usage/availability limit — surface the accurate daily-limit bubble and
-      // DO NOT reportCredentialInvalid (the credential, if any, is fine; the
-      // house agent has none to renew).
-      const houseBubble = houseAgentLimitMessage(finalText);
-      await streaming.closeWithBubble(houseBubble);
-      turnClosed = true;
-      history.appendAgentReply(houseBubble);
-      void history.flush();
-      turnFiles.flushTurn().catch((err) => {
-        log.warn('acpRunner', `turnFiles.flushTurn failed: ${describeError(err)}`);
-      });
-      log.info('acpRunner', `start_task ← house-agent-limit id=${cmd.id.slice(0, 8)}`);
-      await relay.sendResult(cmd.id, 'failed', {
-        error: 'house agent usage ceiling / temporarily unavailable',
-      });
-    } else if (replyIsAuthFailure(finalText)) {
-      // The agent COMPLETED the turn but its reply IS an auth-failure
-      // notice ("Not logged in · Please run /login") — a missing/expired
-      // credential the agent surfaced as plain text instead of throwing.
-      // Swap the raw CLI text for the actionable re-auth bubble and flag
-      // the LinkedAgent credential invalid so Profile › Agents shows
-      // EXPIRED + the re-link CTA, identical to the throw/exit auth paths.
-      await streaming.closeWithBubble(AUTH_FAILURE_MESSAGE);
-      turnClosed = true;
-      history.appendAgentReply(AUTH_FAILURE_MESSAGE);
-      void history.flush();
-      // Symmetry with the happy path: flush any file changeset the agent
-      // produced BEFORE it hit the auth wall. No-ops when there are no
-      // hunks (the typical not-logged-in case), so it's pure insurance
-      // against silently dropping partial edits.
-      turnFiles.flushTurn().catch((err) => {
-        log.warn('acpRunner', `turnFiles.flushTurn failed: ${describeError(err)}`);
-      });
-      void reportCredentialInvalid(opts);
-      log.info('acpRunner', `start_task ← auth-failure-in-reply id=${cmd.id.slice(0, 8)}`);
-      await relay.sendResult(cmd.id, 'failed', { error: 'agent reply reported auth failure' });
-    } else if (
-      shouldOfferOneMRecovery({ detail: '', recentStderr: recentStderr.join('\n'), finalText })
-    ) {
-      // The turn COMPLETED but the reply IS Anthropic's "Usage credits
-      // required for 1M context" 429 body. Disabling 1M context does NOT
-      // fix a credential-type credits gate (2026-06-24 incident) — the real
-      // recovery is reconnecting the Claude subscription via the in-app
-      // OAuth. Surface the reconnect bubble + flag the credential so
-      // Profile › Agents shows the reconnect CTA, mirroring the auth path.
-      await streaming.closeWithBubble(ONE_M_CREDITS_MESSAGE);
-      turnClosed = true;
-      history.appendAgentReply(ONE_M_CREDITS_MESSAGE);
-      void history.flush();
-      turnFiles.flushTurn().catch((err) => {
-        log.warn('acpRunner', `turnFiles.flushTurn failed: ${describeError(err)}`);
-      });
-      void reportCredentialInvalid(opts);
-      log.info('acpRunner', `start_task ← 1m-credits-reconnect id=${cmd.id.slice(0, 8)}`);
-      await relay.sendResult(cmd.id, 'failed', {
-        error: 'agent reply reported 1M-context usage-credits gate',
-      });
-    } else {
-      await streaming.closeTurnWithInteractiveDetection();
-      turnClosed = true;
-      // Agent-proposed handoff: the reply may END with a ```codeam-handoff
-      // fence. It's protocol litter the app renders as a card — the live +
-      // terminal frames already suppress it (StreamingState), and everything
-      // DURABLE (terminal echo, conversation history, squad journal) uses the
-      // stripped text so it can never resurface on a refresh.
-      const { cleanText, proposal } = extractHandoffProposal(
-        finalText,
-        opts.agent,
-        handoffTargets(ctx),
-      );
-      const replyLine = formatAgentReplyLine(cleanText);
-      if (replyLine.length > 0) {
-        showInfo(replyLine);
-      }
-      history.appendAgentReply(cleanText);
-      void history.flush();
-      // Journal the turn for the squad's shared memory — the NEXT agent to
-      // take over receives it in its delta briefing. `opts.agent` is the
-      // ROUTED agent here (the swap above already moved it).
-      recordSquadTurn(ctx, promptText, cleanText);
-      emitHandoffProposal(ctx, proposal);
-      // Emit static quick-reply chips so the mobile UI has
-      // one-tap continuation prompts after every ACP turn.
-      // PTY agents emit a single-string `input_suggestion` via
-      // OutputService.tick(); ACP has no idle-prompt detector so
-      // we emit a fixed array instead. The mobile store normalises
-      // both shapes to string[] before rendering.
-      // Only emitted on a normal (non-select-prompt) turn end --
-      // select_prompt is handled by closeTurnWithInteractiveDetection.
-      void publisher.publishOutput({
-        type: 'input_suggestion',
-        content: ACP_QUICK_REPLIES,
-        done: true,
-      });
-      // End-of-turn file changeset — agent likely edited files
-      // during the turn (tool_call write_file / bash). The
-      // aggregator runs git diff once and batch-posts the hunks
-      // so mobile's PENDING REVIEW counter + Files rail update.
-      // Fire-and-forget; the aggregator owns its own outbox.
-      turnFiles.flushTurn().catch((err) => {
-        log.warn('acpRunner', `turnFiles.flushTurn failed: ${describeError(err)}`);
-      });
-      log.info('acpRunner', `start_task ← done stopReason=${reply.stopReason ?? '?'} id=${cmd.id.slice(0, 8)}`);
-      await relay.sendResult(cmd.id, 'completed', { stopReason: reply.stopReason });
-    }
-  } catch (err) {
-    // POST-CLOSE ACK GUARD: if the turn already reached a terminal, visible
-    // close, the reply was delivered and "Thinking…" cleared — the only awaited
-    // work that can throw after that is the command ACK (`sendResult`). On a
-    // turn that ran longer than the backend's COMMAND_TTL (10 min), the
-    // `command:<id>` record has expired so `sendResult` 404s. Treating that as a
-    // turn failure fired the generic "The agent hit an error and couldn't finish
-    // this turn" bubble which `closeWithBubble` used to OVERWRITE the finished
-    // reply — a FALSE failure on a succeeded turn (2026-08-04, codeagent-dtz7:
-    // confirmed live on Rafael's 18-min turn, `prompt ← ok` then `prompt
-    // failed: HTTP 404` on the ack). The turn already succeeded — log the ack
-    // miss and stop; do NOT cancel (nothing is stuck) or synthesize a bubble.
-    if (turnClosed) {
-      log.warn(
-        'acpRunner',
-        `post-close ack failed (turn already delivered) id=${cmd.id.slice(0, 8)}: ${describeError(err)}`,
-      );
-      return;
-    }
-    // Whether the turn ALREADY streamed VISIBLE progress before it threw —
-    // assistant text OR thinking/tool activity (`hasVisibleProgress`, NOT
-    // `getCurrentText` alone). When it did, `closeAll` finalises that partial
-    // reply as the terminal frame — we must NOT clobber it. When it didn't, the
-    // only frame is an empty `done:true` (dropped by the mobile snapshot-guard),
-    // so we MUST synthesize a visible failure bubble below.
-    //
-    // ⚠️ Text ALONE is the wrong signal: a long agentic turn streams lots of
-    // tool/thinking progress and can throw (idle watchdog tripping as the agent
-    // finishes its last tool, or a trailing error after the work completed)
-    // BEFORE a final `text` reply. Treating that as "no content" fired the
-    // generic TURN_FAILURE_MESSAGE and `closeWithBubble` REPLACED the whole
-    // streamed transcript with it — the error wiped a finished turn and
-    // mis-reported "couldn't finish" (2026-07-17). The broader check keeps such
-    // a turn on the non-destructive `closeAll` (bubble === null) path.
-    const hadText = streaming.hasVisibleProgress();
-    const detail = describeError(err);
-    log.warn('acpRunner', `prompt failed: ${detail}`);
-    // CANCEL the adapter's stuck turn now (the `promptQueueing` poison),
-    // but DEFER the chat flush: we don't yet know whether an ACTIONABLE
-    // bubble will REPLACE the streamed text or whether a partial reply must
-    // be preserved. Finalising via `closeAll` first commits the streamed
-    // raw text (e.g. the agent's own "…401 Invalid authentication
-    // credentials") as its OWN terminal `done:true` bubble — and the
-    // replacement frame published afterwards can no longer overwrite a
-    // finalised turn, so it lands as a SECOND bubble and the raw error
-    // stays pinned above the actionable one (the bug this fixes). The flush
-    // happens below, routed by the bubble decision: `closeWithBubble`
-    // (replace) for an actionable bubble, `closeAll` (keep partial) for a
-    // generic streamed-text failure.
-    await cancelStuckTurn(client);
-    // GUARANTEE a visible terminal frame: recoverFromFailedTurn's closeAll
-    // only published the accumulated ASSISTANT text — empty on a first-turn
-    // proxy/network/auth failure, which the mobile snapshot-guard drops,
-    // leaving the chat with no reply AND no error. failureBubble() decides
-    // the actionable message (re-auth, or generic retry when no text
-    // streamed); null only when a partial reply already serves as terminal.
-    // The outage bubble is shown ONLY when the agent's OWN error
-    // indicates a provider overload (`looksLikeProviderOutage` inside
-    // failureBubble). We deliberately do NOT consult the provider's
-    // status page as a catch-all: a status-page incident can be live
-    // while THIS user's local agent is still operational (a partial /
-    // regional degradation, or a stale/unrelated advisory like a model
-    // suspension). Blaming the provider for a failure it didn't cause —
-    // or worse, on a turn that merely failed for an unrelated reason —
-    // is a false "service disruption" wall. The error text is the only
-    // trustworthy signal that the provider actually rejected the call.
-    //
-    // Headroom budget-exceeded 429 — checked BEFORE the 1M gate because
-    // both are 429s and the discriminator is the proxy's exact body.
-    // The proxy is local; the agent provider is healthy. Fire the backend
-    // notification once per session (idempotency is the backend's job);
-    // then offer the two-option tappable recovery.
-    if (looksLikeBudgetExceeded(`${detail}\n${recentStderr.join('\n')}`)) {
-      await streaming.closeAll();
-      if (!budgetReachedFlag.get()) {
-        budgetReachedFlag.set(true);
-        void postBudgetReached({
-          sessionId: opts.sessionId,
-          pluginId: opts.pluginId,
-          pluginAuthToken: opts.pluginAuthToken,
-          agent: opts.agent,
-          period: extractBudgetPeriod(`${detail}\n${recentStderr.join('\n')}`),
+  // cold (one-shot). Delivered as a resource (not text) so it never lands in
+  // the agent's JSONL as user words — see `squad-context.ts`.
+  const squadContext = collectSquadContext(ctx);
+  applySquadContext(blocks, squadContext, squadContextMode(ctx));
+  // A USER-initiated prompt always re-arms the autonomous-handoff chain: it
+  // interrupts whatever chain was running and gives the new work a full budget.
+  ctx.squad?.resetHops();
+  // ── Autonomous handoff chain (P2-2) ──────────────────────────────────────
+  // Each iteration is ONE agent turn. A self-accepted handoff (auto mode, PRO,
+  // budget left) routes to the target and loops with the proposal's prompt as
+  // the next turn; everything else acks and returns. The hop budget is the hard
+  // bound — there is no other exit condition on the chain.
+  let turnBlocks = blocks;
+  let turnPieces = squadContext;
+  let turnPrompt = promptText;
+  let hop = 1;
+  for (;;) {
+    // Re-read on EVERY iteration: an auto hop swaps the agent, which replaces
+    // these handles exactly like the @-mention route does.
+    const { client, history, budgetRecovery } = ctx;
+    // Tracks whether the turn already reached a terminal, VISIBLE close (reply
+    // delivered + "Thinking…" cleared). Once true, the only awaited work left is
+    // the command ACK — and a long (>10 min) turn's `command:<id>` record can
+    // expire on the backend (COMMAND_TTL) so `sendResult` 404s. That POST-CLOSE
+    // ack failure must NOT be caught and turned into a "couldn't finish" bubble
+    // that CLOBBERS the already-delivered reply (2026-08-04, codeagent-dtz7).
+    let turnClosed = false;
+    try {
+      const reply = await promptWithContextFallback(ctx, client, turnBlocks, turnPieces);
+      // Close with interactive-detection so a trailing
+      // "question + numbered options" pattern in the reply gets
+      // surfaced as a tappable select_prompt chunk on mobile
+      // instead of staying as plain text (Gemini's typical shape
+      // for "¿continuar? 1. sí 2. no").
+      const finalText = streaming.getCurrentText();
+      if (agentHooks(opts.agent)?.classifyCompletedReply?.(finalText) === 'upgrade_required') {
+        // Cursor's OWN plan paywall ("Upgrade your plan to continue"): the
+        // user's Cursor account is on Free, which doesn't include the headless
+        // Agent. NOT a credential problem — swap the bare text for an
+        // actionable bubble linking to the user's Cursor account upgrade page.
+        // Do NOT reportCredentialInvalid (the login is valid).
+        await streaming.closeWithBubble(CURSOR_UPGRADE_MESSAGE);
+        turnClosed = true;
+        history.appendAgentReply(CURSOR_UPGRADE_MESSAGE);
+        void history.flush();
+        log.info('acpRunner', `start_task ← cursor-plan-upgrade-required id=${cmd.id.slice(0, 8)}`);
+        await relay.sendResult(cmd.id, 'failed', { error: 'cursor plan upgrade required' });
+        return;
+      } else if (replyIsHouseAgentLimit(finalText)) {
+        // The turn COMPLETED but the reply IS a house-proxy 403 (CodeAgent Cloud
+        // daily usage ceiling / temporarily unavailable). Claude streams the
+        // wrapped "Failed to authenticate. API Error: 403 …" as plain reply text,
+        // which replyIsAuthFailure would otherwise misclassify as a bad
+        // credential → a pointless re-auth loop (2026-07-29 Rafael). It is a
+        // usage/availability limit — surface the accurate daily-limit bubble and
+        // DO NOT reportCredentialInvalid (the credential, if any, is fine; the
+        // house agent has none to renew).
+        const houseBubble = houseAgentLimitMessage(finalText);
+        await streaming.closeWithBubble(houseBubble);
+        turnClosed = true;
+        history.appendAgentReply(houseBubble);
+        void history.flush();
+        turnFiles.flushTurn().catch((err) => {
+          log.warn('acpRunner', `turnFiles.flushTurn failed: ${describeError(err)}`);
         });
+        log.info('acpRunner', `start_task ← house-agent-limit id=${cmd.id.slice(0, 8)}`);
+        await relay.sendResult(cmd.id, 'failed', {
+          error: 'house agent usage ceiling / temporarily unavailable',
+        });
+        return;
+      } else if (replyIsAuthFailure(finalText)) {
+        // The agent COMPLETED the turn but its reply IS an auth-failure
+        // notice ("Not logged in · Please run /login") — a missing/expired
+        // credential the agent surfaced as plain text instead of throwing.
+        // Swap the raw CLI text for the actionable re-auth bubble and flag
+        // the LinkedAgent credential invalid so Profile › Agents shows
+        // EXPIRED + the re-link CTA, identical to the throw/exit auth paths.
+        await streaming.closeWithBubble(AUTH_FAILURE_MESSAGE);
+        turnClosed = true;
+        history.appendAgentReply(AUTH_FAILURE_MESSAGE);
+        void history.flush();
+        // Symmetry with the happy path: flush any file changeset the agent
+        // produced BEFORE it hit the auth wall. No-ops when there are no
+        // hunks (the typical not-logged-in case), so it's pure insurance
+        // against silently dropping partial edits.
+        turnFiles.flushTurn().catch((err) => {
+          log.warn('acpRunner', `turnFiles.flushTurn failed: ${describeError(err)}`);
+        });
+        void reportCredentialInvalid(opts);
+        log.info('acpRunner', `start_task ← auth-failure-in-reply id=${cmd.id.slice(0, 8)}`);
+        await relay.sendResult(cmd.id, 'failed', { error: 'agent reply reported auth failure' });
+        return;
+      } else if (
+        shouldOfferOneMRecovery({ detail: '', recentStderr: recentStderr.join('\n'), finalText })
+      ) {
+        // The turn COMPLETED but the reply IS Anthropic's "Usage credits
+        // required for 1M context" 429 body. Disabling 1M context does NOT
+        // fix a credential-type credits gate (2026-06-24 incident) — the real
+        // recovery is reconnecting the Claude subscription via the in-app
+        // OAuth. Surface the reconnect bubble + flag the credential so
+        // Profile › Agents shows the reconnect CTA, mirroring the auth path.
+        await streaming.closeWithBubble(ONE_M_CREDITS_MESSAGE);
+        turnClosed = true;
+        history.appendAgentReply(ONE_M_CREDITS_MESSAGE);
+        void history.flush();
+        turnFiles.flushTurn().catch((err) => {
+          log.warn('acpRunner', `turnFiles.flushTurn failed: ${describeError(err)}`);
+        });
+        void reportCredentialInvalid(opts);
+        log.info('acpRunner', `start_task ← 1m-credits-reconnect id=${cmd.id.slice(0, 8)}`);
+        await relay.sendResult(cmd.id, 'failed', {
+          error: 'agent reply reported 1M-context usage-credits gate',
+        });
+        return;
+      } else {
+        await streaming.closeTurnWithInteractiveDetection();
+        turnClosed = true;
+        // Agent-proposed handoff: the reply may END with a ```codeam-handoff
+        // fence. It's protocol litter the app renders as a card — the live +
+        // terminal frames already suppress it (StreamingState), and everything
+        // DURABLE (terminal echo, conversation history, squad journal) uses the
+        // stripped text so it can never resurface on a refresh.
+        const { cleanText, proposal } = extractHandoffProposal(
+          finalText,
+          opts.agent,
+          handoffTargets(ctx),
+        );
+        const replyLine = formatAgentReplyLine(cleanText);
+        if (replyLine.length > 0) {
+          showInfo(replyLine);
+        }
+        history.appendAgentReply(cleanText);
+        void history.flush();
+        // End-of-turn file changeset — agent likely edited files during the
+        // turn (tool_call write_file / bash). The aggregator runs git diff
+        // once and batch-posts the hunks so mobile's PENDING REVIEW counter +
+        // Files rail update. `peekTurnPaths()` (read below by
+        // `recordSquadTurn`) only updates INSIDE this call, so a squad
+        // session AWAITS it here — small git-diff latency before the ack —
+        // so the journal entry captures THIS turn's paths instead of
+        // permanently lagging one turn behind. A non-squad session has no
+        // journal to feed, so it keeps the original fire-and-forget
+        // behavior (`flush` is still `.catch()`'d — no unhandled rejection).
+        const flush = turnFiles.flushTurn().catch((err) => {
+          log.warn('acpRunner', `turnFiles.flushTurn failed: ${describeError(err)}`);
+        });
+        if (ctx.squad) await flush;
+        // Journal the turn for the squad's shared memory — the NEXT agent to
+        // take over receives it in its delta briefing. `opts.agent` is the
+        // ROUTED agent here (the swap above already moved it).
+        recordSquadTurn(ctx, turnPrompt, cleanText);
+        // Autonomous mode self-ACCEPTS a valid proposal instead of emitting the
+        // tap-to-accept card: route to the target and run the proposal's prompt
+        // as the next iteration of this chain. `null` = the normal card flow (or
+        // no proposal at all) — fall through and close the turn.
+        const autoHop = emitHandoffProposal(ctx, proposal, hop);
+        if (autoHop) {
+          const routed = await routeSquadTask(ctx, autoHop.toAgentId);
+          if (routed.ok) {
+            resolveAutoHandoff(ctx, autoHop);
+            hop += 1;
+            turnPrompt = autoHop.prompt;
+            // The routed agent may be new to this session — collect ITS squad
+            // context (preamble / briefing) exactly like a user-routed turn.
+            turnPieces = collectSquadContext(ctx);
+            turnBlocks = [{ type: 'text', text: turnPrompt }];
+            // Same one-time preface the @-mention route gives a newly-routed
+            // agent (no-op once that agent has had it this session).
+            maybePrefaceAgentStandard(turnBlocks, opts.agent, opts.sessionId);
+            applySquadContext(turnBlocks, turnPieces, squadContextMode(ctx));
+            await streaming.beginTurn();
+            ctx.history.appendUserPrompt(turnPrompt);
+            continue;
+          }
+          // The chain stops here rather than wedging: the reply the user already
+          // has is real, and the failed swap left the session on its prior agent.
+          log.warn(
+            'acpRunner',
+            `squad: auto-handoff to ${autoHop.toAgentId} failed: ${routed.error}`,
+          );
+        }
+        // Emit static quick-reply chips so the mobile UI has
+        // one-tap continuation prompts after every ACP turn.
+        // PTY agents emit a single-string `input_suggestion` via
+        // OutputService.tick(); ACP has no idle-prompt detector so
+        // we emit a fixed array instead. The mobile store normalises
+        // both shapes to string[] before rendering.
+        // Only emitted on a normal (non-select-prompt) turn end --
+        // select_prompt is handled by closeTurnWithInteractiveDetection.
+        void publisher.publishOutput({
+          type: 'input_suggestion',
+          content: ACP_QUICK_REPLIES,
+          done: true,
+        });
+        log.info(
+          'acpRunner',
+          `start_task ← done stopReason=${reply.stopReason ?? '?'} id=${cmd.id.slice(0, 8)}`,
+        );
+        await relay.sendResult(cmd.id, 'completed', { stopReason: reply.stopReason });
+        return;
       }
-      await budgetRecovery.offer(cmd.id, blocks, `${detail}\n${recentStderr.join('\n')}`);
+    } catch (err) {
+      // POST-CLOSE ACK GUARD: if the turn already reached a terminal, visible
+      // close, the reply was delivered and "Thinking…" cleared — the only awaited
+      // work that can throw after that is the command ACK (`sendResult`). On a
+      // turn that ran longer than the backend's COMMAND_TTL (10 min), the
+      // `command:<id>` record has expired so `sendResult` 404s. Treating that as a
+      // turn failure fired the generic "The agent hit an error and couldn't finish
+      // this turn" bubble which `closeWithBubble` used to OVERWRITE the finished
+      // reply — a FALSE failure on a succeeded turn (2026-08-04, codeagent-dtz7:
+      // confirmed live on Rafael's 18-min turn, `prompt ← ok` then `prompt
+      // failed: HTTP 404` on the ack). The turn already succeeded — log the ack
+      // miss and stop; do NOT cancel (nothing is stuck) or synthesize a bubble.
+      if (turnClosed) {
+        log.warn(
+          'acpRunner',
+          `post-close ack failed (turn already delivered) id=${cmd.id.slice(0, 8)}: ${describeError(err)}`,
+        );
+        return;
+      }
+      // Whether the turn ALREADY streamed VISIBLE progress before it threw —
+      // assistant text OR thinking/tool activity (`hasVisibleProgress`, NOT
+      // `getCurrentText` alone). When it did, `closeAll` finalises that partial
+      // reply as the terminal frame — we must NOT clobber it. When it didn't, the
+      // only frame is an empty `done:true` (dropped by the mobile snapshot-guard),
+      // so we MUST synthesize a visible failure bubble below.
+      //
+      // ⚠️ Text ALONE is the wrong signal: a long agentic turn streams lots of
+      // tool/thinking progress and can throw (idle watchdog tripping as the agent
+      // finishes its last tool, or a trailing error after the work completed)
+      // BEFORE a final `text` reply. Treating that as "no content" fired the
+      // generic TURN_FAILURE_MESSAGE and `closeWithBubble` REPLACED the whole
+      // streamed transcript with it — the error wiped a finished turn and
+      // mis-reported "couldn't finish" (2026-07-17). The broader check keeps such
+      // a turn on the non-destructive `closeAll` (bubble === null) path.
+      const hadText = streaming.hasVisibleProgress();
+      const detail = describeError(err);
+      log.warn('acpRunner', `prompt failed: ${detail}`);
+      // CANCEL the adapter's stuck turn now (the `promptQueueing` poison),
+      // but DEFER the chat flush: we don't yet know whether an ACTIONABLE
+      // bubble will REPLACE the streamed text or whether a partial reply must
+      // be preserved. Finalising via `closeAll` first commits the streamed
+      // raw text (e.g. the agent's own "…401 Invalid authentication
+      // credentials") as its OWN terminal `done:true` bubble — and the
+      // replacement frame published afterwards can no longer overwrite a
+      // finalised turn, so it lands as a SECOND bubble and the raw error
+      // stays pinned above the actionable one (the bug this fixes). The flush
+      // happens below, routed by the bubble decision: `closeWithBubble`
+      // (replace) for an actionable bubble, `closeAll` (keep partial) for a
+      // generic streamed-text failure.
+      await cancelStuckTurn(client);
+      // GUARANTEE a visible terminal frame: recoverFromFailedTurn's closeAll
+      // only published the accumulated ASSISTANT text — empty on a first-turn
+      // proxy/network/auth failure, which the mobile snapshot-guard drops,
+      // leaving the chat with no reply AND no error. failureBubble() decides
+      // the actionable message (re-auth, or generic retry when no text
+      // streamed); null only when a partial reply already serves as terminal.
+      // The outage bubble is shown ONLY when the agent's OWN error
+      // indicates a provider overload (`looksLikeProviderOutage` inside
+      // failureBubble). We deliberately do NOT consult the provider's
+      // status page as a catch-all: a status-page incident can be live
+      // while THIS user's local agent is still operational (a partial /
+      // regional degradation, or a stale/unrelated advisory like a model
+      // suspension). Blaming the provider for a failure it didn't cause —
+      // or worse, on a turn that merely failed for an unrelated reason —
+      // is a false "service disruption" wall. The error text is the only
+      // trustworthy signal that the provider actually rejected the call.
+      //
+      // Headroom budget-exceeded 429 — checked BEFORE the 1M gate because
+      // both are 429s and the discriminator is the proxy's exact body.
+      // The proxy is local; the agent provider is healthy. Fire the backend
+      // notification once per session (idempotency is the backend's job);
+      // then offer the two-option tappable recovery.
+      if (looksLikeBudgetExceeded(`${detail}\n${recentStderr.join('\n')}`)) {
+        await streaming.closeAll();
+        if (!budgetReachedFlag.get()) {
+          budgetReachedFlag.set(true);
+          void postBudgetReached({
+            sessionId: opts.sessionId,
+            pluginId: opts.pluginId,
+            pluginAuthToken: opts.pluginAuthToken,
+            agent: opts.agent,
+            period: extractBudgetPeriod(`${detail}\n${recentStderr.join('\n')}`),
+          });
+        }
+        await budgetRecovery.offer(cmd.id, turnBlocks, `${detail}\n${recentStderr.join('\n')}`);
+        return;
+      }
+      // 1M-context usage-credits gate (Rafael 2026-06-24) is classified by
+      // failureBubble → ONE_M_CREDITS_MESSAGE (reconnect the Claude
+      // subscription). Disabling 1M doesn't fix a credential-type credits
+      // gate, so we no longer offer the disable action.
+      const bubble = failureBubble({
+        detail,
+        recentStderr: recentStderr.join('\n'),
+        hadText,
+        agent: opts.agent,
+      });
+      if (bubble) {
+        // REPLACE the streamed text with the actionable bubble as the SINGLE
+        // terminal frame. `closeWithBubble` sets the in-flight text to '' and
+        // publishes one `{type:'text', content:bubble, done:true}`; because the
+        // streamed bubble is still in `streaming` state (we did NOT closeAll
+        // above), mobile's processChunk overwrites it in place instead of
+        // pinning the raw error and appending a second bubble. Also neutralises
+        // the open streaming-chunk buffers so the raw text doesn't linger on
+        // the SessionDetail activity feed.
+        await streaming.closeWithBubble(bubble);
+        // Persist it in the DURABLE conversation (the output stream is just a
+        // 3-min buffer the next turn's `clear` wipes — and mobile re-fetches
+        // `get_conversation` on a loop). Without this the bubble shows live
+        // then disappears on the next refresh.
+        history.appendAgentReply(bubble);
+        void history.flush();
+      } else {
+        // No actionable bubble — a genuine partial reply already streamed and
+        // serves as the terminal frame. Finalise it (closeAll) so the
+        // streamed text flips out of "Thinking…" without being clobbered.
+        await streaming.closeAll();
+      }
+      if (bubble === AUTH_FAILURE_MESSAGE || bubble === ONE_M_CREDITS_MESSAGE) {
+        // Same durable flag as onUnexpectedExit — covers the case where the
+        // adapter 401s mid-turn (stalls → idle timeout) instead of exiting,
+        // so Profile › Agents still surfaces the re-auth/reconnect CTA rather
+        // than leaving the user stuck on a CONNECTED-but-dead credential. The
+        // 1M-credits gate reuses this to drive the subscription-reconnect CTA.
+        void reportCredentialInvalid(opts);
+      }
+      await relay.sendResult(cmd.id, 'failed', { error: detail });
       return;
     }
-    // 1M-context usage-credits gate (Rafael 2026-06-24) is classified by
-    // failureBubble → ONE_M_CREDITS_MESSAGE (reconnect the Claude
-    // subscription). Disabling 1M doesn't fix a credential-type credits
-    // gate, so we no longer offer the disable action.
-    const bubble = failureBubble({
-      detail,
-      recentStderr: recentStderr.join('\n'),
-      hadText,
-      agent: opts.agent,
-    });
-    if (bubble) {
-      // REPLACE the streamed text with the actionable bubble as the SINGLE
-      // terminal frame. `closeWithBubble` sets the in-flight text to '' and
-      // publishes one `{type:'text', content:bubble, done:true}`; because the
-      // streamed bubble is still in `streaming` state (we did NOT closeAll
-      // above), mobile's processChunk overwrites it in place instead of
-      // pinning the raw error and appending a second bubble. Also neutralises
-      // the open streaming-chunk buffers so the raw text doesn't linger on
-      // the SessionDetail activity feed.
-      await streaming.closeWithBubble(bubble);
-      // Persist it in the DURABLE conversation (the output stream is just a
-      // 3-min buffer the next turn's `clear` wipes — and mobile re-fetches
-      // `get_conversation` on a loop). Without this the bubble shows live
-      // then disappears on the next refresh.
-      history.appendAgentReply(bubble);
-      void history.flush();
-    } else {
-      // No actionable bubble — a genuine partial reply already streamed and
-      // serves as the terminal frame. Finalise it (closeAll) so the
-      // streamed text flips out of "Thinking…" without being clobbered.
-      await streaming.closeAll();
-    }
-    if (bubble === AUTH_FAILURE_MESSAGE || bubble === ONE_M_CREDITS_MESSAGE) {
-      // Same durable flag as onUnexpectedExit — covers the case where the
-      // adapter 401s mid-turn (stalls → idle timeout) instead of exiting,
-      // so Profile › Agents still surfaces the re-auth/reconnect CTA rather
-      // than leaving the user stuck on a CONNECTED-but-dead credential. The
-      // 1M-credits gate reuses this to drive the subscription-reconnect CTA.
-      void reportCredentialInvalid(opts);
-    }
-    await relay.sendResult(cmd.id, 'failed', { error: detail });
   }
-  return;
+}
+
+/**
+ * `squad_configure` — read/write the session's autonomous-handoff mode
+ * (`headroom_configure` shape). `set` persists to `~/.codeam/config.json` so
+ * the mode survives a CLI restart; both actions ack the state AFTER the
+ * command, including the budget the CLI actually applied (a malformed
+ * `hopBudget` is CLAMPED, never rejected — the ack is the source of truth for
+ * what the UI should render).
+ *
+ * The PRO gate lives on the BACKEND's command-send path (403 PREMIUM_REQUIRED),
+ * exactly like `headroom_configure`; the CLI's own gate is `roster.handoffsEnabled`
+ * at proposal time, so enabling the mode on a FREE plan is inert rather than
+ * an error.
+ */
+async function squadConfigureH(ctx: AcpCommandContext): Promise<void> {
+  const { cmd, relay, opts, squad } = ctx;
+  if (!squad) {
+    await relay.sendResult(cmd.id, 'failed', {
+      error: 'Agent Squad is not available on this session.',
+    });
+    return;
+  }
+  const payload = cmd.payload as SquadConfigurePayload | undefined;
+  if (payload?.action === 'set') {
+    const applied = squad.setAuto({
+      enabled: payload.autoHandoffs === true,
+      hopBudget: clampHopBudget(payload.hopBudget),
+    });
+    // Persistence is best-effort: an unknown pluginId (session removed between
+    // the tap and the command) still leaves the in-memory mode correct.
+    setSquadAuto(opts.pluginId, applied);
+    log.info(
+      'acpRunner',
+      `squad: auto handoffs ${applied.enabled ? 'ON' : 'OFF'} budget=${applied.hopBudget}`,
+    );
+    const result: SquadConfigureResult = { ...applied, hopsRemaining: squad.hopsRemaining() };
+    await relay.sendResult(cmd.id, 'completed', { ...result });
+    return;
+  }
+  if (payload?.action === 'status') {
+    const result: SquadConfigureResult = {
+      ...squad.auto,
+      hopsRemaining: squad.hopsRemaining(),
+    };
+    await relay.sendResult(cmd.id, 'completed', { ...result });
+    return;
+  }
+  await relay.sendResult(cmd.id, 'failed', { error: 'squad_configure: unknown action' });
+}
+
+/** `squad_stats` — per-member activity for the app's "Squad activity" screen. */
+async function squadStatsH(ctx: AcpCommandContext): Promise<void> {
+  const { cmd, relay, squad } = ctx;
+  if (!squad) {
+    await relay.sendResult(cmd.id, 'failed', {
+      error: 'Agent Squad is not available on this session.',
+    });
+    return;
+  }
+  const stats: SquadStatsResult = squad.stats();
+  await relay.sendResult(cmd.id, 'completed', { ...stats });
 }
 
 async function groupMentionTaskH(ctx: AcpCommandContext): Promise<void> {
@@ -895,14 +1257,16 @@ async function groupMentionTaskH(ctx: AcpCommandContext): Promise<void> {
   // it into the originating group as an `agent_reply`.
   const payload = cmd.payload as { taskId?: string; prompt?: string };
   const taskId = typeof payload?.taskId === 'string' ? payload.taskId : '';
-  const promptText =
-    typeof payload?.prompt === 'string' ? payload.prompt : '';
+  const promptText = typeof payload?.prompt === 'string' ? payload.prompt : '';
   if (!taskId || !promptText.trim()) {
     await relay.sendResult(cmd.id, 'failed', {
       error: 'invalid group_mention_task payload',
     });
     return;
   }
+  // User-initiated (a teammate @-mentioned the agent in a Team Space), so it
+  // re-arms the autonomous-handoff chain exactly like a start_task prompt does.
+  ctx.squad?.resetHops();
   await streaming.beginTurn();
   history.appendUserPrompt(promptText);
   let response = '';
@@ -1324,11 +1688,7 @@ async function previewH(ctx: AcpCommandContext): Promise<void> {
   const ackingRelay = new Proxy(relay, {
     get(target, prop, receiver) {
       if (prop === 'sendResult') {
-        return (
-          commandId: string,
-          status: string,
-          result: Record<string, unknown>,
-        ) => {
+        return (commandId: string, status: string, result: Record<string, unknown>) => {
           if (commandId === cmd.id) previewHandlerAcked = true;
           return target.sendResult(commandId, status, result);
         };
@@ -1377,11 +1737,7 @@ async function legacyOrUnsupportedH(ctx: AcpCommandContext): Promise<void> {
     const ackingRelay = new Proxy(relay, {
       get(target, prop, receiver) {
         if (prop === 'sendResult') {
-          return (
-            commandId: string,
-            status: string,
-            result: Record<string, unknown>,
-          ) => {
+          return (commandId: string, status: string, result: Record<string, unknown>) => {
             if (commandId === cmd.id) handlerAcked = true;
             return target.sendResult(commandId, status, result);
           };
@@ -1418,7 +1774,10 @@ async function legacyOrUnsupportedH(ctx: AcpCommandContext): Promise<void> {
  *  tool call doesn't race the cold download past the agent's MCP-init window
  *  (the Sentry incident). Best-effort, bounded, parallel; HTTP-transport
  *  integrations (empty command) are skipped. */
-async function prewarmNewMcpEntries(manifest: IntegrationsManifest, previousIds: Set<string>): Promise<void> {
+async function prewarmNewMcpEntries(
+  manifest: IntegrationsManifest,
+  previousIds: Set<string>,
+): Promise<void> {
   const PREWARMABLE = new Set(['npx', 'uvx']);
   const fresh = manifest.integrations.filter(
     (e) => !previousIds.has(e.id) && e.delivery.mcp && PREWARMABLE.has(e.delivery.mcp.command),
@@ -1428,11 +1787,8 @@ async function prewarmNewMcpEntries(manifest: IntegrationsManifest, previousIds:
       (e) =>
         new Promise<void>((resolve) => {
           const mcp = e.delivery.mcp!;
-          const child = execFile(
-            mcp.command,
-            [...mcp.args, '--help'],
-            { timeout: 90_000 },
-            () => resolve(),
+          const child = execFile(mcp.command, [...mcp.args, '--help'], { timeout: 90_000 }, () =>
+            resolve(),
           );
           child.on('error', () => resolve());
         }),
@@ -1475,7 +1831,10 @@ async function integrationsSyncH(ctx: AcpCommandContext): Promise<void> {
   } catch (err) {
     // The manifest is already persisted, so the tools still bind on the next
     // re-establishment — report but never fail the session.
-    log.warn('acpRunner', `integrations_sync failed (tools apply next restart): ${describeError(err)}`);
+    log.warn(
+      'acpRunner',
+      `integrations_sync failed (tools apply next restart): ${describeError(err)}`,
+    );
     await relay.sendResult(cmd.id, 'completed', { synced: false, error: describeError(err) });
   }
 }
@@ -1568,6 +1927,8 @@ export const ACP_COMMAND_HANDLERS: Record<string, AcpCommandHandler> = {
   pack_start: packStartH,
   pack_action: packActionH,
   pack_status: packStatusH,
+  [SQUAD_CONFIGURE_COMMAND]: squadConfigureH,
+  [SQUAD_STATS_COMMAND]: squadStatsH,
 };
 
 /**

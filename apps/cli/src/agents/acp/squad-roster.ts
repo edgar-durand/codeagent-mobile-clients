@@ -18,7 +18,16 @@
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { HANDOFF_FENCE_TAG, SQUAD_SPECIALTIES, type SquadRosterData } from '@codeam/shared';
+import {
+  HANDOFF_FENCE_TAG,
+  SQUAD_HOP_BUDGET_DEFAULT,
+  SQUAD_SPECIALTIES,
+  clampHopBudget,
+  type SquadAutoConfig,
+  type SquadMemberActivity,
+  type SquadRosterData,
+  type SquadStatsResult,
+} from '@codeam/shared';
 
 export interface SquadMemberState {
   /** The agent's OWN conversation id, for --resume via loadSession. */
@@ -28,6 +37,14 @@ export interface SquadMemberState {
   binaryVerified: boolean;
   /** Last journal turn this agent has seen (drives `entriesSince`). */
   lastTurnIndex: number;
+  /**
+   * This agent's ACP adapter rejected a `ContentBlock::Resource` prompt block
+   * (invalid-params), so squad context is delivered to it as legacy TEXT
+   * blocks for the rest of the session. Set by the ONE retry in
+   * `startTaskH`; never unset (an adapter's capability doesn't change
+   * mid-process).
+   */
+  contextTextFallback: boolean;
 }
 
 export interface SquadJournalEntry {
@@ -57,7 +74,13 @@ function clip(s: string, max: number): string {
 }
 
 function defaultMember(): SquadMemberState {
-  return { acpSessionId: null, provisioned: false, binaryVerified: false, lastTurnIndex: 0 };
+  return {
+    acpSessionId: null,
+    provisioned: false,
+    binaryVerified: false,
+    lastTurnIndex: 0,
+    contextTextFallback: false,
+  };
 }
 
 function journalPathFor(homeDir: string, sessionId: string): string {
@@ -78,13 +101,94 @@ export class SquadState {
   /** Set by the caller after fetchSquadRoster; null until then. */
   roster: SquadRosterData | null = null;
 
+  /**
+   * Autonomous chained handoffs (P2-2, PRO). Seeded from the persisted
+   * `SavedSession.squadAuto` at session start and rewritten by
+   * `squad_configure`. Read-only to callers — mutate via {@link setAuto}, which
+   * clamps the budget and re-arms the chain.
+   */
+  private autoConfig: SquadAutoConfig = { enabled: false, hopBudget: SQUAD_HOP_BUDGET_DEFAULT };
+
+  /**
+   * Hops left in the CURRENT chain. Reset to the budget on every USER-initiated
+   * prompt (so a user turn always interrupts and re-arms) and decremented by
+   * each self-accepted handoff.
+   */
+  private hopsLeft = 0;
+
+  /** Lifetime handoff counters for `squad_stats` (in-memory, this process). */
+  private readonly handoffCounters = { proposed: 0, accepted: 0, auto: 0 };
+
   private readonly journalPath: string;
   private turns: SquadJournalEntry[];
   private readonly members = new Map<string, SquadMemberState>();
 
-  constructor(opts: { sessionId: string; homeDir?: string }) {
+  constructor(opts: { sessionId: string; homeDir?: string; auto?: SquadAutoConfig | null }) {
     this.journalPath = journalPathFor(opts.homeDir ?? os.homedir(), opts.sessionId);
     this.turns = loadJournal(this.journalPath);
+    if (opts.auto) this.setAuto(opts.auto);
+  }
+
+  get auto(): Readonly<SquadAutoConfig> {
+    return this.autoConfig;
+  }
+
+  /** Apply a new mode (clamping the budget) and re-arm the chain. */
+  setAuto(value: SquadAutoConfig): SquadAutoConfig {
+    this.autoConfig = {
+      enabled: value.enabled === true,
+      hopBudget: clampHopBudget(value.hopBudget),
+    };
+    this.resetHops();
+    return this.autoConfig;
+  }
+
+  hopsRemaining(): number {
+    return this.hopsLeft;
+  }
+
+  /** Re-arm the chain — called at the start of every USER-initiated turn. */
+  resetHops(): void {
+    this.hopsLeft = this.autoConfig.enabled ? this.autoConfig.hopBudget : 0;
+  }
+
+  /** Spend one hop on a self-accepted handoff. */
+  consumeHop(): void {
+    if (this.hopsLeft > 0) this.hopsLeft -= 1;
+  }
+
+  countProposal(opts: { auto: boolean }): void {
+    this.handoffCounters.proposed += 1;
+    if (opts.auto) this.handoffCounters.auto += 1;
+  }
+
+  countAccepted(): void {
+    this.handoffCounters.accepted += 1;
+  }
+
+  /**
+   * Per-member activity for the `squad_stats` relay command, derived from the
+   * journal (the same shared history the delta briefing reads) plus the
+   * in-memory handoff counters. `filesTouched` counts DISTINCT paths — a member
+   * that edited the same file across three turns touched ONE file.
+   */
+  stats(): SquadStatsResult {
+    const byAgent = new Map<string, { turns: number; files: Set<string> }>();
+    for (const t of this.turns) {
+      let row = byAgent.get(t.agentId);
+      if (!row) {
+        row = { turns: 0, files: new Set() };
+        byAgent.set(t.agentId, row);
+      }
+      row.turns += 1;
+      for (const f of t.filesTouched) row.files.add(f);
+    }
+    const members: SquadMemberActivity[] = [...byAgent.entries()].map(([agentId, row]) => ({
+      agentId,
+      turns: row.turns,
+      filesTouched: row.files.size,
+    }));
+    return { members, handoffs: { ...this.handoffCounters }, sinceTurn: 1 };
   }
 
   /** Returns (creating on first access) the mutable per-agent state. */
@@ -134,6 +238,32 @@ function specialtyFor(agentId: string): string {
 }
 
 /**
+ * Every literal line of the team preamble that is NOT a per-teammate bullet.
+ * Exported (and consumed by {@link buildTeamPreamble} itself) so
+ * `stripSquadContext` has ONE source of truth for the block's extent when it
+ * scrubs a legacy text-delivered preamble out of hydrated history — a
+ * hand-copied list there would silently rot the moment this copy changes.
+ */
+export const TEAM_PREAMBLE_MARKER = '[Team context]';
+export const TEAM_PREAMBLE_LINES: readonly string[] = [
+  '[Team context] You are the active agent in a CodeAgent Mobile session where the user',
+  'has a squad of agents and can pass work between them. Your available teammates:',
+  'If a task clearly fits a teammate better than you, you MAY propose a handoff by ending',
+  `your reply with a fenced code block tagged ${HANDOFF_FENCE_TAG} containing ONE JSON object:`,
+  '{"to":"<teammate id>","reason":"<one sentence>","prompt":"<the prompt they should run>"}',
+  'Propose at most one handoff per reply, only when genuinely better, and never announce',
+  'the block in prose — the app renders it as a card the user can accept.',
+];
+/** Shape of a teammate bullet — the only VARIABLE line in the preamble. */
+export const TEAM_PREAMBLE_BULLET_RE = /^- .+ — best at: /;
+
+export const BRIEFING_MARKER = '[Team update]';
+export const BRIEFING_HEADER =
+  '[Team update] While you were away, other agents worked on this session:';
+/** Last line of a delta briefing — the block's stable terminator. */
+export const BRIEFING_FOOTER = 'Continue from the CURRENT state of the working tree.';
+
+/**
  * The one-time-per-activation preamble telling the active agent who else is
  * on the squad. Returns null when the roster has no OTHER member (nothing
  * useful to say). `handoffInstructions` gates the codeam-handoff protocol
@@ -148,19 +278,13 @@ export function buildTeamPreamble(
   if (others.length === 0) return null;
 
   const lines = [
-    '[Team context] You are the active agent in a CodeAgent Mobile session where the user',
-    'has a squad of agents and can pass work between them. Your available teammates:',
+    TEAM_PREAMBLE_LINES[0],
+    TEAM_PREAMBLE_LINES[1],
     ...others.map((a) => `- ${a.displayName} — best at: ${specialtyFor(a.agentId)}`),
   ];
 
   if (opts.handoffInstructions) {
-    lines.push(
-      'If a task clearly fits a teammate better than you, you MAY propose a handoff by ending',
-      `your reply with a fenced code block tagged ${HANDOFF_FENCE_TAG} containing ONE JSON object:`,
-      '{"to":"<teammate id>","reason":"<one sentence>","prompt":"<the prompt they should run>"}',
-      'Propose at most one handoff per reply, only when genuinely better, and never announce',
-      'the block in prose — the app renders it as a card the user can accept.',
-    );
+    lines.push(...TEAM_PREAMBLE_LINES.slice(2));
   }
 
   return clip(lines.join('\n'), PREAMBLE_MAX);
@@ -183,8 +307,8 @@ export function buildDeltaBriefing(
 ): string | null {
   if (entries.length === 0) return null;
 
-  const header = '[Team update] While you were away, other agents worked on this session:';
-  const footer = 'Continue from the CURRENT state of the working tree.';
+  const header = BRIEFING_HEADER;
+  const footer = BRIEFING_FOOTER;
   const envelope = header.length + 1 + footer.length + 1;
 
   const sorted = [...entries].sort((a, b) => a.turn - b.turn);
