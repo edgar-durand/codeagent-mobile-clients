@@ -4,6 +4,27 @@ All notable changes to the CodeAgent-Mobile JetBrains plugin are documented here
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.65.1] — 2026-08-14
+
+### Added
+
+- **shared:** Canonical per-agent install snippets (INSTALL_SNIPPETS)
+
+### CI
+
+- **workflow:** Nightly + path-triggered real agent-install gate
+
+### Fixed
+
+- **cli:** Retry agent install once on post-install probe failure + 300s switch install budget
+- **cli:** Codex adapter augments user-local bin PATH before probing (stale-PATH class)
+- **cli:** Three stale-PATH/misreported-install bugs found by the real install gate
+- **cli:** Pre-tag wave — coderabbit runnability authority, retry progress, harness hardening
+
+### Tests
+
+- **cli:** Real per-agent install integration gate (Docker, minimal PATH)
+
 ## [2.65.0] — 2026-08-14
 
 ### Added
