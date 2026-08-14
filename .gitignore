@@ -32,6 +32,10 @@ apps/cli/*.tgz
 # Transient pack tarball the host-agent Docker E2E copies into its build
 # context (cleaned up in afterAll; ignored so a crashed run can't commit it).
 apps/cli/__tests__/docker/*.tgz
+# Same deal for the test-only driver bundles the integration tests copy into
+# that build context (mcp-shim-driver.js IS checked in — these two are not).
+apps/cli/__tests__/docker/headroom-runner-driver.js
+apps/cli/__tests__/docker/agent-install-driver.js
 
 # Logs
 *.log
