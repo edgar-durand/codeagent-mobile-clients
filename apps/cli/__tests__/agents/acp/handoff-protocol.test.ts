@@ -503,7 +503,9 @@ describe('extractHandoffProposal — degenerate/inline form', () => {
     expect(r.cleanText).not.toContain('do the real thing');
   });
 
-  it('only the LAST degenerate match is considered when there are several', () => {
+  it('only the TRAILING degenerate line counts when there are several in the text', () => {
+    // The FIRST one is no longer the reply's tail (the second follows it), so
+    // it's simply not considered at all — only the trailing line is.
     const text = [
       '`codeam-handoff {"to":"codex","reason":"first","prompt":"first prompt"}`',
       '',
@@ -511,6 +513,61 @@ describe('extractHandoffProposal — degenerate/inline form', () => {
     ].join('\n');
     const r = extractHandoffProposal(text, 'claude', new Set(['codex']));
     expect(r.proposal).toEqual({ to: 'codex', reason: 'second', prompt: 'second prompt' });
+  });
+});
+
+// ─── extractHandoffProposal — degenerate form MUST be reply-TRAILING ────────
+// Reviewer finding: matching a degenerate mention ANYWHERE in the text let an
+// agent EXPLAINING the protocol mid-reply produce a fully-resolved FABRICATED
+// proposal card and silently delete the explanatory line — strictly worse
+// than the incident being fixed. The degenerate form now only counts when
+// it's the LAST non-blank line, mirroring "end your reply with…".
+
+describe('extractHandoffProposal — degenerate form must be reply-trailing', () => {
+  it('reviewer repro (inline-code form): a mid-reply worked example is left byte-identical, no proposal', () => {
+    const text =
+      'Sure — to hand this off you would write:\n\n' +
+      '`codeam-handoff {"to":"codex","reason":"example","prompt":"do the thing"}`\n\n' +
+      'but only do that when it fits.';
+    const r = extractHandoffProposal(text, 'claude', new Set(['codex']));
+    expect(r.proposal).toBeNull();
+    expect(r.cleanText).toBe(text);
+  });
+
+  it('reviewer repro (bare form): a mid-reply worked example is left byte-identical, no proposal', () => {
+    const text =
+      'Sure — to hand this off you would write:\n\n' +
+      'codeam-handoff {"to":"codex","reason":"example","prompt":"do the thing"}\n\n' +
+      'but only do that when it fits.';
+    const r = extractHandoffProposal(text, 'claude', new Set(['codex']));
+    expect(r.proposal).toBeNull();
+    expect(r.cleanText).toBe(text);
+  });
+
+  it('a genuinely TRAILING degenerate block (nothing after it) is still a valid proposal and gets stripped', () => {
+    const text =
+      'Handing this off now.\n\n' +
+      '`codeam-handoff {"to":"codex","reason":"needs codex","prompt":"finish it"}`';
+    const r = extractHandoffProposal(text, 'claude', new Set(['codex']));
+    expect(r.proposal).toEqual({ to: 'codex', reason: 'needs codex', prompt: 'finish it' });
+    expect(r.cleanText).toBe('Handing this off now.');
+  });
+
+  it('a trailing degenerate block followed ONLY by blank lines still matches', () => {
+    const text =
+      'Handing this off now.\n\n' +
+      '`codeam-handoff {"to":"codex","reason":"needs codex","prompt":"finish it"}`\n\n\n';
+    const r = extractHandoffProposal(text, 'claude', new Set(['codex']));
+    expect(r.proposal).toEqual({ to: 'codex', reason: 'needs codex', prompt: 'finish it' });
+    expect(r.cleanText).toBe('Handing this off now.');
+  });
+
+  it('a degenerate block on the last line but with trailing prose AFTER it on the SAME line does not match', () => {
+    const text =
+      'Handing this off. `codeam-handoff {"to":"codex","reason":"r","prompt":"p"}` please review soon';
+    const r = extractHandoffProposal(text, 'claude', new Set(['codex']));
+    expect(r.proposal).toBeNull();
+    expect(r.cleanText).toBe(text);
   });
 });
 
@@ -532,6 +589,28 @@ describe('stripHandoffFences — degenerate/inline form', () => {
 
   it('leaves ordinary prose mentioning the tag untouched', () => {
     const text = 'The codeam-handoff protocol lets agents pass work to teammates.';
+    expect(stripHandoffFences(text)).toBe(text);
+  });
+
+  // ─── must be reply-TRAILING (reviewer fix) ─────────────────────────────────
+
+  it('reviewer repro: a mid-reply worked example is left byte-identical (not stripped from the live bubble either)', () => {
+    const text =
+      'Sure — to hand this off you would write:\n\n' +
+      '`codeam-handoff {"to":"codex","reason":"example","prompt":"do the thing"}`\n\n' +
+      'but only do that when it fits.';
+    expect(stripHandoffFences(text)).toBe(text);
+  });
+
+  it('a trailing degenerate block followed ONLY by blank lines is still stripped', () => {
+    const text =
+      'Handing this off now.\n\n`codeam-handoff {"to":"codex","reason":"r","prompt":"p"}`\n\n\n';
+    expect(stripHandoffFences(text)).toBe('Handing this off now.');
+  });
+
+  it('a degenerate block on the last line with trailing prose AFTER it on the SAME line is not stripped', () => {
+    const text =
+      'Handing this off. `codeam-handoff {"to":"codex","reason":"r","prompt":"p"}` please review soon';
     expect(stripHandoffFences(text)).toBe(text);
   });
 });

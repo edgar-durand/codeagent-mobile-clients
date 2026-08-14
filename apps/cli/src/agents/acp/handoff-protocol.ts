@@ -34,15 +34,17 @@ const FENCE_RE = new RegExp('```' + HANDOFF_FENCE_TAG + '\\s*\\n([\\s\\S]*?)\\n?
 // The degenerate/inline form a model emits when it treats the protocol tag
 // as an inline mention instead of a fenced block: `codeam-handoff` followed
 // by ONE JSON object on the SAME line, wrapped in 0-2 backticks (bare text,
-// or a single/double-backtick inline code span). Line-anchored (`^...$`,
-// `m` flag) so it can never match a mid-sentence mention of the tag. The
-// backreference (`\1`) requires the CLOSING backtick count to match the
-// OPENING one, so a stray trailing backtick from unrelated prose can't be
-// swallowed. `g` so we can collect every occurrence and take the last, same
-// as `FENCE_RE`.
-const DEGENERATE_RE = new RegExp(
+// or a single/double-backtick inline code span). Anchored to the WHOLE line
+// (`^...$`) so it can never match a mid-sentence mention of the tag, or a
+// line with trailing prose after the JSON. The backreference (`\1`) requires
+// the CLOSING backtick count to match the OPENING one, so a stray trailing
+// backtick from unrelated prose can't be swallowed.
+//
+// Tested against ONE LINE AT A TIME (via `trailingDegenerateMatch`, never
+// `matchAll` over the whole text) — no `g`/`m` flags. See that function for
+// why: a degenerate match only counts when it's the reply's actual TAIL.
+const DEGENERATE_LINE_RE = new RegExp(
   '^[ \\t]*(`{0,2})[ \\t]*' + HANDOFF_FENCE_TAG + '[ \\t]+(\\{.*\\})[ \\t]*\\1[ \\t]*\\r?$',
-  'gm',
 );
 
 // A fence opened with 4+ backticks is the agent quoting the protocol itself
@@ -188,12 +190,46 @@ function stripFences(masked: string): string {
   return collapseSeams(masked.replace(FENCE_RE, ''));
 }
 
-/** Last `DEGENERATE_RE` match in already-masked text, or null. `matchAll` is
- * consumed fresh each call (the regex carries the `g` flag but this never
- * reads/relies on `lastIndex` across calls). */
-function lastDegenerateMatch(masked: string): RegExpMatchArray | null {
-  const matches = [...masked.matchAll(DEGENERATE_RE)];
-  return matches.length > 0 ? matches[matches.length - 1] : null;
+/**
+ * The LAST non-blank line of `masked`, trailing blank lines skipped, plus its
+ * start offset in `masked`. Null when the text is empty or entirely blank.
+ */
+function lastNonBlankLine(masked: string): { line: string; start: number } | null {
+  const parts = masked.split('\n');
+  const starts: number[] = [];
+  let offset = 0;
+  for (const p of parts) {
+    starts.push(offset);
+    offset += p.length + 1; // +1 accounts for the '\n' separator.
+  }
+  for (let i = parts.length - 1; i >= 0; i--) {
+    if (parts[i].trim().length > 0) return { line: parts[i], start: starts[i] };
+  }
+  return null;
+}
+
+/**
+ * A degenerate match, but ONLY when it's on the reply's actual TAIL — the
+ * last non-blank line of `masked` (trailing blank lines are fine; the
+ * protocol contract is "end your reply with…", so a worked example earlier
+ * in a longer reply must never be mistaken for a live proposal).
+ *
+ * ⚠️ Found the hard way: matching a degenerate mention ANYWHERE in the text
+ * (the original `matchAll`-based implementation) let an agent EXPLAINING the
+ * protocol mid-reply — "to hand this off you'd write `codeam-handoff
+ * {...}` but only when it fits" — get mistaken for a live, fully-resolved
+ * proposal, AND silently deleted the explanatory line out of the visible
+ * reply. Restricting to the trailing line closes that false-positive class
+ * while still catching the real incident (the proposal genuinely WAS the
+ * last thing in the reply).
+ */
+function trailingDegenerateMatch(
+  masked: string,
+): { match: RegExpMatchArray; start: number } | null {
+  const last = lastNonBlankLine(masked);
+  if (!last) return null;
+  const match = last.line.match(DEGENERATE_LINE_RE);
+  return match ? { match, start: last.start } : null;
 }
 
 /** Find + strip a ```codeam-handoff fence. Validates: parseable single JSON
@@ -206,12 +242,14 @@ function lastDegenerateMatch(masked: string): RegExpMatchArray | null {
  * stripped nor parsed, so the user sees the example verbatim.
  *
  * When there's no strict fence, falls back to the DEGENERATE (bare / inline-
- * code) form — `codeam-handoff {...}` on one line. Unlike the strict fence,
- * the degenerate form is treated as a proposal AND stripped ONLY when the
- * JSON parses AND fully validates (target resolves on THIS roster, via
- * {@link resolveHandoffTarget}, and isn't the current agent). An invalid
- * degenerate match leaves the text COMPLETELY untouched — never eat prose
- * that merely resembles the tag. */
+ * code) form — `codeam-handoff {...}` on one line — but ONLY when that line
+ * is the reply's TRAILING content (the last non-blank line; see {@link
+ * trailingDegenerateMatch}). Unlike the strict fence, the degenerate form is
+ * treated as a proposal AND stripped ONLY when the JSON parses AND fully
+ * validates (target resolves on THIS roster, via {@link
+ * resolveHandoffTarget}, and isn't the current agent). An invalid degenerate
+ * match — including one that isn't on the trailing line — leaves the text
+ * COMPLETELY untouched: never eat prose that merely mentions the tag. */
 export function extractHandoffProposal(
   text: string,
   currentAgent: string,
@@ -226,12 +264,12 @@ export function extractHandoffProposal(
     return { cleanText, proposal };
   }
 
-  const degenerate = lastDegenerateMatch(masked);
+  const degenerate = trailingDegenerateMatch(masked);
   if (degenerate) {
-    const proposal = parseProposal(degenerate[2].trim(), currentAgent, validTargets);
+    const proposal = parseProposal(degenerate.match[2].trim(), currentAgent, validTargets);
     if (proposal) {
-      const idx = degenerate.index ?? 0;
-      const stripped = masked.slice(0, idx) + masked.slice(idx + degenerate[0].length);
+      const { start } = degenerate;
+      const stripped = masked.slice(0, start) + masked.slice(start + degenerate.match[0].length);
       return { cleanText: restore(collapseSeams(stripped)), proposal };
     }
     // Malformed JSON, wrong shape, or a target that doesn't resolve on this
@@ -252,24 +290,27 @@ export function extractHandoffProposal(
  *
  * For the DEGENERATE form this function has no session context to fully
  * validate against (no roster, no current agent) — it strips a degenerate
- * match when the JSON has the proposal SHAPE (`parseProposalShape`: parses,
- * non-empty `to`/`reason`/`prompt` within the size caps), without resolving
- * `to`. That's deliberately looser than `extractHandoffProposal`'s durable
- * `cleanText` (which additionally requires the target to resolve on the
- * live roster) — the alternative is leaking a raw JSON blob into the user's
- * chat bubble for a merely-mistyped target, which is worse than an
- * occasional over-eager strip of a shape-valid block. A block that isn't
- * even shape-valid JSON is still never touched (never eat unrelated prose). */
+ * match, when it's on the reply's TRAILING line (see {@link
+ * trailingDegenerateMatch}), if the JSON has the proposal SHAPE
+ * (`parseProposalShape`: parses, non-empty `to`/`reason`/`prompt` within the
+ * size caps), without resolving `to`. That's deliberately looser than
+ * `extractHandoffProposal`'s durable `cleanText` (which additionally
+ * requires the target to resolve on the live roster) — the alternative is
+ * leaking a raw JSON blob into the user's chat bubble for a merely-mistyped
+ * target, which is worse than an occasional over-eager strip of a
+ * shape-valid trailing block. A block that isn't even shape-valid JSON, or
+ * isn't on the trailing line, is still never touched (never eat unrelated
+ * prose — including a worked example mid-reply). */
 export function stripHandoffFences(text: string): string {
   const { masked, restore } = maskOuterFences(text);
   if (masked.search(FENCE_RE) !== -1) {
     return restore(stripFences(masked));
   }
 
-  const degenerate = lastDegenerateMatch(masked);
-  if (degenerate && parseProposalShape(degenerate[2].trim())) {
-    const idx = degenerate.index ?? 0;
-    const stripped = masked.slice(0, idx) + masked.slice(idx + degenerate[0].length);
+  const degenerate = trailingDegenerateMatch(masked);
+  if (degenerate && parseProposalShape(degenerate.match[2].trim())) {
+    const { start } = degenerate;
+    const stripped = masked.slice(0, start) + masked.slice(start + degenerate.match[0].length);
     return restore(collapseSeams(stripped));
   }
 
