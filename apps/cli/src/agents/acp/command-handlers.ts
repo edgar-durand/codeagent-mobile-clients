@@ -40,7 +40,8 @@ import {
 } from '../../integrations/manifest';
 import { buildMcpServersForStart } from '../../integrations/provision';
 import { detectRepoStack } from '../../integrations/detect-stack';
-import type { IntegrationsManifest } from '@codeam/shared';
+import type { HandoffProposal, IntegrationsManifest } from '@codeam/shared';
+import type { SquadState } from './squad-roster';
 import { execFile } from 'node:child_process';
 import {
   handlers as legacyHandlers,
@@ -121,6 +122,29 @@ export interface AcpSessionContext {
    * clears it, so the new agent inherits the session's context.
    */
   pendingHandoff?: { current: string | null };
+  // ─── Agent Squad (all optional — the baton AcpDriver omits them, exactly
+  //     like `switchAgent`, and every squad feature degrades to a no-op) ────
+  /** Roster + per-member provisioning state + the shared turn journal. */
+  squad?: SquadState;
+  /**
+   * Roster-aware @-mention routing: swap onto `agentId` for THIS task
+   * (fast path for a member this process already brought up; per-agent
+   * conversation resume when the member has its own transcript).
+   * `skipFastPath` forces the full credential/install sequence — the ONE
+   * retry after a fast-path failure (an expired credential).
+   */
+  routeToAgent?: (
+    agentId: string,
+    opts?: { skipFastPath?: boolean },
+  ) => Promise<import('@codeam/shared').SwitchAgentResult>;
+  /** At most ONE un-resolved agent-proposed handoff at a time. */
+  pendingProposal?: { current: HandoffProposal | null };
+  /** Serialized emitter — the SAME chain the switch events ride, so a
+   *  `handoff_resolved` can never overtake the swap that resolved it. */
+  postSquadEvent?: (
+    type: 'handoff_proposed' | 'handoff_resolved',
+    payload: Record<string, unknown>,
+  ) => Promise<unknown>;
 }
 
 /**

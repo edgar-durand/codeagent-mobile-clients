@@ -32,6 +32,7 @@ import { CommandRelayService, type RemoteCommand } from '../../services/command-
 import {
   fetchCurrentPluginAuthToken,
   fetchProvisionCredential,
+  fetchSquadRoster,
   postAgentSwitchEvent,
 } from '../../services/pairing.service';
 import { log } from '../../services/logger';
@@ -40,6 +41,7 @@ import { showInfo, showSuccess, showRelayNotice } from '../../ui/banner';
 import {
   AGENT_REGISTRY,
   type AgentId,
+  type HandoffProposal,
   type StreamingChunkKind,
   type SwitchAgentResult,
 } from '@codeam/shared';
@@ -54,7 +56,9 @@ import {
   ensureAgentBinaryForSwitch,
   makeSerializedSwitchEmitter,
   performAgentSwitch,
+  type SwitchAgentDeps,
 } from './switch-agent';
+import { SquadState } from './squad-roster';
 import { provisionAgentCredentials } from '../../commands/host/agent-provisioning';
 import { AcpPublisher } from './publisher';
 import type { PromptBlock } from './buildAcpPromptBlocks';
@@ -1572,6 +1576,13 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
         },
         switchAgentForSession,
         pendingHandoff,
+        // Agent Squad: roster/journal state, the @-mention route, the
+        // single-slot proposal, and the SAME serialized event chain the
+        // switch uses (so proposal events can't overtake switch events).
+        squad,
+        routeToAgent,
+        pendingProposal,
+        emitSwitchEvent,
       );
     },
     { id: opts.agent, name: opts.agent, displayName: opts.agent } as never,
@@ -1584,6 +1595,27 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
   // `session/load` is impossible, this is the continuity mechanism.
   const HANDOFF_MAX_CHARS = 16_000;
   const pendingHandoff: { current: string | null } = { current: null };
+  // ─── Agent Squad (@-mention routing + agent-proposed handoffs) ────────────
+  // Per-agent provisioning/conversation bookkeeping + the shared turn journal
+  // (persisted under ~/.codeam so a CLI restart keeps the team's history).
+  const squad = new SquadState({ sessionId: opts.sessionId });
+  // The roster is a BACKEND fact (which agents the user linked + whether the
+  // plan allows handoffs). Fire-and-forget at session start so a slow/offline
+  // roster fetch never delays the first turn; every squad feature no-ops
+  // while `squad.roster` is null (old backend / offline → silently off).
+  const refreshSquadRoster = (): void => {
+    void fetchSquadRoster({
+      sessionId: opts.sessionId,
+      pluginId: opts.pluginId,
+      pluginAuthToken: opts.pluginAuthToken,
+    }).then((roster) => {
+      if (roster) squad.roster = roster;
+    });
+  };
+  refreshSquadRoster();
+  // At most ONE un-resolved agent-proposed handoff at a time (startTaskH emits
+  // `handoff_proposed` into it at turn close and resolves it on the next turn).
+  const pendingProposal: { current: HandoffProposal | null } = { current: null };
   // Env vars produced by the api_key-path credential provisioner (e.g.
   // OPENAI_API_KEY) — merged into the adapter spawn env; the oauth path
   // writes login-state files and yields {}.
@@ -1607,6 +1639,11 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
     await streaming.closeAll();
     const prevAgent = opts.agent;
     const transcript = history.recentTranscript(HANDOFF_MAX_CHARS);
+    // Remember the OUTGOING agent's own conversation id BEFORE the client is
+    // stopped — coming back to this agent later (squad routing bounces between
+    // members) resumes it via `session/load` so it keeps its OWN memory instead
+    // of restarting cold behind a handoff preamble.
+    squad.member(prevAgent).acpSessionId = acpSessionId;
     // stop() suppresses onUnexpectedExit for its own kill — without that the
     // swap's teardown would process.exit(1) the whole session.
     await client.stop();
@@ -1662,33 +1699,95 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
       payload,
     }),
   );
+  const switchDeps: SwitchAgentDeps = {
+    currentAgent: () => opts.agent,
+    postEvent: emitSwitchEvent,
+    fetchCredential: (agentId) =>
+      fetchProvisionCredential({
+        agentId,
+        sessionId: opts.sessionId,
+        pluginId: opts.pluginId,
+        pluginAuthToken: opts.pluginAuthToken,
+        includeInstallScript: true,
+      }),
+    provisionCredential: (agentId, auth) => {
+      switchCredentialEnv = provisionAgentCredentials(agentId, auth);
+    },
+    ensureBinary: (agentId, installScript) => ensureAgentBinaryForSwitch(agentId, installScript),
+    swapRuntime: relaunchWith,
+    revertRuntime: relaunchWith,
+    persistAgent: (agentId) => setSessionAgent(opts.pluginId, agentId),
+    reannounce: (agentId) => {
+      relay.setAgentMeta({ id: agentId, name: agentId, displayName: agentId } as never);
+      relay.reannounceAgents();
+    },
+  };
   const switchAgentForSession = (rawAgentId: unknown): Promise<SwitchAgentResult> =>
-    performAgentSwitch(
-      {
-        currentAgent: () => opts.agent,
-        postEvent: emitSwitchEvent,
-        fetchCredential: (agentId) =>
-          fetchProvisionCredential({
-            agentId,
-            sessionId: opts.sessionId,
-            pluginId: opts.pluginId,
-            pluginAuthToken: opts.pluginAuthToken,
-            includeInstallScript: true,
-          }),
-        provisionCredential: (agentId, auth) => {
-          switchCredentialEnv = provisionAgentCredentials(agentId, auth);
-        },
-        ensureBinary: (agentId, installScript) => ensureAgentBinaryForSwitch(agentId, installScript),
-        swapRuntime: relaunchWith,
-        revertRuntime: relaunchWith,
-        persistAgent: (agentId) => setSessionAgent(opts.pluginId, agentId),
-        reannounce: (agentId) => {
-          relay.setAgentMeta({ id: agentId, name: agentId, displayName: agentId } as never);
-          relay.reannounceAgents();
-        },
-      },
-      rawAgentId,
-    );
+    performAgentSwitch(switchDeps, rawAgentId);
+
+  /**
+   * Agent Squad routing: swap onto `target` for ONE relayed `start_task`.
+   * Identical machinery to `switch_agent` (same deps, same revert-on-failure)
+   * with two squad-only additions:
+   *
+   *  1. **Fast path** — a member this process already provisioned + verified
+   *     skips the credential fetch/write and the binary probe, so bouncing
+   *     between squad members costs one adapter restart instead of a full
+   *     re-provision. A credential that expired since then surfaces as a swap
+   *     failure; the member's flags are cleared so the caller's ONE retry
+   *     ({ skipFastPath: true }) runs the full sequence.
+   *  2. **Per-agent conversation resume** — a member that already drove this
+   *     session gets its OWN conversation loaded back (ACP `session/load`),
+   *     so it continues with its own memory and needs no handoff preamble.
+   *     Agents without `loadSession`, or a failed load, keep the fresh
+   *     `session/new` + preamble the switch already prepared.
+   */
+  const routeToAgent = async (
+    target: string,
+    routeOpts: { skipFastPath?: boolean } = {},
+  ): Promise<SwitchAgentResult> => {
+    const m = squad.member(target);
+    const fast = routeOpts.skipFastPath !== true;
+    const result = await performAgentSwitch(switchDeps, target, {
+      skipProvision: fast && m.provisioned,
+      skipInstall: fast && m.binaryVerified,
+    });
+    if (!result.ok) {
+      // The fast path is only ever an optimisation — a failure retires it so
+      // the retry (and any later route) re-provisions from scratch.
+      if (fast) {
+        m.provisioned = false;
+        m.binaryVerified = false;
+      }
+      return result;
+    }
+    m.provisioned = true;
+    m.binaryVerified = true;
+    if (m.acpSessionId && agentCaps?.loadSession) {
+      try {
+        // The client is the freshly-spawned one, so its live session id is the
+        // brand-new `session/new` — never the id we're loading (AcpClient's
+        // self-load guard would no-op it otherwise).
+        await client.loadSession(m.acpSessionId);
+        acpSessionId = m.acpSessionId;
+        history.switchActiveSession(m.acpSessionId);
+        // Resumed its OWN memory — the cold-start handoff preamble the swap
+        // prepared would be redundant (and would re-narrate work it remembers).
+        pendingHandoff.current = null;
+        log.info(
+          'acpRunner',
+          `squad: resumed ${target}'s conversation ${m.acpSessionId.slice(0, 8)}`,
+        );
+      } catch (err) {
+        // Keep the fresh session + preamble fallback — the member still gets
+        // the session's context, just not its own transcript.
+        log.warn('acpRunner', `squad: resume for ${target} failed: ${describeError(err)}`);
+      }
+    }
+    // Membership/plan can change mid-session (a teammate linked, PRO started).
+    refreshSquadRoster();
+    return result;
+  };
   // Serialize against the onboarding welcome (#339): wait for its turn to
   // fully close before the relay can start a command turn on the shared
   // StreamingState. Non-fatal internally, so this never rejects.
@@ -1782,6 +1881,20 @@ export async function handleCommand(
   switchAgent?: (agentId: unknown) => Promise<SwitchAgentResult>,
   /** Context-handoff slot the switch fills and start_task consumes. */
   pendingHandoff?: { current: string | null },
+  /** Agent Squad roster + turn journal. See AcpSessionContext.squad. */
+  squad?: SquadState,
+  /** Agent Squad @-mention routing. See AcpSessionContext.routeToAgent. */
+  routeToAgent?: (
+    agentId: string,
+    opts?: { skipFastPath?: boolean },
+  ) => Promise<SwitchAgentResult>,
+  /** Single-slot agent-proposed handoff. See AcpSessionContext.pendingProposal. */
+  pendingProposal?: { current: HandoffProposal | null },
+  /** Serialized squad/handoff event emitter. See AcpSessionContext.postSquadEvent. */
+  postSquadEvent?: (
+    type: 'handoff_proposed' | 'handoff_resolved',
+    payload: Record<string, unknown>,
+  ) => Promise<unknown>,
 ): Promise<void> {
   const session: AcpSessionContext = {
     client,
@@ -1801,6 +1914,10 @@ export async function handleCommand(
     onActiveSessionChanged,
     switchAgent,
     pendingHandoff,
+    squad,
+    routeToAgent,
+    pendingProposal,
+    postSquadEvent,
   };
   await dispatchAcpCommand(assembleAcpCommandContext(session, cmd));
 }
