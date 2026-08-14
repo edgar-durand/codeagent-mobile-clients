@@ -6,11 +6,13 @@ import {
   type AgentReviewReport,
   type BeadsProvisioningPayload,
   type BeadsProvisioningStatus,
+  type SquadRosterData,
 } from '@codeam/shared';
 import pkg from '../../package.json';
 import { vercelBypassHeader } from '../lib/backend-headers';
 import { detectCurrentBranch } from '../lib/git-branch';
 import { computePollDelay } from '../lib/poll-delay';
+import type { SquadEventType } from '../agents/acp/switch-agent';
 
 const API_BASE = resolveApiBaseUrl();
 
@@ -602,15 +604,45 @@ export async function fetchProvisionCredential(input: {
 }
 
 /**
+ * Fetch the squad roster (linked agents + whether agent-proposed handoffs are
+ * enabled) from `/api/plugin/agents/roster`. Mirrors `fetchProvisionCredential`'s
+ * null-on-failure contract — non-2xx, thrown errors, and malformed payloads
+ * (missing `agents` array) all resolve to `null` so callers on an older backend
+ * or offline simply run without squad features.
+ */
+export async function fetchSquadRoster(input: {
+  sessionId: string;
+  pluginId: string;
+  pluginAuthToken: string;
+}): Promise<SquadRosterData | null> {
+  try {
+    const res = await _transport.postJsonAuthed(
+      `${API_BASE}/api/plugin/agents/roster`,
+      { sessionId: input.sessionId, pluginId: input.pluginId },
+      input.pluginAuthToken,
+    );
+    const data = (res as { data?: SquadRosterData } | null)?.data;
+    if (!data || !Array.isArray(data.agents)) return null;
+    return { agents: data.agents, handoffsEnabled: data.handoffsEnabled === true };
+  } catch {
+    return null; // old backend / offline → squad features silently off
+  }
+}
+
+/**
  * Post an agent-switch lifecycle event (progress step / terminal status) to
  * the backend. Mirrors `postHeadroomEvent` — non-fatal; callers serialize the
  * POSTs (emit-chain) so the backend receives them strictly in emit order.
+ *
+ * `handoff_proposed` / `handoff_resolved` cover the Agent Squad agent-proposed
+ * handoff lifecycle (PRO); they share this endpoint with the existing
+ * switch_agent_* progress/status events.
  */
 export async function postAgentSwitchEvent(input: {
   sessionId: string;
   pluginId: string;
   pluginAuthToken: string;
-  type: 'switch_agent_progress' | 'switch_agent_status';
+  type: SquadEventType;
   payload?: Record<string, unknown>;
 }): Promise<{ ok: true } | { ok: false; status: number; message: string }> {
   try {
@@ -844,20 +876,27 @@ export async function _postJsonAuthed(
       (res) => {
         res.on('error', reject);
         let responseBody = '';
-        res.on('data', (chunk: Buffer) => { responseBody += chunk.toString(); });
+        res.on('data', (chunk: Buffer) => {
+          responseBody += chunk.toString();
+        });
         res.on('end', () => {
           if (res.statusCode && res.statusCode >= 400) {
-            reject(
-              makeHttpError(res.statusCode, res.headers['retry-after'], responseBody),
-            );
+            reject(makeHttpError(res.statusCode, res.headers['retry-after'], responseBody));
             return;
           }
-          try { resolve(JSON.parse(responseBody)); } catch { resolve(null); }
+          try {
+            resolve(JSON.parse(responseBody));
+          } catch {
+            resolve(null);
+          }
         });
       },
     );
     req.on('error', reject);
-    req.on('timeout', () => { req.destroy(); reject(new Error('timeout')); });
+    req.on('timeout', () => {
+      req.destroy();
+      reject(new Error('timeout'));
+    });
     req.write(data);
     req.end();
   });
@@ -876,8 +915,7 @@ function makeHttpError(
   responseBody: string,
 ): Error & { statusCode: number; retryAfterSeconds?: number } {
   const raw = Array.isArray(retryAfterHeader) ? retryAfterHeader[0] : retryAfterHeader;
-  const retryAfterSeconds =
-    raw && /^\d+$/.test(raw.trim()) ? Number.parseInt(raw, 10) : undefined;
+  const retryAfterSeconds = raw && /^\d+$/.test(raw.trim()) ? Number.parseInt(raw, 10) : undefined;
   const err = new Error(
     `HTTP ${statusCode}${responseBody ? ': ' + responseBody.slice(0, 200) : ''}`,
   ) as Error & { statusCode: number; retryAfterSeconds?: number };
@@ -913,18 +951,27 @@ export async function _postJson(
       (res) => {
         res.on('error', reject);
         let body = '';
-        res.on('data', (chunk: Buffer) => { body += chunk.toString(); });
+        res.on('data', (chunk: Buffer) => {
+          body += chunk.toString();
+        });
         res.on('end', () => {
           if (res.statusCode && res.statusCode >= 400) {
             reject(makeHttpError(res.statusCode, res.headers['retry-after'], body));
             return;
           }
-          try { resolve(JSON.parse(body)); } catch { resolve(null); }
+          try {
+            resolve(JSON.parse(body));
+          } catch {
+            resolve(null);
+          }
         });
       },
     );
     req.on('error', reject);
-    req.on('timeout', () => { req.destroy(); reject(new Error('timeout')); });
+    req.on('timeout', () => {
+      req.destroy();
+      reject(new Error('timeout'));
+    });
     req.write(data);
     req.end();
   });
@@ -949,18 +996,27 @@ export async function _getJson(
       (res) => {
         res.on('error', reject);
         let body = '';
-        res.on('data', (chunk: Buffer) => { body += chunk.toString(); });
+        res.on('data', (chunk: Buffer) => {
+          body += chunk.toString();
+        });
         res.on('end', () => {
           if (res.statusCode && res.statusCode >= 400) {
             reject(makeHttpError(res.statusCode, res.headers['retry-after'], body));
             return;
           }
-          try { resolve(JSON.parse(body)); } catch { resolve(null); }
+          try {
+            resolve(JSON.parse(body));
+          } catch {
+            resolve(null);
+          }
         });
       },
     );
     req.on('error', reject);
-    req.on('timeout', () => { req.destroy(); reject(new Error('timeout')); });
+    req.on('timeout', () => {
+      req.destroy();
+      reject(new Error('timeout'));
+    });
     req.end();
   });
 }

@@ -615,6 +615,7 @@ export class CommandRelayService {
     _postJson(`${API_BASE}/api/plugin/agents`, {
       pluginId: this.pluginId,
       agents,
+      capabilities: { squad: true },
     })
       .then(() => { this.agentsRegistered = true; })
       .catch(() => { /* retry via agentsTimer */ });

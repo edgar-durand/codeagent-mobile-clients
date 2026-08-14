@@ -15,6 +15,7 @@ export * from './types/preview';
 export * from './types/beads';
 export * from './types/headroom';
 export * from './types/agent-switch';
+export * from './types/agent-squad';
 export * from './headroom/manifest';
 export * from './types/events';
 export * from './preview-prompts';

@@ -32,6 +32,7 @@ import { CommandRelayService, type RemoteCommand } from '../../services/command-
 import {
   fetchCurrentPluginAuthToken,
   fetchProvisionCredential,
+  fetchSquadRoster,
   postAgentSwitchEvent,
 } from '../../services/pairing.service';
 import { log } from '../../services/logger';
@@ -40,6 +41,7 @@ import { showInfo, showSuccess, showRelayNotice } from '../../ui/banner';
 import {
   AGENT_REGISTRY,
   type AgentId,
+  type HandoffProposal,
   type StreamingChunkKind,
   type SwitchAgentResult,
 } from '@codeam/shared';
@@ -54,13 +56,16 @@ import {
   ensureAgentBinaryForSwitch,
   makeSerializedSwitchEmitter,
   performAgentSwitch,
+  type SwitchAgentDeps,
 } from './switch-agent';
+import { SquadState } from './squad-roster';
 import { provisionAgentCredentials } from '../../commands/host/agent-provisioning';
 import { AcpPublisher } from './publisher';
 import type { PromptBlock } from './buildAcpPromptBlocks';
 import { createBudgetRecovery, type BudgetRecovery } from './budgetRecovery';
 import { createWakeCredentialProbe, localCredentialExpiryStatus } from './wakeCredentialProbe';
 import { reconcileCumulative } from './reconcileDelta';
+import { handoffFenceStart, stripHandoffFences } from './handoff-protocol';
 import { maybeSendOnboardingWelcome } from './onboarding';
 import {
   registerTerminalHandlers,
@@ -93,6 +98,8 @@ import {
   dispatchAcpCommand,
   recoverFromFailedTurn,
   type AcpSessionContext,
+  type AcpSessionHandles,
+  type SquadRouteOutcome,
 } from './command-handlers';
 
 // ─── Re-exports (Phase 3 extraction, bd codeagent-2sa) ────────────────────
@@ -506,24 +513,42 @@ export class StreamingState {
     const cumulativeContent = reconcileCumulative(existing?.content ?? '', delta.delta);
     this.streamingChunks.set(chunkId, { kind: delta.kind, content: cumulativeContent });
 
+    // A ```codeam-handoff fence proposed at the tail of a reply is protocol
+    // litter, not user-visible prose — it must never render mid-stream (the
+    // app shows the proposal as a card once the turn closes and the fence is
+    // extracted, see Task 6). `fenceCut` is the index of the fence START in
+    // the FULL cumulative text, or -1 if none has arrived yet; both live
+    // publish paths below truncate to it. Internal buffers (`this.text`,
+    // `streamingChunks`) stay untouched — this is presentation-only.
+    let fenceCut = -1;
+
     // 1) Chat pipe (legacy `/api/commands/output`) — text only. The
     //    bubble body is the ordered concatenation of every text chunk's
     //    reconciled content, recomputed from the per-chunkId buffers so
     //    a snapshot re-send can never concatenate the reply with itself.
     if (delta.kind === 'text') {
       this.recomputeText();
-      void this.publisher.publishOutput({ type: 'text', content: this.text, done: false });
+      fenceCut = handoffFenceStart(this.text);
+      const visibleText = fenceCut === -1 ? this.text : this.text.slice(0, fenceCut).trimEnd();
+      void this.publisher.publishOutput({ type: 'text', content: visibleText, done: false });
     }
     // 2) Epic C streaming-chunk feed (`/api/sessions/:id/streaming-chunk`)
     //    — all four kinds (text, thinking, tool_use, tool_result),
     //    cumulative per chunkId. Drives SessionDetailScreen's rich
     //    THINKING / tool-pill / tool-result bubbles. Both feeds run
     //    in parallel so the redesigned mobile surface stays in sync
-    //    with the legacy chat surface.
+    //    with the legacy chat surface. The text kind reuses `fenceCut`
+    //    computed above — the turn's text always collapses onto a single
+    //    chunkId (see `turnTextChunkId`), so `cumulativeContent` here is
+    //    the same string as `this.text`.
+    const visibleChunkContent =
+      delta.kind === 'text' && fenceCut !== -1
+        ? cumulativeContent.slice(0, fenceCut).trimEnd()
+        : cumulativeContent;
     void this.publisher.publishStreamingChunk({
       chunkId,
       kind: delta.kind,
-      content: cumulativeContent,
+      content: visibleChunkContent,
       isFinal: false,
     });
   }
@@ -555,8 +580,28 @@ export class StreamingState {
    * spuriously and strand the runner with a free-form pending state
    * the user can't see / answer.
    */
+  /**
+   * Presentation-only view of a text buffer: everything BEFORE a
+   * ```codeam-handoff fence. The fence is protocol litter the app renders as
+   * a proposal card (see `handoff-protocol.ts`) — it must never reach the
+   * user, and the TERMINAL frames (`done:true` / `isFinal:true`) are the ones
+   * that persist, so suppressing it only while streaming would still leave it
+   * pinned on the finished bubble. Internal state is untouched:
+   * {@link getCurrentText} keeps returning the RAW text so the turn-close
+   * extraction can parse the proposal out of it.
+   *
+   * Masked-aware (`stripHandoffFences`), unlike the live-stream `append()`
+   * cut (`handoffFenceStart`, unmasked): a TERMINAL frame is the one that
+   * PERSISTS, so cutting on a fence quoted as an example inside a
+   * 4+-backtick block here would permanently truncate the bubble. The live
+   * cut stays unmasked/cheap — a mid-stream example is never terminal.
+   */
+  private visible(text: string): string {
+    return stripHandoffFences(text);
+  }
+
   async closeAll(): Promise<void> {
-    const finalText = this.text;
+    const finalText = this.visible(this.text);
     this.text = '';
     await Promise.all([
       this.publisher.publishOutput({ type: 'text', content: finalText, done: true }),
@@ -608,7 +653,9 @@ export class StreamingState {
         this.publisher.publishStreamingChunk({
           chunkId,
           kind,
-          content,
+          // Terminal frame — same fence suppression the live deltas apply, so
+          // a proposal fence never survives on the finalised bubble.
+          content: kind === 'text' ? this.visible(content) : content,
           isFinal: true,
         }),
       ),
@@ -636,7 +683,7 @@ export class StreamingState {
    * text done:true chunk with the full cumulative).
    */
   async closeTurnWithInteractiveDetection(): Promise<boolean> {
-    const finalText = this.text;
+    const finalText = this.visible(this.text);
     this.text = '';
     // Streaming-chunk feed always flushes regardless of interactive
     // detection — those bubbles live in SessionDetailScreen on their
@@ -1553,6 +1600,13 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
         },
         switchAgentForSession,
         pendingHandoff,
+        // Agent Squad: roster/journal state, the @-mention route, the
+        // single-slot proposal, and the SAME serialized event chain the
+        // switch uses (so proposal events can't overtake switch events).
+        squad,
+        routeToAgent,
+        pendingProposal,
+        emitSwitchEvent,
       );
     },
     { id: opts.agent, name: opts.agent, displayName: opts.agent } as never,
@@ -1565,6 +1619,27 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
   // `session/load` is impossible, this is the continuity mechanism.
   const HANDOFF_MAX_CHARS = 16_000;
   const pendingHandoff: { current: string | null } = { current: null };
+  // ─── Agent Squad (@-mention routing + agent-proposed handoffs) ────────────
+  // Per-agent provisioning/conversation bookkeeping + the shared turn journal
+  // (persisted under ~/.codeam so a CLI restart keeps the team's history).
+  const squad = new SquadState({ sessionId: opts.sessionId });
+  // The roster is a BACKEND fact (which agents the user linked + whether the
+  // plan allows handoffs). Fire-and-forget at session start so a slow/offline
+  // roster fetch never delays the first turn; every squad feature no-ops
+  // while `squad.roster` is null (old backend / offline → silently off).
+  const refreshSquadRoster = (): void => {
+    void fetchSquadRoster({
+      sessionId: opts.sessionId,
+      pluginId: opts.pluginId,
+      pluginAuthToken: opts.pluginAuthToken,
+    }).then((roster) => {
+      if (roster) squad.roster = roster;
+    });
+  };
+  refreshSquadRoster();
+  // At most ONE un-resolved agent-proposed handoff at a time (startTaskH emits
+  // `handoff_proposed` into it at turn close and resolves it on the next turn).
+  const pendingProposal: { current: HandoffProposal | null } = { current: null };
   // Env vars produced by the api_key-path credential provisioner (e.g.
   // OPENAI_API_KEY) — merged into the adapter spawn env; the oauth path
   // writes login-state files and yields {}.
@@ -1588,6 +1663,11 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
     await streaming.closeAll();
     const prevAgent = opts.agent;
     const transcript = history.recentTranscript(HANDOFF_MAX_CHARS);
+    // Remember the OUTGOING agent's own conversation id BEFORE the client is
+    // stopped — coming back to this agent later (squad routing bounces between
+    // members) resumes it via `session/load` so it keeps its OWN memory instead
+    // of restarting cold behind a handoff preamble.
+    squad.member(prevAgent).acpSessionId = acpSessionId;
     // stop() suppresses onUnexpectedExit for its own kill — without that the
     // swap's teardown would process.exit(1) the whole session.
     await client.stop();
@@ -1643,33 +1723,119 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
       payload,
     }),
   );
-  const switchAgentForSession = (rawAgentId: unknown): Promise<SwitchAgentResult> =>
-    performAgentSwitch(
-      {
-        currentAgent: () => opts.agent,
-        postEvent: emitSwitchEvent,
-        fetchCredential: (agentId) =>
-          fetchProvisionCredential({
-            agentId,
-            sessionId: opts.sessionId,
-            pluginId: opts.pluginId,
-            pluginAuthToken: opts.pluginAuthToken,
-            includeInstallScript: true,
-          }),
-        provisionCredential: (agentId, auth) => {
-          switchCredentialEnv = provisionAgentCredentials(agentId, auth);
-        },
-        ensureBinary: (agentId, installScript) => ensureAgentBinaryForSwitch(agentId, installScript),
-        swapRuntime: relaunchWith,
-        revertRuntime: relaunchWith,
-        persistAgent: (agentId) => setSessionAgent(opts.pluginId, agentId),
-        reannounce: (agentId) => {
-          relay.setAgentMeta({ id: agentId, name: agentId, displayName: agentId } as never);
-          relay.reannounceAgents();
-        },
-      },
-      rawAgentId,
-    );
+  const switchDeps: SwitchAgentDeps = {
+    currentAgent: () => opts.agent,
+    postEvent: emitSwitchEvent,
+    fetchCredential: (agentId) =>
+      fetchProvisionCredential({
+        agentId,
+        sessionId: opts.sessionId,
+        pluginId: opts.pluginId,
+        pluginAuthToken: opts.pluginAuthToken,
+        includeInstallScript: true,
+      }),
+    provisionCredential: (agentId, auth) => {
+      switchCredentialEnv = provisionAgentCredentials(agentId, auth);
+    },
+    ensureBinary: (agentId, installScript) => ensureAgentBinaryForSwitch(agentId, installScript),
+    swapRuntime: relaunchWith,
+    revertRuntime: relaunchWith,
+    persistAgent: (agentId) => setSessionAgent(opts.pluginId, agentId),
+    reannounce: (agentId) => {
+      relay.setAgentMeta({ id: agentId, name: agentId, displayName: agentId } as never);
+      relay.reannounceAgents();
+    },
+  };
+  const switchAgentForSession = async (rawAgentId: unknown): Promise<SwitchAgentResult> => {
+    const result = await performAgentSwitch(switchDeps, rawAgentId);
+    // Same reason routeToAgent re-fetches: the squad's membership/plan can
+    // change mid-session, and the agent that just took over reads the roster
+    // for its team preamble on its first turn.
+    if (result.ok) refreshSquadRoster();
+    return result;
+  };
+
+  /** Snapshot of the runner's swappable session handles — what a command
+   *  context must rebind to after a swap (see AcpSessionHandles). */
+  const sessionHandles = (): AcpSessionHandles => ({
+    client,
+    acpSessionId,
+    history,
+    jsonlHistory,
+    agentCaps,
+    budgetRecovery,
+  });
+
+  /**
+   * Agent Squad routing: swap onto `target` for ONE relayed `start_task`.
+   * Identical machinery to `switch_agent` (same deps, same revert-on-failure)
+   * with two squad-only additions:
+   *
+   *  1. **Fast path** — a member this process already provisioned + verified
+   *     skips the credential fetch/write and the binary probe, so bouncing
+   *     between squad members costs one adapter restart instead of a full
+   *     re-provision. A credential that expired since then surfaces as a swap
+   *     failure; the member's flags are cleared so the caller's ONE retry
+   *     ({ skipFastPath: true }) runs the full sequence.
+   *  2. **Per-agent conversation resume** — a member that already drove this
+   *     session gets its OWN conversation loaded back (ACP `session/load`),
+   *     so it continues with its own memory and needs no handoff preamble.
+   *     Agents without `loadSession`, or a failed load, keep the fresh
+   *     `session/new` + preamble the switch already prepared.
+   *
+   * ⚠️ ALWAYS returns the post-swap {@link AcpSessionHandles} — on failure too
+   * (the revert relaunches the prior agent, replacing the same handles). The
+   * caller's command context is a snapshot and MUST rebind to them, or the
+   * turn runs against the adapter this swap already stopped.
+   */
+  const routeToAgent = async (
+    target: string,
+    routeOpts: { skipFastPath?: boolean } = {},
+  ): Promise<SquadRouteOutcome> => {
+    const m = squad.member(target);
+    const fast = routeOpts.skipFastPath !== true;
+    const result = await performAgentSwitch(switchDeps, target, {
+      skipProvision: fast && m.provisioned,
+      skipInstall: fast && m.binaryVerified,
+    });
+    if (!result.ok) {
+      // The fast path is only ever an optimisation — a failure retires it so
+      // the retry (and any later route) re-provisions from scratch.
+      if (fast) {
+        m.provisioned = false;
+        m.binaryVerified = false;
+      }
+      return { result, handles: sessionHandles() };
+    }
+    m.provisioned = true;
+    m.binaryVerified = true;
+    if (m.acpSessionId && agentCaps?.loadSession) {
+      try {
+        // The client is the freshly-spawned one, so its live session id is the
+        // brand-new `session/new` — never the id we're loading (AcpClient's
+        // self-load guard would no-op it otherwise).
+        await client.loadSession(m.acpSessionId);
+        acpSessionId = m.acpSessionId;
+        history.switchActiveSession(m.acpSessionId);
+        // Resumed its OWN memory — the cold-start handoff preamble the swap
+        // prepared would be redundant (and would re-narrate work it remembers).
+        pendingHandoff.current = null;
+        log.info(
+          'acpRunner',
+          `squad: resumed ${target}'s conversation ${m.acpSessionId.slice(0, 8)}`,
+        );
+      } catch (err) {
+        // Keep the fresh session + preamble fallback — the member still gets
+        // the session's context, just not its own transcript.
+        log.warn('acpRunner', `squad: resume for ${target} failed: ${describeError(err)}`);
+      }
+    }
+    // Membership/plan can change mid-session (a teammate linked, PRO started).
+    refreshSquadRoster();
+    // Handles are read AFTER relaunchWith + the optional resume, so they are
+    // the new agent's client/history/caps and the resumed conversation id.
+    return { result, handles: sessionHandles() };
+  };
   // Serialize against the onboarding welcome (#339): wait for its turn to
   // fully close before the relay can start a command turn on the shared
   // StreamingState. Non-fatal internally, so this never rejects.
@@ -1763,6 +1929,17 @@ export async function handleCommand(
   switchAgent?: (agentId: unknown) => Promise<SwitchAgentResult>,
   /** Context-handoff slot the switch fills and start_task consumes. */
   pendingHandoff?: { current: string | null },
+  /** Agent Squad roster + turn journal. See AcpSessionContext.squad. */
+  squad?: SquadState,
+  /** Agent Squad @-mention routing. See AcpSessionContext.routeToAgent. */
+  routeToAgent?: (agentId: string, opts?: { skipFastPath?: boolean }) => Promise<SquadRouteOutcome>,
+  /** Single-slot agent-proposed handoff. See AcpSessionContext.pendingProposal. */
+  pendingProposal?: { current: HandoffProposal | null },
+  /** Serialized squad/handoff event emitter. See AcpSessionContext.postSquadEvent. */
+  postSquadEvent?: (
+    type: 'handoff_proposed' | 'handoff_resolved',
+    payload: Record<string, unknown>,
+  ) => Promise<unknown>,
 ): Promise<void> {
   const session: AcpSessionContext = {
     client,
@@ -1782,6 +1959,10 @@ export async function handleCommand(
     onActiveSessionChanged,
     switchAgent,
     pendingHandoff,
+    squad,
+    routeToAgent,
+    pendingProposal,
+    postSquadEvent,
   };
   await dispatchAcpCommand(assembleAcpCommandContext(session, cmd));
 }

@@ -337,6 +337,60 @@ describe('performAgentSwitch', () => {
     if (!result.ok) expect(result.error).toMatch(/restart the session/);
   });
 
+  // ─── Agent Squad fast path (routeToAgent) ─────────────────────────────────
+
+  it('fast path: provisioned+verified member skips credential and install steps', async () => {
+    const { deps, events, calls } = makeDeps();
+    const result = await performAgentSwitch(deps, 'codex', {
+      skipProvision: true,
+      skipInstall: true,
+    });
+    expect(result).toEqual({ ok: true, agentId: 'codex' });
+    // No provision, no ensureBinary — only the restart + durability half.
+    expect(calls).toEqual(['swap', 'persist', 'reannounce']);
+    expect(events.map((e) => `${e.type}:${String(e.payload.state ?? e.payload.step)}`)).toEqual([
+      'switch_agent_status:switching',
+      'switch_agent_progress:restart',
+      'switch_agent_status:ready',
+    ]);
+  });
+
+  it('fast path: skipping only the credential still runs the binary probe', async () => {
+    const { deps, calls } = makeDeps();
+    const result = await performAgentSwitch(deps, 'codex', { skipProvision: true });
+    expect(result).toEqual({ ok: true, agentId: 'codex' });
+    expect(calls).toEqual(['ensureBinary', 'swap', 'persist', 'reannounce']);
+  });
+
+  it('fast path still reverts on swap failure', async () => {
+    const reverted: AgentId[] = [];
+    const { deps, events } = makeDeps({
+      swapRuntime: async () => {
+        throw new Error('adapter died');
+      },
+      revertRuntime: async (agentId) => {
+        reverted.push(agentId);
+      },
+    });
+    const result = await performAgentSwitch(deps, 'codex', {
+      skipProvision: true,
+      skipInstall: true,
+    });
+    expect(result.ok).toBe(false);
+    expect(reverted).toEqual(['claude']);
+    expect(events.at(-1)?.payload).toMatchObject({ state: 'error' });
+  });
+
+  it('fast path still validates the target (never swaps to a reviewer)', async () => {
+    const { deps, calls } = makeDeps();
+    const result = await performAgentSwitch(deps, 'coderabbit', {
+      skipProvision: true,
+      skipInstall: true,
+    });
+    expect(result.ok).toBe(false);
+    expect(calls).toEqual([]);
+  });
+
   it('persist failure is non-fatal — the switch still completes', async () => {
     const { deps } = makeDeps({
       persistAgent: () => {

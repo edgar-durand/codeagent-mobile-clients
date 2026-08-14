@@ -217,8 +217,17 @@ function dispatchPrompt(ctx: HandlerContext, prompt: string): void {
 
 // ─── Agent control ───────────────────────────────────────────────
 
-const startTask: CommandHandler = (ctx, _cmd, parsed) => {
+const startTask: CommandHandler = async (ctx, cmd, parsed) => {
   const { prompt, files } = parsed;
+  // PTY sessions can't switch agents mid-session — a routed task naming a
+  // DIFFERENT agent would otherwise silently run on the wrong one instead of
+  // failing honestly (the ACP path has `switchAgentH`'s equivalent guard).
+  if (parsed.agentId && parsed.agentId !== ctx.agentId) {
+    await ctx.relay.sendResult(cmd.id, 'failed', {
+      error: "Switching agents isn't supported on this session.",
+    });
+    return;
+  }
   const effectivePrompt = prompt ?? '';
   if (files && files.length > 0) {
     const paths = saveFilesTemp(files);

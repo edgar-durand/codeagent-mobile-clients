@@ -194,10 +194,27 @@ export interface SwitchAgentDeps {
   reannounce(agentId: AgentId): void;
 }
 
-/** Build a serialized emitter over a raw poster (headroom emit-chain shape). */
-export function makeSerializedSwitchEmitter(
-  post: SwitchAgentDeps['postEvent'],
-): SwitchAgentDeps['postEvent'] {
+/**
+ * Every lifecycle event type that shares the agent-switch POST endpoint —
+ * the switch's own progress/status PLUS the Agent Squad handoff proposal
+ * lifecycle. They ride ONE serialized chain (see
+ * {@link makeSerializedSwitchEmitter}) so the backend republishes them in
+ * strict emit order; a `handoff_resolved` can never overtake the
+ * `switch_agent_status:ready` of the swap that resolved it.
+ */
+export type SquadEventType =
+  'switch_agent_progress' | 'switch_agent_status' | 'handoff_proposed' | 'handoff_resolved';
+
+export type SquadEventPoster = (
+  type: SquadEventType,
+  payload: Record<string, unknown>,
+) => Promise<unknown>;
+
+/** Build a serialized emitter over a raw poster (headroom emit-chain shape).
+ *  Accepts the WIDE {@link SquadEventType} union so ONE chain serves both the
+ *  switch events and the handoff events; the returned emitter is still
+ *  assignable to the narrower {@link SwitchAgentDeps.postEvent}. */
+export function makeSerializedSwitchEmitter(post: SquadEventPoster): SquadEventPoster {
   let chain: Promise<unknown> = Promise.resolve();
   return (type, payload) => {
     chain = chain.then(() => post(type, payload)).catch(() => undefined);
@@ -205,9 +222,26 @@ export function makeSerializedSwitchEmitter(
   };
 }
 
+/**
+ * Fast-path knobs for a swap onto an agent this CLI process ALREADY brought
+ * up once (Agent Squad @-mention routing bouncing between squad members).
+ * Both default off, so every existing caller runs the full sequence.
+ *
+ * ⚠️ Skipping the credential step means a credential that EXPIRED since the
+ * first provision surfaces as a swap failure instead — the caller must retry
+ * ONCE on the full path before reporting failure (see `routeToAgent`).
+ */
+export interface AgentSwitchFastPath {
+  /** Credential already written this process → skip fetch + provision. */
+  skipProvision?: boolean;
+  /** Launch binary already verified this process → skip the install probe. */
+  skipInstall?: boolean;
+}
+
 export async function performAgentSwitch(
   deps: SwitchAgentDeps,
   rawAgentId: unknown,
+  fastPath: AgentSwitchFastPath = {},
 ): Promise<SwitchAgentResult> {
   const from = deps.currentAgent();
   const target = resolveSwitchTarget(rawAgentId, from);
@@ -232,24 +266,34 @@ export async function performAgentSwitch(
   void emitStatus({ state: 'switching', agentId, fromAgentId: from });
 
   // 1. Credential — must already be vaulted (mobile only offers linked agents).
-  void emitStep('credential');
-  const cred = await deps.fetchCredential(agentId);
-  if (!cred) {
-    return fail(
-      `No linked credential for ${displayName(agentId)}. Link it in Profile › Agents first.`,
-    );
-  }
-  try {
-    deps.provisionCredential(agentId, toAgentAuth(cred.method, cred.credential));
-  } catch (err) {
-    log.warn('switchAgent', `credential provisioning failed: ${(err as Error).message}`);
-    return fail(`Couldn't write the ${displayName(agentId)} credential on this machine.`);
+  //    Skipped on the squad fast path (this process already wrote it): the
+  //    step event is skipped too, so mobile's progress UI doesn't show a
+  //    phantom stage the CLI never ran.
+  let installScript: string | undefined;
+  if (!fastPath.skipProvision) {
+    void emitStep('credential');
+    const cred = await deps.fetchCredential(agentId);
+    if (!cred) {
+      return fail(
+        `No linked credential for ${displayName(agentId)}. Link it in Profile › Agents first.`,
+      );
+    }
+    try {
+      deps.provisionCredential(agentId, toAgentAuth(cred.method, cred.credential));
+    } catch (err) {
+      log.warn('switchAgent', `credential provisioning failed: ${(err as Error).message}`);
+      return fail(`Couldn't write the ${displayName(agentId)} credential on this machine.`);
+    }
+    installScript = cred.installScript;
   }
 
-  // 2. Binary — instant on baked images; installs on bare boxes.
-  void emitStep('install');
-  const bin = await deps.ensureBinary(agentId, cred.installScript);
-  if (!bin.ok) return fail(bin.error);
+  // 2. Binary — instant on baked images; installs on bare boxes. Skipped when
+  //    this process already resolved the binary for this agent.
+  if (!fastPath.skipInstall) {
+    void emitStep('install');
+    const bin = await deps.ensureBinary(agentId, installScript);
+    if (!bin.ok) return fail(bin.error);
+  }
 
   // 3. Restart on the new adapter. The old client is only stopped inside
   // swapRuntime, so every failure BEFORE this point leaves the session

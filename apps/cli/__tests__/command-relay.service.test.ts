@@ -74,6 +74,21 @@ describe('CommandRelayService', () => {
     relay.stop();
   });
 
+  it('reportAgents POST body includes capabilities.squad === true', async () => {
+    const relay = new CommandRelayService('plugin-cap', vi.fn(), META);
+    relay.start();
+    await vi.advanceTimersByTimeAsync(10);
+    expect(pairing._postJson).toHaveBeenCalledWith(
+      expect.stringContaining('/api/plugin/agents'),
+      expect.objectContaining({
+        pluginId: 'plugin-cap',
+        agents: [expect.objectContaining({ id: 'claude' })],
+        capabilities: { squad: true },
+      }),
+    );
+    relay.stop();
+  });
+
   it('setAgentMeta + reannounceAgents re-registers the switched agent and heartbeats it', async () => {
     // In-session agent switch: the SAME relay instance must re-report the
     // NEW agent (POST /api/plugin/agents) and heartbeat with the new id —
@@ -86,6 +101,7 @@ describe('CommandRelayService', () => {
       expect.objectContaining({
         pluginId: 'plugin-sw',
         agents: [expect.objectContaining({ id: 'claude' })],
+        capabilities: { squad: true },
       }),
     );
     vi.mocked(pairing._postJson).mockClear();
@@ -98,6 +114,7 @@ describe('CommandRelayService', () => {
       expect.objectContaining({
         pluginId: 'plugin-sw',
         agents: [expect.objectContaining({ id: 'codex', name: 'Codex CLI' })],
+        capabilities: { squad: true },
       }),
     );
     // The next heartbeat carries the new agent id too.
