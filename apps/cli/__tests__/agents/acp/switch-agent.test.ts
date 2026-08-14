@@ -192,6 +192,59 @@ describe('ensureAgentBinaryForSwitch', () => {
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.error).toMatch(/timed out/);
   });
+
+  it('retries the install once when the post-install probe fails, then succeeds (half-finished bin link)', async () => {
+    // Sequence: fast probe=false, post-install-1 probe=false, post-install-2 probe=true.
+    const runInstall = vi.fn(async () => ({ ok: true, code: 0, timedOut: false }));
+    const r = await ensureAgentBinaryForSwitch('codex', 'curl install.sh | sh', {
+      resolveAdapter: () => fakeSpec([false, false, true]),
+      runInstall: runInstall as never,
+    });
+    expect(r.ok).toBe(true);
+    expect(runInstall).toHaveBeenCalledTimes(2);
+  });
+
+  it('fails honestly after both probes fail, having attempted install exactly twice', async () => {
+    const runInstall = vi.fn(async () => ({ ok: true, code: 0, timedOut: false }));
+    const r = await ensureAgentBinaryForSwitch('codex', 'curl install.sh | sh', {
+      resolveAdapter: () => fakeSpec(false),
+      runInstall: runInstall as never,
+    });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error).toMatch(/never appeared on PATH/);
+    expect(runInstall).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not retry when there is no install script (unchanged single-probe behavior)', async () => {
+    const r = await ensureAgentBinaryForSwitch('codex', undefined, {
+      resolveAdapter: () => fakeSpec(false),
+    });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error).toMatch(/not installed/);
+  });
+
+  it('does not retry when the FIRST install attempt itself fails (non-zero exit)', async () => {
+    const runInstall = vi.fn(async () => ({ ok: false, code: 1, timedOut: false }));
+    const r = await ensureAgentBinaryForSwitch('codex', 'exit 1', {
+      resolveAdapter: () => fakeSpec(false),
+      runInstall: runInstall as never,
+    });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error).toMatch(/install failed/);
+    expect(runInstall).toHaveBeenCalledTimes(1);
+  });
+
+  it('passes a 300s timeout budget to the install runner on the switch path', async () => {
+    const runInstall = vi.fn(async () => ({ ok: true, code: 0, timedOut: false }));
+    await ensureAgentBinaryForSwitch('codex', 'curl install.sh | sh', {
+      resolveAdapter: () => fakeSpec([false, true]),
+      runInstall: runInstall as never,
+    });
+    expect(runInstall).toHaveBeenCalledWith(
+      'curl install.sh | sh',
+      expect.objectContaining({ timeoutMs: 300_000 }),
+    );
+  });
 });
 
 // ─── makeSerializedSwitchEmitter ─────────────────────────────────────────────
@@ -203,10 +256,13 @@ describe('makeSerializedSwitchEmitter', () => {
       (type: string, payload: Record<string, unknown>) =>
         new Promise((resolve) =>
           // First POST is the slowest — ordering must still hold.
-          setTimeout(() => {
-            done.push(`${type}:${String(payload.step ?? payload.state)}`);
-            resolve(undefined);
-          }, done.length === 0 ? 30 : 1),
+          setTimeout(
+            () => {
+              done.push(`${type}:${String(payload.step ?? payload.state)}`);
+              resolve(undefined);
+            },
+            done.length === 0 ? 30 : 1,
+          ),
         ),
     );
     const emit = makeSerializedSwitchEmitter(post as never);
