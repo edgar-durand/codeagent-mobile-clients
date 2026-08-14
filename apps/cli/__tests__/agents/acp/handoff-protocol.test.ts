@@ -14,6 +14,7 @@ import {
   extractHandoffProposal,
   handoffFenceStart,
   handoffFenceStartMasked,
+  resolveHandoffTarget,
   stripHandoffFences,
 } from '../../../src/agents/acp/handoff-protocol';
 import { log } from '../../../src/services/logger';
@@ -362,5 +363,254 @@ describe('handoffFenceStartMasked', () => {
     const idx = handoffFenceStartMasked(text);
     expect(idx).toBe(text.lastIndexOf('```' + HANDOFF_FENCE_TAG));
     expect(idx).toBeGreaterThan(-1);
+  });
+});
+
+// ─── resolveHandoffTarget — alias/display-name normalization ───────────────
+// fleet-1 codex-emitted-"Claude Code" incident: the agent used the DISPLAY
+// NAME instead of the runtime id — this is the resolver that closes that gap.
+
+describe('resolveHandoffTarget', () => {
+  const RESOLVE_TARGETS = new Set(['claude', 'codex', 'gemini', 'kimi']);
+
+  it('passes through a verbatim runtime id', () => {
+    expect(resolveHandoffTarget('claude', RESOLVE_TARGETS)).toBe('claude');
+  });
+
+  it('is case-insensitive and trims whitespace on a verbatim id', () => {
+    expect(resolveHandoffTarget('  CLAUDE  ', RESOLVE_TARGETS)).toBe('claude');
+    expect(resolveHandoffTarget('Codex', RESOLVE_TARGETS)).toBe('codex');
+  });
+
+  it('resolves the shared-registry DISPLAY NAME "Claude Code" → claude', () => {
+    expect(resolveHandoffTarget('Claude Code', RESOLVE_TARGETS)).toBe('claude');
+  });
+
+  it('resolves other display names — "Gemini CLI" → gemini, "Kimi Code" → kimi', () => {
+    expect(resolveHandoffTarget('Gemini CLI', RESOLVE_TARGETS)).toBe('gemini');
+    expect(resolveHandoffTarget('Kimi Code', RESOLVE_TARGETS)).toBe('kimi');
+  });
+
+  it('resolves the bare short form "Kimi" → kimi', () => {
+    expect(resolveHandoffTarget('Kimi', RESOLVE_TARGETS)).toBe('kimi');
+  });
+
+  it('resolves the PUBLIC id "claude_code" (and hyphen/underscore variants) → claude', () => {
+    expect(resolveHandoffTarget('claude_code', RESOLVE_TARGETS)).toBe('claude');
+    expect(resolveHandoffTarget('claude-code', RESOLVE_TARGETS)).toBe('claude');
+    expect(resolveHandoffTarget('CLAUDE_CODE', RESOLVE_TARGETS)).toBe('claude');
+  });
+
+  it('returns null for an unknown alias', () => {
+    expect(resolveHandoffTarget('not-a-real-agent', RESOLVE_TARGETS)).toBeNull();
+  });
+
+  it('returns null for empty/whitespace-only input', () => {
+    expect(resolveHandoffTarget('', RESOLVE_TARGETS)).toBeNull();
+    expect(resolveHandoffTarget('   ', RESOLVE_TARGETS)).toBeNull();
+  });
+
+  it('returns null when the resolved id is not on THIS roster', () => {
+    // "Codex CLI" resolves globally to "codex", but this roster doesn't have it.
+    expect(resolveHandoffTarget('Codex CLI', new Set(['claude', 'gemini']))).toBeNull();
+  });
+});
+
+// ─── extractHandoffProposal — degenerate/inline form ────────────────────────
+// fleet-1 v2.65.x live bug: codex emitted a single-backtick INLINE code span
+// instead of a 3-backtick fenced block, so the strict FENCE_RE never matched.
+
+describe('extractHandoffProposal — degenerate/inline form', () => {
+  it('a single-backtick inline code span with a valid, resolvable target is treated as a proposal and stripped', () => {
+    const text =
+      'Handing this off.\n\n`codeam-handoff {"to":"Claude Code","reason":"needs Claude","prompt":"finish the review"}`\n';
+    const r = extractHandoffProposal(text, 'codex', new Set(['claude']));
+    expect(r.proposal).toEqual({
+      to: 'claude',
+      reason: 'needs Claude',
+      prompt: 'finish the review',
+    });
+    expect(r.cleanText).not.toContain('codeam-handoff');
+    expect(r.cleanText).toBe('Handing this off.');
+  });
+
+  it('a bare (zero-backtick) degenerate line is also matched', () => {
+    const text = 'Done.\n\ncodeam-handoff {"to":"codex","reason":"needs codex","prompt":"go"}';
+    const r = extractHandoffProposal(text, 'claude', new Set(['codex']));
+    expect(r.proposal).toEqual({ to: 'codex', reason: 'needs codex', prompt: 'go' });
+    expect(r.cleanText).toBe('Done.');
+  });
+
+  it('a double-backtick inline span is also matched', () => {
+    const text = '``codeam-handoff {"to":"codex","reason":"r","prompt":"p"}``';
+    const r = extractHandoffProposal(text, 'claude', new Set(['codex']));
+    expect(r.proposal).toEqual({ to: 'codex', reason: 'r', prompt: 'p' });
+    expect(r.cleanText).toBe('');
+  });
+
+  it('CRITICAL SAFETY RULE: invalid JSON in a degenerate form leaves the text COMPLETELY untouched', () => {
+    const text = 'Some notes.\n\n`codeam-handoff {not valid json}`\n';
+    const r = extractHandoffProposal(text, 'claude', new Set(['codex']));
+    expect(r.proposal).toBeNull();
+    expect(r.cleanText).toBe(text);
+  });
+
+  it('CRITICAL SAFETY RULE: an unresolvable target in a degenerate form leaves the text COMPLETELY untouched', () => {
+    const text =
+      'Some notes.\n\n`codeam-handoff {"to":"not-a-real-agent","reason":"r","prompt":"p"}`\n';
+    const r = extractHandoffProposal(text, 'claude', new Set(['codex']));
+    expect(r.proposal).toBeNull();
+    expect(r.cleanText).toBe(text);
+  });
+
+  it('does not eat ordinary prose that merely mentions the tag inline', () => {
+    const text = 'The codeam-handoff protocol lets agents pass work to teammates.';
+    const r = extractHandoffProposal(text, 'claude', new Set(['codex']));
+    expect(r.proposal).toBeNull();
+    expect(r.cleanText).toBe(text);
+  });
+
+  it('a degenerate mention inside a 4+-backtick worked example is left untouched, no proposal', () => {
+    const text = [
+      "Here's the degenerate form some agents mistakenly use:",
+      '',
+      '````',
+      '`codeam-handoff {"to":"codex","reason":"example","prompt":"do not run"}`',
+      '````',
+      '',
+    ].join('\n');
+    const r = extractHandoffProposal(text, 'claude', new Set(['codex']));
+    expect(r.proposal).toBeNull();
+    expect(r.cleanText).toBe(text);
+  });
+
+  it('a strict fence still wins over a degenerate mention elsewhere in the same reply', () => {
+    const text = [
+      'codeam-handoff is neat but this is just prose about it, not a real block.',
+      '',
+      '```codeam-handoff',
+      '{"to":"codex","reason":"the real one","prompt":"do the real thing"}',
+      '```',
+      '',
+    ].join('\n');
+    const r = extractHandoffProposal(text, 'claude', new Set(['codex']));
+    expect(r.proposal).toEqual({
+      to: 'codex',
+      reason: 'the real one',
+      prompt: 'do the real thing',
+    });
+    expect(r.cleanText).toContain('codeam-handoff is neat');
+    expect(r.cleanText).not.toContain('do the real thing');
+  });
+
+  it('only the TRAILING degenerate line counts when there are several in the text', () => {
+    // The FIRST one is no longer the reply's tail (the second follows it), so
+    // it's simply not considered at all — only the trailing line is.
+    const text = [
+      '`codeam-handoff {"to":"codex","reason":"first","prompt":"first prompt"}`',
+      '',
+      '`codeam-handoff {"to":"codex","reason":"second","prompt":"second prompt"}`',
+    ].join('\n');
+    const r = extractHandoffProposal(text, 'claude', new Set(['codex']));
+    expect(r.proposal).toEqual({ to: 'codex', reason: 'second', prompt: 'second prompt' });
+  });
+});
+
+// ─── extractHandoffProposal — degenerate form MUST be reply-TRAILING ────────
+// Reviewer finding: matching a degenerate mention ANYWHERE in the text let an
+// agent EXPLAINING the protocol mid-reply produce a fully-resolved FABRICATED
+// proposal card and silently delete the explanatory line — strictly worse
+// than the incident being fixed. The degenerate form now only counts when
+// it's the LAST non-blank line, mirroring "end your reply with…".
+
+describe('extractHandoffProposal — degenerate form must be reply-trailing', () => {
+  it('reviewer repro (inline-code form): a mid-reply worked example is left byte-identical, no proposal', () => {
+    const text =
+      'Sure — to hand this off you would write:\n\n' +
+      '`codeam-handoff {"to":"codex","reason":"example","prompt":"do the thing"}`\n\n' +
+      'but only do that when it fits.';
+    const r = extractHandoffProposal(text, 'claude', new Set(['codex']));
+    expect(r.proposal).toBeNull();
+    expect(r.cleanText).toBe(text);
+  });
+
+  it('reviewer repro (bare form): a mid-reply worked example is left byte-identical, no proposal', () => {
+    const text =
+      'Sure — to hand this off you would write:\n\n' +
+      'codeam-handoff {"to":"codex","reason":"example","prompt":"do the thing"}\n\n' +
+      'but only do that when it fits.';
+    const r = extractHandoffProposal(text, 'claude', new Set(['codex']));
+    expect(r.proposal).toBeNull();
+    expect(r.cleanText).toBe(text);
+  });
+
+  it('a genuinely TRAILING degenerate block (nothing after it) is still a valid proposal and gets stripped', () => {
+    const text =
+      'Handing this off now.\n\n' +
+      '`codeam-handoff {"to":"codex","reason":"needs codex","prompt":"finish it"}`';
+    const r = extractHandoffProposal(text, 'claude', new Set(['codex']));
+    expect(r.proposal).toEqual({ to: 'codex', reason: 'needs codex', prompt: 'finish it' });
+    expect(r.cleanText).toBe('Handing this off now.');
+  });
+
+  it('a trailing degenerate block followed ONLY by blank lines still matches', () => {
+    const text =
+      'Handing this off now.\n\n' +
+      '`codeam-handoff {"to":"codex","reason":"needs codex","prompt":"finish it"}`\n\n\n';
+    const r = extractHandoffProposal(text, 'claude', new Set(['codex']));
+    expect(r.proposal).toEqual({ to: 'codex', reason: 'needs codex', prompt: 'finish it' });
+    expect(r.cleanText).toBe('Handing this off now.');
+  });
+
+  it('a degenerate block on the last line but with trailing prose AFTER it on the SAME line does not match', () => {
+    const text =
+      'Handing this off. `codeam-handoff {"to":"codex","reason":"r","prompt":"p"}` please review soon';
+    const r = extractHandoffProposal(text, 'claude', new Set(['codex']));
+    expect(r.proposal).toBeNull();
+    expect(r.cleanText).toBe(text);
+  });
+});
+
+// ─── stripHandoffFences — degenerate/inline form ─────────────────────────────
+
+describe('stripHandoffFences — degenerate/inline form', () => {
+  it('strips a shape-valid degenerate block (no roster context needed here)', () => {
+    const text =
+      'Handing this off.\n\n`codeam-handoff {"to":"Claude Code","reason":"needs Claude","prompt":"finish the review"}`\n';
+    const out = stripHandoffFences(text);
+    expect(out).not.toContain('codeam-handoff');
+    expect(out).toBe('Handing this off.');
+  });
+
+  it('leaves an invalid (non-JSON) degenerate mention untouched', () => {
+    const text = 'Some notes.\n\n`codeam-handoff {not valid json}`\n';
+    expect(stripHandoffFences(text)).toBe(text);
+  });
+
+  it('leaves ordinary prose mentioning the tag untouched', () => {
+    const text = 'The codeam-handoff protocol lets agents pass work to teammates.';
+    expect(stripHandoffFences(text)).toBe(text);
+  });
+
+  // ─── must be reply-TRAILING (reviewer fix) ─────────────────────────────────
+
+  it('reviewer repro: a mid-reply worked example is left byte-identical (not stripped from the live bubble either)', () => {
+    const text =
+      'Sure — to hand this off you would write:\n\n' +
+      '`codeam-handoff {"to":"codex","reason":"example","prompt":"do the thing"}`\n\n' +
+      'but only do that when it fits.';
+    expect(stripHandoffFences(text)).toBe(text);
+  });
+
+  it('a trailing degenerate block followed ONLY by blank lines is still stripped', () => {
+    const text =
+      'Handing this off now.\n\n`codeam-handoff {"to":"codex","reason":"r","prompt":"p"}`\n\n\n';
+    expect(stripHandoffFences(text)).toBe('Handing this off now.');
+  });
+
+  it('a degenerate block on the last line with trailing prose AFTER it on the SAME line is not stripped', () => {
+    const text =
+      'Handing this off. `codeam-handoff {"to":"codex","reason":"r","prompt":"p"}` please review soon';
+    expect(stripHandoffFences(text)).toBe(text);
   });
 });

@@ -248,13 +248,20 @@ export const TEAM_PREAMBLE_MARKER = '[Team context]';
 export const TEAM_PREAMBLE_LINES: readonly string[] = [
   '[Team context] You are the active agent in a CodeAgent Mobile session where the user',
   'has a squad of agents and can pass work between them. Your available teammates:',
-  'If a task clearly fits a teammate better than you, you MAY propose a handoff by ending',
-  `your reply with a fenced code block tagged ${HANDOFF_FENCE_TAG} containing ONE JSON object:`,
+  'If a task clearly fits a teammate better than you, you MAY propose a handoff. The fence',
+  `MUST be a three-backtick code block with the info string exactly ${HANDOFF_FENCE_TAG}`,
+  '(never a single backtick, never bare text) with the JSON alone on its own line inside',
+  'it, exactly like this:',
+  '```' + HANDOFF_FENCE_TAG,
   '{"to":"<teammate id>","reason":"<one sentence>","prompt":"<the prompt they should run>"}',
-  'Propose at most one handoff per reply, only when genuinely better, and never announce',
-  'the block in prose — the app renders it as a card the user can accept.',
+  '```',
+  '"to" MUST be one of the ids shown above, written EXACTLY as shown (e.g. "claude", never',
+  'a display name like "Claude Code"). Propose at most one handoff per reply, only when',
+  'genuinely better, and never announce the block in prose — the app renders it as a card',
+  'the user can accept.',
 ];
-/** Shape of a teammate bullet — the only VARIABLE line in the preamble. */
+/** Shape of a teammate bullet — the only VARIABLE lines in the preamble
+ * (each now also carries the literal id the agent must use for "to"). */
 export const TEAM_PREAMBLE_BULLET_RE = /^- .+ — best at: /;
 
 export const BRIEFING_MARKER = '[Team update]';
@@ -280,7 +287,9 @@ export function buildTeamPreamble(
   const lines = [
     TEAM_PREAMBLE_LINES[0],
     TEAM_PREAMBLE_LINES[1],
-    ...others.map((a) => `- ${a.displayName} — best at: ${specialtyFor(a.agentId)}`),
+    ...others.map(
+      (a) => `- ${a.displayName} (id: ${a.agentId}) — best at: ${specialtyFor(a.agentId)}`,
+    ),
   ];
 
   if (opts.handoffInstructions) {
