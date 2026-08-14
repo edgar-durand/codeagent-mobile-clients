@@ -136,6 +136,13 @@ export function extractHandoffProposal(
  * as an example inside a 4+-backtick block. */
 export function stripHandoffFences(text: string): string {
   const { masked, restore } = maskOuterFences(text);
+  if (masked.search(FENCE_RE) === -1) {
+    // No real fence: byte-identical passthrough. The seam collapse + trim in
+    // stripFences must never touch fence-less replies — this runs on EVERY
+    // terminal frame, not just squad turns. (String#search ignores the /g
+    // lastIndex, so the module-level FENCE_RE stays stateless here.)
+    return text;
+  }
   return restore(stripFences(masked));
 }
 

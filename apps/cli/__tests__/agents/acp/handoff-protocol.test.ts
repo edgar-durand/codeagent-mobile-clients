@@ -13,6 +13,7 @@ vi.mock('../../../src/services/logger', () => ({
 import {
   extractHandoffProposal,
   handoffFenceStart,
+  stripHandoffFences,
 } from '../../../src/agents/acp/handoff-protocol';
 import { log } from '../../../src/services/logger';
 
@@ -232,6 +233,24 @@ describe('extractHandoffProposal — no fence', () => {
     const r = extractHandoffProposal(text, 'claude', TARGETS);
     expect(r.proposal).toBeNull();
     expect(r.cleanText).toBe(text);
+  });
+});
+
+// ─── stripHandoffFences — fence-less passthrough ─────────────────────────────
+
+describe('stripHandoffFences — no fence', () => {
+  it('is a byte-identical passthrough (no trim, no blank-line collapse)', () => {
+    const text = '  \nParagraph one.\n\n\n\nParagraph two after a big gap.\n\n  ';
+    expect(stripHandoffFences(text)).toBe(text);
+  });
+
+  it('still strips a real fence and collapses only then', () => {
+    const text =
+      'Before.\n\n```codeam-handoff\n{"to":"codex","reason":"r","prompt":"p"}\n```\n\nAfter.';
+    const out = stripHandoffFences(text);
+    expect(out).not.toContain('codeam-handoff');
+    expect(out).toContain('Before.');
+    expect(out).toContain('After.');
   });
 });
 
