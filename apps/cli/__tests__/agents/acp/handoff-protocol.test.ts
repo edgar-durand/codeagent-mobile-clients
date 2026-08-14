@@ -773,3 +773,111 @@ describe('stripHandoffFences — degenerate trailing-BLOCK (multi-line) form', (
     expect(stripHandoffFences(text)).toBe(text);
   });
 });
+
+// ─── extractHandoffProposal — sweeps EARLIER shape-valid degenerate blocks ─
+// Re-review finding: a self-correcting model (emits a handoff attempt, then
+// re-emits a better one) leaves the EARLIER attempt's tag-line + raw JSON
+// sitting mid-reply — the trailing-only rule resolves the LAST one as the
+// proposal but never touched the first, so its litter survived verbatim in
+// cleanText. Ruling: once the trailing block resolves to a VALID proposal,
+// ALSO strip any earlier degenerate block that is itself SHAPE-VALID
+// (parseProposalShape passes) — a valid trailing proposal establishes
+// protocol intent, so an earlier own-line tag+valid-JSON block is
+// near-certainly a discarded attempt, not prose. A shape-INVALID earlier
+// candidate is left byte-identical (prose safety). No trailing valid
+// proposal → nothing degenerate is swept mid-text (current behavior).
+
+describe('extractHandoffProposal — sweeps earlier shape-valid degenerate blocks', () => {
+  it("reviewer's exact repro: two degenerate blocks (first codex, last gemini) → proposal=gemini, cleanText has NO litter, prose intact", () => {
+    const text = [
+      'Let me hand this off.',
+      '',
+      '`codeam-handoff {"to":"codex","reason":"first attempt","prompt":"p1"}`',
+      '',
+      'Actually, better to use gemini.',
+      '',
+      '`codeam-handoff {"to":"gemini","reason":"second attempt","prompt":"p2"}`',
+    ].join('\n');
+    const r = extractHandoffProposal(text, 'claude', new Set(['codex', 'gemini']));
+    expect(r.proposal).toEqual({ to: 'gemini', reason: 'second attempt', prompt: 'p2' });
+    expect(r.cleanText).not.toContain('codeam-handoff');
+    expect(r.cleanText).not.toContain('"to"');
+    expect(r.cleanText).toContain('Let me hand this off.');
+    expect(r.cleanText).toContain('Actually, better to use gemini.');
+    expect(r.cleanText).not.toMatch(/\n{3,}/);
+  });
+
+  it('an earlier SHAPE-INVALID block is left byte-identical while the trailing block still proposes', () => {
+    const text = [
+      'Let me hand this off.',
+      '',
+      '`codeam-handoff {not valid json}`',
+      '',
+      'Actually, better to use gemini.',
+      '',
+      '`codeam-handoff {"to":"gemini","reason":"r","prompt":"p"}`',
+    ].join('\n');
+    const r = extractHandoffProposal(text, 'claude', new Set(['codex', 'gemini']));
+    expect(r.proposal).toEqual({ to: 'gemini', reason: 'r', prompt: 'p' });
+    // The invalid earlier block survives VERBATIM — never eat ambiguous prose.
+    expect(r.cleanText).toContain('`codeam-handoff {not valid json}`');
+    // …but the (now single remaining) real fence-tag mention is the earlier
+    // one only — the trailing valid block is still gone.
+    expect(r.cleanText).not.toContain('"to":"gemini"');
+  });
+
+  it('an earlier example quoted inside a 4+-backtick block is untouched (outer-fence masking already covers this)', () => {
+    const text = [
+      "Here's how it works:",
+      '',
+      '````',
+      '`codeam-handoff {"to":"codex","reason":"example","prompt":"do not run"}`',
+      '````',
+      '',
+      'Handing off now.',
+      '',
+      '`codeam-handoff {"to":"gemini","reason":"real","prompt":"p2"}`',
+    ].join('\n');
+    const r = extractHandoffProposal(text, 'claude', new Set(['codex', 'gemini']));
+    expect(r.proposal).toEqual({ to: 'gemini', reason: 'real', prompt: 'p2' });
+    // The quoted example survives verbatim, nested fence included.
+    expect(r.cleanText).toContain('````');
+    expect(r.cleanText).toContain(
+      '`codeam-handoff {"to":"codex","reason":"example","prompt":"do not run"}`',
+    );
+    expect(r.cleanText).toContain('Handing off now.');
+    // Only the real trailing block's JSON is gone.
+    expect(r.cleanText).not.toContain('"reason":"real"');
+  });
+
+  it('with NO trailing valid proposal, an earlier shape-valid mention is left untouched (current behavior unchanged)', () => {
+    const text = [
+      'Let me hand this off.',
+      '',
+      '`codeam-handoff {"to":"codex","reason":"r","prompt":"p"}`',
+      '',
+      'On second thought, never mind — staying on this myself.',
+    ].join('\n');
+    const r = extractHandoffProposal(text, 'claude', new Set(['codex']));
+    expect(r.proposal).toBeNull();
+    expect(r.cleanText).toBe(text);
+  });
+
+  it('sweeps an earlier trailing-BLOCK-shaped mid-reply candidate too (single-line body after a tag-only line)', () => {
+    const text = [
+      'Let me hand this off.',
+      '',
+      '`codeam-handoff',
+      '{"to":"codex","reason":"first attempt","prompt":"p1"}',
+      '',
+      'Actually, better to use gemini.',
+      '',
+      '`codeam-handoff {"to":"gemini","reason":"second attempt","prompt":"p2"}`',
+    ].join('\n');
+    const r = extractHandoffProposal(text, 'claude', new Set(['codex', 'gemini']));
+    expect(r.proposal).toEqual({ to: 'gemini', reason: 'second attempt', prompt: 'p2' });
+    expect(r.cleanText).not.toContain('codeam-handoff');
+    expect(r.cleanText).toContain('Let me hand this off.');
+    expect(r.cleanText).toContain('Actually, better to use gemini.');
+  });
+});

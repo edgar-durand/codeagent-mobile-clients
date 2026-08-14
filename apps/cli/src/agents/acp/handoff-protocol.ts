@@ -316,6 +316,76 @@ function trailingDegenerateMatch(masked: string): DegenerateMatch | null {
   return trailingSameLineMatch(masked) ?? trailingBlockMatch(masked);
 }
 
+/**
+ * Every EARLIER degenerate-form span in `masked` — strictly before
+ * `beforeOffset` (the trailing proposal's own start) — whose JSON is
+ * SHAPE-VALID (`parseProposalShape` passes). Called ONLY once a trailing
+ * block has already resolved to a fully-validated proposal: a self-
+ * correcting model (emits a handoff attempt, then re-emits a better one) can
+ * leave an earlier attempt's tag-line + raw JSON sitting mid-reply, and a
+ * valid trailing proposal establishes protocol intent — an own-line
+ * tag+valid-JSON block before it is near-certainly a discarded attempt, not
+ * prose. A SHAPE-INVALID earlier candidate is left alone (prose safety: we
+ * only ever remove something that unambiguously parses as a handoff
+ * payload).
+ *
+ * Recognizes both forms, same-line and block, but — unlike the TRAILING
+ * block form, which is anchored to the absolute end of the text — an
+ * earlier block form has no such anchor to safely bound a pretty-printed
+ * multi-line body, so only a body that is a SINGLE line (immediately after
+ * the tag-only line, blank lines aside) is recognized here; anything more
+ * ambiguous is left untouched rather than guessed at.
+ */
+function earlierShapeValidDegenerateSpans(
+  masked: string,
+  beforeOffset: number,
+): Array<{ start: number; end: number }> {
+  const lines = masked.split('\n');
+  const starts = lineStarts(lines);
+  const spans: Array<{ start: number; end: number }> = [];
+
+  for (let i = 0; i < lines.length && starts[i] < beforeOffset; i++) {
+    const same = lines[i].match(DEGENERATE_LINE_RE);
+    if (same) {
+      const end = starts[i] + same[0].length;
+      if (end <= beforeOffset && parseProposalShape(same[2].trim())) {
+        spans.push({ start: starts[i], end });
+      }
+      continue;
+    }
+
+    if (TAG_ONLY_LINE_RE.test(lines[i])) {
+      let j = i + 1;
+      while (j < lines.length && lines[j].trim().length === 0) j++;
+      if (j >= lines.length || starts[j] >= beforeOffset) continue;
+      if (!parseProposalShape(lines[j].trim())) continue;
+
+      let end = starts[j] + lines[j].length;
+      let k = j + 1;
+      if (k < lines.length && starts[k] < beforeOffset && CLOSING_BACKTICK_LINE_RE.test(lines[k])) {
+        end = starts[k] + lines[k].length;
+      }
+      if (end <= beforeOffset) spans.push({ start: starts[i], end });
+    }
+  }
+  return spans;
+}
+
+/** Cut every `[start, end)` span out of `text` (spans sorted, non-
+ * overlapping expected — the callers never produce overlapping ones) and
+ * concatenate what's left. */
+function removeSpans(text: string, spans: ReadonlyArray<{ start: number; end: number }>): string {
+  const sorted = [...spans].sort((a, b) => a.start - b.start);
+  let result = '';
+  let cursor = 0;
+  for (const span of sorted) {
+    result += text.slice(cursor, span.start);
+    cursor = span.end;
+  }
+  result += text.slice(cursor);
+  return result;
+}
+
 /** Find + strip a ```codeam-handoff fence. Validates: parseable single JSON
  * object; to is in validTargets; to != currentAgent; reason/prompt non-empty
  * strings (prompt <= 8000, reason <= 1000). Invalid -> proposal:null but the
@@ -334,7 +404,13 @@ function trailingDegenerateMatch(masked: string): DegenerateMatch | null {
  * validates (target resolves on THIS roster, via {@link
  * resolveHandoffTarget}, and isn't the current agent). An invalid degenerate
  * match — including one that isn't on the trailing line/block — leaves the
- * text COMPLETELY untouched: never eat prose that merely mentions the tag. */
+ * text COMPLETELY untouched: never eat prose that merely mentions the tag.
+ *
+ * Once the trailing block resolves to a valid proposal, ALSO sweeps any
+ * EARLIER shape-valid degenerate blocks out of the reply (see {@link
+ * earlierShapeValidDegenerateSpans}) — a self-correcting model that emits a
+ * handoff attempt, then re-emits a better one, otherwise leaves the first
+ * attempt's tag-line + raw JSON sitting mid-reply as litter. */
 export function extractHandoffProposal(
   text: string,
   currentAgent: string,
@@ -353,7 +429,11 @@ export function extractHandoffProposal(
   if (degenerate) {
     const proposal = parseProposal(degenerate.jsonRaw.trim(), currentAgent, validTargets);
     if (proposal) {
-      const stripped = masked.slice(0, degenerate.start) + masked.slice(degenerate.end);
+      const earlier = earlierShapeValidDegenerateSpans(masked, degenerate.start);
+      const stripped = removeSpans(masked, [
+        ...earlier,
+        { start: degenerate.start, end: degenerate.end },
+      ]);
       return { cleanText: restore(collapseSeams(stripped)), proposal };
     }
     // Malformed JSON, wrong shape, or a target that doesn't resolve on this
