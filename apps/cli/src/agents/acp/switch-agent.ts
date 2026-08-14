@@ -93,6 +93,12 @@ export async function ensureAgentBinaryForSwitch(
   deps: {
     resolveAdapter?: typeof getAcpAdapter;
     runInstall?: typeof runAgentInstallScript;
+    /**
+     * Called once, immediately before the RETRY install attempt, so the
+     * orchestrator can re-emit a progress step and mobile stops looking
+     * frozen. See the watchdog note at the retry site.
+     */
+    onRetry?: () => void;
   } = {},
 ): Promise<{ ok: true } | { ok: false; error: string }> {
   const resolveAdapter = deps.resolveAdapter ?? getAcpAdapter;
@@ -110,7 +116,9 @@ export async function ensureAgentBinaryForSwitch(
     };
   }
   log.info('switchAgent', `installing ${agentId} binary (missing on PATH)`);
-  const res = await runInstall(installScript, { logScope: 'switchAgent' });
+  // 300s (vs the 180s default) — the fleet-1 2026-08-14 incident showed a
+  // slow self-hosted box interrupting npm mid install under the shorter cap.
+  const res = await runInstall(installScript, { logScope: 'switchAgent', timeoutMs: 300_000 });
   if (!res.ok) {
     return {
       ok: false,
@@ -121,6 +129,49 @@ export async function ensureAgentBinaryForSwitch(
   }
   // The installer exited 0 — give the PATH/package probe a short window to
   // observe the binary (npm -g bin links land asynchronously on some FSes).
+  if (await spec.waitForBinary({ timeoutMs: 30_000 })) return { ok: true };
+
+  // RETRY-ONCE (fleet-1, 2026-08-14): a codex switch on a self-hosted box
+  // failed with "installed but its binary never appeared on PATH" — the box
+  // showed npm's atomic bin-link left HALF-FINISHED
+  // (`~/.local/bin/.codex-ykcFwAyA -> ../lib/node_modules/@openai/codex/bin/codex.js`
+  // existed but the rename to `codex` never happened, likely the previous
+  // 180s cap interrupting a slow install). Re-running the SAME install
+  // script is safe (backend install snippets are idempotent) and completes
+  // the half-finished link. Only fail with the honest message if a second
+  // attempt also can't produce a visible binary.
+  log.info(
+    'switchAgent',
+    'install probe failed — retrying install once (half-finished bin link class)',
+  );
+  // Re-emit the progress step so the retry is VISIBLE. Without it the switch
+  // looks frozen for the entire second attempt.
+  //
+  // ⚠️ Re-emits the EXISTING `install` step on purpose. The backend DTO
+  // accepts only `credential | install | restart`; inventing a `retry` step
+  // would 400 the whole progress POST and lose the signal entirely.
+  //
+  // ⚠️ Watchdog interplay — worst case this whole call is 2 × 300 s install
+  // plus 2 × 30 s probe (~11 min), which OVERRUNS mobile's 240 s switch
+  // watchdog. That is accepted, not a bug: the watchdog fires an honest,
+  // transient error in the UI, and the eventual `switch_agent_status: ready`
+  // overwrites/heals the slot when the install finally lands (v2.63 store
+  // semantics — status is last-write-wins per session, not append-only). The
+  // re-emitted step also refreshes the client's activity signal in the
+  // meantime.
+  deps.onRetry?.();
+  const retryRes = await runInstall(installScript, {
+    logScope: 'switchAgent',
+    timeoutMs: 300_000,
+  });
+  if (!retryRes.ok) {
+    return {
+      ok: false,
+      error: retryRes.timedOut
+        ? `${displayName(agentId)} install timed out.`
+        : `${displayName(agentId)} install failed.`,
+    };
+  }
   if (await spec.waitForBinary({ timeoutMs: 30_000 })) return { ok: true };
   return {
     ok: false,
@@ -178,6 +229,9 @@ export interface SwitchAgentDeps {
   ensureBinary(
     agentId: AgentId,
     installScript: string | undefined,
+    /** Invoked before the retry install attempt so the orchestrator can
+     *  re-emit the `install` progress step (see `ensureAgentBinaryForSwitch`). */
+    onRetry?: () => void,
   ): Promise<{ ok: true } | { ok: false; error: string }>;
   /**
    * Stop the old client and bring the new agent fully up (cancel in-flight
@@ -246,7 +300,11 @@ export async function performAgentSwitch(
   const from = deps.currentAgent();
   const target = resolveSwitchTarget(rawAgentId, from);
   if (!target.ok) {
-    return { ok: false, agentId: typeof rawAgentId === 'string' ? rawAgentId : '', error: target.error };
+    return {
+      ok: false,
+      agentId: typeof rawAgentId === 'string' ? rawAgentId : '',
+      error: target.error,
+    };
   }
   const agentId = target.agentId;
   const emitStatus = (status: SwitchAgentStatus): Promise<unknown> =>
@@ -291,7 +349,11 @@ export async function performAgentSwitch(
   //    this process already resolved the binary for this agent.
   if (!fastPath.skipInstall) {
     void emitStep('install');
-    const bin = await deps.ensureBinary(agentId, installScript);
+    // The retry re-emits `install` on the SAME serialized chain, so mobile
+    // sees a second progress beat instead of ~5 more minutes of silence.
+    const bin = await deps.ensureBinary(agentId, installScript, () => {
+      void emitStep('install');
+    });
     if (!bin.ok) return fail(bin.error);
   }
 
@@ -313,7 +375,9 @@ export async function performAgentSwitch(
         `Switching to ${displayName(agentId)} failed and ${displayName(from)} couldn't be restored — restart the session.`,
       );
     }
-    return fail(`Couldn't start ${displayName(agentId)} — the session stays on ${displayName(from)}.`);
+    return fail(
+      `Couldn't start ${displayName(agentId)} — the session stays on ${displayName(from)}.`,
+    );
   }
 
   // 4. Durability + visibility. Persist first (a crash between these still

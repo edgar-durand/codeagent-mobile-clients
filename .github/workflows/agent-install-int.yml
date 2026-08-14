@@ -1,0 +1,135 @@
+name: Agent install integration
+
+# REAL per-agent install gate for the stale-PATH / half-finished-install class.
+#
+# Test of record: apps/cli/__tests__/integration/agent-install.int.test.ts
+# Canonical snippets: packages/shared/src/agents/install-snippets.ts
+#
+# Every agent's install snippet is executed FOR REAL inside a fresh container
+# whose base mirrors apps/box/Dockerfile, as a non-root user with a per-user
+# npm prefix and a deliberately minimal, systemd-like PATH — then the REAL
+# adapter probe and a real `<binary> --version` are driven from ONE
+# long-running node process that captured its PATH BEFORE the install. That
+# combination is the only way this class is observable; it is exactly how
+# codex broke on fleet-1 (2026-08-14) and how cursor / coderabbit / aider were
+# each found on this gate's first run.
+#
+# ⚠️ Deliberately NOT a required check. These are real network installs
+# against six independent vendors (npm, cursor.com, code.kimi.com,
+# opencode.ai, cli.coderabbit.ai, PyPI) — an upstream outage must surface as
+# visible red here, not as a merge block on unrelated work. It lives in its
+# OWN workflow (rather than as another step in ci.yml) so its runtime and its
+# flake profile stay off the critical PR path.
+
+on:
+  pull_request:
+    paths:
+      # The launch/probe/install paths under test.
+      - 'apps/cli/src/agents/**'
+      # The shared install runner every snippet is executed through.
+      - 'apps/cli/src/commands/host/agent-install.ts'
+      # `findInPath` / `augmentPath` — the binary resolution the non-ACP
+      # agents' probes go through, and the seam the stale-PATH class lives on.
+      - 'apps/cli/src/os/**'
+      # The canonical snippets the gate executes.
+      - 'packages/shared/src/agents/**'
+      # The gate's own moving parts.
+      - 'apps/cli/src/agent-install-driver.ts'
+      - 'apps/cli/__tests__/integration/agent-install.int.test.ts'
+      - 'apps/cli/__tests__/docker/agent-install.Dockerfile'
+      - '.github/workflows/agent-install-int.yml'
+  schedule:
+    # Nightly 03:00 UTC. The PR trigger only fires when we change the agent
+    # code; the cron is what catches an UPSTREAM change — a vendor installer
+    # moving its target dir, changing its exit code, or breaking outright —
+    # with no commit of ours involved. That is how CodeRabbit's exit-2-on-
+    # success would have been caught the day it shipped.
+    - cron: '0 3 * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: agent-install-int-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  agent-install:
+    name: Real per-agent install (Docker, minimal PATH)
+    runs-on: ubuntu-latest
+    # Six real vendor installs plus the half-link regression, run SERIALLY in
+    # one file (vitest executes a file's tests in order), each with its own
+    # fresh container. ~3 min warm; 30 min is the backstop for a cold image
+    # build plus a slow upstream.
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '20'
+          cache: npm
+
+      - name: Install workspaces
+        run: npm ci
+
+      # The container runs the BUILT driver + the packed CLI, so the gate
+      # exercises the same bundle users install — not ts-node over source.
+      - name: Build CLI
+        working-directory: apps/cli
+        run: npm run build
+
+      # Layer-cache the test image across runs, keyed by the build context.
+      # Only the apt layer is expensive; agent installs deliberately happen at
+      # TEST time (they are the thing under test and must never be baked).
+      - name: Set up Docker Buildx (for layer cache)
+        uses: docker/setup-buildx-action@v3
+
+      - name: Pre-build the test image
+        env:
+          AGENT_INSTALL_IMAGE_TAG: codeam-agent-install:ci
+        run: |
+          set -euo pipefail
+          DOCKER_DIR="$GITHUB_WORKSPACE/apps/cli/__tests__/docker"
+          DOCKERFILE="$DOCKER_DIR/agent-install.Dockerfile"
+
+          # Both files are COPYed by the Dockerfile, so they must land in the
+          # build context BEFORE buildx runs. The driver is test-only and is
+          # excluded from the npm `files` allowlist, hence the separate copy.
+          cd "$GITHUB_WORKSPACE/apps/cli"
+          npm pack --silent
+          TARBALL=$(ls codeam-cli-*.tgz | tail -1)
+          cp "$TARBALL" "$DOCKER_DIR/codeam-cli.tgz"
+          rm -f "$TARBALL"
+          cp dist/agent-install-driver.js "$DOCKER_DIR/agent-install-driver.js"
+
+          docker buildx build \
+            --cache-from type=gha,scope=agent-install \
+            --cache-to   type=gha,scope=agent-install,mode=max \
+            --load \
+            -f "$DOCKERFILE" \
+            -t codeam-agent-install:ci \
+            --build-arg CODEAM_TARBALL=codeam-cli.tgz \
+            "$DOCKER_DIR"
+
+          # The test reuses the image via AGENT_INSTALL_IMAGE_TAG and does not
+          # run its own build, so the context copies are no longer needed.
+          rm -f "$DOCKER_DIR/codeam-cli.tgz" "$DOCKER_DIR/agent-install-driver.js"
+
+      - name: Real per-agent install integration test
+        working-directory: apps/cli
+        env:
+          RUN_AGENT_INSTALL_INT: '1'
+          AGENT_INSTALL_IMAGE_TAG: codeam-agent-install:ci
+        run: npx vitest run agent-install.int --reporter=verbose
+
+      # The driver's JSON result per agent (captured PATH, install dir, probe,
+      # version output) is the diagnostic record. On failure, leave the local
+      # docker state visible in the log so an upstream break is attributable
+      # without re-running.
+      - name: Docker state on failure
+        if: failure()
+        run: |
+          docker ps -a || true
+          docker images || true

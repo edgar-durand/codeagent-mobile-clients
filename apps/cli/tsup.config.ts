@@ -71,7 +71,7 @@ export default defineConfig([
     // by `headroom-provision.int.test.ts`. Not part of the published CLI
     // surface; compiled separately so the test can `node dist/headroom-runner-driver.js`
     // against the REAL provisioning code without mocking pip / headroom init.
-    entry: ['src/headroom-runner-driver.ts'],
+    entry: ['src/headroom-runner-driver.ts', 'src/agent-install-driver.ts'],
     format: ['cjs'],
     target: 'node20',
     noExternal: ['@clack/prompts', '@clack/core', '@agentclientprotocol/sdk'],

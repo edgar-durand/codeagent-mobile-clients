@@ -34,7 +34,7 @@
  * letting users hit a downstream spawn failure they can't act on.
  */
 
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { chmodSync, mkdirSync, writeFileSync } from 'node:fs';
 import * as path from 'node:path';
 import type { OsStrategy } from '../../os';
@@ -76,6 +76,33 @@ export interface CoderabbitInstallDeps {
   runner?: HeadroomRunner;
   /** Run the curl|sh installer. Returns its exit code + combined output. */
   runInstallScript?: (env: NodeJS.ProcessEnv) => Promise<{ code: number | null; output: string }>;
+  /**
+   * Is the installed binary actually RUNNABLE (`coderabbit --version` exits 0)?
+   * Only consulted when the installer exited non-zero — see the runnability
+   * guard in {@link ensureCoderabbitInstalled}. Injected in tests so no real
+   * subprocess is spawned.
+   */
+  runVersionProbe?: (binary: string, env: NodeJS.ProcessEnv) => boolean;
+}
+
+/**
+ * Default runnability probe: `<binary> --version`, short timeout, output
+ * discarded. Mirrors `kimiRuns()` in `../kimi/installer.ts` — a spawn error or
+ * a non-zero/null status (a truncated binary SIGSEGVs → status null) means the
+ * binary is not usable.
+ */
+function defaultRunVersionProbe(binary: string, env: NodeJS.ProcessEnv): boolean {
+  const r = spawnSync(binary, ['--version'], { stdio: 'ignore', timeout: 15_000, env });
+  return !r.error && r.status === 0;
+}
+
+function probeRuns(binary: string, env: NodeJS.ProcessEnv, deps: CoderabbitInstallDeps): boolean {
+  const probe = deps.runVersionProbe ?? defaultRunVersionProbe;
+  try {
+    return probe(binary, env);
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -284,30 +311,56 @@ export async function ensureCoderabbitInstalled(
   log.info('coderabbit', 'CodeRabbit CLI not found — installing via the official script');
   const run = deps.runInstallScript ?? defaultRunInstallScript;
   const { code, output } = await run(env);
+
+  // The installer drops the binary into a per-user dir; if PATH wasn't
+  // refreshed by the shell rc, augment it on the fly so the post-install probe
+  // sees the binary without a terminal restart. CodeRabbit drops to
+  // `~/.local/bin` on Linux + `/opt/homebrew/bin` or `~/.local/bin` on macOS —
+  // probe both.
+  os.augmentPath([`${os.homeDir()}/.local/bin`, '/opt/homebrew/bin']);
+  const binary = os.findInPath('coderabbit');
+  const detail = summarizeInstallFailure(output);
+
+  // ⚠️ THE BINARY — not the vendor script's exit code — is the authority on
+  // whether the install worked. CodeRabbit's `install.sh` (0.7.2) exits **2**
+  // on a completely successful install: it prints "[SUCCESS] Installation
+  // verified" / "[SUCCESS] Installation complete", leaves a working
+  // ~/.local/bin/coderabbit, and still returns non-zero (reproduced on both
+  // linux-amd64 and linux-arm64 by the real-install gate,
+  // `__tests__/integration/agent-install.int.test.ts`). Gating on the exit
+  // code first meant every user with a perfectly good install was told
+  // "CodeRabbit CLI install failed: [SUCCESS] Installation complete".
+  if (binary !== null) {
+    // Clean exit → presence is enough (unchanged behavior).
+    if (code === 0) return { ok: true };
+    // Non-zero exit → presence alone is NOT enough. `findInPath` only checks
+    // X_OK, so an interrupted download that left a truncated binary looks
+    // identical to a healthy one. When the script told us something went
+    // wrong, the authority is RUNNABILITY, not existence — the same guard
+    // Kimi's install snippet applies (`kimi --version` after install; a
+    // truncated ~157 MB ELF SIGSEGVs on every invocation). Only a binary that
+    // actually answers `--version` clears a non-zero exit.
+    if (probeRuns(binary, env, deps)) return { ok: true };
+    return {
+      ok: false,
+      error: detail
+        ? `CodeRabbit CLI install failed and the installed binary does not run: ${detail}`
+        : "CodeRabbit CLI install failed — the installed `coderabbit` binary does not run. Re-run the install and check this machine's network egress.",
+    };
+  }
+
   if (code !== 0) {
-    const detail = summarizeInstallFailure(output);
     return {
       ok: false,
       error: detail
         ? `CodeRabbit CLI install failed: ${detail}`
-        : 'CodeRabbit CLI install failed — check this machine\'s network egress and try again.',
+        : "CodeRabbit CLI install failed — check this machine's network egress and try again.",
     };
   }
-
-  // The installer drops the binary into a per-user dir; if PATH
-  // wasn't refreshed by the shell rc, augment it on the fly so the
-  // post-install probe sees the binary without a terminal restart.
-  // CodeRabbit drops to `~/.local/bin` on Linux + `/opt/homebrew/bin`
-  // or `~/.local/bin` on macOS — probe both.
-  os.augmentPath([`${os.homeDir()}/.local/bin`, '/opt/homebrew/bin']);
-  if (os.findInPath('coderabbit') === null) {
-    const detail = summarizeInstallFailure(output);
-    return {
-      ok: false,
-      error: detail
-        ? `CodeRabbit CLI install did not produce a binary: ${detail}`
-        : 'CodeRabbit CLI install reported success but no `coderabbit` binary was found on PATH.',
-    };
-  }
-  return { ok: true };
+  return {
+    ok: false,
+    error: detail
+      ? `CodeRabbit CLI install did not produce a binary: ${detail}`
+      : 'CodeRabbit CLI install reported success but no `coderabbit` binary was found on PATH.',
+  };
 }
