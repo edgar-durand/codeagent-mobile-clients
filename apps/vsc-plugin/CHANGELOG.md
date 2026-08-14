@@ -4,6 +4,27 @@ All notable changes to the CodeAgent Mobile VS Code extension are documented her
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.64.0] — 2026-08-14
+
+### Added
+
+- **shared:** Agent-squad wire types (StartTaskPayload.agentId, roster, handoff fence)
+- **cli:** FetchSquadRoster + handoff event posting
+- **cli:** Squad roster state, journal persistence, team preamble + delta briefing
+- **cli:** Codeam-handoff fence extraction + stream truncation helper
+- **cli:** Suppress codeam-handoff fences from the live stream
+- **cli:** Roster-aware fast swap + per-agent conversation resume
+- **cli:** Start_task.agentId routing + team preamble / delta briefing composition
+- **cli:** Agent-proposed handoffs — detect, emit, resolve
+- **cli:** Announce squad capability
+
+### Fixed
+
+- **cli:** Ignore codeam-handoff fences nested in 4+-backtick blocks + CRLF seam collapse
+- **cli:** Rebind context handles on route swap + realistic routing test + roster refresh
+- **cli:** Own-turns briefing filter, masked terminal truncation, honest PTY agentId failure
+- **cli:** StripHandoffFences is a byte-identical passthrough when no fence present
+
 ## [2.63.1] — 2026-08-13
 
 ### Fixed
