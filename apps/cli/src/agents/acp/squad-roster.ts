@@ -167,8 +167,8 @@ export function buildTeamPreamble(
 }
 
 function renderJournalEntry(e: SquadJournalEntry): string {
-  const files = e.filesTouched.length > 0 ? e.filesTouched.join(', ') : 'none';
-  return `- turn ${e.turn} (${e.agentId}): ${e.prompt} → ${e.replySummary} (files: ${files})`;
+  const filesClause = e.filesTouched.length > 0 ? ` (files: ${e.filesTouched.join(', ')})` : '';
+  return `- turn ${e.turn} (${e.agentId}): ${e.prompt} → ${e.replySummary}${filesClause}`;
 }
 
 /**

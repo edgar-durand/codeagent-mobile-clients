@@ -142,6 +142,84 @@ describe('StreamingState.append — codeam-handoff fence suppressed from the liv
     }
   });
 
+  it('a quoted codeam-handoff example inside a 4+-backtick block survives INTACT in the TERMINAL frame', async () => {
+    const { state, publishOutput, publishStreamingChunk } = makeState();
+    const quotedExample = [
+      "Here's how the handoff protocol works, for reference:",
+      '',
+      '````',
+      'To hand off, end your reply with:',
+      '```' + HANDOFF_FENCE_TAG,
+      '{"to":"reviewer","reason":"example only","prompt":"do not run this"}',
+      '```',
+      '````',
+      '',
+    ].join('\n');
+    state.append({ chunkId: 'msg-1', kind: 'text', delta: quotedExample });
+    publishOutput.mockClear();
+    publishStreamingChunk.mockClear();
+
+    await state.closeAll();
+
+    const finalOutputs = publishOutput.mock.calls
+      .map((c) => c[0] as { done?: boolean; content?: string })
+      .filter((b) => b.done === true);
+    const finalChunks = publishStreamingChunk.mock.calls
+      .map((c) => c[0] as { isFinal?: boolean; content?: string })
+      .filter((b) => b.isFinal === true);
+    expect(finalOutputs.length).toBeGreaterThan(0);
+    expect(finalChunks.length).toBeGreaterThan(0);
+    for (const frame of [...finalOutputs, ...finalChunks]) {
+      // The quoted example — including its nested ```codeam-handoff fence —
+      // must survive verbatim on the persisted bubble, never truncated.
+      expect(frame.content).toContain('````');
+      expect(frame.content).toContain(HANDOFF_FENCE_TAG);
+      expect(frame.content).toContain('do not run this');
+    }
+  });
+
+  it('a REAL top-level fence after a quoted example: example preserved, real fence stripped from the TERMINAL frame', async () => {
+    const { state, publishOutput, publishStreamingChunk } = makeState();
+    const text = [
+      "Here's how the handoff protocol works, for reference:",
+      '',
+      '````',
+      'To hand off, end your reply with:',
+      '```' + HANDOFF_FENCE_TAG,
+      '{"to":"reviewer","reason":"example only","prompt":"do not run this"}',
+      '```',
+      '````',
+      '',
+      'Given that, I am handing off now.',
+      '',
+      '```' + HANDOFF_FENCE_TAG,
+      '{"to":"reviewer","reason":"real handoff","prompt":"do the real thing"}',
+      '```',
+      '',
+    ].join('\n');
+    state.append({ chunkId: 'msg-1', kind: 'text', delta: text });
+    publishOutput.mockClear();
+    publishStreamingChunk.mockClear();
+
+    await state.closeAll();
+
+    const finalOutputs = publishOutput.mock.calls
+      .map((c) => c[0] as { done?: boolean; content?: string })
+      .filter((b) => b.done === true);
+    const finalChunks = publishStreamingChunk.mock.calls
+      .map((c) => c[0] as { isFinal?: boolean; content?: string })
+      .filter((b) => b.isFinal === true);
+    expect(finalOutputs.length).toBeGreaterThan(0);
+    expect(finalChunks.length).toBeGreaterThan(0);
+    for (const frame of [...finalOutputs, ...finalChunks]) {
+      expect(frame.content).toContain('````');
+      expect(frame.content).toContain('do not run this');
+      expect(frame.content).toContain('Given that, I am handing off now.');
+      // The REAL fence at the tail is stripped.
+      expect(frame.content).not.toContain('do the real thing');
+    }
+  });
+
   it('publishes identically to before when no fence is present (regression guard)', () => {
     const { state, publishOutput, publishStreamingChunk } = makeState();
     state.append({ chunkId: 'msg-1', kind: 'text', delta: 'The ' });

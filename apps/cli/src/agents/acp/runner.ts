@@ -65,7 +65,7 @@ import type { PromptBlock } from './buildAcpPromptBlocks';
 import { createBudgetRecovery, type BudgetRecovery } from './budgetRecovery';
 import { createWakeCredentialProbe, localCredentialExpiryStatus } from './wakeCredentialProbe';
 import { reconcileCumulative } from './reconcileDelta';
-import { handoffFenceStart } from './handoff-protocol';
+import { handoffFenceStart, stripHandoffFences } from './handoff-protocol';
 import { maybeSendOnboardingWelcome } from './onboarding';
 import {
   registerTerminalHandlers,
@@ -589,10 +589,15 @@ export class StreamingState {
    * pinned on the finished bubble. Internal state is untouched:
    * {@link getCurrentText} keeps returning the RAW text so the turn-close
    * extraction can parse the proposal out of it.
+   *
+   * Masked-aware (`stripHandoffFences`), unlike the live-stream `append()`
+   * cut (`handoffFenceStart`, unmasked): a TERMINAL frame is the one that
+   * PERSISTS, so cutting on a fence quoted as an example inside a
+   * 4+-backtick block here would permanently truncate the bubble. The live
+   * cut stays unmasked/cheap — a mid-stream example is never terminal.
    */
   private visible(text: string): string {
-    const cut = handoffFenceStart(text);
-    return cut === -1 ? text : text.slice(0, cut).trimEnd();
+    return stripHandoffFences(text);
   }
 
   async closeAll(): Promise<void> {

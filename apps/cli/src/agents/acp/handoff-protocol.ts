@@ -93,6 +93,14 @@ function parseProposal(
   return { to, reason, prompt };
 }
 
+/** Strip ALL top-level fences from already-masked text (the masked
+ * outer-fenced examples are opaque tokens here, so their nested fences are
+ * untouched), collapsing any blank-line runs (LF or CRLF) left at the seams. */
+function stripFences(masked: string): string {
+  const stripped = masked.replace(FENCE_RE, '');
+  return stripped.replace(/(?:\r?\n){3,}/g, '\n\n').trim();
+}
+
 /** Find + strip a ```codeam-handoff fence. Validates: parseable single JSON
  * object; to is in validTargets; to != currentAgent; reason/prompt non-empty
  * strings (prompt <= 8000, reason <= 1000). Invalid -> proposal:null but the
@@ -114,16 +122,21 @@ export function extractHandoffProposal(
 
   const last = matches[matches.length - 1];
   const proposal = parseProposal(last[1].trim(), currentAgent, validTargets);
-
-  // Strip ALL top-level fences (the masked outer-fenced examples are opaque
-  // tokens here, so their nested fences are untouched), collapse any
-  // blank-line runs (LF or CRLF) left at the seams, then restore the
-  // original outer-fenced examples verbatim.
-  const stripped = masked.replace(FENCE_RE, '');
-  const collapsed = stripped.replace(/(?:\r?\n){3,}/g, '\n\n').trim();
-  const cleanText = restore(collapsed);
+  const cleanText = restore(stripFences(masked));
 
   return { cleanText, proposal };
+}
+
+/** Presentation-only, masked-aware fence-stripped view of `text` -- the same
+ * `cleanText` `extractHandoffProposal` produces, without needing
+ * `currentAgent`/`validTargets` since this never parses a proposal. Used by
+ * the runner's TERMINAL frames (`closeAll` / `closeTurnWithInteractiveDetection`
+ * / the final `flushStreamingChunks` pass), where truncating on an UNMASKED
+ * fence start would permanently cut a reply that merely quotes the protocol
+ * as an example inside a 4+-backtick block. */
+export function stripHandoffFences(text: string): string {
+  const { masked, restore } = maskOuterFences(text);
+  return restore(stripFences(masked));
 }
 
 /** Index of the fence START in `text`, or -1. Used by the streaming layer to

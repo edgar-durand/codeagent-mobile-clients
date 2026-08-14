@@ -434,7 +434,13 @@ function prefixSquadContext(ctx: AcpCommandContext, blocks: PromptBlock[]): void
   if (!squad) return;
   const member = squad.member(opts.agent);
   if (squad.turnCount() > member.lastTurnIndex) {
-    const briefing = buildDeltaBriefing(squad.entriesSince(member.lastTurnIndex));
+    // Exclude this agent's OWN prior turns — after a CLI restart lastTurnIndex
+    // resets to 0 while the journal persists, so without this filter an agent
+    // gets briefed on work it already did itself.
+    const otherEntries = squad
+      .entriesSince(member.lastTurnIndex)
+      .filter((e) => e.agentId !== opts.agent);
+    const briefing = buildDeltaBriefing(otherEntries);
     if (briefing) blocks.unshift({ type: 'text', text: briefing });
   }
   const roster = squad.roster;
@@ -462,7 +468,7 @@ function recordSquadTurn(ctx: AcpCommandContext, prompt: string, replySummary: s
     // TurnFileAggregator owns per-turn file changesets end-to-end (git diff →
     // outbox POST) and exposes no path list, and its flush is fire-and-forget,
     // so there is nothing accurate to attribute synchronously here. The
-    // briefing renders "files: none" rather than a guess.
+    // briefing simply omits the files clause rather than guessing.
     filesTouched: [],
   });
   squad.member(opts.agent).lastTurnIndex = squad.turnCount();

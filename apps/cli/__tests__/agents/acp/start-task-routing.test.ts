@@ -393,6 +393,49 @@ describe('start_task — squad prompt prefixes', () => {
     await dispatchAcpCommand(assembleAcpCommandContext(session, startTask({ prompt: 'hello' })));
     expect(texts(promptedBlocks[0])).toEqual(['hello']);
   });
+
+  it("after a CLI restart, a journal of only the CURRENT agent's own turns injects NO briefing", async () => {
+    // Simulate the restart: one SquadState instance records claude's turn and
+    // persists it to disk, then a SECOND instance (fresh process) reloads the
+    // journal — its per-member lastTurnIndex resets to 0 in memory even
+    // though the journal itself is non-empty.
+    const journalSquad = new SquadState({ sessionId: 's1', homeDir });
+    journalSquad.recordTurn({
+      agentId: 'claude',
+      prompt: 'refactor the parser',
+      replySummary: 'done, split into two modules',
+      filesTouched: ['src/parser.ts'],
+    });
+    const restarted = new SquadState({ sessionId: 's1', homeDir });
+    const { session, promptedBlocks } = makeCtx({ squad: restarted, agent: 'claude' });
+    await dispatchAcpCommand(assembleAcpCommandContext(session, startTask({ prompt: 'continue' })));
+    const blockTexts = texts(promptedBlocks[0]);
+    expect(blockTexts.some((t) => t.includes('[Team update]'))).toBe(false);
+  });
+
+  it("after a CLI restart, a MIXED journal briefs only the OTHER agent's entries", async () => {
+    const journalSquad = new SquadState({ sessionId: 's1', homeDir });
+    journalSquad.recordTurn({
+      agentId: 'claude',
+      prompt: 'wrote the parser',
+      replySummary: 'parser done',
+      filesTouched: ['src/parser.ts'],
+    });
+    journalSquad.recordTurn({
+      agentId: 'codex',
+      prompt: 'wrote tests',
+      replySummary: 'tests added',
+      filesTouched: ['src/parser.test.ts'],
+    });
+    const restarted = new SquadState({ sessionId: 's1', homeDir });
+    const { session, promptedBlocks } = makeCtx({ squad: restarted, agent: 'codex' });
+    await dispatchAcpCommand(assembleAcpCommandContext(session, startTask({ prompt: 'continue' })));
+    const blockTexts = texts(promptedBlocks[0]);
+    const briefing = blockTexts.find((t) => t.includes('[Team update]'));
+    expect(briefing).toBeDefined();
+    expect(briefing).toContain('wrote the parser');
+    expect(briefing).not.toContain('wrote tests');
+  });
 });
 
 // ─── Agent-proposed handoffs (detect → emit → resolve) ─────────────────────

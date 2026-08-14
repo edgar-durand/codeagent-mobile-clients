@@ -12,6 +12,7 @@ import pkg from '../../package.json';
 import { vercelBypassHeader } from '../lib/backend-headers';
 import { detectCurrentBranch } from '../lib/git-branch';
 import { computePollDelay } from '../lib/poll-delay';
+import type { SquadEventType } from '../agents/acp/switch-agent';
 
 const API_BASE = resolveApiBaseUrl();
 
@@ -641,7 +642,7 @@ export async function postAgentSwitchEvent(input: {
   sessionId: string;
   pluginId: string;
   pluginAuthToken: string;
-  type: 'switch_agent_progress' | 'switch_agent_status' | 'handoff_proposed' | 'handoff_resolved';
+  type: SquadEventType;
   payload?: Record<string, unknown>;
 }): Promise<{ ok: true } | { ok: false; status: number; message: string }> {
   try {
