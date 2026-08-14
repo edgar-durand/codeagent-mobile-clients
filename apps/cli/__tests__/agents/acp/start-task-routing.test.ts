@@ -48,6 +48,7 @@ interface CtxOverrides {
   routeResults?: Array<{ ok: boolean; agentId: string; error?: string }>;
   pendingHandoff?: { current: string | null };
   squad?: SquadState;
+  turnFilesPeek?: string[];
 }
 
 function makeCtx(over: CtxOverrides = {}) {
@@ -156,7 +157,10 @@ function makeCtx(over: CtxOverrides = {}) {
     history,
     jsonlHistory: {},
     agentCaps: { loadSession: true },
-    turnFiles: { flushTurn: vi.fn(async () => undefined) },
+    turnFiles: {
+      flushTurn: vi.fn(async () => undefined),
+      peekTurnPaths: vi.fn(() => over.turnFilesPeek ?? []),
+    },
     getBeads: () => null,
     publisher: { publishOutput: vi.fn(async () => undefined) },
     recentStderr: [],
@@ -607,5 +611,29 @@ describe('start_task — squad journal', () => {
     expect(squad.entriesSince(0)[0]?.agentId).toBe('codex');
     expect(squad.member('codex').lastTurnIndex).toBe(1);
     expect(squad.member('claude').lastTurnIndex).toBe(0);
+  });
+
+  it('captures a non-empty filesTouched from the aggregator peek', async () => {
+    const squad = new SquadState({ sessionId: 's1', homeDir });
+    const { session } = makeCtx({
+      squad,
+      replyText: 'Refactored the parser.',
+      turnFilesPeek: ['src/parser.ts', 'src/parser.test.ts'],
+    });
+    await dispatchAcpCommand(
+      assembleAcpCommandContext(session, startTask({ prompt: 'refactor the parser' })),
+    );
+    const [entry] = squad.entriesSince(0);
+    expect(entry?.filesTouched).toEqual(['src/parser.ts', 'src/parser.test.ts']);
+  });
+
+  it('caps filesTouched at 20 paths', async () => {
+    const squad = new SquadState({ sessionId: 's1', homeDir });
+    const many = Array.from({ length: 25 }, (_, i) => `src/file-${i}.ts`);
+    const { session } = makeCtx({ squad, turnFilesPeek: many });
+    await dispatchAcpCommand(assembleAcpCommandContext(session, startTask({ prompt: 'go' })));
+    const [entry] = squad.entriesSince(0);
+    expect(entry?.filesTouched).toHaveLength(20);
+    expect(entry?.filesTouched).toEqual(many.slice(0, 20));
   });
 });

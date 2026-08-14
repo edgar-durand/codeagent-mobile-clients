@@ -34,10 +34,7 @@ import { beadsActionFromPayload } from '../../beads/wiring';
 import { handleBeadsActionCommand, type StartedBeads } from '../../beads';
 import { configureSkill, type SkillsConfigureAction } from '../../skills/configure';
 import { packStartH, packActionH, packStatusH } from '../../packs/handlers';
-import {
-  persistIntegrationsManifest,
-  readIntegrationsManifest,
-} from '../../integrations/manifest';
+import { persistIntegrationsManifest, readIntegrationsManifest } from '../../integrations/manifest';
 import { buildMcpServersForStart } from '../../integrations/provision';
 import { detectRepoStack } from '../../integrations/detect-stack';
 import type { HandoffProposal, IntegrationsManifest, StartTaskPayload } from '@codeam/shared';
@@ -459,17 +456,19 @@ function prefixSquadContext(ctx: AcpCommandContext, blocks: PromptBlock[]): void
  * agent would be briefed on its own turn.
  */
 function recordSquadTurn(ctx: AcpCommandContext, prompt: string, replySummary: string): void {
-  const { squad, opts } = ctx;
+  const { squad, opts, turnFiles } = ctx;
   if (!squad) return;
   squad.recordTurn({
     agentId: opts.agent,
     prompt,
     replySummary,
     // TurnFileAggregator owns per-turn file changesets end-to-end (git diff →
-    // outbox POST) and exposes no path list, and its flush is fire-and-forget,
-    // so there is nothing accurate to attribute synchronously here. The
-    // briefing simply omits the files clause rather than guessing.
-    filesTouched: [],
+    // outbox POST) and its flush for THIS turn is fired off fire-and-forget
+    // below (after this call), so `peekTurnPaths()` is a best-effort read of
+    // the aggregator's last completed flush rather than a guaranteed-current
+    // one — still far more useful than always omitting the files clause.
+    // Capped so a pathological turn (mass refactor) doesn't bloat the journal.
+    filesTouched: turnFiles.peekTurnPaths().slice(0, 20),
   });
   squad.member(opts.agent).lastTurnIndex = squad.turnCount();
 }
@@ -749,7 +748,10 @@ async function startTaskH(ctx: AcpCommandContext): Promise<void> {
       turnFiles.flushTurn().catch((err) => {
         log.warn('acpRunner', `turnFiles.flushTurn failed: ${describeError(err)}`);
       });
-      log.info('acpRunner', `start_task ← done stopReason=${reply.stopReason ?? '?'} id=${cmd.id.slice(0, 8)}`);
+      log.info(
+        'acpRunner',
+        `start_task ← done stopReason=${reply.stopReason ?? '?'} id=${cmd.id.slice(0, 8)}`,
+      );
       await relay.sendResult(cmd.id, 'completed', { stopReason: reply.stopReason });
     }
   } catch (err) {
@@ -895,8 +897,7 @@ async function groupMentionTaskH(ctx: AcpCommandContext): Promise<void> {
   // it into the originating group as an `agent_reply`.
   const payload = cmd.payload as { taskId?: string; prompt?: string };
   const taskId = typeof payload?.taskId === 'string' ? payload.taskId : '';
-  const promptText =
-    typeof payload?.prompt === 'string' ? payload.prompt : '';
+  const promptText = typeof payload?.prompt === 'string' ? payload.prompt : '';
   if (!taskId || !promptText.trim()) {
     await relay.sendResult(cmd.id, 'failed', {
       error: 'invalid group_mention_task payload',
@@ -1324,11 +1325,7 @@ async function previewH(ctx: AcpCommandContext): Promise<void> {
   const ackingRelay = new Proxy(relay, {
     get(target, prop, receiver) {
       if (prop === 'sendResult') {
-        return (
-          commandId: string,
-          status: string,
-          result: Record<string, unknown>,
-        ) => {
+        return (commandId: string, status: string, result: Record<string, unknown>) => {
           if (commandId === cmd.id) previewHandlerAcked = true;
           return target.sendResult(commandId, status, result);
         };
@@ -1377,11 +1374,7 @@ async function legacyOrUnsupportedH(ctx: AcpCommandContext): Promise<void> {
     const ackingRelay = new Proxy(relay, {
       get(target, prop, receiver) {
         if (prop === 'sendResult') {
-          return (
-            commandId: string,
-            status: string,
-            result: Record<string, unknown>,
-          ) => {
+          return (commandId: string, status: string, result: Record<string, unknown>) => {
             if (commandId === cmd.id) handlerAcked = true;
             return target.sendResult(commandId, status, result);
           };
@@ -1418,7 +1411,10 @@ async function legacyOrUnsupportedH(ctx: AcpCommandContext): Promise<void> {
  *  tool call doesn't race the cold download past the agent's MCP-init window
  *  (the Sentry incident). Best-effort, bounded, parallel; HTTP-transport
  *  integrations (empty command) are skipped. */
-async function prewarmNewMcpEntries(manifest: IntegrationsManifest, previousIds: Set<string>): Promise<void> {
+async function prewarmNewMcpEntries(
+  manifest: IntegrationsManifest,
+  previousIds: Set<string>,
+): Promise<void> {
   const PREWARMABLE = new Set(['npx', 'uvx']);
   const fresh = manifest.integrations.filter(
     (e) => !previousIds.has(e.id) && e.delivery.mcp && PREWARMABLE.has(e.delivery.mcp.command),
@@ -1428,11 +1424,8 @@ async function prewarmNewMcpEntries(manifest: IntegrationsManifest, previousIds:
       (e) =>
         new Promise<void>((resolve) => {
           const mcp = e.delivery.mcp!;
-          const child = execFile(
-            mcp.command,
-            [...mcp.args, '--help'],
-            { timeout: 90_000 },
-            () => resolve(),
+          const child = execFile(mcp.command, [...mcp.args, '--help'], { timeout: 90_000 }, () =>
+            resolve(),
           );
           child.on('error', () => resolve());
         }),
@@ -1475,7 +1468,10 @@ async function integrationsSyncH(ctx: AcpCommandContext): Promise<void> {
   } catch (err) {
     // The manifest is already persisted, so the tools still bind on the next
     // re-establishment — report but never fail the session.
-    log.warn('acpRunner', `integrations_sync failed (tools apply next restart): ${describeError(err)}`);
+    log.warn(
+      'acpRunner',
+      `integrations_sync failed (tools apply next restart): ${describeError(err)}`,
+    );
     await relay.sendResult(cmd.id, 'completed', { synced: false, error: describeError(err) });
   }
 }

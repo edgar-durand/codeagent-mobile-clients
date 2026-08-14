@@ -31,24 +31,24 @@ describe('TurnFileAggregator + RepoDirtyTracker', () => {
     await fs.rm(outboxDir, { recursive: true, force: true });
   });
 
-  function stubDiscovery(repos: Array<{ repoRoot: string; repoPath: string; repoName: string }>): void {
+  function stubDiscovery(
+    repos: Array<{ repoRoot: string; repoPath: string; repoName: string }>,
+  ): void {
     vi.spyOn(gitChangeset, 'discoverRepos').mockResolvedValue(repos);
   }
 
   it('scans every discovered repo on the FIRST flush (initial-dirty seed)', async () => {
-    const collect = vi
-      .spyOn(gitChangeset, 'collectRepoChangeset')
-      .mockResolvedValue([
-        {
-          filePath: 'src/a.ts',
-          fileStatus: 'modified',
-          linesAdded: 1,
-          linesRemoved: 0,
-          hunkCount: 1,
-          repoPath: '',
-          repoName: 'demo',
-        },
-      ]);
+    const collect = vi.spyOn(gitChangeset, 'collectRepoChangeset').mockResolvedValue([
+      {
+        filePath: 'src/a.ts',
+        fileStatus: 'modified',
+        linesAdded: 1,
+        linesRemoved: 0,
+        hunkCount: 1,
+        repoPath: '',
+        repoName: 'demo',
+      },
+    ]);
 
     stubDiscovery([
       { repoRoot: '/repos/a', repoPath: 'a', repoName: 'a' },
@@ -76,9 +76,7 @@ describe('TurnFileAggregator + RepoDirtyTracker', () => {
   });
 
   it('skips repos that did NOT see a filesystem event between turns', async () => {
-    const collect = vi
-      .spyOn(gitChangeset, 'collectRepoChangeset')
-      .mockResolvedValue([]);
+    const collect = vi.spyOn(gitChangeset, 'collectRepoChangeset').mockResolvedValue([]);
 
     stubDiscovery([
       { repoRoot: '/repos/a', repoPath: 'a', repoName: 'a' },
@@ -114,9 +112,7 @@ describe('TurnFileAggregator + RepoDirtyTracker', () => {
   });
 
   it('skips git entirely on a chat-only turn (no file events)', async () => {
-    const collect = vi
-      .spyOn(gitChangeset, 'collectRepoChangeset')
-      .mockResolvedValue([]);
+    const collect = vi.spyOn(gitChangeset, 'collectRepoChangeset').mockResolvedValue([]);
 
     stubDiscovery([{ repoRoot: '/repos/a', repoPath: 'a', repoName: 'a' }]);
 
@@ -146,9 +142,7 @@ describe('TurnFileAggregator + RepoDirtyTracker', () => {
   });
 
   it('without a tracker falls back to scanning every discovered repo', async () => {
-    const collect = vi
-      .spyOn(gitChangeset, 'collectRepoChangeset')
-      .mockResolvedValue([]);
+    const collect = vi.spyOn(gitChangeset, 'collectRepoChangeset').mockResolvedValue([]);
 
     stubDiscovery([
       { repoRoot: '/repos/a', repoPath: 'a', repoName: 'a' },
@@ -198,7 +192,9 @@ describe('TurnFileAggregator + RepoDirtyTracker', () => {
     /** Read the outbox JSONL written by the aggregator. Each line is
      *  one enqueued batch; an absent / empty file means nothing was
      *  enqueued, which is exactly the "suppressed POST" assertion. */
-    async function readOutbox(sessionId: string): Promise<
+    async function readOutbox(
+      sessionId: string,
+    ): Promise<
       Array<{ files: Array<{ filePath: string; linesAdded: number; linesRemoved: number }> }>
     > {
       const file = path.join(outboxDir, `${sessionId}.jsonl`);
@@ -242,10 +238,7 @@ describe('TurnFileAggregator + RepoDirtyTracker', () => {
     it('second flush enqueues a file that appeared after baseline', async () => {
       vi.spyOn(gitChangeset, 'collectRepoChangeset')
         .mockResolvedValueOnce([mkEntry('CLAUDE.md', 8, 0)])
-        .mockResolvedValueOnce([
-          mkEntry('CLAUDE.md', 8, 0),
-          mkEntry('new-file.ts', 5, 0),
-        ]);
+        .mockResolvedValueOnce([mkEntry('CLAUDE.md', 8, 0), mkEntry('new-file.ts', 5, 0)]);
       stubDiscovery([{ repoRoot: '/repos/a', repoPath: '', repoName: 'demo' }]);
 
       const agg = mkAggregator('sess-baseline-new-file');
@@ -278,20 +271,107 @@ describe('TurnFileAggregator + RepoDirtyTracker', () => {
 
     it('second flush suppresses POST when every file matches baseline', async () => {
       vi.spyOn(gitChangeset, 'collectRepoChangeset')
-        .mockResolvedValueOnce([
-          mkEntry('CLAUDE.md', 8, 0),
-          mkEntry('App.tsx', 20, 2),
-        ])
-        .mockResolvedValueOnce([
-          mkEntry('CLAUDE.md', 8, 0),
-          mkEntry('App.tsx', 20, 2),
-        ]);
+        .mockResolvedValueOnce([mkEntry('CLAUDE.md', 8, 0), mkEntry('App.tsx', 20, 2)])
+        .mockResolvedValueOnce([mkEntry('CLAUDE.md', 8, 0), mkEntry('App.tsx', 20, 2)]);
       stubDiscovery([{ repoRoot: '/repos/a', repoPath: '', repoName: 'demo' }]);
 
       const agg = mkAggregator('sess-baseline-no-delta');
       await agg.flushTurn(); // baseline
       await agg.flushTurn(); // exactly matches → suppress
       expect(await readOutbox('sess-baseline-no-delta')).toEqual([]);
+      agg.stop();
+    });
+  });
+
+  // ── peekTurnPaths ───────────────────────────────────────────────
+  //
+  // Non-destructive accessor consumed by the squad journal (recordSquadTurn)
+  // so it can attribute a turn's touched files without paying for (or
+  // blocking on) a fresh git scan of its own.
+  describe('peekTurnPaths', () => {
+    function mkEntry(filePath: string, added: number, removed: number) {
+      return {
+        filePath,
+        fileStatus: 'modified' as const,
+        linesAdded: added,
+        linesRemoved: removed,
+        hunkCount: added + removed > 0 ? 1 : 0,
+        repoPath: '',
+        repoName: 'demo',
+      };
+    }
+
+    function mkAggregator(sessionId: string): TurnFileAggregator {
+      return new TurnFileAggregator({
+        workingDir: '/repos',
+        sessionId,
+        pluginId: 'plug-1',
+        pluginAuthToken: 'tok',
+        apiBaseUrl: 'https://api.example.test',
+        outboxDir,
+        outboxAutoSchedule: false,
+      });
+    }
+
+    it('is empty before any flush', () => {
+      const agg = mkAggregator('sess-peek-initial');
+      expect(agg.peekTurnPaths()).toEqual([]);
+      agg.stop();
+    });
+
+    it('is still empty after the first (baseline-capturing) flush', async () => {
+      vi.spyOn(gitChangeset, 'collectRepoChangeset').mockResolvedValue([
+        mkEntry('CLAUDE.md', 8, 0),
+      ]);
+      stubDiscovery([{ repoRoot: '/repos/a', repoPath: '', repoName: 'demo' }]);
+
+      const agg = mkAggregator('sess-peek-baseline');
+      await agg.flushTurn();
+      expect(agg.peekTurnPaths()).toEqual([]);
+      agg.stop();
+    });
+
+    it('reflects the novel files found by the most recent flush', async () => {
+      vi.spyOn(gitChangeset, 'collectRepoChangeset')
+        .mockResolvedValueOnce([mkEntry('CLAUDE.md', 8, 0)])
+        .mockResolvedValueOnce([mkEntry('CLAUDE.md', 8, 0), mkEntry('new-file.ts', 5, 0)]);
+      stubDiscovery([{ repoRoot: '/repos/a', repoPath: '', repoName: 'demo' }]);
+
+      const agg = mkAggregator('sess-peek-novel');
+      await agg.flushTurn(); // baseline — peek stays empty
+      expect(agg.peekTurnPaths()).toEqual([]);
+      await agg.flushTurn(); // 'new-file.ts' is novel
+      expect(agg.peekTurnPaths()).toEqual(['new-file.ts']);
+      agg.stop();
+    });
+
+    it('goes back to empty once the worktree reverts to the baseline (never returns stale paths)', async () => {
+      vi.spyOn(gitChangeset, 'collectRepoChangeset')
+        .mockResolvedValueOnce([mkEntry('CLAUDE.md', 8, 0)])
+        .mockResolvedValueOnce([mkEntry('CLAUDE.md', 8, 0), mkEntry('new-file.ts', 5, 0)])
+        .mockResolvedValueOnce([mkEntry('CLAUDE.md', 8, 0)]);
+      stubDiscovery([{ repoRoot: '/repos/a', repoPath: '', repoName: 'demo' }]);
+
+      const agg = mkAggregator('sess-peek-reset');
+      await agg.flushTurn(); // baseline
+      await agg.flushTurn(); // 'new-file.ts' novel
+      expect(agg.peekTurnPaths()).toEqual(['new-file.ts']);
+      await agg.flushTurn(); // worktree back to baseline-only → nothing novel this flush
+      expect(agg.peekTurnPaths()).toEqual([]);
+      agg.stop();
+    });
+
+    it('does not include changes that exactly match the baseline', async () => {
+      vi.spyOn(gitChangeset, 'collectRepoChangeset').mockResolvedValue([
+        mkEntry('CLAUDE.md', 8, 0),
+        mkEntry('App.tsx', 20, 2),
+      ]);
+      stubDiscovery([{ repoRoot: '/repos/a', repoPath: '', repoName: 'demo' }]);
+
+      const agg = mkAggregator('sess-peek-matches-baseline');
+      await agg.flushTurn(); // baseline
+      await agg.flushTurn(); // identical → suppressed
+      expect(agg.peekTurnPaths()).toEqual([]);
       agg.stop();
     });
   });
