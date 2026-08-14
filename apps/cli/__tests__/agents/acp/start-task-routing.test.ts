@@ -52,13 +52,17 @@ interface CtxOverrides {
   pendingHandoff?: { current: string | null };
   squad?: SquadState;
   turnFilesPeek?: string[];
+  /** Queue of errors the fake adapter throws, one per prompt() call. A
+   *  `null`/missing entry means that call succeeds. */
+  promptFailures?: Array<unknown>;
 }
 
 function makeCtx(over: CtxOverrides = {}) {
   const calls: string[] = [];
-  const promptedBlocks: Array<Array<{ type: string; text?: string }>> = [];
+  const promptedBlocks: PromptBlocks[] = [];
   const replyText = over.replyText ?? 'All done.';
   const routeResults = [...(over.routeResults ?? [])];
+  const promptFailures = [...(over.promptFailures ?? [])];
 
   /**
    * A swap REPLACES the client: `relaunchWith` stops the old adapter — which
@@ -74,10 +78,14 @@ function makeCtx(over: CtxOverrides = {}) {
       stop: () => {
         stopped = true;
       },
-      prompt: vi.fn(async (blocks: Array<{ type: string; text?: string }>) => {
+      prompt: vi.fn(async (blocks: PromptBlocks) => {
         if (stopped) throw new Error('AcpClient.prompt called before start()');
         calls.push(`prompt@${label}`);
-        promptedBlocks.push(blocks);
+        // Snapshot: the fallback retry MUTATES the caller's array in place, so
+        // recording the live reference would show only the final shape.
+        promptedBlocks.push(blocks.map((b) => ({ ...b })));
+        const failure = promptFailures.shift();
+        if (failure) throw failure;
         return { stopReason: 'end_turn' };
       }),
       cancel: vi.fn(async () => undefined),
@@ -208,6 +216,21 @@ function startTask(payload: Record<string, unknown>, id = 'cmd-1'): RemoteComman
 function texts(blocks: Array<{ type: string; text?: string }>): string[] {
   return blocks.filter((b) => b.type === 'text').map((b) => b.text ?? '');
 }
+
+/**
+ * The squad context the turn delivered natively — the text inside the single
+ * `codeam://squad-context` resource block, or null when none was sent.
+ */
+function squadContext(blocks: PromptBlocks): string | null {
+  const block = blocks.find((b) => b.type === 'resource');
+  return block?.resource?.text ?? null;
+}
+
+type PromptBlocks = Array<{
+  type: string;
+  text?: string;
+  resource?: { uri: string; mimeType: string; text: string };
+}>;
 
 describe('start_task — agentId routing', () => {
   it('swaps onto the mentioned agent BEFORE prompting', async () => {
@@ -355,7 +378,9 @@ describe('start_task — squad prompt prefixes', () => {
     const squad = new SquadState({ sessionId: 's1', homeDir });
     const { session, promptedBlocks } = makeCtx({ squad });
     await dispatchAcpCommand(assembleAcpCommandContext(session, startTask({ prompt: 'first' })));
-    expect(texts(promptedBlocks[0])[0]).toContain('[Team context]');
+    expect(squadContext(promptedBlocks[0])).toContain('[Team context]');
+    // The user's OWN blocks stay their own words — nothing injected as text.
+    expect(texts(promptedBlocks[0])).toEqual(['first']);
 
     // Second turn on the same agent: the member has journaled a turn, so no
     // preamble — and no briefing either (it authored the only entry).
@@ -364,9 +389,10 @@ describe('start_task — squad prompt prefixes', () => {
       assembleAcpCommandContext(second.session, startTask({ prompt: 'second' }, 'cmd-2')),
     );
     expect(texts(second.promptedBlocks[0])).toEqual(['second']);
+    expect(squadContext(second.promptedBlocks[0])).toBeNull();
   });
 
-  it('composes preamble → briefing → handoff → user blocks, in that order', async () => {
+  it('delivers preamble → briefing → handoff as ONE resource block ahead of the user blocks', async () => {
     const squad = new SquadState({ sessionId: 's1', homeDir });
     // Another agent already worked in this session — codex has seen none of it.
     squad.recordTurn({
@@ -384,21 +410,87 @@ describe('start_task — squad prompt prefixes', () => {
     await dispatchAcpCommand(
       assembleAcpCommandContext(session, startTask({ prompt: 'now the tests', agentId: 'codex' })),
     );
-    const blockTexts = texts(promptedBlocks[0]);
-    expect(blockTexts).toHaveLength(4);
-    expect(blockTexts[0]).toContain('[Team context]');
-    expect(blockTexts[1]).toContain('[Team update]');
-    expect(blockTexts[1]).toContain('refactor the parser');
-    expect(blockTexts[2]).toBe('[Session handoff] context…');
-    expect(blockTexts[3]).toBe('now the tests');
+    const blocks = promptedBlocks[0];
+    // Exactly two blocks: the native context resource, then the user's text.
+    expect(blocks).toHaveLength(2);
+    expect(blocks[0]).toMatchObject({
+      type: 'resource',
+      resource: { uri: 'codeam://squad-context', mimeType: 'text/plain' },
+    });
+    expect(blocks[1]).toEqual({ type: 'text', text: 'now the tests' });
+    // …and the context itself is composed preamble → briefing → handoff.
+    const context = squadContext(blocks) ?? '';
+    expect(context.indexOf('[Team context]')).toBe(0);
+    expect(context.indexOf('[Team update]')).toBeGreaterThan(0);
+    expect(context).toContain('refactor the parser');
+    expect(context.indexOf('[Session handoff] context…')).toBeGreaterThan(
+      context.indexOf('[Team update]'),
+    );
+    // NOTHING squad-ish rides a visible text block (the P0 this fixes).
+    expect(texts(blocks)).toEqual(['now the tests']);
     // One-shot: the handoff slot is consumed.
     expect(pendingHandoff.current).toBeNull();
+  });
+
+  it('an adapter that REJECTS the resource block retries ONCE with legacy text blocks', async () => {
+    const squad = new SquadState({ sessionId: 's1', homeDir });
+    const { session, promptedBlocks, client, relay } = makeCtx({
+      squad,
+      promptFailures: [{ code: -32602, message: 'Invalid params' }],
+    });
+    await dispatchAcpCommand(assembleAcpCommandContext(session, startTask({ prompt: 'first' })));
+
+    expect(client.prompt).toHaveBeenCalledTimes(2);
+    // Attempt 1: native resource block. Attempt 2: the same context as text.
+    expect(squadContext(promptedBlocks[0])).toContain('[Team context]');
+    expect(squadContext(promptedBlocks[1])).toBeNull();
+    expect(texts(promptedBlocks[1])[0]).toContain('[Team context]');
+    expect(texts(promptedBlocks[1]).at(-1)).toBe('first');
+    // …and the turn still completes normally.
+    expect(relay.sendResult).toHaveBeenCalledWith('cmd-1', 'completed', {
+      stopReason: 'end_turn',
+    });
+    // The downgrade is remembered per member for the rest of the session.
+    expect(squad.member('claude').contextTextFallback).toBe(true);
+  });
+
+  it('once downgraded, the NEXT turn goes straight to text blocks (no wasted attempt)', async () => {
+    const squad = new SquadState({ sessionId: 's1', homeDir });
+    squad.member('claude').contextTextFallback = true;
+    const { session, promptedBlocks, client } = makeCtx({ squad });
+    await dispatchAcpCommand(assembleAcpCommandContext(session, startTask({ prompt: 'first' })));
+
+    expect(client.prompt).toHaveBeenCalledTimes(1);
+    expect(squadContext(promptedBlocks[0])).toBeNull();
+    expect(texts(promptedBlocks[0])[0]).toContain('[Team context]');
+  });
+
+  it('does NOT retry an unrelated failure — a re-prompt would double-run the turn', async () => {
+    const squad = new SquadState({ sessionId: 's1', homeDir });
+    const { session, client } = makeCtx({
+      squad,
+      promptFailures: [new Error('ACP prompt idle — adapter sent no updates')],
+    });
+    await dispatchAcpCommand(assembleAcpCommandContext(session, startTask({ prompt: 'first' })));
+
+    expect(client.prompt).toHaveBeenCalledTimes(1);
+    expect(squad.member('claude').contextTextFallback).toBe(false);
+  });
+
+  it('does NOT retry when the turn carried no squad context at all', async () => {
+    const { session, client } = makeCtx({
+      roster: null,
+      promptFailures: [{ code: -32602, message: 'Invalid params' }],
+    });
+    await dispatchAcpCommand(assembleAcpCommandContext(session, startTask({ prompt: 'hello' })));
+    expect(client.prompt).toHaveBeenCalledTimes(1);
   });
 
   it('no roster → no squad prefixes at all (old backend / offline)', async () => {
     const { session, promptedBlocks } = makeCtx({ roster: null });
     await dispatchAcpCommand(assembleAcpCommandContext(session, startTask({ prompt: 'hello' })));
     expect(texts(promptedBlocks[0])).toEqual(['hello']);
+    expect(squadContext(promptedBlocks[0])).toBeNull();
   });
 
   it("after a CLI restart, a journal of only the CURRENT agent's own turns injects NO briefing", async () => {
@@ -416,8 +508,7 @@ describe('start_task — squad prompt prefixes', () => {
     const restarted = new SquadState({ sessionId: 's1', homeDir });
     const { session, promptedBlocks } = makeCtx({ squad: restarted, agent: 'claude' });
     await dispatchAcpCommand(assembleAcpCommandContext(session, startTask({ prompt: 'continue' })));
-    const blockTexts = texts(promptedBlocks[0]);
-    expect(blockTexts.some((t) => t.includes('[Team update]'))).toBe(false);
+    expect(squadContext(promptedBlocks[0]) ?? '').not.toContain('[Team update]');
   });
 
   it("after a CLI restart, a MIXED journal briefs only the OTHER agent's entries", async () => {
@@ -437,11 +528,10 @@ describe('start_task — squad prompt prefixes', () => {
     const restarted = new SquadState({ sessionId: 's1', homeDir });
     const { session, promptedBlocks } = makeCtx({ squad: restarted, agent: 'codex' });
     await dispatchAcpCommand(assembleAcpCommandContext(session, startTask({ prompt: 'continue' })));
-    const blockTexts = texts(promptedBlocks[0]);
-    const briefing = blockTexts.find((t) => t.includes('[Team update]'));
-    expect(briefing).toBeDefined();
-    expect(briefing).toContain('wrote the parser');
-    expect(briefing).not.toContain('wrote tests');
+    const context = squadContext(promptedBlocks[0]) ?? '';
+    expect(context).toContain('[Team update]');
+    expect(context).toContain('wrote the parser');
+    expect(context).not.toContain('wrote tests');
   });
 });
 

@@ -39,7 +39,13 @@ import { buildMcpServersForStart } from '../../integrations/provision';
 import { detectRepoStack } from '../../integrations/detect-stack';
 import type { HandoffProposal, IntegrationsManifest, StartTaskPayload } from '@codeam/shared';
 import { buildDeltaBriefing, buildTeamPreamble, type SquadState } from './squad-roster';
+import {
+  buildSquadContextBlock,
+  isSquadContextBlock,
+  looksLikeUnsupportedPromptShape,
+} from './squad-context';
 import { extractHandoffProposal } from './handoff-protocol';
+import type { PromptResponse } from '@agentclientprotocol/sdk';
 import { execFile } from 'node:child_process';
 import {
   handlers as legacyHandlers,
@@ -408,9 +414,9 @@ async function routeSquadTask(
 }
 
 /**
- * Prefix the squad context blocks onto a turn, in the order the agent reads
- * them: `[team preamble?, delta briefing?, pending handoff?, ...user blocks]`
- * (composed by unshifting in reverse). Each piece is conditional:
+ * Collect the squad context pieces for THIS turn, in the order the agent reads
+ * them: `[team preamble?, delta briefing?, pending handoff?]`. Each piece is
+ * conditional:
  *
  *  - **team preamble** — once per member, on its FIRST turn this process
  *    (`lastTurnIndex === 0`); tells it who else is on the squad and, when the
@@ -419,33 +425,100 @@ async function routeSquadTask(
  *    hasn't seen (`turnCount() > lastTurnIndex`).
  *  - **pending handoff** — the existing switch mechanism (one-shot).
  *
- * All of it rides the AGENT prompt only: the recorded/echoed user prompt stays
- * the user's own words.
+ * Consumes the one-shot handoff slot, so it must be called exactly once per
+ * turn. All of it rides the AGENT prompt only: the recorded/echoed user prompt
+ * stays the user's own words.
  */
-function prefixSquadContext(ctx: AcpCommandContext, blocks: PromptBlock[]): void {
+function collectSquadContext(ctx: AcpCommandContext): string[] {
+  const pieces: string[] = [];
+  const { squad, opts } = ctx;
+  if (squad) {
+    const member = squad.member(opts.agent);
+    const roster = squad.roster;
+    if (roster && member.lastTurnIndex === 0) {
+      const preamble = buildTeamPreamble(roster, opts.agent, {
+        handoffInstructions: roster.handoffsEnabled === true,
+      });
+      if (preamble) pieces.push(preamble);
+    }
+    if (squad.turnCount() > member.lastTurnIndex) {
+      // Exclude this agent's OWN prior turns — after a CLI restart lastTurnIndex
+      // resets to 0 while the journal persists, so without this filter an agent
+      // gets briefed on work it already did itself.
+      const otherEntries = squad
+        .entriesSince(member.lastTurnIndex)
+        .filter((e) => e.agentId !== opts.agent);
+      const briefing = buildDeltaBriefing(otherEntries);
+      if (briefing) pieces.push(briefing);
+    }
+  }
   if (ctx.pendingHandoff?.current) {
-    blocks.unshift({ type: 'text', text: ctx.pendingHandoff.current });
+    pieces.push(ctx.pendingHandoff.current);
     ctx.pendingHandoff.current = null;
   }
-  const { squad, opts } = ctx;
-  if (!squad) return;
-  const member = squad.member(opts.agent);
-  if (squad.turnCount() > member.lastTurnIndex) {
-    // Exclude this agent's OWN prior turns — after a CLI restart lastTurnIndex
-    // resets to 0 while the journal persists, so without this filter an agent
-    // gets briefed on work it already did itself.
-    const otherEntries = squad
-      .entriesSince(member.lastTurnIndex)
-      .filter((e) => e.agentId !== opts.agent);
-    const briefing = buildDeltaBriefing(otherEntries);
-    if (briefing) blocks.unshift({ type: 'text', text: briefing });
+  return pieces;
+}
+
+/**
+ * Prepend the collected squad context onto the prompt blocks.
+ *
+ * **NATIVE by default:** ONE `ContentBlock::Resource` carrying all the pieces
+ * joined — semantically context, never user words, so the agent's own JSONL
+ * doesn't record it as part of the user's message and the hydration path can't
+ * replay it as a visible bubble (the P0 the addendum fixes). `text` mode is
+ * the per-agent fallback for an adapter that rejects resource blocks; it
+ * reproduces the pre-fix layout (one text block per piece).
+ */
+function applySquadContext(
+  blocks: PromptBlock[],
+  pieces: readonly string[],
+  mode: 'resource' | 'text',
+): void {
+  if (pieces.length === 0) return;
+  if (mode === 'resource') {
+    blocks.unshift(buildSquadContextBlock(pieces.join('\n\n')));
+    return;
   }
-  const roster = squad.roster;
-  if (roster && member.lastTurnIndex === 0) {
-    const preamble = buildTeamPreamble(roster, opts.agent, {
-      handoffInstructions: roster.handoffsEnabled === true,
-    });
-    if (preamble) blocks.unshift({ type: 'text', text: preamble });
+  for (let i = pieces.length - 1; i >= 0; i--) blocks.unshift({ type: 'text', text: pieces[i] });
+}
+
+/**
+ * Run the turn's prompt, with a ONE-shot per-agent downgrade to legacy text
+ * blocks when the adapter can't accept the native resource block.
+ *
+ * The retry is gated on {@link looksLikeUnsupportedPromptShape} (an
+ * invalid-params-shaped rejection) — anything else propagates untouched, so a
+ * genuinely failed turn is never silently re-run. The decision is remembered
+ * on the squad member so the rest of the session goes straight to text.
+ * `blocks` is mutated in place: downstream consumers (budget recovery) must
+ * see the array the agent actually received.
+ */
+async function promptWithContextFallback(
+  ctx: AcpCommandContext,
+  client: AcpClient,
+  blocks: PromptBlock[],
+  pieces: readonly string[],
+): Promise<PromptResponse> {
+  try {
+    return await client.prompt(blocks);
+  } catch (err) {
+    if (
+      pieces.length === 0 ||
+      blocks.length === 0 ||
+      !isSquadContextBlock(blocks[0]) ||
+      !looksLikeUnsupportedPromptShape(err)
+    ) {
+      throw err;
+    }
+    log.warn(
+      'acpRunner',
+      `squad: ${ctx.opts.agent} rejected the native squad-context resource block ` +
+        `(${describeError(err)}) — retrying once with legacy text blocks`,
+    );
+    if (ctx.squad) ctx.squad.member(ctx.opts.agent).contextTextFallback = true;
+    blocks.shift();
+    applySquadContext(blocks, pieces, 'text');
+    return await client.prompt(blocks);
   }
 }
 
@@ -606,13 +679,20 @@ async function startTaskH(ctx: AcpCommandContext): Promise<void> {
   // Prepended AFTER recording the user prompt + echo, so it rides the agent prompt
   // only and never shows as part of the user's message. Managed deploys only.
   maybePrefaceAgentStandard(blocks, opts.agent, opts.sessionId);
-  // Squad context prefixes, composed onto the AGENT prompt only:
-  //   [team preamble?, delta briefing?, pending handoff?, ...user blocks]
-  // The handoff slot is the existing `switch_agent` continuity mechanism — the
+  // Squad context, composed onto the AGENT prompt only, as ONE native ACP
+  // resource block ahead of the user's blocks:
+  //   [codeam://squad-context {preamble?, briefing?, handoff?}, ...user blocks]
+  // The handoff piece is the existing `switch_agent` continuity mechanism — the
   // FIRST prompt after a swap carries the OLD conversation's bounded tail so
   // the new agent continues with the session's context instead of starting
-  // cold (one-shot). See {@link prefixSquadContext}.
-  prefixSquadContext(ctx, blocks);
+  // cold (one-shot). Delivered as a resource (not text) so it never lands in
+  // the agent's JSONL as user words — see `squad-context.ts`.
+  const squadContext = collectSquadContext(ctx);
+  applySquadContext(
+    blocks,
+    squadContext,
+    ctx.squad?.member(opts.agent).contextTextFallback === true ? 'text' : 'resource',
+  );
   // Tracks whether the turn already reached a terminal, VISIBLE close (reply
   // delivered + "Thinking…" cleared). Once true, the only awaited work left is
   // the command ACK — and a long (>10 min) turn's `command:<id>` record can
@@ -621,7 +701,7 @@ async function startTaskH(ctx: AcpCommandContext): Promise<void> {
   // that CLOBBERS the already-delivered reply (2026-08-04, codeagent-dtz7).
   let turnClosed = false;
   try {
-    const reply = await client.prompt(blocks);
+    const reply = await promptWithContextFallback(ctx, client, blocks, squadContext);
     // Close with interactive-detection so a trailing
     // "question + numbered options" pattern in the reply gets
     // surfaced as a tappable select_prompt chunk on mobile

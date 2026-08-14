@@ -25,9 +25,21 @@ export interface StartTaskPayload {
   files?: FileEntry[];
 }
 
+/**
+ * The subset of the ACP `ContentBlock` union this CLI ever SENDS.
+ *
+ * `resource` is an `EmbeddedResource` (`{ type: 'resource', resource: { uri,
+ * mimeType, text } }` — structurally the SDK's `EmbeddedResource &
+ * { type: 'resource' }` over `TextResourceContents`). It carries injected
+ * CONTEXT rather than user words, so conforming agents keep it out of the
+ * transcript's user message — see `squad-context.ts` for why that matters.
+ * Blocks are handed to `connection.prompt({ prompt: blocks })` verbatim, so
+ * this union IS the wire shape; no separate serializer exists.
+ */
 export type PromptBlock =
   | { type: 'text'; text: string }
-  | { type: 'image'; mimeType: string; data: string };
+  | { type: 'image'; mimeType: string; data: string }
+  | { type: 'resource'; resource: { uri: string; mimeType: string; text: string } };
 
 const MIME_FROM_EXT: Record<string, string> = {
   png: 'image/png',
@@ -44,12 +56,9 @@ function inferMime(filename: string): string {
   return MIME_FROM_EXT[ext] ?? 'application/octet-stream';
 }
 
-const PLACEHOLDER_PROMPT =
-  'Please review the attached image(s) and let me know what you find.';
+const PLACEHOLDER_PROMPT = 'Please review the attached image(s) and let me know what you find.';
 
-export function buildAcpPromptBlocks(
-  payload: StartTaskPayload,
-): PromptBlock[] {
+export function buildAcpPromptBlocks(payload: StartTaskPayload): PromptBlock[] {
   const blocks: PromptBlock[] = [];
 
   for (const file of payload.files ?? []) {

@@ -13,6 +13,7 @@ import {
 import { vercelBypassHeader } from '../lib/backend-headers';
 import { log } from './logger';
 import { encodeCwd } from '../agents/claude/history';
+import { stripSquadContext } from '../agents/acp/squad-context';
 import type { RuntimeStrategy } from '../agents/strategy';
 
 /**
@@ -73,6 +74,34 @@ function extractText(content: unknown): string {
 }
 
 const CONVERSATION_BATCH_SIZE = 30;
+
+/**
+ * Scrub Agent Squad injected context out of a hydrated conversation.
+ *
+ * Squad context now rides an ACP `resource` block (`codeam://squad-context`),
+ * which {@link extractText} already drops — it keeps ONLY `type: 'text'`
+ * blocks, so a resource block can never reach a bubble. This pass covers the
+ * OTHER two cases: transcripts written before that fix, and any adapter that
+ * fell back to legacy text blocks. Without it the user sees
+ * `[Session handoff] You (Codex) are taking over…` as their own message when
+ * the app reloads history (the 2026-08-14 fleet-1 P0).
+ *
+ * Byte-identical for messages with no marker, and a message that was ENTIRELY
+ * injected context is dropped rather than shipped as an empty bubble.
+ */
+function scrubSquadContext(messages: ClaudeHistoryMessage[]): ClaudeHistoryMessage[] {
+  const out: ClaudeHistoryMessage[] = [];
+  for (const m of messages) {
+    const text = stripSquadContext(m.text);
+    if (text === m.text) {
+      out.push(m);
+      continue;
+    }
+    if (text.length === 0) continue;
+    out.push({ ...m, text });
+  }
+  return out;
+}
 
 /** Parse a JSONL session file into a list of ChatMessages (user + assistant only). */
 function parseJsonl(filePath: string): ClaudeHistoryMessage[] {
@@ -579,6 +608,10 @@ export class HistoryService {
    * convention as parseJsonl.
    */
   private readConversation(sessionId: string): ClaudeHistoryMessage[] {
+    return scrubSquadContext(this.readConversationRaw(sessionId));
+  }
+
+  private readConversationRaw(sessionId: string): ClaudeHistoryMessage[] {
     if (this.runtime.resolveHistoryFile) {
       const filePath = this.runtime.resolveHistoryFile(this.cwd, sessionId);
       if (!filePath) return [];
