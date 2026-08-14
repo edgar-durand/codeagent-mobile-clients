@@ -118,7 +118,17 @@ function makeCtx(over: CtxOverrides = {}) {
     pendingHandoff: over.pendingHandoff,
   } as unknown as AcpSessionContext;
 
-  return { session, calls, client, relay, routeToAgent, squad, postSquadEvent, promptedBlocks, opts };
+  return {
+    session,
+    calls,
+    client,
+    relay,
+    routeToAgent,
+    squad,
+    postSquadEvent,
+    promptedBlocks,
+    opts,
+  };
 }
 
 function startTask(payload: Record<string, unknown>, id = 'cmd-1'): RemoteCommand {
@@ -236,9 +246,7 @@ describe('start_task — squad prompt prefixes', () => {
   it('prefixes the team preamble on a member FIRST turn only', async () => {
     const squad = new SquadState({ sessionId: 's1', homeDir });
     const { session, promptedBlocks } = makeCtx({ squad });
-    await dispatchAcpCommand(
-      assembleAcpCommandContext(session, startTask({ prompt: 'first' })),
-    );
+    await dispatchAcpCommand(assembleAcpCommandContext(session, startTask({ prompt: 'first' })));
     expect(texts(promptedBlocks[0])[0]).toContain('[Team context]');
 
     // Second turn on the same agent: the member has journaled a turn, so no
@@ -283,6 +291,149 @@ describe('start_task — squad prompt prefixes', () => {
     const { session, promptedBlocks } = makeCtx({ roster: null });
     await dispatchAcpCommand(assembleAcpCommandContext(session, startTask({ prompt: 'hello' })));
     expect(texts(promptedBlocks[0])).toEqual(['hello']);
+  });
+});
+
+// ─── Agent-proposed handoffs (detect → emit → resolve) ─────────────────────
+
+const HANDOFF_ROSTER: SquadRosterData = { ...ROSTER, handoffsEnabled: true };
+
+function fenceReply(to: string, reason = 'better suited', prompt = 'run the tests'): string {
+  return [
+    "Here's what I found.",
+    '',
+    '```codeam-handoff',
+    JSON.stringify({ to, reason, prompt }),
+    '```',
+  ].join('\n');
+}
+
+/** Every ('type', payload) pair the serialized squad emitter received. */
+function events(
+  postSquadEvent: ReturnType<typeof vi.fn>,
+): Array<[string, Record<string, unknown>]> {
+  return postSquadEvent.mock.calls as Array<[string, Record<string, unknown>]>;
+}
+
+describe('start_task — agent-proposed handoffs', () => {
+  it('emits handoff_proposed once, on the binding wire shape, and opens the slot', async () => {
+    const { session, postSquadEvent } = makeCtx({
+      roster: HANDOFF_ROSTER,
+      replyText: fenceReply('codex', 'codex is faster at tests', 'fix the failing suite'),
+    });
+    await dispatchAcpCommand(assembleAcpCommandContext(session, startTask({ prompt: 'ship it' })));
+
+    expect(events(postSquadEvent)).toEqual([
+      [
+        'handoff_proposed',
+        {
+          proposalId: 'hp-cmd-1',
+          fromAgentId: 'claude',
+          toAgentId: 'codex',
+          reason: 'codex is faster at tests',
+          prompt: 'fix the failing suite',
+        },
+      ],
+    ]);
+    expect(session.pendingProposal?.current).toMatchObject({
+      proposalId: 'hp-cmd-1',
+      toAgentId: 'codex',
+    });
+  });
+
+  it('keeps the fence out of the durable reply AND the journal', async () => {
+    const squad = new SquadState({ sessionId: 's1', homeDir });
+    const { session } = makeCtx({
+      squad,
+      roster: HANDOFF_ROSTER,
+      replyText: fenceReply('codex'),
+    });
+    const history = session.history as unknown as { appendAgentReply: ReturnType<typeof vi.fn> };
+    await dispatchAcpCommand(assembleAcpCommandContext(session, startTask({ prompt: 'ship it' })));
+
+    const durable = history.appendAgentReply.mock.calls[0][0] as string;
+    expect(durable).toBe("Here's what I found.");
+    expect(squad.entriesSince(0)[0]?.replySummary).toBe("Here's what I found.");
+  });
+
+  it('handoffsEnabled false → fence still stripped, NO event', async () => {
+    const { session, postSquadEvent } = makeCtx({ replyText: fenceReply('codex') });
+    const history = session.history as unknown as { appendAgentReply: ReturnType<typeof vi.fn> };
+    await dispatchAcpCommand(assembleAcpCommandContext(session, startTask({ prompt: 'ship it' })));
+
+    expect(postSquadEvent).not.toHaveBeenCalled();
+    expect(session.pendingProposal?.current).toBeNull();
+    expect(history.appendAgentReply.mock.calls[0][0]).toBe("Here's what I found.");
+  });
+
+  it('routing the next task to the proposed agent resolves it ACCEPTED', async () => {
+    const { session, postSquadEvent } = makeCtx({
+      roster: HANDOFF_ROSTER,
+      replyText: fenceReply('codex'),
+    });
+    await dispatchAcpCommand(assembleAcpCommandContext(session, startTask({ prompt: 'ship it' })));
+    await dispatchAcpCommand(
+      assembleAcpCommandContext(session, startTask({ prompt: 'go', agentId: 'codex' }, 'cmd-2')),
+    );
+
+    const resolved = events(postSquadEvent).filter(([t]) => t === 'handoff_resolved');
+    expect(resolved).toEqual([['handoff_resolved', { proposalId: 'hp-cmd-1', accepted: true }]]);
+    expect(session.pendingProposal?.current).toBeNull();
+  });
+
+  it('any other prompt resolves it DECLINED', async () => {
+    const { session, postSquadEvent } = makeCtx({
+      roster: HANDOFF_ROSTER,
+      replyText: fenceReply('codex'),
+    });
+    await dispatchAcpCommand(assembleAcpCommandContext(session, startTask({ prompt: 'ship it' })));
+    // No agentId — the user simply carried on with the current agent. (The
+    // second reply carries no fence, so nothing new is proposed.)
+    (session.streaming.getCurrentText as ReturnType<typeof vi.fn>).mockReturnValue('ok');
+    await dispatchAcpCommand(
+      assembleAcpCommandContext(session, startTask({ prompt: 'no, keep going' }, 'cmd-2')),
+    );
+
+    expect(events(postSquadEvent)).toEqual([
+      ['handoff_proposed', expect.objectContaining({ proposalId: 'hp-cmd-1' })],
+      ['handoff_resolved', { proposalId: 'hp-cmd-1', accepted: false }],
+    ]);
+    expect(session.pendingProposal?.current).toBeNull();
+  });
+
+  it('drops a SECOND proposal while one is still pending (max one open card)', async () => {
+    const { session, postSquadEvent, client } = makeCtx({
+      roster: HANDOFF_ROSTER,
+      replyText: fenceReply('codex'),
+    });
+    // Two turns in flight at once: both resolve nothing at their (empty) start,
+    // then close in order — the second must find the slot already taken. The
+    // staggered prompt keeps the interleaving deterministic.
+    let n = 0;
+    (client.prompt as ReturnType<typeof vi.fn>).mockImplementation(
+      async () =>
+        new Promise((resolve) => setTimeout(() => resolve({ stopReason: 'end_turn' }), (n += 10))),
+    );
+    await Promise.all([
+      dispatchAcpCommand(assembleAcpCommandContext(session, startTask({ prompt: 'a' }, 'cmd-a'))),
+      dispatchAcpCommand(assembleAcpCommandContext(session, startTask({ prompt: 'b' }, 'cmd-b'))),
+    ]);
+
+    expect(events(postSquadEvent).filter(([t]) => t === 'handoff_proposed')).toHaveLength(1);
+    expect(session.pendingProposal?.current?.proposalId).toBe('hp-cmd-a');
+  });
+
+  it('ignores a fence naming an agent outside the roster', async () => {
+    const { session, postSquadEvent } = makeCtx({
+      roster: HANDOFF_ROSTER,
+      replyText: fenceReply('ghost'),
+    });
+    const history = session.history as unknown as { appendAgentReply: ReturnType<typeof vi.fn> };
+    await dispatchAcpCommand(assembleAcpCommandContext(session, startTask({ prompt: 'ship it' })));
+
+    expect(postSquadEvent).not.toHaveBeenCalled();
+    // …but the litter is still stripped from what the user sees.
+    expect(history.appendAgentReply.mock.calls[0][0]).toBe("Here's what I found.");
   });
 });
 

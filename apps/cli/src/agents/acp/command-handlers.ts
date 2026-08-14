@@ -42,6 +42,7 @@ import { buildMcpServersForStart } from '../../integrations/provision';
 import { detectRepoStack } from '../../integrations/detect-stack';
 import type { HandoffProposal, IntegrationsManifest, StartTaskPayload } from '@codeam/shared';
 import { buildDeltaBriefing, buildTeamPreamble, type SquadState } from './squad-roster';
+import { extractHandoffProposal } from './handoff-protocol';
 import { execFile } from 'node:child_process';
 import {
   handlers as legacyHandlers,
@@ -425,6 +426,73 @@ function recordSquadTurn(ctx: AcpCommandContext, prompt: string, replySummary: s
   squad.member(opts.agent).lastTurnIndex = squad.turnCount();
 }
 
+/**
+ * Squad ids a handoff may be proposed TO: every roster member except the one
+ * replying. Empty without a roster — `extractHandoffProposal` then still
+ * STRIPS the fence (protocol litter never reaches the user) but yields no
+ * proposal.
+ */
+function handoffTargets(ctx: AcpCommandContext): Set<string> {
+  const roster = ctx.squad?.roster;
+  if (!roster) return new Set();
+  return new Set(roster.agents.map((a) => a.agentId).filter((id) => id !== ctx.opts.agent));
+}
+
+/**
+ * Resolve the open agent-proposed handoff, if any, against the task the user
+ * just sent: routing the task to the proposed agent ACCEPTS it, anything else
+ * (a different agent, or just carrying on with the current one) DECLINES it.
+ * The slot clears either way — a proposal is only ever answered once, and an
+ * un-answered one must never outlive the turn that followed it.
+ */
+function resolvePendingProposal(ctx: AcpCommandContext, requestedAgentId: string): void {
+  const slot = ctx.pendingProposal;
+  const pending = slot?.current;
+  if (!slot || !pending) return;
+  slot.current = null;
+  const accepted = requestedAgentId === pending.toAgentId;
+  log.info(
+    'acpRunner',
+    `squad: handoff ${pending.proposalId} ${accepted ? 'accepted' : 'declined'}`,
+  );
+  void ctx.postSquadEvent?.('handoff_resolved', {
+    proposalId: pending.proposalId,
+    accepted,
+  });
+}
+
+/**
+ * Publish an agent-proposed handoff the reply carried in its
+ * ```codeam-handoff fence. Gated on the PRO roster flag (`handoffsEnabled`)
+ * and capped at ONE open proposal — a second one while the first is
+ * un-resolved is dropped rather than racing two cards onto the app.
+ *
+ * `proposalId` is derived from the command id, so it's stable + collision-free
+ * without a clock: a retried ack for the same turn resolves the same proposal.
+ */
+function emitHandoffProposal(
+  ctx: AcpCommandContext,
+  proposal: { to: string; reason: string; prompt: string } | null,
+): void {
+  const { squad, pendingProposal, postSquadEvent, opts, cmd } = ctx;
+  if (!proposal || !pendingProposal || !postSquadEvent) return;
+  if (squad?.roster?.handoffsEnabled !== true) return;
+  if (pendingProposal.current) {
+    log.info('acpRunner', 'squad: dropping handoff proposal — one is already pending');
+    return;
+  }
+  const record: HandoffProposal = {
+    proposalId: `hp-${cmd.id}`,
+    fromAgentId: opts.agent,
+    toAgentId: proposal.to,
+    reason: proposal.reason,
+    prompt: proposal.prompt,
+  };
+  pendingProposal.current = record;
+  log.info('acpRunner', `squad: handoff proposed ${opts.agent} → ${record.toAgentId}`);
+  void postSquadEvent('handoff_proposed', { ...record });
+}
+
 async function startTaskH(ctx: AcpCommandContext): Promise<void> {
   const {
     cmd,
@@ -451,6 +519,10 @@ async function startTaskH(ctx: AcpCommandContext): Promise<void> {
   // (never silently answers with the agent the user didn't mention). An id
   // equal to the current agent (or absent) is a plain no-op: run as normal.
   const requestedAgentId = typeof payload?.agentId === 'string' ? payload.agentId.trim() : '';
+  // An open agent-proposed handoff is answered by THIS task: routing it to the
+  // proposed agent accepts, anything else declines. Runs before the routing so
+  // the resolution reflects what the user actually asked for.
+  resolvePendingProposal(ctx, requestedAgentId);
   if (requestedAgentId.length > 0 && requestedAgentId !== opts.agent) {
     const routed = await routeSquadTask(ctx, requestedAgentId);
     if (!routed.ok) {
@@ -590,16 +662,27 @@ async function startTaskH(ctx: AcpCommandContext): Promise<void> {
     } else {
       await streaming.closeTurnWithInteractiveDetection();
       turnClosed = true;
-      const replyLine = formatAgentReplyLine(finalText);
+      // Agent-proposed handoff: the reply may END with a ```codeam-handoff
+      // fence. It's protocol litter the app renders as a card — the live +
+      // terminal frames already suppress it (StreamingState), and everything
+      // DURABLE (terminal echo, conversation history, squad journal) uses the
+      // stripped text so it can never resurface on a refresh.
+      const { cleanText, proposal } = extractHandoffProposal(
+        finalText,
+        opts.agent,
+        handoffTargets(ctx),
+      );
+      const replyLine = formatAgentReplyLine(cleanText);
       if (replyLine.length > 0) {
         showInfo(replyLine);
       }
-      history.appendAgentReply(finalText);
+      history.appendAgentReply(cleanText);
       void history.flush();
       // Journal the turn for the squad's shared memory — the NEXT agent to
       // take over receives it in its delta briefing. `opts.agent` is the
       // ROUTED agent here (the swap above already moved it).
-      recordSquadTurn(ctx, promptText, finalText);
+      recordSquadTurn(ctx, promptText, cleanText);
+      emitHandoffProposal(ctx, proposal);
       // Emit static quick-reply chips so the mobile UI has
       // one-tap continuation prompts after every ACP turn.
       // PTY agents emit a single-string `input_suggestion` via

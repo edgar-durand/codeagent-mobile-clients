@@ -203,10 +203,7 @@ export interface SwitchAgentDeps {
  * `switch_agent_status:ready` of the swap that resolved it.
  */
 export type SquadEventType =
-  | 'switch_agent_progress'
-  | 'switch_agent_status'
-  | 'handoff_proposed'
-  | 'handoff_resolved';
+  'switch_agent_progress' | 'switch_agent_status' | 'handoff_proposed' | 'handoff_resolved';
 
 export type SquadEventPoster = (
   type: SquadEventType,

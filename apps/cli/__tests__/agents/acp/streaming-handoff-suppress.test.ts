@@ -94,6 +94,54 @@ describe('StreamingState.append — codeam-handoff fence suppressed from the liv
     );
   });
 
+  it('keeps the fence out of the TERMINAL frames too (closeAll)', async () => {
+    const { state, publishOutput, publishStreamingChunk } = makeState();
+    state.append({ chunkId: 'msg-1', kind: 'text', delta: prose });
+    state.append({ chunkId: 'msg-1', kind: 'text', delta: fenceOpenPart1 });
+    state.append({ chunkId: 'msg-1', kind: 'text', delta: fenceOpenPart2 });
+    state.append({ chunkId: 'msg-1', kind: 'text', delta: jsonBody + fenceClose });
+    publishOutput.mockClear();
+    publishStreamingChunk.mockClear();
+
+    await state.closeAll();
+
+    // The terminal frames are the ones that PERSIST — a fence surviving here
+    // would stay pinned on the finished bubble forever.
+    const finalOutputs = publishOutput.mock.calls
+      .map((c) => c[0] as { done?: boolean; content?: string })
+      .filter((b) => b.done === true);
+    const finalChunks = publishStreamingChunk.mock.calls
+      .map((c) => c[0] as { isFinal?: boolean; content?: string })
+      .filter((b) => b.isFinal === true);
+    expect(finalOutputs.length).toBeGreaterThan(0);
+    expect(finalChunks.length).toBeGreaterThan(0);
+    for (const frame of [...finalOutputs, ...finalChunks]) {
+      expect(frame.content).toBe(prose);
+    }
+  });
+
+  it('keeps the fence out of the TERMINAL frames too (closeTurnWithInteractiveDetection)', async () => {
+    const { state, publishOutput, publishStreamingChunk } = makeState();
+    state.append({
+      chunkId: 'msg-1',
+      kind: 'text',
+      delta: prose + fenceOpenPart1 + fenceOpenPart2 + jsonBody + fenceClose,
+    });
+    // Raw text — fence included — is still what the turn-close extraction reads.
+    expect(state.getCurrentText()).toContain(HANDOFF_FENCE_TAG);
+    publishOutput.mockClear();
+    publishStreamingChunk.mockClear();
+
+    await state.closeTurnWithInteractiveDetection();
+
+    for (const call of [...publishOutput.mock.calls, ...publishStreamingChunk.mock.calls]) {
+      const content = (call[0] as { content?: unknown }).content;
+      if (typeof content !== 'string') continue;
+      expect(content).not.toContain(HANDOFF_FENCE_TAG);
+      expect(content).not.toContain('please review the diff');
+    }
+  });
+
   it('publishes identically to before when no fence is present (regression guard)', () => {
     const { state, publishOutput, publishStreamingChunk } = makeState();
     state.append({ chunkId: 'msg-1', kind: 'text', delta: 'The ' });

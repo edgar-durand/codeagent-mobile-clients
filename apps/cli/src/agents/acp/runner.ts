@@ -578,8 +578,23 @@ export class StreamingState {
    * spuriously and strand the runner with a free-form pending state
    * the user can't see / answer.
    */
+  /**
+   * Presentation-only view of a text buffer: everything BEFORE a
+   * ```codeam-handoff fence. The fence is protocol litter the app renders as
+   * a proposal card (see `handoff-protocol.ts`) — it must never reach the
+   * user, and the TERMINAL frames (`done:true` / `isFinal:true`) are the ones
+   * that persist, so suppressing it only while streaming would still leave it
+   * pinned on the finished bubble. Internal state is untouched:
+   * {@link getCurrentText} keeps returning the RAW text so the turn-close
+   * extraction can parse the proposal out of it.
+   */
+  private visible(text: string): string {
+    const cut = handoffFenceStart(text);
+    return cut === -1 ? text : text.slice(0, cut).trimEnd();
+  }
+
   async closeAll(): Promise<void> {
-    const finalText = this.text;
+    const finalText = this.visible(this.text);
     this.text = '';
     await Promise.all([
       this.publisher.publishOutput({ type: 'text', content: finalText, done: true }),
@@ -631,7 +646,9 @@ export class StreamingState {
         this.publisher.publishStreamingChunk({
           chunkId,
           kind,
-          content,
+          // Terminal frame — same fence suppression the live deltas apply, so
+          // a proposal fence never survives on the finalised bubble.
+          content: kind === 'text' ? this.visible(content) : content,
           isFinal: true,
         }),
       ),
@@ -659,7 +676,7 @@ export class StreamingState {
    * text done:true chunk with the full cumulative).
    */
   async closeTurnWithInteractiveDetection(): Promise<boolean> {
-    const finalText = this.text;
+    const finalText = this.visible(this.text);
     this.text = '';
     // Streaming-chunk feed always flushes regardless of interactive
     // detection — those bubbles live in SessionDetailScreen on their
