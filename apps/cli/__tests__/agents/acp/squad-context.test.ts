@@ -11,6 +11,7 @@ import { describe, it, expect } from 'vitest';
 import {
   SQUAD_CONTEXT_URI,
   buildSquadContextBlock,
+  isLeakedSquadContextText,
   isSquadContextBlock,
   looksLikeUnsupportedPromptShape,
   stripSquadContext,
@@ -164,5 +165,24 @@ describe('stripSquadContext', () => {
 
   it('returns empty for a message that was ENTIRELY injected context', () => {
     expect(stripSquadContext(HANDOFF)).toBe('');
+  });
+});
+
+describe('isLeakedSquadContextText', () => {
+  // fleet-1 2026-08-13, codeam-cli 2.65.0: codex's third-party ACP bridge
+  // (`codex-acp`) downgraded our native `resource` block to plain text that
+  // STARTS with its own uri before codex ever recorded it — the marker-based
+  // `stripSquadContext` can't see this shape since the uri isn't one of its
+  // block literals.
+  it('flags text that starts with the raw squad-context uri', () => {
+    expect(isLeakedSquadContextText(`${SQUAD_CONTEXT_URI}\n<context resource text>`)).toBe(true);
+    expect(isLeakedSquadContextText(SQUAD_CONTEXT_URI)).toBe(true);
+    // Leading whitespace from the bridge's own formatting is still a leak.
+    expect(isLeakedSquadContextText(`  ${SQUAD_CONTEXT_URI} some payload`)).toBe(true);
+  });
+
+  it('leaves ordinary user text — including text that merely mentions the uri — alone', () => {
+    expect(isLeakedSquadContextText('fix the parser')).toBe(false);
+    expect(isLeakedSquadContextText(`please don't use ${SQUAD_CONTEXT_URI} anywhere`)).toBe(false);
   });
 });

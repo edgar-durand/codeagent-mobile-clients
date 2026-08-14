@@ -13,7 +13,8 @@ import {
 import { vercelBypassHeader } from '../lib/backend-headers';
 import { log } from './logger';
 import { encodeCwd } from '../agents/claude/history';
-import { stripSquadContext } from '../agents/acp/squad-context';
+import { stripSquadContext, isLeakedSquadContextText } from '../agents/acp/squad-context';
+import { isAgentMetaBlock } from '../agents/acp/agent-meta-blocks';
 import type { RuntimeStrategy } from '../agents/strategy';
 
 /**
@@ -97,10 +98,22 @@ const CONVERSATION_BATCH_SIZE = 30;
  *
  * Byte-identical for messages with no marker, and a message that was ENTIRELY
  * injected context is dropped rather than shipped as an empty bubble.
+ *
+ * This is the SHARED chokepoint every `runtime.parseHistoryFile` output flows
+ * through (`readConversationRaw` above), so it also covers the fleet-1
+ * 2026-08-13 codex incident: `isLeakedSquadContextText` drops a whole message
+ * that IS the `codeam://squad-context` resource downgraded to plain text by a
+ * third-party ACP bridge, and `isAgentMetaBlock` drops an agent's own injected
+ * config blocks (e.g. codex's `<recommended_plugins>`) — neither is real user
+ * words. Both checks are whole-message, exact-anchor (see their doc comments),
+ * so this stays a defense-in-depth backstop for EVERY agent, not just codex,
+ * even though `codex/history.ts`'s own `isSyntheticCodexTurn` already filters
+ * them before they reach here.
  */
 function scrubSquadContext(messages: ClaudeHistoryMessage[]): ClaudeHistoryMessage[] {
   const out: ClaudeHistoryMessage[] = [];
   for (const m of messages) {
+    if (isLeakedSquadContextText(m.text) || isAgentMetaBlock(m.text)) continue;
     const text = stripSquadContext(m.text);
     if (text === m.text) {
       out.push(m);
@@ -137,7 +150,11 @@ function parseJsonl(filePath: string): ClaudeHistoryMessage[] {
     }
     const result = historyRecordSchema.safeParse(parsedJson);
     if (!result.success) {
-      log.warn('history:parseJsonl', `record failed schema validation in ${filePath}`, result.error.issues);
+      log.warn(
+        'history:parseJsonl',
+        `record failed schema validation in ${filePath}`,
+        result.error.issues,
+      );
       continue;
     }
     const record: HistoryRecord = result.data;
@@ -185,9 +202,7 @@ function post(
           // SEC crit1 (#819): authenticate conversation-history writes so
           // the backend can verify the (sessionId, pluginId) ownership.
           // Older backends ignore the header.
-          ...(pluginAuthToken
-            ? { 'X-Plugin-Auth-Token': pluginAuthToken }
-            : {}),
+          ...(pluginAuthToken ? { 'X-Plugin-Auth-Token': pluginAuthToken } : {}),
         },
         timeout: 15000,
       },
@@ -302,7 +317,7 @@ export class HistoryService {
 
   /** Check if the quota cache is stale (older than ttlMs, default 30 min) */
   isQuotaStale(ttlMs: number = 30 * 60 * 1000): boolean {
-    return this._quotaPercent === null || (Date.now() - this._quotaFetchedAt) > ttlMs;
+    return this._quotaPercent === null || Date.now() - this._quotaFetchedAt > ttlMs;
   }
 
   private get projectDir(): string {
@@ -311,8 +326,10 @@ export class HistoryService {
     // directory scan for cosmetic encoding drift. Fall back to the
     // derived path when the strategy returns null (directory doesn't
     // exist yet — e.g. first-ever Claude run in this cwd).
-    return this.runtime.resolveHistoryDir(this.cwd)
-      ?? path.join(os.homedir(), '.claude', 'projects', encodeCwd(this.cwd));
+    return (
+      this.runtime.resolveHistoryDir(this.cwd) ??
+      path.join(os.homedir(), '.claude', 'projects', encodeCwd(this.cwd))
+    );
   }
 
   /** Set the current Claude conversation ID (extracted from /cost command or session start) */
@@ -366,21 +383,25 @@ export class HistoryService {
     const dir = this.projectDir;
     const cutoff = this.bootTimeMs - HistoryService.BIRTHTIME_GRACE_MS;
     try {
-      const files = fs.readdirSync(dir, { withFileTypes: true })
-        .filter(e => e.isFile() && e.name.endsWith('.jsonl'))
-        .map(e => {
+      const files = fs
+        .readdirSync(dir, { withFileTypes: true })
+        .filter((e) => e.isFile() && e.name.endsWith('.jsonl'))
+        .map((e) => {
           try {
             const stat = fs.statSync(path.join(dir, e.name));
             return { name: e.name, mtime: stat.mtimeMs, birthtime: stat.birthtimeMs };
+          } catch {
+            return { name: e.name, mtime: 0, birthtime: 0 };
           }
-          catch { return { name: e.name, mtime: 0, birthtime: 0 }; }
         })
-        .filter(f => f.birthtime >= cutoff)
+        .filter((f) => f.birthtime >= cutoff)
         .sort((a, b) => b.mtime - a.mtime);
       if (files.length > 0) {
         this.currentConversationId = path.basename(files[0].name, '.jsonl');
       }
-    } catch { /* silent */ }
+    } catch {
+      /* silent */
+    }
   }
 
   /**
@@ -413,8 +434,11 @@ export class HistoryService {
     const cutoff = this.bootTimeMs - HistoryService.BIRTHTIME_GRACE_MS;
 
     let entries: fs.Dirent[];
-    try { entries = fs.readdirSync(dir, { withFileTypes: true }); }
-    catch { return null; }
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return null;
+    }
 
     // Same birthtime filter as `detectCurrentConversation`: the
     // fallback "most recent JSONL" branch otherwise reads usage
@@ -422,15 +446,16 @@ export class HistoryService {
     // project dir, leaking that run's context-window stats into
     // our fresh-pair mobile UI.
     const files = entries
-      .filter(e => e.isFile() && e.name.endsWith('.jsonl'))
-      .map(e => {
+      .filter((e) => e.isFile() && e.name.endsWith('.jsonl'))
+      .map((e) => {
         try {
           const stat = fs.statSync(path.join(dir, e.name));
           return { name: e.name, mtime: stat.mtimeMs, birthtime: stat.birthtimeMs };
+        } catch {
+          return { name: e.name, mtime: 0, birthtime: 0 };
         }
-        catch { return { name: e.name, mtime: 0, birthtime: 0 }; }
       })
-      .filter(f => f.birthtime >= cutoff)
+      .filter((f) => f.birthtime >= cutoff)
       .sort((a, b) => b.mtime - a.mtime);
 
     if (files.length === 0) return null;
@@ -444,15 +469,18 @@ export class HistoryService {
       ? `${this.currentConversationId}.jsonl`
       : files[0].name;
 
-    if (!files.some(f => f.name === targetFile)) return null;
+    if (!files.some((f) => f.name === targetFile)) return null;
 
     return this.extractUsageFromFile(path.join(dir, targetFile));
   }
 
   private extractUsageFromFile(filePath: string): ContextUsage | null {
     let raw: string;
-    try { raw = fs.readFileSync(filePath, 'utf8'); }
-    catch { return null; }
+    try {
+      raw = fs.readFileSync(filePath, 'utf8');
+    } catch {
+      return null;
+    }
 
     let lastUsage: Record<string, number> | null = null;
     let lastModel: string | null = null;
@@ -465,12 +493,17 @@ export class HistoryService {
           // Skip synthetic messages (all-zero usage, not real API responses)
           if (msg?.['model'] === '<synthetic>') continue;
           const usage = msg?.['usage'] as Record<string, number> | undefined;
-          if (usage && (usage['input_tokens'] !== undefined || usage['prompt_tokens'] !== undefined)) {
+          if (
+            usage &&
+            (usage['input_tokens'] !== undefined || usage['prompt_tokens'] !== undefined)
+          ) {
             lastUsage = usage;
           }
           if (msg?.['model']) lastModel = msg['model'] as string;
         }
-      } catch { /* skip malformed */ }
+      } catch {
+        /* skip malformed */
+      }
     }
 
     const total = getContextWindow(lastModel);
@@ -481,13 +514,21 @@ export class HistoryService {
       return { used: 0, total, percent: 0, model: lastModel, outputTokens: 0, cacheReadTokens: 0 };
     }
 
-    const inputTokens = (lastUsage['input_tokens'] ?? lastUsage['prompt_tokens'] ?? 0)
-      + (lastUsage['cache_read_input_tokens'] ?? 0)
-      + (lastUsage['cache_creation_input_tokens'] ?? 0);
+    const inputTokens =
+      (lastUsage['input_tokens'] ?? lastUsage['prompt_tokens'] ?? 0) +
+      (lastUsage['cache_read_input_tokens'] ?? 0) +
+      (lastUsage['cache_creation_input_tokens'] ?? 0);
     const outputTokens = lastUsage['output_tokens'] ?? lastUsage['completion_tokens'] ?? 0;
     const percent = Math.min(100, Math.round((inputTokens / total) * 100));
 
-    return { used: inputTokens, total, percent, model: lastModel, outputTokens, cacheReadTokens: lastUsage['cache_read_input_tokens'] ?? 0 };
+    return {
+      used: inputTokens,
+      total,
+      percent,
+      model: lastModel,
+      outputTokens,
+      cacheReadTokens: lastUsage['cache_read_input_tokens'] ?? 0,
+    };
   }
 
   /**
@@ -505,19 +546,28 @@ export class HistoryService {
 
     let files: string[];
     try {
-      files = fs.readdirSync(projectDir)
-        .filter(f => f.endsWith('.jsonl'))
-        .filter(f => {
+      files = fs
+        .readdirSync(projectDir)
+        .filter((f) => f.endsWith('.jsonl'))
+        .filter((f) => {
           // Pre-filter: skip files not modified this month
-          try { return fs.statSync(path.join(projectDir, f)).mtimeMs >= monthStartMs; }
-          catch { return false; }
+          try {
+            return fs.statSync(path.join(projectDir, f)).mtimeMs >= monthStartMs;
+          } catch {
+            return false;
+          }
         });
-    } catch { return 0; }
+    } catch {
+      return 0;
+    }
 
     for (const file of files) {
       let raw: string;
-      try { raw = fs.readFileSync(path.join(projectDir, file), 'utf8'); }
-      catch { continue; }
+      try {
+        raw = fs.readFileSync(path.join(projectDir, file), 'utf8');
+      } catch {
+        continue;
+      }
 
       for (const line of raw.split('\n').filter(Boolean)) {
         try {
@@ -540,11 +590,14 @@ export class HistoryService {
           const cacheRead = usage['cache_read_input_tokens'] ?? 0;
           const cacheWrite = usage['cache_creation_input_tokens'] ?? 0;
 
-          totalCost += (input / 1_000_000) * pricing.input
-            + (output / 1_000_000) * pricing.output
-            + (cacheRead / 1_000_000) * pricing.cacheRead
-            + (cacheWrite / 1_000_000) * pricing.cacheWrite;
-        } catch { /* skip */ }
+          totalCost +=
+            (input / 1_000_000) * pricing.input +
+            (output / 1_000_000) * pricing.output +
+            (cacheRead / 1_000_000) * pricing.cacheRead +
+            (cacheWrite / 1_000_000) * pricing.cacheWrite;
+        } catch {
+          /* skip */
+        }
       }
     }
 
@@ -681,7 +734,9 @@ export class HistoryService {
       }
 
       if (!ok) {
-        throw new Error(`Failed to upload conversation batch ${i + 1}/${totalBatches} after all retries`);
+        throw new Error(
+          `Failed to upload conversation batch ${i + 1}/${totalBatches} after all retries`,
+        );
       }
     }
     // Mark the last message as the high-water mark so subsequent
@@ -739,8 +794,7 @@ export class HistoryService {
     // high-water mark, never go through uploadDelta.
     const now = Date.now();
     const staleBaseline =
-      now - (this.lastUploadWallMs.get(sessionId) ?? 0) >
-      HistoryService.REBASELINE_INTERVAL_MS;
+      now - (this.lastUploadWallMs.get(sessionId) ?? 0) > HistoryService.REBASELINE_INTERVAL_MS;
     if (!staleBaseline && this.lastTranscriptMtimeMs.get(sessionId) === mtimeMs) {
       return false;
     }

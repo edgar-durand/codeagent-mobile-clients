@@ -2,6 +2,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import type { NormalizedMessage } from '@codeam/shared';
+import { isLeakedSquadContextText } from '../acp/squad-context';
+import { isAgentMetaBlock } from '../acp/agent-meta-blocks';
 
 /**
  * Codex stores rich session transcripts as JSONL "rollouts" under
@@ -129,6 +131,15 @@ function messageFromPayload(payload: unknown): MessageVariant | null {
  * compacted-context references as SYNTHETIC turns in the rollout. They aren't
  * user-facing conversation, so the mirror / feed must skip them — otherwise the
  * first thing the phone shows is a wall of permissions text and `<ccr:…>` blobs.
+ *
+ * Two more synthetic classes were added for the fleet-1 2026-08-13 incident:
+ *  - `isLeakedSquadContextText` — our `codeam://squad-context` resource block,
+ *    downgraded to plain text by the third-party `codex-acp` npm bridge (see
+ *    that function's doc comment for the full mechanism).
+ *  - `isAgentMetaBlock` — Codex's OWN injected config blocks (e.g.
+ *    `<recommended_plugins>`), never something the user typed.
+ * Both are exact, whole-message anchors — never fuzzy — so real user text
+ * that merely mentions either topic mid-sentence is untouched.
  */
 function isSyntheticCodexTurn(role: string | undefined, text: string): boolean {
   if (role === 'developer' || role === 'system') return true;
@@ -138,6 +149,8 @@ function isSyntheticCodexTurn(role: string | undefined, text: string): boolean {
   if (trimmed.startsWith('<turn_aborted>')) return true;
   // A turn that is ONLY compacted-context reference tokens (`<<ccr:…>>`).
   if (/^(<<ccr:[^>]*>>\s*)+$/.test(trimmed)) return true;
+  if (isLeakedSquadContextText(trimmed)) return true;
+  if (isAgentMetaBlock(trimmed)) return true;
   return false;
 }
 

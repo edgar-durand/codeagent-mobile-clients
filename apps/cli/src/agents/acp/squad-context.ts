@@ -54,6 +54,31 @@ export function isSquadContextBlock(block: PromptBlock): boolean {
 }
 
 /**
+ * True when hydrated text is (or begins with) the literal `codeam://squad-context`
+ * URI — evidence a third-party ACP↔native bridge downgraded our `resource`
+ * content block to plain text before the agent recorded its own transcript,
+ * and that downgraded text leaked into a hydrated conversation (the fleet-1
+ * 2026-08-13 codex incident: the web dashboard showed the session TITLE as
+ * `codeam://squad-context <context r...` and a bubble attributed to the user
+ * containing the raw resource payload).
+ *
+ * `codex-acp` (the third-party npm ACP adapter Codex launches through, see
+ * `agents/acp/adapters.ts`) doesn't understand our `resource` content block
+ * and serializes it to a plain `input_text`/`output_text` item that STARTS
+ * with the resource's own `uri` before Codex ever sees it — so by the time
+ * it lands in the rollout it is indistinguishable, at the text level, from a
+ * user turn. `stripSquadContext` cannot help here: it strips embedded marker
+ * BLOCKS, but a bridge-downgraded resource carries our uri as a literal
+ * prefix, not one of the marker literals.
+ *
+ * Anchored on our own custom URI scheme, which real user text would never
+ * legitimately start with — conservative, whole-message, never fuzzy.
+ */
+export function isLeakedSquadContextText(text: string): boolean {
+  return text.trim().startsWith(SQUAD_CONTEXT_URI);
+}
+
+/**
  * True when an adapter rejected a prompt because it could not accept the
  * shape we sent — the ONE condition that earns a text-block retry.
  *

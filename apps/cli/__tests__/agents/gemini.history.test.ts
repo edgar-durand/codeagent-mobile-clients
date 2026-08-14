@@ -58,7 +58,10 @@ afterEach(() => {
 function makeGeminiRoot(cwd: string, projectName: string, sessionId: string): string {
   const root = mkdtempSync(path.join(tmpdir(), 'gemini-'));
   cleanups.push(root);
-  writeFileSync(path.join(root, 'projects.json'), JSON.stringify({ projects: { [cwd]: projectName } }));
+  writeFileSync(
+    path.join(root, 'projects.json'),
+    JSON.stringify({ projects: { [cwd]: projectName } }),
+  );
   const chats = path.join(root, 'tmp', projectName, 'chats');
   mkdirSync(chats, { recursive: true });
   const file = path.join(chats, `session-2026-06-06T02-37-${sessionId.slice(0, 8)}.jsonl`);
@@ -93,6 +96,36 @@ describe('gemini/history', () => {
 
   it('parseHistoryFile returns [] for a missing file (no throw)', () => {
     expect(parseHistoryFile('/no/such/session.jsonl')).toEqual([]);
+  });
+
+  // Same resource-content leak class as the fleet-1 2026-08-13 codex incident
+  // (see `codex.history.test.ts`): gemini is ACP-native (no third-party bridge),
+  // and `extractGeminiText`'s `fromParts` only reads a part's `.text` — an ACP
+  // `resource` block's payload lives under `.resource.text`, so it structurally
+  // can never surface here. Asserted, not assumed.
+  it('never surfaces a non-text (resource-shaped) content part as message text', () => {
+    const root = mkdtempSync(path.join(tmpdir(), 'gemini-'));
+    cleanups.push(root);
+    const chats = path.join(root, 'tmp', 'proj-alias', 'chats');
+    mkdirSync(chats, { recursive: true });
+    const file = path.join(chats, 'session-resource.jsonl');
+    writeFileSync(
+      file,
+      [
+        JSON.stringify({
+          id: 'r1',
+          timestamp: '2026-08-13T09:00:00.000Z',
+          type: 'user',
+          content: [
+            {
+              type: 'resource',
+              resource: { uri: 'codeam://squad-context', text: 'leaked context' },
+            },
+          ],
+        }),
+      ].join('\n'),
+    );
+    expect(parseHistoryFile(file)).toEqual([]);
   });
 
   it('resolveHistoryFile falls back to the newest chats file when the id matches nothing', () => {
