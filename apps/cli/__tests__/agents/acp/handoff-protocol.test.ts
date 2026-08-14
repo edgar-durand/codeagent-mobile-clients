@@ -13,9 +13,11 @@ vi.mock('../../../src/services/logger', () => ({
 import {
   extractHandoffProposal,
   handoffFenceStart,
+  handoffFenceStartMasked,
   stripHandoffFences,
 } from '../../../src/agents/acp/handoff-protocol';
 import { log } from '../../../src/services/logger';
+import { HANDOFF_FENCE_TAG } from '@codeam/shared';
 
 const TARGETS = new Set(['codex', 'gemini']);
 
@@ -272,6 +274,93 @@ describe('handoffFenceStart', () => {
     const text = 'Reply so far...\n\n```codeam-handoff\n{"to": ';
     const idx = handoffFenceStart(text);
     expect(idx).toBe(text.indexOf('```codeam-handoff'));
+    expect(idx).toBeGreaterThan(-1);
+  });
+});
+
+// ─── handoffFenceStartMasked ─────────────────────────────────────────────────
+
+describe('handoffFenceStartMasked', () => {
+  it('returns -1 when there is no fence', () => {
+    expect(handoffFenceStartMasked('nothing to see here')).toBe(-1);
+  });
+
+  it('detects a fully-formed real fence (no outer quoting) at the same index as handoffFenceStart', () => {
+    const text = 'Reply.\n\n```codeam-handoff\n{"to":"codex"}\n```\n';
+    const idx = handoffFenceStartMasked(text);
+    expect(idx).toBe(text.indexOf('```codeam-handoff'));
+    expect(idx).toBeGreaterThan(-1);
+  });
+
+  it('detects a partial fence opening before the body/close exist (still real, no outer quoting)', () => {
+    const text = 'Reply so far...\n\n```codeam-handoff\n{"to": ';
+    const idx = handoffFenceStartMasked(text);
+    expect(idx).toBe(text.indexOf('```codeam-handoff'));
+    expect(idx).toBeGreaterThan(-1);
+  });
+
+  it('a codeam-handoff fence quoted inside a closed 4+-backtick example → -1 (example only)', () => {
+    const text = [
+      "Here's how the handoff protocol works, for reference:",
+      '',
+      '````',
+      'To hand off, end your reply with:',
+      '```' + HANDOFF_FENCE_TAG,
+      '{"to":"codex","reason":"example only","prompt":"do not run this"}',
+      '```',
+      '````',
+      '',
+    ].join('\n');
+    expect(handoffFenceStartMasked(text)).toBe(-1);
+  });
+
+  it('a real top-level fence AFTER a quoted example: returns the REAL fence raw index, not the quoted one', () => {
+    const text = [
+      "Here's how the handoff protocol works, for reference:",
+      '',
+      '````',
+      'To hand off, end your reply with:',
+      '```' + HANDOFF_FENCE_TAG,
+      '{"to":"codex","reason":"example only","prompt":"do not run this"}',
+      '```',
+      '````',
+      '',
+      'Given that, I am handing off now.',
+      '',
+      '```' + HANDOFF_FENCE_TAG,
+      '{"to":"gemini","reason":"real handoff","prompt":"do the real thing"}',
+      '```',
+      '',
+    ].join('\n');
+    const idx = handoffFenceStartMasked(text);
+    // The UNMASKED (buggy) index would be the QUOTED fence, inside the
+    // example — the masked-aware index must be the LAST (real, unquoted)
+    // occurrence instead.
+    const unmaskedIdx = handoffFenceStart(text);
+    const lastRealIdx = text.lastIndexOf('```' + HANDOFF_FENCE_TAG);
+    expect(idx).toBe(lastRealIdx);
+    expect(idx).not.toBe(unmaskedIdx);
+    expect(idx).toBeGreaterThan(-1);
+  });
+
+  it('a partial (still-streaming) real fence after a fully-quoted example is still detected', () => {
+    const text = [
+      "Here's how the handoff protocol works, for reference:",
+      '',
+      '````',
+      'To hand off, end your reply with:',
+      '```' + HANDOFF_FENCE_TAG,
+      '{"to":"codex","reason":"example only","prompt":"do not run this"}',
+      '```',
+      '````',
+      '',
+      'Given that, I am handing off now.',
+      '',
+      '```' + HANDOFF_FENCE_TAG,
+      '{"to": ',
+    ].join('\n');
+    const idx = handoffFenceStartMasked(text);
+    expect(idx).toBe(text.lastIndexOf('```' + HANDOFF_FENCE_TAG));
     expect(idx).toBeGreaterThan(-1);
   });
 });

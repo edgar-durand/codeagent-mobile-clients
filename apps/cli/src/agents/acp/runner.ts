@@ -65,12 +65,9 @@ import type { PromptBlock } from './buildAcpPromptBlocks';
 import { createBudgetRecovery, type BudgetRecovery } from './budgetRecovery';
 import { createWakeCredentialProbe, localCredentialExpiryStatus } from './wakeCredentialProbe';
 import { reconcileCumulative } from './reconcileDelta';
-import { handoffFenceStart, stripHandoffFences } from './handoff-protocol';
+import { handoffFenceStartMasked, stripHandoffFences } from './handoff-protocol';
 import { maybeSendOnboardingWelcome } from './onboarding';
-import {
-  registerTerminalHandlers,
-  closeAllTerminals,
-} from '../../services/terminal-ops.service';
+import { registerTerminalHandlers, closeAllTerminals } from '../../services/terminal-ops.service';
 import { mapSessionUpdate, mapPermissionRequest } from './mappers';
 import { internalPathPermissionOutcome } from './internal-paths';
 import { guardrailDecision } from './guardrails';
@@ -360,7 +357,9 @@ export class StreamingState {
    *   - 'none' — nothing pending; the runner acks the command as
    *     failed so mobile shows a stale-question affordance.
    */
-  resolveSelection(index: number): { kind: 'resolved' } | { kind: 'reprompt'; text: string } | { kind: 'none' } {
+  resolveSelection(
+    index: number,
+  ): { kind: 'resolved' } | { kind: 'reprompt'; text: string } | { kind: 'none' } {
     if (!this.pending) return { kind: 'none' };
     if (this.pending.kind === 'permission') {
       const label = this.pending.labels[index];
@@ -520,6 +519,10 @@ export class StreamingState {
     // the FULL cumulative text, or -1 if none has arrived yet; both live
     // publish paths below truncate to it. Internal buffers (`this.text`,
     // `streamingChunks`) stay untouched — this is presentation-only.
+    // Masked-aware (`handoffFenceStartMasked`): an agent quoting the
+    // protocol as a worked example inside a closed 4+-backtick block must
+    // stream through untruncated — an unmasked cut would match the quoted
+    // fence-open marker and truncate the live view for the rest of the turn.
     let fenceCut = -1;
 
     // 1) Chat pipe (legacy `/api/commands/output`) — text only. The
@@ -528,7 +531,7 @@ export class StreamingState {
     //    a snapshot re-send can never concatenate the reply with itself.
     if (delta.kind === 'text') {
       this.recomputeText();
-      fenceCut = handoffFenceStart(this.text);
+      fenceCut = handoffFenceStartMasked(this.text);
       const visibleText = fenceCut === -1 ? this.text : this.text.slice(0, fenceCut).trimEnd();
       void this.publisher.publishOutput({ type: 'text', content: visibleText, done: false });
     }
@@ -590,11 +593,12 @@ export class StreamingState {
    * {@link getCurrentText} keeps returning the RAW text so the turn-close
    * extraction can parse the proposal out of it.
    *
-   * Masked-aware (`stripHandoffFences`), unlike the live-stream `append()`
-   * cut (`handoffFenceStart`, unmasked): a TERMINAL frame is the one that
+   * Masked-aware (`stripHandoffFences`), same as the live-stream `append()`
+   * cut (`handoffFenceStartMasked`): a TERMINAL frame is the one that
    * PERSISTS, so cutting on a fence quoted as an example inside a
-   * 4+-backtick block here would permanently truncate the bubble. The live
-   * cut stays unmasked/cheap — a mid-stream example is never terminal.
+   * 4+-backtick block here would permanently truncate the bubble — and an
+   * unmasked live cut would truncate the LIVE view for the rest of the turn
+   * the moment the quoted example's fence-open marker streams in.
    */
   private visible(text: string): string {
     return stripHandoffFences(text);
@@ -830,7 +834,11 @@ export class AcpHistory {
        * one (which the SET-replace backend would otherwise clobber each turn).
        * Absent / returns null → fall back to pushing only the current session.
        */
-      listSessions?: () => Promise<Array<{ id: string; summary: string; timestamp: number }> | null>;
+      listSessions?: () => Promise<Array<{
+        id: string;
+        summary: string;
+        timestamp: number;
+      }> | null>;
     },
   ) {}
 
@@ -1127,7 +1135,8 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
     mcpServers: opts.mcpServers,
     onSessionUpdate: (notification) => {
       updateCount += 1;
-      const variant = (notification.update as { sessionUpdate?: string })?.sessionUpdate ?? 'unknown';
+      const variant =
+        (notification.update as { sessionUpdate?: string })?.sessionUpdate ?? 'unknown';
       const deltas = mapSessionUpdate(notification);
       // Info-level so it appears with CODEAM_DEBUG=1 (the canonical
       // smoke-test invocation) without needing trace. Includes a
@@ -1135,12 +1144,12 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
       // notification but my mapper ignored it" apart from "SDK
       // never delivered anything" — those are different bugs.
       // Preview first 120 chars of each delta (text + dropped
-       // kinds) so we can spot "agent emitted something but we
-       // dropped it silently" bugs in smoke tests without raw stdio
-       // tracing. Tool-use info is especially load-bearing — if
-       // Gemini ever asks the user something via a custom tool call
-       // instead of session/request_permission, we'd miss the
-       // interactive prompt without this breadcrumb.
+      // kinds) so we can spot "agent emitted something but we
+      // dropped it silently" bugs in smoke tests without raw stdio
+      // tracing. Tool-use info is especially load-bearing — if
+      // Gemini ever asks the user something via a custom tool call
+      // instead of session/request_permission, we'd miss the
+      // interactive prompt without this breadcrumb.
       const previews = deltas
         .map((d) => `${d.kind}:"${d.delta.slice(0, 120).replace(/\n/g, '\\n')}"`)
         .join(' | ');
@@ -1589,7 +1598,12 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
         publisher,
         recentStderr,
         budgetRecovery,
-        { get: () => _budgetReachedPosted, set: (v: boolean) => { _budgetReachedPosted = v; } },
+        {
+          get: () => _budgetReachedPosted,
+          set: (v: boolean) => {
+            _budgetReachedPosted = v;
+          },
+        },
         // resume_session re-points the runner's active conversation: the
         // relay callback reads `acpSessionId` per command, so every FUTURE
         // get_conversation / upload / one-shot serves the RESUMED id — not
