@@ -36,6 +36,7 @@ import { configureSkill, type SkillsConfigureAction } from '../../skills/configu
 import { packStartH, packActionH, packStatusH } from '../../packs/handlers';
 import { persistIntegrationsManifest, readIntegrationsManifest } from '../../integrations/manifest';
 import { buildMcpServersForStart } from '../../integrations/provision';
+import { mergeWithLocalMcpServers } from '../../services/local-mcp-servers';
 import { detectRepoStack } from '../../integrations/detect-stack';
 import {
   SQUAD_CONFIGURE_COMMAND,
@@ -1816,12 +1817,18 @@ async function integrationsSyncH(ctx: AcpCommandContext): Promise<void> {
     const previousIds = new Set((readIntegrationsManifest()?.integrations ?? []).map((e) => e.id));
     persistIntegrationsManifest(manifest);
     await prewarmNewMcpEntries(manifest, previousIds);
-    const servers = buildMcpServersForStart({
-      sessionId: opts.sessionId,
-      pluginId: opts.pluginId,
-      pluginAuthToken: opts.pluginAuthToken,
-      pollSecret: opts.pollSecret,
-    });
+    // Same merge policy as session start (`commands/start.ts`) — the respawn
+    // this triggers rebuilds `mcpServers` from scratch, so box-local servers
+    // (`~/.codeam/mcp-servers.json`) must be re-merged here too, or they'd
+    // silently vanish from a live session the first time integrations sync.
+    const servers = mergeWithLocalMcpServers(
+      buildMcpServersForStart({
+        sessionId: opts.sessionId,
+        pluginId: opts.pluginId,
+        pluginAuthToken: opts.pluginAuthToken,
+        pollSecret: opts.pollSecret,
+      }),
+    );
     const applied = await client.reprovisionMcp(servers);
     await relay.sendResult(cmd.id, 'completed', {
       synced: true,

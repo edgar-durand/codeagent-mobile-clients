@@ -42,6 +42,7 @@ import { startClaudeCredentialSync } from '../agents/claude/credential-sync';
 import { ensureBeadsWorkflowHint } from '../beads/workflow-hint';
 import { ensureAgentStandard } from '../agents/agent-standard';
 import { buildMcpServersForStart } from '../integrations/provision';
+import { mergeWithLocalMcpServers } from '../services/local-mcp-servers';
 import { provisionSkillsForStart } from '../skills/provision';
 import type { StartedBeads } from '../beads';
 import { isLocalSession, runtimeSupportsBaton } from '../baton/gate';
@@ -280,12 +281,19 @@ export async function start(
   // fetch — the `codeam mcp-run` shim brokers that lazily at its own spawn),
   // so unlike beads/deps it needs no gate; threaded into BOTH the plain ACP
   // path and the baton's mobile driver below.
-  const mcpServers = buildMcpServersForStart({
-    sessionId: session.id,
-    pluginId,
-    pluginAuthToken: session.pluginAuthToken ?? undefined,
-    pollSecret: session.pollSecret,
-  });
+  // Box-local custom MCP servers (`~/.codeam/mcp-servers.json`) — a
+  // self-hosted box owner's own MCP config, merged in AFTER the integration
+  // servers (integration wins on a name collision) so it always reaches the
+  // agent even though `session/new` passes `mcpServers` explicitly and would
+  // otherwise override whatever the agent's own native MCP config declares.
+  const mcpServers = mergeWithLocalMcpServers(
+    buildMcpServersForStart({
+      sessionId: session.id,
+      pluginId,
+      pluginAuthToken: session.pluginAuthToken ?? undefined,
+      pollSecret: session.pollSecret,
+    }),
+  );
 
   // Agent Skills — materialize any curated SKILL.md the deploy attached
   // (~/.codeam/skills.json) under $HOME before the agent spawns. Claude
