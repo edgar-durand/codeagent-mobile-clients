@@ -1524,6 +1524,16 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
     pluginAuthToken: opts.pluginAuthToken,
     agentId: opts.agent,
   });
+  // Prime the pre-session baseline so turn 1's end-of-turn flush is a REAL
+  // flush (else turn 1's edits are swallowed as pre-existing dirt). The
+  // aggregator's FIRST-ever `flushTurn()` call captures whatever the
+  // worktree looks like at that moment as the baseline and returns without
+  // recording any paths — nothing in production called `flushTurn()` before
+  // turn 1's own end-of-turn flush, so turn 1's own edits WERE that first
+  // (baseline) call, and its journal entry always read empty. Fire-and-forget
+  // — this must not delay session start; it only needs to land before turn 1
+  // ENDS, which takes at least seconds.
+  void turnFiles.flushTurn().catch(() => {});
   // Debounced repo-dirty → flushTurn hook. In legacy PTY mode every
   // user-visible turn ended with `flushTurn()` and that was the
   // only way hunks landed. ACP sessions edit files via tool calls

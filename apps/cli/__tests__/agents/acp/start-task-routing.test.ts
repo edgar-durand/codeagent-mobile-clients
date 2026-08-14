@@ -648,6 +648,16 @@ describe('start_task — squad journal', () => {
   // CURRENT turn's paths rather than a stale one. This wires a REAL
   // `TurnFileAggregator` (only its git subprocess + network POST are
   // stubbed) through the real `dispatchAcpCommand` → `startTaskH` path.
+  //
+  // `TurnFileAggregator`'s FIRST-EVER `flushTurn()` call is always the
+  // pre-pair baseline capture — it stashes the worktree's current dirty
+  // state and returns WITHOUT recording any paths (see
+  // `turn-file-aggregator.ts`). `runAcpSession` (`runner.ts`) primes that
+  // baseline once, right after constructing the aggregator, specifically so
+  // TURN 1's own end-of-turn flush is a REAL (non-baseline) flush. The
+  // manual `await turnFiles.flushTurn()` below stands in for that
+  // production priming call — a harness that mirrors runner startup, per
+  // the fix's own comment in `runAcpSession`.
   describe('with a REAL TurnFileAggregator (not a stubbed peek)', () => {
     let outboxDir: string;
 
@@ -660,7 +670,19 @@ describe('start_task — squad journal', () => {
       fs.rmSync(outboxDir, { recursive: true, force: true });
     });
 
-    it("captures THIS turn's touched files via the real flushTurn → peekTurnPaths call order", async () => {
+    function mkAggregator(): TurnFileAggregator {
+      return new TurnFileAggregator({
+        workingDir: '/repos',
+        sessionId: 's1',
+        pluginId: 'p1',
+        pluginAuthToken: 'tok',
+        apiBaseUrl: 'https://api.example.test',
+        outboxDir,
+        outboxAutoSchedule: false,
+      });
+    }
+
+    it('TURN 1 captures its own touched files when the session-start baseline is primed (the fix)', async () => {
       vi.spyOn(gitChangeset, 'discoverRepos').mockResolvedValue([
         { repoRoot: '/repos/a', repoPath: '', repoName: 'demo' },
       ]);
@@ -676,21 +698,50 @@ describe('start_task — squad journal', () => {
           repoPath: '',
           repoName: 'demo',
         },
-      ]); // this turn's real edit
+      ]); // turn 1's real edit
 
-      const turnFiles = new TurnFileAggregator({
-        workingDir: '/repos',
-        sessionId: 's1',
-        pluginId: 'p1',
-        pluginAuthToken: 'tok',
-        apiBaseUrl: 'https://api.example.test',
-        outboxDir,
-        outboxAutoSchedule: false,
-      });
-      // Drain the baseline-capturing flush that a real session would have
-      // run before the first agent turn — mirrors production, where the
-      // aggregator is constructed at session start, well before any turn.
+      const turnFiles = mkAggregator();
+      // Mirrors the `void turnFiles.flushTurn().catch(() => {})` priming
+      // call `runAcpSession` now fires right after constructing the
+      // aggregator (session start) — BEFORE turn 1 ever runs.
       await turnFiles.flushTurn();
+
+      const squad = new SquadState({ sessionId: 's1', homeDir });
+      const { session } = makeCtx({ squad, replyText: 'Refactored the parser.' });
+      session.turnFiles = turnFiles;
+
+      // TURN 1 — the very first start_task this session ever sees.
+      await dispatchAcpCommand(
+        assembleAcpCommandContext(session, startTask({ prompt: 'refactor the parser' })),
+      );
+
+      const [entry] = squad.entriesSince(0);
+      expect(entry?.filesTouched).toEqual(['src/parser.ts']);
+
+      turnFiles.stop();
+    });
+
+    it('regression guard: WITHOUT priming, TURN 1 own flush becomes the baseline and its edits are swallowed', async () => {
+      vi.spyOn(gitChangeset, 'discoverRepos').mockResolvedValue([
+        { repoRoot: '/repos/a', repoPath: '', repoName: 'demo' },
+      ]);
+      // Only ONE collectRepoChangeset call happens: turn 1's own flush IS
+      // the aggregator's first-ever flush, so it becomes the baseline
+      // capture and never reaches the novel-diff / peekTurnPaths update.
+      vi.spyOn(gitChangeset, 'collectRepoChangeset').mockResolvedValueOnce([
+        {
+          filePath: 'src/parser.ts',
+          fileStatus: 'modified',
+          linesAdded: 3,
+          linesRemoved: 1,
+          hunkCount: 1,
+          repoPath: '',
+          repoName: 'demo',
+        },
+      ]);
+
+      const turnFiles = mkAggregator();
+      // No priming call here — this is the pre-fix production shape.
 
       const squad = new SquadState({ sessionId: 's1', homeDir });
       const { session } = makeCtx({ squad, replyText: 'Refactored the parser.' });
@@ -701,7 +752,7 @@ describe('start_task — squad journal', () => {
       );
 
       const [entry] = squad.entriesSince(0);
-      expect(entry?.filesTouched).toEqual(['src/parser.ts']);
+      expect(entry?.filesTouched).toEqual([]);
 
       turnFiles.stop();
     });
