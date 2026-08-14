@@ -642,6 +642,12 @@ function emitHandoffProposal(
   }
   // Budget exhausted (or auto off) → the v1 card flow, untouched.
   const auto = squad.auto.enabled && squad.hopsRemaining() > 0;
+  // Spend the hop BEFORE emitting and before the route attempt, for two
+  // reasons: `hopsRemaining` on the wire is the count left AFTER this hop
+  // (mobile renders it as "<n> hops left"), and charging up-front means a hop
+  // that fails to route still costs budget — a repeatedly-failing target can't
+  // retry its way around the bound.
+  if (auto) squad.consumeHop();
   const record: HandoffProposal = {
     proposalId: proposalIdFor(cmd.id, hop),
     fromAgentId: opts.agent,
@@ -660,15 +666,26 @@ function emitHandoffProposal(
     pendingProposal.current = record;
     return null;
   }
-  squad.consumeHop();
-  squad.countAccepted();
+  // NOT resolved yet — the caller routes first. Reporting `accepted: true` here
+  // would claim a handoff that may still fail to swap, and would inflate the
+  // `accepted` stat for a hop that never ran. See {@link resolveAutoHandoff}.
+  return record;
+}
+
+/**
+ * Confirm a self-accepted handoff — ONLY once its route actually succeeded, so
+ * `handoff_resolved{accepted:true}` and the `accepted` counter always describe
+ * a hop that really ran. A failed route emits nothing: an `auto` proposal is a
+ * passive timeline notice on mobile, never a card left awaiting an answer.
+ */
+function resolveAutoHandoff(ctx: AcpCommandContext, record: HandoffProposal): void {
+  ctx.squad?.countAccepted();
   const resolution: HandoffResolution = {
     proposalId: record.proposalId,
     accepted: true,
     auto: true,
   };
-  void postSquadEvent('handoff_resolved', { ...resolution });
-  return record;
+  void ctx.postSquadEvent?.('handoff_resolved', { ...resolution });
 }
 
 /**
@@ -688,8 +705,14 @@ function emitHandoffProposal(
  */
 async function runCoderabbitMention(ctx: AcpCommandContext, promptText: string): Promise<void> {
   const { cmd, relay, streaming, opts, turnFiles } = ctx;
+  // A BARE `@coderabbit` arrives with an empty prompt (mobile lifts the mention
+  // out of the text). Recording '' would render a blank user bubble AND latch
+  // `AcpHistory.summary` to '' — the RECENT row's label is derived from the
+  // FIRST user prompt and never re-derived, so the session would show a blank
+  // summary forever. Fall back to the mention itself: what the user actually sent.
+  const userText = promptText.length > 0 ? promptText : `@${CODERABBIT_AGENT_ID}`;
   await streaming.beginTurn();
-  ctx.history.appendUserPrompt(promptText);
+  ctx.history.appendUserPrompt(userText);
   log.info('acpRunner', `squad: coderabbit one-shot review id=${cmd.id.slice(0, 8)}`);
 
   const review = await runCoderabbitMentionReview({
@@ -723,7 +746,7 @@ async function runCoderabbitMention(ctx: AcpCommandContext, promptText: string):
   await turnFiles.flushTurn().catch((err) => {
     log.warn('acpRunner', `turnFiles.flushTurn failed: ${describeError(err)}`);
   });
-  recordCoderabbitTurn(ctx, promptText, output);
+  recordCoderabbitTurn(ctx, userText, output);
   await relay.sendResult(cmd.id, 'completed', { agentId: CODERABBIT_AGENT_ID });
 }
 
@@ -772,6 +795,9 @@ async function startTaskH(ctx: AcpCommandContext): Promise<void> {
   }
   const blocks = buildAcpPromptBlocks(payload ?? {});
   if (blocks.length === 0) {
+    // `resolvePendingProposal` already ran, so an empty/malformed task still
+    // DECLINES and clears any open proposal — intentional: the user acted, so
+    // the proposal is stale and must not outlive the turn that followed it.
     log.warn('acpRunner', 'start_task with empty prompt + no attachments; ignoring');
     await relay.sendResult(cmd.id, 'failed', { error: 'empty prompt' });
     return;
@@ -983,6 +1009,7 @@ async function startTaskH(ctx: AcpCommandContext): Promise<void> {
         if (autoHop) {
           const routed = await routeSquadTask(ctx, autoHop.toAgentId);
           if (routed.ok) {
+            resolveAutoHandoff(ctx, autoHop);
             hop += 1;
             turnPrompt = autoHop.prompt;
             // The routed agent may be new to this session — collect ITS squad
@@ -1237,6 +1264,9 @@ async function groupMentionTaskH(ctx: AcpCommandContext): Promise<void> {
     });
     return;
   }
+  // User-initiated (a teammate @-mentioned the agent in a Team Space), so it
+  // re-arms the autonomous-handoff chain exactly like a start_task prompt does.
+  ctx.squad?.resetHops();
   await streaming.beginTurn();
   history.appendUserPrompt(promptText);
   let response = '';

@@ -18,6 +18,7 @@ import {
 } from '../../../src/agents/acp/command-handlers';
 import { SquadState } from '../../../src/agents/acp/squad-roster';
 import { makeConfig } from '../../../src/config';
+import * as pairing from '../../../src/services/pairing.service';
 import type { RemoteCommand, SquadRosterData } from '@codeam/shared';
 
 let homeDir: string;
@@ -283,13 +284,14 @@ describe('autonomous handoffs', () => {
       'handoff_proposed',
       'handoff_resolved',
     ]);
+    // hopsRemaining is what's left AFTER this hop (budget 2 → 1 then 0).
     expect(events[0]).toEqual([
       'handoff_proposed',
       expect.objectContaining({
         proposalId: 'hp-cmd-1',
         toAgentId: 'codex',
         auto: true,
-        hopsRemaining: 2,
+        hopsRemaining: 1,
       }),
     ]);
     expect(events[1]).toEqual([
@@ -301,7 +303,7 @@ describe('autonomous handoffs', () => {
       proposalId: 'hp-cmd-1-h2',
       toAgentId: 'gemini',
       auto: true,
-      hopsRemaining: 1,
+      hopsRemaining: 0,
     });
     expect(squad.hopsRemaining()).toBe(0);
   });
@@ -328,6 +330,26 @@ describe('autonomous handoffs', () => {
       proposalId: 'hp-cmd-1-h2',
       toAgentId: 'gemini',
     });
+  });
+
+  it('a Team Space group mention ALSO resets the budget (it is user-initiated)', async () => {
+    const squad = new SquadState({ sessionId: 's1', homeDir });
+    squad.setAuto({ enabled: true, hopBudget: 2 });
+    squad.consumeHop();
+    squad.consumeHop();
+    expect(squad.hopsRemaining()).toBe(0);
+
+    // The handler round-trips the reply into the originating group; keep the
+    // test hermetic (it's best-effort in production, so a stub is faithful).
+    vi.spyOn(pairing, '_postJsonAuthed').mockResolvedValue({});
+    const { session } = makeCtx({ squad, replies: ['All done.'] });
+    await dispatchAcpCommand(
+      assembleAcpCommandContext(
+        session,
+        cmd('group_mention_task', { taskId: 't1', prompt: 'take a look' }, 'cmd-g'),
+      ),
+    );
+    expect(squad.hopsRemaining()).toBe(2);
   });
 
   it('a USER prompt RESETS the budget (and interrupts the chain)', async () => {
@@ -381,7 +403,7 @@ describe('autonomous handoffs', () => {
   it('a failed auto route ends the chain honestly — the delivered reply still acks', async () => {
     const squad = new SquadState({ sessionId: 's1', homeDir });
     squad.setAuto({ enabled: true, hopBudget: 3 });
-    const { session, prompts, relay } = makeCtx({
+    const { session, prompts, relay, events } = makeCtx({
       squad,
       replies: [fence('codex')],
       routeResults: [{ ok: false, agentId: 'codex', error: 'expired credential' }],
@@ -393,6 +415,24 @@ describe('autonomous handoffs', () => {
     expect(relay.sendResult).toHaveBeenCalledWith('cmd-1', 'completed', {
       stopReason: 'end_turn',
     });
+    // The hop was PROPOSED but never ran: no `accepted` resolution, and the
+    // stats must not count it as accepted.
+    expect(events.map(([t]) => t)).toEqual(['handoff_proposed']);
+    expect(squad.stats().handoffs).toEqual({ proposed: 1, accepted: 0, auto: 1 });
+  });
+
+  it('charges the hop even when its route fails, so a bad target cannot retry past the bound', async () => {
+    const squad = new SquadState({ sessionId: 's1', homeDir });
+    squad.setAuto({ enabled: true, hopBudget: 1 });
+    const { session } = makeCtx({
+      squad,
+      replies: [fence('codex')],
+      routeResults: [{ ok: false, agentId: 'codex', error: 'expired credential' }],
+    });
+    await dispatchAcpCommand(
+      assembleAcpCommandContext(session, cmd('start_task', { prompt: 'ship it' })),
+    );
+    expect(squad.hopsRemaining()).toBe(0);
   });
 
   it('journals every turn of the chain under the agent that ran it', async () => {

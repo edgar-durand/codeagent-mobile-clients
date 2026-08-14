@@ -19,6 +19,7 @@ import {
   buildDeltaBriefing,
   buildTeamPreamble,
   BRIEFING_FOOTER,
+  TEAM_PREAMBLE_LINES,
 } from '../../../src/agents/acp/squad-roster';
 import type { SquadRosterData } from '@codeam/shared';
 
@@ -141,6 +142,17 @@ describe('stripSquadContext', () => {
   it('strips MULTIPLE occurrences of the same marker', () => {
     const joined = `${HANDOFF}\nfirst\n${HANDOFF}\nsecond`;
     expect(stripSquadContext(joined)).toBe('first\nsecond');
+  });
+
+  it('leaves a user message that merely STARTS with "[Team context]" byte-identical', () => {
+    // The preamble has no terminator line, so its two exact header literals ARE
+    // the gate. Without it, this whole message would be deleted.
+    const userText = '[Team context] here is what I want you to know about our team setup';
+    expect(stripSquadContext(userText)).toBe(userText);
+
+    // Right marker, right FIRST line, wrong second line → still the user's words.
+    const nearMiss = [TEAM_PREAMBLE_LINES[0], 'and here is my actual question'].join('\n');
+    expect(stripSquadContext(nearMiss)).toBe(nearMiss);
   });
 
   it('leaves a marker with NO terminator untouched (never eat the user words)', () => {

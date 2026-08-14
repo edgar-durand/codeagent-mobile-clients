@@ -40,7 +40,12 @@ export interface HandoffProposal {
    * for `auto: true`, never the accept card. Absent = the v1 card flow.
    */
   auto?: boolean;
-  /** Hops still available in the current chain when this fired (`auto` only). */
+  /**
+   * Hops left in the chain AFTER this one (`auto` only) — the hop is already
+   * spent when this is emitted, so `0` means "this is the last auto hop; any
+   * further proposal falls back to the card". Mobile renders it verbatim as
+   * "<n> hops left".
+   */
   hopsRemaining?: number;
 }
 

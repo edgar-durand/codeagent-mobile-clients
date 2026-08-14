@@ -83,17 +83,26 @@ function skipWhile(
 }
 
 /**
- * Index just past a `[Team context]` block starting at `start`, or `start`
- * itself when the block doesn't continue (nothing to strip beyond the header).
+ * Index just past a `[Team context]` block starting at `start`, or `-1` when
+ * the lines at `start` are not a real preamble.
  *
- * The preamble has exactly two kinds of continuation line: a teammate bullet
- * and one of the fixed literals in {@link TEAM_PREAMBLE_LINES}. The first line
- * that is neither ends the block — that's the user's own text.
+ * The preamble has NO terminator line, so its two fixed opening literals ARE
+ * the gate — mirroring how the other two markers gate on their terminator.
+ * ⚠️ A `startsWith('[Team context]')` test is NOT enough: a user message that
+ * merely BEGINS with that text would be deleted wholesale. Both header lines
+ * must match {@link TEAM_PREAMBLE_LINES} exactly; anything else is the user's
+ * own words and is left byte-identical.
+ *
+ * Past the header the block has exactly two kinds of continuation line — a
+ * teammate bullet and one of the fixed protocol literals — so the first line
+ * that is neither ends it.
  */
 function endOfTeamPreamble(lines: readonly string[], start: number): number {
+  if (lines[start] !== TEAM_PREAMBLE_LINES[0]) return -1;
+  if (lines[start + 1] !== TEAM_PREAMBLE_LINES[1]) return -1;
   return skipWhile(
     lines,
-    start + 1,
+    start + 2,
     (line) => TEAM_PREAMBLE_BULLET_RE.test(line) || TEAM_PREAMBLE_LINES.includes(line),
   );
 }
@@ -120,11 +129,15 @@ function endOfTerminatedBlock(lines: readonly string[], start: number, terminato
  * emits (see `squad-roster.ts` / `switch-agent.ts`):
  *  - `[Session handoff] … --- End of handoff context ---`
  *  - `[Team update] … Continue from the CURRENT state of the working tree.`
- *  - `[Team context] …` (header + teammate bullets + optional protocol lines)
+ *  - `[Team context] …` (both exact header lines + teammate bullets + optional
+ *    protocol lines)
  *
  * Markers can appear at the start, mid-message (the blocks were joined with
  * the user's text by the agent's own transcript writer), and more than once.
- * With NO marker present the input is returned byte-identical.
+ * Every marker is GATED — on its terminator line, or (the preamble, which has
+ * none) on its exact header pair. A marker whose gate doesn't match is the
+ * user's own words: the input is then returned byte-identical, as it is when
+ * no marker appears at all.
  */
 export function stripSquadContext(text: string): string {
   if (
@@ -155,9 +168,12 @@ export function stripSquadContext(text: string): string {
         continue;
       }
     } else if (line.startsWith(TEAM_PREAMBLE_MARKER)) {
-      i = endOfTeamPreamble(lines, i);
-      stripped = true;
-      continue;
+      const end = endOfTeamPreamble(lines, i);
+      if (end !== -1) {
+        i = end;
+        stripped = true;
+        continue;
+      }
     }
     kept.push(line);
     i++;

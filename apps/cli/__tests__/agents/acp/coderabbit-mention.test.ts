@@ -25,6 +25,8 @@ import {
 } from '../../../src/agents/acp/coderabbit-mention';
 import { resolveSwitchTarget } from '../../../src/agents/acp/switch-agent';
 import { SquadState } from '../../../src/agents/acp/squad-roster';
+import { AcpHistory } from '../../../src/agents/acp/runner';
+import type { AcpPublisher } from '../../../src/agents/acp/publisher';
 import * as pairing from '../../../src/services/pairing.service';
 import * as coderabbitConfigure from '../../../src/agents/coderabbit/configure';
 import type { RemoteCommand, SquadRosterData } from '@codeam/shared';
@@ -239,6 +241,47 @@ describe('start_task — @coderabbit mention', () => {
     // briefing about it (its lastTurnIndex must NOT advance).
     expect(squad.entriesSince(0)).toMatchObject([{ agentId: 'coderabbit', prompt: '@coderabbit' }]);
     expect(squad.member('claude').lastTurnIndex).toBe(0);
+  });
+
+  it('a BARE mention records the mention itself — never an empty user prompt', async () => {
+    stubReviewer('## Findings');
+    vi.spyOn(pairing, 'fetchProvisionCredential').mockResolvedValue({
+      method: 'oauth',
+      credential: 'blob',
+    });
+    // Mobile lifts `@coderabbit` out of the text, so the prompt arrives EMPTY.
+    const { session, history, squad } = makeCtx();
+    await dispatchAcpCommand(
+      assembleAcpCommandContext(session, startTask({ prompt: '', agentId: 'coderabbit' })),
+    );
+    expect(history.appendUserPrompt).toHaveBeenCalledWith('@coderabbit');
+    expect(squad.entriesSince(0)[0]?.prompt).toBe('@coderabbit');
+  });
+
+  it('a BARE mention leaves the session summary usable (not latched blank)', async () => {
+    stubReviewer('## Findings');
+    vi.spyOn(pairing, 'fetchProvisionCredential').mockResolvedValue({
+      method: 'oauth',
+      credential: 'blob',
+    });
+    // A REAL AcpHistory: `summary` is derived from the FIRST user prompt and
+    // never re-derived, so an empty one would blank the RECENT row forever.
+    const pushSessionList = vi.fn(
+      async (_a: { sessions: Array<{ summary: string }> }) => undefined,
+    );
+    const publisher = {
+      pushSessionList,
+      pushConversation: vi.fn(async () => undefined),
+    } as unknown as AcpPublisher;
+    const { session } = makeCtx();
+    session.history = new AcpHistory(publisher, { agent: 'claude', acpSessionId: 'conv-1' });
+
+    await dispatchAcpCommand(
+      assembleAcpCommandContext(session, startTask({ prompt: '', agentId: 'coderabbit' })),
+    );
+    await session.history.flush();
+    expect(pushSessionList).toHaveBeenCalled();
+    expect(pushSessionList.mock.calls[0][0].sessions[0].summary).toBe('@coderabbit');
   });
 
   it('works even though the roster does NOT list coderabbit', async () => {
