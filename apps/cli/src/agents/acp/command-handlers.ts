@@ -16,7 +16,7 @@
  */
 
 import { log } from '../../services/logger';
-import { _postJsonAuthed } from '../../services/pairing.service';
+import { _postJsonAuthed, fetchProvisionCredential } from '../../services/pairing.service';
 import { resolveApiBaseUrl } from '@codeam/shared';
 import { showInfo } from '../../ui/banner';
 import { createOsStrategy } from '../../os';
@@ -56,6 +56,13 @@ import {
   looksLikeUnsupportedPromptShape,
 } from './squad-context';
 import { extractHandoffProposal } from './handoff-protocol';
+import {
+  CODERABBIT_AGENT_ID,
+  composeReviewOutput,
+  hasCustomInstructions,
+  logMentionOutcome,
+  runCoderabbitMentionReview,
+} from './coderabbit-mention';
 import type { PromptResponse } from '@agentclientprotocol/sdk';
 import { execFile } from 'node:child_process';
 import {
@@ -664,6 +671,77 @@ function emitHandoffProposal(
   return record;
 }
 
+/**
+ * `@coderabbit <ask>` — ONE review turn inside the current session, WITHOUT a
+ * swap.
+ *
+ * CodeRabbit has no ACP adapter and its runtime is a `BatchAgentStrategy`
+ * (`mode: 'batch'`), so it can never be the session's live agent — the swap
+ * machinery every other mention uses simply does not apply (see
+ * `coderabbit-mention.ts`). Instead the existing batch review path runs as a
+ * synthetic turn: the user's message echoes as THEIR words, the review
+ * publishes as one agent turn attributed to `coderabbit` (and journaled under
+ * it), and the resident agent is untouched throughout — nothing to revert,
+ * nothing to wedge.
+ *
+ * FREE: a mention is not a handoff, so no PRO gate applies here.
+ */
+async function runCoderabbitMention(ctx: AcpCommandContext, promptText: string): Promise<void> {
+  const { cmd, relay, streaming, opts, turnFiles } = ctx;
+  await streaming.beginTurn();
+  ctx.history.appendUserPrompt(promptText);
+  log.info('acpRunner', `squad: coderabbit one-shot review id=${cmd.id.slice(0, 8)}`);
+
+  const review = await runCoderabbitMentionReview({
+    fetchCredential: () =>
+      fetchProvisionCredential({
+        agentId: CODERABBIT_AGENT_ID,
+        sessionId: opts.sessionId,
+        pluginId: opts.pluginId,
+        pluginAuthToken: opts.pluginAuthToken,
+      }),
+  });
+  logMentionOutcome(review);
+
+  if (!review.ok) {
+    // Honest failure as the turn's single terminal frame; the session's own
+    // agent never moved, so there is nothing to restore.
+    await streaming.closeWithBubble(review.error);
+    ctx.history.appendAgentReply(review.error, CODERABBIT_AGENT_ID);
+    void ctx.history.flush();
+    await relay.sendResult(cmd.id, 'failed', { error: review.error });
+    return;
+  }
+
+  const output = composeReviewOutput(review.markdown, hasCustomInstructions(promptText));
+  await streaming.closeWithBubble(output);
+  ctx.history.appendAgentReply(output, CODERABBIT_AGENT_ID);
+  void ctx.history.flush();
+  // The reviewer edits nothing, but the flush keeps `peekTurnPaths()` aligned
+  // with the turn boundary for whatever the RESIDENT agent does next — and
+  // gives the journal entry the same shape every other turn has.
+  await turnFiles.flushTurn().catch((err) => {
+    log.warn('acpRunner', `turnFiles.flushTurn failed: ${describeError(err)}`);
+  });
+  recordCoderabbitTurn(ctx, promptText, output);
+  await relay.sendResult(cmd.id, 'completed', { agentId: CODERABBIT_AGENT_ID });
+}
+
+/**
+ * Journal the review under `coderabbit` — NOT under the resident agent (which
+ * never ran this turn), and without advancing any member's `lastTurnIndex`: the
+ * resident agent HASN'T seen the review, so it must still receive it in its
+ * next delta briefing.
+ */
+function recordCoderabbitTurn(ctx: AcpCommandContext, prompt: string, replySummary: string): void {
+  ctx.squad?.recordTurn({
+    agentId: CODERABBIT_AGENT_ID,
+    prompt,
+    replySummary,
+    filesTouched: [],
+  });
+}
+
 async function startTaskH(ctx: AcpCommandContext): Promise<void> {
   // Only the handles a swap can NEVER replace are destructured up front —
   // `relaunchWith` reassigns client / history / jsonlHistory / agentCaps /
@@ -673,12 +751,6 @@ async function startTaskH(ctx: AcpCommandContext): Promise<void> {
   const { cmd, relay, streaming, opts, turnFiles, publisher, recentStderr, budgetReachedFlag } =
     ctx;
   const payload = cmd.payload as StartTaskPayload | undefined;
-  const blocks = buildAcpPromptBlocks(payload ?? {});
-  if (blocks.length === 0) {
-    log.warn('acpRunner', 'start_task with empty prompt + no attachments; ignoring');
-    await relay.sendResult(cmd.id, 'failed', { error: 'empty prompt' });
-    return;
-  }
   // Agent Squad @-mention routing: the task carries the MENTIONED agent's id.
   // Swap onto it BEFORE anything else runs — a failed swap fails the TASK
   // (never silently answers with the agent the user didn't mention). An id
@@ -688,6 +760,22 @@ async function startTaskH(ctx: AcpCommandContext): Promise<void> {
   // proposed agent accepts, anything else declines. Runs before the routing so
   // the resolution reflects what the user actually asked for.
   resolvePendingProposal(ctx, requestedAgentId);
+  // `@coderabbit` is the ONE mention that never swaps — it is a batch reviewer,
+  // not an ACP agent. Intercepted BEFORE the roster/route check (so it works
+  // regardless of whether the backend lists it in the switch-capable roster)
+  // AND before the empty-prompt guard: a BARE `@coderabbit` is the primary way
+  // to use it, and mobile lifts the mention out of the text, so the prompt
+  // legitimately arrives empty. There is nothing to send an agent here.
+  if (requestedAgentId === CODERABBIT_AGENT_ID) {
+    await runCoderabbitMention(ctx, (payload?.prompt ?? '').trim());
+    return;
+  }
+  const blocks = buildAcpPromptBlocks(payload ?? {});
+  if (blocks.length === 0) {
+    log.warn('acpRunner', 'start_task with empty prompt + no attachments; ignoring');
+    await relay.sendResult(cmd.id, 'failed', { error: 'empty prompt' });
+    return;
+  }
   if (requestedAgentId.length > 0 && requestedAgentId !== opts.agent) {
     const routed = await routeSquadTask(ctx, requestedAgentId);
     if (!routed.ok) {

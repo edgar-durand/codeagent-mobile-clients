@@ -900,14 +900,20 @@ export class AcpHistory {
     });
   }
 
-  appendAgentReply(text: string): void {
+  /**
+   * `agentId` overrides the producing agent for a turn this session's RESIDENT
+   * agent did not author — today only the `@coderabbit` one-shot review, which
+   * runs the batch reviewer inside the session without ever swapping. Defaults
+   * to the resident agent.
+   */
+  appendAgentReply(text: string, agentId: AgentId = this.opts.agent): void {
     if (text.length === 0) return;
     this.messages.push({
       id: randomUUID(),
       role: 'agent',
       text,
       timestamp: Date.now(),
-      agentId: this.opts.agent,
+      agentId,
     });
   }
 
