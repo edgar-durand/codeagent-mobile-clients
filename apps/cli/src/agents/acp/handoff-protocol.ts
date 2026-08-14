@@ -1,8 +1,8 @@
 /**
- * `codeam-handoff` fence protocol — extraction/validation of an agent-proposed
+ * `codeam-handoff` fence protocol -- extraction/validation of an agent-proposed
  * handoff embedded at the tail of a reply, plus the partial-fence-start
  * detector the streaming layer uses to truncate live output before the fence
- * body exists (the app renders the proposal as a card — protocol litter must
+ * body exists (the app renders the proposal as a card -- protocol litter must
  * never reach the user).
  *
  * The active agent proposes a handoff by ending its reply with a fenced code
@@ -25,6 +25,33 @@ const PROMPT_MAX = 8000;
 const FENCE_OPEN = '```' + HANDOFF_FENCE_TAG;
 // Non-greedy across the whole text; `g` so we can collect every fence.
 const FENCE_RE = new RegExp('```' + HANDOFF_FENCE_TAG + '\\s*\\n([\\s\\S]*?)\\n?```', 'g');
+
+// A fence opened with 4+ backticks is the agent quoting the protocol itself
+// as a worked example (e.g. explaining how handoffs work) -- any
+// codeam-handoff fence nested inside it must be shown to the user verbatim,
+// never stripped or parsed as a real proposal. The backreference requires
+// the SAME backtick count to close, so this only matches genuine outer
+// fences, never the 3-backtick codeam-handoff fence itself.
+const OUTER_FENCE_RE = /(`{4,})[\s\S]*?\1/g;
+// A plain ASCII placeholder that never appears in real agent output, so it
+// can't collide with surrounding prose and survives the seam-collapse pass
+// untouched (it contains no newlines).
+const outerFencePlaceholder = (i: number): string => `@@HANDOFF_MASK_${i}@@`;
+
+/** Replace every 4+-backtick-fenced span with an opaque placeholder so the
+ * `codeam-handoff` matcher never looks inside a quoted example. Returns the
+ * masked text plus a restorer that puts the original spans back verbatim. */
+function maskOuterFences(text: string): { masked: string; restore: (s: string) => string } {
+  const spans: string[] = [];
+  const masked = text.replace(OUTER_FENCE_RE, (m) => {
+    const token = outerFencePlaceholder(spans.length);
+    spans.push(m);
+    return token;
+  });
+  const restore = (s: string): string =>
+    spans.reduce((acc, span, i) => acc.split(outerFencePlaceholder(i)).join(span), s);
+  return { masked, restore };
+}
 
 function parseProposal(
   raw: string,
@@ -67,15 +94,20 @@ function parseProposal(
 }
 
 /** Find + strip a ```codeam-handoff fence. Validates: parseable single JSON
- * object; to ∈ validTargets; to ≠ currentAgent; reason/prompt non-empty
- * strings (prompt ≤ 8000, reason ≤ 1000). Invalid → proposal:null but the
- * fence is STILL stripped (never show protocol litter to the user). */
+ * object; to is in validTargets; to != currentAgent; reason/prompt non-empty
+ * strings (prompt <= 8000, reason <= 1000). Invalid -> proposal:null but the
+ * fence is STILL stripped (never show protocol litter to the user).
+ *
+ * A codeam-handoff fence nested inside an outer 4+-backtick block (the agent
+ * quoting the protocol as an example) is masked out first -- it is neither
+ * stripped nor parsed, so the user sees the example verbatim. */
 export function extractHandoffProposal(
   text: string,
   currentAgent: string,
   validTargets: ReadonlySet<string>,
 ): ExtractedHandoff {
-  const matches = [...text.matchAll(FENCE_RE)];
+  const { masked, restore } = maskOuterFences(text);
+  const matches = [...masked.matchAll(FENCE_RE)];
   if (matches.length === 0) {
     return { cleanText: text, proposal: null };
   }
@@ -83,10 +115,13 @@ export function extractHandoffProposal(
   const last = matches[matches.length - 1];
   const proposal = parseProposal(last[1].trim(), currentAgent, validTargets);
 
-  // Strip ALL fences, then collapse any blank-line runs left at the seams so
-  // the surrounding text reads cleanly.
-  const stripped = text.replace(FENCE_RE, '');
-  const cleanText = stripped.replace(/\n{3,}/g, '\n\n').trim();
+  // Strip ALL top-level fences (the masked outer-fenced examples are opaque
+  // tokens here, so their nested fences are untouched), collapse any
+  // blank-line runs (LF or CRLF) left at the seams, then restore the
+  // original outer-fenced examples verbatim.
+  const stripped = masked.replace(FENCE_RE, '');
+  const collapsed = stripped.replace(/(?:\r?\n){3,}/g, '\n\n').trim();
+  const cleanText = restore(collapsed);
 
   return { cleanText, proposal };
 }

@@ -153,6 +153,77 @@ describe('extractHandoffProposal — multiple fences', () => {
   });
 });
 
+// ─── extractHandoffProposal — quoted example inside a 4+-backtick block ────
+
+describe('extractHandoffProposal — quoted example inside a 4+-backtick block', () => {
+  it('a codeam-handoff fence nested inside a ````-fenced example is left untouched, no proposal', () => {
+    const text = [
+      "Here's how the handoff protocol works, for reference:",
+      '',
+      '````',
+      'To hand off, end your reply with:',
+      '```codeam-handoff',
+      '{"to":"codex","reason":"example only","prompt":"do not run this"}',
+      '```',
+      '````',
+      '',
+    ].join('\n');
+    const r = extractHandoffProposal(text, 'claude', TARGETS);
+    expect(r.proposal).toBeNull();
+    expect(r.cleanText).toBe(text);
+  });
+
+  it('a real top-level fence AFTER a quoted example: example preserved, real fence stripped + proposal returned', () => {
+    const text = [
+      "Here's how the handoff protocol works, for reference:",
+      '',
+      '````',
+      'To hand off, end your reply with:',
+      '```codeam-handoff',
+      '{"to":"codex","reason":"example only","prompt":"do not run this"}',
+      '```',
+      '````',
+      '',
+      'Given that, I am handing off now.',
+      '',
+      '```codeam-handoff',
+      '{"to":"gemini","reason":"real handoff","prompt":"do the real thing"}',
+      '```',
+      '',
+    ].join('\n');
+    const r = extractHandoffProposal(text, 'claude', TARGETS);
+    expect(r.proposal).toEqual({
+      to: 'gemini',
+      reason: 'real handoff',
+      prompt: 'do the real thing',
+    });
+    // The quoted example survives verbatim, including its nested fence text.
+    expect(r.cleanText).toContain('````');
+    expect(r.cleanText).toContain(
+      '{"to":"codex","reason":"example only","prompt":"do not run this"}',
+    );
+    expect(r.cleanText).toContain('Given that, I am handing off now.');
+    // Only the REAL top-level fence's JSON is gone from the tail.
+    expect(r.cleanText).not.toContain('do the real thing');
+    expect(r.cleanText).not.toMatch(/\n{3,}/);
+  });
+});
+
+// ─── extractHandoffProposal — CRLF ──────────────────────────────────────────
+
+describe('extractHandoffProposal — CRLF', () => {
+  it('collapses a CRLF blank-line run left at the seam to at most one blank line', () => {
+    const text =
+      'Before the fence.\r\n\r\n```codeam-handoff\r\n{"to":"codex","reason":"x","prompt":"y"}\r\n```\r\n\r\nAfter the fence.';
+    const r = extractHandoffProposal(text, 'claude', TARGETS);
+    expect(r.proposal).toEqual({ to: 'codex', reason: 'x', prompt: 'y' });
+    expect(r.cleanText).not.toContain('codeam-handoff');
+    expect(r.cleanText).toContain('Before the fence.');
+    expect(r.cleanText).toContain('After the fence.');
+    expect(r.cleanText).not.toMatch(/(?:\r?\n){3,}/);
+  });
+});
+
 // ─── extractHandoffProposal — no fence ──────────────────────────────────────
 
 describe('extractHandoffProposal — no fence', () => {
