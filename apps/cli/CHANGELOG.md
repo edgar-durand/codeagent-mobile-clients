@@ -4,6 +4,16 @@ All notable changes to `codeam-cli` are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.65.2] — 2026-08-14
+
+### Added
+
+- **cli:** Box-local custom MCP servers (~/.codeam/mcp-servers.json) merged into every ACP session
+
+### Fixed
+
+- **cli:** Dedupe within-file duplicate names in local MCP config (keep first, warn)
+
 ## [2.65.1] — 2026-08-14
 
 ### Added
