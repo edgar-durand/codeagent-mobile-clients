@@ -614,3 +614,162 @@ describe('stripHandoffFences — degenerate/inline form', () => {
     expect(stripHandoffFences(text)).toBe(text);
   });
 });
+
+// ─── extractHandoffProposal — degenerate TRAILING-BLOCK (multi-line) form ──
+// fleet-1 round-2 live bug (v2.65.4): codex used the correct runtime id
+// ("claude") this time, but put the tag ALONE on one line — single backtick,
+// no closing backtick — with the JSON on the NEXT line. Neither the strict
+// 3-backtick fence nor the same-line degenerate matcher caught this: no
+// closing fence, and the trailing line was bare JSON with no tag on it.
+
+describe('extractHandoffProposal — degenerate trailing-BLOCK (multi-line) form', () => {
+  const EXACT_REPRO =
+    '`codeam-handoff\n' +
+    '{"to":"claude","reason":"El usuario quiere continuar esta tarea con Claude Code.","prompt":"Continúa desde el contexto actual."}';
+
+  it('EXACT round-2 repro: single-backtick tag line + JSON on the next line', () => {
+    const text = `Voy a pasar esto a Claude.\n\n${EXACT_REPRO}`;
+    const r = extractHandoffProposal(text, 'codex', new Set(['claude']));
+    expect(r.proposal).toEqual({
+      to: 'claude',
+      reason: 'El usuario quiere continuar esta tarea con Claude Code.',
+      prompt: 'Continúa desde el contexto actual.',
+    });
+    expect(r.cleanText).toBe('Voy a pasar esto a Claude.');
+    expect(r.cleanText).not.toContain('codeam-handoff');
+  });
+
+  it('bare (zero-backtick) tag line + JSON on the next line', () => {
+    const text =
+      'Handing off.\n\ncodeam-handoff\n{"to":"codex","reason":"needs codex","prompt":"go"}';
+    const r = extractHandoffProposal(text, 'claude', new Set(['codex']));
+    expect(r.proposal).toEqual({ to: 'codex', reason: 'needs codex', prompt: 'go' });
+    expect(r.cleanText).toBe('Handing off.');
+  });
+
+  it('pretty-printed multi-line JSON body after the tag line', () => {
+    const text = [
+      'Handing off.',
+      '',
+      '`codeam-handoff',
+      '{',
+      '  "to": "codex",',
+      '  "reason": "needs codex",',
+      '  "prompt": "go"',
+      '}',
+    ].join('\n');
+    const r = extractHandoffProposal(text, 'claude', new Set(['codex']));
+    expect(r.proposal).toEqual({ to: 'codex', reason: 'needs codex', prompt: 'go' });
+    expect(r.cleanText).toBe('Handing off.');
+  });
+
+  it('tag line + JSON + a lone closing-backtick line after it', () => {
+    const text = [
+      'Handing off.',
+      '',
+      '`codeam-handoff',
+      '{"to":"codex","reason":"needs codex","prompt":"go"}',
+      '```',
+    ].join('\n');
+    const r = extractHandoffProposal(text, 'claude', new Set(['codex']));
+    expect(r.proposal).toEqual({ to: 'codex', reason: 'needs codex', prompt: 'go' });
+    expect(r.cleanText).toBe('Handing off.');
+    expect(r.cleanText).not.toContain('`');
+  });
+
+  it('a tag line mid-reply with prose AFTER the JSON block is left byte-identical, no proposal', () => {
+    const text = [
+      'Sure — to hand this off you would write:',
+      '',
+      '`codeam-handoff',
+      '{"to":"codex","reason":"example","prompt":"do the thing"}',
+      '',
+      'but only do that when it fits.',
+    ].join('\n');
+    const r = extractHandoffProposal(text, 'claude', new Set(['codex']));
+    expect(r.proposal).toBeNull();
+    expect(r.cleanText).toBe(text);
+  });
+
+  it('a tag line at the end with INVALID JSON after it leaves the text byte-identical', () => {
+    const text = ['Handing off.', '', '`codeam-handoff', '{not valid json}'].join('\n');
+    const r = extractHandoffProposal(text, 'claude', new Set(['codex']));
+    expect(r.proposal).toBeNull();
+    expect(r.cleanText).toBe(text);
+  });
+
+  it('a tag line at the end with an unresolvable target leaves the text byte-identical', () => {
+    const text = [
+      'Handing off.',
+      '',
+      '`codeam-handoff',
+      '{"to":"not-a-real-agent","reason":"r","prompt":"p"}',
+    ].join('\n');
+    const r = extractHandoffProposal(text, 'claude', new Set(['codex']));
+    expect(r.proposal).toBeNull();
+    expect(r.cleanText).toBe(text);
+  });
+
+  it('a trailing-block mention inside a 4+-backtick worked example is left untouched, no proposal', () => {
+    const text = [
+      "Here's the block form some agents mistakenly use:",
+      '',
+      '````',
+      '`codeam-handoff',
+      '{"to":"codex","reason":"example","prompt":"do not run"}',
+      '````',
+      '',
+    ].join('\n');
+    const r = extractHandoffProposal(text, 'claude', new Set(['codex']));
+    expect(r.proposal).toBeNull();
+    expect(r.cleanText).toBe(text);
+  });
+
+  it('a strict fence still wins over a trailing-block mention elsewhere in the same reply', () => {
+    const text = [
+      '`codeam-handoff',
+      '{"to":"codex","reason":"not this one","prompt":"ignore"}',
+      '',
+      '```codeam-handoff',
+      '{"to":"codex","reason":"the real one","prompt":"do the real thing"}',
+      '```',
+    ].join('\n');
+    const r = extractHandoffProposal(text, 'claude', new Set(['codex']));
+    expect(r.proposal).toEqual({
+      to: 'codex',
+      reason: 'the real one',
+      prompt: 'do the real thing',
+    });
+  });
+});
+
+// ─── stripHandoffFences — degenerate trailing-BLOCK (multi-line) form ──────
+
+describe('stripHandoffFences — degenerate trailing-BLOCK (multi-line) form', () => {
+  it('strips the EXACT round-2 repro from the live/terminal bubble too', () => {
+    const text =
+      'Voy a pasar esto a Claude.\n\n' +
+      '`codeam-handoff\n' +
+      '{"to":"claude","reason":"r","prompt":"p"}';
+    const out = stripHandoffFences(text);
+    expect(out).not.toContain('codeam-handoff');
+    expect(out).toBe('Voy a pasar esto a Claude.');
+  });
+
+  it('leaves a mid-reply tag-line-with-trailing-prose block untouched', () => {
+    const text = [
+      'Sure — to hand this off you would write:',
+      '',
+      '`codeam-handoff',
+      '{"to":"codex","reason":"example","prompt":"do the thing"}',
+      '',
+      'but only do that when it fits.',
+    ].join('\n');
+    expect(stripHandoffFences(text)).toBe(text);
+  });
+
+  it('leaves an invalid JSON body after a trailing tag line untouched', () => {
+    const text = ['Handing off.', '', '`codeam-handoff', '{not valid json}'].join('\n');
+    expect(stripHandoffFences(text)).toBe(text);
+  });
+});
