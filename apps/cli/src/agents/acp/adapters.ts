@@ -25,6 +25,7 @@
 import * as path from 'node:path';
 import type { AgentId } from '@codeam/shared';
 import {
+  augmentUserLocalBinPaths,
   resolveCursorAgentBinary,
   waitForClaudeNativeBinary,
   waitForCommandOnPath,
@@ -117,7 +118,15 @@ const REGISTRY: Partial<Record<AgentId, () => AdapterSpec | null>> = {
       args: [bin],
       requiresAgentBinary: 'codex',
       // codex ships via `npm install -g @openai/codex` → PATH binary.
-      waitForBinary: (o) => waitForCommandOnPath('codex', o),
+      waitForBinary: (o) => {
+        // Stale-PATH guard (fleet-1, 2026-08-14): a long-running host
+        // process (e.g. this CLI under a systemd unit) can be missing
+        // ~/.local/bin (or another npm global-prefix bin dir) entirely,
+        // even though codex IS installed there — a bare PATH probe would
+        // never see it. Same class as kimi/opencode's augment*Path guards.
+        augmentUserLocalBinPaths();
+        return waitForCommandOnPath('codex', o);
+      },
     };
   },
   // Cursor speaks ACP NATIVELY via `cursor-agent acp` ("Start the Cursor
@@ -161,7 +170,12 @@ const REGISTRY: Partial<Record<AgentId, () => AdapterSpec | null>> = {
     // codeam was launched from.
     args: ['--skip-trust', '--acp'],
     requiresAgentBinary: 'gemini',
-    waitForBinary: (o) => waitForCommandOnPath('gemini', o),
+    // gemini ships via `npm install -g @google/gemini-cli` → PATH binary,
+    // same stale-PATH exposure as codex above.
+    waitForBinary: (o) => {
+      augmentUserLocalBinPaths();
+      return waitForCommandOnPath('gemini', o);
+    },
   }),
   // Kimi Code (Moonshot) speaks ACP natively via `kimi acp` — a stdio
   // JSON-RPC server that answers `initialize` (agentInfo `Kimi Code CLI`,
@@ -329,7 +343,8 @@ export async function resolveAcpAdapterWithRetry(
   const timeoutMs = opts.timeoutMs ?? DEFAULT_ADAPTER_RETRY_TIMEOUT_MS;
   const pollMs = opts.pollMs ?? DEFAULT_ADAPTER_RETRY_POLL_MS;
   const now = opts.now ?? Date.now;
-  const sleep = opts.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+  const sleep =
+    opts.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
   const resolve = opts.resolve ?? getAcpAdapter;
 
   // A THROW from the resolver is the SAME transient-failure class as a

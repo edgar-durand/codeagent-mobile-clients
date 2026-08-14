@@ -132,8 +132,7 @@ export interface WaitForClaudeBinaryOptions extends ClaudeBinaryDeps {
   sleep?: (ms: number) => Promise<void>;
 }
 
-const realSleep = (ms: number): Promise<void> =>
-  new Promise((resolve) => setTimeout(resolve, ms));
+const realSleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
 /**
  * Poll until the Claude native binary appears on disk (it's still being
@@ -221,6 +220,49 @@ export async function waitForCommandOnPath(
     if (check()) return true;
   }
   return check();
+}
+
+/**
+ * Add well-known user-local npm bin directories to THIS process's PATH,
+ * idempotently. Same stale-PATH class as kimi's `augmentKimiPath` /
+ * opencode's `augmentOpencodePath` (`../kimi/installer.ts` /
+ * `../opencode/installer.ts`), generalized to npm `-g`-installed agent
+ * binaries (codex, gemini) instead of a single vendor-specific install dir.
+ *
+ * Root cause (fleet-1, 2026-08-14 — the SECOND bug behind that day's codex
+ * switch failure, found after the half-finished-bin-link fix in
+ * `switch-agent.ts` still didn't stick): the box runs `codeam host-agent`
+ * as a **systemd unit** whose process PATH lacked `~/.local/bin` entirely.
+ * `npm install -g @openai/codex` had actually landed the binary there (npm's
+ * default global-prefix bin dir on a per-user install), but the bare
+ * `waitForCommandOnPath('codex')` probe could never see it — so every
+ * mention reported "installed but never appeared on PATH" and re-ran the
+ * (already-successful) install, forever.
+ *
+ * Deliberately NOT a subprocess spawn (no `npm config get prefix` / `npm
+ * prefix -g`) — every candidate is a static, well-known dir; a directory
+ * that doesn't exist is a harmless PATH entry that never resolves, so this
+ * stays cheap enough to call on every probe.
+ */
+export function augmentUserLocalBinPaths(): void {
+  const home = os.homedir();
+  const candidates = [
+    // XDG-style per-user bin — npm's default global-prefix bin dir on most
+    // Linux setups (`npm config set prefix ~/.local` or an nvm-less
+    // per-user npm), and where curl-based agent installers commonly land.
+    path.join(home, '.local', 'bin'),
+    // Common explicit npm global-prefix conventions seen in the wild
+    // (`npm config set prefix ~/.npm-global`, and Debian/Fedora's
+    // `~/.local/share/npm` layout for `npm config set prefix
+    // ~/.local/share/npm`).
+    path.join(home, '.npm-global', 'bin'),
+    path.join(home, '.local', 'share', 'npm', 'bin'),
+  ];
+  const parts = (process.env.PATH ?? '').split(path.delimiter).filter((p) => p.length > 0);
+  const existing = new Set(parts);
+  const additions = candidates.filter((dir) => !existing.has(dir));
+  if (additions.length === 0) return;
+  process.env.PATH = [...additions, ...parts].join(path.delimiter);
 }
 
 // ─────────────────────────── cursor-agent ────────────────────────────
