@@ -11,6 +11,7 @@ import {
   SquadState,
   buildTeamPreamble,
   buildDeltaBriefing,
+  TEAM_PREAMBLE_BULLET_RE,
 } from '../../../src/agents/acp/squad-roster';
 
 const ROSTER = {
@@ -61,6 +62,34 @@ describe('buildTeamPreamble', () => {
     const p = buildTeamPreamble(roster, 'claude', { handoffInstructions: false })!;
     expect(p).toContain('Future Agent');
     expect(p).toContain('general implementation tasks');
+  });
+
+  // ─── Preamble hardening — fleet-1 codex-emitted-"Claude Code" incident ──────
+
+  it('lists the RUNTIME id inline on every teammate bullet, not just the display name', () => {
+    const p = buildTeamPreamble(ROSTER, 'claude', { handoffInstructions: false })!;
+    expect(p).toContain('- Codex (id: codex) — best at:');
+  });
+
+  it('the handoff instructions spell out the strict three-backtick fence requirement', () => {
+    const p = buildTeamPreamble(ROSTER, 'claude', { handoffInstructions: true })!;
+    expect(p).toContain('three-backtick');
+    expect(p).toContain('never a single backtick, never bare text');
+    expect(p).toContain('```' + 'codeam-handoff');
+  });
+
+  it('the handoff instructions tell the agent to use the id verbatim, not the display name', () => {
+    const p = buildTeamPreamble(ROSTER, 'claude', { handoffInstructions: true })!;
+    expect(p).toContain('EXACTLY as shown');
+    expect(p).toContain('never');
+    expect(p).toContain('"Claude Code"');
+  });
+
+  it('teammate bullets still match TEAM_PREAMBLE_BULLET_RE (squad-context scrubbing depends on it)', () => {
+    const p = buildTeamPreamble(ROSTER, 'claude', { handoffInstructions: true })!;
+    const bulletLine = p.split('\n').find((l) => l.startsWith('- Codex'));
+    expect(bulletLine).toBeDefined();
+    expect(TEAM_PREAMBLE_BULLET_RE.test(bulletLine!)).toBe(true);
   });
 });
 
