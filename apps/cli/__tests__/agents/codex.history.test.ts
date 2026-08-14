@@ -9,6 +9,7 @@ import {
   getCurrentUsage,
   resolveHistoryFile,
   discoverSessionId,
+  listResumableSessions,
 } from '../../src/agents/codex/history';
 
 /** Build today's UTC date-bucket dir under a fake ~/.codex/sessions home. */
@@ -124,7 +125,10 @@ describe('codex/history (rollouts)', () => {
         [
           rec('session_meta', { id: 'sess-flat', cwd: dir }),
           rec('response_item', flatMsg('developer', 'You are Codex. <permissions>…</permissions>')),
-          rec('response_item', flatMsg('user', '<environment_context>\n  <cwd>/x</cwd>\n</environment_context>')),
+          rec(
+            'response_item',
+            flatMsg('user', '<environment_context>\n  <cwd>/x</cwd>\n</environment_context>'),
+          ),
           rec('response_item', flatMsg('user', 'hello')),
           rec('response_item', flatMsg('assistant', 'Hello. What would you like to work on?')),
           rec('response_item', flatMsg('user', '<turn_aborted> The user interrupted')),
@@ -138,7 +142,54 @@ describe('codex/history (rollouts)', () => {
       ]);
     });
 
-    it("returns [] when session_meta.cwd does not match process.cwd()", () => {
+    it('drops a leaked codeam://squad-context resource block AND a <recommended_plugins> meta block (fleet-1 2026-08-13)', () => {
+      // Real codex-acp rollout shape (captured from the incident): the bridge
+      // downgrades our `resource` prompt block to a plain `input_text` item
+      // whose text STARTS with the resource's own uri, and codex separately
+      // injects its own `<recommended_plugins>` config block as a `user`-role
+      // message — neither is something the user typed. Only the genuine
+      // 'start the server' turn (and codex's reply) should survive.
+      const dir = mkdtempSync(path.join(tmpdir(), 'codex-leak-'));
+      dirsToClean.push(dir);
+      process.chdir(dir);
+
+      const filePath = path.join(dir, 'rollout-2026-08-13T09-00-00-leak.jsonl');
+      const rec = (type: string, payload: unknown): string =>
+        JSON.stringify({ timestamp: '2026-08-13T09:00:00.000Z', type, payload });
+      const flatMsg = (role: string, text: string): unknown => ({
+        type: 'message',
+        role,
+        content: [{ type: role === 'assistant' ? 'output_text' : 'input_text', text }],
+      });
+      const leakedResourceText =
+        'codeam://squad-context <context resource text="[Team context] You are the active agent…">';
+      const recommendedPlugins = [
+        '<recommended_plugins>',
+        '  - openai/curated-remote-plugin-a',
+        '  - openai/curated-remote-plugin-b',
+        '</recommended_plugins>',
+      ].join('\n');
+      writeFileSync(
+        filePath,
+        [
+          rec('session_meta', { id: 'sess-leak', cwd: dir }),
+          rec('response_item', flatMsg('user', leakedResourceText)),
+          rec('response_item', flatMsg('user', recommendedPlugins)),
+          rec('response_item', flatMsg('user', 'start the server')),
+          rec('response_item', flatMsg('assistant', 'Starting it now.')),
+        ].join('\n'),
+      );
+
+      const out = parseHistoryFile(filePath);
+      expect(out.map((m) => [m.role, m.text])).toEqual([
+        ['user', 'start the server'],
+        ['agent', 'Starting it now.'],
+      ]);
+      expect(JSON.stringify(out)).not.toContain('codeam://squad-context');
+      expect(JSON.stringify(out)).not.toContain('recommended_plugins');
+    });
+
+    it('returns [] when session_meta.cwd does not match process.cwd()', () => {
       const dir = mkdtempSync(path.join(tmpdir(), 'codex-rollout-'));
       const wrongCwd = mkdtempSync(path.join(tmpdir(), 'codex-other-'));
       dirsToClean.push(dir, wrongCwd);
@@ -309,6 +360,54 @@ describe('codex/history (rollouts)', () => {
     });
   });
 
+  describe('listResumableSessions — summary/title never latches on a leaked or meta block', () => {
+    const dirsToClean: string[] = [];
+    afterEach(() => {
+      while (dirsToClean.length > 0) {
+        try {
+          rmSync(dirsToClean.pop()!, { recursive: true, force: true });
+        } catch {
+          /* best-effort */
+        }
+      }
+    });
+
+    it('skips the leaked squad-context text AND the <recommended_plugins> block, using the first REAL user message as the title', () => {
+      const home = mkdtempSync(path.join(tmpdir(), 'codex-list-leak-'));
+      const proj = mkdtempSync(path.join(tmpdir(), 'codex-proj-'));
+      dirsToClean.push(home, proj);
+      const cwd = realpathSync(proj);
+      const bucket = todayBucket(home);
+      mkdirSync(bucket, { recursive: true });
+
+      const rec = (type: string, payload: unknown): string =>
+        JSON.stringify({ timestamp: '2026-08-13T09:00:00.000Z', type, payload });
+      const flatMsg = (role: string, text: string): unknown => ({
+        type: 'message',
+        role,
+        content: [{ type: 'input_text', text }],
+      });
+      const leakedResourceText = 'codeam://squad-context <context resource text="…">';
+      const recommendedPlugins = '<recommended_plugins>\n  - a\n</recommended_plugins>';
+
+      const filePath = path.join(bucket, 'rollout-2026-08-13T09-00-00-leak.jsonl');
+      writeFileSync(
+        filePath,
+        [
+          rec('session_meta', { id: 'sess-leak', cwd }),
+          rec('response_item', flatMsg('user', leakedResourceText)),
+          rec('response_item', flatMsg('user', recommendedPlugins)),
+          rec('response_item', flatMsg('user', 'deploy the codespace agent')),
+        ].join('\n'),
+      );
+
+      const sessions = listResumableSessions(cwd, home);
+      expect(sessions).toHaveLength(1);
+      expect(sessions[0].id).toBe('sess-leak');
+      expect(sessions[0].summary).toBe('deploy the codespace agent');
+    });
+  });
+
   describe('getCurrentUsage', () => {
     it('returns null when no rollout files in dir', () => {
       const dir = mkdtempSync(path.join(tmpdir(), 'codex-no-rollouts-'));
@@ -327,7 +426,10 @@ describe('codex/history (rollouts)', () => {
             type: 'event_msg',
             payload: {
               TokenCount: {
-                info: { total_token_usage: { total_tokens: 10_000 }, model_context_window: 272_000 },
+                info: {
+                  total_token_usage: { total_tokens: 10_000 },
+                  model_context_window: 272_000,
+                },
               },
             },
           }),
@@ -336,7 +438,10 @@ describe('codex/history (rollouts)', () => {
             type: 'event_msg',
             payload: {
               TokenCount: {
-                info: { total_token_usage: { total_tokens: 50_000 }, model_context_window: 272_000 },
+                info: {
+                  total_token_usage: { total_tokens: 50_000 },
+                  model_context_window: 272_000,
+                },
               },
             },
           }),
@@ -399,7 +504,11 @@ describe('codex/history (rollouts)', () => {
       dirsToClean.push(home, proj, other);
       seedRollout(home, 'sess-other', realpathSync(other));
 
-      const id = await discoverSessionId(realpathSync(proj), { sinceMs: Date.now(), timeoutMs: 600 }, home);
+      const id = await discoverSessionId(
+        realpathSync(proj),
+        { sinceMs: Date.now(), timeoutMs: 600 },
+        home,
+      );
       expect(id).toBeNull();
     });
 
@@ -407,7 +516,11 @@ describe('codex/history (rollouts)', () => {
       const home = mkdtempSync(path.join(tmpdir(), 'codex-disc-'));
       const proj = mkdtempSync(path.join(tmpdir(), 'codex-proj-'));
       dirsToClean.push(home, proj);
-      const id = await discoverSessionId(realpathSync(proj), { sinceMs: Date.now(), timeoutMs: 600 }, home);
+      const id = await discoverSessionId(
+        realpathSync(proj),
+        { sinceMs: Date.now(), timeoutMs: 600 },
+        home,
+      );
       expect(id).toBeNull();
     });
   });

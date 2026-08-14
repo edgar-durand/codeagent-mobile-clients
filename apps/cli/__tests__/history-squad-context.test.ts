@@ -18,6 +18,7 @@ import * as os from 'os';
 import * as path from 'path';
 import { HistoryService } from '../src/services/history.service';
 import type { RuntimeStrategy } from '../src/agents/strategy';
+import type { NormalizedMessage } from '@codeam/shared';
 
 let tmpDir: string;
 const SID = 'conv-1';
@@ -153,5 +154,68 @@ describe('conversation hydration — squad context never becomes a user bubble',
       },
     ]);
     expect(hydrate(makeService())[0].text).toBe('hello\n- a bullet\n[not a marker]');
+  });
+});
+
+/**
+ * fleet-1 2026-08-13 (codeam-cli 2.65.0): the SAME chokepoint (`readConversation`
+ * → `scrubSquadContext`) also has to cover agents whose `RuntimeStrategy` goes
+ * through `resolveHistoryFile`/`parseHistoryFile` (codex, gemini, cursor) rather
+ * than the claude JSONL path above. Drives a fake strategy so the check is
+ * agent-shaped without needing a real codex rollout on disk.
+ */
+describe('conversation hydration — resolveHistoryFile agents (codex/gemini/cursor shape)', () => {
+  function makeServiceWithParsedMessages(messages: NormalizedMessage[]): HistoryService {
+    const runtime = {
+      id: 'codex',
+      resolveHistoryDir: () => null,
+      resolveHistoryFile: () => '/fake/rollout.jsonl',
+      parseHistoryFile: () => messages,
+    } as unknown as RuntimeStrategy;
+    return new HistoryService(runtime, 'plugin-1', '/workspaces/proj');
+  }
+
+  it('drops a codeam://squad-context resource block downgraded to plain text by a third-party ACP bridge', () => {
+    const svc = makeServiceWithParsedMessages([
+      {
+        id: 'rollout:0',
+        role: 'user',
+        text: 'codeam://squad-context <context resource text="[Team context] …">',
+        timestamp: '2026-08-13T09:00:00.000Z',
+      },
+      {
+        id: 'rollout:1',
+        role: 'user',
+        text: 'start the server',
+        timestamp: '2026-08-13T09:00:01.000Z',
+      },
+    ]);
+    expect(hydrate(svc).map((m) => m.text)).toEqual(['start the server']);
+  });
+
+  it("drops an agent-injected <recommended_plugins> meta block, never surfacing it as the user's words", () => {
+    const svc = makeServiceWithParsedMessages([
+      {
+        id: 'rollout:0',
+        role: 'user',
+        text: '<recommended_plugins>\n  - openai/curated-remote-plugin-a\n</recommended_plugins>',
+        timestamp: '2026-08-13T09:00:00.000Z',
+      },
+      {
+        id: 'rollout:1',
+        role: 'user',
+        text: 'deploy the codespace agent',
+        timestamp: '2026-08-13T09:00:01.000Z',
+      },
+    ]);
+    expect(hydrate(svc).map((m) => m.text)).toEqual(['deploy the codespace agent']);
+  });
+
+  it('leaves an ordinary codex/gemini/cursor conversation byte-identical', () => {
+    const svc = makeServiceWithParsedMessages([
+      { id: 'rollout:0', role: 'user', text: 'fix the bug', timestamp: '2026-08-13T09:00:00.000Z' },
+      { id: 'rollout:1', role: 'agent', text: 'done', timestamp: '2026-08-13T09:00:01.000Z' },
+    ]);
+    expect(hydrate(svc).map((m) => m.text)).toEqual(['fix the bug', 'done']);
   });
 });

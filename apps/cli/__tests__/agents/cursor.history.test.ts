@@ -83,4 +83,33 @@ describe('cursor/history', () => {
   it('parseHistoryFile returns [] for a missing file (no throw)', () => {
     expect(parseHistoryFile('/no/such/transcript.jsonl')).toEqual([]);
   });
+
+  // Same resource-content leak class as the fleet-1 2026-08-13 codex incident
+  // (see `codex.history.test.ts`): `extractText` here only keeps blocks whose
+  // `type === 'text'`, so a `resource`-shaped block structurally can never
+  // surface as message text. Asserted, not assumed.
+  it('never surfaces a non-text (resource-shaped) content block as message text', () => {
+    const cwd = '/Users/edgar/Documents/proj';
+    const id = 'sess-resource';
+    const root = mkdtempSync(path.join(tmpdir(), 'cursor-proj-'));
+    cleanups.push(root);
+    const dir = path.join(root, encodeCursorCwd(cwd), 'agent-transcripts', id);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      path.join(dir, `${id}.jsonl`),
+      JSON.stringify({
+        role: 'user',
+        message: {
+          content: [
+            {
+              type: 'resource',
+              resource: { uri: 'codeam://squad-context', text: 'leaked context' },
+            },
+          ],
+        },
+      }),
+    );
+    const file = resolveHistoryFile(cwd, id, root) as string;
+    expect(parseHistoryFile(file)).toEqual([]);
+  });
 });
