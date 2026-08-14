@@ -81,7 +81,10 @@ describe('ensureInstallPrerequisites', () => {
   it('falls back to a SCOPED python zipfile shim when unzip cannot be installed', async () => {
     const res = await ensureInstallPrerequisites(fakeOs(new Set(['git'])), {
       // no package manager, but python3 exists
-      runner: fakeRunner((c) => c === 'python3', async () => ({ code: 1, stderr: 'denied' })),
+      runner: fakeRunner(
+        (c) => c === 'python3',
+        async () => ({ code: 1, stderr: 'denied' }),
+      ),
     });
     expect(res.ok).toBe(true);
     if (!res.ok) return;
@@ -100,7 +103,10 @@ describe('ensureInstallPrerequisites', () => {
   it('returns an ACTIONABLE error when a prerequisite cannot be provided', async () => {
     const res = await ensureInstallPrerequisites(fakeOs(new Set(['unzip'])), {
       // git is missing and has no unprivileged substitute
-      runner: fakeRunner((c) => c === 'apt-get', async () => ({ code: 1, stderr: 'denied' })),
+      runner: fakeRunner(
+        (c) => c === 'apt-get',
+        async () => ({ code: 1, stderr: 'denied' }),
+      ),
     });
     expect(res.ok).toBe(false);
     if (res.ok) return;
@@ -157,7 +163,10 @@ describe('ensureCoderabbitInstalled', () => {
     let seenPath = '';
     const before = process.env.PATH;
     const res = await ensureCoderabbitInstalled(fakeOs(present), {
-      runner: fakeRunner((c) => c === 'python3', async () => ({ code: 1, stderr: '' })),
+      runner: fakeRunner(
+        (c) => c === 'python3',
+        async () => ({ code: 1, stderr: '' }),
+      ),
       runInstallScript: async (env) => {
         seenPath = env.PATH ?? '';
         present.add('coderabbit');
@@ -188,5 +197,25 @@ describe('ensureCoderabbitInstalled', () => {
     });
     expect(res.ok).toBe(false);
     expect(res.error).toMatch(/did not produce a binary|no `coderabbit` binary/);
+  });
+
+  it('SUCCEEDS when the script exits non-zero but the binary is installed', async () => {
+    // CodeRabbit's install.sh 0.7.2 exits 2 on a fully successful install
+    // (reproduced on linux-amd64 AND linux-arm64 by the real-install gate).
+    // The binary — not the vendor exit code — is the authority, otherwise
+    // every user with a working install is told
+    // "install failed: [SUCCESS] Installation complete".
+    const present = new Set(['unzip', 'git']);
+    const res = await ensureCoderabbitInstalled(fakeOs(present), {
+      runner: fakeRunner(() => true),
+      runInstallScript: async () => {
+        present.add('coderabbit');
+        return {
+          code: 2,
+          output: '[SUCCESS] Installation verified\n[SUCCESS] Installation complete\n',
+        };
+      },
+    });
+    expect(res).toEqual({ ok: true });
   });
 });

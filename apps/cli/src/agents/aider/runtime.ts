@@ -32,6 +32,7 @@ import * as history from './history';
 import { aiderCredentialLocator, aiderLoginLauncher } from './link';
 import { detectAiderSelector, filterAiderChrome, parseAiderChrome } from './parsing';
 import type { OsStrategy } from '../../os';
+import { augmentUserLocalBinPaths } from '../acp/agent-binary';
 import type { ChangeModelInstruction, RuntimeStrategy } from '../strategy';
 
 const AIDER_CONTEXT_WINDOW = 200_000;
@@ -60,6 +61,16 @@ export class AiderRuntimeStrategy implements RuntimeStrategy {
   }
 
   async prepareLaunch(): Promise<{ cmd: string; args: string[]; env?: Record<string, string> }> {
+    // ⚠️ Stale-PATH guard — same class as codex/gemini/cursor's ACP
+    // `waitForBinary` branches. `pip install aider-chat` on a non-root box
+    // prints "Defaulting to user installation because normal site-packages is
+    // not writeable" and lands the console script in ~/.local/bin, which a
+    // long-running daemon started with a systemd-minimal PATH never has. The
+    // bare probe then throws "Aider is not on PATH. Install it with: pip
+    // install aider-chat" on a box where aider IS installed. Caught by the
+    // real per-agent install gate
+    // (`__tests__/integration/agent-install.int.test.ts`).
+    augmentUserLocalBinPaths();
     const binary = this.os.findInPath('aider');
     if (!binary) {
       throw new Error(

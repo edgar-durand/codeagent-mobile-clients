@@ -284,30 +284,43 @@ export async function ensureCoderabbitInstalled(
   log.info('coderabbit', 'CodeRabbit CLI not found — installing via the official script');
   const run = deps.runInstallScript ?? defaultRunInstallScript;
   const { code, output } = await run(env);
+
+  // The installer drops the binary into a per-user dir; if PATH wasn't
+  // refreshed by the shell rc, augment it on the fly so the post-install probe
+  // sees the binary without a terminal restart. CodeRabbit drops to
+  // `~/.local/bin` on Linux + `/opt/homebrew/bin` or `~/.local/bin` on macOS —
+  // probe both.
+  os.augmentPath([`${os.homeDir()}/.local/bin`, '/opt/homebrew/bin']);
+  const binary = os.findInPath('coderabbit');
+
+  // ⚠️ THE BINARY — not the vendor script's exit code — is the authority on
+  // whether the install worked. CodeRabbit's `install.sh` (0.7.2) exits **2**
+  // on a completely successful install: it prints "[SUCCESS] Installation
+  // verified" / "[SUCCESS] Installation complete", leaves a working
+  // ~/.local/bin/coderabbit, and still returns non-zero (reproduced on both
+  // linux-amd64 and linux-arm64 by the real-install gate,
+  // `__tests__/integration/agent-install.int.test.ts`). Gating on the exit
+  // code first meant every user with a perfectly good install was told
+  // "CodeRabbit CLI install failed: [SUCCESS] Installation complete".
+  //
+  // The exit code still selects WHICH failure message we show when there is
+  // genuinely no binary — a script that aborted on a missing prerequisite
+  // still surfaces its own actionable diagnosis.
+  if (binary !== null) return { ok: true };
+
+  const detail = summarizeInstallFailure(output);
   if (code !== 0) {
-    const detail = summarizeInstallFailure(output);
     return {
       ok: false,
       error: detail
         ? `CodeRabbit CLI install failed: ${detail}`
-        : 'CodeRabbit CLI install failed — check this machine\'s network egress and try again.',
+        : "CodeRabbit CLI install failed — check this machine's network egress and try again.",
     };
   }
-
-  // The installer drops the binary into a per-user dir; if PATH
-  // wasn't refreshed by the shell rc, augment it on the fly so the
-  // post-install probe sees the binary without a terminal restart.
-  // CodeRabbit drops to `~/.local/bin` on Linux + `/opt/homebrew/bin`
-  // or `~/.local/bin` on macOS — probe both.
-  os.augmentPath([`${os.homeDir()}/.local/bin`, '/opt/homebrew/bin']);
-  if (os.findInPath('coderabbit') === null) {
-    const detail = summarizeInstallFailure(output);
-    return {
-      ok: false,
-      error: detail
-        ? `CodeRabbit CLI install did not produce a binary: ${detail}`
-        : 'CodeRabbit CLI install reported success but no `coderabbit` binary was found on PATH.',
-    };
-  }
-  return { ok: true };
+  return {
+    ok: false,
+    error: detail
+      ? `CodeRabbit CLI install did not produce a binary: ${detail}`
+      : 'CodeRabbit CLI install reported success but no `coderabbit` binary was found on PATH.',
+  };
 }

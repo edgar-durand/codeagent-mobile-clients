@@ -152,7 +152,23 @@ const REGISTRY: Partial<Record<AgentId, () => AdapterSpec | null>> = {
     command: resolveCursorAgentBinary() ?? 'cursor-agent',
     args: ['acp'],
     requiresAgentBinary: 'cursor-agent',
-    waitForBinary: (o) => waitForCursorAgent(o),
+    // ⚠️ Stale-PATH guard — the SAME class as codex/gemini above, but cursor
+    // hid it behind a probe that passes anyway. Caught by the real per-agent
+    // install gate (`__tests__/integration/agent-install.int.test.ts`):
+    // on an in-session switch the adapter spec is resolved BEFORE the install
+    // (that is `ensureAgentBinaryForSwitch`'s first step), so with no
+    // cursor-agent on disk yet `resolveCursorAgentBinary()` returns null and
+    // the spec is PERMANENTLY CACHED with the bare name `cursor-agent`. The
+    // installer then drops the binary in ~/.local/bin — absent from a
+    // systemd-minimal PATH — and `waitForCursorAgent` still reports READY
+    // (it probes the absolute install location), so the switch proceeds and
+    // the ACP client spawns the cached bare name → `spawn cursor-agent
+    // ENOENT`. Augmenting PATH here makes the bare-name spawn resolve, which
+    // is exactly what the codex/gemini branches already do.
+    waitForBinary: (o) => {
+      augmentUserLocalBinPaths();
+      return waitForCursorAgent(o);
+    },
   }),
   // Gemini speaks ACP natively via `gemini --acp` — no npm adapter
   // package, just the user-installed `gemini` binary on PATH. Same
