@@ -23,6 +23,9 @@ import {
 } from '../../../src/agents/acp/command-handlers';
 import { SquadState } from '../../../src/agents/acp/squad-roster';
 import type { RemoteCommand, SquadRosterData } from '@codeam/shared';
+import { TurnFileAggregator } from '../../../src/services/turn-files/turn-file-aggregator';
+import * as gitChangeset from '../../../src/services/turn-files/git-changeset';
+import { _transport } from '../../../src/services/file-watcher/transport';
 
 let homeDir: string;
 
@@ -635,5 +638,72 @@ describe('start_task — squad journal', () => {
     const [entry] = squad.entriesSince(0);
     expect(entry?.filesTouched).toHaveLength(20);
     expect(entry?.filesTouched).toEqual(many.slice(0, 20));
+  });
+
+  // ── real aggregator, real call order ────────────────────────────
+  //
+  // The tests above stub `turnFiles.peekTurnPaths()` directly — they prove
+  // recordSquadTurn WIRES the accessor correctly, but not that the runner's
+  // actual call order (`await flushTurn()` THEN `recordSquadTurn`) lands the
+  // CURRENT turn's paths rather than a stale one. This wires a REAL
+  // `TurnFileAggregator` (only its git subprocess + network POST are
+  // stubbed) through the real `dispatchAcpCommand` → `startTaskH` path.
+  describe('with a REAL TurnFileAggregator (not a stubbed peek)', () => {
+    let outboxDir: string;
+
+    beforeEach(() => {
+      outboxDir = fs.mkdtempSync(path.join(os.tmpdir(), 'codeam-squad-tfa-'));
+      vi.spyOn(_transport, 'post').mockResolvedValue({ statusCode: 200, body: '{}' });
+    });
+    afterEach(() => {
+      vi.restoreAllMocks();
+      fs.rmSync(outboxDir, { recursive: true, force: true });
+    });
+
+    it("captures THIS turn's touched files via the real flushTurn → peekTurnPaths call order", async () => {
+      vi.spyOn(gitChangeset, 'discoverRepos').mockResolvedValue([
+        { repoRoot: '/repos/a', repoPath: '', repoName: 'demo' },
+      ]);
+      const collect = vi.spyOn(gitChangeset, 'collectRepoChangeset');
+      collect.mockResolvedValueOnce([]); // pre-pair baseline — nothing touched yet
+      collect.mockResolvedValueOnce([
+        {
+          filePath: 'src/parser.ts',
+          fileStatus: 'modified',
+          linesAdded: 3,
+          linesRemoved: 1,
+          hunkCount: 1,
+          repoPath: '',
+          repoName: 'demo',
+        },
+      ]); // this turn's real edit
+
+      const turnFiles = new TurnFileAggregator({
+        workingDir: '/repos',
+        sessionId: 's1',
+        pluginId: 'p1',
+        pluginAuthToken: 'tok',
+        apiBaseUrl: 'https://api.example.test',
+        outboxDir,
+        outboxAutoSchedule: false,
+      });
+      // Drain the baseline-capturing flush that a real session would have
+      // run before the first agent turn — mirrors production, where the
+      // aggregator is constructed at session start, well before any turn.
+      await turnFiles.flushTurn();
+
+      const squad = new SquadState({ sessionId: 's1', homeDir });
+      const { session } = makeCtx({ squad, replyText: 'Refactored the parser.' });
+      session.turnFiles = turnFiles;
+
+      await dispatchAcpCommand(
+        assembleAcpCommandContext(session, startTask({ prompt: 'refactor the parser' })),
+      );
+
+      const [entry] = squad.entriesSince(0);
+      expect(entry?.filesTouched).toEqual(['src/parser.ts']);
+
+      turnFiles.stop();
+    });
   });
 });

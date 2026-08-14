@@ -162,34 +162,19 @@ export function handoffFenceStart(text: string): number {
  * fence-open substring already matched. This masks outer-fenced spans first,
  * so only a fence-open OUTSIDE one of them can trigger a live cut.
  *
- * Mapping strategy: placeholders (`@@HANDOFF_MASK_<n>@@`) can never contain
- * the fence-open marker themselves, and masking preserves relative order —
- * so the Kth occurrence of `FENCE_OPEN` in the masked text is always the
- * SAME occurrence (by ordinal, among occurrences that survive masking) as
- * the Kth occurrence of `FENCE_OPEN` in the raw text that falls OUTSIDE
- * every outer-fence span. We find the ordinal of the match in the (cheap)
- * masked text, then re-locate that same ordinal directly in the raw text —
- * sidestepping the need to translate a byte offset across two
- * differently-lengthed strings.
+ * Placeholders (`@@HANDOFF_MASK_<n>@@`) can never contain the fence-open
+ * marker themselves, so `masked` containing NO `FENCE_OPEN` means every raw
+ * occurrence is quoted inside a masked span — nothing to cut on. Otherwise
+ * we re-scan the RAW text directly for the first `FENCE_OPEN` that does NOT
+ * fall inside an outer-fence span; that's guaranteed to exist (it's exactly
+ * what made `masked` contain one) and is the fence to cut at.
  */
 export function handoffFenceStartMasked(text: string): number {
   const { masked } = maskOuterFences(text);
-  const maskedIdx = masked.indexOf(FENCE_OPEN);
-  if (maskedIdx === -1) return -1;
+  if (masked.indexOf(FENCE_OPEN) === -1) return -1;
 
-  // Ordinal (0-based) of the found occurrence among all `FENCE_OPEN`
-  // occurrences in the masked text.
-  let ordinal = 0;
-  for (
-    let i = masked.indexOf(FENCE_OPEN);
-    i !== -1 && i < maskedIdx;
-    i = masked.indexOf(FENCE_OPEN, i + 1)
-  ) {
-    ordinal++;
-  }
-
-  // Outer-fence spans in the RAW text, so matches that fall inside one can
-  // be skipped when re-locating the same ordinal.
+  // Outer-fence spans in the RAW text — a `FENCE_OPEN` match inside one of
+  // these is a quoted example, not a real fence.
   const spans: Array<{ start: number; end: number }> = [];
   for (const m of text.matchAll(OUTER_FENCE_RE)) {
     const start = m.index ?? 0;
@@ -197,11 +182,8 @@ export function handoffFenceStartMasked(text: string): number {
   }
   const insideSpan = (idx: number): boolean => spans.some((s) => idx >= s.start && idx < s.end);
 
-  let seen = -1;
   for (let i = text.indexOf(FENCE_OPEN); i !== -1; i = text.indexOf(FENCE_OPEN, i + 1)) {
-    if (insideSpan(i)) continue;
-    seen++;
-    if (seen === ordinal) return i;
+    if (!insideSpan(i)) return i;
   }
   return -1;
 }

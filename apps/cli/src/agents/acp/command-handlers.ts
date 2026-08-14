@@ -463,11 +463,11 @@ function recordSquadTurn(ctx: AcpCommandContext, prompt: string, replySummary: s
     prompt,
     replySummary,
     // TurnFileAggregator owns per-turn file changesets end-to-end (git diff →
-    // outbox POST) and its flush for THIS turn is fired off fire-and-forget
-    // below (after this call), so `peekTurnPaths()` is a best-effort read of
-    // the aggregator's last completed flush rather than a guaranteed-current
-    // one — still far more useful than always omitting the files clause.
-    // Capped so a pathological turn (mass refactor) doesn't bloat the journal.
+    // outbox POST). The caller (`startTaskH`) AWAITS `turnFiles.flushTurn()`
+    // for THIS turn before calling recordSquadTurn precisely so
+    // `peekTurnPaths()` reflects THIS turn's novel files, not a stale read
+    // of whatever the aggregator's PREVIOUS flush happened to find. Capped
+    // so a pathological turn (mass refactor) doesn't bloat the journal.
     filesTouched: turnFiles.peekTurnPaths().slice(0, 20),
   });
   squad.member(opts.agent).lastTurnIndex = squad.turnCount();
@@ -722,6 +722,20 @@ async function startTaskH(ctx: AcpCommandContext): Promise<void> {
       }
       history.appendAgentReply(cleanText);
       void history.flush();
+      // End-of-turn file changeset — agent likely edited files during the
+      // turn (tool_call write_file / bash). The aggregator runs git diff
+      // once and batch-posts the hunks so mobile's PENDING REVIEW counter +
+      // Files rail update. `peekTurnPaths()` (read below by
+      // `recordSquadTurn`) only updates INSIDE this call, so a squad
+      // session AWAITS it here — small git-diff latency before the ack —
+      // so the journal entry captures THIS turn's paths instead of
+      // permanently lagging one turn behind. A non-squad session has no
+      // journal to feed, so it keeps the original fire-and-forget
+      // behavior (`flush` is still `.catch()`'d — no unhandled rejection).
+      const flush = turnFiles.flushTurn().catch((err) => {
+        log.warn('acpRunner', `turnFiles.flushTurn failed: ${describeError(err)}`);
+      });
+      if (ctx.squad) await flush;
       // Journal the turn for the squad's shared memory — the NEXT agent to
       // take over receives it in its delta briefing. `opts.agent` is the
       // ROUTED agent here (the swap above already moved it).
@@ -739,14 +753,6 @@ async function startTaskH(ctx: AcpCommandContext): Promise<void> {
         type: 'input_suggestion',
         content: ACP_QUICK_REPLIES,
         done: true,
-      });
-      // End-of-turn file changeset — agent likely edited files
-      // during the turn (tool_call write_file / bash). The
-      // aggregator runs git diff once and batch-posts the hunks
-      // so mobile's PENDING REVIEW counter + Files rail update.
-      // Fire-and-forget; the aggregator owns its own outbox.
-      turnFiles.flushTurn().catch((err) => {
-        log.warn('acpRunner', `turnFiles.flushTurn failed: ${describeError(err)}`);
       });
       log.info(
         'acpRunner',

@@ -144,14 +144,13 @@ export class TurnFileAggregator {
   }
 
   /**
-   * Non-destructive read of the paths `flushTurn()` last found novel —
-   * does NOT trigger a scan or clear anything. Callers that need an
-   * approximate "what did this turn touch" answer without paying for
-   * (or waiting on) a fresh git scan — e.g. the squad journal, which
-   * records synchronously right where `flushTurn()` is fired off
-   * fire-and-forget — read this instead. Best-effort: on a session's
-   * very first turn (still capturing the pre-pair baseline) or a
-   * chat-only turn, this is an empty array.
+   * Non-destructive read of the paths the MOST RECENT `flushTurn()` call
+   * found novel — does NOT trigger a scan or clear anything itself. The
+   * squad journal (`recordSquadTurn` in `command-handlers.ts`) `await`s
+   * `flushTurn()` for the turn it's about to record BEFORE calling this, so
+   * the read reflects THAT turn's paths, not a stale one left over from
+   * whatever flushed previously. Empty on a session's very first turn
+   * (still capturing the pre-pair baseline) or a chat-only turn.
    */
   peekTurnPaths(): string[] {
     return [...this.lastTurnPaths];
