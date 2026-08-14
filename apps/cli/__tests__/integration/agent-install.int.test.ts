@@ -54,7 +54,7 @@ import { promisify } from 'node:util';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { z } from 'zod';
-import { INSTALL_SNIPPETS, type AgentId } from '@codeam/shared';
+import { AGENT_INSTALL_CASES } from '../fixtures/agent-install-cases';
 
 const execFileP = promisify(execFile);
 
@@ -138,47 +138,13 @@ type DriverResult = z.infer<typeof DriverResultSchema>;
 
 const RESULT_MARKER = '__AGENT_INSTALL_RESULT__';
 
-// ── Per-agent case table ─────────────────────────────────────────────────────
-
-interface RealCase {
-  kind: 'real';
-  /** Why this agent's install is interesting — surfaced in the test name. */
-  note: string;
-}
-
-interface TrackedSkip {
-  kind: 'tracked-skip';
-  reason: string;
-}
-
-type AgentCase = RealCase | TrackedSkip;
-
 /**
- * EVERY key of `INSTALL_SNIPPETS` must appear here. A new agent added to the
- * canonical snippet map without a decision recorded here fails the suite (see
- * the coverage test) — a silent gap is exactly how the class escaped before.
+ * Per-agent decision table. Defined in `__tests__/fixtures/` and shared with
+ * `__tests__/agents/agent-install-cases.test.ts`, which asserts it covers every
+ * `INSTALL_SNIPPETS` key. That coverage assertion deliberately lives in the
+ * PLAIN unit suite — inside this Docker-gated suite it would never run on a PR.
  */
-const CASES: Record<string, AgentCase> = {
-  codex: {
-    kind: 'real',
-    note: 'npm -g into the per-user prefix — the original fleet-1 binary',
-  },
-  gemini: { kind: 'real', note: 'npm -g into the per-user prefix' },
-  kimi: { kind: 'real', note: 'curl installer → ~/.kimi-code/bin (off PATH by construction)' },
-  cursor: {
-    kind: 'real',
-    note: 'curl installer → ~/.local/bin; adapter spec is cached with the BARE name pre-install',
-  },
-  opencode: { kind: 'real', note: 'curl installer → ~/.opencode/bin (off PATH by construction)' },
-  aider: {
-    kind: 'real',
-    note: 'pip falls back to a --user install → ~/.local/bin; probed via the runtime prepareLaunch',
-  },
-  coderabbit: {
-    kind: 'real',
-    note: "canonical snippet is credential-only, so the REAL path is the CLI's own installer",
-  },
-};
+const CASES = AGENT_INSTALL_CASES;
 
 // ── docker helpers ───────────────────────────────────────────────────────────
 
@@ -213,9 +179,14 @@ async function dockerExecRaw(args: string[], timeoutMs: number): Promise<string>
 const containers = new Set<string>();
 
 async function startContainer(name: string): Promise<void> {
+  // ⚠️ Register BEFORE `docker run`. If the run times out or the daemon is slow
+  // to answer, the container can still exist while the call rejects — a name
+  // registered only on success would leak it past afterAll. `docker rm -f` on a
+  // name that was never created is a harmless no-op, so over-registering costs
+  // nothing and under-registering leaks a container per failed run.
+  containers.add(name);
   await docker(['rm', '-f', name], 30_000).catch(() => undefined);
   await docker(['run', '-d', '--name', name, IMAGE_TAG], 60_000);
-  containers.add(name);
 }
 
 async function removeContainerQuiet(name: string): Promise<void> {
@@ -366,28 +337,9 @@ suite('per-agent REAL install — Docker integration (stale-PATH / half-install 
     }
   }, 120_000);
 
-  it('has a recorded decision for every agent in INSTALL_SNIPPETS', () => {
-    // A new installable agent must never slip in without a real case OR an
-    // explicit, reasoned skip. Silence is what let the class escape before.
-    for (const id of Object.keys(INSTALL_SNIPPETS)) {
-      expect(CASES[id], `no agent-install case recorded for "${id}"`).toBeDefined();
-    }
-    for (const id of Object.keys(CASES)) {
-      expect(
-        INSTALL_SNIPPETS[id as AgentId],
-        `case "${id}" is not in INSTALL_SNIPPETS`,
-      ).toBeDefined();
-    }
-    for (const [id, c] of Object.entries(CASES)) {
-      if (c.kind === 'tracked-skip') {
-        // Never silent: a skip must carry a reason, and it is announced.
-        expect(c.reason.length, `tracked skip for ${id} has no reason`).toBeGreaterThan(20);
-        // eslint-disable-next-line no-console
-        console.warn(`[agent-install] TRACKED SKIP — ${id}: ${c.reason}`);
-      }
-    }
-  });
-
+  // The table's COVERAGE of INSTALL_SNIPPETS is asserted in the plain unit
+  // suite (`__tests__/agents/agent-install-cases.test.ts`) so it runs on every
+  // PR, not only when this Docker gate is enabled.
   for (const [agentId, agentCase] of Object.entries(CASES)) {
     if (agentCase.kind === 'tracked-skip') {
       it.skip(`${agentId} — TRACKED SKIP: ${agentCase.reason}`, () => undefined);

@@ -152,19 +152,26 @@ const REGISTRY: Partial<Record<AgentId, () => AdapterSpec | null>> = {
     command: resolveCursorAgentBinary() ?? 'cursor-agent',
     args: ['acp'],
     requiresAgentBinary: 'cursor-agent',
-    // ⚠️ Stale-PATH guard — the SAME class as codex/gemini above, but cursor
-    // hid it behind a probe that passes anyway. Caught by the real per-agent
-    // install gate (`__tests__/integration/agent-install.int.test.ts`):
-    // on an in-session switch the adapter spec is resolved BEFORE the install
-    // (that is `ensureAgentBinaryForSwitch`'s first step), so with no
-    // cursor-agent on disk yet `resolveCursorAgentBinary()` returns null and
-    // the spec is PERMANENTLY CACHED with the bare name `cursor-agent`. The
-    // installer then drops the binary in ~/.local/bin — absent from a
-    // systemd-minimal PATH — and `waitForCursorAgent` still reports READY
-    // (it probes the absolute install location), so the switch proceeds and
-    // the ACP client spawns the cached bare name → `spawn cursor-agent
-    // ENOENT`. Augmenting PATH here makes the bare-name spawn resolve, which
-    // is exactly what the codex/gemini branches already do.
+    // Stale-PATH guard — same class as codex/gemini above, kept here so the
+    // PROBE and the SPAWN agree about what "ready" means.
+    //
+    // On an in-session switch the adapter spec is resolved BEFORE the install
+    // (`ensureAgentBinaryForSwitch`'s first step), so with no cursor-agent on
+    // disk yet `resolveCursorAgentBinary()` returns null and the spec is
+    // PERMANENTLY CACHED with the bare name `cursor-agent`. The installer then
+    // drops the binary in ~/.local/bin, which a systemd-minimal PATH lacks,
+    // yet `waitForCursorAgent` still reports READY (it probes the absolute
+    // install location).
+    //
+    // ⚠️ Scope, honestly: this is defence in depth, NOT a live outage fix.
+    // `AcpClient.start` already spawns with `expandPathForAgentBinaries(...)`
+    // (client.ts), which folds the same dirs in, so the production ACP spawn
+    // very likely resolved anyway. What was genuinely wrong is that a probe
+    // could report ready while a *plain* spawn from the same process could not
+    // find the binary — the real-install gate
+    // (`__tests__/integration/agent-install.int.test.ts`) spawns without that
+    // expansion and caught the divergence. Aligning the probe with codex/gemini
+    // costs one idempotent call and removes the discrepancy.
     waitForBinary: (o) => {
       augmentUserLocalBinPaths();
       return waitForCursorAgent(o);

@@ -93,6 +93,12 @@ export async function ensureAgentBinaryForSwitch(
   deps: {
     resolveAdapter?: typeof getAcpAdapter;
     runInstall?: typeof runAgentInstallScript;
+    /**
+     * Called once, immediately before the RETRY install attempt, so the
+     * orchestrator can re-emit a progress step and mobile stops looking
+     * frozen. See the watchdog note at the retry site.
+     */
+    onRetry?: () => void;
   } = {},
 ): Promise<{ ok: true } | { ok: false; error: string }> {
   const resolveAdapter = deps.resolveAdapter ?? getAcpAdapter;
@@ -138,6 +144,22 @@ export async function ensureAgentBinaryForSwitch(
     'switchAgent',
     'install probe failed — retrying install once (half-finished bin link class)',
   );
+  // Re-emit the progress step so the retry is VISIBLE. Without it the switch
+  // looks frozen for the entire second attempt.
+  //
+  // ⚠️ Re-emits the EXISTING `install` step on purpose. The backend DTO
+  // accepts only `credential | install | restart`; inventing a `retry` step
+  // would 400 the whole progress POST and lose the signal entirely.
+  //
+  // ⚠️ Watchdog interplay — worst case this whole call is 2 × 300 s install
+  // plus 2 × 30 s probe (~11 min), which OVERRUNS mobile's 240 s switch
+  // watchdog. That is accepted, not a bug: the watchdog fires an honest,
+  // transient error in the UI, and the eventual `switch_agent_status: ready`
+  // overwrites/heals the slot when the install finally lands (v2.63 store
+  // semantics — status is last-write-wins per session, not append-only). The
+  // re-emitted step also refreshes the client's activity signal in the
+  // meantime.
+  deps.onRetry?.();
   const retryRes = await runInstall(installScript, {
     logScope: 'switchAgent',
     timeoutMs: 300_000,
@@ -207,6 +229,9 @@ export interface SwitchAgentDeps {
   ensureBinary(
     agentId: AgentId,
     installScript: string | undefined,
+    /** Invoked before the retry install attempt so the orchestrator can
+     *  re-emit the `install` progress step (see `ensureAgentBinaryForSwitch`). */
+    onRetry?: () => void,
   ): Promise<{ ok: true } | { ok: false; error: string }>;
   /**
    * Stop the old client and bring the new agent fully up (cancel in-flight
@@ -324,7 +349,11 @@ export async function performAgentSwitch(
   //    this process already resolved the binary for this agent.
   if (!fastPath.skipInstall) {
     void emitStep('install');
-    const bin = await deps.ensureBinary(agentId, installScript);
+    // The retry re-emits `install` on the SAME serialized chain, so mobile
+    // sees a second progress beat instead of ~5 more minutes of silence.
+    const bin = await deps.ensureBinary(agentId, installScript, () => {
+      void emitStep('install');
+    });
     if (!bin.ok) return fail(bin.error);
   }
 

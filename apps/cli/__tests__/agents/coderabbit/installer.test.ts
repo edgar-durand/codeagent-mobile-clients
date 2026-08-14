@@ -199,15 +199,17 @@ describe('ensureCoderabbitInstalled', () => {
     expect(res.error).toMatch(/did not produce a binary|no `coderabbit` binary/);
   });
 
-  it('SUCCEEDS when the script exits non-zero but the binary is installed', async () => {
+  it('SUCCEEDS when the script exits non-zero but the binary RUNS', async () => {
     // CodeRabbit's install.sh 0.7.2 exits 2 on a fully successful install
     // (reproduced on linux-amd64 AND linux-arm64 by the real-install gate).
-    // The binary — not the vendor exit code — is the authority, otherwise
+    // Runnability — not the vendor exit code — is the authority, otherwise
     // every user with a working install is told
     // "install failed: [SUCCESS] Installation complete".
     const present = new Set(['unzip', 'git']);
+    const runVersionProbe = vi.fn(() => true);
     const res = await ensureCoderabbitInstalled(fakeOs(present), {
       runner: fakeRunner(() => true),
+      runVersionProbe,
       runInstallScript: async () => {
         present.add('coderabbit');
         return {
@@ -217,5 +219,39 @@ describe('ensureCoderabbitInstalled', () => {
       },
     });
     expect(res).toEqual({ ok: true });
+    expect(runVersionProbe).toHaveBeenCalledOnce();
+  });
+
+  it('FAILS when the script exits non-zero and the installed binary does not run', async () => {
+    // Presence (X_OK) is not enough: an interrupted download leaves a
+    // truncated binary that is executable but SIGSEGVs on every invocation —
+    // indistinguishable from a healthy one by findInPath alone. Same class as
+    // Kimi's post-install `kimi --version` integrity guard.
+    const present = new Set(['unzip', 'git']);
+    const res = await ensureCoderabbitInstalled(fakeOs(present), {
+      runner: fakeRunner(() => true),
+      runVersionProbe: () => false,
+      runInstallScript: async () => {
+        present.add('coderabbit');
+        return { code: 1, output: '[ERROR] download interrupted\n' };
+      },
+    });
+    expect(res.ok).toBe(false);
+    expect(res.error).toMatch(/does not run/);
+  });
+
+  it('does NOT probe runnability when the script exited cleanly (presence is enough)', async () => {
+    const present = new Set(['unzip', 'git']);
+    const runVersionProbe = vi.fn(() => true);
+    const res = await ensureCoderabbitInstalled(fakeOs(present), {
+      runner: fakeRunner(() => true),
+      runVersionProbe,
+      runInstallScript: async () => {
+        present.add('coderabbit');
+        return { code: 0, output: 'ok\n' };
+      },
+    });
+    expect(res).toEqual({ ok: true });
+    expect(runVersionProbe).not.toHaveBeenCalled();
   });
 });

@@ -26,6 +26,11 @@ on:
     paths:
       # The launch/probe/install paths under test.
       - 'apps/cli/src/agents/**'
+      # The shared install runner every snippet is executed through.
+      - 'apps/cli/src/commands/host/agent-install.ts'
+      # `findInPath` / `augmentPath` — the binary resolution the non-ACP
+      # agents' probes go through, and the seam the stale-PATH class lives on.
+      - 'apps/cli/src/os/**'
       # The canonical snippets the gate executes.
       - 'packages/shared/src/agents/**'
       # The gate's own moving parts.

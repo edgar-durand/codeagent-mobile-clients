@@ -57,11 +57,16 @@ RUN set -e; \
 ARG CODEAM_TARBALL=codeam-cli.tgz
 COPY ${CODEAM_TARBALL} /tmp/codeam-cli.tgz
 COPY agent-install-driver.js /tmp/agent-install-driver.js
+# ⚠️ The install and the driver copy MUST fail the build if they fail — a
+# missing driver would turn every agent case into an unparseable-output error
+# that looks like a vendor problem. Only the informational resolve probe is
+# allowed to be non-fatal, so its `|| true` is scoped to its own RUN line.
 RUN npm install -g --omit=optional /tmp/codeam-cli.tgz \
     && rm -f /tmp/codeam-cli.tgz \
     && cp /tmp/agent-install-driver.js "$(npm root -g)/codeam-cli/dist/agent-install-driver.js" \
     && rm -f /tmp/agent-install-driver.js \
-    && node -e "require.resolve('codeam-cli/package.json')" >/dev/null 2>&1 || true
+    && test -s "$(npm root -g)/codeam-cli/dist/agent-install-driver.js"
+RUN node -e "require.resolve('codeam-cli/package.json')" >/dev/null 2>&1 || true
 
 # ── Non-root user with a per-user npm prefix (the fleet-1 shape) ─────────────
 RUN useradd --create-home --home-dir /home/agent agent \

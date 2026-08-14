@@ -1778,7 +1778,8 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
     provisionCredential: (agentId, auth) => {
       switchCredentialEnv = provisionAgentCredentials(agentId, auth);
     },
-    ensureBinary: (agentId, installScript) => ensureAgentBinaryForSwitch(agentId, installScript),
+    ensureBinary: (agentId, installScript, onRetry) =>
+      ensureAgentBinaryForSwitch(agentId, installScript, { onRetry }),
     swapRuntime: relaunchWith,
     revertRuntime: relaunchWith,
     persistAgent: (agentId) => setSessionAgent(opts.pluginId, agentId),

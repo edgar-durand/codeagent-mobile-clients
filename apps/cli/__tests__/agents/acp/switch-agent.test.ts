@@ -234,6 +234,33 @@ describe('ensureAgentBinaryForSwitch', () => {
     expect(runInstall).toHaveBeenCalledTimes(1);
   });
 
+  it('calls onRetry exactly once, before the retry install attempt', async () => {
+    const order: string[] = [];
+    const runInstall = vi.fn(async () => {
+      order.push('install');
+      return { ok: true, code: 0, timedOut: false };
+    });
+    const r = await ensureAgentBinaryForSwitch('codex', 'curl install.sh | sh', {
+      resolveAdapter: () => fakeSpec([false, false, true]),
+      runInstall: runInstall as never,
+      onRetry: () => order.push('onRetry'),
+    });
+    expect(r.ok).toBe(true);
+    // The signal must precede the retry, not trail it — mobile needs the beat
+    // BEFORE the (up to 300 s) second attempt, not after.
+    expect(order).toEqual(['install', 'onRetry', 'install']);
+  });
+
+  it('never calls onRetry when the first probe already succeeds', async () => {
+    const onRetry = vi.fn();
+    await ensureAgentBinaryForSwitch('codex', 'curl install.sh | sh', {
+      resolveAdapter: () => fakeSpec([false, true]),
+      runInstall: vi.fn(async () => ({ ok: true, code: 0, timedOut: false })) as never,
+      onRetry,
+    });
+    expect(onRetry).not.toHaveBeenCalled();
+  });
+
   it('passes a 300s timeout budget to the install runner on the switch path', async () => {
     const runInstall = vi.fn(async () => ({ ok: true, code: 0, timedOut: false }));
     await ensureAgentBinaryForSwitch('codex', 'curl install.sh | sh', {
@@ -332,6 +359,34 @@ describe('performAgentSwitch', () => {
       'switch_agent_status:ready',
     ]);
     expect(events.at(-1)?.payload).toMatchObject({ agentId: 'codex', fromAgentId: 'claude' });
+  });
+
+  it('retry path: emits the install step TWICE on the same serialized chain', async () => {
+    // The retry can take up to another 300 s. Without a second beat mobile
+    // shows a frozen "Installing…" for the whole attempt. `install` is
+    // re-emitted deliberately — the backend DTO only accepts
+    // credential|install|restart, so a new step name would 400.
+    const { deps, events } = makeDeps({
+      ensureBinary: async (_agentId, _installScript, onRetry) => {
+        onRetry?.();
+        return { ok: true as const };
+      },
+    });
+    const result = await performAgentSwitch(deps, 'codex');
+    expect(result.ok).toBe(true);
+    expect(events.map((e) => `${e.type}:${String(e.payload.state ?? e.payload.step)}`)).toEqual([
+      'switch_agent_status:switching',
+      'switch_agent_progress:credential',
+      'switch_agent_progress:install',
+      'switch_agent_progress:install',
+      'switch_agent_progress:restart',
+      'switch_agent_status:ready',
+    ]);
+    // Only ever the three steps the backend DTO accepts.
+    const steps = events
+      .filter((e) => e.type === 'switch_agent_progress')
+      .map((e) => String(e.payload.step));
+    expect(new Set(steps)).toEqual(new Set(['credential', 'install', 'restart']));
   });
 
   it('invalid target: no events, no side effects', async () => {
