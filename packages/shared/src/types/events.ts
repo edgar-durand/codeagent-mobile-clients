@@ -105,6 +105,9 @@ export const USER_EVENTS = {
   // the backend re-publishes them on the per-user SSE bus (mirrored in repo A).
   SWITCH_AGENT_PROGRESS: 'switch_agent_progress',
   SWITCH_AGENT_STATUS: 'switch_agent_status',
+  // Agent Squad — the CLI posts these to /api/agent-switch/events; PRO-gated.
+  HANDOFF_PROPOSED: 'handoff_proposed',
+  HANDOFF_RESOLVED: 'handoff_resolved',
 
   // VCS / PR Command Center — the backend publishes this after an agent finishes
   // reviewing a PR (verdict + comment count + findings), driving the mobile
