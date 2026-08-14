@@ -55,6 +55,15 @@ interface ClaudeHistoryMessage {
   role: 'user' | 'agent';
   text: string;
   timestamp: number;
+  /**
+   * The agent that produced this turn. A transcript file is written by ONE
+   * agent, and this service is rebuilt per agent on a swap, so stamping the
+   * session's current agent is exact for the bucket it uploads — mobile keeps
+   * per-turn attribution when it reloads a multi-agent session's history
+   * instead of collapsing it to the screen label (codeagent-egai). Additive on
+   * the wire: older backends ignore it.
+   */
+  agentId?: string;
 }
 
 // Re-export encodeCwd so callers that import it from this module
@@ -608,7 +617,8 @@ export class HistoryService {
    * convention as parseJsonl.
    */
   private readConversation(sessionId: string): ClaudeHistoryMessage[] {
-    return scrubSquadContext(this.readConversationRaw(sessionId));
+    const agentId = this.runtime.id;
+    return scrubSquadContext(this.readConversationRaw(sessionId)).map((m) => ({ ...m, agentId }));
   }
 
   private readConversationRaw(sessionId: string): ClaudeHistoryMessage[] {

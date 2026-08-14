@@ -77,8 +77,18 @@ describe('HistoryService — per-agent transcript resolution', () => {
       resolveHistoryFile: () => rollout,
       parseHistoryFile: () => [
         { id: 'rollout:0', role: 'user', text: 'hi', timestamp: '2025-05-07T17:24:22.000Z' },
-        { id: 'rollout:1', role: 'system', text: 'injected ctx', timestamp: '2025-05-07T17:24:23.000Z' },
-        { id: 'rollout:2', role: 'agent', text: 'hello back', timestamp: '2025-05-07T17:24:24.000Z' },
+        {
+          id: 'rollout:1',
+          role: 'system',
+          text: 'injected ctx',
+          timestamp: '2025-05-07T17:24:23.000Z',
+        },
+        {
+          id: 'rollout:2',
+          role: 'agent',
+          text: 'hello back',
+          timestamp: '2025-05-07T17:24:24.000Z',
+        },
       ],
     } as unknown as RuntimeStrategy;
     const svc = new HistoryService(runtime, 'plugin-1', '/workspaces/proj');
@@ -86,8 +96,20 @@ describe('HistoryService — per-agent transcript resolution', () => {
     const read = (svc as unknown as WithRead).readConversation('codex-sess');
 
     expect(read).toEqual([
-      { id: 'rollout:0', role: 'user', text: 'hi', timestamp: new Date('2025-05-07T17:24:22.000Z').getTime() },
-      { id: 'rollout:2', role: 'agent', text: 'hello back', timestamp: new Date('2025-05-07T17:24:24.000Z').getTime() },
+      {
+        id: 'rollout:0',
+        agentId: 'codex',
+        role: 'user',
+        text: 'hi',
+        timestamp: new Date('2025-05-07T17:24:22.000Z').getTime(),
+      },
+      {
+        id: 'rollout:2',
+        agentId: 'codex',
+        role: 'agent',
+        text: 'hello back',
+        timestamp: new Date('2025-05-07T17:24:24.000Z').getTime(),
+      },
     ]);
   });
 
@@ -95,7 +117,8 @@ describe('HistoryService — per-agent transcript resolution', () => {
     const sid = 'claude-sess';
     fs.writeFileSync(
       path.join(tmpDir, `${sid}.jsonl`),
-      JSON.stringify({ type: 'user', uuid: 'u1', timestamp: 123, message: { content: 'hey' } }) + '\n',
+      JSON.stringify({ type: 'user', uuid: 'u1', timestamp: 123, message: { content: 'hey' } }) +
+        '\n',
     );
     const runtime = {
       id: 'claude',
@@ -105,6 +128,8 @@ describe('HistoryService — per-agent transcript resolution', () => {
 
     const read = (svc as unknown as WithRead).readConversation(sid);
 
-    expect(read).toEqual([{ id: 'u1', role: 'user', text: 'hey', timestamp: 123 }]);
+    expect(read).toEqual([
+      { id: 'u1', agentId: 'claude', role: 'user', text: 'hey', timestamp: 123 },
+    ]);
   });
 });

@@ -278,11 +278,24 @@ export class AcpPublisher {
    * `mode: 'replace'` so a re-send overrides any stale persisted
    * version — important for the ACP path because each turn we ship
    * the cumulative messages, not a delta.
+   *
+   * Each message may carry its OWN `agentId` — the agent that PRODUCED that
+   * turn. The top-level `agentId` only keys the backend's per-agent
+   * conversation bucket, so without the per-message field a multi-agent
+   * session's reloaded history collapsed to whichever agent happened to be
+   * active (the v1 limitation, codeagent-egai). Additive: older backends
+   * ignore it, older CLIs simply omit it.
    */
   async pushConversation(args: {
     agentId: string;
     sessionId: string;
-    messages: Array<{ id: string; role: 'user' | 'agent'; text: string; timestamp: number }>;
+    messages: Array<{
+      id: string;
+      role: 'user' | 'agent';
+      text: string;
+      timestamp: number;
+      agentId?: string;
+    }>;
   }): Promise<void> {
     const url = `${this.apiBase}/api/sessions/conversation`;
     const body = JSON.stringify({

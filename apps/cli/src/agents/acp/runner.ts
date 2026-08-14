@@ -819,6 +819,10 @@ export class AcpHistory {
     role: 'user' | 'agent';
     text: string;
     timestamp: number;
+    /** The agent that produced this turn — stamped at record time, so a
+     *  session that swapped agents keeps per-turn attribution when mobile
+     *  reloads the history (codeagent-egai). */
+    agentId: AgentId;
   }> = [];
   private summary: string | null = null;
 
@@ -892,6 +896,7 @@ export class AcpHistory {
       role: 'user',
       text,
       timestamp: Date.now(),
+      agentId: this.opts.agent,
     });
   }
 
@@ -902,6 +907,7 @@ export class AcpHistory {
       role: 'agent',
       text,
       timestamp: Date.now(),
+      agentId: this.opts.agent,
     });
   }
 
