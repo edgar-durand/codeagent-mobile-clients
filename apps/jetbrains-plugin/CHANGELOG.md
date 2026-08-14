@@ -4,6 +4,23 @@ All notable changes to the CodeAgent-Mobile JetBrains plugin are documented here
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.65.0] — 2026-08-14
+
+### Added
+
+- **cli:** Autonomous chained handoffs with a hop budget (squad_configure/squad_stats)
+- **cli:** Per-turn agentId on the conversation push payload
+- **cli:** @coderabbit one-shot review mentions (batch path, no swap)
+
+### Fixed
+
+- **cli:** Journal captures turn file paths (peek accessor)
+- **cli:** Masked-aware live-stream fence truncation
+- **cli:** Journal reads the CURRENT turn's paths + simplify masked fence-start
+- **cli:** Prime turn-file baseline at session start so turn 1 journals its own paths
+- **cli:** Squad context rides an ACP resource block, never the user's words
+- **cli:** Phase-2 review wave — mention history, strip anchor, auto-accept ordering, hop convention
+
 ## [2.64.0] — 2026-08-14
 
 ### Added
