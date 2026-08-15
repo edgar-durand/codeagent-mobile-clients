@@ -551,17 +551,49 @@ export async function postHeadroomEvent(input: {
  * non-fatal. The backend republishes on the per-user SSE bus so the mobile UI
  * can render the OAuth `authUrl`, link progress, and review findings live.
  */
-/** Parse a backend error body (JSON `{code, message}`) — best-effort. Returns
- *  null when the body is absent/not JSON/carries neither field, so callers
- *  fall back to their own generic copy. */
+/**
+ * Parse a backend error body — best-effort. Returns null when the body is
+ * absent/not JSON/carries neither field, so callers fall back to their own
+ * generic copy.
+ *
+ * The REAL envelope (confirmed against api-v2's `AllExceptionsFilter`, which
+ * serializes EVERY `DomainHttpException` — including `LinkedAgentsError` /
+ * `CREDENTIAL_EXPIRED` — this way; see
+ * `codeagent-mobile/apps/api-v2/src/common/filters/all-exceptions.filter.ts`
+ * and the doc-comment atop `plugin-linked-agents.controller.ts`) is the
+ * NESTED shape:
+ *   `{ success: false, error: { code, message } }`
+ * NOT a flat `{ code, message }` — that flat shape was an unverified
+ * assumption in the original version of this function and meant the
+ * `switch_agent` credential step NEVER actually surfaced the backend's
+ * message (fleet-1 harness, 2026-08-15: a real daemon against a stub
+ * returning the exact 409 body above still emitted the generic "No linked
+ * credential" copy). Falls back to checking a flat `{code, message}` too, in
+ * case an older/different endpoint ever used that shape.
+ */
 function parseBackendErrorBody(
   body: string | undefined,
 ): { code?: string; message?: string } | null {
   if (!body) return null;
   try {
-    const parsed = JSON.parse(body) as { code?: unknown; message?: unknown };
-    const code = typeof parsed.code === 'string' ? parsed.code : undefined;
-    const message = typeof parsed.message === 'string' ? parsed.message : undefined;
+    const parsed = JSON.parse(body) as {
+      code?: unknown;
+      message?: unknown;
+      error?: { code?: unknown; message?: unknown };
+    };
+    const nested = parsed.error;
+    const code =
+      typeof nested?.code === 'string'
+        ? nested.code
+        : typeof parsed.code === 'string'
+          ? parsed.code
+          : undefined;
+    const message =
+      typeof nested?.message === 'string'
+        ? nested.message
+        : typeof parsed.message === 'string'
+          ? parsed.message
+          : undefined;
     return code || message ? { code, message } : null;
   } catch {
     return null;

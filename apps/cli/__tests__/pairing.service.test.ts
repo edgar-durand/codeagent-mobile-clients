@@ -287,10 +287,19 @@ describe('fetchProvisionCredentialDetailed', () => {
     });
   });
 
-  it('returns ok:false with the backend CODE + MESSAGE verbatim on a structured error body (e.g. 409 CREDENTIAL_EXPIRED)', async () => {
+  it('returns ok:false with the backend CODE + MESSAGE verbatim on the REAL api-v2 error envelope (409 CREDENTIAL_EXPIRED)', async () => {
+    // The ACTUAL wire shape (api-v2's AllExceptionsFilter, which serializes
+    // EVERY DomainHttpException this way — see the doc-comment atop
+    // `plugin-linked-agents.controller.ts`): NESTED under `error`, not a flat
+    // `{code, message}`. This is the exact body a fleet-1 harness run fed the
+    // real transport (2026-08-15) — a flat-shape assumption here previously
+    // let this test pass while the real credential-fetch path stayed broken.
     const backendMessage =
       'The vaulted "claude_code" credential expired and could not be refreshed — re-link the agent';
-    const body = JSON.stringify({ code: 'CREDENTIAL_EXPIRED', message: backendMessage });
+    const body = JSON.stringify({
+      success: false,
+      error: { code: 'CREDENTIAL_EXPIRED', message: backendMessage },
+    });
     const err = Object.assign(new Error(`HTTP 409: ${body.slice(0, 200)}`), {
       statusCode: 409,
       body,
@@ -309,6 +318,26 @@ describe('fetchProvisionCredentialDetailed', () => {
       status: 409,
       code: 'CREDENTIAL_EXPIRED',
       message: backendMessage,
+    });
+  });
+
+  it('also accepts a flat {code, message} body (defensive fallback for any endpoint not using the nested envelope)', async () => {
+    const body = JSON.stringify({ code: 'NOT_AVAILABLE', message: 'flat-shape message' });
+    const err = Object.assign(new Error(`HTTP 409: ${body}`), { statusCode: 409, body });
+    vi.spyOn(pairing._transport, 'postJsonAuthed').mockRejectedValue(err);
+
+    const result = await pairing.fetchProvisionCredentialDetailed({
+      agentId: 'claude_code',
+      sessionId: 'sess-1',
+      pluginId: 'plug-1',
+      pluginAuthToken: 'v1.tok',
+    });
+
+    expect(result).toEqual({
+      ok: false,
+      status: 409,
+      code: 'NOT_AVAILABLE',
+      message: 'flat-shape message',
     });
   });
 
@@ -390,8 +419,11 @@ describe('fetchProvisionCredential (legacy null-on-any-failure contract)', () =>
     expect(result).toEqual({ method: 'api_key', credential: 'sk-ant-test' });
   });
 
-  it('collapses a structured backend error (e.g. CREDENTIAL_EXPIRED) to null — same as any other failure', async () => {
-    const body = JSON.stringify({ code: 'CREDENTIAL_EXPIRED', message: 'expired' });
+  it('collapses a structured backend error (e.g. CREDENTIAL_EXPIRED, real nested envelope) to null — same as any other failure', async () => {
+    const body = JSON.stringify({
+      success: false,
+      error: { code: 'CREDENTIAL_EXPIRED', message: 'expired' },
+    });
     const err = Object.assign(new Error(`HTTP 409: ${body}`), { statusCode: 409, body });
     vi.spyOn(pairing._transport, 'postJsonAuthed').mockRejectedValue(err);
 
