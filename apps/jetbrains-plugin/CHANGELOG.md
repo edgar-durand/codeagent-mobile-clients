@@ -4,6 +4,13 @@ All notable changes to the CodeAgent-Mobile JetBrains plugin are documented here
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.65.7] — 2026-08-15
+
+### Fixed
+
+- **cli:** Honest credential/empty-turn errors + partial-fence holdback
+- **cli:** Credential error propagation matches the real transport error shape
+
 ## [2.65.6] — 2026-08-15
 
 ### Fixed
