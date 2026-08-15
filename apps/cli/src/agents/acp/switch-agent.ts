@@ -47,6 +47,23 @@ function displayName(id: string): string {
 }
 
 /**
+ * The message shown when the credential step fails. Uses the BACKEND's own
+ * message verbatim when it sent one (e.g. `409 {code:'CREDENTIAL_EXPIRED',
+ * message:"The vaulted \"claude_code\" credential expired and could not be
+ * refreshed — re-link the agent"}`) — that's what actually happened and
+ * names the fix. Falls back to the generic "no linked credential" copy only
+ * when the backend truly had nothing to say (404 / older backend / network),
+ * which is the ONLY case that copy is accurate for.
+ */
+function credentialFailureMessage(
+  agentId: AgentId,
+  failure: { code?: string; message?: string },
+): string {
+  if (failure.message) return failure.message;
+  return `No linked credential for ${displayName(agentId)}. Link it in Profile › Agents first.`;
+}
+
+/**
  * Validate a raw `switch_agent` payload agent id. Returns the typed id or a
  * human-readable refusal. Exported for the mobile-side contract tests.
  */
@@ -214,6 +231,19 @@ export function buildHandoffPreamble(
  * closures so the state machine + event ordering are unit-testable with
  * fakes, while the runner keeps ownership of its swappable locals.
  */
+/**
+ * Result of a vaulted-credential fetch — mirrors
+ * `pairing.service.ts`'s `ProvisionCredentialResult` structurally (no
+ * import: keeps this module's public contract self-contained and
+ * test-friendly). `ok: false` carries the backend's OWN error code/message
+ * when it had one (e.g. `409 {code:'CREDENTIAL_EXPIRED', message:'…'}`) so
+ * the switch step can surface it verbatim instead of a misleading generic
+ * "no linked credential" — see `performAgentSwitch`.
+ */
+export type CredentialFetchResult =
+  | { ok: true; method: 'api_key' | 'oauth'; credential: string; installScript?: string }
+  | { ok: false; code?: string; message?: string };
+
 export interface SwitchAgentDeps {
   currentAgent(): AgentId;
   /** Serialized event POST — callers get strict emit-order on the wire. */
@@ -221,9 +251,7 @@ export interface SwitchAgentDeps {
     type: 'switch_agent_progress' | 'switch_agent_status',
     payload: Record<string, unknown>,
   ): Promise<unknown>;
-  fetchCredential(
-    agentId: AgentId,
-  ): Promise<{ method: 'api_key' | 'oauth'; credential: string; installScript?: string } | null>;
+  fetchCredential(agentId: AgentId): Promise<CredentialFetchResult>;
   /** Write the credential with the per-agent provisioner. Throws on failure. */
   provisionCredential(agentId: AgentId, auth: AgentAuth): void;
   ensureBinary(
@@ -331,10 +359,8 @@ export async function performAgentSwitch(
   if (!fastPath.skipProvision) {
     void emitStep('credential');
     const cred = await deps.fetchCredential(agentId);
-    if (!cred) {
-      return fail(
-        `No linked credential for ${displayName(agentId)}. Link it in Profile › Agents first.`,
-      );
+    if (!cred.ok) {
+      return fail(credentialFailureMessage(agentId, cred));
     }
     try {
       deps.provisionCredential(agentId, toAgentAuth(cred.method, cred.credential));

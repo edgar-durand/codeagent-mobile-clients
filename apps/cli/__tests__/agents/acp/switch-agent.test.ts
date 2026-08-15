@@ -14,6 +14,8 @@ import {
   type SwitchAgentDeps,
 } from '../../../src/agents/acp/switch-agent';
 import { AcpHistory } from '../../../src/agents/acp/runner';
+import * as pairing from '../../../src/services/pairing.service';
+import { fetchProvisionCredentialDetailed } from '../../../src/services/pairing.service';
 import type { AgentId } from '@codeam/shared';
 
 // ─── resolveSwitchTarget ─────────────────────────────────────────────────────
@@ -317,6 +319,7 @@ function makeDeps(overrides: DepOverrides = {}) {
       events.push({ type, payload });
     },
     fetchCredential: async () => ({
+      ok: true as const,
       method: 'oauth' as const,
       credential: '{"t":1}',
       installScript: 'echo hi',
@@ -397,13 +400,88 @@ describe('performAgentSwitch', () => {
     expect(calls).toEqual([]);
   });
 
-  it('no vaulted credential: error status, session untouched', async () => {
-    const { deps, events, calls } = makeDeps({ fetchCredential: async () => null });
+  it('no vaulted credential (absent, no backend message): error status uses the generic copy, session untouched', async () => {
+    const { deps, events, calls } = makeDeps({ fetchCredential: async () => ({ ok: false }) });
     const result = await performAgentSwitch(deps, 'codex');
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.error).toMatch(/Link it in Profile/);
     expect(calls).toEqual([]);
     expect(events.at(-1)?.payload).toMatchObject({ state: 'error' });
+  });
+
+  it('credential fetch 404 (no vaulted credential, no message): falls back to the generic copy', async () => {
+    const { deps, events, calls } = makeDeps({
+      fetchCredential: async () => ({ ok: false, code: undefined, message: undefined }),
+    });
+    const result = await performAgentSwitch(deps, 'codex');
+    expect(result.ok).toBe(false);
+    if (!result.ok)
+      expect(result.error).toBe(
+        'No linked credential for Codex CLI. Link it in Profile › Agents first.',
+      );
+    expect(calls).toEqual([]);
+    expect(events.at(-1)?.payload).toMatchObject({
+      state: 'error',
+      error: result.ok ? undefined : result.error,
+    });
+  });
+
+  it('credential fetch fails with a backend error (e.g. CREDENTIAL_EXPIRED): the backend message is surfaced VERBATIM, not the generic copy', async () => {
+    const backendMessage =
+      'The vaulted "claude_code" credential expired and could not be refreshed — re-link the agent';
+    const { deps, events, calls } = makeDeps({
+      fetchCredential: async () => ({
+        ok: false,
+        code: 'CREDENTIAL_EXPIRED',
+        message: backendMessage,
+      }),
+    });
+    const result = await performAgentSwitch(deps, 'codex');
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error).toBe(backendMessage);
+    expect(calls).toEqual([]);
+    expect(events.at(-1)?.payload).toMatchObject({ state: 'error', error: backendMessage });
+  });
+
+  // ─── REAL WIRING — the exact gap a fleet-1 harness run caught (2026-08-15):
+  // a real daemon against a stub backend returning EXACTLY the 409 body below
+  // still emitted the GENERIC "No linked credential" message, because every
+  // test above mocks `deps.fetchCredential` directly — it never exercises the
+  // real HTTP-error-body parsing in `pairing.service.ts`. This wires
+  // `deps.fetchCredential` to the REAL `fetchProvisionCredentialDetailed`
+  // (mocking only the transport, exactly like `runner.ts`'s `switchDeps`
+  // does), so the full chain — transport reject → `makeHttpError` →
+  // `parseBackendErrorBody` → `CredentialFetchResult` → `performAgentSwitch`'s
+  // emitted error — is proven end-to-end, not just at the module boundary.
+  it('REAL WIRING: a 409 CREDENTIAL_EXPIRED from the actual transport propagates the backend message verbatim through fetchProvisionCredentialDetailed', async () => {
+    const backendMessage =
+      'The vaulted "claude_code" credential expired and could not be refreshed — re-link the agent';
+    const body = JSON.stringify({
+      success: false,
+      error: { code: 'CREDENTIAL_EXPIRED', message: backendMessage },
+    });
+    const err = Object.assign(new Error(`HTTP 409: ${body.slice(0, 200)}`), {
+      statusCode: 409,
+      body,
+    });
+    vi.spyOn(pairing._transport, 'postJsonAuthed').mockRejectedValue(err);
+
+    const { deps, events, calls } = makeDeps({
+      fetchCredential: (agentId) =>
+        fetchProvisionCredentialDetailed({
+          agentId,
+          sessionId: 's1',
+          pluginId: 'p1',
+          pluginAuthToken: 'tok',
+          includeInstallScript: true,
+        }),
+    });
+    const result = await performAgentSwitch(deps, 'codex');
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error).toBe(backendMessage);
+    expect(calls).toEqual([]);
+    expect(events.at(-1)?.payload).toMatchObject({ state: 'error', error: backendMessage });
+    vi.restoreAllMocks();
   });
 
   it('binary ensure failure: error status, swap never attempted', async () => {

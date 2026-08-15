@@ -27,6 +27,7 @@ import {
   AUTH_FAILURE_MESSAGE,
   ONE_M_CREDITS_MESSAGE,
   TURN_FAILURE_MESSAGE,
+  emptyReplyMessage,
   looksLikeProviderOutage,
   providerOutageMessage,
   agentStatusPage,
@@ -41,6 +42,20 @@ import {
   replyIsHouseAgentLimit,
   houseAgentLimitMessage,
 } from '../../src/agents/acp/runner';
+
+describe('emptyReplyMessage — the honest bubble for a silently-empty end_turn', () => {
+  it('names the agent + its binary for a known agent (kimi)', () => {
+    const msg = emptyReplyMessage('kimi');
+    expect(msg).toContain('Kimi Code');
+    expect(msg).toContain('empty reply');
+    expect(msg).toContain('`kimi -p "test"`');
+  });
+
+  it('falls back to the raw id for an unknown agent string', () => {
+    const msg = emptyReplyMessage('some-future-agent');
+    expect(msg).toContain('some-future-agent');
+  });
+});
 
 describe('startupFailureMessage — agent-that-never-started surfaces an actionable reason', () => {
   const GEMINI_STDERR =
@@ -317,7 +332,9 @@ describe('replyIsAuthFailure — auth error arriving as a COMPLETED-turn reply',
   // NO reconnect CTA. Must be classified as an auth failure → re-auth bubble.
   it('flags the OAuth-refresh failure reply (Failed to authenticate: OAuth session expired…)', () => {
     expect(
-      replyIsAuthFailure('Failed to authenticate: OAuth session expired and could not be refreshed'),
+      replyIsAuthFailure(
+        'Failed to authenticate: OAuth session expired and could not be refreshed',
+      ),
     ).toBe(true);
     // Its parts each anchor independently.
     expect(replyIsAuthFailure('OAuth session expired')).toBe(true);
@@ -329,7 +346,9 @@ describe('replyIsAuthFailure — auth error arriving as a COMPLETED-turn reply',
     // failure anchors ("failed to authenticate", "oauth session expired",
     // "…could not be refreshed") appear.
     expect(
-      replyIsAuthFailure('Your OAuth token auto-refreshes in the background, so you rarely re-auth.'),
+      replyIsAuthFailure(
+        'Your OAuth token auto-refreshes in the background, so you rarely re-auth.',
+      ),
     ).toBe(false);
     // Long prose about OAuth refresh — the ≤200-char guard also rejects it.
     const longReply =
@@ -512,9 +531,7 @@ describe('house-agent 403 (CodeAgent Cloud ceiling) is NOT an auth failure', () 
     expect(looksLikeAuthFailure(PRO_CEILING)).toBe(false);
     expect(looksLikeAuthFailure(UNAVAILABLE)).toBe(false);
     // A genuine credential 401 still classifies as an auth failure.
-    expect(
-      looksLikeAuthFailure('API Error: 401 invalid authentication credentials'),
-    ).toBe(true);
+    expect(looksLikeAuthFailure('API Error: 401 invalid authentication credentials')).toBe(true);
   });
 
   it('failureBubble surfaces the daily-limit bubble, never the re-auth bubble', () => {

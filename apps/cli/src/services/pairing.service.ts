@@ -552,12 +552,72 @@ export async function postHeadroomEvent(input: {
  * can render the OAuth `authUrl`, link progress, and review findings live.
  */
 /**
- * Fetch the caller's ALREADY-vaulted credential for an agent so the CLI can
- * provision it onto a fresh session without a re-login. Returns null on any
- * failure (404 = no vaulted credential, older backend, network) so the caller
- * cleanly falls back to the normal link flow.
+ * Parse a backend error body — best-effort. Returns null when the body is
+ * absent/not JSON/carries neither field, so callers fall back to their own
+ * generic copy.
+ *
+ * The REAL envelope (confirmed against api-v2's `AllExceptionsFilter`, which
+ * serializes EVERY `DomainHttpException` — including `LinkedAgentsError` /
+ * `CREDENTIAL_EXPIRED` — this way; see
+ * `codeagent-mobile/apps/api-v2/src/common/filters/all-exceptions.filter.ts`
+ * and the doc-comment atop `plugin-linked-agents.controller.ts`) is the
+ * NESTED shape:
+ *   `{ success: false, error: { code, message } }`
+ * NOT a flat `{ code, message }` — that flat shape was an unverified
+ * assumption in the original version of this function and meant the
+ * `switch_agent` credential step NEVER actually surfaced the backend's
+ * message (fleet-1 harness, 2026-08-15: a real daemon against a stub
+ * returning the exact 409 body above still emitted the generic "No linked
+ * credential" copy). Falls back to checking a flat `{code, message}` too, in
+ * case an older/different endpoint ever used that shape.
  */
-export async function fetchProvisionCredential(input: {
+function parseBackendErrorBody(
+  body: string | undefined,
+): { code?: string; message?: string } | null {
+  if (!body) return null;
+  try {
+    const parsed = JSON.parse(body) as {
+      code?: unknown;
+      message?: unknown;
+      error?: { code?: unknown; message?: unknown };
+    };
+    const nested = parsed.error;
+    const code =
+      typeof nested?.code === 'string'
+        ? nested.code
+        : typeof parsed.code === 'string'
+          ? parsed.code
+          : undefined;
+    const message =
+      typeof nested?.message === 'string'
+        ? nested.message
+        : typeof parsed.message === 'string'
+          ? parsed.message
+          : undefined;
+    return code || message ? { code, message } : null;
+  } catch {
+    return null;
+  }
+}
+
+export type ProvisionCredentialResult =
+  | { ok: true; method: 'api_key' | 'oauth'; credential: string; installScript?: string }
+  | { ok: false; status: number; code?: string; message?: string };
+
+/**
+ * Fetch the caller's ALREADY-vaulted credential for an agent so the CLI can
+ * provision it onto a fresh session without a re-login. Returns a
+ * DISCRIMINATED result so a caller that needs to tell "no vaulted
+ * credential" (404 / older backend / malformed payload) apart from a REAL
+ * backend error (e.g. `409 {code: 'CREDENTIAL_EXPIRED', message: '…'}`) can
+ * surface the backend's own message instead of a misleading generic one —
+ * the fix for the `switch_agent` credential step showing "No linked
+ * credential" when the backend actually said the vaulted credential expired
+ * (fleet-1, 2026-08-13/14). See {@link fetchProvisionCredential} for the
+ * older null-on-any-failure contract kept for callers that only need a
+ * yes/no.
+ */
+export async function fetchProvisionCredentialDetailed(input: {
   agentId: string;
   sessionId: string;
   pluginId: string;
@@ -569,7 +629,7 @@ export async function fetchProvisionCredential(input: {
    * ignore the flag and simply omit `installScript`.
    */
   includeInstallScript?: boolean;
-}): Promise<{ method: 'api_key' | 'oauth'; credential: string; installScript?: string } | null> {
+}): Promise<ProvisionCredentialResult> {
   try {
     const res = await _transport.postJsonAuthed(
       `${API_BASE}/api/plugin/agents/${input.agentId}/provision-credential`,
@@ -590,6 +650,7 @@ export async function fetchProvisionCredential(input: {
       data.credential.length > 0
     ) {
       return {
+        ok: true,
         method: data.method,
         credential: data.credential,
         ...(typeof data.installScript === 'string' && data.installScript.length > 0
@@ -597,10 +658,34 @@ export async function fetchProvisionCredential(input: {
           : {}),
       };
     }
-    return null;
-  } catch {
-    return null;
+    // 2xx but a missing/malformed payload — treat as "nothing vaulted",
+    // same as a 404, with no backend code/message to surface.
+    return { ok: false, status: 0 };
+  } catch (err) {
+    const e = err as Error & { statusCode?: number; body?: string };
+    const status = typeof e.statusCode === 'number' ? e.statusCode : 0;
+    const parsed = parseBackendErrorBody(e.body);
+    return { ok: false, status, code: parsed?.code, message: parsed?.message };
   }
+}
+
+/**
+ * Older null-on-any-failure contract over {@link fetchProvisionCredentialDetailed}
+ * — 404 = no vaulted credential, older backend, network, or any other
+ * failure all collapse to `null` so the caller cleanly falls back to the
+ * normal link flow. Kept for callers (CodeRabbit mention / provision) that
+ * only need a yes/no and don't render the failure as a chat message.
+ */
+export async function fetchProvisionCredential(
+  input: Parameters<typeof fetchProvisionCredentialDetailed>[0],
+): Promise<{ method: 'api_key' | 'oauth'; credential: string; installScript?: string } | null> {
+  const res = await fetchProvisionCredentialDetailed(input);
+  if (!res.ok) return null;
+  return {
+    method: res.method,
+    credential: res.credential,
+    ...(res.installScript ? { installScript: res.installScript } : {}),
+  };
 }
 
 /**
@@ -904,23 +989,27 @@ export async function _postJsonAuthed(
 
 /**
  * Build an HTTP error that carries the status code + parsed
- * `Retry-After` header (in seconds). Used by every transport
- * function in this module so callers can distinguish a real
+ * `Retry-After` header (in seconds) + the RAW response body. Used by every
+ * transport function in this module so callers can distinguish a real
  * network failure from a rate-limit / auth / 4xx response without
- * regex'ing the message string.
+ * regex'ing the message string. The `message` embeds only the first 200
+ * chars of the body (log-friendly); `body` carries it in FULL so a caller
+ * that needs the backend's structured `{code, message}` JSON (see
+ * `fetchProvisionCredentialDetailed`) can parse it without truncation risk.
  */
 function makeHttpError(
   statusCode: number,
   retryAfterHeader: string | string[] | undefined,
   responseBody: string,
-): Error & { statusCode: number; retryAfterSeconds?: number } {
+): Error & { statusCode: number; retryAfterSeconds?: number; body?: string } {
   const raw = Array.isArray(retryAfterHeader) ? retryAfterHeader[0] : retryAfterHeader;
   const retryAfterSeconds = raw && /^\d+$/.test(raw.trim()) ? Number.parseInt(raw, 10) : undefined;
   const err = new Error(
     `HTTP ${statusCode}${responseBody ? ': ' + responseBody.slice(0, 200) : ''}`,
-  ) as Error & { statusCode: number; retryAfterSeconds?: number };
+  ) as Error & { statusCode: number; retryAfterSeconds?: number; body?: string };
   err.statusCode = statusCode;
   if (typeof retryAfterSeconds === 'number') err.retryAfterSeconds = retryAfterSeconds;
+  if (responseBody) err.body = responseBody;
   return err;
 }
 

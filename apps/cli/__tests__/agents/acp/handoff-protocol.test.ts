@@ -16,6 +16,7 @@ import {
   handoffFenceStartMasked,
   resolveHandoffTarget,
   stripHandoffFences,
+  withholdTrailingPartialFenceMarker,
 } from '../../../src/agents/acp/handoff-protocol';
 import { log } from '../../../src/services/logger';
 import { HANDOFF_FENCE_TAG } from '@codeam/shared';
@@ -363,6 +364,56 @@ describe('handoffFenceStartMasked', () => {
     const idx = handoffFenceStartMasked(text);
     expect(idx).toBe(text.lastIndexOf('```' + HANDOFF_FENCE_TAG));
     expect(idx).toBeGreaterThan(-1);
+  });
+});
+
+describe('withholdTrailingPartialFenceMarker', () => {
+  it('returns text unchanged when there is no trailing backtick at all', () => {
+    expect(withholdTrailingPartialFenceMarker('Here is the fix.')).toBe('Here is the fix.');
+  });
+
+  it("withholds a single trailing backtick (the marker's first byte)", () => {
+    expect(withholdTrailingPartialFenceMarker('Here is the fix.`')).toBe('Here is the fix.');
+  });
+
+  it('withholds every growing INCOMPLETE prefix of the marker, one byte at a time', () => {
+    const prose = 'Handing this off now.';
+    const marker = '```' + HANDOFF_FENCE_TAG;
+    // Feed the marker in one byte at a time, up to (but not including) the
+    // LAST byte — once the marker is COMPLETE, `handoffFenceStartMasked`
+    // takes over and this function is a deliberate no-op (see the dedicated
+    // test below). Assert the withheld view never contains any partial
+    // marker byte until it fully forms.
+    let text = prose;
+    for (const ch of marker.slice(0, -1)) {
+      text += ch;
+      const visible = withholdTrailingPartialFenceMarker(text);
+      expect(visible).toBe(prose);
+    }
+  });
+
+  it('releases the withheld text once the next delta DISPROVES the marker (diverges)', () => {
+    // "``x" is not a prefix of the marker (marker is "```codeam-handoff") —
+    // the 2 backticks were a false start, and once disproven the ENTIRE
+    // string (including the backticks) becomes visible again.
+    const text = 'Here is some code: ``x';
+    expect(withholdTrailingPartialFenceMarker(text)).toBe(text);
+  });
+
+  it('is a no-op once the FULL marker has already formed (the caller is expected to use handoffFenceStartMasked instead)', () => {
+    const text = 'Reply.\n\n```' + HANDOFF_FENCE_TAG;
+    // The full marker is already present — withhold only kicks in for an
+    // INCOMPLETE (strictly shorter) trailing prefix, so this is unchanged.
+    expect(withholdTrailingPartialFenceMarker(text)).toBe(text);
+  });
+
+  it('does not withhold ordinary backtick usage unrelated to the handoff marker (e.g. inline code spans)', () => {
+    const text = 'Run `npm test` to verify.';
+    expect(withholdTrailingPartialFenceMarker(text)).toBe(text);
+  });
+
+  it('withholds an all-backticks string shorter than the marker', () => {
+    expect(withholdTrailingPartialFenceMarker('```')).toBe('');
   });
 });
 

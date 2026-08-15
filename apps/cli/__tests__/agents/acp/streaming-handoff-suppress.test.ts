@@ -340,4 +340,83 @@ describe('StreamingState.append — codeam-handoff fence suppressed from the liv
     expect(finalText.endsWith('```')).toBe(true);
     expect(finalText).toBe(prose + '```' + HANDOFF_FENCE_TAG + '\n' + jsonBody + '\n' + '```');
   });
+
+  // ─── FENCE-ONLY reply: the terminal frame must CLEAR, not stick on the last
+  // partial-marker litter that streamed live (fleet-1, 2026-08-14 — the phone
+  // bubble permanently showed "`codeam-h" because nothing ever replaced it).
+  describe('a reply that is NOTHING but the codeam-handoff fence (no prose at all)', () => {
+    // Split byte-by-byte so every intermediate live publish is exercised —
+    // this is the exact shape that leaked "`codeam-h" live before the fix.
+    const deltas = Array.from('```' + HANDOFF_FENCE_TAG + '\n' + jsonBody + '\n' + fenceClose);
+
+    it('never publishes a trailing partial marker on ANY live delta', () => {
+      const { state, publishOutput, publishStreamingChunk } = makeState();
+      const marker = '```' + HANDOFF_FENCE_TAG;
+      // Every strict, non-empty prefix of the marker ("`", "``", "```",
+      // "```c", … "```codeam-handof") — none of these may EVER be the
+      // trailing content of a published frame.
+      const partialPrefixes = Array.from({ length: marker.length - 1 }, (_, i) =>
+        marker.slice(0, i + 1),
+      );
+      for (const delta of deltas) {
+        state.append({ chunkId: 'msg-1', kind: 'text', delta });
+      }
+      for (const content of [
+        ...allContents(publishOutput),
+        ...allContents(publishStreamingChunk),
+      ]) {
+        for (const partial of partialPrefixes) {
+          expect(content.endsWith(partial)).toBe(false);
+        }
+      }
+    });
+
+    it('closeAll clears the terminal frame to EMPTY — never sticks on the last live litter', async () => {
+      const { state, publishOutput, publishStreamingChunk } = makeState();
+      for (const delta of deltas) {
+        state.append({ chunkId: 'msg-1', kind: 'text', delta });
+      }
+      publishOutput.mockClear();
+      publishStreamingChunk.mockClear();
+
+      await state.closeAll();
+
+      const finalOutputs = publishOutput.mock.calls
+        .map((c) => c[0] as { done?: boolean; content?: string })
+        .filter((b) => b.done === true);
+      const finalChunks = publishStreamingChunk.mock.calls
+        .map((c) => c[0] as { isFinal?: boolean; content?: string })
+        .filter((b) => b.isFinal === true);
+      expect(finalOutputs.length).toBeGreaterThan(0);
+      expect(finalChunks.length).toBeGreaterThan(0);
+      for (const frame of [...finalOutputs, ...finalChunks]) {
+        // An EXPLICIT empty frame — not a no-op that leaves the last partial
+        // marker frame as the effective "final" state on the wire.
+        expect(frame.content).toBe('');
+      }
+    });
+
+    it('closeTurnWithInteractiveDetection clears the terminal frame to EMPTY too', async () => {
+      const { state, publishOutput, publishStreamingChunk } = makeState();
+      for (const delta of deltas) {
+        state.append({ chunkId: 'msg-1', kind: 'text', delta });
+      }
+      publishOutput.mockClear();
+      publishStreamingChunk.mockClear();
+
+      await state.closeTurnWithInteractiveDetection();
+
+      const finalOutputs = publishOutput.mock.calls
+        .map((c) => c[0] as { done?: boolean; content?: string })
+        .filter((b) => b.done === true);
+      const finalChunks = publishStreamingChunk.mock.calls
+        .map((c) => c[0] as { isFinal?: boolean; content?: string })
+        .filter((b) => b.isFinal === true);
+      expect(finalOutputs.length).toBeGreaterThan(0);
+      expect(finalChunks.length).toBeGreaterThan(0);
+      for (const frame of [...finalOutputs, ...finalChunks]) {
+        expect(frame.content).toBe('');
+      }
+    });
+  });
 });
