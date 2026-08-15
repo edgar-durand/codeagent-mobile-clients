@@ -246,9 +246,7 @@ export interface AcpClientOptions {
    *  call. The caller publishes an awaiting-answer to mobile and
    *  resolves once the user replies. Throwing or returning
    *  `outcome.kind === 'cancelled'` aborts the tool. */
-  onRequestPermission: (
-    request: RequestPermissionRequest,
-  ) => Promise<RequestPermissionResponse>;
+  onRequestPermission: (request: RequestPermissionRequest) => Promise<RequestPermissionResponse>;
   /** Called on adapter stderr lines for debugging — log surface
    *  the caller owns so we don't have to pick stdout vs stderr
    *  semantics here. */
@@ -555,10 +553,7 @@ export class AcpClient {
       const output = Writable.toWeb(child.stdin) as WritableStream<Uint8Array>;
       const stream = ndJsonStream(output, input);
 
-      this.connection = new ClientSideConnection(
-        (_agent: Agent) => this.buildClient(),
-        stream,
-      );
+      this.connection = new ClientSideConnection((_agent: Agent) => this.buildClient(), stream);
 
       // Reject the WHOLE handshake if the child dies mid-startup (see
       // startAbortReject / the exit handler). A never-rejected startAborted just
@@ -591,9 +586,7 @@ export class AcpClient {
       // set (id + agent-authored title + updatedAt) — so the RECENT list works
       // for claude/codex/gemini alike without per-agent JSONL scanning.
       this.supportsListSessions = !!(
-        initialize.agentCapabilities as
-          | { sessionCapabilities?: { list?: unknown } }
-          | undefined
+        initialize.agentCapabilities as { sessionCapabilities?: { list?: unknown } } | undefined
       )?.sessionCapabilities?.list;
 
       log.info('acpClient', 'newSession → sending');
@@ -641,8 +634,7 @@ export class AcpClient {
       this.captureModes(newSession.modes ?? null);
       // `currentServiceTier` is a legacy non-standard codex-acp field surfaced
       // only in the welcome banner — not part of the native model contract.
-      const tier = (newSession as unknown as { currentServiceTier?: string })
-        .currentServiceTier;
+      const tier = (newSession as unknown as { currentServiceTier?: string }).currentServiceTier;
       // Log the model so account-mismatch bugs (e.g. an adapter defaulting to a
       // model the user's account doesn't include) are immediately visible in
       // the smoke-test log instead of surfacing as a cryptic "Authentication
@@ -733,9 +725,7 @@ export class AcpClient {
     // start_task path with image attachments passes the array directly
     // so it can interleave `image` + `text` blocks.
     const blocks: PromptBlock[] =
-      typeof input === 'string'
-        ? [{ type: 'text', text: input }]
-        : (input as PromptBlock[]);
+      typeof input === 'string' ? [{ type: 'text', text: input }] : (input as PromptBlock[]);
     try {
       return await this.sendPromptOnce(blocks);
     } catch (err) {
@@ -769,14 +759,8 @@ export class AcpClient {
     if (!this.connection || !this.sessionId) {
       throw new Error('AcpClient.sendPromptOnce called before start()');
     }
-    const textLen = blocks.reduce(
-      (n, b) => (b.type === 'text' ? n + b.text.length : n),
-      0,
-    );
-    const imageCount = blocks.reduce(
-      (n, b) => (b.type === 'image' ? n + 1 : n),
-      0,
-    );
+    const textLen = blocks.reduce((n, b) => (b.type === 'text' ? n + b.text.length : n), 0);
+    const imageCount = blocks.reduce((n, b) => (b.type === 'image' ? n + 1 : n), 0);
     log.info(
       'acpClient',
       `prompt → session=${this.sessionId.slice(0, 8)} textChars=${textLen} imageBlocks=${imageCount}`,
@@ -810,6 +794,27 @@ export class AcpClient {
     this.pendingToolCalls.clear();
     try {
       const result = await Promise.race([send, idle.promise]);
+      // Root-cause fix (fleet-1 handoff-robustness round 3, empirically
+      // confirmed on a live box): the ACP SDK's stdio dispatch resolves a
+      // `session/prompt` RPC response in ONE promise hop
+      // (`Peer.handleResponse` → `pendingResponse.resolve`), but dispatches a
+      // TRAILING `session/update` notification (e.g. the reply's very last
+      // text delta) via a fire-and-forget chain several `await` hops deep
+      // (`Peer.receiveMessage` → `void processIncomingMessage(...)` →
+      // per-handler `handleMessage` iteration). When the adapter sends both
+      // back-to-back, the single-hop response can resolve BEFORE the
+      // multi-hop notification chain finishes — even though the notification
+      // was read off the wire FIRST. `streaming.append()` for that last
+      // delta then hasn't run yet when the caller reads
+      // `getCurrentText()` right after this `await` unblocks, silently
+      // truncating the reply (verified live: a reply ending
+      // "…}\n```" landed as "…}\n" — the closing fence never made it into
+      // the accumulated text). `setImmediate` is a hard barrier: Node fully
+      // drains the microtask queue — however many hops deep — before running
+      // ANY macrotask, so this reliably waits out an ALREADY-STARTED
+      // notification chain without guessing at a duration. One-shot, not a
+      // polling loop.
+      await new Promise<void>((resolve) => setImmediate(resolve));
       log.info(
         'acpClient',
         `prompt ← ok stopReason=${result.stopReason ?? '?'} elapsedMs=${Date.now() - t0}`,
@@ -1073,9 +1078,7 @@ export class AcpClient {
    * Returns null when the agent doesn't advertise `list` (caller falls back or
    * skips). Best-effort — never throws out to the caller.
    */
-  async listSessions(): Promise<
-    Array<{ id: string; summary: string; timestamp: number }> | null
-  > {
+  async listSessions(): Promise<Array<{ id: string; summary: string; timestamp: number }> | null> {
     if (!this.connection || !this.supportsListSessions) return null;
     try {
       const res = await this.connection.listSessions({ cwd: this.opts.cwd });
@@ -1150,9 +1153,7 @@ export class AcpClient {
    * hardcoded list, no guessed model.
    */
   private captureModelConfig(configOptions: SessionConfigOption[]): void {
-    const modelOption = configOptions.find(
-      (o) => o.category === 'model' && o.type === 'select',
-    );
+    const modelOption = configOptions.find((o) => o.category === 'model' && o.type === 'select');
     if (!modelOption || modelOption.type !== 'select') {
       this.modelConfigId = undefined;
       this.availableModels = [];
@@ -1185,9 +1186,7 @@ export class AcpClient {
       throw new Error('AcpClient.setMode called before start()');
     }
     if (this.availableModes.length === 0) {
-      throw new Error(
-        'mode selection not available: this agent advertises no ACP session modes',
-      );
+      throw new Error('mode selection not available: this agent advertises no ACP session modes');
     }
     log.info('acpClient', `setMode → ${modeId}`);
     // Typed native RPC (`session/set_mode`) — request is `{ sessionId, modeId }`.
@@ -1396,11 +1395,9 @@ export class AcpClient {
           const code = (err as NodeJS.ErrnoException).code;
           if (code === 'ENOENT') throw RequestError.resourceNotFound(params.path);
           if (code === 'EACCES' || code === 'EPERM') {
-            throw new RequestError(
-              -32002,
-              `Permission denied: ${params.path}`,
-              { uri: params.path },
-            );
+            throw new RequestError(-32002, `Permission denied: ${params.path}`, {
+              uri: params.path,
+            });
           }
           if (code === 'EISDIR') {
             throw RequestError.invalidParams(`path is a directory: ${params.path}`);
@@ -1420,19 +1417,15 @@ export class AcpClient {
         } catch (err) {
           const code = (err as NodeJS.ErrnoException).code;
           if (code === 'EACCES' || code === 'EPERM') {
-            throw new RequestError(
-              -32002,
-              `Permission denied: ${params.path}`,
-              { uri: params.path },
-            );
+            throw new RequestError(-32002, `Permission denied: ${params.path}`, {
+              uri: params.path,
+            });
           }
           if (code === 'ENOENT') {
             // Parent directory missing — distinct from "file not
             // found" semantically; the adapter sees this and knows
             // to mkdir before retrying instead of giving up.
-            throw RequestError.invalidParams(
-              `Parent directory does not exist for: ${params.path}`,
-            );
+            throw RequestError.invalidParams(`Parent directory does not exist for: ${params.path}`);
           }
           throw RequestError.internalError({ uri: params.path }, code ?? String(err));
         }
@@ -1580,9 +1573,7 @@ function knownAgentBinaryDirs(): string[] {
  * through {@link AcpClient.start}.
  */
 export function expandPathForAgentBinaries(existingPath: string): string {
-  const existing = new Set(
-    existingPath.split(path.delimiter).filter((p) => p.length > 0),
-  );
+  const existing = new Set(existingPath.split(path.delimiter).filter((p) => p.length > 0));
   const additions: string[] = [];
   for (const dir of knownAgentBinaryDirs()) {
     if (!existing.has(dir)) {

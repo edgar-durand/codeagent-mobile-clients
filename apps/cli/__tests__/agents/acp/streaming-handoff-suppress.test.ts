@@ -308,4 +308,36 @@ describe('StreamingState.append — codeam-handoff fence suppressed from the liv
       'The answer is 42.',
     ]);
   });
+
+  // ─── ACCUMULATED text must receive EVERY delta verbatim ────────────────────
+  // fleet-1 round-3 empirical finding: `getCurrentText()` returned the reply
+  // with the fence UNCLOSED on a live box, even though the adapter's delta
+  // log showed the closing ``` was sent. Traced to a race ABOVE this class
+  // (the ACP SDK's stdio dispatch resolves the `session/prompt` RPC response
+  // in one promise hop but dispatches a trailing notification several hops
+  // deep — see the `setImmediate` drain fix in `client.ts`
+  // `sendPromptOnce`), fixed there. This locks in the INVARIANT the fix
+  // relies on: `StreamingState.append`'s own accumulation (`getCurrentText`)
+  // must always receive every delta verbatim regardless of the live-cut
+  // (`handoffFenceStartMasked`) truncating what gets PUBLISHED — feeding the
+  // exact split-token delta sequence a real adapter streams (open fence
+  // split across several deltas, JSON body, closing fence as its OWN final
+  // delta) through the REAL StreamingState.
+
+  it('getCurrentText() ends with the closing fence even when it arrives as its own trailing delta', () => {
+    const { state } = makeState();
+    const prose = 'Voy a pasar esto a Claude.\n\n';
+    const jsonBody =
+      '{"to":"claude","reason":"El usuario quiere continuar esta tarea con Claude Code.","prompt":"Continúa desde el contexto actual."}';
+    // Mirrors the live delta log: the fence-open marker itself split across
+    // several small deltas, then the JSON body, then the closing fence as
+    // its own SEPARATE, FINAL delta — the exact shape that exposed the bug.
+    const deltas = [prose, '``', '`' + HANDOFF_FENCE_TAG, '\n', jsonBody, '\n', '```'];
+    for (const delta of deltas) {
+      state.append({ chunkId: 'msg-1', kind: 'text', delta });
+    }
+    const finalText = state.getCurrentText();
+    expect(finalText.endsWith('```')).toBe(true);
+    expect(finalText).toBe(prose + '```' + HANDOFF_FENCE_TAG + '\n' + jsonBody + '\n' + '```');
+  });
 });

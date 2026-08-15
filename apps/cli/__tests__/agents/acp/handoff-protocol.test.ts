@@ -881,3 +881,81 @@ describe('extractHandoffProposal — sweeps earlier shape-valid degenerate block
     expect(r.cleanText).toContain('Actually, better to use gemini.');
   });
 });
+
+// ─── extractHandoffProposal — UNCLOSED trailing fence (fleet-1 round 3) ────
+// Live root cause: a genuine ```codeam-handoff open-fence marker (3
+// backticks — FENCE_RE's own domain) whose CLOSING ``` never made it into
+// the accumulated turn text (see the `setImmediate` drain fix in
+// client.ts). FENCE_RE requires the close, so it never matches; the OLD
+// trailing-block tag-line regex capped at 0-2 backticks, so it didn't
+// recognize the 3-backtick open marker either — no net caught it, raw
+// litter rendered. TAG_ONLY_LINE_RE now accepts ANY backtick count.
+
+describe('extractHandoffProposal — unclosed trailing fence (0-3+ backtick tag-only line)', () => {
+  it('byte-verbatim captured tail from the live box: proposal resolves + fully stripped', () => {
+    // Exact bytes from the coordinator's captured evidence (Spanish reply,
+    // unclosed fence — no closing ``` anywhere in the text).
+    const text =
+      '```codeam-handoff\n' +
+      '{"to":"claude","reason":"El usuario solicitó continuar la sesión con Claude Code.",' +
+      '"prompt":"Continúa ayudando al usuario desde el estado actual del proyecto. ' +
+      'Primero pregúntale qué tarea quiere realizar si todavía no ha indicado una."}\n';
+    const r = extractHandoffProposal(text, 'codex', new Set(['claude']));
+    expect(r.proposal).toEqual({
+      to: 'claude',
+      reason: 'El usuario solicitó continuar la sesión con Claude Code.',
+      prompt:
+        'Continúa ayudando al usuario desde el estado actual del proyecto. ' +
+        'Primero pregúntale qué tarea quiere realizar si todavía no ha indicado una.',
+    });
+    expect(r.cleanText).not.toContain('codeam-handoff');
+    expect(r.cleanText).toBe('');
+  });
+
+  it('the same unclosed fence with realistic lead-in prose: proposal resolves, prose survives, litter gone', () => {
+    const text =
+      'Voy a pasar esto a Claude.\n\n' +
+      '```codeam-handoff\n' +
+      '{"to":"claude","reason":"r","prompt":"p"}\n';
+    const r = extractHandoffProposal(text, 'codex', new Set(['claude']));
+    expect(r.proposal).toEqual({ to: 'claude', reason: 'r', prompt: 'p' });
+    expect(r.cleanText).toBe('Voy a pasar esto a Claude.');
+    expect(r.cleanText).not.toContain('```');
+  });
+
+  it('an unclosed fence with INVALID JSON after it leaves the text byte-identical', () => {
+    const text = 'Handing off.\n\n```codeam-handoff\n{not valid json}\n';
+    const r = extractHandoffProposal(text, 'claude', new Set(['codex']));
+    expect(r.proposal).toBeNull();
+    expect(r.cleanText).toBe(text);
+  });
+
+  it('an unclosed fence mid-reply with prose AFTER it is left byte-identical (trailing rule still holds)', () => {
+    const text = [
+      'Sure — to hand this off you would write:',
+      '',
+      '```codeam-handoff',
+      '{"to":"codex","reason":"example","prompt":"do the thing"}',
+      '',
+      'but only do that when it fits.',
+    ].join('\n');
+    const r = extractHandoffProposal(text, 'claude', new Set(['codex']));
+    expect(r.proposal).toBeNull();
+    expect(r.cleanText).toBe(text);
+  });
+
+  it('still masks an unclosed-fence-shaped mention inside a 4+-backtick worked example', () => {
+    const text = [
+      "Here's the fence form some agents mistakenly leave unclosed:",
+      '',
+      '`````',
+      '```codeam-handoff',
+      '{"to":"codex","reason":"example","prompt":"do not run"}',
+      '`````',
+      '',
+    ].join('\n');
+    const r = extractHandoffProposal(text, 'claude', new Set(['codex']));
+    expect(r.proposal).toBeNull();
+    expect(r.cleanText).toBe(text);
+  });
+});

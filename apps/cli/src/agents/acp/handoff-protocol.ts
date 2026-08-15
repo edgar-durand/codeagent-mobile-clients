@@ -48,12 +48,22 @@ const DEGENERATE_LINE_RE = new RegExp(
 );
 
 // The trailing MULTI-LINE degenerate form (fleet-1 round 2): the model puts
-// `codeam-handoff` ALONE on its own line — 0-2 backticks, nothing else — and
+// `codeam-handoff` ALONE on its own line — ANY backtick count, including
+// ZERO or the proper 3+ fence-open marker, nothing else on the line — and
 // the JSON object on the line(s) that follow (models may pretty-print across
 // several lines). This is the "tag-only" opening line; see
 // `trailingBlockMatch` for how the JSON body after it is located/validated.
+//
+// ⚠️ Unbounded (`` `* ``), not capped at 0-2: fleet-1 round 3 caught a
+// genuinely well-formed ```codeam-handoff open-fence marker (3 backticks —
+// the SAME marker FENCE_RE looks for) whose CLOSING ``` never made it into
+// the accumulated turn text (see the accumulation-drain fix in
+// `client.ts`'s `sendPromptOnce` for why). FENCE_RE requires the close, so
+// it never matches an unclosed fence; this tag-only line is the fallback
+// net — an unclosed 3-backtick (or more) fence-open, followed by a
+// shape-valid JSON body and nothing else, is still treated as a proposal.
 const TAG_ONLY_LINE_RE = new RegExp(
-  '^[ \\t]*`{0,2}[ \\t]*' + HANDOFF_FENCE_TAG + '[ \\t]*`{0,2}[ \\t]*\\r?$',
+  '^[ \\t]*`*[ \\t]*' + HANDOFF_FENCE_TAG + '[ \\t]*`*[ \\t]*\\r?$',
 );
 // A line consisting SOLELY of backticks (optionally whitespace-padded) — the
 // optional closing-fence line a model may still emit after the JSON body in
