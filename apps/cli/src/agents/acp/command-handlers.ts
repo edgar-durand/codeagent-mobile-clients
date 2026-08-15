@@ -87,6 +87,7 @@ import {
   CURSOR_UPGRADE_MESSAGE,
   ONE_M_CREDITS_MESSAGE,
   describeError,
+  emptyReplyMessage,
   failureBubble,
   houseAgentLimitMessage,
   replyIsAuthFailure,
@@ -964,6 +965,36 @@ async function startTaskH(ctx: AcpCommandContext): Promise<void> {
         await relay.sendResult(cmd.id, 'failed', {
           error: 'agent reply reported 1M-context usage-credits gate',
         });
+        return;
+      } else if (
+        reply.stopReason === 'end_turn' &&
+        finalText.trim().length === 0 &&
+        !streaming.hasVisibleProgress()
+      ) {
+        // The turn COMPLETED cleanly (no throw, stopReason=end_turn) but the
+        // agent's OWN ACP server streamed ZERO visible content — no text, no
+        // thinking, no tool activity. Observed live on kimi-code 0.36.0
+        // (fleet-1, 2026-08-14): its ACP server swallowed a provider 402
+        // membership error and just ended the turn silently. Without this,
+        // the only frame published is the empty `done:true` from
+        // `closeTurnWithInteractiveDetection`, which the mobile snapshot-
+        // guard drops — same "never end silently" contract
+        // `TURN_FAILURE_MESSAGE` covers on the THROWN-error path (see
+        // failure-messages.ts), just reached via a clean resolve.
+        // `finalText.trim() === ''` is checked ALONGSIDE `hasVisibleProgress()`
+        // (redundant in real StreamingState — a non-empty `text` always makes
+        // `hasVisibleProgress()` true) purely so a tool/thinking-only turn
+        // with legitimately empty CHAT text never mis-fires here.
+        const bubble = emptyReplyMessage(opts.agent);
+        await streaming.closeWithBubble(bubble);
+        turnClosed = true;
+        history.appendAgentReply(bubble);
+        void history.flush();
+        turnFiles.flushTurn().catch((err) => {
+          log.warn('acpRunner', `turnFiles.flushTurn failed: ${describeError(err)}`);
+        });
+        log.info('acpRunner', `start_task ← empty-reply id=${cmd.id.slice(0, 8)}`);
+        await relay.sendResult(cmd.id, 'failed', { error: 'agent turn ended with an empty reply' });
         return;
       } else {
         await streaming.closeTurnWithInteractiveDetection();

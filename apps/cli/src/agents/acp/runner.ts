@@ -31,7 +31,7 @@ import { randomUUID } from 'node:crypto';
 import { CommandRelayService, type RemoteCommand } from '../../services/command-relay.service';
 import {
   fetchCurrentPluginAuthToken,
-  fetchProvisionCredential,
+  fetchProvisionCredentialDetailed,
   fetchSquadRoster,
   postAgentSwitchEvent,
 } from '../../services/pairing.service';
@@ -65,7 +65,11 @@ import type { PromptBlock } from './buildAcpPromptBlocks';
 import { createBudgetRecovery, type BudgetRecovery } from './budgetRecovery';
 import { createWakeCredentialProbe, localCredentialExpiryStatus } from './wakeCredentialProbe';
 import { reconcileCumulative } from './reconcileDelta';
-import { handoffFenceStartMasked, stripHandoffFences } from './handoff-protocol';
+import {
+  handoffFenceStartMasked,
+  stripHandoffFences,
+  withholdTrailingPartialFenceMarker,
+} from './handoff-protocol';
 import { maybeSendOnboardingWelcome } from './onboarding';
 import { registerTerminalHandlers, closeAllTerminals } from '../../services/terminal-ops.service';
 import { mapSessionUpdate, mapPermissionRequest } from './mappers';
@@ -113,6 +117,7 @@ export {
   adapterExitMessage,
   agentStatusPage,
   budgetBubbleMessage,
+  emptyReplyMessage,
   failureBubble,
   houseAgentLimitMessage,
   looksLikeAuthFailure,
@@ -524,6 +529,12 @@ export class StreamingState {
     // stream through untruncated — an unmasked cut would match the quoted
     // fence-open marker and truncate the live view for the rest of the turn.
     let fenceCut = -1;
+    // Set only for `kind:'text'` below — the visible text this delta
+    // publishes on BOTH feeds (`cumulativeContent` is byte-identical to
+    // `this.text` for text deltas, see the comment on the streaming-chunk
+    // feed below), so it's computed once and reused rather than duplicating
+    // the fence-cut/holdback logic per feed.
+    let textVisible: string | null = null;
 
     // 1) Chat pipe (legacy `/api/commands/output`) — text only. The
     //    bubble body is the ordered concatenation of every text chunk's
@@ -532,22 +543,27 @@ export class StreamingState {
     if (delta.kind === 'text') {
       this.recomputeText();
       fenceCut = handoffFenceStartMasked(this.text);
-      const visibleText = fenceCut === -1 ? this.text : this.text.slice(0, fenceCut).trimEnd();
-      void this.publisher.publishOutput({ type: 'text', content: visibleText, done: false });
+      // No FULL marker yet — withhold any trailing suffix that could still
+      // grow INTO one (e.g. "```code") so a diverging/never-completing
+      // marker never leaves a dangling partial-marker frame as the last
+      // thing published (fleet-1, 2026-08-14 — see
+      // `withholdTrailingPartialFenceMarker`).
+      textVisible =
+        fenceCut === -1
+          ? withholdTrailingPartialFenceMarker(this.text)
+          : this.text.slice(0, fenceCut).trimEnd();
+      void this.publisher.publishOutput({ type: 'text', content: textVisible, done: false });
     }
     // 2) Epic C streaming-chunk feed (`/api/sessions/:id/streaming-chunk`)
     //    — all four kinds (text, thinking, tool_use, tool_result),
     //    cumulative per chunkId. Drives SessionDetailScreen's rich
     //    THINKING / tool-pill / tool-result bubbles. Both feeds run
     //    in parallel so the redesigned mobile surface stays in sync
-    //    with the legacy chat surface. The text kind reuses `fenceCut`
+    //    with the legacy chat surface. The text kind reuses `textVisible`
     //    computed above — the turn's text always collapses onto a single
     //    chunkId (see `turnTextChunkId`), so `cumulativeContent` here is
     //    the same string as `this.text`.
-    const visibleChunkContent =
-      delta.kind === 'text' && fenceCut !== -1
-        ? cumulativeContent.slice(0, fenceCut).trimEnd()
-        : cumulativeContent;
+    const visibleChunkContent = delta.kind === 'text' ? (textVisible as string) : cumulativeContent;
     void this.publisher.publishStreamingChunk({
       chunkId,
       kind: delta.kind,
@@ -1768,7 +1784,7 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
     currentAgent: () => opts.agent,
     postEvent: emitSwitchEvent,
     fetchCredential: (agentId) =>
-      fetchProvisionCredential({
+      fetchProvisionCredentialDetailed({
         agentId,
         sessionId: opts.sessionId,
         pluginId: opts.pluginId,

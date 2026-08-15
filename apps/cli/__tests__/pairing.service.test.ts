@@ -6,7 +6,9 @@ import * as gitBranch from '../src/lib/git-branch';
 import pkg from '../package.json';
 
 describe('requestCode', () => {
-  afterEach(() => { vi.restoreAllMocks(); });
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
 
   it('returns ok: true with code and expiresAt on success', async () => {
     vi.spyOn(pairing._transport, 'postJson').mockResolvedValue({
@@ -74,14 +76,14 @@ describe('requestCode', () => {
 });
 
 describe('fetchCurrentPluginAuthToken', () => {
-  afterEach(() => { vi.restoreAllMocks(); });
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
 
   it('includes ideVersion equal to the running package version in the reconnect body', async () => {
-    const postSpy = vi
-      .spyOn(pairing._transport, 'postJson')
-      .mockResolvedValue({
-        data: { paired: true, pluginAuthToken: 'v1.fake-token' },
-      } as never);
+    const postSpy = vi.spyOn(pairing._transport, 'postJson').mockResolvedValue({
+      data: { paired: true, pluginAuthToken: 'v1.fake-token' },
+    } as never);
 
     await pairing.fetchCurrentPluginAuthToken('sess-1', 'plugin-1');
 
@@ -122,7 +124,9 @@ describe('fetchCurrentPluginAuthToken', () => {
 });
 
 describe('postAgentReviewReport', () => {
-  afterEach(() => { vi.restoreAllMocks(); });
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
 
   it('POSTs the report to /api/vcs/agent-review/report with X-Plugin-Auth-Token + sessionId/pluginId', async () => {
     const spy = vi
@@ -172,7 +176,9 @@ describe('postAgentReviewReport', () => {
 });
 
 describe('postLinkCredential', () => {
-  afterEach(() => { vi.restoreAllMocks(); });
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
 
   it('POSTs the credential blob with X-Plugin-Auth-Token + sessionId+pluginId in body', async () => {
     const spy = vi
@@ -252,5 +258,164 @@ describe('postLinkCredential', () => {
 
     const [, body] = spy.mock.calls[0];
     expect(Object.keys(body)).not.toContain('modelPreference');
+  });
+});
+
+describe('fetchProvisionCredentialDetailed', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('returns ok:true with method/credential/installScript on a valid payload', async () => {
+    vi.spyOn(pairing._transport, 'postJsonAuthed').mockResolvedValue({
+      data: { method: 'oauth', credential: '{"t":1}', installScript: 'echo hi' },
+    } as never);
+
+    const result = await pairing.fetchProvisionCredentialDetailed({
+      agentId: 'claude_code',
+      sessionId: 'sess-1',
+      pluginId: 'plug-1',
+      pluginAuthToken: 'v1.tok',
+      includeInstallScript: true,
+    });
+
+    expect(result).toEqual({
+      ok: true,
+      method: 'oauth',
+      credential: '{"t":1}',
+      installScript: 'echo hi',
+    });
+  });
+
+  it('returns ok:false with the backend CODE + MESSAGE verbatim on a structured error body (e.g. 409 CREDENTIAL_EXPIRED)', async () => {
+    const backendMessage =
+      'The vaulted "claude_code" credential expired and could not be refreshed — re-link the agent';
+    const body = JSON.stringify({ code: 'CREDENTIAL_EXPIRED', message: backendMessage });
+    const err = Object.assign(new Error(`HTTP 409: ${body.slice(0, 200)}`), {
+      statusCode: 409,
+      body,
+    });
+    vi.spyOn(pairing._transport, 'postJsonAuthed').mockRejectedValue(err);
+
+    const result = await pairing.fetchProvisionCredentialDetailed({
+      agentId: 'claude_code',
+      sessionId: 'sess-1',
+      pluginId: 'plug-1',
+      pluginAuthToken: 'v1.tok',
+    });
+
+    expect(result).toEqual({
+      ok: false,
+      status: 409,
+      code: 'CREDENTIAL_EXPIRED',
+      message: backendMessage,
+    });
+  });
+
+  it('returns ok:false with no code/message on a plain 404 (no vaulted credential) — the "truly absent" case', async () => {
+    const err = Object.assign(new Error('HTTP 404: Not Found'), { statusCode: 404 });
+    vi.spyOn(pairing._transport, 'postJsonAuthed').mockRejectedValue(err);
+
+    const result = await pairing.fetchProvisionCredentialDetailed({
+      agentId: 'claude_code',
+      sessionId: 'sess-1',
+      pluginId: 'plug-1',
+      pluginAuthToken: 'v1.tok',
+    });
+
+    expect(result).toEqual({ ok: false, status: 404, code: undefined, message: undefined });
+  });
+
+  it('returns ok:false, status:0 on a network failure (no statusCode at all)', async () => {
+    vi.spyOn(pairing._transport, 'postJsonAuthed').mockRejectedValue(new Error('ECONNREFUSED'));
+
+    const result = await pairing.fetchProvisionCredentialDetailed({
+      agentId: 'claude_code',
+      sessionId: 'sess-1',
+      pluginId: 'plug-1',
+      pluginAuthToken: 'v1.tok',
+    });
+
+    expect(result).toEqual({ ok: false, status: 0, code: undefined, message: undefined });
+  });
+
+  it('returns ok:false when the 2xx payload is malformed/missing (no code/message to surface)', async () => {
+    vi.spyOn(pairing._transport, 'postJsonAuthed').mockResolvedValue({ data: {} } as never);
+
+    const result = await pairing.fetchProvisionCredentialDetailed({
+      agentId: 'claude_code',
+      sessionId: 'sess-1',
+      pluginId: 'plug-1',
+      pluginAuthToken: 'v1.tok',
+    });
+
+    expect(result).toEqual({ ok: false, status: 0 });
+  });
+
+  it('ignores an unparseable error body instead of throwing', async () => {
+    const err = Object.assign(new Error('HTTP 500: <html>oops</html>'), {
+      statusCode: 500,
+      body: '<html>oops</html>',
+    });
+    vi.spyOn(pairing._transport, 'postJsonAuthed').mockRejectedValue(err);
+
+    const result = await pairing.fetchProvisionCredentialDetailed({
+      agentId: 'claude_code',
+      sessionId: 'sess-1',
+      pluginId: 'plug-1',
+      pluginAuthToken: 'v1.tok',
+    });
+
+    expect(result).toEqual({ ok: false, status: 500, code: undefined, message: undefined });
+  });
+});
+
+describe('fetchProvisionCredential (legacy null-on-any-failure contract)', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('returns the credential (unwrapped, no `ok`) on success', async () => {
+    vi.spyOn(pairing._transport, 'postJsonAuthed').mockResolvedValue({
+      data: { method: 'api_key', credential: 'sk-ant-test' },
+    } as never);
+
+    const result = await pairing.fetchProvisionCredential({
+      agentId: 'claude_code',
+      sessionId: 'sess-1',
+      pluginId: 'plug-1',
+      pluginAuthToken: 'v1.tok',
+    });
+
+    expect(result).toEqual({ method: 'api_key', credential: 'sk-ant-test' });
+  });
+
+  it('collapses a structured backend error (e.g. CREDENTIAL_EXPIRED) to null — same as any other failure', async () => {
+    const body = JSON.stringify({ code: 'CREDENTIAL_EXPIRED', message: 'expired' });
+    const err = Object.assign(new Error(`HTTP 409: ${body}`), { statusCode: 409, body });
+    vi.spyOn(pairing._transport, 'postJsonAuthed').mockRejectedValue(err);
+
+    const result = await pairing.fetchProvisionCredential({
+      agentId: 'claude_code',
+      sessionId: 'sess-1',
+      pluginId: 'plug-1',
+      pluginAuthToken: 'v1.tok',
+    });
+
+    expect(result).toBeNull();
+  });
+
+  it('returns null on a 404 (no vaulted credential)', async () => {
+    const err = Object.assign(new Error('HTTP 404'), { statusCode: 404 });
+    vi.spyOn(pairing._transport, 'postJsonAuthed').mockRejectedValue(err);
+
+    const result = await pairing.fetchProvisionCredential({
+      agentId: 'claude_code',
+      sessionId: 'sess-1',
+      pluginId: 'plug-1',
+      pluginAuthToken: 'v1.tok',
+    });
+
+    expect(result).toBeNull();
   });
 });

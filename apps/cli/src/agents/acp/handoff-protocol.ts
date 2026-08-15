@@ -555,3 +555,34 @@ export function handoffFenceStartMasked(text: string): number {
   }
   return -1;
 }
+
+/**
+ * Withhold a trailing partial fence-open marker from a LIVE (non-terminal)
+ * publish. `handoffFenceStartMasked` only fires once the FULL
+ * "```codeam-handoff" marker exists in the cumulative text — before that, a
+ * real adapter streams the marker byte-by-byte ("`", "``", "```", "```c", …)
+ * and, without this, each of those partial prefixes gets published as
+ * visible text. If the marker never completes (a diverging delta) or the
+ * turn happens to end right there, the LAST thing the phone saw is stuck
+ * showing a dangling partial marker like "`codeam-h" forever (fleet-1,
+ * 2026-08-14 — the live bubble permanently showed "`codeam-h").
+ *
+ * Returns `text` with its longest trailing suffix that is a STRICT (i.e.
+ * incomplete) prefix of the fence-open marker removed. Purely a function of
+ * the CURRENT cumulative text — recomputed from scratch on every call, so:
+ *   - a later delta that DISPROVES the marker (the suffix no longer matches
+ *     a marker prefix) naturally "releases" the withheld text on the very
+ *     next call — nothing to track, no separate state;
+ *   - once the marker actually COMPLETES, `handoffFenceStartMasked` takes
+ *     over and this function is moot (the caller only consults it when
+ *     `handoffFenceStartMasked` returned -1).
+ */
+export function withholdTrailingPartialFenceMarker(text: string): string {
+  const maxLen = Math.min(text.length, FENCE_OPEN.length - 1);
+  for (let len = maxLen; len > 0; len--) {
+    if (FENCE_OPEN.startsWith(text.slice(text.length - len))) {
+      return text.slice(0, text.length - len);
+    }
+  }
+  return text;
+}

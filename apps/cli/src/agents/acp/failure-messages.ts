@@ -13,7 +13,7 @@
  * CLAUDE.md "Agent-failure messaging" section.
  */
 
-import type { AgentId } from '@codeam/shared';
+import { AGENT_REGISTRY, isKnownAgentId, type AgentId } from '@codeam/shared';
 import { looksLike1mContextCreditsError } from './oneMContextRecovery';
 import { looksLikeBudgetExceeded, extractBudgetPeriod } from './budgetRecovery';
 import { agentHooks } from './agent-hooks';
@@ -193,6 +193,27 @@ export const TURN_FAILURE_MESSAGE =
   '⚠️ **The agent hit an error and couldn’t finish this turn.** Please send your message again.';
 
 /**
+ * Persistent, actionable message for a turn that completed NORMALLY (no
+ * throw — `stopReason: 'end_turn'`) but the agent's own ACP server streamed
+ * ZERO visible content: no assistant text, no thinking, no tool activity.
+ * Observed live on kimi-code 0.36.0 (fleet-1, 2026-08-14): its ACP server
+ * swallowed the provider's own error (a 402 membership rejection) and
+ * resolved the turn cleanly with no `agent_message_chunk` updates at all.
+ * Without this, the only frame published is an empty `done:true` — same
+ * "silent" failure mode {@link TURN_FAILURE_MESSAGE} covers on the THROWN
+ * path, just reached via a clean resolve instead of a catch. Names the
+ * agent's OWN binary so the user has a concrete local repro/diagnostic step.
+ */
+export function emptyReplyMessage(agent: string): string {
+  const label = isKnownAgentId(agent) ? AGENT_REGISTRY[agent].displayName : agent;
+  const binary = isKnownAgentId(agent) ? AGENT_REGISTRY[agent].binaryName : agent;
+  return (
+    `⚠️ **${label} returned an empty reply.** Its provider may be having issues — ` +
+    `check the agent's login/subscription on this machine (e.g. run \`${binary} -p "test"\` there).`
+  );
+}
+
+/**
  * Detects a turn failure caused by the AGENT PROVIDER being down / overloaded
  * (Anthropic, OpenAI, …) rather than the user's session or credential — e.g.
  * Anthropic's HTTP 529 `overloaded_error`, or an upstream 5xx / "service
@@ -214,9 +235,7 @@ export function looksLikeProviderOutage(text: string): boolean {
  * Returns null for agents whose provider we don't have a status URL for — the
  * outage message then degrades gracefully to a vendor-less form.
  */
-export function agentStatusPage(
-  agent: string,
-): { vendor: string; url: string } | null {
+export function agentStatusPage(agent: string): { vendor: string; url: string } | null {
   // Normalise vendor aliases + the public id (`claude_code`) onto the runtime
   // AgentId, preserving the substring robustness callers rely on, then read the
   // per-vendor `{ vendor, url }` DATA from the per-agent hooks registry.
@@ -265,7 +284,7 @@ export function startupFailureMessage(agent: string, detail: string, recentStder
     return [
       "⚠️ **Gemini couldn't start — your Google account isn't eligible.**",
       '',
-      "Google discontinued free **“Login with Google”** access to the Gemini CLI on 2026-06-18. The free / individual tier (and Google AI Pro/Ultra) can no longer authenticate here.",
+      'Google discontinued free **“Login with Google”** access to the Gemini CLI on 2026-06-18. The free / individual tier (and Google AI Pro/Ultra) can no longer authenticate here.',
       '',
       'To use Gemini from CodeAgent, re-link it in **Profile › Agents** with either:',
       '• a **Gemini API key** (AI Studio — free quota available), or',
@@ -275,11 +294,9 @@ export function startupFailureMessage(agent: string, detail: string, recentStder
   if (looksLikeAuthFailure(haystack)) return AUTH_FAILURE_MESSAGE;
   if (looksLikeProviderOutage(haystack)) return providerOutageMessage(agent);
   const tail = recentStderr.split('\n').filter(Boolean).slice(-3).join('\n');
-  return [
-    `⚠️ The ${agent} agent failed to start.`,
-    '',
-    tail ? `Details:\n${tail}` : detail,
-  ].join('\n');
+  return [`⚠️ The ${agent} agent failed to start.`, '', tail ? `Details:\n${tail}` : detail].join(
+    '\n',
+  );
 }
 
 /**
