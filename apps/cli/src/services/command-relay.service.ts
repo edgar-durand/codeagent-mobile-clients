@@ -169,12 +169,52 @@ export class CommandRelayService {
      * config lookup and is replayed as `X-Plugin-Poll-Secret`.
      */
     private readonly explicitPollSecret?: string,
+    /**
+     * Optional rider on the recurring heartbeat tick — invoked from the SAME
+     * 20 s `setInterval` that sends the heartbeat, right after the beat is
+     * issued. Exists so a feature that must periodically RE-ASSERT something
+     * to the backend (today: the session baton re-affirming its driver state
+     * so the backend's 1 h Redis snapshot never expires under a live session)
+     * can ride the sanctioned tick instead of adding a second polling timer
+     * — see CLAUDE.md "No polling for realtime".
+     *
+     * ⚠️ Same contract as the beat itself (CLAUDE.md "Heartbeat must stay
+     * punctual"): the rider MUST do zero synchronous I/O and return
+     * immediately — anything it needs to send is fire-and-forget. It is
+     * called inside a try/catch so a throwing rider can never kill the beat.
+     *
+     * `firstAfterConnect` is true on the beat issued by `start()` and on the
+     * first beat after the relay establishes its command channel (a fresh SSE
+     * connection or a switch to the polling fallback), so a rider can
+     * re-assert immediately after a reconnect instead of waiting out its own
+     * throttle window.
+     */
+    private readonly onHeartbeat?: (info: { firstAfterConnect: boolean }) => void,
   ) {}
+
+  /**
+   * Set whenever the command channel is (re-)established; consumed by the
+   * next {@link emitHeartbeatTick}. See the `onHeartbeat` ctor param.
+   */
+  private heartbeatFirstAfterConnect = true;
+
+  /** Invoke the heartbeat rider (if any) exactly once per beat. Never throws. */
+  private emitHeartbeatTick(): void {
+    if (!this.onHeartbeat) return;
+    const firstAfterConnect = this.heartbeatFirstAfterConnect;
+    this.heartbeatFirstAfterConnect = false;
+    try {
+      this.onHeartbeat({ firstAfterConnect });
+    } catch (err) {
+      log.trace('relay', 'heartbeat rider threw (ignored)', err);
+    }
+  }
 
   start(): void {
     this.cleanup();
 
     this._running = true;
+    this.heartbeatFirstAfterConnect = true;
     this.agentsRegistered = false;
     log.info('relay', `start pluginId=${this.pluginId.slice(0, 8)} agent=${this.agentMeta.id}`);
     // Seed the branch synchronously ONCE here — `start()` runs before
@@ -184,11 +224,14 @@ export class CommandRelayService {
     // beat off the synchronous-git path.
     this.cachedBranch = detectCurrentBranch();
     this.sendHeartbeat(true);
+    this.emitHeartbeatTick();
     this.heartbeatTimer = setInterval(() => {
       // Refresh the branch off the hot path, then beat with the cached
       // value. The async refresh can never delay this tick's POST.
       void this.refreshBranch();
       this.sendHeartbeat(true);
+      // Riders run AFTER the beat is issued so they can never delay it.
+      this.emitHeartbeatTick();
     }, 20_000);
     this.agentsTimer = setInterval(() => {
       if (this._running && !this.agentsRegistered) this.reportAgents();
@@ -302,6 +345,9 @@ export class CommandRelayService {
         // 200 — reset failure counter; consume events.
         log.info('relay', 'sse connected');
         this.sseFailures = 0;
+        // Command channel (re-)established — let the next beat's rider
+        // re-assert immediately rather than waiting out its own throttle.
+        this.heartbeatFirstAfterConnect = true;
         this.armSseWatchdog();
         let buffer = '';
         res.setEncoding('utf8');
@@ -437,6 +483,9 @@ export class CommandRelayService {
 
   private startPollingFallback(): void {
     if (this.pollTimer) return;
+    // Same "channel (re-)established" signal SSE-connected raises — the
+    // fallback is how this relay now reaches the backend.
+    this.heartbeatFirstAfterConnect = true;
     void this.pollLoop();
   }
 
