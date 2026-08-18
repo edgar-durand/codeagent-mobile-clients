@@ -31,6 +31,18 @@ export class BatonController {
     return this._conversationId;
   }
 
+  /** The exact triple the last `publishState` emitted — the CLI's current view
+   *  of who holds the baton. Read by the heartbeat re-affirmation rider
+   *  ({@link makeBatonHeartbeatReaffirm}), which re-posts it periodically so the
+   *  backend's 1 h Redis snapshot never expires under a live session. */
+  currentState(): { state: BatonState; driver: DriverKind; conversationId: string | null } {
+    return {
+      state: this._state,
+      driver: this._active,
+      conversationId: this._conversationId,
+    };
+  }
+
   async begin(): Promise<void> {
     this._conversationId = await this.deps.local.start(undefined);
     this._active = 'local_tui';

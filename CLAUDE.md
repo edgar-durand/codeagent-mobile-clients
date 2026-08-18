@@ -200,6 +200,15 @@ over ACP. It is a purely ADDITIVE branch — codespace / self-hosted paths are u
   `session/update` before it resolves; without the guard those land as open `done:false` chunks
   that never close → mobile "Thinking…" stuck. Mobile already has the history via the mirror. The
   normal ACP path never calls `loadSession`, so only the baton needs this. (v2.60.3)
+- **State RE-AFFIRMATION on the relay heartbeat** (`makeBatonHeartbeatReaffirm`, wired as the
+  `CommandRelayService` `onHeartbeat` rider): the CLI used to post `baton_state` only on a
+  TRANSITION, but the backend mirrors it into Redis `baton:<sessionId>` with a **1 h TTL** and
+  mobile treats a missing snapshot as "pre-baton CLI" (no BatonBar — deliberate rollout safety).
+  A local session left alone for over an hour therefore reopened with **Take Control gone**. The
+  rider re-posts the CURRENT state through the SAME serialized poster, throttled to ~5 min (plus
+  always on the first beat after a relay (re)connect), never for the transient `SWITCHING`. ⚠️ It
+  rides the EXISTING 20 s heartbeat tick — no second timer ("No polling for realtime") — and must
+  stay synchronous-work-free ("Heartbeat must stay punctual").
 - **Ordered state POSTs** (`makeSerializedBatonPoster`): a bare `void postBatonEvent()` let a fast
   hand-back's `SWITCHING`→`LOCAL_DRIVE` pair reorder → mobile stuck on "Switching…". The backend
   publishes each event before responding 2xx, so awaiting each POST before the next guarantees order. (v2.60.4)

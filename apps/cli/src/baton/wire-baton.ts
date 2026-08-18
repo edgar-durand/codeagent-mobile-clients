@@ -241,6 +241,73 @@ export function makeSerializedBatonPoster<A>(
   };
 }
 
+/**
+ * How often the baton re-affirms its current state to the backend. Well under
+ * the backend's 1 h `baton:<sessionId>` Redis TTL (`TTL_BATON_STATUS = 3600`)
+ * so the snapshot is refreshed with a very wide margin, and far rarer than the
+ * 20 s heartbeat it rides so we don't spam the SSE bus.
+ */
+export const BATON_REAFFIRM_INTERVAL_MS = 5 * 60_000;
+
+/**
+ * Builds the heartbeat rider that keeps the backend's baton snapshot alive.
+ *
+ * ⚠️ THE BUG THIS FIXES: the CLI only ever posted `baton_state` on a state
+ * TRANSITION. The backend mirrors each post into Redis `baton:<sessionId>`
+ * with a **1 h TTL**, and mobile does ONE `GET /api/baton/sessions/:id/state`
+ * on session open, treating `null` as "pre-baton CLI" (no BatonBar — a
+ * deliberate rollout-safety default). So a local session left alone for over
+ * an hour lost its snapshot and re-opened with the Take-Control affordance
+ * GONE, even though the CLI was alive and holding the baton. The source of
+ * truth has to keep RE-AFFIRMING, not just announce edges.
+ *
+ * It rides the relay's EXISTING 20 s heartbeat tick (`onHeartbeat`) rather
+ * than arming a timer of its own — CLAUDE.md "No polling for realtime" plus
+ * "Heartbeat must stay punctual": one timer, and the rider only hands the
+ * already-known state to the serialized poster (a fire-and-forget POST), so
+ * the tick does no synchronous work.
+ *
+ * Rules:
+ *  - **Throttled** to {@link BATON_REAFFIRM_INTERVAL_MS} — the point is
+ *    keeping a 1 h TTL alive, not beating every 20 s.
+ *  - **Always re-affirms on the first beat after a (re)connect**, so a relay
+ *    that just re-established its channel (or just started) republishes
+ *    immediately instead of waiting out the throttle.
+ *  - **Never re-affirms the transient `SWITCHING` state** — the controller
+ *    publishes the steady state moments later through the same serialized
+ *    poster; re-asserting a stale `SWITCHING` is the one thing that could
+ *    latch mobile on "Switching…". The throttle clock is left untouched in
+ *    that case so the very next tick re-affirms the steady state.
+ *  - **No-op when the baton isn't active** (`currentState()` → `null`, e.g.
+ *    after teardown) — non-baton sessions never construct this at all.
+ */
+export function makeBatonHeartbeatReaffirm(deps: {
+  /** Current baton state, or `null` when there is nothing to affirm. */
+  currentState: () => {
+    state: BatonState;
+    driver: DriverKind;
+    conversationId: string | null;
+  } | null;
+  /** The SAME serialized poster `publishState` uses, so a re-affirm can never
+   *  overtake a real transition on the wire. */
+  publish: (state: BatonState, driver: DriverKind, conversationId: string | null) => void;
+  intervalMs?: number;
+  now?: () => number;
+}): (info: { firstAfterConnect: boolean }) => void {
+  const now = deps.now ?? Date.now;
+  const intervalMs = deps.intervalMs ?? BATON_REAFFIRM_INTERVAL_MS;
+  let lastAffirmedAt: number | null = null;
+  return ({ firstAfterConnect }): void => {
+    const current = deps.currentState();
+    if (!current) return;
+    if (current.state === 'SWITCHING') return;
+    const at = now();
+    if (!firstAfterConnect && lastAffirmedAt !== null && at - lastAffirmedAt < intervalMs) return;
+    lastAffirmedAt = at;
+    deps.publish(current.state, current.driver, current.conversationId);
+  };
+}
+
 export interface BatonSessionOptions {
   agent: AgentId;
   /** The paired-session id (the backend row). */
@@ -428,21 +495,29 @@ export async function runBatonSession(opts: BatonSessionOptions): Promise<void> 
   // ─── Controller: single active driver + backend state publish ────────────
   // Ordered baton-state poster — successive POSTs never overtake one another.
   const postBatonState = makeSerializedBatonPoster(postBatonEvent);
+  // Fire-and-forget, non-fatal — but ORDERED (see makeSerializedBatonPoster):
+  // a fast SWITCHING→steady-state pair must not arrive reordered and leave
+  // mobile stuck on "Switching…". Shared by the controller's transition
+  // publishes AND the heartbeat re-affirmation rider, so both ride ONE chain.
+  const publishBatonState = (
+    state: BatonState,
+    driver: DriverKind,
+    conversationId: string | null,
+  ): void => {
+    postBatonState({
+      sessionId: opts.sessionId,
+      pluginId: opts.pluginId,
+      pluginAuthToken: opts.pluginAuthToken,
+      state,
+      driver,
+      conversationId,
+    });
+  };
   const controller = new BatonController({
     local: nativeDriver,
     mobile: mobileDriver,
     publishState: (state: BatonState, driver: DriverKind, conversationId: string | null) => {
-      // Fire-and-forget, non-fatal — but ORDERED (see makeSerializedBatonPoster):
-      // a fast SWITCHING→steady-state pair must not arrive reordered and leave
-      // mobile stuck on "Switching…".
-      postBatonState({
-        sessionId: opts.sessionId,
-        pluginId: opts.pluginId,
-        pluginAuthToken: opts.pluginAuthToken,
-        state,
-        driver,
-        conversationId,
-      });
+      publishBatonState(state, driver, conversationId);
       // (Re-)arm the read-only mirror whenever the native TUI holds the baton.
       // The first LOCAL_DRIVE (from `begin()`) is a fresh session; subsequent
       // ones are handback re-arms.
@@ -462,6 +537,14 @@ export async function runBatonSession(opts: BatonSessionOptions): Promise<void> 
   // command machinery and acks via the relay, so mobile never hangs.
   const dispatchActive = (cmd: RemoteCommand): Promise<void> =>
     controller.activeSessionDriver.dispatch(cmd);
+  // Declared here (ahead of the ─── Lifecycle ─── block that sets it) so the
+  // heartbeat rider below can read it; the rider only ever runs post-`start()`.
+  let torn = false;
+  // The relay's heartbeat also carries the baton state RE-AFFIRMATION rider
+  // (see makeBatonHeartbeatReaffirm): the backend keeps the baton snapshot in
+  // Redis for 1 h, and mobile renders no BatonBar when that snapshot is gone,
+  // so a live session that hasn't switched drivers in over an hour would lose
+  // Take Control entirely. Riding the existing 20 s tick keeps it to ONE timer.
   relay = new CommandRelayService(
     opts.pluginId,
     makeOnCommand({
@@ -470,10 +553,16 @@ export async function runBatonSession(opts: BatonSessionOptions): Promise<void> 
       ack: (id, status, result) => relay.sendResult(id, status, result),
     }),
     runtime.meta,
+    undefined,
+    undefined,
+    makeBatonHeartbeatReaffirm({
+      // Nothing to affirm once the session is torn down.
+      currentState: () => (torn ? null : controller.currentState()),
+      publish: publishBatonState,
+    }),
   );
 
   // ─── Lifecycle ───────────────────────────────────────────────────────────
-  let torn = false;
   function teardown(): void {
     if (torn) return;
     torn = true;

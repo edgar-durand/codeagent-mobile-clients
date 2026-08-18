@@ -332,3 +332,125 @@ describe('CommandRelayService pairing-invalid (401/403 fatal on /api/commands/re
     expect(resultCalls()).toBe(before + 1);
   });
 });
+
+describe('CommandRelayService heartbeat rider (onHeartbeat)', () => {
+  const realRandom = Math.random;
+  beforeEach(() => {
+    vi.useFakeTimers();
+    Math.random = () => 0.5;
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.clearAllMocks();
+    Math.random = realRandom;
+  });
+
+  function heartbeatCalls(): number {
+    return vi
+      .mocked(pairing._postJson)
+      .mock.calls.filter(([url]) => String(url).includes('/api/plugin/heartbeat')).length;
+  }
+
+  it('rides the SAME 20 s tick as the heartbeat — no second timer', async () => {
+    const onHeartbeat = vi.fn();
+    const relay = new CommandRelayService(
+      'plugin-hb-rider',
+      vi.fn(),
+      META,
+      undefined,
+      undefined,
+      onHeartbeat,
+    );
+    relay.start();
+    await vi.advanceTimersByTimeAsync(10);
+    expect(onHeartbeat).toHaveBeenCalledTimes(1); // start()'s immediate beat
+    const beatsAfterStart = heartbeatCalls();
+
+    await vi.advanceTimersByTimeAsync(20_000 * 3 + 100);
+    // Exactly one rider invocation per beat — never more, never fewer.
+    expect(onHeartbeat.mock.calls.length).toBe(heartbeatCalls());
+    expect(heartbeatCalls()).toBe(beatsAfterStart + 3);
+    relay.stop();
+  });
+
+  it('flags the beats around a (re)connect, then settles to steady ticks', async () => {
+    const onHeartbeat = vi.fn();
+    const relay = new CommandRelayService(
+      'plugin-hb-connect',
+      vi.fn(),
+      META,
+      undefined,
+      undefined,
+      onHeartbeat,
+    );
+    relay.start();
+    await vi.advanceTimersByTimeAsync(10);
+    // Beat 1 = start()'s immediate beat, issued BEFORE any command channel
+    // exists. Beat 2 = the first beat after the channel came up (the polling
+    // fallback here, a 200 SSE stream in production) — both re-affirm.
+    expect(onHeartbeat).toHaveBeenNthCalledWith(1, { firstAfterConnect: true });
+    await vi.advanceTimersByTimeAsync(20_000 + 10);
+    expect(onHeartbeat).toHaveBeenNthCalledWith(2, { firstAfterConnect: true });
+    // From there on it's steady ticks — the rider's own throttle takes over.
+    await vi.advanceTimersByTimeAsync(20_000 + 10);
+    expect(onHeartbeat).toHaveBeenNthCalledWith(3, { firstAfterConnect: false });
+    relay.stop();
+  });
+
+  it('a throwing rider never kills the beat', async () => {
+    const onHeartbeat = vi.fn(() => {
+      throw new Error('rider blew up');
+    });
+    const relay = new CommandRelayService(
+      'plugin-hb-throw',
+      vi.fn(),
+      META,
+      undefined,
+      undefined,
+      onHeartbeat,
+    );
+    relay.start();
+    await vi.advanceTimersByTimeAsync(10);
+    const before = heartbeatCalls();
+    await vi.advanceTimersByTimeAsync(20_000 * 2 + 100);
+    expect(heartbeatCalls()).toBe(before + 2);
+    expect(onHeartbeat).toHaveBeenCalledTimes(3);
+    relay.stop();
+  });
+
+  it('the beat stays punctual: the rider adds no sync git read and no awaited work', async () => {
+    // Regression guard for CLAUDE.md "Heartbeat must stay punctual" — the
+    // rider is fire-and-forget, so a POST that never resolves cannot stall
+    // the next 20 s beat, and the sync git seam is still start()-only.
+    const syncSeam = vi.spyOn(gitBranch._execSeam, 'exec').mockReturnValue('main\n');
+    vi.spyOn(gitBranch._execSeamAsync, 'exec').mockResolvedValue('main\n');
+    const onHeartbeat = vi.fn(() => {
+      void new Promise(() => {}); // a POST that never settles
+    });
+    const relay = new CommandRelayService(
+      'plugin-hb-punctual',
+      vi.fn(),
+      META,
+      undefined,
+      undefined,
+      onHeartbeat,
+    );
+    relay.start();
+    await vi.advanceTimersByTimeAsync(10);
+    const syncCallsAfterStart = syncSeam.mock.calls.length;
+    const before = heartbeatCalls();
+
+    await vi.advanceTimersByTimeAsync(20_000 * 3 + 100);
+    expect(heartbeatCalls()).toBe(before + 3); // still punctual
+    expect(syncSeam.mock.calls.length).toBe(syncCallsAfterStart); // no new sync I/O
+    relay.stop();
+  });
+
+  it('relays without a rider are byte-for-byte unchanged', async () => {
+    const relay = new CommandRelayService('plugin-hb-none', vi.fn(), META);
+    relay.start();
+    await vi.advanceTimersByTimeAsync(20_000 + 100);
+    expect(heartbeatCalls()).toBe(2);
+    relay.stop();
+  });
+});

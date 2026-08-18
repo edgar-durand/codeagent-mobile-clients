@@ -4,6 +4,7 @@ import {
   makeOnCommand,
   makeMirrorOnNewMessages,
   makeSerializedBatonPoster,
+  makeBatonHeartbeatReaffirm,
 } from '../../src/baton/wire-baton';
 import type { RemoteCommand } from '../../src/services/command-relay.service';
 import { isLocalSession } from '../../src/baton/gate';
@@ -313,5 +314,122 @@ describe('makeMirrorOnNewMessages (LOCAL_DRIVE live mirror)', () => {
       { type: 'new_turn', done: false },
       { type: 'text', content: 'reply A', done: true },
     ]);
+  });
+});
+
+describe('makeBatonHeartbeatReaffirm (the 1 h backend snapshot never expires)', () => {
+  // The CLI used to post `baton_state` only on a TRANSITION. The backend
+  // snapshot lives in Redis for 1 h, and mobile treats a missing snapshot as
+  // "pre-baton CLI" → no BatonBar. A local session left alone for over an hour
+  // therefore reopened with Take Control GONE. The rider re-affirms the CURRENT
+  // state on the relay's existing 20 s heartbeat so the TTL is always fresh.
+  const LOCAL = {
+    state: 'LOCAL_DRIVE' as const,
+    driver: 'local_tui' as const,
+    conversationId: 'conv-1',
+  };
+
+  function harness(
+    currentState: () => {
+      state: 'LOCAL_DRIVE' | 'MOBILE_DRIVE' | 'SWITCHING';
+      driver: 'local_tui' | 'mobile_acp';
+      conversationId: string | null;
+    } | null,
+  ) {
+    const publish = vi.fn();
+    let now = 1_000_000;
+    const reaffirm = makeBatonHeartbeatReaffirm({
+      currentState,
+      publish,
+      intervalMs: 5 * 60_000,
+      now: () => now,
+    });
+    /** Advance the clock by one 20 s heartbeat and fire the tick. */
+    const tick = (firstAfterConnect = false): void => {
+      now += 20_000;
+      reaffirm({ firstAfterConnect });
+    };
+    return { publish, tick, reaffirm, at: (ms: number) => (now = ms) };
+  }
+
+  it('re-affirms the CURRENT state through the poster on a heartbeat tick', () => {
+    const { publish, reaffirm } = harness(() => LOCAL);
+    reaffirm({ firstAfterConnect: true });
+    expect(publish).toHaveBeenCalledTimes(1);
+    expect(publish).toHaveBeenCalledWith('LOCAL_DRIVE', 'local_tui', 'conv-1');
+  });
+
+  it('re-affirms whatever the controller currently holds (MOBILE_DRIVE too)', () => {
+    let state = LOCAL as ReturnType<
+      Parameters<typeof makeBatonHeartbeatReaffirm>[0]['currentState']
+    >;
+    const { publish, tick } = harness(() => state);
+    tick(true);
+    state = { state: 'MOBILE_DRIVE', driver: 'mobile_acp', conversationId: 'conv-1' };
+    // Past the throttle window so the next tick affirms the new steady state.
+    for (let i = 0; i < 16; i += 1) tick();
+    expect(publish).toHaveBeenLastCalledWith('MOBILE_DRIVE', 'mobile_acp', 'conv-1');
+  });
+
+  it('throttles: 20 s ticks re-affirm at most once per ~5 min', () => {
+    const { publish, tick } = harness(() => LOCAL);
+    tick(true); // first beat after connect — always affirms
+    expect(publish).toHaveBeenCalledTimes(1);
+    // 14 more 20 s ticks = 280 s later — still inside the 300 s window.
+    for (let i = 0; i < 14; i += 1) tick();
+    expect(publish).toHaveBeenCalledTimes(1);
+    tick(); // 300 s — window elapsed
+    expect(publish).toHaveBeenCalledTimes(2);
+    // And it does NOT immediately re-affirm again on the next tick.
+    tick();
+    expect(publish).toHaveBeenCalledTimes(2);
+  });
+
+  it('always re-affirms on the first tick after a (re)connect, ignoring the throttle', () => {
+    const { publish, tick } = harness(() => LOCAL);
+    tick(true);
+    expect(publish).toHaveBeenCalledTimes(1);
+    tick(); // 20 s later — throttled
+    expect(publish).toHaveBeenCalledTimes(1);
+    tick(true); // relay reconnected — affirm now, don't wait out the window
+    expect(publish).toHaveBeenCalledTimes(2);
+  });
+
+  it('inactive baton (non-local / torn-down session) → zero posts on every tick', () => {
+    const { publish, tick } = harness(() => null);
+    tick(true);
+    for (let i = 0; i < 40; i += 1) tick();
+    expect(publish).not.toHaveBeenCalled();
+  });
+
+  it('never re-affirms the transient SWITCHING state, and does not burn the throttle window', () => {
+    let state = { state: 'SWITCHING', driver: 'local_tui', conversationId: 'conv-1' } as ReturnType<
+      Parameters<typeof makeBatonHeartbeatReaffirm>[0]['currentState']
+    >;
+    const { publish, tick } = harness(() => state);
+    tick(true);
+    expect(publish).not.toHaveBeenCalled();
+    // The handoff settled — the very next tick affirms the steady state.
+    state = { state: 'MOBILE_DRIVE', driver: 'mobile_acp', conversationId: 'conv-1' };
+    tick();
+    expect(publish).toHaveBeenCalledWith('MOBILE_DRIVE', 'mobile_acp', 'conv-1');
+  });
+
+  it('is synchronous-work-free: returns void immediately, the post is fire-and-forget', () => {
+    // CLAUDE.md "Heartbeat must stay punctual" — the rider runs on the same
+    // 20 s interval as the beat, so it must never await anything.
+    let settled = false;
+    const publish = vi.fn(() => {
+      // The real poster is `makeSerializedBatonPoster(postBatonEvent)`: it
+      // starts a promise chain and returns void. Simulate a POST that never
+      // resolves — the rider must not care.
+      void new Promise(() => {}).then(() => {
+        settled = true;
+      });
+    });
+    const reaffirm = makeBatonHeartbeatReaffirm({ currentState: () => LOCAL, publish });
+    expect(reaffirm({ firstAfterConnect: true })).toBeUndefined();
+    expect(publish).toHaveBeenCalledTimes(1);
+    expect(settled).toBe(false);
   });
 });
