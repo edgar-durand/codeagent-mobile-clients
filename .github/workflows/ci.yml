@@ -269,6 +269,25 @@ jobs:
 
           npx vitest run fleet-box.int
 
+      # Session Baton — REAL local-session integration test. Drives the actual
+      # composition root (runBatonSession) with the real native `claude` TUI,
+      # the real ACP adapter and the real relay against an in-test stub
+      # backend, and asserts the three 2026-08-18 regressions stay fixed:
+      # take-control BEFORE the first TUI turn reaches MOBILE_DRIVE (never
+      # wedges in SWITCHING), handback returns to LOCAL_DRIVE, no raw TUI
+      # chrome reaches the chat pipe, and SIGINT posts `online:false` before
+      # the process exits. Gated to Linux + Node 20; the test ALSO self-skips
+      # when `claude --version` fails, which is the case on a stock runner —
+      # so this step is green-but-skipped until an authenticated claude is
+      # provisioned here (install @anthropic-ai/claude-code + a credential
+      # secret, see apps/cli/__tests__/integration/README.md).
+      - name: CLI session-baton local integration test (real claude)
+        if: matrix.os == 'ubuntu-latest' && matrix.node == '20'
+        working-directory: apps/cli
+        env:
+          RUN_BATON_INT: '1'
+        run: npx vitest run integration/baton-local
+
       # Smoke from the repo workspace. Confirms the freshly-built
       # binary boots on this OS, the argument parser handles every
       # `<cmd> --help` we ship, and the live backend at

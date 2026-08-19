@@ -6,7 +6,10 @@ vi.mock('../src/services/pairing.service', () => ({
   _getJson: vi.fn().mockResolvedValue({ data: [] }),
 }));
 
-import { CommandRelayService } from '../src/services/command-relay.service';
+import {
+  CommandRelayService,
+  stopRelayWithGoodbye,
+} from '../src/services/command-relay.service';
 import * as gitBranch from '../src/lib/git-branch';
 import { AGENT_REGISTRY } from '@codeam/shared';
 
@@ -452,5 +455,81 @@ describe('CommandRelayService heartbeat rider (onHeartbeat)', () => {
     await vi.advanceTimersByTimeAsync(20_000 + 100);
     expect(heartbeatCalls()).toBe(2);
     relay.stop();
+  });
+});
+
+/**
+ * Regression for "closing Claude Code / the CLI leaves mobile showing ONLINE"
+ * (2026-08-18, owner-reported). `stop()` fired the `online:false` heartbeat
+ * fire-and-forget and every shutdown path called `process.exit()` immediately
+ * after, so the POST never left the process — and nothing on the backend
+ * publishes when the 30 s heartbeat key expires, so mobile stayed "online"
+ * until the user re-opened the app.
+ */
+describe('CommandRelayService — goodbye heartbeat', () => {
+  const realRandom = Math.random;
+  beforeEach(() => {
+    vi.useFakeTimers();
+    Math.random = () => 0.5;
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.clearAllMocks();
+    Math.random = realRandom;
+  });
+
+  it('stopAndFlush resolves only AFTER the online:false heartbeat has settled', async () => {
+    // Hold each heartbeat POST open so the test controls exactly when it lands.
+    const gate = (): { promise: Promise<void>; open: () => void } => {
+      let open!: () => void;
+      const promise = new Promise<void>((resolve) => {
+        open = resolve;
+      });
+      return { promise, open };
+    };
+    const online = gate();
+    const goodbye = gate();
+    let beats = 0;
+    vi.mocked(pairing._postJson).mockImplementation(async (url: string) => {
+      if (url.includes('/api/plugin/heartbeat')) {
+        beats += 1;
+        await (beats === 1 ? online.promise : goodbye.promise);
+      }
+      return { success: true };
+    });
+
+    const relay = new CommandRelayService('plugin-bye', vi.fn(), META);
+    relay.start();
+    await vi.advanceTimersByTimeAsync(10);
+    online.open(); // let the initial online:true beat through
+
+    let flushed = false;
+    const p = relay.stopAndFlush().then(() => {
+      flushed = true;
+    });
+    await vi.advanceTimersByTimeAsync(10);
+    expect(flushed).toBe(false); // still waiting on the goodbye POST
+    expect(pairing._postJson).toHaveBeenCalledWith(
+      expect.stringContaining('/api/plugin/heartbeat'),
+      expect.objectContaining({ pluginId: 'plugin-bye', online: false }),
+    );
+
+    goodbye.open();
+    await p;
+    expect(flushed).toBe(true);
+  });
+
+  it('stopRelayWithGoodbye gives up after its bound so a dead network cannot hang the exit', async () => {
+    // Never settles — a hung POST must not wedge Ctrl+C.
+    const relay = { stopAndFlush: vi.fn(() => new Promise<void>(() => {})) };
+    let done = false;
+    const p = stopRelayWithGoodbye(relay, 1500).then(() => {
+      done = true;
+    });
+    await vi.advanceTimersByTimeAsync(1499);
+    expect(done).toBe(false);
+    await vi.advanceTimersByTimeAsync(2);
+    await p;
+    expect(done).toBe(true);
   });
 });

@@ -4,7 +4,10 @@ import { addSession, getActiveSession, getActiveSessionForAgent, ensurePluginId,
 import { acquireDaemonLock } from './pair-auto';
 import { maybeStartHeadroomReporter, maybeResumeLocalHeadroomReporter } from './host-agent';
 import { showIntro, showInfo, showError } from '../ui/banner';
-import { CommandRelayService } from '../services/command-relay.service';
+import {
+  CommandRelayService,
+  stopRelayWithGoodbye,
+} from '../services/command-relay.service';
 import { AgentService } from '../services/agent.service';
 import { createRuntimeStrategy } from '../agents/registry';
 import { getAcpAdapter, requiresAcp, resolveAcpAdapterWithRetry } from '../agents/acp/adapters';
@@ -682,12 +685,15 @@ export async function start(
         outputSvc.push(raw);
         streamingEmitter?.push(raw);
       },
-      onExit(code) {
+      async onExit(code) {
         process.removeListener('SIGINT', sigintHandler);
         process.removeListener('SIGTERM', sigintHandler);
         process.removeListener('SIGHUP', sigintHandler);
         outputSvc.dispose();
-        relay.stop();
+        // The agent exited on its own — the session is over. AWAIT the
+        // `online:false` heartbeat: fire-and-forget never survived the
+        // `process.exit` below, so mobile kept showing the session ONLINE.
+        await stopRelayWithGoodbye(relay);
         void fileWatcher?.stop();
         turnFiles?.stop();
         void beads?.watcher.stop();
@@ -769,7 +775,8 @@ export async function start(
     shuttingDown = true;
     agent.kill();
     outputSvc.dispose();
-    relay.stop();
+    // AWAITED goodbye — see onExit above (this handler ends in process.exit).
+    await stopRelayWithGoodbye(relay);
     void fileWatcher?.stop();
     void beads?.watcher.stop();
     void streamingEmitter?.stop();

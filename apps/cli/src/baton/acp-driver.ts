@@ -8,16 +8,13 @@ import type { AcpPublisher } from '../agents/acp/publisher';
 import { createBudgetRecovery } from '../agents/acp/budgetRecovery';
 import type { PromptBlock } from '../agents/acp/buildAcpPromptBlocks';
 import { relaunchProxyWithoutBudget } from '../agents/acp/headroom-budget-proxy';
-import {
-  AcpHistory,
-  StreamingState,
-  type AcpRunnerOptions,
-} from '../agents/acp/runner';
+import { AcpHistory, StreamingState, type AcpRunnerOptions } from '../agents/acp/runner';
 import {
   assembleAcpCommandContext,
   dispatchAcpCommand,
   type AcpSessionContext,
 } from '../agents/acp/command-handlers';
+import { log } from '../services/logger';
 import type { DriverKind, SessionDriver } from './types';
 
 export interface AcpDriverDeps {
@@ -72,10 +69,29 @@ export class AcpDriver implements SessionDriver {
   constructor(private readonly deps: AcpDriverDeps) {}
 
   async start(resumeId?: string): Promise<string> {
+    // ⚠️ ZERO-TURN GUARD (2026-08-18 incident). The native TUI hands us the id
+    // it PRE-MINTED at spawn (claude `--session-id <uuid>`), but the agent only
+    // writes `<id>.jsonl` on its FIRST turn. A user who pairs and immediately
+    // takes control from mobile — without typing anything in the terminal —
+    // therefore hands us an id that exists NOWHERE on disk, and
+    // `claude-agent-acp`'s `session/load` for it never resolves (observed live:
+    // no `← ok`, no error, ever) → the baton wedged in `SWITCHING` forever.
+    // There is no conversation to preserve in that case, so we start FRESH and
+    // adopt the ACP-minted id as THE conversation id: mobile drives it, the
+    // controller stores it, and the later handback `--resume`s the very
+    // conversation mobile just drove (the ACP adapter writes to the same
+    // on-disk store the native TUI resumes from).
+    const resumable = resumeId !== undefined && this.hasTranscript(resumeId);
+    if (resumeId !== undefined && !resumable) {
+      log.info(
+        'batonAcp',
+        `resume id ${resumeId.slice(0, 8)} has no transcript on disk (zero turns yet) — starting a fresh ACP session instead of session/load`,
+      );
+    }
     let started: Awaited<ReturnType<AcpClient['start']>>;
     try {
       started = await this.deps.client.start();
-      if (resumeId !== undefined) {
+      if (resumable && resumeId !== undefined) {
         // Cross-store bridge (cursor): its native-TUI conversation lives in a
         // DIFFERENT on-disk store than ACP `session/load` reads, so mirror it
         // across BEFORE the load or `session/load` 404s. No-op for claude/kimi
@@ -105,8 +121,9 @@ export class AcpDriver implements SessionDriver {
       throw err;
     }
     // Explicit undefined check (not truthiness): an empty-string id must still
-    // resume rather than mint a fresh conversation.
-    const conversationId = resumeId !== undefined ? resumeId : started.sessionId;
+    // resume rather than mint a fresh conversation. A NON-resumable resume id
+    // (zero turns on disk, above) falls through to the freshly-minted ACP id.
+    const conversationId = resumable && resumeId !== undefined ? resumeId : started.sessionId;
     this.acpSessionId = conversationId;
     this.agentCaps = started.initialize.agentCapabilities;
     // New (re)spawn → drop the memoised session so history/models rebind to the
@@ -114,6 +131,26 @@ export class AcpDriver implements SessionDriver {
     this.session = null;
     this.budgetReachedPosted = false;
     return conversationId;
+  }
+
+  /**
+   * Does the agent's own on-disk transcript for `conversationId` exist yet?
+   * `resolveHistoryFile` returns null when the file isn't there (every baton
+   * runtime `existsSync`-checks), which is exactly "the native TUI has run zero
+   * turns on this id" — the only case where `session/load` has nothing to load.
+   * A runtime without the hook can't be a baton runtime (see `gate.ts`), but if
+   * one ever is, assume resumable so behaviour is unchanged.
+   */
+  private hasTranscript(conversationId: string): boolean {
+    const resolve = this.deps.runtime.resolveHistoryFile;
+    if (typeof resolve !== 'function') return true;
+    try {
+      return resolve.call(this.deps.runtime, this.deps.opts.cwd, conversationId) !== null;
+    } catch {
+      // A throwing resolver must not block a hand-off — fall back to the
+      // previous behaviour (attempt the load; it is now bounded by a timeout).
+      return true;
+    }
   }
 
   async stop(): Promise<void> {

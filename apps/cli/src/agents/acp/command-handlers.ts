@@ -27,7 +27,11 @@ export { modeIsFullAutoApprove } from './modes';
 import type { RuntimeStrategy } from '../strategy';
 import { removeSession, setSquadAuto } from '../../config';
 import { closeAllTerminals } from '../../services/terminal-ops.service';
-import type { CommandRelayService, RemoteCommand } from '../../services/command-relay.service';
+import {
+  stopRelayWithGoodbye,
+  type CommandRelayService,
+  type RemoteCommand,
+} from '../../services/command-relay.service';
 import type { HistoryService } from '../../services/history.service';
 import type { TurnFileAggregator } from '../../services/turn-files/turn-file-aggregator';
 import { beadsActionFromPayload } from '../../beads/wiring';
@@ -1699,7 +1703,9 @@ async function sessionShutdownH(ctx: AcpCommandContext): Promise<void> {
       /* best-effort */
     }
   }
-  relay.stop();
+  // AWAITED goodbye so the backend flips this session offline immediately
+  // (a fire-and-forget heartbeat never survives the process.exit below).
+  await stopRelayWithGoodbye(relay);
   closeAllTerminals();
   await client.stop();
   process.exit(0);

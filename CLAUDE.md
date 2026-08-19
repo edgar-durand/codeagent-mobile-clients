@@ -212,10 +212,34 @@ over ACP. It is a purely ADDITIVE branch — codespace / self-hosted paths are u
 - **Ordered state POSTs** (`makeSerializedBatonPoster`): a bare `void postBatonEvent()` let a fast
   hand-back's `SWITCHING`→`LOCAL_DRIVE` pair reorder → mobile stuck on "Switching…". The backend
   publishes each event before responding 2xx, so awaiting each POST before the next guarantees order. (v2.60.4)
+- **Zero-turn take-control** (`AcpDriver.start`): the native driver hands over the id it PRE-MINTED
+  at spawn (claude `--session-id`), but the agent writes `<id>.jsonl` only on its FIRST turn. Taking
+  control before typing anything therefore asked the adapter to `session/load` an id that exists
+  NOWHERE on disk — and `claude-agent-acp` answers that with neither ok nor error, forever. The
+  driver now checks `resolveHistoryFile` first: no transcript → skip the load, start FRESH, and adopt
+  the ACP-minted id as THE conversation id (the handback `--resume`s it). (2026-08-18)
+- **Every hand-off is BOUNDED** (`BatonController.DEFAULT_SWITCH_TIMEOUT_MS`, 45 s; plus a 60 s
+  timeout inside `AcpClient.loadSession` — it was the one handshake RPC with none). On timeout the
+  controller stops the half-started driver, RE-STARTS the one it already stopped (a bare state revert
+  left the user with a dead terminal) and re-publishes the pre-switch steady state, so `SWITCHING`
+  can never be terminal. (2026-08-18)
+- **LOCAL_DRIVE publishes NOTHING from the screen** (`OutputService.setPublishSuppressed`, enabled by
+  `NativeTuiDriver`): every PTY byte used to flow through the legacy OutputService, so the mobile chat
+  rendered raw Claude Code chrome (box rules, `❯`, "auto mode on (shift+tab to cycle)") as agent
+  output. The transcript mirror is the ONLY source of chat content while the terminal drives; typed
+  streaming comes from the ACP driver in MOBILE_DRIVE. (2026-08-18)
+- **Goodbye heartbeat is AWAITED** (`CommandRelayService.stopAndFlush` / `stopRelayWithGoodbye`):
+  `stop()` fired `online:false` fire-and-forget and every shutdown path called `process.exit()`
+  immediately, so the POST never left the process and mobile kept showing the session ONLINE (nothing
+  publishes when the backend's 30 s heartbeat key expires). Now bounded-awaited on SIGINT/SIGTERM/
+  SIGHUP, on the ACP shutdown, and when the native TUI exits on its own. ⚠️ A `kill -9`/power loss
+  still can't say goodbye — the backend needs a sweeper that publishes offline on key expiry. (2026-08-18)
 
-Tests: `apps/cli/__tests__/baton/*` (gate, controller wiring, acp-driver load-replay bracket,
-terminal park, serialized poster) + `__tests__/agents/acp/streaming-state-dedup.test.ts`
-(load-replay guard). Spec/plan in the container repo `docs/superpowers/`.
+Tests: `apps/cli/__tests__/baton/*` (gate, controller wiring + bounded hand-off, acp-driver
+load-replay bracket + zero-turn guard, terminal park, serialized poster, LOCAL_DRIVE publishes no PTY
+frames) + `__tests__/agents/acp/streaming-state-dedup.test.ts` (load-replay guard). The whole loop
+runs for REAL (native claude TUI + ACP adapter + relay vs. a stub backend) in
+`__tests__/integration/baton-local.int.test.ts` (`RUN_BATON_INT=1`, also in ci.yml). Spec/plan in the container repo `docs/superpowers/`.
 
 ### CodeAgent Box rescue fleet — the `fleet_*` control-plane handlers (`host-agent.ts`)
 

@@ -158,3 +158,31 @@ describe('AcpClient.loadSession — load-replay guard', () => {
     }
   });
 });
+
+/**
+ * Regression for the 2026-08-18 baton "Switching…" incident: `session/load`
+ * was the ONE handshake RPC with no timeout. `claude-agent-acp` answered
+ * neither ok nor error for a session id with no transcript on disk, so the
+ * caller (the baton's AcpDriver) waited forever and the hand-off wedged.
+ */
+describe('AcpClient.loadSession — bounded', () => {
+  it('rejects with ACP_LOAD_SESSION_TIMEOUT when the adapter never answers', async () => {
+    vi.useFakeTimers();
+    try {
+      const client = makeClient({
+        adapter: { requiresAgentBinary: 'claude' } as unknown as AcpClientOptions['adapter'],
+      });
+      const internals = client as unknown as ClientInternals;
+      // Never settles — exactly what the live adapter did.
+      internals.connection = { loadSession: vi.fn(() => new Promise<never>(() => {})) };
+      internals.sessionId = 'sess-active';
+
+      const p = client.loadSession('sess-never-written');
+      const assertion = expect(p).rejects.toThrow(/ACP_LOAD_SESSION_TIMEOUT/);
+      await vi.advanceTimersByTimeAsync(60_000);
+      await assertion;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});

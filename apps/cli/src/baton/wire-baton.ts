@@ -1,6 +1,10 @@
 import type { AgentId, NormalizedMessage } from '@codeam/shared';
 import type { McpServer } from '@agentclientprotocol/sdk';
-import { CommandRelayService, type RemoteCommand } from '../services/command-relay.service';
+import {
+  CommandRelayService,
+  stopRelayWithGoodbye,
+  type RemoteCommand,
+} from '../services/command-relay.service';
 import { AgentService } from '../services/agent.service';
 import { createRuntimeStrategy } from '../agents/registry';
 import { AcpClient } from '../agents/acp/client';
@@ -443,8 +447,11 @@ export async function runBatonSession(opts: BatonSessionOptions): Promise<void> 
       nativeDriver.handlePtyData(raw);
     },
     onExit(code) {
-      teardown();
-      process.exit(code);
+      // The user quit the native TUI themselves (`/exit`, Ctrl+D) — that ends
+      // the session, so say goodbye BEFORE exiting. A deliberate hand-off kill
+      // (`NativeTuiDriver.stop()`) never lands here: `AgentService.kill()`
+      // removes the exit listener first.
+      void teardown().finally(() => process.exit(code));
     },
   });
   nativeDriver = new NativeTuiDriver({
@@ -563,19 +570,23 @@ export async function runBatonSession(opts: BatonSessionOptions): Promise<void> 
   );
 
   // ─── Lifecycle ───────────────────────────────────────────────────────────
-  function teardown(): void {
+  // ⚠️ AWAITED goodbye: every exit path here used to fire the `online:false`
+  // heartbeat and immediately `process.exit`, so the POST never left the
+  // process — mobile kept showing the session ONLINE (nothing publishes when
+  // the backend's 30 s heartbeat key expires). `stopRelayWithGoodbye` waits for
+  // it, bounded, so closing the terminal flips the app to offline at once.
+  async function teardown(): Promise<void> {
     if (torn) return;
     torn = true;
     process.removeListener('SIGINT', onSignal);
     process.removeListener('SIGTERM', onSignal);
     process.removeListener('SIGHUP', onSignal);
     mirror?.stop();
-    relay.stop();
     void controller.shutdown();
+    await stopRelayWithGoodbye(relay);
   }
   const onSignal = (): void => {
-    teardown();
-    process.exit(0);
+    void teardown().finally(() => process.exit(0));
   };
   process.once('SIGINT', onSignal);
   process.once('SIGTERM', onSignal);
