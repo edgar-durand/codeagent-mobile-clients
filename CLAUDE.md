@@ -228,6 +228,18 @@ over ACP. It is a purely ADDITIVE branch — codespace / self-hosted paths are u
   rendered raw Claude Code chrome (box rules, `❯`, "auto mode on (shift+tab to cycle)") as agent
   output. The transcript mirror is the ONLY source of chat content while the terminal drives; typed
   streaming comes from the ACP driver in MOBILE_DRIVE. (2026-08-18)
+- **The baton FOLLOWS the native TUI through `/clear` (+ `/rename`)** (`RuntimeStrategy.watchConversationSwitch`
+  → `NativeTuiDriver.onConversationSwitch` → `BatonController.switchConversation`): Claude Code's `/clear` mints a
+  NEW session id and immediately writes `<newId>.jsonl` (verified live, claude 2.1.235); the old file is never
+  touched again. The mirror kept tailing the dead file and Take Control `session/load`ed the old id, so the
+  mobile went silent (owner report 2026-08-18). Claude's hook (`agents/claude/history.ts
+  watchConversationSwitch`) is an `fs.watch` on the project dir (root-watch until it exists) that attributes a
+  new JSONL to the INTERACTIVE TUI via its `<command-name>/clear</command-name>` echo (or a `SessionStart:clear`
+  hook attachment) — a `claude -p` one-shot (preview detect / AI summary, same cwd) or the ACP adapter can't
+  hijack it. The controller re-publishes LOCAL_DRIVE on the new id (LOCAL_DRIVE→LOCAL_DRIVE = a switch, so
+  `wire-baton` arms the mirror FRESH), and `parseHistoryFile` drops the slash-command echoes so
+  `<command-name>…` never renders as a user bubble. `/rename` only appends `custom-title` records — no switch.
+  ⚠️ `/resume <other>` inside the TUI is NOT followed yet (an older file, no `/clear` marker). (2026-08-19)
 - **Goodbye heartbeat is AWAITED** (`CommandRelayService.stopAndFlush` / `stopRelayWithGoodbye`):
   `stop()` fired `online:false` fire-and-forget and every shutdown path called `process.exit()`
   immediately, so the POST never left the process and mobile kept showing the session ONLINE (nothing
