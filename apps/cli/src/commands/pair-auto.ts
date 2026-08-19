@@ -8,6 +8,7 @@ import { capture, identifyUser } from '../services/telemetry.service';
 import { vercelBypassHeader } from '../lib/backend-headers';
 import { rmIfExistsQuiet } from '../lib/quiet';
 import { detectCurrentBranch } from '../lib/git-branch';
+import { resolveSessionHostname } from '../lib/session-hostname';
 import { start } from './start';
 import { startInfraOnly } from './start-infra-only';
 import { maybeStartHeadroomReporter } from './host-agent';
@@ -130,7 +131,9 @@ async function claimOnce(
     pluginId,
     ideName: 'codeam-cli (codespace)',
     ideVersion: process.env.npm_package_version ?? 'unknown',
-    hostname: os.hostname(),
+    // Codespace sessions all share one `codespaces-<hash>` hostname (every
+    // codespace is created on the wrapper repo) — report the user's repo.
+    hostname: resolveSessionHostname(),
     codespaceName: process.env.CODESPACE_NAME ?? '',
     // Current git branch of the codespace's working directory, so the
     // backend can populate `PairedSession.branch` for the codespace pair.
@@ -159,7 +162,9 @@ async function claimOnce(
     // and the bootstrap shell can pattern-match on the code.
     const aborted = (err as { name?: string }).name === 'AbortError';
     throw networkError(
-      aborted ? `request timed out after ${CLAIM_TIMEOUT_MS}ms` : `fetch failed: ${(err as Error).message}`,
+      aborted
+        ? `request timed out after ${CLAIM_TIMEOUT_MS}ms`
+        : `fetch failed: ${(err as Error).message}`,
       err,
     );
   } finally {
@@ -296,8 +301,14 @@ export function acquireDaemonLock(sessionId: string): boolean {
       }
     };
     process.once('exit', release);
-    process.once('SIGTERM', () => { release(); process.exit(0); });
-    process.once('SIGINT', () => { release(); process.exit(0); });
+    process.once('SIGTERM', () => {
+      release();
+      process.exit(0);
+    });
+    process.once('SIGINT', () => {
+      release();
+      process.exit(0);
+    });
     return true;
   } catch {
     return true; // fail-open — never block a daemon from starting
@@ -388,7 +399,7 @@ export async function pairAuto(args: string[]): Promise<void> {
   if (!isKnownAgentId(claimed.agent)) {
     fail(
       `agent "${claimed.agent}" is not supported in this codeam-cli version. ` +
-      `Upgrade with 'npm i -g codeam-cli@latest'.`,
+        `Upgrade with 'npm i -g codeam-cli@latest'.`,
     );
   }
 
@@ -468,9 +479,7 @@ export async function pairAuto(args: string[]): Promise<void> {
       codespaceName: process.env.CODESPACE_NAME ?? undefined,
     });
     // eslint-disable-next-line no-console
-    console.log(
-      '  Skipping agent launch — install an agent from the dashboard to start chatting.',
-    );
+    console.log('  Skipping agent launch — install an agent from the dashboard to start chatting.');
     await startInfraOnly(claimed.agent);
     return;
   }
@@ -491,7 +500,9 @@ export async function pairAuto(args: string[]): Promise<void> {
         codespaceId: process.env['CODESPACE_NAME'] ?? claimed.sessionId,
       })
     : null;
-  process.once('exit', () => { headroomReporter?.stop(); });
+  process.once('exit', () => {
+    headroomReporter?.stop();
+  });
 
   // Hand off to the same long-running poller `codeam pair` ends with — PINNED to
   // this deploy's own session so concurrent host-agent children don't collide on
