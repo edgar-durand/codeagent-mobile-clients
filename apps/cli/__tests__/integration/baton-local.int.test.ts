@@ -26,26 +26,13 @@
  *   5. **Goodbye heartbeat.** SIGINT posts `online:false` BEFORE the process
  *      exits, so mobile stops showing the session as online.
  *
- * ── Gating ───────────────────────────────────────────────────────────────
- * The suite only runs with `RUN_BATON_INT=1`:
+ * A second scenario (2026-08-19) proves the mobile keeps FOLLOWING the native
+ * TUI through `/clear` (new conversation id) and `/rename` — see the doc on
+ * that test below.
  *
- *   RUN_BATON_INT=1 npx vitest run integration/baton-local
- *
- * With the gate set, the behaviour on a missing/unauthenticated `claude`
- * DIFFERS by environment ON PURPOSE:
- *
- *   - **local** (`CI` unset) → skips with a printed reason, so a contributor
- *     without a claude backend isn't blocked.
- *   - **CI** (`CI=true`) → **FAILS LOUDLY** with the exact reason. This step is
- *     a real gate; a silently-skipped gate is worse than no gate, because it
- *     reads green while proving nothing.
- *
- * In CI the agent authenticates exactly like a **house agent ("CodeAgent
- * Cloud") session**: Claude Code pointed at our managed backend via
- * `ANTHROPIC_BASE_URL` + `ANTHROPIC_AUTH_TOKEN` (+ the MiniMax model pins) —
- * the same env `host-agent.ts` writes for a house `self_hosted_deploy`. No
- * per-developer credential is involved. See
- * `.github/workflows/ci.yml` and the README in this directory.
+ * ── Gating / auth ────────────────────────────────────────────────────────
+ * See `__tests__/fixtures/baton/local-harness.ts` (`RUN_BATON_INT=1`; skips
+ * locally without a claude backend, FAILS LOUDLY in CI).
  *
  * ⚠️ `process.exit` is stubbed for the duration (the CLI's shutdown paths call
  * it), which is also what lets the goodbye assertion observe the ORDER: the
@@ -53,79 +40,27 @@
  * fired.
  */
 
-import { describe, it, expect, vi, beforeAll } from 'vitest';
-import * as http from 'node:http';
+import { describe, it, expect, vi, beforeAll, afterAll } from 'vitest';
 import * as fs from 'node:fs';
-import * as os from 'node:os';
-import * as path from 'node:path';
-import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { ensureClaudeOnboarded } from '../../src/agents/claude/onboarding';
-import { resolveHistoryDir } from '../../src/agents/claude/history';
+import {
+  RUN_BATON_INT,
+  IN_CI,
+  BLOCKED,
+  CHROME_MARKERS,
+  announceGate,
+  preflight,
+  startStubBackend,
+  type StubBackend,
+  waitUntil,
+  transcriptIds,
+  transcriptRaw,
+  makeSessionCwd,
+} from '../fixtures/baton/local-harness';
 
-const RUN_BATON_INT = process.env.RUN_BATON_INT === '1';
-/** GitHub Actions (and every other runner we use) sets `CI=true`. */
-const IN_CI = process.env.CI === 'true';
+announceGate('baton-local');
 
-/** House-agent / BYO credential delivered through the environment. */
-const HAS_ENV_CREDENTIAL = Boolean(
-  process.env.ANTHROPIC_AUTH_TOKEN || process.env.ANTHROPIC_API_KEY || process.env.CLAUDE_CODE_OAUTH_TOKEN,
-);
-
-function describeErr(err: unknown): string {
-  const e = err as { message?: string; stdout?: unknown; stderr?: unknown };
-  return [e?.message, String(e?.stdout ?? ''), String(e?.stderr ?? '')]
-    .filter((s) => s && s.trim())
-    .join('\n')
-    .slice(0, 2000);
-}
-
-/** `claude --version`, or the reason it isn't usable. */
-function probeClaudeBinary(): { ok: true; version: string } | { ok: false; reason: string } {
-  try {
-    const out = execFileSync('claude', ['--version'], { encoding: 'utf8', timeout: 60_000 });
-    return { ok: true, version: out.trim() };
-  } catch (err) {
-    return {
-      ok: false,
-      reason: `\`claude --version\` failed — no usable claude binary on PATH: ${describeErr(err)}`,
-    };
-  }
-}
-
-const BINARY = RUN_BATON_INT ? probeClaudeBinary() : ({ ok: false, reason: 'gate off' } as const);
-
-/**
- * Why this run cannot exercise the real gate — `null` when it can.
- * In CI every one of these becomes a FAILING test; locally, a skip.
- */
-function blockedReason(): string | null {
-  if (!BINARY.ok) return BINARY.reason;
-  if (IN_CI && !HAS_ENV_CREDENTIAL) {
-    return (
-      'no agent credential in the environment. This gate runs Claude Code as a HOUSE AGENT ' +
-      '("CodeAgent Cloud"): set ANTHROPIC_BASE_URL + ANTHROPIC_AUTH_TOKEN (the ci.yml step ' +
-      'feeds ANTHROPIC_AUTH_TOKEN from the MINIMAX_API_KEY repo secret). An empty secret ' +
-      'renders as an empty env var, which is exactly this failure.'
-    );
-  }
-  return null;
-}
-
-const BLOCKED = RUN_BATON_INT ? blockedReason() : null;
-
-if (!RUN_BATON_INT) {
-  // eslint-disable-next-line no-console
-  console.log(
-    '[baton-local] SKIPPED — set RUN_BATON_INT=1 (with a claude backend) to run the real local-baton gate.',
-  );
-} else if (BLOCKED && !IN_CI) {
-  // eslint-disable-next-line no-console
-  console.log(`[baton-local] SKIPPED — ${BLOCKED}`);
-} else if (BINARY.ok) {
-  // eslint-disable-next-line no-console
-  console.log(`[baton-local] RUNNING against claude ${BINARY.version}`);
-}
+const RENAMED_TITLE = 'codeam-baton-clear-int';
 
 /**
  * CI must never silently skip this gate. When the environment can't run it we
@@ -145,138 +80,25 @@ describe.runIf(RUN_BATON_INT && IN_CI && BLOCKED !== null)(
   },
 );
 
-/** TUI chrome that must NEVER reach the chat pipe (the owner's screenshot). */
-const CHROME_MARKERS = ['─', '│', '╭', '╰', '❯', 'shift+tab to cycle', 'esc to interrupt', '�'];
-
-interface Recorded {
-  batonStates: string[];
-  heartbeats: Array<{ online: boolean }>;
-  outputFrames: Array<Record<string, unknown>>;
-  results: Array<{ commandId: string; status: string }>;
-}
-
-/** Poll `predicate` until true (real timers), or fail with `label`. */
-async function waitUntil(
-  label: string,
-  predicate: () => boolean,
-  timeoutMs: number,
-): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if (predicate()) return;
-    await new Promise((r) => setTimeout(r, 250));
-  }
-  throw new Error(`timed out after ${Math.round(timeoutMs / 1000)}s waiting for: ${label}`);
-}
-
-/** Every `<conversation>.jsonl` claude has written for `cwd`, if any. */
-function transcriptFiles(cwd: string): string[] {
-  const dir = resolveHistoryDir(cwd);
-  if (!dir) return [];
-  try {
-    return fs.readdirSync(dir).filter((f) => f.endsWith('.jsonl'));
-  } catch {
-    return [];
-  }
-}
-
 describe.skipIf(!RUN_BATON_INT || BLOCKED !== null)('session baton — real local session (claude)', () => {
-  beforeAll(() => {
-    // Pre-complete Claude's first-run theme picker + changelog banner exactly as
-    // the product does on every non-local surface (`start.ts` →
-    // `ensureClaudeOnboarded`). A CI runner's HOME is fresh, so without this the
-    // native TUI opens on the theme dialog and never takes a turn. Idempotent
-    // and merge-preserving, so it is a no-op on a developer's own machine.
-    ensureClaudeOnboarded();
-
-    if (!IN_CI) return;
-    // CI-only live auth probe. Without it an unauthenticated backend surfaces
-    // 3 minutes later as an opaque "timed out waiting for the ACP turn"; here it
-    // surfaces immediately, quoting what claude actually said.
-    const probeCwd = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'codeam-baton-preflight-')));
-    ensureClaudeOnboarded(probeCwd);
-    try {
-      const out = execFileSync(
-        'claude',
-        ['--print', '--dangerously-skip-permissions', 'Reply with the single word READY.'],
-        { cwd: probeCwd, encoding: 'utf8', timeout: 240_000, env: { ...process.env } },
-      );
-      if (!out.trim()) {
-        throw new Error('claude --print returned EMPTY output — the backend answered nothing.');
-      }
-      // eslint-disable-next-line no-console
-      console.log(`[baton-local] auth preflight ok: ${JSON.stringify(out.trim().slice(0, 120))}`);
-    } catch (err) {
-      throw new Error(
-        '[baton-local] CI GATE CANNOT RUN — the house-agent backend did not answer a one-shot turn.\n' +
-          `ANTHROPIC_BASE_URL=${process.env.ANTHROPIC_BASE_URL ?? '(unset)'} ` +
-          `ANTHROPIC_AUTH_TOKEN=${process.env.ANTHROPIC_AUTH_TOKEN ? '(set)' : '(EMPTY/unset)'}\n` +
-          describeErr(err),
-      );
-    } finally {
-      fs.rmSync(probeCwd, { recursive: true, force: true });
-    }
+  // One stub backend for the whole file (see `startStubBackend`): the CLI
+  // captures the API base at module import, so every scenario must post to
+  // the SAME port. Each scenario `reset()`s what it recorded.
+  let backend: StubBackend;
+  beforeAll(async () => {
+    preflight('baton-local');
+    backend = await startStubBackend();
   }, 300_000);
+  afterAll(async () => {
+    await backend?.close();
+  });
 
   it('take-control BEFORE the first turn AND after one on disk → MOBILE_DRIVE both times, handback → LOCAL_DRIVE, no TUI bytes in chat, goodbye on SIGINT', async () => {
-    const rec: Recorded = { batonStates: [], heartbeats: [], outputFrames: [], results: [] };
-    const pending: Array<Record<string, unknown>> = [];
     const exits: Array<{ code: number | undefined; sawOffline: boolean }> = [];
-    const sawOffline = (): boolean => rec.heartbeats.some((h) => h.online === false);
-    const lastState = (): string | undefined => rec.batonStates[rec.batonStates.length - 1];
+    backend.reset();
+    const { rec, enqueue, lastState, sawOffline } = backend;
 
-    // ── Stub backend ────────────────────────────────────────────────────
-    const server = http.createServer((req, res) => {
-      let raw = '';
-      req.on('data', (c) => (raw += c));
-      req.on('end', () => {
-        const url = req.url ?? '';
-        let body: Record<string, unknown> = {};
-        try {
-          body = raw ? (JSON.parse(raw) as Record<string, unknown>) : {};
-        } catch {
-          /* non-JSON — ignore */
-        }
-        const reply = (payload: unknown): void => {
-          res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify(payload));
-        };
-        if (url.startsWith('/api/commands/pending')) {
-          const batch = pending.splice(0, pending.length);
-          return reply({ data: batch });
-        }
-        if (url.startsWith('/api/plugin/heartbeat')) {
-          rec.heartbeats.push({ online: body.online === true });
-          return reply({ success: true });
-        }
-        if (url.startsWith('/api/baton/events')) {
-          rec.batonStates.push(String(body.state));
-          return reply({ success: true });
-        }
-        if (url.startsWith('/api/commands/output')) {
-          rec.outputFrames.push(body);
-          return reply({ success: true });
-        }
-        if (url.startsWith('/api/commands/result')) {
-          rec.results.push({
-            commandId: String(body.commandId),
-            status: String(body.status),
-          });
-          return reply({ success: true });
-        }
-        return reply({ success: true, data: {} });
-      });
-    });
-    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
-    const port = (server.address() as { port: number }).port;
-    // MUST be set before importing anything that captures the API base at
-    // module load (pairing.service, chunk-emitter, command-relay).
-    process.env.CODEAM_API_URL = `http://127.0.0.1:${port}`;
-
-    const cwd = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'codeam-baton-local-')));
-    // Pre-accept the per-workspace "do you trust this folder?" dialog for THIS
-    // cwd — a fresh temp dir is always untrusted and the TUI would wedge on it.
-    ensureClaudeOnboarded(cwd);
+    const cwd = makeSessionCwd();
     const exitSpy = vi.spyOn(process, 'exit').mockImplementation(((code?: number) => {
       exits.push({ code, sawOffline: sawOffline() });
       return undefined as never;
@@ -308,7 +130,7 @@ describe.skipIf(!RUN_BATON_INT || BLOCKED !== null)('session baton — real loca
       // 1. The baton comes up driving locally.
       await waitUntil(
         'baton_state LOCAL_DRIVE',
-        () => rec.batonStates.includes('LOCAL_DRIVE'),
+        () => rec.batonEvents.some((e) => e.state === 'LOCAL_DRIVE'),
         90_000,
       );
 
@@ -320,10 +142,10 @@ describe.skipIf(!RUN_BATON_INT || BLOCKED !== null)('session baton — real loca
       //    genuinely up, just turn-less), then hand over.
       await new Promise((r) => setTimeout(r, 12_000));
       expect(
-        transcriptFiles(cwd),
+        transcriptIds(cwd),
         'BRANCH A precondition: claude must not have written a transcript yet',
       ).toEqual([]);
-      pending.push({ id: 'cmd-take-1', sessionId, type: 'take_control', payload: {} });
+      enqueue({ id: 'cmd-take-1', sessionId, type: 'take_control', payload: {} });
       await waitUntil(
         'baton_state MOBILE_DRIVE (branch A: zero turns — not stuck in SWITCHING)',
         () => lastState() === 'MOBILE_DRIVE',
@@ -332,7 +154,7 @@ describe.skipIf(!RUN_BATON_INT || BLOCKED !== null)('session baton — real loca
 
       // 3. A real turn from "mobile" over ACP, so the conversation actually
       //    exists on disk for the handback to resume.
-      pending.push({
+      enqueue({
         id: 'cmd-task',
         sessionId,
         type: 'start_task',
@@ -345,7 +167,7 @@ describe.skipIf(!RUN_BATON_INT || BLOCKED !== null)('session baton — real loca
       );
 
       // 4. Handback returns the baton to the terminal.
-      pending.push({ id: 'cmd-back-1', sessionId, type: 'handback', payload: {} });
+      enqueue({ id: 'cmd-back-1', sessionId, type: 'handback', payload: {} });
       await waitUntil(
         'baton_state LOCAL_DRIVE again',
         () => lastState() === 'LOCAL_DRIVE',
@@ -357,7 +179,7 @@ describe.skipIf(!RUN_BATON_INT || BLOCKED !== null)('session baton — real loca
       //    raw frames into the chat pipe (assertion 8 below) — the mobile view
       //    in LOCAL_DRIVE must come from the transcript mirror alone. It also
       //    puts a NATIVE-TUI-authored turn on disk for branch B.
-      pending.push({
+      enqueue({
         id: 'cmd-local-task',
         sessionId,
         type: 'start_task',
@@ -375,10 +197,10 @@ describe.skipIf(!RUN_BATON_INT || BLOCKED !== null)('session baton — real loca
       //    cannot pass this by accident.
       await waitUntil(
         "claude's transcript JSONL to exist on disk (branch B precondition)",
-        () => transcriptFiles(cwd).length > 0,
+        () => transcriptIds(cwd).length > 0,
         180_000,
       );
-      pending.push({ id: 'cmd-take-2', sessionId, type: 'take_control', payload: {} });
+      enqueue({ id: 'cmd-take-2', sessionId, type: 'take_control', payload: {} });
       await waitUntil(
         'baton_state MOBILE_DRIVE (branch B: session/load over an existing transcript)',
         () => lastState() === 'MOBILE_DRIVE',
@@ -386,7 +208,7 @@ describe.skipIf(!RUN_BATON_INT || BLOCKED !== null)('session baton — real loca
       );
 
       // 7. …and back to the terminal one more time.
-      pending.push({ id: 'cmd-back-2', sessionId, type: 'handback', payload: {} });
+      enqueue({ id: 'cmd-back-2', sessionId, type: 'handback', payload: {} });
       await waitUntil(
         'baton_state LOCAL_DRIVE after the second handback',
         () => lastState() === 'LOCAL_DRIVE',
@@ -414,8 +236,214 @@ describe.skipIf(!RUN_BATON_INT || BLOCKED !== null)('session baton — real loca
       expect(sawOffline()).toBe(true);
     } finally {
       exitSpy.mockRestore();
-      delete process.env.CODEAM_API_URL;
-      await new Promise<void>((resolve) => server.close(() => resolve()));
+      fs.rmSync(cwd, { recursive: true, force: true });
+    }
+  }, 900_000);
+
+  /**
+   * ── /clear + /rename follow-through (owner report 2026-08-18) ────────────
+   * On a local baton session the owner ran `/clear` then `/rename` in the
+   * Claude Code TUI and the mobile stopped receiving the streamed turns.
+   * Verified live (claude 2.1.235, 2026-08-19): `/clear` mints a NEW session
+   * id and immediately writes `<newId>.jsonl`; the old file is never touched
+   * again — so the transcript mirror kept tailing a dead file and Take Control
+   * `session/load`ed the old id. `/rename` only appends `custom-title` records
+   * to the current file. Asserted end to end:
+   *   1. a TUI turn BEFORE `/clear` is mirrored live to mobile;
+   *   2. `/clear` → the baton re-publishes LOCAL_DRIVE with the NEW
+   *      conversation id (the one claude actually created);
+   *   3. `/rename` → no spurious switch; the mirror keeps working;
+   *   4. a TUI turn AFTER `/clear` + `/rename` is mirrored live AND lands in a
+   *      conversation snapshot keyed by the NEW id — and no `<command-name>`
+   *      slash-command echo leaks into the chat;
+   *   5. Take Control after the clear reaches MOBILE_DRIVE ON the new
+   *      conversation, a mobile ACP turn completes there, handback returns to
+   *      LOCAL_DRIVE.
+   * The slash commands are typed through the same PTY keystroke path a mobile
+   * prompt uses in LOCAL_DRIVE (`start_task` → `AgentService.sendCommand` →
+   * the PTY) — they reach the TUI exactly as if the user typed them.
+   *
+   * Same file (not a sibling) ON PURPOSE: vitest runs files in parallel, and
+   * two concurrent native TUIs race on the shared `~/.claude.json`
+   * (`ensureClaudeOnboarded` is a read-modify-write), so one of them re-opens
+   * the workspace-trust dialog and never takes its turn. Tests within a file
+   * run sequentially.
+   */
+  it('/clear rebinds the mirror + Take Control to the NEW conversation; /rename does not break it', async () => {
+    const exits: Array<{ code: number | undefined }> = [];
+    backend.reset();
+    const { rec, enqueue, lastBaton, lastState } = backend;
+
+    const cwd = makeSessionCwd();
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation(((code?: number) => {
+      exits.push({ code });
+      return undefined as never;
+    }) as typeof process.exit);
+
+    const { runBatonSession } = await import('../../src/baton/wire-baton');
+    const { getAcpAdapter } = await import('../../src/agents/acp/adapters');
+    const adapter = getAcpAdapter('claude');
+    if (!adapter) throw new Error('claude ACP adapter not resolvable');
+
+    const sessionId = `baton-clear-int-${randomUUID()}`;
+    const pluginId = `plugin-${randomUUID()}`;
+
+    /** Did the mirror live-publish `userText` and a completed agent reply after it? */
+    const mirroredTurn = (userText: string): boolean => {
+      const frames = rec.outputFrames;
+      const at = frames.findIndex((f) => f.type === 'user_message' && f.content === userText);
+      if (at < 0) return false;
+      return frames.slice(at + 1).some((f) => f.type === 'text' && f.done === true);
+    };
+    /** The reply text the mirror published right after `userText`. */
+    const replyAfter = (userText: string): string => {
+      const frames = rec.outputFrames;
+      const at = frames.findIndex((f) => f.type === 'user_message' && f.content === userText);
+      const reply = frames.slice(at + 1).find((f) => f.type === 'text' && f.done === true);
+      return typeof reply?.content === 'string' ? reply.content : '';
+    };
+
+    try {
+      void runBatonSession({
+        agent: 'claude',
+        sessionId,
+        pluginId,
+        pluginAuthToken: 'int-token',
+        cwd,
+        adapter,
+      }).catch((err) => {
+        // eslint-disable-next-line no-console
+        console.error('[baton-local] runBatonSession threw (clear scenario):', err);
+      });
+
+      // ── 0. Up, driving locally, on the pre-minted conversation id. ──────
+      await waitUntil(
+        'baton_state LOCAL_DRIVE',
+        () => rec.batonEvents.some((e) => e.state === 'LOCAL_DRIVE'),
+        90_000,
+      );
+      const originalId = lastBaton()?.conversationId;
+      expect(originalId, 'begin() must publish the pre-minted conversation id').toBeTruthy();
+      // Let the TUI finish booting before typing into it.
+      await new Promise((r) => setTimeout(r, 12_000));
+
+      // ── 1. A turn in the TUI BEFORE /clear is mirrored live to mobile. ──
+      enqueue({
+        id: 'cmd-turn-1',
+        sessionId,
+        type: 'start_task',
+        payload: { prompt: 'Reply with the single word ONE.' },
+      });
+      await waitUntil(
+        'the pre-clear TUI turn to be mirrored live (user_message + completed reply)',
+        () => mirroredTurn('Reply with the single word ONE.'),
+        180_000,
+      );
+      expect(replyAfter('Reply with the single word ONE.')).toMatch(/ONE/i);
+      expect(transcriptIds(cwd), 'the pre-clear turn lives in the pre-minted transcript').toEqual([
+        originalId,
+      ]);
+
+      // ── 2. /clear in the TUI → claude mints a NEW conversation; the baton
+      //       must re-publish LOCAL_DRIVE bound to that new id. ─────────────
+      const batonEventsBeforeClear = rec.batonEvents.length;
+      enqueue({ id: 'cmd-clear', sessionId, type: 'start_task', payload: { prompt: '/clear' } });
+      await waitUntil(
+        'baton_state LOCAL_DRIVE re-published with a NEW conversation id after /clear',
+        () =>
+          rec.batonEvents
+            .slice(batonEventsBeforeClear)
+            .some((e) => e.state === 'LOCAL_DRIVE' && !!e.conversationId && e.conversationId !== originalId),
+        90_000,
+      );
+      const newId = lastBaton()?.conversationId as string;
+      expect(newId).not.toBe(originalId);
+      expect(lastState()).toBe('LOCAL_DRIVE');
+      // …and the id the baton bound IS the transcript claude actually created.
+      expect(transcriptIds(cwd).sort()).toEqual([originalId as string, newId].sort());
+
+      // ── 3. /rename in the TUI → records land in the NEW file, no switch. ──
+      const batonEventsBeforeRename = rec.batonEvents.length;
+      enqueue({
+        id: 'cmd-rename',
+        sessionId,
+        type: 'start_task',
+        payload: { prompt: `/rename ${RENAMED_TITLE}` },
+      });
+      await waitUntil(
+        "claude to write the custom-title record for /rename into the NEW conversation's transcript",
+        () => transcriptRaw(cwd, newId).includes(RENAMED_TITLE),
+        60_000,
+      );
+      expect(
+        rec.batonEvents.slice(batonEventsBeforeRename).filter((e) => e.conversationId !== newId),
+        '/rename must not re-point the baton at another conversation',
+      ).toEqual([]);
+
+      // ── 4. A turn AFTER /clear + /rename is mirrored live from the NEW
+      //       transcript, snapshotted under the NEW id, no slash echo leaks. ──
+      enqueue({
+        id: 'cmd-turn-2',
+        sessionId,
+        type: 'start_task',
+        payload: { prompt: 'Reply with the single word TWO.' },
+      });
+      await waitUntil(
+        'the post-clear TUI turn to be mirrored live from the NEW transcript',
+        () => mirroredTurn('Reply with the single word TWO.'),
+        180_000,
+      );
+      expect(replyAfter('Reply with the single word TWO.')).toMatch(/TWO/i);
+      const newSnapshots = rec.conversations.filter((c) => c.conversationId === newId);
+      expect(newSnapshots.length, 'a conversation snapshot keyed by the NEW id').toBeGreaterThan(0);
+      const lastNew = newSnapshots[newSnapshots.length - 1];
+      expect(lastNew.messages.map((m) => m.role)).toEqual(['user', 'agent']);
+      expect(lastNew.messages[0].text).toBe('Reply with the single word TWO.');
+      // The `/clear` + `/rename` echoes are TUI bookkeeping, never chat.
+      const echoFrames = rec.outputFrames.filter(
+        (f) => typeof f.content === 'string' && f.content.includes('<command-name>'),
+      );
+      expect(echoFrames, 'slash-command echoes leaked into the chat pipe').toEqual([]);
+      expect(
+        rec.conversations.flatMap((c) => c.messages).filter((m) => m.text.includes('<command-name>')),
+        'slash-command echoes leaked into a conversation snapshot',
+      ).toEqual([]);
+
+      // ── 5. Take Control after the clear → MOBILE_DRIVE on the NEW
+      //       conversation; a mobile turn runs there; handback. ─────────────
+      enqueue({ id: 'cmd-take', sessionId, type: 'take_control', payload: {} });
+      await waitUntil(
+        'baton_state MOBILE_DRIVE after /clear (session/load of the NEW conversation)',
+        () => lastState() === 'MOBILE_DRIVE',
+        120_000,
+      );
+      expect(lastBaton()?.conversationId, 'Take Control must resume the NEW conversation').toBe(newId);
+      enqueue({
+        id: 'cmd-mobile-turn',
+        sessionId,
+        type: 'start_task',
+        payload: { prompt: 'Reply with the single word THREE.' },
+      });
+      await waitUntil(
+        'the mobile ACP turn on the new conversation to complete',
+        () => rec.results.some((r) => r.commandId === 'cmd-mobile-turn' && r.status === 'completed'),
+        180_000,
+      );
+      enqueue({ id: 'cmd-back', sessionId, type: 'handback', payload: {} });
+      await waitUntil('baton_state LOCAL_DRIVE after handback', () => lastState() === 'LOCAL_DRIVE', 120_000);
+      expect(lastBaton()?.conversationId).toBe(newId);
+
+      // No raw TUI chrome anywhere in the chat pipe, across the whole run.
+      const chromeFrames = rec.outputFrames.filter((f) => {
+        const text = typeof f.content === 'string' ? f.content : '';
+        return CHROME_MARKERS.some((m) => text.includes(m));
+      });
+      expect(chromeFrames.map((f) => String(f.content).slice(0, 120))).toEqual([]);
+
+      process.emit('SIGINT');
+      await waitUntil('process exit after SIGINT', () => exits.some((e) => e.code === 0), 30_000);
+    } finally {
+      exitSpy.mockRestore();
       fs.rmSync(cwd, { recursive: true, force: true });
     }
   }, 900_000);
