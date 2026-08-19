@@ -17,6 +17,9 @@ import { AGENT_REGISTRY, isKnownAgentId, type AgentId } from '@codeam/shared';
 import { looksLike1mContextCreditsError } from './oneMContextRecovery';
 import { looksLikeBudgetExceeded, extractBudgetPeriod } from './budgetRecovery';
 import { agentHooks } from './agent-hooks';
+// TYPE-only import: keeps this leaf module free of `backend-reports`' runtime
+// graph (which pulls the pairing service) — erased at compile time.
+import type { CredentialInvalidReason } from './backend-reports';
 
 // The per-agent classifier predicates live in `agent-hooks.ts` (the pure
 // per-agent registry). Re-exported here from their original home so the
@@ -297,6 +300,34 @@ export function startupFailureMessage(agent: string, detail: string, recentStder
   return [`⚠️ The ${agent} agent failed to start.`, '', tail ? `Details:\n${tail}` : detail].join(
     '\n',
   );
+}
+
+/**
+ * Does a STARTUP failure prove the linked credential is permanently unusable
+ * (as opposed to a transient crash / install race / provider outage)?
+ *
+ * Only `ineligible_tier` qualifies today: the user's ACCOUNT can never
+ * authenticate with this agent again, so re-running the same login is futile —
+ * the app must show "Needs re-link" and stop offering the agent as default /
+ * auto-install. Everything else at startup (module-load races, adapter
+ * unavailable, timeouts, and even a bare auth 401 that may just be a stale
+ * access token the box can refresh) returns `null` and is left alone.
+ *
+ * Reported to the backend by `surfaceStartupFailure` so `GET /api/agents/linked`
+ * flips to `credentialStatus: 'expired'` — WITHOUT this the CLI only printed the
+ * chat bubble and Profile › Agents kept showing "CONNECTED · DEFAULT", so the
+ * deploy wizard re-preselected the dead agent on every retry (the 2026-08-19
+ * six-failed-codespaces incident).
+ */
+export function startupCredentialInvalidReason(
+  agent: string,
+  detail: string,
+  recentStderr: string,
+): CredentialInvalidReason | null {
+  const haystack = `${detail}\n${recentStderr}`;
+  return agentHooks(agent)?.classifyStartupFailure?.(haystack) === 'ineligible_tier'
+    ? 'ineligible_tier'
+    : null;
 }
 
 /**
