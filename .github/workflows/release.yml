@@ -729,5 +729,30 @@ jobs:
                  "release pings Discord. See README → Releases & changelogs."
             exit 0
           fi
-          jq -n --arg c "$MSG" '{content:$c}' \
+          jq -n --arg c "$MSG" '{content:$c, flags:4}' \
             | curl -sS -X POST -H 'Content-Type: application/json' -d @- "$WEBHOOK"
+
+  # ── Release succeeded → Discord ──────────────────────────────────────────
+  notify-success:
+    name: Announce release
+    needs: [setup, verify-published, release]
+    if: success()
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Post to Discord
+        env:
+          WEBHOOK: ${{ secrets.DISCORD_RELEASE_WEBHOOK }}
+          TAG: ${{ github.ref_name }}
+          VERSION: ${{ needs.setup.outputs.version }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -uo pipefail
+          MSG=$(printf '%s\n%s' \
+            "🚀 **Release $TAG published** — codeam-cli@$VERSION + @codeam/shared@$VERSION verified on npm; VS Code + JetBrains artifacts attached to the GitHub release." \
+            "$RUN_URL")
+          echo "$MSG"
+          [ -n "${WEBHOOK:-}" ] || { echo "::warning::DISCORD_RELEASE_WEBHOOK not set"; exit 0; }
+          jq -n --arg c "$MSG" '{content:$c, flags:4}' \
+            | curl -sS -o /dev/null -w 'discord %{http_code}\n' -X POST -H 'Content-Type: application/json' -d @- "$WEBHOOK"
