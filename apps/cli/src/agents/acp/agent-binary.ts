@@ -243,26 +243,40 @@ export async function waitForCommandOnPath(
  * prefix -g`) — every candidate is a static, well-known dir; a directory
  * that doesn't exist is a harmless PATH entry that never resolves, so this
  * stays cheap enough to call on every probe.
+ *
+ * Platform-agnostic by construction: every candidate is built with the
+ * platform `path` (`pathApi`), and PATH is split/joined on that platform's
+ * `delimiter` (`:` POSIX, `;` win32). The deps seam (same convention as
+ * {@link CursorAgentResolveDeps}) exists so the win32 branch can be
+ * unit-tested from any host via `path.win32` injection.
  */
-export function augmentUserLocalBinPaths(): void {
-  const home = os.homedir();
+export interface AugmentUserLocalBinPathsDeps {
+  env?: NodeJS.ProcessEnv;
+  homedir?: string;
+  pathApi?: path.PlatformPath;
+}
+
+export function augmentUserLocalBinPaths(deps: AugmentUserLocalBinPathsDeps = {}): void {
+  const env = deps.env ?? process.env;
+  const home = deps.homedir ?? os.homedir();
+  const p = deps.pathApi ?? path;
   const candidates = [
     // XDG-style per-user bin — npm's default global-prefix bin dir on most
     // Linux setups (`npm config set prefix ~/.local` or an nvm-less
     // per-user npm), and where curl-based agent installers commonly land.
-    path.join(home, '.local', 'bin'),
+    p.join(home, '.local', 'bin'),
     // Common explicit npm global-prefix conventions seen in the wild
     // (`npm config set prefix ~/.npm-global`, and Debian/Fedora's
     // `~/.local/share/npm` layout for `npm config set prefix
     // ~/.local/share/npm`).
-    path.join(home, '.npm-global', 'bin'),
-    path.join(home, '.local', 'share', 'npm', 'bin'),
+    p.join(home, '.npm-global', 'bin'),
+    p.join(home, '.local', 'share', 'npm', 'bin'),
   ];
-  const parts = (process.env.PATH ?? '').split(path.delimiter).filter((p) => p.length > 0);
+  const parts = (env.PATH ?? '').split(p.delimiter).filter((s) => s.length > 0);
   const existing = new Set(parts);
   const additions = candidates.filter((dir) => !existing.has(dir));
   if (additions.length === 0) return;
-  process.env.PATH = [...additions, ...parts].join(path.delimiter);
+  env.PATH = [...additions, ...parts].join(p.delimiter);
 }
 
 // ─────────────────────────── cursor-agent ────────────────────────────
