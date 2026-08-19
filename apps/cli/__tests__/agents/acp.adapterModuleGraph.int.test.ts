@@ -21,6 +21,7 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+import { spawn, type ChildProcess } from 'child_process';
 import {
   probeAdapterModuleGraph,
   waitForAdapterModuleGraph,
@@ -49,35 +50,28 @@ beforeAll(() => {
   );
 
   // An adapter whose install is "still settling": it crashes with a missing
-  // module for the first 2 spawns (a marker file counts them), then — once the
-  // "install" completes — loads fine and stays alive. Proves the gate recovers.
+  // module until the "install" lands `not-installed-yet.cjs` next to it, then
+  // loads fine and stays alive. WHEN the install lands is decided by the TEST
+  // (after it has OBSERVED two crash exits through the `spawnFn` seam — see
+  // the gate test below), not by a counter the script increments itself, so
+  // the gate can only release legitimately after the crashes it is supposed
+  // to survive.
   //
   // ⚠️ The crash MUST be SYNCHRONOUS (a `require()` of a missing module throws at
   // module-eval time), NOT an async `await import()`. The real incident is a
   // STATIC import failing at instantiation — synchronous, before any liveness
   // window. An `await import()` rejects asynchronously, and on a loaded CI runner
   // that rejection can land AFTER the probe's `livenessMs`, so the probe sees the
-  // process "still alive" and wrongly classifies it `ok` at attempt 2 — the flake
-  // that failed ubuntu·node22 on 2026-07-09 (`expected 2 to be >= 3`). A sync
-  // `require` throw exits 1 deterministically well before the liveness timer.
-  fs.writeFileSync(
-    path.join(dir, 'counter.txt'),
-    '0',
-  );
+  // process "still alive" and wrongly classifies it `ok` — the flake that failed
+  // ubuntu·node22 on 2026-07-09. A sync `require` throw exits 1 deterministically
+  // well before the liveness timer.
   fs.writeFileSync(
     path.join(dir, 'settling.mjs'),
     [
-      `import { readFileSync, writeFileSync } from 'node:fs';`,
-      `import { fileURLToPath } from 'node:url';`,
-      `import { dirname, join } from 'node:path';`,
       `import { createRequire } from 'node:module';`,
       `const require = createRequire(import.meta.url);`,
-      `const here = dirname(fileURLToPath(import.meta.url));`,
-      `const cfile = join(here, 'counter.txt');`,
-      `const n = Number(readFileSync(cfile, 'utf8')) + 1;`,
-      `writeFileSync(cfile, String(n));`,
       // Synchronous throw → "Cannot find module" on stderr, exit 1, immediately.
-      `if (n <= 2) { require('./not-installed-yet-' + n + '.cjs'); }`,
+      `require('./not-installed-yet.cjs');`,
       `setInterval(() => {}, 1000);`,
     ].join('\n'),
   );
@@ -103,17 +97,70 @@ describe('probeAdapterModuleGraph (real node subprocess)', () => {
   });
 });
 
+/**
+ * The liveness window the gate test runs with. The invariant this whole test
+ * rests on is "a synchronously-crashing node child EXITS well inside
+ * `livenessMs`" — the probe is, by design, a timer race (an adapter that
+ * survives the window is judged loaded). A fixed small window (250ms) lost
+ * that race on a loaded macos-latest runner on 2026-08-19: node had not even
+ * reached the `require()` when the timer fired, the FIRST probe was judged
+ * `ok`, and the gate released after 1 attempt (`expected 1 to be >= 3`). So
+ * instead of guessing a number, MEASURE this machine's sync-crash latency
+ * (`broken.mjs`, same shape) and give the window a 10× margin over it, with a
+ * sane floor/ceiling — the window scales with the host instead of racing it.
+ */
+async function calibrateLivenessMs(): Promise<number> {
+  const t0 = Date.now();
+  await new Promise<void>((resolve) => {
+    const c = spawn(NODE, [path.join(dir, 'broken.mjs')], { stdio: 'ignore' });
+    c.on('exit', () => resolve());
+    c.on('error', () => resolve());
+  });
+  const crashMs = Date.now() - t0;
+  return Math.min(Math.max(crashMs * 10, 500), 5_000);
+}
+
 describe('waitForAdapterModuleGraph (real node subprocess)', () => {
   it('polls through the transient install window and releases only once the adapter loads', async () => {
+    const livenessMs = await calibrateLivenessMs();
+    const notYetInstalled = path.join(dir, 'not-installed-yet.cjs');
+    fs.rmSync(notYetInstalled, { force: true });
+
+    // Observe every real child the gate spawns, in order. The "install" lands
+    // ONLY after the second crash exit has been observed, so a legitimate
+    // release must come from a child spawned after that.
+    const exits: Array<{ attempt: number; code: number | null }> = [];
+    let attempts = 0;
+    let installedAtAttempt: number | null = null;
+    const spawnFn = ((cmd: string, args: readonly string[], opts: unknown): ChildProcess => {
+      const attempt = ++attempts;
+      const child = spawn(cmd, [...args], opts as Parameters<typeof spawn>[2]);
+      child.on('exit', (code) => {
+        exits.push({ attempt, code });
+        const crashes = exits.filter((e) => e.code !== 0 && e.code !== null).length;
+        if (crashes === 2 && installedAtAttempt === null) {
+          fs.writeFileSync(notYetInstalled, 'module.exports = {};\n');
+          installedAtAttempt = attempt;
+        }
+      });
+      return child;
+    }) as unknown as typeof spawn;
+
     const ok = await waitForAdapterModuleGraph(NODE, [path.join(dir, 'settling.mjs')], {
-      livenessMs: 250,
+      livenessMs,
       pollMs: 50,
-      timeoutMs: 15_000,
+      timeoutMs: 30_000,
+      spawnFn,
     });
     expect(ok).toBe(true);
-    // It must have actually retried past the 2 crashing spawns.
-    const attempts = Number(fs.readFileSync(path.join(dir, 'counter.txt'), 'utf8'));
-    expect(attempts).toBeGreaterThanOrEqual(3);
+
+    // Ordering, not a poll count: both crash exits were observed BEFORE the
+    // gate released (the install was triggered by them), and the child that
+    // finally satisfied the gate is one spawned AFTER the install landed.
+    expect(installedAtAttempt).not.toBeNull();
+    const crashExits = exits.filter((e) => e.code !== 0 && e.code !== null);
+    expect(crashExits.map((e) => e.attempt)).toEqual([1, 2]);
+    expect(attempts).toBeGreaterThan(installedAtAttempt!);
   });
 
   it('gives up (returns false) within the timeout when the adapter never loads', async () => {

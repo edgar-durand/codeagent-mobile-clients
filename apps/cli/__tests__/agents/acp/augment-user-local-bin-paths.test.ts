@@ -48,28 +48,68 @@ afterEach(() => {
   fs.rmSync(fakeHome, { recursive: true, force: true });
 });
 
+// Inherited-PATH fixtures are built with the HOST's `path.delimiter` (`:`
+// POSIX, `;` win32). Hard-coding `'/usr/bin:/bin'` made the win32 matrix
+// split it into ONE opaque entry, so `indexOf('/usr/bin')` was -1 and the
+// "prepended" ordering assertion failed (`expected 0 to be less than -1`,
+// main cross-OS run 2026-08-19).
+const SYS_BIN = path.resolve(path.sep, 'usr', 'bin');
+const BIN = path.resolve(path.sep, 'bin');
+const joinPath = (...dirs: string[]): string => dirs.join(path.delimiter);
+const splitPath = (): string[] => (process.env.PATH ?? '').split(path.delimiter);
+
 describe('augmentUserLocalBinPaths', () => {
   it('prepends the missing user-local bin dirs to PATH', () => {
-    process.env.PATH = '/usr/bin:/bin';
+    process.env.PATH = joinPath(SYS_BIN, BIN);
     augmentUserLocalBinPaths();
     const localBin = path.join(fakeHome, '.local', 'bin');
-    const parts = (process.env.PATH ?? '').split(path.delimiter);
+    const parts = splitPath();
     expect(parts).toContain(localBin);
+    expect(parts).toContain(SYS_BIN);
     // Prepended, not appended — a freshly-installed binary must win any
     // stale same-named entry earlier in the inherited PATH.
-    expect(parts.indexOf(localBin)).toBeLessThan(parts.indexOf('/usr/bin'));
+    expect(parts.indexOf(localBin)).toBeLessThan(parts.indexOf(SYS_BIN));
   });
 
   it('does not duplicate a dir already present on PATH (idempotent)', () => {
     const localBin = path.join(fakeHome, '.local', 'bin');
-    process.env.PATH = `${localBin}:/usr/bin`;
+    process.env.PATH = joinPath(localBin, SYS_BIN);
     augmentUserLocalBinPaths();
-    let parts = (process.env.PATH ?? '').split(path.delimiter);
+    let parts = splitPath();
     expect(parts.filter((p) => p === localBin)).toHaveLength(1);
     // Calling it again is still a no-op.
     augmentUserLocalBinPaths();
-    parts = (process.env.PATH ?? '').split(path.delimiter);
+    parts = splitPath();
     expect(parts.filter((p) => p === localBin)).toHaveLength(1);
+  });
+
+  // The fleet-1 incident was Linux, but the stale-PATH class is NOT POSIX-only
+  // (cf. the cursor-agent Windows trap in `resolveCursorAgentBinary`), so the
+  // augment must behave on win32 too: `;`-delimited PATH, backslash dirs.
+  // Exercised from any host via the deps seam (`path.win32` + explicit env).
+  it('uses the win32 delimiter and path shape when given path.win32', () => {
+    const env: NodeJS.ProcessEnv = { PATH: 'C:\\Windows\\system32;C:\\Windows' };
+    augmentUserLocalBinPaths({ env, homedir: 'C:\\Users\\box', pathApi: path.win32 });
+    const parts = (env.PATH ?? '').split(';');
+    expect(parts[0]).toBe('C:\\Users\\box\\.local\\bin');
+    expect(parts).toContain('C:\\Users\\box\\.npm-global\\bin');
+    expect(parts).toContain('C:\\Users\\box\\.local\\share\\npm\\bin');
+    expect(parts.indexOf('C:\\Windows\\system32')).toBeGreaterThan(
+      parts.indexOf('C:\\Users\\box\\.local\\bin'),
+    );
+    // Still idempotent under the win32 shape — no duplicates on a second call,
+    // and no `:`-splitting of the drive letter.
+    augmentUserLocalBinPaths({ env, homedir: 'C:\\Users\\box', pathApi: path.win32 });
+    expect((env.PATH ?? '').split(';').filter((p) => p === 'C:\\Users\\box\\.local\\bin')).toHaveLength(1);
+    expect(env.PATH).not.toContain(':/');
+  });
+
+  it('produces the exact POSIX PATH shape when given path.posix (host-independent)', () => {
+    const posixEnv: NodeJS.ProcessEnv = { PATH: '/usr/bin:/bin' };
+    augmentUserLocalBinPaths({ env: posixEnv, homedir: '/home/box', pathApi: path.posix });
+    expect(posixEnv.PATH).toBe(
+      '/home/box/.local/bin:/home/box/.npm-global/bin:/home/box/.local/share/npm/bin:/usr/bin:/bin',
+    );
   });
 
   // POSIX-only: relies on chmod +x and `which` PATH resolution semantics
