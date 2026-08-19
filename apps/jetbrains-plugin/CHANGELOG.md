@@ -4,6 +4,14 @@ All notable changes to the CodeAgent-Mobile JetBrains plugin are documented here
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.65.10] — 2026-08-19
+
+### Fixed
+
+- **cli:** Codespace sessions report the user's repo, not the shared wrapper hostname
+- **cli:** Dedupe the native ACP model list and validate model/tier at the wire boundary
+- **cli:** Welcome card greets first-time users correctly and never shows a raw internal path
+
 ## [2.65.9] — 2026-08-19
 
 ### Fixed
