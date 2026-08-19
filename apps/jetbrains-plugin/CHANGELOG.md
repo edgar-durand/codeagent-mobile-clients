@@ -4,6 +4,22 @@ All notable changes to the CodeAgent-Mobile JetBrains plugin are documented here
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.65.11] — 2026-08-19
+
+### Documentation
+
+- **cli:** Record the 2026-08-18 baton hand-off + goodbye-heartbeat invariants
+
+### Fixed
+
+- **cli:** Take-control never wedges on "Switching…" again
+- **cli:** Say goodbye before exiting so mobile stops showing ONLINE
+- **cli:** LOCAL_DRIVE mirrors the transcript only — no raw TUI bytes to mobile
+
+### Tests
+
+- **cli:** Real baton local integration test (take-control before first turn, handback, goodbye heartbeat)
+
 ## [2.65.10] — 2026-08-19
 
 ### Fixed
