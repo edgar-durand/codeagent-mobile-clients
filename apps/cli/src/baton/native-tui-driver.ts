@@ -100,6 +100,16 @@ export class NativeTuiDriver implements SessionDriver {
       deps.opts.pluginAuthToken,
       deps.runtime,
     );
+    // ⚠️ LOCAL_DRIVE mirrors the TRANSCRIPT, never the screen. Every PTY byte
+    // of the native TUI used to flow through this OutputService and get
+    // published as chat output, so mobile rendered raw Claude Code chrome
+    // (box-drawing rules, `❯`, "auto mode on (shift+tab to cycle) · esc to
+    // interrupt") as if it were the agent talking. The read-only
+    // TranscriptMirror is the ONLY source of chat content while this driver
+    // holds the baton (the ACP driver streams typed content in MOBILE_DRIVE),
+    // so the publish path stays muted for this driver's whole life — `push()`
+    // still runs, keeping the session-id / rate-limit detection side-effects.
+    this.outputSvc.setPublishSuppressed(true);
     // Baton is local-only → keep-alive is a no-op (codespace-only mechanism).
     this.keepAliveCtx = { inCodespace: false, codespaceName: undefined };
     this.setKeepAlive = buildKeepAlive(this.keepAliveCtx).apply;

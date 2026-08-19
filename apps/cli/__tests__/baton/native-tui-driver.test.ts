@@ -4,6 +4,8 @@ import { NativeTuiDriver, type NativeTuiDriverDeps } from '../../src/baton/nativ
 import type { AgentService } from '../../src/services/agent.service';
 import type { RuntimeStrategy } from '../../src/agents/strategy';
 import type { CommandRelayService, RemoteCommand } from '../../src/services/command-relay.service';
+import { _transport as chunkTransport } from '../../src/services/output/chunk-emitter';
+import { createRuntimeStrategy } from '../../src/agents/registry';
 
 function fakeAgent(id: string) {
   return {
@@ -145,6 +147,55 @@ describe('NativeTuiDriver', () => {
     // Let the fire-and-forget background discovery settle.
     await vi.waitFor(() => expect(onLateBind).toHaveBeenCalledWith('codex-first-turn-id'));
     expect(discoverSessionId).toHaveBeenCalledTimes(2);
+  });
+
+  // ── LOCAL_DRIVE publishes NOTHING from the screen (2026-08-18 report) ──
+  // Every PTY byte of the native TUI used to flow through the legacy
+  // OutputService and get published as chat output, so mobile rendered raw
+  // Claude Code chrome (box-drawing rules, `❯`, the "auto mode on (shift+tab to
+  // cycle) · esc to interrupt" status line) as if the agent had said it. The
+  // read-only TranscriptMirror is the ONLY source of chat content in
+  // LOCAL_DRIVE.
+  it('publishes ZERO chat frames from PTY bytes, even with a turn open', async () => {
+    vi.useFakeTimers();
+    const post = vi
+      .spyOn(chunkTransport, 'post')
+      .mockResolvedValue({ statusCode: 200, body: '{}' });
+    try {
+      const agent = fakeAgent('conv-9');
+      // The REAL claude runtime, so the render + chrome/selector detection the
+      // publish path runs is the production one, not a stub.
+      const d = new NativeTuiDriver(
+        makeDeps(agent, { runtime: createRuntimeStrategy('claude') }).deps,
+      );
+      await d.start();
+
+      // A mobile-routed prompt opens a turn on the legacy PTY pipe (the only
+      // way the buffer activates in the baton) …
+      await d.dispatch({
+        id: 'cmd-prompt',
+        sessionId: 's',
+        type: 'start_task',
+        payload: { prompt: 'hello' },
+      } as RemoteCommand);
+
+      // … and then the real TUI paints its chrome.
+      d.handlePtyData(
+        '\u001b[2J╭──────────────────────────────────────────╮\r\n' +
+          '│ ❯ auto mode on (shift+tab to cycle) · esc to interrupt · ← for agents │\r\n' +
+          '╰──────────────────────────────────────────╯\r\n',
+      );
+      // Well past the 1.5 s warm-up so the render+emit tick has run repeatedly.
+      await vi.advanceTimersByTimeAsync(10_000);
+
+      const chatPosts = post.mock.calls.filter(([url]) =>
+        String(url).includes('/api/commands/output'),
+      );
+      expect(chatPosts).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+      post.mockRestore();
+    }
   });
 
   it('dispatch routes a non-baton command through the legacy PTY dispatchCommand', async () => {

@@ -343,10 +343,32 @@ export class OutputService {
     ];
   }
 
+  /**
+   * Mute/unmute the CHAT-output publish path. Every frame this service would
+   * emit (clear / user_message / new_turn / text / chrome_steps / selectors /
+   * banner / input_suggestion) is dropped while muted; `push()` and the tick
+   * still run, so the detection side-effects (session id, rate limit,
+   * terminal-turn gate) are untouched.
+   *
+   * ⚠️ The one caller is the baton's {@link NativeTuiDriver}: while LOCAL_DRIVE
+   * holds the baton, the mobile view is the read-only TRANSCRIPT mirror, never
+   * a screen-scrape — piping the native TUI's PTY bytes through here published
+   * raw Claude Code chrome (box-drawing rules, `❯`, "auto mode on (shift+tab to
+   * cycle) · esc to interrupt") into the chat as if it were agent output.
+   * Terminal-panel frames (`sendTerminalChunk`/`sendTerminalExit`) go straight
+   * to the emitter and are deliberately NOT affected.
+   */
+  setPublishSuppressed(suppressed: boolean): void {
+    this.publishSuppressed = suppressed;
+  }
+
+  private publishSuppressed = false;
+
   private async send(
     body: Record<string, unknown>,
     opts: { critical?: boolean } = {},
   ): Promise<void> {
+    if (this.publishSuppressed) return;
     const outcome: SendOutcome = await this.emitter.send(body, opts);
     if (outcome.dead && this.pty.isActive) {
       this.dispose();
