@@ -625,3 +625,109 @@ jobs:
             dist/cli/codeam-cli-${{ needs.setup.outputs.version }}.tgz
             dist/vsc/codeagent-mobile-${{ needs.setup.outputs.version }}.vsix
             ${{ steps.jb.outputs.zip }}
+
+  # ── Did npm ACTUALLY get it? ──────────────────────────────────────────────
+  # 2026-08-14→18: four consecutive releases (v2.65.8 … v2.65.11) failed to
+  # reach npm because the granular NPM_TOKEN had expired. The publish jobs went
+  # red, nobody was watching the Actions tab, and npm stayed on 2.65.7 for four
+  # days. This job does not trust a job status — it re-reads the REGISTRY and
+  # fails if either package is missing at this tag's version, so "release is
+  # green" can only mean "npm serves it".
+  verify-published:
+    name: Verify npm serves this version
+    needs: [setup, publish-shared, publish-cli]
+    if: always() && needs.setup.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 20
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: npm view codeam-cli + @codeam/shared
+        env:
+          VERSION: ${{ needs.setup.outputs.version }}
+        run: |
+          set -uo pipefail
+          MISSING=""
+          for PKG in codeam-cli @codeam/shared; do
+            FOUND=0
+            # The registry's read replicas lag a publish by seconds — retry
+            # before declaring a miss so a propagation delay isn't an incident.
+            for ATTEMPT in 1 2 3 4 5 6; do
+              if npm view "$PKG@$VERSION" version >/dev/null 2>&1; then
+                FOUND=1
+                break
+              fi
+              echo "… $PKG@$VERSION not on the registry yet (attempt $ATTEMPT/6)"
+              sleep 20
+            done
+            if [ "$FOUND" = "1" ]; then
+              echo "✓ $PKG@$VERSION is live on npm"
+            else
+              echo "::error::$PKG@$VERSION is NOT on npm — the publish did not land."
+              MISSING="$MISSING $PKG"
+            fi
+          done
+          if [ -n "$MISSING" ]; then
+            echo "::error::Release ${GITHUB_REF_NAME} is INCOMPLETE — missing on npm:$MISSING." \
+                 "Most likely cause: the NPM_TOKEN repo secret expired (granular npm" \
+                 "tokens expire after 90 days). Mint a new Automation token with publish" \
+                 "rights on codeam-cli AND the @codeam scope, update NPM_TOKEN, then" \
+                 "re-run the failed jobs — the publish guards make retries idempotent."
+            exit 1
+          fi
+
+  # ── Make a failed release impossible to miss ──────────────────────────────
+  # Runs only when something upstream failed. Posts the tag + which jobs failed
+  # to Discord so an expired token / broken publish surfaces the same day
+  # instead of four releases later.
+  notify-failure:
+    name: Alert on release failure
+    needs:
+      [setup, publish-shared, publish-cli, publish-box, publish-vsc, publish-jetbrains, release, verify-published]
+    if: failure()
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Post to Discord
+        env:
+          WEBHOOK: ${{ secrets.DISCORD_RELEASE_WEBHOOK }}
+          TAG: ${{ github.ref_name }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          R_SHARED: ${{ needs.publish-shared.result }}
+          R_CLI: ${{ needs.publish-cli.result }}
+          R_BOX: ${{ needs.publish-box.result }}
+          R_VSC: ${{ needs.publish-vsc.result }}
+          R_JB: ${{ needs.publish-jetbrains.result }}
+          R_RELEASE: ${{ needs.release.result }}
+          R_VERIFY: ${{ needs.verify-published.result }}
+        run: |
+          set -uo pipefail
+          FAILED=""
+          add() { [ "$2" = "failure" ] && FAILED="$FAILED $1"; return 0; }
+          add "publish-shared"    "$R_SHARED"
+          add "publish-cli"       "$R_CLI"
+          add "publish-box"       "$R_BOX"
+          add "publish-vsc"       "$R_VSC"
+          add "publish-jetbrains" "$R_JB"
+          add "release"           "$R_RELEASE"
+          add "verify-published"  "$R_VERIFY"
+          [ -n "$FAILED" ] || FAILED=" (see the run)"
+          MSG=$(printf '%s\n%s\n%s' \
+            "🚨 **Release $TAG FAILED** — failing jobs:$FAILED" \
+            "If a publish job failed, check NPM_TOKEN expiry first (granular npm tokens last 90 days)." \
+            "$RUN_URL")
+          echo "$MSG"
+          if [ -z "${WEBHOOK:-}" ]; then
+            echo "::warning::DISCORD_RELEASE_WEBHOOK is not set — the failure was NOT announced." \
+                 "Add the repo secret (Settings → Secrets and variables → Actions) so a broken" \
+                 "release pings Discord. See README → Releases & changelogs."
+            exit 0
+          fi
+          jq -n --arg c "$MSG" '{content:$c}' \
+            | curl -sS -X POST -H 'Content-Type: application/json' -d @- "$WEBHOOK"

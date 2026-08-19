@@ -269,24 +269,105 @@ jobs:
 
           npx vitest run fleet-box.int
 
+      # ── Session Baton REAL gate — provisioning ───────────────────────────
+      # Put the SDK-BUNDLED, exact-pinned `claude` on PATH so the native TUI
+      # half of the baton test can launch it (`buildClaudeLaunch` probes PATH).
+      #
+      # ⚠️ Deliberately NOT `npm i -g @anthropic-ai/claude-code`: that floats to
+      # whatever Claude Code published today — exactly the drift the
+      # acp-version-freeze contract test exists to prevent — and the ACP half of
+      # this same test spawns the SDK-bundled binary, so a global install would
+      # run TWO DIFFERENT claude versions inside one baton session. This is the
+      # same binary `bundledClaudeBinDir()` resolves on a self-hosted box, and
+      # it moves only when `@agentclientprotocol/claude-agent-acp` is bumped.
+      - name: Provision the house agent (pinned claude binary on PATH)
+        if: matrix.os == 'ubuntu-latest' && matrix.node == '20'
+        run: |
+          set -euo pipefail
+          BIN=$(find "$GITHUB_WORKSPACE" -type f \
+                  -path '*/@anthropic-ai/claude-agent-sdk-linux-*/claude' \
+                  -print -quit)
+          if [ -z "$BIN" ]; then
+            echo "::error::SDK-bundled claude binary not found under node_modules." \
+                 "Expected @anthropic-ai/claude-agent-sdk-linux-*/claude (an optional" \
+                 "platform dep of @agentclientprotocol/claude-agent-acp). Did npm ci" \
+                 "run with --omit=optional?"
+            exit 1
+          fi
+          chmod +x "$BIN"
+          mkdir -p "$HOME/.local/bin"
+          ln -sf "$BIN" "$HOME/.local/bin/claude"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          echo "claude -> $BIN"
+          "$BIN" --version
+
       # Session Baton — REAL local-session integration test. Drives the actual
       # composition root (runBatonSession) with the real native `claude` TUI,
       # the real ACP adapter and the real relay against an in-test stub
-      # backend, and asserts the three 2026-08-18 regressions stay fixed:
+      # backend, and asserts the 2026-08-18 regressions stay fixed:
       # take-control BEFORE the first TUI turn reaches MOBILE_DRIVE (never
-      # wedges in SWITCHING), handback returns to LOCAL_DRIVE, no raw TUI
-      # chrome reaches the chat pipe, and SIGINT posts `online:false` before
-      # the process exits. Gated to Linux + Node 20; the test ALSO self-skips
-      # when `claude --version` fails, which is the case on a stock runner —
-      # so this step is green-but-skipped until an authenticated claude is
-      # provisioned here (install @anthropic-ai/claude-code + a credential
-      # secret, see apps/cli/__tests__/integration/README.md).
-      - name: CLI session-baton local integration test (real claude)
+      # wedges in SWITCHING), take-control AGAIN once a transcript exists on
+      # disk exercises the `session/load` branch, handback returns to
+      # LOCAL_DRIVE, no raw TUI chrome reaches the chat pipe, and SIGINT posts
+      # `online:false` before the process exits.
+      #
+      # AUTH: the agent runs as a HOUSE AGENT ("CodeAgent Cloud") — Claude Code
+      # pointed at our managed backend through ANTHROPIC_BASE_URL +
+      # ANTHROPIC_AUTH_TOKEN with the MiniMax model pins, byte-for-byte the env
+      # `host-agent.ts` writes for a house `self_hosted_deploy`. No personal
+      # Anthropic key, no per-developer credential — the same recipe the
+      # acp-chrome-canary workflow already uses. (The house PROXY hop
+      # `…/api/v1/agent-proxy` is skipped on purpose: its token is minted
+      # server-side per (userId, codespaceId) and only adds metering, so there
+      # is nothing a CI runner could hold long-lived.)
+      #
+      # ⚠️ This is a REAL gate: with RUN_BATON_INT=1 and CI=true the test FAILS
+      # LOUDLY when claude is missing or the backend won't answer — it does not
+      # skip. It only skips locally (CI unset). Fork PRs cannot read the secret,
+      # so the step is guarded on it and announces itself as unproven instead.
+      # `secrets` is not a context you can read from a step-level `if`, so the
+      # availability is reduced to a step OUTPUT here and branched on below.
+      - name: Is the house-agent credential available?
+        id: house_secret
         if: matrix.os == 'ubuntu-latest' && matrix.node == '20'
+        env:
+          HOUSE_AGENT_TOKEN: ${{ secrets.MINIMAX_API_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -n "${HOUSE_AGENT_TOKEN:-}" ]; then
+            echo 'available=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'available=false' >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: CLI session-baton local integration test (real claude, house agent)
+        if: >-
+          matrix.os == 'ubuntu-latest' && matrix.node == '20'
+          && steps.house_secret.outputs.available == 'true'
         working-directory: apps/cli
         env:
           RUN_BATON_INT: '1'
-        run: npx vitest run integration/baton-local
+          ANTHROPIC_BASE_URL: https://api.minimax.io/anthropic
+          ANTHROPIC_AUTH_TOKEN: ${{ secrets.MINIMAX_API_KEY }}
+          ANTHROPIC_MODEL: MiniMax-M3
+          ANTHROPIC_DEFAULT_SONNET_MODEL: MiniMax-M3
+          ANTHROPIC_DEFAULT_OPUS_MODEL: MiniMax-M3
+          ANTHROPIC_DEFAULT_HAIKU_MODEL: MiniMax-M3
+          CLAUDE_CODE_AUTO_COMPACT_WINDOW: '512000'
+          API_TIMEOUT_MS: '3000000'
+          # Belt to the version pin's suspenders — the on-disk binary
+          # self-updates unless told not to (see acp-version-freeze).
+          DISABLE_AUTOUPDATER: '1'
+        run: npx vitest run integration/baton-local --reporter=verbose
+
+      - name: Session-baton gate NOT run (no house-agent secret)
+        if: >-
+          matrix.os == 'ubuntu-latest' && matrix.node == '20'
+          && steps.house_secret.outputs.available != 'true'
+        run: |
+          echo "::warning::Session-baton real gate did NOT run — MINIMAX_API_KEY is" \
+               "unavailable (fork PR, or the secret was removed). The baton" \
+               "regressions are UNPROVEN on this run."
 
       # Smoke from the repo workspace. Confirms the freshly-built
       # binary boots on this OS, the argument parser handles every
