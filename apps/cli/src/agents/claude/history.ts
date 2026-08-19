@@ -232,6 +232,12 @@ export function parseHistoryFile(filePath: string): NormalizedMessage[] {
 
     const text = extractText(msg['content']).trim();
     if (!text) continue;
+    // A local slash command (`/clear`, `/rename`, …) is echoed into the
+    // transcript as a `user` record wrapping `<command-name>…</command-name>`.
+    // It is TUI bookkeeping, not a conversation turn — surfacing it would
+    // render "<command-name>/clear</command-name>" as a user bubble on mobile
+    // and leave a never-answered turn open ("Thinking…").
+    if (type === 'user' && isLocalCommandEcho(text)) continue;
 
     const ts = r['timestamp'];
     const timestamp =
@@ -325,4 +331,173 @@ export function listResumableSessions(cwd: string): Array<{
   }
   out.sort((a, b) => b.timestamp - a.timestamp);
   return out;
+}
+
+/**
+ * Claude Code echoes every local slash command into the transcript as a
+ * `user` record whose content is `<command-name>/x</command-name>…` (plus
+ * `<local-command-stdout>` / `<local-command-caveat>` wrappers). Verified
+ * live on claude 2.1.235: `/clear` → `<command-name>/clear</command-name>`,
+ * `/rename foo` → `<command-name>/rename</command-name>…<command-args>foo`.
+ */
+export function isLocalCommandEcho(text: string): boolean {
+  return /^\s*<(command-name|local-command-[a-z]+)>/.test(text);
+}
+
+const CLEAR_COMMAND_ECHO = '<command-name>/clear</command-name>';
+/** Read at most this much of a candidate transcript when classifying it — the
+ *  `/clear` echo sits in the first handful of records. */
+const SWITCH_PROBE_BYTES = 256 * 1024;
+
+/**
+ * Does `filePath` look like a conversation the INTERACTIVE TUI started with
+ * `/clear`? Two independent markers, either suffices:
+ *   - a `user` record echoing `<command-name>/clear</command-name>` — written
+ *     by the TUI itself the moment `/clear` runs (before any turn);
+ *   - a `SessionStart:clear` hook attachment (only present when the user has
+ *     SessionStart hooks configured, so it is the secondary signal).
+ * A `claude -p` one-shot (preview detection, AI summaries — same cwd, same
+ * project dir) or the ACP adapter's session never carries either, so they
+ * can't hijack the baton.
+ */
+export function isClearedConversationFile(filePath: string): boolean {
+  let fd: number;
+  try {
+    fd = fs.openSync(filePath, 'r');
+  } catch {
+    return false;
+  }
+  let raw: string;
+  try {
+    const buf = Buffer.alloc(SWITCH_PROBE_BYTES);
+    const n = fs.readSync(fd, buf, 0, SWITCH_PROBE_BYTES, 0);
+    raw = buf.toString('utf8', 0, n);
+  } catch {
+    return false;
+  } finally {
+    fs.closeSync(fd);
+  }
+  // Cheap pre-check before parsing line by line.
+  if (!raw.includes(CLEAR_COMMAND_ECHO) && !raw.includes('SessionStart:clear')) return false;
+  for (const line of raw.split('\n')) {
+    if (!line.trim()) continue;
+    let r: Record<string, unknown>;
+    try {
+      r = JSON.parse(line) as Record<string, unknown>;
+    } catch {
+      continue; // the probe window may cut the last line mid-record
+    }
+    if (r['type'] === 'user' && !r['isMeta']) {
+      const msg = r['message'] as Record<string, unknown> | undefined;
+      if (extractText(msg?.['content']).trimStart().startsWith(CLEAR_COMMAND_ECHO)) return true;
+    }
+    if (r['type'] === 'attachment') {
+      const att = r['attachment'] as Record<string, unknown> | undefined;
+      if (typeof att?.['hookName'] === 'string' && att['hookName'].startsWith('SessionStart:clear')) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+/**
+ * Watch `~/.claude/projects/<encodeCwd(cwd)>/` for the native TUI switching to
+ * a NEW conversation (`/clear`), and call `onSwitch(newId)` — once per switch,
+ * for as long as the watcher lives (a second `/clear` fires again).
+ *
+ * Verified live (claude 2.1.235, 2026-08-19): `/clear` mints a fresh session
+ * id and IMMEDIATELY writes `<newId>.jsonl` (a `user` record echoing
+ * `<command-name>/clear</command-name>`), before the user types anything; the
+ * old `<oldId>.jsonl` is never touched again. `/rename` writes `custom-title`
+ * / `agent-name` records into the CURRENT file — no new conversation.
+ *
+ * EVENT-DRIVEN ONLY (repo "no polling" rule): an `fs.watch` on the project
+ * dir; when that dir doesn't exist yet (no turn before the `/clear`) an
+ * `fs.watch` on the projects root catches its creation. Every event rescans
+ * the `*.jsonl` files created since `sinceMs` (minus a small clock grace),
+ * re-probing a candidate only when it grew, and fires the first one that
+ * {@link isClearedConversationFile} attributes to the interactive TUI.
+ */
+export function watchConversationSwitch(
+  cwd: string,
+  opts: { currentId: string; sinceMs: number },
+  onSwitch: (conversationId: string) => void,
+  projectsRoot?: string,
+): () => void {
+  const root = projectsRoot ?? path.join(os.homedir(), '.claude', 'projects');
+  const floor = opts.sinceMs - 2_000;
+  let currentId = opts.currentId;
+  const handled = new Set<string>([currentId]);
+  const probedSize = new Map<string, number>();
+  let dirWatcher: fs.FSWatcher | null = null;
+  let rootWatcher: fs.FSWatcher | null = null;
+  let closed = false;
+
+  const scan = (dir: string): void => {
+    if (closed) return;
+    let entries: string[];
+    try {
+      entries = fs.readdirSync(dir);
+    } catch {
+      return;
+    }
+    for (const name of entries) {
+      if (!name.endsWith('.jsonl')) continue;
+      const id = name.slice(0, -'.jsonl'.length);
+      if (handled.has(id)) continue;
+      const file = path.join(dir, name);
+      let st: fs.Stats;
+      try {
+        st = fs.statSync(file);
+      } catch {
+        continue;
+      }
+      // Birthtime where the fs reports one (macOS/Windows); mtime otherwise.
+      const createdAt = st.birthtimeMs > 0 ? st.birthtimeMs : st.mtimeMs;
+      if (createdAt < floor) continue;
+      if (probedSize.get(file) === st.size) continue; // unchanged since last probe
+      probedSize.set(file, st.size);
+      if (!isClearedConversationFile(file)) continue;
+      handled.add(id);
+      currentId = id;
+      onSwitch(currentId);
+      return;
+    }
+  };
+
+  const attachDir = (): boolean => {
+    const dir = resolveHistoryDir(cwd, root);
+    if (!dir) return false;
+    rootWatcher?.close();
+    rootWatcher = null;
+    try {
+      dirWatcher = fs.watch(dir, { persistent: false }, () => scan(dir));
+    } catch {
+      return false;
+    }
+    scan(dir); // anything that landed between the event and the watch
+    return true;
+  };
+
+  if (!attachDir()) {
+    // No project dir yet (claude creates it on the first transcript write —
+    // which a `/clear` before any turn also does). Watch the root for it.
+    try {
+      fs.mkdirSync(root, { recursive: true });
+      rootWatcher = fs.watch(root, { persistent: false }, () => {
+        if (!closed && !dirWatcher) attachDir();
+      });
+    } catch {
+      /* no root watch possible — the switch simply won't be detected */
+    }
+  }
+
+  return () => {
+    closed = true;
+    dirWatcher?.close();
+    rootWatcher?.close();
+    dirWatcher = null;
+    rootWatcher = null;
+  };
 }

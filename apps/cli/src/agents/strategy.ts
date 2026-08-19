@@ -299,6 +299,28 @@ export interface InteractiveAgentStrategy extends BaseAgentStrategy {
   discoverSessionId?(cwd: string, opts: { sinceMs: number; timeoutMs?: number }): Promise<string | null>;
 
   /**
+   * Watch the agent's on-disk session store for the NATIVE TUI switching to a
+   * NEW conversation mid-session, for the baton's {@link NativeTuiDriver}.
+   * Claude Code's `/clear` mints a fresh session id and starts writing a new
+   * `<newId>.jsonl` — the process (and the codeam pairing wrapped around it)
+   * stays the same, but the conversation the user is driving is no longer the
+   * one the baton bound at spawn. Without this hook the transcript mirror kept
+   * tailing the dead file and Take Control `session/load`ed the old id, so the
+   * mobile went silent after a `/clear` (owner report, 2026-08-18).
+   *
+   * Implementations must be EVENT-DRIVEN (fs watch on the store), never a
+   * realtime poll, and must attribute the new conversation to the interactive
+   * TUI (not to a `-p` one-shot or another process sharing the cwd) before
+   * calling `onSwitch(newId)`. Returns an unsubscribe. Undefined for agents
+   * with no such in-TUI conversation switch.
+   */
+  watchConversationSwitch?(
+    cwd: string,
+    opts: { currentId: string; sinceMs: number },
+    onSwitch: (conversationId: string) => void,
+  ): () => void;
+
+  /**
    * Baton hand-off bridges — for agents whose native-TUI and ACP sessions live in
    * SEPARATE on-disk stores, so a `session/load` of the native session id would
    * otherwise fail. Claude/Kimi share ONE store across both modes and leave these

@@ -40,6 +40,15 @@ export interface NativeTuiDriverDeps {
    * bind the conversation + arm the mirror. Undefined for the common case.
    */
   onLateBind?: (conversationId: string) => void;
+  /**
+   * Conversation-SWITCH callback: the native TUI moved to a NEW conversation
+   * mid-session (Claude `/clear` mints a fresh id + JSONL while the process —
+   * and the codeam pairing — stay the same). Fired from the runtime's
+   * event-driven `watchConversationSwitch` hook so the controller can rebind
+   * the live conversation (mirror follows the new transcript, Take Control
+   * resumes the NEW id). Undefined for agents without such a switch.
+   */
+  onConversationSwitch?: (conversationId: string) => void;
 }
 
 /**
@@ -71,6 +80,9 @@ export class NativeTuiDriver implements SessionDriver {
 
   private readonly outputSvc: OutputService;
   private readonly historySvc: HistoryService;
+  /** Unsubscribe for the runtime's conversation-switch watcher (armed per
+   *  `start()`, torn down in `stop()`), or null when not armed. */
+  private unwatchSwitch: (() => void) | null = null;
   private readonly setKeepAlive: (enabled: boolean) => void;
   private readonly keepAliveCtx: KeepAliveContext;
 
@@ -124,7 +136,9 @@ export class NativeTuiDriver implements SessionDriver {
       // picks up the mobile turns. No-op for claude/kimi (shared store) and any
       // agent that doesn't implement the hook.
       await this.deps.runtime.syncTranscriptForNativeResume?.(this.deps.opts.cwd, resumeId);
+      const resumedAt = this.now();
       await this.agent.restart(resumeId, false);
+      this.armSwitchWatch(resumeId, resumedAt);
       return resumeId;
     }
     // Stamp BEFORE spawn so an agent that mints its id on-disk at boot (Kimi)
@@ -134,7 +148,10 @@ export class NativeTuiDriver implements SessionDriver {
     // Fast path: the runtime pre-minted the id (Claude's `--session-id`) →
     // AgentService already knows it, no discovery needed.
     const preMinted = this.agent.spawnedSessionId;
-    if (preMinted) return preMinted;
+    if (preMinted) {
+      this.armSwitchWatch(preMinted, spawnedAt);
+      return preMinted;
+    }
     // Fallback: some agents neither pre-mint nor print the id — they only WRITE
     // it to their on-disk session store. If the runtime knows how to find it
     // (Kimi/Codex `discoverSessionId`), poll for it. Inert for other agents.
@@ -165,7 +182,27 @@ export class NativeTuiDriver implements SessionDriver {
     return null;
   }
 
+  /**
+   * Follow the native TUI if it switches conversation mid-session (Claude
+   * `/clear`): the runtime's event-driven watcher reports the new id, we point
+   * the PTY-side history at it and tell the controller to rebind. Armed once
+   * per `start()` (fresh or resume) on the id the TUI is driving; inert for
+   * agents without the hook.
+   */
+  private armSwitchWatch(currentId: string, sinceMs: number): void {
+    this.unwatchSwitch?.();
+    this.unwatchSwitch = null;
+    const watch = this.deps.runtime.watchConversationSwitch;
+    if (!watch) return;
+    this.unwatchSwitch = watch(this.deps.opts.cwd, { currentId, sinceMs }, (id) => {
+      this.historySvc.setCurrentConversationId(id);
+      this.deps.onConversationSwitch?.(id);
+    });
+  }
+
   async stop(): Promise<void> {
+    this.unwatchSwitch?.();
+    this.unwatchSwitch = null;
     this.agent.kill();
     // Hand-off (not process exit): the native TUI was hard-killed, so the
     // terminal modes it turned on (focus reporting, bracketed paste, mouse)

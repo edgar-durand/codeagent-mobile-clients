@@ -225,4 +225,51 @@ describe('BatonController', () => {
       expect(c.conversationId).toBe('mobile-fresh');
     });
   });
+
+  describe('switchConversation (native TUI `/clear` → new conversation id)', () => {
+    it('re-points the conversation and re-publishes LOCAL_DRIVE so the mirror re-arms', async () => {
+      const local = fakeDriver('local_tui', 'conv-1');
+      const mobile = fakeDriver('mobile_acp', 'm');
+      const publishState = vi.fn();
+      const c = new BatonController({ local, mobile, publishState });
+      await c.begin();
+      expect(c.conversationId).toBe('conv-1');
+
+      c.switchConversation('conv-2'); // the TUI ran /clear
+      expect(c.conversationId).toBe('conv-2');
+      expect(c.state).toBe('LOCAL_DRIVE');
+      expect(publishState).toHaveBeenLastCalledWith('LOCAL_DRIVE', 'local_tui', 'conv-2');
+    });
+
+    it('Take Control after the switch resumes the NEW conversation', async () => {
+      const local = fakeDriver('local_tui', 'conv-1');
+      const mobile = fakeDriver('mobile_acp', 'm');
+      const c = new BatonController({ local, mobile, publishState: vi.fn() });
+      await c.begin();
+      c.switchConversation('conv-2');
+      const p = c.takeControl();
+      local.releaseYield();
+      await p;
+      expect(mobile.startSpy).toHaveBeenCalledWith('conv-2');
+      expect(c.conversationId).toBe('conv-2');
+    });
+
+    it('is a no-op for the same id, and outside LOCAL_DRIVE', async () => {
+      const local = fakeDriver('local_tui', 'conv-1');
+      const mobile = fakeDriver('mobile_acp', 'mobile-fresh');
+      const publishState = vi.fn();
+      const c = new BatonController({ local, mobile, publishState });
+      await c.begin();
+      const publishes = publishState.mock.calls.length;
+      c.switchConversation('conv-1');
+      expect(publishState.mock.calls.length).toBe(publishes); // nothing re-published
+
+      const p = c.takeControl();
+      local.releaseYield();
+      await p;
+      expect(c.state).toBe('MOBILE_DRIVE');
+      c.switchConversation('stray'); // the terminal isn't driving — ignore
+      expect(c.conversationId).toBe('conv-1');
+    });
+  });
 });
