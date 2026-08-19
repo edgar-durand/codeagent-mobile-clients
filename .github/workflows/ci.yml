@@ -4,6 +4,9 @@ on:
   push:
     branches: [main]
   pull_request:
+    # `labeled` so adding the `cross-os` label re-runs the PR with the full
+    # macOS/Windows matrix (see matrix-setup) without a dummy push.
+    types: [opened, synchronize, reopened, labeled]
   schedule:
     # WEEKLY full cross-OS matrix (Mondays 06:00 UTC), not nightly.
     #
@@ -42,7 +45,10 @@ jobs:
     steps:
       - id: set
         run: |
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
+          # PRs are Linux-only (cost) UNLESS labelled `cross-os` — use that
+          # label when a PR touches Windows/macOS-specific paths or fixes a
+          # cross-OS failure, so it is proven BEFORE it lands on main.
+          if [ "${{ github.event_name }}" = "pull_request" ] && [ "${{ contains(github.event.pull_request.labels.*.name, 'cross-os') }}" != "true" ]; then
             echo 'cli=[{"os":"ubuntu-latest","node":"20"},{"os":"ubuntu-latest","node":"22"}]' >> "$GITHUB_OUTPUT"
             echo 'vsc=["ubuntu-latest"]' >> "$GITHUB_OUTPUT"
           else
@@ -496,3 +502,67 @@ jobs:
       - name: Gradle build
         working-directory: apps/jetbrains-plugin
         run: ./gradlew buildPlugin
+
+  # ── CI results → Discord #ci_notifications ───────────────────────────────
+  # Posts a per-job summary of this run. Always for main pushes / the weekly
+  # cross-OS run / manual dispatch; for PRs only when something failed (so a
+  # green PR stays quiet). Reads the run's jobs via the API so matrix cells
+  # (ubuntu/macos/windows) show individually, not as one aggregate result.
+  # Owner request 2026-08-19; webhook secret DISCORD_RELEASE_WEBHOOK (shared
+  # with release.yml). Missing secret → warning only, never a red job.
+  notify-discord:
+    name: CI results → Discord
+    needs: [matrix-setup, commitlint, knip, cli, cli-coverage, vsc-plugin, jetbrains-plugin]
+    if: always()
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: Summarise jobs and post
+        env:
+          GH_TOKEN: ${{ github.token }}
+          WEBHOOK: ${{ secrets.DISCORD_RELEASE_WEBHOOK }}
+          REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          EVENT: ${{ github.event_name }}
+          REF: ${{ github.ref_name }}
+          SHA: ${{ github.sha }}
+          PR_NUM: ${{ github.event.pull_request.number }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          ACTOR: ${{ github.actor }}
+        run: |
+          set -uo pipefail
+          JOBS=$(gh api --paginate "repos/$REPO/actions/runs/$RUN_ID/jobs?per_page=100" \
+                 --jq '.jobs[] | select(.name != "CI results → Discord") | [.name, (.conclusion // .status)] | @tsv')
+          FAILED=0; LINES=""
+          while IFS=$'\t' read -r NAME RES; do
+            [ -z "$NAME" ] && continue
+            case "$RES" in
+              success)   ICON="✅";;
+              skipped)   ICON="⏭️";;
+              cancelled) ICON="⚪";;
+              failure)   ICON="❌"; FAILED=1;;
+              *)         ICON="❔";;
+            esac
+            LINES="$LINES"$'\n'"$ICON $NAME"
+          done <<< "$JOBS"
+          if [ "$EVENT" = "pull_request" ] && [ "$FAILED" = "0" ]; then
+            echo "PR run is green — staying quiet."
+            exit 0
+          fi
+          if [ "$FAILED" = "1" ]; then HEAD="❌ **CI FAILED**"; else HEAD="✅ **CI passed**"; fi
+          case "$EVENT" in
+            pull_request) CTX="PR #$PR_NUM — $PR_TITLE";;
+            schedule)     CTX="weekly cross-OS run on $REF";;
+            *)            CTX="$EVENT on $REF @ ${SHA:0:8} by $ACTOR";;
+          esac
+          MSG=$(printf '%s · clients · %s%s\n%s' "$HEAD" "$CTX" "$LINES" "$RUN_URL")
+          echo "$MSG"
+          if [ -z "${WEBHOOK:-}" ]; then
+            echo "::warning::DISCORD_RELEASE_WEBHOOK not set — CI summary not posted."
+            exit 0
+          fi
+          jq -n --arg c "$MSG" '{content:$c}' \
+            | curl -sS -o /dev/null -w 'discord %{http_code}\n' -X POST -H 'Content-Type: application/json' -d @- "$WEBHOOK"
