@@ -138,8 +138,12 @@ export function buildOnboardingWelcome(cwd: string): string {
     '- **Team Spaces** — share this session with your team, or hand it off to someone else.',
     '',
     'Found a bug or have feedback? Reach us at:',
-    '- GitHub: https://github.com/edgar-durand/codeagent-mobile-clients/issues',
-    '- Discord: https://discord.gg/Np2pbMrV9f',
+    // EXPLICIT markdown links, not bare URLs. Relying on the app's autolinker
+    // rendered the GitHub bullet as an EMPTY link (the label was consumed, the
+    // href never attached) — a labelled link renders correctly everywhere and
+    // reads better than a raw URL on a phone-width bubble.
+    '- [GitHub issues](https://github.com/edgar-durand/codeagent-mobile-clients/issues)',
+    '- [Discord community](https://discord.gg/Np2pbMrV9f)',
     '',
     `Ready when you are — try **"explain ${repo}"** or **"what should I work on first?"**`,
   ].join('\n');
@@ -206,7 +210,10 @@ export async function maybeSendOnboardingWelcome(opts: {
     log.trace('acpRunner', `onboarding marker check failed: ${(err as Error).message}`);
     return;
   }
-  log.info('acpRunner', `sending first-pair onboarding welcome for session=${opts.sessionId.slice(0, 8)}`);
+  log.info(
+    'acpRunner',
+    `sending first-pair onboarding welcome for session=${opts.sessionId.slice(0, 8)}`,
+  );
   // Run the welcome turn to completion; swallow errors (non-fatal). The caller
   // awaits this so the turn fully closes before the relay can begin a command
   // turn on the shared StreamingState (#339).
