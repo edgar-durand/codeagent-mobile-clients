@@ -11,7 +11,7 @@ them — they need real binaries / network / live credentials.
 | `beads-configure.int.test.ts` | `RUN_BEADS_INT=1` | Real beads/Dolt config store. |
 | `headroom-provision.int.test.ts` | `RUN_HEADROOM_INT=1` | Real Headroom enable/disable + `:8787/stats`. |
 | `baton-loop.int.test.ts` | `RUN_BATON_INT=1` | Cross-mode resume: a natively-created claude session resumes through the baton's ACP path. |
-| `baton-local.int.test.ts` | `RUN_BATON_INT=1` | **Whole local baton, real claude** — take-control BEFORE the first TUI turn → `MOBILE_DRIVE`, a real ACP turn, handback → `LOCAL_DRIVE`, take-control AGAIN over an on-disk transcript (`session/load`), zero TUI chrome in the chat pipe, and the `online:false` goodbye heartbeat on SIGINT. **Runs as a real gate in `ci.yml`** — see below. |
+| `baton-local.int.test.ts` | `RUN_BATON_INT=1` | **Whole local baton, real claude** — take-control BEFORE the first TUI turn → `MOBILE_DRIVE`, a real ACP turn, handback → `LOCAL_DRIVE`, take-control AGAIN over an on-disk transcript (`session/load`), zero TUI chrome in the chat pipe, the `online:false` goodbye heartbeat on SIGINT, and the mobile FOLLOWING the TUI through `/clear` (new conversation id), `/rename` and `/resume <id>`. **Runs as a real gate in `ci.yml`** — see below. |
 
 ## `acp-provision-smoke.int.test.ts` — automated CLAUDE.md Step 8
 
@@ -118,6 +118,23 @@ Take Control once with no `<id>.jsonl` on disk (fresh ACP session) and once afte
 a native-TUI turn has written one (`session/load` + its replay swallowed). Each
 branch asserts its own precondition on disk, so a regression that "fixes" one
 branch by never loading at all still fails.
+
+A second scenario in the same file (2026-08-19) is the gate for **`/clear` +
+`/rename` follow-through**: `/clear` in the Claude Code TUI mints a NEW session
+id + JSONL (verified live on claude 2.1.235), so the baton must re-publish
+`LOCAL_DRIVE` on the new id, the mirror must live-publish the next TUI turn
+from the NEW transcript (and snapshot it under the new id, with no
+`<command-name>` slash echo leaking), `/rename` must not re-point anything,
+and Take Control after the clear must `session/load` the NEW conversation.
+Verified red: stubbing `ClaudeRuntimeStrategy.watchConversationSwitch` to a
+no-op times out waiting for the re-published id. A third scenario does the
+same for **`/resume <id>`** (claude appends a `last-prompt` marker to the
+resumed file): first turn on A → `/clear` (B) → `/resume A` → re-published on
+A, next turn mirrored from A, Take Control on A. It lives in the SAME file on
+purpose — vitest runs files in parallel and two concurrent native TUIs race on
+the shared `~/.claude.json` (`ensureClaudeOnboarded` is read-modify-write), so
+one re-opens the workspace-trust dialog. Shared harness (gate, preflight, stub
+backend): `__tests__/fixtures/baton/local-harness.ts`.
 
 ```bash
 RUN_BATON_INT=1 npx vitest run integration/baton-local   # ~3 min, real claude turns

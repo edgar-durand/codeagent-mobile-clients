@@ -137,6 +137,19 @@ export class ClaudeRuntimeStrategy implements RuntimeStrategy {
     return history.parseHistoryFile(filePath);
   }
 
+  /**
+   * Baton: follow the native TUI through `/clear` (new conversation id, new
+   * JSONL) and `/resume` (an existing one) — see
+   * {@link history.watchConversationSwitch}.
+   */
+  watchConversationSwitch(
+    cwd: string,
+    opts: { currentId: string },
+    onSwitch: (conversationId: string, info: { kind: 'new' | 'resumed' }) => void,
+  ): () => void {
+    return history.watchConversationSwitch(cwd, opts, onSwitch);
+  }
+
   getCurrentUsage(historyDir: string) {
     return history.getCurrentUsage(historyDir);
   }

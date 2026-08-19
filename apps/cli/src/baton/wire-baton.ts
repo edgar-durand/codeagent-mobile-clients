@@ -471,6 +471,12 @@ export async function runBatonSession(opts: BatonSessionOptions): Promise<void> 
     // Safe forward-ref — `controller` is initialised long before `begin()` runs,
     // and onLateBind only fires from inside `begin()`'s spawn.
     onLateBind: (id: string) => controller.rebindConversation(id),
+    // The native TUI switched conversation mid-drive (Claude `/clear` mints a
+    // new id + JSONL; `/resume` re-opens an existing one): rebind so the mirror
+    // follows that transcript and a later Take Control resumes THAT
+    // conversation. Owner report 2026-08-18: after `/clear` (+`/rename`) the
+    // mobile went silent — the mirror kept tailing the abandoned file.
+    onConversationSwitch: (id: string) => controller.switchConversation(id),
   });
 
   // ─── Read-only transcript mirror (rebuilt each LOCAL_DRIVE entry) ─────────
@@ -483,6 +489,15 @@ export async function runBatonSession(opts: BatonSessionOptions): Promise<void> 
   // later LOCAL_DRIVE entry can only be reached via a handback, i.e. a re-arm
   // where the mobile already holds the conversation (skip the catch-up replay).
   let firstLocalDrive = true;
+  // Last state the controller published. A LOCAL_DRIVE published while the
+  // previous publish was ALSO LOCAL_DRIVE (no SWITCHING in between) can only
+  // be a conversation SWITCH (`controller.switchConversation`, Claude `/clear`
+  // or `/resume`) — a handback always passes through SWITCHING first. The
+  // mobile is not showing that conversation yet, so its mirror is FRESH
+  // (live-publish everything it holds, then each new turn — a `/resume`
+  // replays the resumed history, mirroring what the terminal just rendered),
+  // exactly like the very first LOCAL_DRIVE.
+  let lastPublished: BatonState | null = null;
   const startMirror = (conversationId: string, fresh: boolean): void => {
     mirror?.stop();
     mirror = new TranscriptMirror({
@@ -529,11 +544,13 @@ export async function runBatonSession(opts: BatonSessionOptions): Promise<void> 
       // The first LOCAL_DRIVE (from `begin()`) is a fresh session; subsequent
       // ones are handback re-arms.
       if (state === 'LOCAL_DRIVE' && conversationId) {
-        startMirror(conversationId, firstLocalDrive);
+        const switched = lastPublished === 'LOCAL_DRIVE';
+        startMirror(conversationId, firstLocalDrive || switched);
         firstLocalDrive = false;
       } else if (state !== 'LOCAL_DRIVE') {
         mirror?.stop();
       }
+      lastPublished = state;
     },
   });
 

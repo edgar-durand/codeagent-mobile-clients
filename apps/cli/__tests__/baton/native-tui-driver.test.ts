@@ -111,6 +111,54 @@ describe('NativeTuiDriver', () => {
     }
   });
 
+  describe('conversation-switch watch (Claude `/clear` / `/resume`)', () => {
+    function runtimeWithWatch() {
+      const unwatch = vi.fn();
+      let fire: ((id: string, info: { kind: 'new' | 'resumed' }) => void) | null = null;
+      const watchConversationSwitch = vi.fn(
+        (_cwd: string, _opts: { currentId: string }, onSwitch: (id: string, info: { kind: 'new' | 'resumed' }) => void) => {
+          fire = onSwitch;
+          return unwatch;
+        },
+      );
+      return {
+        runtime: { watchConversationSwitch } as unknown as RuntimeStrategy,
+        watchConversationSwitch,
+        unwatch,
+        fire: (id: string) => fire?.(id, { kind: 'new' }),
+      };
+    }
+
+    it('arms the runtime watcher on the pre-minted id after a fresh start and forwards a switch to onConversationSwitch', async () => {
+      const agent = fakeAgent('conv-9');
+      const rt = runtimeWithWatch();
+      const onConversationSwitch = vi.fn();
+      const d = new NativeTuiDriver(makeDeps(agent, { runtime: rt.runtime, onConversationSwitch }).deps);
+      await d.start();
+      expect(rt.watchConversationSwitch).toHaveBeenCalledTimes(1);
+      expect(rt.watchConversationSwitch.mock.calls[0][1].currentId).toBe('conv-9');
+      rt.fire('conv-after-clear');
+      expect(onConversationSwitch).toHaveBeenCalledWith('conv-after-clear');
+    });
+
+    it('re-arms on the resumed id after a handback, and tears the watcher down on stop()', async () => {
+      const agent = fakeAgent('conv-9');
+      const rt = runtimeWithWatch();
+      const d = new NativeTuiDriver(makeDeps(agent, { runtime: rt.runtime }).deps);
+      await d.start('conv-42');
+      expect(rt.watchConversationSwitch.mock.calls[0][1].currentId).toBe('conv-42');
+      await d.stop();
+      expect(rt.unwatch).toHaveBeenCalledTimes(1);
+    });
+
+    it('is inert for runtimes without the hook', async () => {
+      const agent = fakeAgent('conv-9');
+      const d = new NativeTuiDriver(makeDeps(agent).deps);
+      await expect(d.start()).resolves.toBe('conv-9');
+      await expect(d.stop()).resolves.toBeUndefined();
+    });
+  });
+
   it('start(undefined) throws when the agent exposes no session id after spawn', async () => {
     const agent = fakeAgent('conv-9');
     agent.spawnedSessionId = null;
