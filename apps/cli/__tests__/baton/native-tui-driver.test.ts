@@ -111,12 +111,12 @@ describe('NativeTuiDriver', () => {
     }
   });
 
-  describe('conversation-switch watch (Claude `/clear`)', () => {
+  describe('conversation-switch watch (Claude `/clear` / `/resume`)', () => {
     function runtimeWithWatch() {
       const unwatch = vi.fn();
-      let fire: ((id: string) => void) | null = null;
+      let fire: ((id: string, info: { kind: 'new' | 'resumed' }) => void) | null = null;
       const watchConversationSwitch = vi.fn(
-        (_cwd: string, _opts: { currentId: string; sinceMs: number }, onSwitch: (id: string) => void) => {
+        (_cwd: string, _opts: { currentId: string }, onSwitch: (id: string, info: { kind: 'new' | 'resumed' }) => void) => {
           fire = onSwitch;
           return unwatch;
         },
@@ -125,7 +125,7 @@ describe('NativeTuiDriver', () => {
         runtime: { watchConversationSwitch } as unknown as RuntimeStrategy,
         watchConversationSwitch,
         unwatch,
-        fire: (id: string) => fire?.(id),
+        fire: (id: string) => fire?.(id, { kind: 'new' }),
       };
     }
 

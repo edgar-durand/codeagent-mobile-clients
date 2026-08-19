@@ -26,9 +26,9 @@
  *   5. **Goodbye heartbeat.** SIGINT posts `online:false` BEFORE the process
  *      exits, so mobile stops showing the session as online.
  *
- * A second scenario (2026-08-19) proves the mobile keeps FOLLOWING the native
- * TUI through `/clear` (new conversation id) and `/rename` — see the doc on
- * that test below.
+ * Two more scenarios (2026-08-19) prove the mobile keeps FOLLOWING the native
+ * TUI through `/clear` (new conversation id) + `/rename`, and through
+ * `/resume <id>` (an existing conversation) — see the docs on those tests.
  *
  * ── Gating / auth ────────────────────────────────────────────────────────
  * See `__tests__/fixtures/baton/local-harness.ts` (`RUN_BATON_INT=1`; skips
@@ -434,6 +434,140 @@ describe.skipIf(!RUN_BATON_INT || BLOCKED !== null)('session baton — real loca
       expect(lastBaton()?.conversationId).toBe(newId);
 
       // No raw TUI chrome anywhere in the chat pipe, across the whole run.
+      const chromeFrames = rec.outputFrames.filter((f) => {
+        const text = typeof f.content === 'string' ? f.content : '';
+        return CHROME_MARKERS.some((m) => text.includes(m));
+      });
+      expect(chromeFrames.map((f) => String(f.content).slice(0, 120))).toEqual([]);
+
+      process.emit('SIGINT');
+      await waitUntil('process exit after SIGINT', () => exits.some((e) => e.code === 0), 30_000);
+    } finally {
+      exitSpy.mockRestore();
+      fs.rmSync(cwd, { recursive: true, force: true });
+    }
+  }, 900_000);
+
+  /**
+   * ── /resume <id> follow-through ───────────────────────────────────────────
+   * Same class of switch as `/clear`, other direction: the TUI re-opens an
+   * EXISTING conversation. Verified live (claude 2.1.235, 2026-08-19; both
+   * `/resume <id>` and the interactive picker): claude immediately appends one
+   * `last-prompt` record to the RESUMED file (the active file gets nothing),
+   * then the next turn lands there. The watcher attributes it as growth of a
+   * KNOWN, non-current transcript carrying that marker. Asserted end to end:
+   * first turn on A → `/clear` (B) → turn on B → `/resume A` → the baton
+   * re-publishes LOCAL_DRIVE on A → the next TUI turn is mirrored live from A's
+   * transcript and snapshotted under A → Take Control reaches MOBILE_DRIVE ON
+   * A, a mobile ACP turn completes there → handback. Same file, same shared
+   * stub backend (see the scenario above for why).
+   */
+  it('/resume <id> in the TUI rebinds the mirror + Take Control to THAT conversation', async () => {
+    const exits: Array<{ code: number | undefined }> = [];
+    backend.reset();
+    const { rec, enqueue, lastBaton, lastState } = backend;
+
+    const cwd = makeSessionCwd();
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation(((code?: number) => {
+      exits.push({ code });
+      return undefined as never;
+    }) as typeof process.exit);
+
+    const { runBatonSession } = await import('../../src/baton/wire-baton');
+    const { getAcpAdapter } = await import('../../src/agents/acp/adapters');
+    const adapter = getAcpAdapter('claude');
+    if (!adapter) throw new Error('claude ACP adapter not resolvable');
+
+    const sessionId = `baton-resume-int-${randomUUID()}`;
+    const pluginId = `plugin-${randomUUID()}`;
+
+    const mirroredTurn = (userText: string): boolean => {
+      const frames = rec.outputFrames;
+      const at = frames.findIndex((f) => f.type === 'user_message' && f.content === userText);
+      if (at < 0) return false;
+      return frames.slice(at + 1).some((f) => f.type === 'text' && f.done === true);
+    };
+    /** The most recent LOCAL_DRIVE publish after index `from` whose id is `id`. */
+    const republishedOn = (from: number, id: string): boolean =>
+      rec.batonEvents.slice(from).some((e) => e.state === 'LOCAL_DRIVE' && e.conversationId === id);
+
+    try {
+      void runBatonSession({
+        agent: 'claude',
+        sessionId,
+        pluginId,
+        pluginAuthToken: 'int-token',
+        cwd,
+        adapter,
+      }).catch((err) => {
+        // eslint-disable-next-line no-console
+        console.error('[baton-local] runBatonSession threw (resume scenario):', err);
+      });
+
+      await waitUntil(
+        'baton_state LOCAL_DRIVE',
+        () => rec.batonEvents.some((e) => e.state === 'LOCAL_DRIVE'),
+        90_000,
+      );
+      const idA = lastBaton()?.conversationId as string;
+      expect(idA).toBeTruthy();
+      await new Promise((r) => setTimeout(r, 12_000));
+
+      // Turn on A.
+      enqueue({ id: 'cmd-a1', sessionId, type: 'start_task', payload: { prompt: 'Reply with the single word ONE.' } });
+      await waitUntil('turn ONE mirrored (on A)', () => mirroredTurn('Reply with the single word ONE.'), 180_000);
+
+      // /clear → B, and a turn on B so both conversations have content.
+      let mark = rec.batonEvents.length;
+      enqueue({ id: 'cmd-clear', sessionId, type: 'start_task', payload: { prompt: '/clear' } });
+      await waitUntil(
+        'LOCAL_DRIVE re-published on the /clear conversation (B)',
+        () => rec.batonEvents.slice(mark).some((e) => e.state === 'LOCAL_DRIVE' && !!e.conversationId && e.conversationId !== idA),
+        90_000,
+      );
+      const idB = lastBaton()?.conversationId as string;
+      enqueue({ id: 'cmd-b1', sessionId, type: 'start_task', payload: { prompt: 'Reply with the single word TWO.' } });
+      await waitUntil('turn TWO mirrored (on B)', () => mirroredTurn('Reply with the single word TWO.'), 180_000);
+      expect(transcriptIds(cwd).sort()).toEqual([idA, idB].sort());
+
+      // /resume A → claude appends its resume marker to A's file; the baton
+      // must re-publish LOCAL_DRIVE bound to A again.
+      mark = rec.batonEvents.length;
+      const aLinesBefore = transcriptRaw(cwd, idA).split('\n').filter(Boolean).length;
+      enqueue({ id: 'cmd-resume', sessionId, type: 'start_task', payload: { prompt: `/resume ${idA}` } });
+      await waitUntil('LOCAL_DRIVE re-published on the RESUMED conversation (A)', () => republishedOn(mark, idA), 90_000);
+      expect(lastBaton()?.conversationId).toBe(idA);
+      expect(
+        transcriptRaw(cwd, idA).split('\n').filter(Boolean).length,
+        "claude appended to A's transcript on /resume (the marker the watcher keys on)",
+      ).toBeGreaterThan(aLinesBefore);
+
+      // A turn after the resume lands in A and is mirrored live from A.
+      enqueue({ id: 'cmd-a2', sessionId, type: 'start_task', payload: { prompt: 'Reply with the single word THREE.' } });
+      await waitUntil('turn THREE mirrored (on A, after /resume)', () => mirroredTurn('Reply with the single word THREE.'), 180_000);
+      expect(transcriptRaw(cwd, idA)).toContain('Reply with the single word THREE.');
+      expect(transcriptRaw(cwd, idB)).not.toContain('Reply with the single word THREE.');
+      const aSnapshots = rec.conversations.filter((c) => c.conversationId === idA);
+      expect(aSnapshots.length).toBeGreaterThan(0);
+      const lastA = aSnapshots[aSnapshots.length - 1].messages.map((m) => m.text);
+      expect(lastA).toContain('Reply with the single word ONE.');
+      expect(lastA).toContain('Reply with the single word THREE.');
+      expect(lastA).not.toContain('Reply with the single word TWO.');
+
+      // Take Control → MOBILE_DRIVE on A; a mobile turn runs there; handback.
+      enqueue({ id: 'cmd-take', sessionId, type: 'take_control', payload: {} });
+      await waitUntil('baton_state MOBILE_DRIVE after /resume', () => lastState() === 'MOBILE_DRIVE', 120_000);
+      expect(lastBaton()?.conversationId, 'Take Control must resume the RESUMED conversation').toBe(idA);
+      enqueue({ id: 'cmd-mobile-turn', sessionId, type: 'start_task', payload: { prompt: 'Reply with the single word FOUR.' } });
+      await waitUntil(
+        'the mobile ACP turn on A to complete',
+        () => rec.results.some((r) => r.commandId === 'cmd-mobile-turn' && r.status === 'completed'),
+        180_000,
+      );
+      enqueue({ id: 'cmd-back', sessionId, type: 'handback', payload: {} });
+      await waitUntil('baton_state LOCAL_DRIVE after handback', () => lastState() === 'LOCAL_DRIVE', 120_000);
+      expect(lastBaton()?.conversationId).toBe(idA);
+
       const chromeFrames = rec.outputFrames.filter((f) => {
         const text = typeof f.content === 'string' ? f.content : '';
         return CHROME_MARKERS.some((m) => text.includes(m));

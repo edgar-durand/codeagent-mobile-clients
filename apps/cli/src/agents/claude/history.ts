@@ -401,38 +401,118 @@ export function isClearedConversationFile(filePath: string): boolean {
   return false;
 }
 
+/** Why the native TUI switched conversation — `new` = `/clear` (fresh
+ *  transcript), `resumed` = `/resume` (an existing transcript picked up again). */
+export type ConversationSwitchKind = 'new' | 'resumed';
+
 /**
- * Watch `~/.claude/projects/<encodeCwd(cwd)>/` for the native TUI switching to
- * a NEW conversation (`/clear`), and call `onSwitch(newId)` — once per switch,
- * for as long as the watcher lives (a second `/clear` fires again).
+ * Does the bytes appended to a transcript since `fromOffset` carry Claude's
+ * RESUME signature? Verified live (claude 2.1.235, 2026-08-19, both `/resume
+ * <id>` and the interactive `/resume` picker): the instant a conversation is
+ * resumed, claude appends exactly one `last-prompt` record to ITS file (the
+ * previously-active file gets nothing), before any turn. A normal turn also
+ * ends in a `last-prompt`, so a resume that somehow skipped the immediate
+ * record is still attributed by its first turn.
+ */
+function appendedTailHasResumeMarker(filePath: string, fromOffset: number): boolean {
+  let fd: number;
+  try {
+    fd = fs.openSync(filePath, 'r');
+  } catch {
+    return false;
+  }
+  try {
+    const size = fs.fstatSync(fd).size;
+    const len = Math.min(Math.max(size - fromOffset, 0), SWITCH_PROBE_BYTES);
+    if (len <= 0) return false;
+    const buf = Buffer.alloc(len);
+    const n = fs.readSync(fd, buf, 0, len, fromOffset);
+    const raw = buf.toString('utf8', 0, n);
+    if (!raw.includes('"last-prompt"')) return false;
+    for (const line of raw.split('\n')) {
+      if (!line.trim()) continue;
+      try {
+        if ((JSON.parse(line) as Record<string, unknown>)['type'] === 'last-prompt') return true;
+      } catch {
+        /* partial line at either edge of the tail */
+      }
+    }
+    return false;
+  } catch {
+    return false;
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+/**
+ * Watch `~/.claude/projects/<encodeCwd(cwd)>/` for the native TUI switching
+ * conversation — `/clear` (NEW transcript) or `/resume` (an EXISTING
+ * transcript) — and call `onSwitch(newId, {kind})`, once per switch, for as
+ * long as the watcher lives (every later `/clear`/`/resume` fires again).
  *
- * Verified live (claude 2.1.235, 2026-08-19): `/clear` mints a fresh session
- * id and IMMEDIATELY writes `<newId>.jsonl` (a `user` record echoing
- * `<command-name>/clear</command-name>`), before the user types anything; the
- * old `<oldId>.jsonl` is never touched again. `/rename` writes `custom-title`
- * / `agent-name` records into the CURRENT file — no new conversation.
+ * Verified live (claude 2.1.235, 2026-08-19):
+ *   - `/clear` mints a fresh session id and IMMEDIATELY writes `<newId>.jsonl`
+ *     (a `user` record echoing `<command-name>/clear</command-name>`), before
+ *     the user types anything; the old file is never touched again.
+ *   - `/resume <id>` and the interactive `/resume` picker IMMEDIATELY append
+ *     one `last-prompt` record to the RESUMED `<id>.jsonl`; the file that was
+ *     active gets nothing.
+ *   - `/rename` writes `custom-title` / `agent-name` records into the CURRENT
+ *     file — no new conversation.
+ *
+ * Attribution (so a `claude -p` one-shot — preview detection / AI summary,
+ * same cwd — or the ACP adapter can never hijack the baton):
+ *   - every `*.jsonl` present when the watch attaches is a KNOWN conversation
+ *     (baselined at its current size); the current one is excluded;
+ *   - a file that APPEARS later is a `/clear` candidate only if
+ *     {@link isClearedConversationFile} says the interactive TUI created it —
+ *     anything else (a one-shot) stays unclassified and is never followed;
+ *   - a KNOWN, non-current file that GROWS with a `last-prompt` record in the
+ *     appended tail is a `/resume` — only the interactive TUI writes to old
+ *     conversations of this cwd. A conversation we switched AWAY from is
+ *     baselined at that moment, so `/clear` → `/resume <old>` round-trips.
  *
  * EVENT-DRIVEN ONLY (repo "no polling" rule): an `fs.watch` on the project
- * dir; when that dir doesn't exist yet (no turn before the `/clear`) an
- * `fs.watch` on the projects root catches its creation. Every event rescans
- * the `*.jsonl` files created since `sinceMs` (minus a small clock grace),
- * re-probing a candidate only when it grew, and fires the first one that
- * {@link isClearedConversationFile} attributes to the interactive TUI.
+ * dir; when that dir doesn't exist yet (no turn before the first `/clear`) an
+ * `fs.watch` on the projects root catches its creation. Every event rescans,
+ * re-probing a file only when its size changed.
  */
 export function watchConversationSwitch(
   cwd: string,
-  opts: { currentId: string; sinceMs: number },
-  onSwitch: (conversationId: string) => void,
+  opts: { currentId: string },
+  onSwitch: (conversationId: string, info: { kind: ConversationSwitchKind }) => void,
   projectsRoot?: string,
 ): () => void {
   const root = projectsRoot ?? path.join(os.homedir(), '.claude', 'projects');
-  const floor = opts.sinceMs - 2_000;
   let currentId = opts.currentId;
-  const handled = new Set<string>([currentId]);
-  const probedSize = new Map<string, number>();
+  /** Known conversations (not current) → size when last known idle. */
+  const baseline = new Map<string, number>();
+  /** Files that appeared after attach and did NOT qualify as a `/clear`
+   *  (one-shots, other processes) → size at last probe. */
+  const unclassified = new Map<string, number>();
   let dirWatcher: fs.FSWatcher | null = null;
   let rootWatcher: fs.FSWatcher | null = null;
   let closed = false;
+
+  const fileSize = (file: string): number | null => {
+    try {
+      return fs.statSync(file).size;
+    } catch {
+      return null;
+    }
+  };
+
+  const switchTo = (dir: string, id: string, kind: ConversationSwitchKind): void => {
+    // The conversation we leave becomes a known, resumable one — baseline it
+    // NOW so a later `/resume <it>` is seen as growth.
+    const leaving = fileSize(path.join(dir, `${currentId}.jsonl`));
+    if (leaving !== null) baseline.set(currentId, leaving);
+    baseline.delete(id);
+    unclassified.delete(id);
+    currentId = id;
+    onSwitch(id, { kind });
+  };
 
   const scan = (dir: string): void => {
     if (closed) return;
@@ -445,32 +525,50 @@ export function watchConversationSwitch(
     for (const name of entries) {
       if (!name.endsWith('.jsonl')) continue;
       const id = name.slice(0, -'.jsonl'.length);
-      if (handled.has(id)) continue;
+      if (id === currentId) continue;
       const file = path.join(dir, name);
-      let st: fs.Stats;
-      try {
-        st = fs.statSync(file);
-      } catch {
+      const size = fileSize(file);
+      if (size === null) continue;
+      const known = baseline.get(id);
+      if (known !== undefined) {
+        // A known conversation grew → `/resume` if the tail carries the marker.
+        if (size > known && appendedTailHasResumeMarker(file, known)) {
+          switchTo(dir, id, 'resumed');
+          return;
+        }
         continue;
       }
-      // Birthtime where the fs reports one (macOS/Windows); mtime otherwise.
-      const createdAt = st.birthtimeMs > 0 ? st.birthtimeMs : st.mtimeMs;
-      if (createdAt < floor) continue;
-      if (probedSize.get(file) === st.size) continue; // unchanged since last probe
-      probedSize.set(file, st.size);
-      if (!isClearedConversationFile(file)) continue;
-      handled.add(id);
-      currentId = id;
-      onSwitch(currentId);
-      return;
+      // Appeared after attach: `/clear` candidate (re-probe only on growth).
+      if (unclassified.get(id) === size) continue;
+      unclassified.set(id, size);
+      if (isClearedConversationFile(file)) {
+        switchTo(dir, id, 'new');
+        return;
+      }
     }
   };
 
-  const attachDir = (): boolean => {
+  /** Attach to the project dir. On the INITIAL attach every present file is a
+   *  known conversation; when the dir is created later (root-watch path) the
+   *  files in it are new by construction. */
+  const attachDir = (initial: boolean): boolean => {
     const dir = resolveHistoryDir(cwd, root);
     if (!dir) return false;
     rootWatcher?.close();
     rootWatcher = null;
+    if (initial) {
+      try {
+        for (const name of fs.readdirSync(dir)) {
+          if (!name.endsWith('.jsonl')) continue;
+          const id = name.slice(0, -'.jsonl'.length);
+          if (id === currentId) continue;
+          const size = fileSize(path.join(dir, name));
+          if (size !== null) baseline.set(id, size);
+        }
+      } catch {
+        /* unreadable dir — treated as empty */
+      }
+    }
     try {
       dirWatcher = fs.watch(dir, { persistent: false }, () => scan(dir));
     } catch {
@@ -480,13 +578,13 @@ export function watchConversationSwitch(
     return true;
   };
 
-  if (!attachDir()) {
+  if (!attachDir(true)) {
     // No project dir yet (claude creates it on the first transcript write —
     // which a `/clear` before any turn also does). Watch the root for it.
     try {
       fs.mkdirSync(root, { recursive: true });
       rootWatcher = fs.watch(root, { persistent: false }, () => {
-        if (!closed && !dirWatcher) attachDir();
+        if (!closed && !dirWatcher) attachDir(false);
       });
     } catch {
       /* no root watch possible — the switch simply won't be detected */

@@ -73,11 +73,11 @@ export class BatonController {
   }
 
   /**
-   * The native TUI SWITCHED to a new conversation while driving (Claude
-   * `/clear`): the process and the pairing are unchanged, but the conversation
-   * the user is in has a new id. Re-point the baton at it so the read-only
-   * mirror follows the new transcript and a later Take Control resumes the NEW
-   * conversation instead of the abandoned one. Guarded to LOCAL_DRIVE — only
+   * The native TUI SWITCHED conversation while driving (Claude `/clear` →
+   * a new id, `/resume` → an existing one): the process and the pairing are
+   * unchanged, but the conversation the user is in has another id. Re-point
+   * the baton at it so the read-only mirror follows that transcript and a
+   * later Take Control resumes THAT conversation instead of the abandoned one. Guarded to LOCAL_DRIVE — only
    * the terminal can switch its own conversation, and during a hand-off /
    * MOBILE_DRIVE the native watcher is torn down anyway (`stop()`). Same id →
    * no-op. Re-publishes LOCAL_DRIVE so the mirror re-arms + mobile learns the id.

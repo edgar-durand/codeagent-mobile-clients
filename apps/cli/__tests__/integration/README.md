@@ -11,7 +11,7 @@ them — they need real binaries / network / live credentials.
 | `beads-configure.int.test.ts` | `RUN_BEADS_INT=1` | Real beads/Dolt config store. |
 | `headroom-provision.int.test.ts` | `RUN_HEADROOM_INT=1` | Real Headroom enable/disable + `:8787/stats`. |
 | `baton-loop.int.test.ts` | `RUN_BATON_INT=1` | Cross-mode resume: a natively-created claude session resumes through the baton's ACP path. |
-| `baton-local.int.test.ts` | `RUN_BATON_INT=1` | **Whole local baton, real claude** — take-control BEFORE the first TUI turn → `MOBILE_DRIVE`, a real ACP turn, handback → `LOCAL_DRIVE`, take-control AGAIN over an on-disk transcript (`session/load`), zero TUI chrome in the chat pipe, the `online:false` goodbye heartbeat on SIGINT, and the mobile FOLLOWING the TUI through `/clear` (new conversation id) + `/rename`. **Runs as a real gate in `ci.yml`** — see below. |
+| `baton-local.int.test.ts` | `RUN_BATON_INT=1` | **Whole local baton, real claude** — take-control BEFORE the first TUI turn → `MOBILE_DRIVE`, a real ACP turn, handback → `LOCAL_DRIVE`, take-control AGAIN over an on-disk transcript (`session/load`), zero TUI chrome in the chat pipe, the `online:false` goodbye heartbeat on SIGINT, and the mobile FOLLOWING the TUI through `/clear` (new conversation id), `/rename` and `/resume <id>`. **Runs as a real gate in `ci.yml`** — see below. |
 
 ## `acp-provision-smoke.int.test.ts` — automated CLAUDE.md Step 8
 
@@ -127,7 +127,10 @@ from the NEW transcript (and snapshot it under the new id, with no
 `<command-name>` slash echo leaking), `/rename` must not re-point anything,
 and Take Control after the clear must `session/load` the NEW conversation.
 Verified red: stubbing `ClaudeRuntimeStrategy.watchConversationSwitch` to a
-no-op times out waiting for the re-published id. It lives in the SAME file on
+no-op times out waiting for the re-published id. A third scenario does the
+same for **`/resume <id>`** (claude appends a `last-prompt` marker to the
+resumed file): first turn on A → `/clear` (B) → `/resume A` → re-published on
+A, next turn mirrored from A, Take Control on A. It lives in the SAME file on
 purpose — vitest runs files in parallel and two concurrent native TUIs race on
 the shared `~/.claude.json` (`ensureClaudeOnboarded` is read-modify-write), so
 one re-opens the workspace-trust dialog. Shared harness (gate, preflight, stub

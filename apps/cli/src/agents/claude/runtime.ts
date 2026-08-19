@@ -139,12 +139,13 @@ export class ClaudeRuntimeStrategy implements RuntimeStrategy {
 
   /**
    * Baton: follow the native TUI through `/clear` (new conversation id, new
-   * JSONL) — see {@link history.watchConversationSwitch}.
+   * JSONL) and `/resume` (an existing one) — see
+   * {@link history.watchConversationSwitch}.
    */
   watchConversationSwitch(
     cwd: string,
-    opts: { currentId: string; sinceMs: number },
-    onSwitch: (conversationId: string) => void,
+    opts: { currentId: string },
+    onSwitch: (conversationId: string, info: { kind: 'new' | 'resumed' }) => void,
   ): () => void {
     return history.watchConversationSwitch(cwd, opts, onSwitch);
   }

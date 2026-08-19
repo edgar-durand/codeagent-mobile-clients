@@ -472,10 +472,10 @@ export async function runBatonSession(opts: BatonSessionOptions): Promise<void> 
     // and onLateBind only fires from inside `begin()`'s spawn.
     onLateBind: (id: string) => controller.rebindConversation(id),
     // The native TUI switched conversation mid-drive (Claude `/clear` mints a
-    // new id + JSONL): rebind so the mirror follows the new transcript and a
-    // later Take Control resumes the NEW conversation. Owner report 2026-08-18:
-    // after `/clear` (+`/rename`) the mobile went silent — the mirror kept
-    // tailing the abandoned file.
+    // new id + JSONL; `/resume` re-opens an existing one): rebind so the mirror
+    // follows that transcript and a later Take Control resumes THAT
+    // conversation. Owner report 2026-08-18: after `/clear` (+`/rename`) the
+    // mobile went silent — the mirror kept tailing the abandoned file.
     onConversationSwitch: (id: string) => controller.switchConversation(id),
   });
 
@@ -491,10 +491,12 @@ export async function runBatonSession(opts: BatonSessionOptions): Promise<void> 
   let firstLocalDrive = true;
   // Last state the controller published. A LOCAL_DRIVE published while the
   // previous publish was ALSO LOCAL_DRIVE (no SWITCHING in between) can only
-  // be a conversation SWITCH (`controller.switchConversation`, Claude `/clear`)
-  // — a handback always passes through SWITCHING first. The new conversation
-  // is one the mobile has never seen, so its mirror is FRESH (live-publish from
-  // its first turn), exactly like the very first LOCAL_DRIVE.
+  // be a conversation SWITCH (`controller.switchConversation`, Claude `/clear`
+  // or `/resume`) — a handback always passes through SWITCHING first. The
+  // mobile is not showing that conversation yet, so its mirror is FRESH
+  // (live-publish everything it holds, then each new turn — a `/resume`
+  // replays the resumed history, mirroring what the terminal just rendered),
+  // exactly like the very first LOCAL_DRIVE.
   let lastPublished: BatonState | null = null;
   const startMirror = (conversationId: string, fresh: boolean): void => {
     mirror?.stop();

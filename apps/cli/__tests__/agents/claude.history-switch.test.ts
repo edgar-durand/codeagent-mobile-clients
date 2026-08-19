@@ -131,19 +131,26 @@ describe('claude/history — isClearedConversationFile', () => {
 });
 
 describe('claude/history — watchConversationSwitch (event-driven)', () => {
-  it('fires with the new id when /clear writes a fresh JSONL into an existing project dir, ignores one-shots, and follows a second /clear', async () => {
+  /** What claude appends to a file the instant it is /resume'd (both the
+   *  explicit `/resume <id>` and the picker — verified live). */
+  const resumeMarker = (): string => rec('last-prompt', { lastPrompt: 'Reply with the single word ONE.' }) + '\n';
+
+  it('fires {kind:new} when /clear writes a fresh JSONL into an existing project dir, ignores one-shots + /rename, follows a second /clear', async () => {
     const root = mkdtempSync(path.join(tmpdir(), 'claude-h-switch-root-'));
     const cwd = '/Users/alice/work';
     const dir = path.join(root, encodeCwd(cwd));
     mkdirSync(dir, { recursive: true });
     const current = path.join(dir, 'current.jsonl');
     writeFileSync(current, userRec('hello') + '\n');
-    const seen: string[] = [];
-    const unwatch = watchConversationSwitch(cwd, { currentId: 'current', sinceMs: Date.now() }, (id) => seen.push(id), root);
+    const seen: Array<[string, string]> = [];
+    const unwatch = watchConversationSwitch(cwd, { currentId: 'current' }, (id, info) => seen.push([id, info.kind]), root);
     try {
       // A `claude -p` one-shot in the same cwd (preview detection / AI summary)
-      // lands in the same dir — it must NOT hijack the baton.
-      writeFileSync(path.join(dir, 'oneshot.jsonl'), [userRec('detect'), assistantRec('x')].join('\n') + '\n');
+      // lands in the same dir — it must NOT hijack the baton, even as it grows.
+      const oneShot = path.join(dir, 'oneshot.jsonl');
+      writeFileSync(oneShot, userRec('detect') + '\n');
+      await new Promise((r) => setTimeout(r, 100));
+      appendFileSync(oneShot, assistantRec('x') + '\n' + rec('last-prompt', { lastPrompt: 'detect' }) + '\n');
       // /rename on the current conversation — no switch either.
       appendFileSync(current, renameLines().join('\n') + '\n');
       await new Promise((r) => setTimeout(r, 300));
@@ -156,54 +163,86 @@ describe('claude/history — watchConversationSwitch (event-driven)', () => {
       await new Promise((r) => setTimeout(r, 100));
       appendFileSync(next, clearedFileLines().slice(1).join('\n') + '\n');
       await waitUntil(() => seen.length === 1);
-      expect(seen).toEqual(['next-1']);
+      expect(seen).toEqual([['next-1', 'new']]);
 
       // A turn on the new conversation is not another switch…
-      appendFileSync(next, [userRec('TWO?'), assistantRec('TWO')].join('\n') + '\n');
+      appendFileSync(next, [userRec('TWO?'), assistantRec('TWO'), rec('last-prompt', { lastPrompt: 'TWO?' })].join('\n') + '\n');
       await new Promise((r) => setTimeout(r, 300));
-      expect(seen).toEqual(['next-1']);
+      expect(seen).toEqual([['next-1', 'new']]);
 
       // …but a second /clear is.
       writeFileSync(path.join(dir, 'next-2.jsonl'), clearedFileLines().join('\n') + '\n');
       await waitUntil(() => seen.length === 2);
-      expect(seen).toEqual(['next-1', 'next-2']);
+      expect(seen).toEqual([['next-1', 'new'], ['next-2', 'new']]);
     } finally {
       unwatch();
       rmSync(root, { recursive: true, force: true });
     }
   });
 
-  it('catches a /clear that CREATES the project dir (no turn before it), and ignores files older than sinceMs', async () => {
+  it('fires {kind:resumed} when a KNOWN non-current transcript grows with the resume marker: a pre-existing one, and the one we /clear-ed away from', async () => {
+    const root = mkdtempSync(path.join(tmpdir(), 'claude-h-switch-root-'));
+    const cwd = '/Users/alice/work';
+    const dir = path.join(root, encodeCwd(cwd));
+    mkdirSync(dir, { recursive: true });
+    const current = path.join(dir, 'current.jsonl');
+    writeFileSync(current, [userRec('hello'), assistantRec('hi')].join('\n') + '\n');
+    // An older conversation of this cwd from a previous day.
+    const older = path.join(dir, 'older.jsonl');
+    writeFileSync(older, [userRec('old question'), assistantRec('old answer')].join('\n') + '\n');
+    const seen: Array<[string, string]> = [];
+    const unwatch = watchConversationSwitch(cwd, { currentId: 'current' }, (id, info) => seen.push([id, info.kind]), root);
+    try {
+      // Growth WITHOUT the marker (e.g. a stray rename record) is not a resume.
+      appendFileSync(older, rec('custom-title', { customTitle: 'x' }) + '\n');
+      await new Promise((r) => setTimeout(r, 300));
+      expect(seen).toEqual([]);
+
+      // `/resume older` → claude appends the last-prompt record to older.jsonl.
+      appendFileSync(older, resumeMarker());
+      await waitUntil(() => seen.length === 1);
+      expect(seen).toEqual([['older', 'resumed']]);
+
+      // Turns on the resumed conversation (now current) are not switches.
+      appendFileSync(older, [userRec('more'), assistantRec('sure'), rec('last-prompt', { lastPrompt: 'more' })].join('\n') + '\n');
+      await new Promise((r) => setTimeout(r, 300));
+      expect(seen).toEqual([['older', 'resumed']]);
+
+      // `/resume current` — back to the conversation we left: it was baselined
+      // when we switched away, so its growth is a resume too.
+      appendFileSync(current, resumeMarker());
+      await waitUntil(() => seen.length === 2);
+      expect(seen).toEqual([['older', 'resumed'], ['current', 'resumed']]);
+
+      // /clear then /resume the cleared-away conversation: round-trips.
+      writeFileSync(path.join(dir, 'fresh.jsonl'), clearedFileLines().join('\n') + '\n');
+      await waitUntil(() => seen.length === 3);
+      expect(seen[2]).toEqual(['fresh', 'new']);
+      appendFileSync(current, resumeMarker());
+      await waitUntil(() => seen.length === 4);
+      expect(seen[3]).toEqual(['current', 'resumed']);
+    } finally {
+      unwatch();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('catches a /clear that CREATES the project dir (no turn before it)', async () => {
     const root = mkdtempSync(path.join(tmpdir(), 'claude-h-switch-root-'));
     const cwd = '/Users/alice/fresh';
     const dir = path.join(root, encodeCwd(cwd));
     const seen: string[] = [];
     // Project dir does not exist yet → the watcher must hang off the root.
-    const unwatch = watchConversationSwitch(cwd, { currentId: 'premint', sinceMs: Date.now() + 5_000 }, (id) => seen.push(id), root);
+    const unwatch = watchConversationSwitch(cwd, { currentId: 'premint' }, (id) => seen.push(id), root);
     try {
+      await new Promise((r) => setTimeout(r, 100));
       mkdirSync(dir, { recursive: true });
-      // Too old (created before sinceMs − grace) even though it looks cleared.
-      writeFileSync(path.join(dir, 'stale.jsonl'), clearedFileLines().join('\n') + '\n');
-      await new Promise((r) => setTimeout(r, 300));
-      expect(seen).toEqual([]);
+      writeFileSync(path.join(dir, 'after-clear.jsonl'), clearedFileLines().join('\n') + '\n');
+      await waitUntil(() => seen.length === 1);
+      expect(seen).toEqual(['after-clear']);
     } finally {
       unwatch();
       rmSync(root, { recursive: true, force: true });
-    }
-
-    const root2 = mkdtempSync(path.join(tmpdir(), 'claude-h-switch-root-'));
-    const dir2 = path.join(root2, encodeCwd(cwd));
-    const seen2: string[] = [];
-    const unwatch2 = watchConversationSwitch(cwd, { currentId: 'premint', sinceMs: Date.now() }, (id) => seen2.push(id), root2);
-    try {
-      await new Promise((r) => setTimeout(r, 100));
-      mkdirSync(dir2, { recursive: true });
-      writeFileSync(path.join(dir2, 'after-clear.jsonl'), clearedFileLines().join('\n') + '\n');
-      await waitUntil(() => seen2.length === 1);
-      expect(seen2).toEqual(['after-clear']);
-    } finally {
-      unwatch2();
-      rmSync(root2, { recursive: true, force: true });
     }
   });
 
@@ -213,7 +252,7 @@ describe('claude/history — watchConversationSwitch (event-driven)', () => {
     const dir = path.join(root, encodeCwd(cwd));
     mkdirSync(dir, { recursive: true });
     const seen: string[] = [];
-    const unwatch = watchConversationSwitch(cwd, { currentId: 'current', sinceMs: Date.now() }, (id) => seen.push(id), root);
+    const unwatch = watchConversationSwitch(cwd, { currentId: 'current' }, (id) => seen.push(id), root);
     unwatch();
     writeFileSync(path.join(dir, 'next.jsonl'), clearedFileLines().join('\n') + '\n');
     await new Promise((r) => setTimeout(r, 300));
