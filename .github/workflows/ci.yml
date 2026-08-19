@@ -536,18 +536,22 @@ jobs:
           set -uo pipefail
           JOBS=$(gh api --paginate "repos/$REPO/actions/runs/$RUN_ID/jobs?per_page=100" \
                  --jq '.jobs[] | select(.name != "CI results → Discord") | [.name, (.conclusion // .status)] | @tsv')
-          FAILED=0; LINES=""
+          FAILED=0; CANCELLED=0; LINES=""
           while IFS=$'\t' read -r NAME RES; do
             [ -z "$NAME" ] && continue
             case "$RES" in
               success)   ICON="✅";;
               skipped)   ICON="⏭️";;
-              cancelled) ICON="⚪";;
+              cancelled) ICON="⚪"; CANCELLED=1;;
               failure)   ICON="❌"; FAILED=1;;
               *)         ICON="❔";;
             esac
             LINES="$LINES"$'\n'"$ICON $NAME"
           done <<< "$JOBS"
+          if [ "$CANCELLED" = "1" ]; then
+            echo "Run was superseded/cancelled — the replacing run will report."
+            exit 0
+          fi
           if [ "$EVENT" = "pull_request" ] && [ "$FAILED" = "0" ]; then
             echo "PR run is green — staying quiet."
             exit 0
@@ -564,5 +568,5 @@ jobs:
             echo "::warning::DISCORD_RELEASE_WEBHOOK not set — CI summary not posted."
             exit 0
           fi
-          jq -n --arg c "$MSG" '{content:$c}' \
+          jq -n --arg c "$MSG" '{content:$c, flags:4}' \
             | curl -sS -o /dev/null -w 'discord %{http_code}\n' -X POST -H 'Content-Type: application/json' -d @- "$WEBHOOK"

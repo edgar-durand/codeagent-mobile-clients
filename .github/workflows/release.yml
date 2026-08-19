@@ -729,7 +729,7 @@ jobs:
                  "release pings Discord. See README → Releases & changelogs."
             exit 0
           fi
-          jq -n --arg c "$MSG" '{content:$c}' \
+          jq -n --arg c "$MSG" '{content:$c, flags:4}' \
             | curl -sS -X POST -H 'Content-Type: application/json' -d @- "$WEBHOOK"
 
   # ── Release succeeded → Discord ──────────────────────────────────────────
@@ -754,5 +754,5 @@ jobs:
             "$RUN_URL")
           echo "$MSG"
           [ -n "${WEBHOOK:-}" ] || { echo "::warning::DISCORD_RELEASE_WEBHOOK not set"; exit 0; }
-          jq -n --arg c "$MSG" '{content:$c}' \
+          jq -n --arg c "$MSG" '{content:$c, flags:4}' \
             | curl -sS -o /dev/null -w 'discord %{http_code}\n' -X POST -H 'Content-Type: application/json' -d @- "$WEBHOOK"
