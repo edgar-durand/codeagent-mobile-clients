@@ -10,6 +10,8 @@ them — they need real binaries / network / live credentials.
 | `kimi-acp-provision.int.test.ts` | `RUN_KIMI_INT=1` | Kimi-specific POSITIVE/NEGATIVE regression (credential slot). |
 | `beads-configure.int.test.ts` | `RUN_BEADS_INT=1` | Real beads/Dolt config store. |
 | `headroom-provision.int.test.ts` | `RUN_HEADROOM_INT=1` | Real Headroom enable/disable + `:8787/stats`. |
+| `baton-loop.int.test.ts` | `RUN_BATON_INT=1` | Cross-mode resume: a natively-created claude session resumes through the baton's ACP path. |
+| `baton-local.int.test.ts` | `RUN_BATON_INT=1` | **Whole local baton, real claude** — take-control BEFORE the first TUI turn → `MOBILE_DRIVE`, a real ACP turn, handback → `LOCAL_DRIVE`, zero TUI chrome in the chat pipe, and the `online:false` goodbye heartbeat on SIGINT. |
 
 ## `acp-provision-smoke.int.test.ts` — automated CLAUDE.md Step 8
 
@@ -89,3 +91,32 @@ this suite is a no-op there. To run it nightly, add a separate gated job (a
 secrets are configured, then runs
 `(cd apps/cli && npx vitest run acp-provision-smoke)`. Rows with no secret skip
 cleanly, so the job is green until you add the first credential secret.
+
+## `baton-local.int.test.ts` — the local Session Baton, end to end
+
+Runs the REAL composition root (`runBatonSession`) — real native `claude` TUI,
+real ACP adapter, real `CommandRelayService`/controller/drivers/mirror —
+against an in-process stub backend that serves `/api/commands/pending` and
+captures `/api/baton/events`, `/api/commands/output`, `/api/commands/result`
+and `/api/plugin/heartbeat`. Nothing under `src/` is mocked; only the backend
+is faked (`CODEAM_API_URL` points at the stub).
+
+It is the regression gate for the three 2026-08-18 owner-reported bugs:
+
+1. **Take Control before the first TUI turn** — the scenario that hung: the
+   pre-minted conversation id has no transcript on disk, so `session/load`
+   never resolved and the baton wedged in `SWITCHING`. Verified red: reverting
+   the `AcpDriver` zero-turn guard makes this time out waiting for
+   `MOBILE_DRIVE`.
+2. **No screen-scrape in LOCAL_DRIVE** — a prompt sent from mobile while the
+   terminal holds the baton must not pump raw TUI frames into the chat.
+   Verified red: un-suppressing `OutputService` publishes box-drawing chrome.
+3. **Goodbye heartbeat** — SIGINT posts `online:false` BEFORE `process.exit`.
+
+```bash
+RUN_BATON_INT=1 npx vitest run integration/baton-local   # ~45 s, one real claude turn
+```
+
+Skips cleanly (with a printed reason) when `RUN_BATON_INT` is unset or
+`claude --version` fails, so CI stays green until an authenticated claude is
+provisioned on the runner.
