@@ -124,6 +124,54 @@ describe('BatonController', () => {
     expect(c.activeDriver).toBe('mobile_acp');
   });
 
+  // ── Bounded hand-off (2026-08-18 "Switching…" incident) ──────────────
+  // The live failure was a driver that resolved NEITHER way: the ACP adapter's
+  // `session/load` never answered, so `takeControl` sat in `SWITCHING` for the
+  // rest of the session (mobile latched on "Switching…", every later
+  // take/handback silently no-op'd on the `_state !== from` guard).
+  it('times out a hung hand-off, reverts to the steady state, and revives the stopped driver', async () => {
+    const local = fakeDriver('local_tui', 'conv-1');
+    const mobile = fakeDriver('mobile_acp', 'conv-1');
+    // Never settles — exactly what the wedged adapter did.
+    mobile.start = vi.fn(async () => new Promise<string>(() => {}));
+    const publishState = vi.fn();
+    const c = new BatonController({ local, mobile, publishState, switchTimeoutMs: 40 });
+    await c.begin();
+
+    const p = c.takeControl();
+    local.releaseYield();
+    await expect(p).rejects.toThrow(/BATON_SWITCH_TIMEOUT/);
+
+    // Not wedged: reverted to LOCAL_DRIVE and published, so mobile leaves
+    // "Switching…" instead of latching on it forever.
+    expect(c.state).toBe('LOCAL_DRIVE');
+    expect(c.activeDriver).toBe('local_tui');
+    expect(publishState).toHaveBeenLastCalledWith('LOCAL_DRIVE', 'local_tui', 'conv-1');
+    // The half-started driver is stopped, and the native TUI (already killed
+    // by the hand-off) is brought back on the same conversation — a bare state
+    // revert would leave the user with a dead terminal.
+    expect(mobile.stopSpy).toHaveBeenCalled();
+    expect(local.startSpy).toHaveBeenLastCalledWith('conv-1');
+  });
+
+  it('a later take-control still works after a timed-out one (state was not wedged)', async () => {
+    const local = fakeDriver('local_tui', 'conv-1');
+    const mobile = fakeDriver('mobile_acp', 'conv-1');
+    const workingStart = mobile.start;
+    mobile.start = vi.fn(async () => new Promise<string>(() => {}));
+    const c = new BatonController({ local, mobile, publishState: vi.fn(), switchTimeoutMs: 40 });
+    await c.begin();
+    const p = c.takeControl();
+    local.releaseYield();
+    await expect(p).rejects.toThrow();
+
+    mobile.start = workingStart;
+    const p2 = c.takeControl();
+    local.releaseYield();
+    await p2;
+    expect(c.state).toBe('MOBILE_DRIVE');
+  });
+
   describe('rebindConversation (late-bind, Codex first-turn id)', () => {
     function deferredLocal(): SessionDriver {
       // Fresh start resolves null (id not minted until the first turn); resume
@@ -155,7 +203,11 @@ describe('BatonController', () => {
 
     it('is a no-op once an id is already set (never clobbers a live conversation)', async () => {
       const local = deferredLocal();
-      const c = new BatonController({ local, mobile: fakeDriver('mobile_acp', 'm'), publishState: vi.fn() });
+      const c = new BatonController({
+        local,
+        mobile: fakeDriver('mobile_acp', 'm'),
+        publishState: vi.fn(),
+      });
       await c.begin();
       c.rebindConversation('first');
       c.rebindConversation('second'); // ignored — already bound

@@ -181,6 +181,18 @@ export const FATAL_STARTUP_RE =
 const NEWSESSION_TIMEOUT_MS = 120_000;
 
 /**
+ * Backstop ceiling for `session/load`. It was the ONE handshake RPC with no
+ * timeout, and a wedged adapter simply never answered: the 2026-08-18 baton
+ * incident logged `loadSession → sessionId=…` with no `← ok` and no error, ever
+ * — the take-control hand-off then sat in `SWITCHING` for the rest of the
+ * session (`claude-agent-acp` never resolves `session/load` for an id that has
+ * no transcript on disk). A load replays an existing conversation the agent
+ * already has locally, so it is far cheaper than first-run onboarding — 60 s is
+ * already an order of magnitude past a healthy load.
+ */
+const LOADSESSION_TIMEOUT_MS = 60_000;
+
+/**
  * IDLE window for a single `session/prompt` round-trip — the max time
  * the adapter may go silent (no `session/update`, no in-flight
  * permission request) before we treat it as wedged and fail the turn.
@@ -1007,13 +1019,35 @@ export class AcpClient {
     // so live streaming for non-resuming users is untouched.
     this.opts.beginLoadReplay?.();
     let loaded: Awaited<ReturnType<ClientSideConnection['loadSession']>> | undefined;
+    // Bounded: an adapter that answers neither ok nor error must not hang the
+    // caller forever (see LOADSESSION_TIMEOUT_MS). The reject surfaces as a
+    // normal thrown error, so every caller's existing failure path runs.
+    let loadTimer: ReturnType<typeof setTimeout> | undefined;
     try {
-      loaded = await this.connection.loadSession({
-        sessionId,
-        cwd: this.opts.cwd,
-        mcpServers: this.opts.mcpServers ?? [],
-      });
+      loaded = await Promise.race([
+        this.connection.loadSession({
+          sessionId,
+          cwd: this.opts.cwd,
+          mcpServers: this.opts.mcpServers ?? [],
+        }),
+        new Promise<never>((_, reject) => {
+          loadTimer = setTimeout(() => {
+            const tail = this.recentStderr.slice(-4).join(' | ');
+            reject(
+              new Error(
+                `ACP_LOAD_SESSION_TIMEOUT: ${this.opts.adapter.requiresAgentBinary} did not answer session/load for ${sessionId.slice(
+                  0,
+                  8,
+                )} within ${Math.round(LOADSESSION_TIMEOUT_MS / 1000)}s${
+                  tail ? ` — last output: ${tail}` : ''
+                }`,
+              ),
+            );
+          }, LOADSESSION_TIMEOUT_MS);
+        }),
+      ]);
     } finally {
+      if (loadTimer) clearTimeout(loadTimer);
       this.opts.endLoadReplay?.();
     }
     this.sessionId = sessionId;

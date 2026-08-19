@@ -106,6 +106,44 @@ describe('AcpDriver', () => {
     expect(streaming.endLoadReplay).toHaveBeenCalledTimes(1);
   });
 
+  // ── Zero-turn guard (2026-08-18 "Switching…" incident) ────────────────
+  // The native TUI pre-mints the conversation id at spawn, but the agent only
+  // writes `<id>.jsonl` on its FIRST turn. Taking control before typing
+  // anything therefore hands us an id that exists nowhere on disk, and the
+  // adapter's `session/load` for it never resolved — the hand-off wedged.
+  it('skips session/load and starts FRESH when the resume id has no transcript on disk', async () => {
+    const client = fakeClient('acp-fresh');
+    const { deps } = makeDeps(client);
+    // Real runtime contract: `resolveHistoryFile` returns null when the file
+    // isn't there yet (every baton runtime existsSync-checks).
+    (deps.runtime as unknown as { resolveHistoryFile: () => string | null }).resolveHistoryFile =
+      () => null;
+
+    const id = await new AcpDriver(deps).start('never-written');
+
+    expect(client.loadSession).not.toHaveBeenCalled();
+    // The ACP-minted id becomes THE conversation id, so the later handback
+    // resumes the conversation mobile just drove.
+    expect(id).toBe('acp-fresh');
+  });
+
+  it('still resumes via session/load when the transcript DOES exist', async () => {
+    const client = fakeClient('acp-fresh');
+    const { deps } = makeDeps(client);
+    const file = path.join(tempDir, 'conv-42.jsonl');
+    fs.writeFileSync(file, '');
+    (
+      deps.runtime as unknown as {
+        resolveHistoryFile: (cwd: string, id: string) => string | null;
+      }
+    ).resolveHistoryFile = (_cwd, id) => (id === 'conv-42' ? file : null);
+
+    const id = await new AcpDriver(deps).start('conv-42');
+
+    expect(client.loadSession).toHaveBeenCalledWith('conv-42');
+    expect(id).toBe('conv-42');
+  });
+
   it('start(undefined) spawns fresh and returns the new session id (no load)', async () => {
     const client = fakeClient('acp-fresh');
     const d = new AcpDriver(makeDeps(client).deps);

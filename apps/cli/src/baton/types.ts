@@ -30,4 +30,9 @@ export interface BatonControllerDeps {
   local: SessionDriver;
   mobile: SessionDriver;
   publishState: (state: BatonState, driver: DriverKind, conversationId: string | null) => void;
+  /** Upper bound on a whole hand-off (yield → stop → start). A driver that
+   *  never resolves would otherwise leave the baton in `SWITCHING` forever —
+   *  the 2026-08-18 "Switching…" incident. Injectable for tests; defaults to
+   *  {@link BatonController.DEFAULT_SWITCH_TIMEOUT_MS}. */
+  switchTimeoutMs?: number;
 }
