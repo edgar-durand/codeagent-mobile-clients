@@ -28,7 +28,11 @@
  */
 
 import { randomUUID } from 'node:crypto';
-import { CommandRelayService, type RemoteCommand } from '../../services/command-relay.service';
+import {
+  CommandRelayService,
+  stopRelayWithGoodbye,
+  type RemoteCommand,
+} from '../../services/command-relay.service';
 import {
   fetchCurrentPluginAuthToken,
   fetchProvisionCredentialDetailed,
@@ -1977,7 +1981,9 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
   const shutdown = async (signal: NodeJS.Signals) => {
     showInfo(`Shutting down ACP session (${signal})…`);
     clearTimeout(prewarmTimer);
-    relay.stop();
+    // AWAITED goodbye — a fire-and-forget `online:false` never made it out
+    // before `process.exit` below, so mobile kept the session ONLINE.
+    await stopRelayWithGoodbye(relay);
     void fileWatcher.stop();
     turnFiles.stop();
     closeAllTerminals();

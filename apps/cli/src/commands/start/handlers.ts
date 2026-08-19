@@ -6,7 +6,11 @@ import { spawn, spawnSync, execFile } from 'child_process';
 import which from 'which';
 import type { AgentService } from '../../services/agent.service';
 import type { BatonController } from '../../baton/baton-controller';
-import type { CommandRelayService, RemoteCommand } from '../../services/command-relay.service';
+import {
+  stopRelayWithGoodbye,
+  type CommandRelayService,
+  type RemoteCommand,
+} from '../../services/command-relay.service';
 import type { HistoryService } from '../../services/history.service';
 import type { OutputService } from '../../services/output.service';
 import type { RuntimeStrategy } from '../../agents/strategy';
@@ -394,7 +398,9 @@ const sessionTerminated: CommandHandler = async (ctx, cmd) => {
     proc.unref();
   } catch { /* pm2 may not be installed locally; ignore */ }
   ctx.outputSvc.dispose();
-  ctx.relay.stop();
+  // AWAITED goodbye so the backend flips this session offline immediately
+  // (a fire-and-forget heartbeat never survives the process.exit below).
+  await stopRelayWithGoodbye(ctx.relay);
   process.exit(0);
 };
 
@@ -423,7 +429,9 @@ const shutdownSession: CommandHandler = async (ctx, cmd) => {
     proc.unref();
   } catch { /* ignore */ }
   ctx.outputSvc.dispose();
-  ctx.relay.stop();
+  // AWAITED goodbye so the backend flips this session offline immediately
+  // (a fire-and-forget heartbeat never survives the process.exit below).
+  await stopRelayWithGoodbye(ctx.relay);
   process.exit(0);
 };
 

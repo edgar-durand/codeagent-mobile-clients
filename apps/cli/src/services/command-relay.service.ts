@@ -262,11 +262,31 @@ export class CommandRelayService {
     }
   }
 
+  /**
+   * Stop the relay. Kept SYNCHRONOUS for the many callers that just tear down
+   * — the goodbye heartbeat is fired but NOT awaited here.
+   *
+   * ⚠️ On a shutdown path that calls `process.exit()` right after, use
+   * {@link stopAndFlush} (or {@link stopRelayWithGoodbye}) instead: the process
+   * dies before the fire-and-forget POST hits the wire, so the backend never
+   * learns the CLI went away and mobile keeps showing the session ONLINE until
+   * the 30 s Redis heartbeat key expires — silently, since nothing publishes on
+   * expiry (the 2026-08-18 "closing Claude Code leaves mobile online" report).
+   */
   stop(): void {
+    void this.stopAndFlush();
+  }
+
+  /**
+   * Same teardown as {@link stop}, but resolves only once the `online:false`
+   * heartbeat POST has settled — so a caller can `await` it before exiting.
+   * Never rejects (`sendHeartbeat` swallows its own transport errors).
+   */
+  async stopAndFlush(): Promise<void> {
     if (!this._running) return;
     this._running = false;
     this.cleanup();
-    this.sendHeartbeat(false).catch(() => {});
+    await this.sendHeartbeat(false);
   }
 
   async sendResult(
@@ -702,5 +722,38 @@ export class CommandRelayService {
       try { this.sseRequest.destroy(); } catch { /* ignore */ }
       this.sseRequest = null;
     }
+  }
+}
+
+
+/**
+ * How long a shutdown path may wait for the goodbye heartbeat before exiting
+ * anyway. Long enough for a normal round-trip, short enough that Ctrl+C still
+ * feels instant on a dead network.
+ */
+export const RELAY_GOODBYE_TIMEOUT_MS = 1500;
+
+/**
+ * Stop the relay and WAIT (bounded) for its `online:false` heartbeat to land.
+ * The one thing every `process.exit()` shutdown path must do so mobile flips
+ * the session to offline immediately instead of waiting out a Redis TTL that
+ * nothing publishes on. Never throws.
+ */
+export async function stopRelayWithGoodbye(
+  relay: Pick<CommandRelayService, 'stopAndFlush'>,
+  timeoutMs: number = RELAY_GOODBYE_TIMEOUT_MS,
+): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      relay.stopAndFlush(),
+      new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, timeoutMs);
+      }),
+    ]);
+  } catch {
+    /* best-effort — never block an exit on the goodbye */
+  } finally {
+    if (timer) clearTimeout(timer);
   }
 }
