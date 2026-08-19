@@ -139,6 +139,26 @@ From **2.0.0 onwards all three clients ship under the same version line.** Pushi
 
 Publishing secrets (`PAT`, `OVSX_TOKEN`, `CERTIFICATE_CHAIN`, `PRIVATE_KEY`, `PRIVATE_KEY_PASSWORD`, `PUBLISH_TOKEN`) live in local `.env` files and are gitignored — they never land in this repo.
 
+### When a release doesn't show up on npm
+
+The release workflow ends with a **`verify-published`** job that re-reads the
+registry (`npm view codeam-cli@<version>` + `npm view @codeam/shared@<version>`)
+and fails the run if either package is missing — a green release now means npm
+actually serves it, not merely that the publish job exited 0.
+
+> ⚠️ **If `npm view codeam-cli version` lags the latest git tag, check `NPM_TOKEN`
+> expiry first — granular npm tokens expire after 90 days.** That is what silently
+> broke v2.65.8 → v2.65.11 (four releases over four days: the publish jobs went
+> red, nobody watched the Actions tab, and npm stayed on 2.65.7). Mint a fresh
+> **Automation** token with publish rights on `codeam-cli` **and** the `@codeam`
+> scope, update the `NPM_TOKEN` repo secret, and re-run the failed jobs — the
+> publish steps are idempotent, so retries are safe.
+
+Any failing job in the release workflow also posts to Discord via the
+**`DISCORD_RELEASE_WEBHOOK`** repo secret (Settings → Secrets and variables →
+Actions). If that secret is unset the workflow still fails, but only logs a
+warning — set it so a broken release pings you the same day.
+
 ---
 
 ## Architecture (where this fits in)
