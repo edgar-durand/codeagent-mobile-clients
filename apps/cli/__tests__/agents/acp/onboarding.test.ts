@@ -24,6 +24,28 @@ describe('buildOnboardingWelcome', () => {
     expect(w).toContain('https://discord.gg/Np2pbMrV9f');
   });
 
+  it('renders the feedback channels as LABELLED markdown links, never a bare URL', () => {
+    // Live bug: relying on the app's autolinker rendered the GitHub bullet as
+    // an EMPTY link (visible label gone, nothing tappable). An explicit
+    // `[label](href)` always renders both halves.
+    vi.spyOn(_onboardingSeam, 'gitRemoteUrl').mockReturnValue(null);
+    const w = buildOnboardingWelcome('/workspaces/widgets');
+
+    expect(w).toContain(
+      '- [GitHub issues](https://github.com/edgar-durand/codeagent-mobile-clients/issues)',
+    );
+    expect(w).toContain('- [Discord community](https://discord.gg/Np2pbMrV9f)');
+
+    // And NO bullet may be a bare `- <Label>: <url>` — that is the shape that
+    // produced the empty link.
+    for (const line of w.split('\n')) {
+      if (!line.startsWith('- ')) continue;
+      if (!line.includes('http')) continue;
+      expect(line).toMatch(/\[[^\]]+\]\(https?:\/\/[^)]+\)/);
+      expect(line).not.toMatch(/^- [^[]*: https?:\/\//);
+    }
+  });
+
   it('falls back to a generic project label when cwd has no basename', () => {
     expect(buildOnboardingWelcome('')).toContain('this project');
   });
@@ -54,7 +76,9 @@ describe('resolveRepoName', () => {
 
   it('never leaks a UUID dir name — falls back to a generic label when there is no remote', () => {
     vi.spyOn(_onboardingSeam, 'gitRemoteUrl').mockReturnValue(null);
-    expect(resolveRepoName('/workspaces/a2480d74-aaa4-442d-91cc-2a6c595b3560')).toBe('this project');
+    expect(resolveRepoName('/workspaces/a2480d74-aaa4-442d-91cc-2a6c595b3560')).toBe(
+      'this project',
+    );
   });
 });
 

@@ -634,7 +634,14 @@ export class AcpClient {
       this.captureModes(newSession.modes ?? null);
       // `currentServiceTier` is a legacy non-standard codex-acp field surfaced
       // only in the welcome banner — not part of the native model contract.
-      const tier = (newSession as unknown as { currentServiceTier?: string }).currentServiceTier;
+      // ⚠️ VALIDATE, don't trust the cast. Adapters have been observed sending
+      // `[]` here; `[]` is TRUTHY and `String([])` is `''`, which rendered the
+      // welcome card as "Cursor Agent · default · " (and, with an array model,
+      // "Cursor Agent · default[]"). Anything that isn't a non-empty string is
+      // treated as absent.
+      const tier = nonEmptyString(
+        (newSession as unknown as { currentServiceTier?: unknown }).currentServiceTier,
+      );
       // Log the model so account-mismatch bugs (e.g. an adapter defaulting to a
       // model the user's account doesn't include) are immediately visible in
       // the smoke-test log instead of surfacing as a cryptic "Authentication
@@ -1161,15 +1168,19 @@ export class AcpClient {
       return;
     }
     this.modelConfigId = modelOption.id;
-    this.currentModelId = modelOption.currentValue;
-    this.availableModels = flattenSelectOptions(modelOption.options).map((opt) => ({
-      id: opt.value,
-      label: opt.name,
-      // Only when it's a real catalog match — native ids are often opaque
-      // aliases ("default"/"opus") or proxied (MiniMax house agent), for which a
-      // default 200K is a fake; undefined → the UI omits the context sub-label.
-      contextWindow: tryGetContextWindow(opt.value),
-    }));
+    // Same boundary rule as `tier`: an array / object / empty string coming off
+    // the wire must read as "no current model", never be stringified into a label.
+    this.currentModelId = nonEmptyString(modelOption.currentValue);
+    this.availableModels = dedupeModelOptions(
+      flattenSelectOptions(modelOption.options).map((opt) => ({
+        id: opt.value,
+        label: opt.name,
+        // Only when it's a real catalog match — native ids are often opaque
+        // aliases ("default"/"opus") or proxied (MiniMax house agent), for which a
+        // default 200K is a fake; undefined → the UI omits the context sub-label.
+        contextWindow: tryGetContextWindow(opt.value),
+      })),
+    );
   }
 
   /**
@@ -1472,6 +1483,57 @@ export function flattenSelectOptions(
     }
   }
   return out;
+}
+
+/**
+ * Narrow an unvalidated wire value to a non-empty string, or `undefined`.
+ *
+ * The ACP payloads are typed through casts at a few legacy/non-standard fields
+ * (`currentServiceTier`, `currentValue`), so TypeScript never catches an
+ * adapter that sends an array or an object. Those values then get `String()`-
+ * coerced into a display template — which is exactly how the welcome card ended
+ * up reading `Cursor Agent · default[]`.
+ */
+export function nonEmptyString(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim().length > 0 ? value : undefined;
+}
+
+/**
+ * Collapse a native model list into one the user can actually choose from.
+ *
+ * Two distinct defects, both observed live on OpenCode's "Switch Model" sheet
+ * (which listed "MiniMax-M3" THREE times):
+ *
+ *  1. **Repeated ids.** `flattenSelectOptions` splices every group's options
+ *     into one flat list, and agents that expose the same model under several
+ *     provider groups then emit the SAME `value` more than once. Those rows are
+ *     literally the same choice — the first one wins, the rest are dropped.
+ *  2. **Repeated labels on DIFFERENT ids.** Genuinely distinct models can share
+ *     a display name (the same model reached through two providers/proxies).
+ *     Dropping one would lose a real choice, so instead the colliding rows are
+ *     qualified with their id — the user sees three DISTINGUISHABLE rows rather
+ *     than three identical ones.
+ *
+ * Order is preserved (the agent's own ordering is meaningful) and no model is
+ * ever invented. Exported pure so it can be unit-tested without a live adapter.
+ */
+export function dedupeModelOptions(models: AgentModel[]): AgentModel[] {
+  const seen = new Set<string>();
+  const unique: AgentModel[] = [];
+  for (const m of models) {
+    if (seen.has(m.id)) continue;
+    seen.add(m.id);
+    unique.push(m);
+  }
+
+  const labelCounts = new Map<string, number>();
+  for (const m of unique) labelCounts.set(m.label, (labelCounts.get(m.label) ?? 0) + 1);
+
+  return unique.map((m) =>
+    (labelCounts.get(m.label) ?? 0) > 1 && m.label !== m.id
+      ? { ...m, label: `${m.label} (${m.id})` }
+      : m,
+  );
 }
 
 /**

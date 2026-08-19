@@ -1,6 +1,5 @@
 import * as https from 'https';
 import * as http from 'http';
-import * as os from 'os';
 import {
   resolveApiBaseUrl,
   type AgentReviewReport,
@@ -11,6 +10,7 @@ import {
 import pkg from '../../package.json';
 import { vercelBypassHeader } from '../lib/backend-headers';
 import { detectCurrentBranch } from '../lib/git-branch';
+import { resolveSessionHostname } from '../lib/session-hostname';
 import { computePollDelay } from '../lib/poll-delay';
 import type { SquadEventType } from '../agents/acp/switch-agent';
 
@@ -84,7 +84,9 @@ export async function requestCode(
       pluginId,
       ideName: 'Terminal (codeam-cli)',
       ideVersion: pkg.version,
-      hostname: os.hostname(),
+      // In a codespace `os.hostname()` is the SAME shared `codespaces-<hash>`
+      // for every user (wrapper-repo strategy) — report the user's repo instead.
+      hostname: resolveSessionHostname(),
       runtime,
       branch,
       ...(codespaceName ? { codespaceName } : {}),

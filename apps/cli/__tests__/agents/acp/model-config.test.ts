@@ -1,6 +1,10 @@
 import { describe, expect, it, vi } from 'vitest';
 import { getContextWindow } from '@codeam/shared';
-import { AcpClient, flattenSelectOptions } from '../../../src/agents/acp/client';
+import {
+  AcpClient,
+  flattenSelectOptions,
+  dedupeModelOptions,
+} from '../../../src/agents/acp/client';
 import type { AcpClientOptions } from '../../../src/agents/acp/client';
 
 /**
@@ -34,12 +38,10 @@ function makeClient(overrides?: Partial<AcpClientOptions>): AcpClient {
 interface ClientInternals {
   captureModelConfig: (configOptions: unknown[]) => void;
   captureModes: (modes: unknown) => void;
-  connection:
-    | {
-        setSessionConfigOption?: ReturnType<typeof vi.fn>;
-        setSessionMode?: ReturnType<typeof vi.fn>;
-      }
-    | null;
+  connection: {
+    setSessionConfigOption?: ReturnType<typeof vi.fn>;
+    setSessionMode?: ReturnType<typeof vi.fn>;
+  } | null;
   sessionId: string | null;
   modelConfigId: string | undefined;
 }
@@ -254,5 +256,98 @@ describe('flattenSelectOptions', () => {
       { value: 'b', name: 'B' },
       { value: 'c', name: 'C' },
     ]);
+  });
+});
+
+describe('dedupeModelOptions — the "MiniMax-M3 listed three times" bug', () => {
+  it('drops rows that repeat the SAME model id', () => {
+    // OpenCode advertised the same model under several provider groups; the
+    // flattened list then carried the identical id three times.
+    const out = dedupeModelOptions([
+      { id: 'minimax-m3', label: 'MiniMax-M3' },
+      { id: 'minimax-m3', label: 'MiniMax-M3' },
+      { id: 'minimax-m3', label: 'MiniMax-M3' },
+    ]);
+    expect(out).toEqual([{ id: 'minimax-m3', label: 'MiniMax-M3' }]);
+  });
+
+  it('keeps DISTINCT models that merely share a label, but makes them distinguishable', () => {
+    const out = dedupeModelOptions([
+      { id: 'openrouter/minimax-m3', label: 'MiniMax-M3' },
+      { id: 'house/minimax-m3', label: 'MiniMax-M3' },
+      { id: 'anthropic/claude-sonnet-4', label: 'Claude Sonnet 4' },
+    ]);
+    expect(out).toEqual([
+      { id: 'openrouter/minimax-m3', label: 'MiniMax-M3 (openrouter/minimax-m3)' },
+      { id: 'house/minimax-m3', label: 'MiniMax-M3 (house/minimax-m3)' },
+      { id: 'anthropic/claude-sonnet-4', label: 'Claude Sonnet 4' },
+    ]);
+    // No two rows may render identically.
+    expect(new Set(out.map((m) => m.label)).size).toBe(out.length);
+  });
+
+  it("preserves the agent's own ordering and every other field", () => {
+    const out = dedupeModelOptions([
+      { id: 'b', label: 'B', contextWindow: 200_000 },
+      { id: 'a', label: 'A' },
+      { id: 'b', label: 'B', contextWindow: 200_000 },
+    ]);
+    expect(out).toEqual([
+      { id: 'b', label: 'B', contextWindow: 200_000 },
+      { id: 'a', label: 'A' },
+    ]);
+  });
+
+  it('never qualifies a label that already equals its id', () => {
+    const out = dedupeModelOptions([
+      { id: 'default', label: 'default' },
+      { id: 'default', label: 'default' },
+    ]);
+    expect(out).toEqual([{ id: 'default', label: 'default' }]);
+  });
+
+  it('is a no-op on an already-unique list and on an empty list', () => {
+    const models = [
+      { id: 'a', label: 'A' },
+      { id: 'b', label: 'B' },
+    ];
+    expect(dedupeModelOptions(models)).toEqual(models);
+    expect(dedupeModelOptions([])).toEqual([]);
+  });
+});
+
+describe('captureModelConfig dedupes before mobile ever sees the list', () => {
+  it('a grouped config option repeating one model yields ONE row', () => {
+    const client = makeClient();
+    const internals = client as unknown as ClientInternals;
+    internals.captureModelConfig([
+      {
+        id: 'model',
+        category: 'model',
+        type: 'select',
+        currentValue: 'minimax-m3',
+        options: [
+          {
+            group: 'p1',
+            name: 'Provider 1',
+            options: [{ value: 'minimax-m3', name: 'MiniMax-M3' }],
+          },
+          {
+            group: 'p2',
+            name: 'Provider 2',
+            options: [{ value: 'minimax-m3', name: 'MiniMax-M3' }],
+          },
+          {
+            group: 'p3',
+            name: 'Provider 3',
+            options: [{ value: 'minimax-m3', name: 'MiniMax-M3' }],
+          },
+        ],
+      },
+    ]);
+    const models = client.getAvailableModels();
+    expect(models).toHaveLength(1);
+    expect(models[0].label).toBe('MiniMax-M3');
+    expect(client.getCurrentModelId()).toBe('minimax-m3');
   });
 });

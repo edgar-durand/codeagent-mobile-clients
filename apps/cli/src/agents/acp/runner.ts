@@ -48,7 +48,7 @@ import {
 import type { McpServer, RequestPermissionResponse } from '@agentclientprotocol/sdk';
 import { createOsStrategy } from '../../os';
 import { createInteractiveAgentStrategy } from '../registry';
-import { AcpClient, type AcpClientOptions } from './client';
+import { AcpClient, nonEmptyString, type AcpClientOptions } from './client';
 import { relaunchProxyWithoutBudget } from './headroom-budget-proxy';
 import { resolveAcpAdapterWithRetry, type AdapterSpec } from './adapters';
 import {
@@ -70,7 +70,7 @@ import {
   stripHandoffFences,
   withholdTrailingPartialFenceMarker,
 } from './handoff-protocol';
-import { maybeSendOnboardingWelcome } from './onboarding';
+import { maybeSendOnboardingWelcome, resolveRepoName } from './onboarding';
 import { registerTerminalHandlers, closeAllTerminals } from '../../services/terminal-ops.service';
 import { mapSessionUpdate, mapPermissionRequest } from './mappers';
 import { internalPathPermissionOutcome } from './internal-paths';
@@ -1458,12 +1458,16 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
   // via the ACP session/list RPC and load the most-recent OTHER conversation —
   // the load-replay is swallowed by the guard on loadSession(). Best-effort: any
   // failure leaves the fresh session in place.
+  // Drives the welcome card's title: a brand-new conversation must NOT greet a
+  // first-time user with "Welcome back!" (observed live on two fresh signups).
+  let resumedPriorConversation = false;
   if (process.env.CODEAM_RESUME_LATEST === '1') {
     try {
       const priorId = pickLatestResumableConversation(await client.listSessions(), acpSessionId);
       if (priorId) {
         await client.loadSession(priorId);
         acpSessionId = priorId;
+        resumedPriorConversation = true;
         log.info('acpRunner', `auto-resumed latest conversation ${priorId.slice(0, 8)}`);
       }
     } catch (err) {
@@ -1483,18 +1487,19 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
   void publisher.publishOutput({
     type: 'agent_banner',
     agentId: opts.agent,
-    // Match the legacy "Welcome back!" copy the Claude PTY banner
-    // detector used as title fallback — keeps the chat surface
-    // visually identical to the PTY path on first connect.
-    title: 'Welcome back!',
+    // "Welcome back!" ONLY when we actually resumed a prior conversation.
+    // A fresh pairing is somebody's FIRST turn — greeting them with "back"
+    // is plainly wrong and was the top confusion in new-user recordings.
+    title: bannerTitle(resumedPriorConversation),
     // Subtitle = "<display name> · <model>" when we know the model
     // (codex-acp returns `currentModelId` on newSession; claude /
     // gemini adapters omit it). Falls back to `<display name>`
     // alone so the card never renders with a dangling separator.
     subtitle: buildBannerSubtitle(opts.agent, acpSessionId, handshakeModel, handshakeTier),
-    // The cwd — same field the legacy banner pulled from Claude's
-    // footer line under the ASCII art.
-    path: opts.cwd,
+    // A human location, NOT the raw cwd. On a self-hosted box the cwd is
+    // `/home/box/.codeam/self-hosted/<uuid>` and on a codespace it's a UUID
+    // directory — both are noise to the user and leak internal layout.
+    path: bannerLocation(opts.cwd),
     done: true,
   });
 
@@ -1808,9 +1813,10 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
     void publisher.publishOutput({
       type: 'agent_banner',
       agentId: nextAgent,
-      title: 'Welcome back!',
+      // A switch starts a FRESH conversation with the new agent — never "back".
+      title: bannerTitle(false),
       subtitle: buildBannerSubtitle(nextAgent, hs.sessionId, hs.model, hs.tier),
-      path: opts.cwd,
+      path: bannerLocation(opts.cwd),
       done: true,
     });
   };
@@ -2084,7 +2090,25 @@ export async function handleCommand(
  *                     bubble still gives users a debug handle when
  *                     the adapter omits model metadata).
  */
-function buildBannerSubtitle(
+export function bannerTitle(resumed: boolean): string {
+  return resumed ? 'Welcome back!' : 'Welcome!';
+}
+
+/**
+ * The welcome card's location line. Renders as `Ready in <repo>` using the
+ * same repo resolution the onboarding welcome uses (git `origin` remote first,
+ * directory basename only when it isn't a UUID).
+ *
+ * NEVER the raw cwd: self-hosted sessions run out of
+ * `/home/box/.codeam/self-hosted/<uuid>` and codespaces out of a UUID-named
+ * clone, so `path: opts.cwd` put an internal path in front of brand-new users
+ * as the very first thing they read.
+ */
+export function bannerLocation(cwd: string): string {
+  return `Ready in ${resolveRepoName(cwd)}`;
+}
+
+export function buildBannerSubtitle(
   agentId: AgentId,
   acpSessionId: string,
   model: string | undefined,
@@ -2092,7 +2116,13 @@ function buildBannerSubtitle(
 ): string {
   const meta = AGENT_REGISTRY[agentId];
   const displayName = meta?.displayName ?? agentId;
-  if (model && tier) return `${displayName} · ${model} · ${tier}`;
-  if (model) return `${displayName} · ${model}`;
+  // Re-narrow at the render site. `model`/`tier` are typed through casts on the
+  // ACP wire, so a non-string (an empty ARRAY was observed) reaches here with a
+  // clean type but stringifies into the label — "Cursor Agent · default[]" and
+  // a dangling "· " separator, because `[]` is truthy and `String([])` is ''.
+  const m = nonEmptyString(model);
+  const t = nonEmptyString(tier);
+  if (m && t) return `${displayName} · ${m} · ${t}`;
+  if (m) return `${displayName} · ${m}`;
   return `${displayName} · ACP · ${acpSessionId.slice(0, 8)}`;
 }
