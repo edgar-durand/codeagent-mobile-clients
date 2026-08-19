@@ -90,6 +90,7 @@ import {
   describeError,
   looksLikeAuthFailure,
   looksLikeProviderOutage,
+  startupCredentialInvalidReason,
   startupFailureMessage,
 } from './failure-messages';
 import { reportCredentialInvalid } from './backend-reports';
@@ -127,6 +128,7 @@ export {
   replyIsAuthFailure,
   replyIsCursorUpgradeRequired,
   replyIsHouseAgentLimit,
+  startupCredentialInvalidReason,
   startupFailureMessage,
 } from './failure-messages';
 export { postBudgetReached, reportCredentialInvalid } from './backend-reports';
@@ -1008,14 +1010,53 @@ export { looksLikeBudgetExceeded } from './budgetRecovery';
  * fails the command. The relay's long-lived SSE keeps the process alive so the
  * session stays online showing the message until the user re-links / redeploys.
  */
+/**
+ * Fire-once guard for the startup credential-invalid report. Module-scope is
+ * exactly session-scope here: `codeam start` runs ONE session per process, and
+ * `surfaceStartupFailure` keeps that process alive on its error relay — so a
+ * retried command inside the same dead session can't re-POST. Exported as a
+ * mutable object purely so tests can reset it between cases.
+ */
+export const _startupCredentialReportGuard = { reported: false };
+
 export async function surfaceStartupFailure(opts: {
   agent: AgentId;
   pluginId: string;
   detail: string;
   recentStderr: string;
   publisher: AcpPublisher;
+  /** Credential-report identity. Optional: a caller with no paired-session
+   *  token (there is one — the "no token at all" branch in `start.ts`) still
+   *  gets the chat bubble; only the durable backend flag is skipped. */
+  sessionId?: string;
+  pluginAuthToken?: string;
+  pollSecret?: string;
 }): Promise<void> {
   const msg = startupFailureMessage(opts.agent, opts.detail, opts.recentStderr);
+  // Tell the BACKEND when the startup failure proves the credential is
+  // permanently unusable (Gemini `ineligible_tier`). Until this existed the CLI
+  // only printed the chat bubble, so `GET /api/agents/linked` kept reporting
+  // CONNECTED and the deploy wizard re-preselected the dead agent — one user
+  // burned six codespaces re-deploying an account Google had already cut off
+  // (2026-08-19 replay review). Fire-once per session, best-effort, never awaited
+  // into the failure path.
+  const reason = startupCredentialInvalidReason(opts.agent, opts.detail, opts.recentStderr);
+  if (
+    reason !== null &&
+    !_startupCredentialReportGuard.reported &&
+    opts.sessionId &&
+    opts.pluginAuthToken
+  ) {
+    _startupCredentialReportGuard.reported = true;
+    void reportCredentialInvalid({
+      agent: opts.agent,
+      sessionId: opts.sessionId,
+      pluginId: opts.pluginId,
+      pluginAuthToken: opts.pluginAuthToken,
+      pollSecret: opts.pollSecret,
+      reason,
+    });
+  }
   const publish = async (): Promise<void> => {
     try {
       await opts.publisher.publishOutput({ type: 'new_turn', done: false });
@@ -1394,6 +1435,9 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
       detail,
       recentStderr: recentStderr.join('\n'),
       publisher,
+      sessionId: opts.sessionId,
+      pluginAuthToken: opts.pluginAuthToken,
+      pollSecret: opts.pollSecret,
     });
     return;
   }

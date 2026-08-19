@@ -37,6 +37,40 @@ describe('reportCredentialInvalid', () => {
     ).resolves.toBeUndefined();
   });
 
+  it('carries the optional reason on the wire when given', async () => {
+    const calls: Array<{ init: RequestInit }> = [];
+    const fakeFetch = vi.fn(async (_url: string, init: RequestInit) => {
+      calls.push({ init });
+      return { ok: true, status: 200 } as Response;
+    }) as unknown as typeof fetch;
+
+    await reportCredentialInvalid(
+      { agent: 'gemini', sessionId: 's1', pluginId: 'p1', pluginAuthToken: 'tok', reason: 'ineligible_tier' },
+      fakeFetch,
+    );
+
+    expect(JSON.parse(calls[0].init.body as string)).toEqual({
+      sessionId: 's1',
+      pluginId: 'p1',
+      reason: 'ineligible_tier',
+    });
+  });
+
+  it('OMITS reason entirely when absent (byte-identical to the pre-reason wire)', async () => {
+    const calls: Array<{ init: RequestInit }> = [];
+    const fakeFetch = vi.fn(async (_url: string, init: RequestInit) => {
+      calls.push({ init });
+      return { ok: true, status: 200 } as Response;
+    }) as unknown as typeof fetch;
+
+    await reportCredentialInvalid(
+      { agent: 'claude_code', sessionId: 's1', pluginId: 'p1', pluginAuthToken: 'tok' },
+      fakeFetch,
+    );
+
+    expect(calls[0].init.body).toBe(JSON.stringify({ sessionId: 's1', pluginId: 'p1' }));
+  });
+
   it('url-encodes the agent id', async () => {
     const calls: string[] = [];
     const fakeFetch = vi.fn(async (url: string) => { calls.push(url); return { ok: true, status: 200 } as Response; }) as unknown as typeof fetch;

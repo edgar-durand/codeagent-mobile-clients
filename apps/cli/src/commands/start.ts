@@ -489,6 +489,9 @@ export async function start(
             refreshAuthToken: () =>
               fetchCurrentPluginAuthToken(session.id, pluginId, session.pollSecret),
           }),
+          sessionId: session.id,
+          pluginAuthToken: session.pluginAuthToken,
+          pollSecret: session.pollSecret,
         });
         return;
       }

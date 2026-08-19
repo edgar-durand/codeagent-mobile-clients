@@ -12,6 +12,20 @@ import { resolveApiBaseUrl } from '@codeam/shared';
 import { fetchCurrentPluginAuthToken } from '../../services/pairing.service';
 
 /**
+ * WHY a credential is unusable. Optional on the wire (older backends ignore an
+ * unknown field, and the CLI still reports without one), but it lets the app
+ * render the RIGHT recovery copy:
+ *
+ *  - `'auth_failure'` — the provider returned a real runtime 401.
+ *  - `'expired'`      — the local token is past its expiry and unrefreshable.
+ *  - `'ineligible_tier'` — the ACCOUNT itself can never authenticate here, no
+ *    matter how fresh the token is (Gemini's post-2026-06-18 free "Login with
+ *    Google" deprecation). Re-running the SAME login can't fix it — the user
+ *    must re-link with a different credential class (API key / paid tier).
+ */
+export type CredentialInvalidReason = 'ineligible_tier' | 'auth_failure' | 'expired';
+
+/**
  * Best-effort durable flag: tell the backend this LinkedAgent credential is
  * invalid so Profile › Agents shows EXPIRED + the re-auth CTA (instead of
  * CONNECTED from a dead-but-present refresh token). Never throws — credential
@@ -24,11 +38,18 @@ export async function reportCredentialInvalid(
     pluginId: string;
     pluginAuthToken: string;
     pollSecret?: string;
+    reason?: CredentialInvalidReason;
   },
   fetchImpl: typeof fetch = fetch,
 ): Promise<void> {
   const url = `${resolveApiBaseUrl()}/api/plugin/agents/${encodeURIComponent(opts.agent)}/credential-invalid`;
-  const body = JSON.stringify({ sessionId: opts.sessionId, pluginId: opts.pluginId });
+  // `reason` is OMITTED when absent so the body stays byte-identical to the
+  // pre-reason wire for every existing caller (old backends validate strictly).
+  const body = JSON.stringify({
+    sessionId: opts.sessionId,
+    pluginId: opts.pluginId,
+    ...(opts.reason ? { reason: opts.reason } : {}),
+  });
   try {
     const makeHeaders = (token: string): Record<string, string> => ({
       'Content-Type': 'application/json',
