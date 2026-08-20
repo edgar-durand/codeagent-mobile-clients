@@ -4,6 +4,7 @@ import {
   type GuardrailCategory,
   type GuardrailPolicy,
 } from '@codeam/shared';
+import { isProseOnlyToolKind } from './internal-paths';
 
 /**
  * Native ACP guardrails — the pure decision function, a generalization of
@@ -119,6 +120,11 @@ export function guardrailDecision(
   request: GuardrailPermissionRequest,
   policy: GuardrailPolicy,
 ): GuardrailDecision {
+  // Prose-only kinds (plan approval / thinking): their rawInput is free text
+  // ABOUT the work — a plan that MENTIONS `rm -rf` is not running it. Scanning
+  // it silently blocked ExitPlanMode approvals (same class as the 2026-08-19
+  // internal-path P0), so these calls always go to the normal prompt flow.
+  if (isProseOnlyToolKind(request.toolCall.kind)) return null;
   const hay = haystack(request.toolCall);
   if (!hay) return null;
   const matched = matchedCategories(hay);

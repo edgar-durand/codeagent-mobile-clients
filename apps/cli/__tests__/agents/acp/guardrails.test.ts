@@ -105,6 +105,38 @@ describe('guardrailDecision — disposition', () => {
   });
 });
 
+describe('guardrailDecision — prose-only kinds are exempt from the free-text scan', () => {
+  // Same class as the 2026-08-19 ExitPlanMode internal-path P0: a plan that
+  // MENTIONS `rm -rf` / `git push main` is not running it — silently denying
+  // (or confirm-gating) the plan approval wedges plan mode.
+  it('an ExitPlanMode plan mentioning rm -rf is NOT intercepted even under all-deny', () => {
+    expect(
+      guardrailDecision(
+        {
+          toolCall: {
+            title: 'Ready to code?',
+            kind: 'switch_mode',
+            rawInput: { plan: 'First rm -rf the stale build dir, then git push origin main.' },
+          },
+          options: OPTS,
+        },
+        ALL_DENY,
+      ),
+    ).toBeNull();
+  });
+  it('a think block mentioning a secret file is NOT intercepted', () => {
+    expect(
+      guardrailDecision(
+        {
+          toolCall: { title: 'Thinking', kind: 'think', rawInput: { thought: 'maybe check .env next' } },
+          options: OPTS,
+        },
+        ALL_DENY,
+      ),
+    ).toBeNull();
+  });
+});
+
 describe('toolPathIsSecret (fs-seam belt)', () => {
   it('matches secret paths, not ordinary source', () => {
     expect(toolPathIsSecret('/app/.env')).toBe(true);
