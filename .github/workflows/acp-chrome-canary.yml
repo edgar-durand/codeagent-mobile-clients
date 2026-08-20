@@ -48,3 +48,13 @@ jobs:
         run: |
           echo "::error::TUI chrome leaked into the ACP stream on the PINNED adapter — the chat is broken. See the canary log above."
           exit 1
+
+  notify-discord:
+    name: Nightly result → Discord
+    needs: [canary]
+    if: always()
+    uses: ./.github/workflows/discord-notify.yml
+    permissions:
+      actions: read
+      contents: read
+    secrets: inherit
