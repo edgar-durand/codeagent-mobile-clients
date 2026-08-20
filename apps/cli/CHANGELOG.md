@@ -4,6 +4,16 @@ All notable changes to `codeam-cli` are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.65.14] — 2026-08-20
+
+### CI
+
+- **workflow:** All workflows report to Discord (catch-all) (#643)
+
+### Fixed
+
+- **cli:** Permission guards never scan plan text and never auto-reject silently
+
 ## [2.65.13] — 2026-08-20
 
 ### Fixed
