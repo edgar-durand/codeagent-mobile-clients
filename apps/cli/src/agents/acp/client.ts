@@ -1205,15 +1205,21 @@ export class AcpClient {
     // Same boundary rule as `tier`: an array / object / empty string coming off
     // the wire must read as "no current model", never be stringified into a label.
     this.currentModelId = nonEmptyString(modelOption.currentValue);
+    // Filter non-chat models (embeddings, rerankers, …) BEFORE dedupe —
+    // agents that expose their provider's whole catalog would otherwise
+    // offer `text-embedding-3-large` as a chat model.
     this.availableModels = dedupeModelOptions(
-      flattenSelectOptions(modelOption.options).map((opt) => ({
-        id: opt.value,
-        label: opt.name,
-        // Only when it's a real catalog match — native ids are often opaque
-        // aliases ("default"/"opus") or proxied (MiniMax house agent), for which a
-        // default 200K is a fake; undefined → the UI omits the context sub-label.
-        contextWindow: tryGetContextWindow(opt.value),
-      })),
+      filterChatModelOptions(
+        flattenSelectOptions(modelOption.options).map((opt) => ({
+          id: opt.value,
+          label: opt.name,
+          // Only when it's a real catalog match — native ids are often opaque
+          // aliases ("default"/"opus") or proxied (MiniMax house agent), for which a
+          // default 200K is a fake; undefined → the UI omits the context sub-label.
+          contextWindow: tryGetContextWindow(opt.value),
+        })),
+        this.currentModelId,
+      ),
     );
   }
 
@@ -1551,6 +1557,45 @@ export function nonEmptyString(value: unknown): string | undefined {
  * Order is preserved (the agent's own ordering is meaningful) and no model is
  * ever invented. Exported pure so it can be unit-tested without a live adapter.
  */
+/**
+ * Non-chat model detector — id/label patterns for models that can never
+ * drive a coding-agent conversation. Some agents (opencode) advertise their
+ * provider's ENTIRE catalog as the ACP model select, embeddings included:
+ * a live Switch Model sheet offered `OpenAI/text-embedding-3-large`
+ * `/-small` `/-ada-002` as selectable chat models (2026-08-19 replay wave,
+ * user caigicungdc98, recording B f108_0254s). `AgentModel` carries no
+ * capability metadata, so this is a conservative NAME denylist —
+ * embeddings, rerankers, moderation, speech (tts/whisper/transcribe) and
+ * pure image models. Anything not clearly non-chat is kept.
+ */
+const NON_CHAT_MODEL_PATTERNS: RegExp[] = [
+  /\bembed(?:ding)?s?\b/i, // text-embedding-3-large, *-embed-*, embeddings
+  /\brerank(?:er|ing)?\b/i,
+  /\bmoderation\b/i,
+  /\btts\b/i,
+  /\bwhisper\b/i,
+  /\btranscribe\b/i,
+  /\bdall-?e\b/i,
+];
+
+/**
+ * Drop models the user could never chat with. The model the agent reports
+ * as CURRENT is never dropped — if the agent really is running it, hiding
+ * it would desync the client's ✓ from reality. Exported pure for unit
+ * tests; the mobile store applies the same guard for sessions on older
+ * CLIs (`sessionModel.store.ts` `filterChatModels`).
+ */
+export function filterChatModelOptions(
+  models: AgentModel[],
+  currentModelId?: string,
+): AgentModel[] {
+  return models.filter(
+    (m) =>
+      m.id === currentModelId ||
+      !NON_CHAT_MODEL_PATTERNS.some((re) => re.test(`${m.id} ${m.label}`)),
+  );
+}
+
 export function dedupeModelOptions(models: AgentModel[]): AgentModel[] {
   const seen = new Set<string>();
   const unique: AgentModel[] = [];

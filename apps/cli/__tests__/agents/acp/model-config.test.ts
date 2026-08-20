@@ -4,6 +4,7 @@ import {
   AcpClient,
   flattenSelectOptions,
   dedupeModelOptions,
+  filterChatModelOptions,
 } from '../../../src/agents/acp/client';
 import type { AcpClientOptions } from '../../../src/agents/acp/client';
 
@@ -348,6 +349,67 @@ describe('captureModelConfig dedupes before mobile ever sees the list', () => {
     const models = client.getAvailableModels();
     expect(models).toHaveLength(1);
     expect(models[0].label).toBe('MiniMax-M3');
+    expect(client.getCurrentModelId()).toBe('minimax-m3');
+  });
+});
+
+describe('filterChatModelOptions — embedding models offered as chat models (2026-08-19 replay wave)', () => {
+  it('drops embedding / rerank / moderation / speech models from the catalog', () => {
+    const out = filterChatModelOptions([
+      { id: 'openai/text-embedding-3-large', label: 'OpenAI/text-embedding-3-large' },
+      { id: 'openai/text-embedding-3-small', label: 'OpenAI/text-embedding-3-small' },
+      { id: 'openai/text-embedding-ada-002', label: 'OpenAI/text-embedding-ada-002' },
+      { id: 'cohere/rerank-english-v3', label: 'Rerank English v3' },
+      { id: 'openai/omni-moderation-latest', label: 'omni-moderation-latest' },
+      { id: 'openai/whisper-1', label: 'Whisper' },
+      { id: 'openai/tts-1', label: 'TTS 1' },
+      { id: 'opencode/big-pickle', label: 'Big Pickle' },
+      { id: 'deepseek/deepseek-v4-flash-free', label: 'DeepSeek V4 Flash Free' },
+    ]);
+    expect(out.map((m) => m.id)).toEqual([
+      'opencode/big-pickle',
+      'deepseek/deepseek-v4-flash-free',
+    ]);
+  });
+
+  it('never drops the model the agent reports as CURRENT', () => {
+    const out = filterChatModelOptions(
+      [
+        { id: 'openai/text-embedding-3-large', label: 'text-embedding-3-large' },
+        { id: 'minimax-m3', label: 'MiniMax-M3' },
+      ],
+      'openai/text-embedding-3-large',
+    );
+    expect(out.map((m) => m.id)).toEqual(['openai/text-embedding-3-large', 'minimax-m3']);
+  });
+
+  it('keeps chat models whose names merely resemble the denylist (codegemma, embedding-free names)', () => {
+    const out = filterChatModelOptions([
+      { id: 'google/codegemma', label: 'CodeGemma' },
+      { id: 'minimax-m3', label: 'MiniMax-M3' },
+      { id: 'anthropic/claude-sonnet-4', label: 'Claude Sonnet 4' },
+    ]);
+    expect(out).toHaveLength(3);
+  });
+
+  it('captureModelConfig filters the native catalog before dedupe — list_models never carries an embedding row', () => {
+    const client = makeClient();
+    (client as unknown as ClientInternals).captureModelConfig([
+      {
+        id: 'model',
+        name: 'Model',
+        category: 'model',
+        type: 'select',
+        currentValue: 'minimax-m3',
+        options: [
+          { value: 'minimax-m3', name: 'MiniMax-M3' },
+          { value: 'openai/text-embedding-3-large', name: 'OpenAI/text-embedding-3-large' },
+          { value: 'openai/text-embedding-3-small', name: 'OpenAI/text-embedding-3-small' },
+        ],
+      },
+    ]);
+
+    expect(client.getAvailableModels().map((m) => m.id)).toEqual(['minimax-m3']);
     expect(client.getCurrentModelId()).toBe('minimax-m3');
   });
 });
