@@ -133,13 +133,3 @@ jobs:
         run: |
           docker ps -a || true
           docker images || true
-
-  notify-discord:
-    name: Nightly result → Discord
-    needs: [agent-install]
-    if: always()
-    uses: ./.github/workflows/discord-notify.yml
-    permissions:
-      actions: read
-      contents: read
-    secrets: inherit
