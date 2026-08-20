@@ -240,9 +240,12 @@ export interface AcpClientOptions {
    * `process.env`, before the augmented `PATH`). Lets the runner inject
    * `CLAUDE_CODE_DISABLE_1M_CONTEXT=1` on an on-demand re-spawn — claude
    * reads that knob only at process start, so it must be in the spawn env,
-   * not set after the fact. Empty/omitted by default.
+   * not set after the fact. Empty/omitted by default. An `undefined` value
+   * DELETES the variable from the child env (Node's `spawn` omits
+   * `undefined`-valued entries) — how a switch away from the house agent
+   * strips the managed-proxy routing the process env still carries.
    */
-  extraEnv?: Record<string, string>;
+  extraEnv?: Record<string, string | undefined>;
   /** Working directory for the agent's session (becomes the
    *  primary `cwd` ACP root). */
   cwd: string;

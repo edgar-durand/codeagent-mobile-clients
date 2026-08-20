@@ -24,6 +24,8 @@
  */
 import {
   AGENT_REGISTRY,
+  HOUSE_AGENT_ID,
+  HOUSE_AGENT_NAME,
   isKnownAgentId,
   type AgentAuth,
   type AgentId,
@@ -43,6 +45,9 @@ const NON_SWITCHABLE: ReadonlySet<string> = new Set([
 
 /** Human display name for error copy; falls back to the raw id. */
 function displayName(id: string): string {
+  // White-label rule: the house agent is always "CodeAgent Cloud", never the
+  // underlying runtime's name.
+  if (id === HOUSE_AGENT_ID) return HOUSE_AGENT_NAME;
   return isKnownAgentId(id) ? (AGENT_REGISTRY[id]?.displayName ?? id) : id;
 }
 
@@ -56,7 +61,7 @@ function displayName(id: string): string {
  * which is the ONLY case that copy is accurate for.
  */
 function credentialFailureMessage(
-  agentId: AgentId,
+  agentId: string,
   failure: { code?: string; message?: string },
 ): string {
   if (failure.message) return failure.message;
@@ -67,12 +72,36 @@ function credentialFailureMessage(
  * Validate a raw `switch_agent` payload agent id. Returns the typed id or a
  * human-readable refusal. Exported for the mobile-side contract tests.
  */
+export interface ResolvedSwitchTarget {
+  ok: true;
+  /** Internal runtime to launch (the house agent runs the claude adapter). */
+  agentId: AgentId;
+  /** Wire id used for the credential fetch AND every progress/status event —
+   *  the public `house-codeagent-cloud` sentinel for the house agent, the
+   *  internal runtime id for everything else. */
+  wireId: string;
+  /** True when the target is the managed house agent (CodeAgent Cloud). */
+  house: boolean;
+}
+
 export function resolveSwitchTarget(
   raw: unknown,
   currentAgent: AgentId,
-): { ok: true; agentId: AgentId } | { ok: false; error: string } {
+  /** True when the RUNNING agent is the house agent — its runtime id is
+   *  `claude`, so `currentAgent` alone can never tell house from real Claude. */
+  currentIsHouse = false,
+): ResolvedSwitchTarget | { ok: false; error: string } {
   if (typeof raw !== 'string' || raw.length === 0) {
     return { ok: false, error: 'switch_agent: missing agentId' };
+  }
+  // House agent (CodeAgent Cloud): runtime is the claude ACP adapter pointed
+  // at our managed proxy. The credential step provisions the proxy env, not a
+  // vaulted user credential.
+  if (raw === HOUSE_AGENT_ID) {
+    if (currentIsHouse) {
+      return { ok: false, error: `${HOUSE_AGENT_NAME} is already this session's agent.` };
+    }
+    return { ok: true, agentId: 'claude', wireId: HOUSE_AGENT_ID, house: true };
   }
   if (!isKnownAgentId(raw)) {
     return { ok: false, error: `Unknown agent "${raw}".` };
@@ -86,10 +115,12 @@ export function resolveSwitchTarget(
       error: `${displayName(raw)} can't be switched to in a live session yet.`,
     };
   }
-  if (raw === currentAgent) {
+  // On a HOUSE session `currentAgent` reads `claude`, but the running agent is
+  // CodeAgent Cloud — switching to REAL Claude Code is a legitimate change.
+  if (raw === currentAgent && !currentIsHouse) {
     return { ok: false, error: `${displayName(raw)} is already this session's agent.` };
   }
-  return { ok: true, agentId: raw };
+  return { ok: true, agentId: raw, wireId: raw, house: false };
 }
 
 /** Map the provision-credential response onto the provisioners' AgentAuth. */
@@ -241,19 +272,36 @@ export function buildHandoffPreamble(
  * "no linked credential" — see `performAgentSwitch`.
  */
 export type CredentialFetchResult =
-  | { ok: true; method: 'api_key' | 'oauth'; credential: string; installScript?: string }
+  | {
+      ok: true;
+      method: 'api_key' | 'oauth' | 'house_proxy';
+      credential: string;
+      /** Present for `house_proxy`: the managed agent-proxy origin the claude
+       *  runtime is pointed at (`ANTHROPIC_BASE_URL`). */
+      baseUrl?: string;
+      installScript?: string;
+    }
   | { ok: false; code?: string; message?: string };
 
 export interface SwitchAgentDeps {
   currentAgent(): AgentId;
+  /** True when the RUNNING agent is the house agent (CodeAgent Cloud) — its
+   *  runtime id is `claude`, so `currentAgent()` alone can never tell. */
+  currentIsHouse(): boolean;
   /** Serialized event POST — callers get strict emit-order on the wire. */
   postEvent(
     type: 'switch_agent_progress' | 'switch_agent_status',
     payload: Record<string, unknown>,
   ): Promise<unknown>;
-  fetchCredential(agentId: AgentId): Promise<CredentialFetchResult>;
+  /** `agentId` is the WIRE id — the internal runtime id for real agents, the
+   *  public `house-codeagent-cloud` sentinel for the house agent. */
+  fetchCredential(agentId: string): Promise<CredentialFetchResult>;
   /** Write the credential with the per-agent provisioner. Throws on failure. */
   provisionCredential(agentId: AgentId, auth: AgentAuth): void;
+  /** House-agent switch: stage the managed-proxy env for the claude adapter
+   *  spawn (ANTHROPIC_BASE_URL/AUTH_TOKEN + model pins + isolated config
+   *  dir). Throws on failure. */
+  provisionHouseProxy(cfg: { baseUrl: string; token: string }): void;
   ensureBinary(
     agentId: AgentId,
     installScript: string | undefined,
@@ -265,11 +313,15 @@ export interface SwitchAgentDeps {
    * Stop the old client and bring the new agent fully up (cancel in-flight
    * turn → flush streaming → capture handoff → new adapter + client +
    * runtime/history rebuild → banner). Throws on failure — the orchestrator
-   * then calls {@link revertRuntime}.
+   * then calls {@link revertRuntime}. `house` flags a house-agent (CodeAgent
+   * Cloud) launch: the runtime spawns with the staged managed-proxy env and
+   * the banner carries the white-label identity.
    */
-  swapRuntime(agentId: AgentId): Promise<void>;
-  /** Best-effort relaunch of the PRIOR agent after a failed swap. */
-  revertRuntime(agentId: AgentId): Promise<void>;
+  swapRuntime(agentId: AgentId, swapOpts: { house: boolean }): Promise<void>;
+  /** Best-effort relaunch of the PRIOR agent after a failed swap. `house`
+   *  restores the prior HOUSE state (a house session reverts to the proxy
+   *  env, not to bare claude). */
+  revertRuntime(agentId: AgentId, swapOpts: { house: boolean }): Promise<void>;
   /** Persist the new agent to ~/.codeam/config.json (session row). */
   persistAgent(agentId: AgentId): void;
   /** relay.setAgentMeta + reannounceAgents with the new agent. */
@@ -326,7 +378,8 @@ export async function performAgentSwitch(
   fastPath: AgentSwitchFastPath = {},
 ): Promise<SwitchAgentResult> {
   const from = deps.currentAgent();
-  const target = resolveSwitchTarget(rawAgentId, from);
+  const fromIsHouse = deps.currentIsHouse();
+  const target = resolveSwitchTarget(rawAgentId, from, fromIsHouse);
   if (!target.ok) {
     return {
       ok: false,
@@ -335,38 +388,65 @@ export async function performAgentSwitch(
     };
   }
   const agentId = target.agentId;
+  // Every event carries the WIRE ids: the public house sentinel for the house
+  // agent (mobile renders "CodeAgent Cloud"; the internal `claude` would break
+  // the white-label rule), the internal runtime id for everything else.
+  const wireId = target.wireId;
+  const fromWireId = fromIsHouse ? HOUSE_AGENT_ID : from;
+  const targetName = displayName(wireId);
   const emitStatus = (status: SwitchAgentStatus): Promise<unknown> =>
     deps.postEvent('switch_agent_status', { ...status });
   const emitStep = (step: SwitchAgentStep): Promise<unknown> =>
-    deps.postEvent('switch_agent_progress', { step, agentId });
+    deps.postEvent('switch_agent_progress', { step, agentId: wireId });
   const fail = (error: string): SwitchAgentResult => {
     // ALWAYS leave a local log line — the 2026-08-13 fleet-1 kimi failure
     // was only diagnosable from the wire because the fail path logged
     // nothing on the box.
-    log.warn('switchAgent', `switch ${from} → ${agentId} failed: ${error}`);
-    void emitStatus({ state: 'error', agentId, fromAgentId: from, error });
-    return { ok: false, agentId, error };
+    log.warn('switchAgent', `switch ${fromWireId} → ${wireId} failed: ${error}`);
+    void emitStatus({ state: 'error', agentId: wireId, fromAgentId: fromWireId, error });
+    return { ok: false, agentId: wireId, error };
   };
 
-  log.info('switchAgent', `switch requested ${from} → ${agentId}`);
-  void emitStatus({ state: 'switching', agentId, fromAgentId: from });
+  log.info('switchAgent', `switch requested ${fromWireId} → ${wireId}`);
+  void emitStatus({ state: 'switching', agentId: wireId, fromAgentId: fromWireId });
 
-  // 1. Credential — must already be vaulted (mobile only offers linked agents).
-  //    Skipped on the squad fast path (this process already wrote it): the
-  //    step event is skipped too, so mobile's progress UI doesn't show a
-  //    phantom stage the CLI never ran.
+  // 1. Credential — must already be vaulted (mobile only offers linked agents;
+  //    the house agent instead gets an ephemeral managed-proxy token minted by
+  //    the backend). Skipped on the squad fast path (this process already
+  //    wrote it): the step event is skipped too, so mobile's progress UI
+  //    doesn't show a phantom stage the CLI never ran.
   let installScript: string | undefined;
   if (!fastPath.skipProvision) {
     void emitStep('credential');
-    const cred = await deps.fetchCredential(agentId);
+    const cred = await deps.fetchCredential(wireId);
     if (!cred.ok) {
-      return fail(credentialFailureMessage(agentId, cred));
+      return fail(credentialFailureMessage(wireId, cred));
     }
-    try {
-      deps.provisionCredential(agentId, toAgentAuth(cred.method, cred.credential));
-    } catch (err) {
-      log.warn('switchAgent', `credential provisioning failed: ${(err as Error).message}`);
-      return fail(`Couldn't write the ${displayName(agentId)} credential on this machine.`);
+    if (target.house) {
+      // The proxy env needs BOTH the token and the base URL — an older
+      // backend answers this fetch with a 404 (no vaulted credential), never
+      // a partial house payload, so this guard only trips on a malformed one.
+      if (cred.method !== 'house_proxy' || !cred.baseUrl) {
+        return fail(`${targetName} isn't available on this backend yet.`);
+      }
+      try {
+        deps.provisionHouseProxy({ baseUrl: cred.baseUrl, token: cred.credential });
+      } catch (err) {
+        log.warn('switchAgent', `house proxy provisioning failed: ${(err as Error).message}`);
+        return fail(`Couldn't configure ${targetName} on this machine.`);
+      }
+    } else {
+      if (cred.method === 'house_proxy') {
+        // Defensive: a house payload for a non-house target would write the
+        // proxy token where a real credential belongs.
+        return fail(`Couldn't fetch the ${targetName} credential.`);
+      }
+      try {
+        deps.provisionCredential(agentId, toAgentAuth(cred.method, cred.credential));
+      } catch (err) {
+        log.warn('switchAgent', `credential provisioning failed: ${(err as Error).message}`);
+        return fail(`Couldn't write the ${targetName} credential on this machine.`);
+      }
     }
     installScript = cred.installScript;
   }
@@ -388,21 +468,21 @@ export async function performAgentSwitch(
   // untouched on the old agent.
   void emitStep('restart');
   try {
-    await deps.swapRuntime(agentId);
+    await deps.swapRuntime(agentId, { house: target.house });
   } catch (err) {
-    log.warn('switchAgent', `swap failed, reverting to ${from}: ${(err as Error).message}`);
+    log.warn('switchAgent', `swap failed, reverting to ${fromWireId}: ${(err as Error).message}`);
     try {
-      await deps.revertRuntime(from);
+      await deps.revertRuntime(from, { house: fromIsHouse });
     } catch (revertErr) {
       // Old agent didn't come back either — surfaceable but never silent:
       // the error status below tells the user the session needs a restart.
       log.warn('switchAgent', `revert failed: ${(revertErr as Error).message}`);
       return fail(
-        `Switching to ${displayName(agentId)} failed and ${displayName(from)} couldn't be restored — restart the session.`,
+        `Switching to ${targetName} failed and ${displayName(fromWireId)} couldn't be restored — restart the session.`,
       );
     }
     return fail(
-      `Couldn't start ${displayName(agentId)} — the session stays on ${displayName(from)}.`,
+      `Couldn't start ${targetName} — the session stays on ${displayName(fromWireId)}.`,
     );
   }
 
@@ -414,7 +494,7 @@ export async function performAgentSwitch(
     log.warn('switchAgent', `persist failed (non-fatal): ${(err as Error).message}`);
   }
   deps.reannounce(agentId);
-  await emitStatus({ state: 'ready', agentId, fromAgentId: from });
-  log.info('switchAgent', `switch complete ${from} → ${agentId}`);
-  return { ok: true, agentId };
+  await emitStatus({ state: 'ready', agentId: wireId, fromAgentId: fromWireId });
+  log.info('switchAgent', `switch complete ${fromWireId} → ${wireId}`);
+  return { ok: true, agentId: wireId };
 }

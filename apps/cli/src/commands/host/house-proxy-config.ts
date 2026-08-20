@@ -93,27 +93,96 @@ export function readHouseProxyChildEnv(): Record<string, string> {
     const o = parsed as Record<string, unknown>;
     if (typeof o.baseUrl !== 'string' || !o.baseUrl) return {};
     if (typeof o.token !== 'string' || !o.token) return {};
-    const env: Record<string, string> = {
-      ANTHROPIC_BASE_URL: o.baseUrl,
-      ANTHROPIC_AUTH_TOKEN: o.token,
-      CLAUDE_CODE_AUTO_COMPACT_WINDOW: '512000',
-      API_TIMEOUT_MS: '3000000',
-    };
-    if (o.openRouter === true) {
-      // OpenRouter routes real Claude model names; ANTHROPIC_API_KEY must be
-      // empty so a stale key can't override the Bearer auth token.
-      env.ANTHROPIC_API_KEY = '';
-    } else {
-      env.ANTHROPIC_MODEL = 'MiniMax-M3';
-      env.ANTHROPIC_DEFAULT_SONNET_MODEL = 'MiniMax-M3';
-      env.ANTHROPIC_DEFAULT_OPUS_MODEL = 'MiniMax-M3';
-      env.ANTHROPIC_DEFAULT_HAIKU_MODEL = 'MiniMax-M3';
-    }
-    if (typeof o.claudeConfigDir === 'string' && o.claudeConfigDir) {
-      env.CLAUDE_CONFIG_DIR = o.claudeConfigDir;
-    }
-    return env;
+    return buildHouseProxyChildEnv({
+      baseUrl: o.baseUrl,
+      token: o.token,
+      openRouter: o.openRouter === true,
+      ...(typeof o.claudeConfigDir === 'string' && o.claudeConfigDir
+        ? { claudeConfigDir: o.claudeConfigDir }
+        : {}),
+    });
   } catch {
     return {};
   }
+}
+
+/**
+ * The house/gateway agent env — the ONE builder shared by the deploy path
+ * (host-agent childEnv), the resume path ({@link readHouseProxyChildEnv}),
+ * and the in-session `switch_agent` house target (adapter spawn extraEnv).
+ * Mirrors the codespace house bootstrap byte-for-byte
+ * (apps/api-v2/src/codespaces/agent.ts).
+ */
+export function buildHouseProxyChildEnv(cfg: HouseProxyConfig): Record<string, string> {
+  const env: Record<string, string> = {
+    ANTHROPIC_BASE_URL: cfg.baseUrl,
+    ANTHROPIC_AUTH_TOKEN: cfg.token,
+    CLAUDE_CODE_AUTO_COMPACT_WINDOW: '512000',
+    API_TIMEOUT_MS: '3000000',
+  };
+  if (cfg.openRouter === true) {
+    // OpenRouter routes real Claude model names; ANTHROPIC_API_KEY must be
+    // empty so a stale key can't override the Bearer auth token.
+    env.ANTHROPIC_API_KEY = '';
+  } else {
+    env.ANTHROPIC_MODEL = 'MiniMax-M3';
+    env.ANTHROPIC_DEFAULT_SONNET_MODEL = 'MiniMax-M3';
+    env.ANTHROPIC_DEFAULT_OPUS_MODEL = 'MiniMax-M3';
+    env.ANTHROPIC_DEFAULT_HAIKU_MODEL = 'MiniMax-M3';
+  }
+  if (typeof cfg.claudeConfigDir === 'string' && cfg.claudeConfigDir) {
+    env.CLAUDE_CONFIG_DIR = cfg.claudeConfigDir;
+  }
+  return env;
+}
+
+/**
+ * Every env key the house/gateway proxy setup may have exported into this
+ * process or a prior adapter spawn. A switch AWAY from the house agent maps
+ * each of these to `undefined` in the adapter's extraEnv — Node's `spawn`
+ * omits `undefined`-valued env entries, so the next agent boots CLEAN of the
+ * proxy routing (a real Claude Code switch on a house box would otherwise
+ * inherit `ANTHROPIC_BASE_URL` and keep talking to the managed proxy).
+ */
+export const HOUSE_PROXY_ENV_KEYS = [
+  'ANTHROPIC_BASE_URL',
+  'ANTHROPIC_AUTH_TOKEN',
+  'ANTHROPIC_API_KEY',
+  'ANTHROPIC_MODEL',
+  'ANTHROPIC_DEFAULT_SONNET_MODEL',
+  'ANTHROPIC_DEFAULT_OPUS_MODEL',
+  'ANTHROPIC_DEFAULT_HAIKU_MODEL',
+  'CLAUDE_CODE_AUTO_COMPACT_WINDOW',
+  'API_TIMEOUT_MS',
+  'CLAUDE_CONFIG_DIR',
+] as const;
+
+/** extraEnv overrides that DELETE the house-proxy env from the child spawn. */
+export function clearHouseProxyEnvOverrides(): Record<string, undefined> {
+  const out: Record<string, undefined> = {};
+  for (const key of HOUSE_PROXY_ENV_KEYS) out[key] = undefined;
+  return out;
+}
+
+/**
+ * True when this PROCESS was launched with the managed house-proxy env (a
+ * house deploy exports it into the pair-auto child). A user's own custom
+ * `ANTHROPIC_BASE_URL` never matches — only our agent-proxy path does.
+ */
+export function isHouseProxyEnv(env: NodeJS.ProcessEnv): boolean {
+  return (
+    typeof env.ANTHROPIC_AUTH_TOKEN === 'string' &&
+    env.ANTHROPIC_AUTH_TOKEN.length > 0 &&
+    (env.ANTHROPIC_BASE_URL ?? '').includes('/api/v1/agent-proxy')
+  );
+}
+
+/** Subset of `env` holding the house-proxy keys (seed for a later re-spawn). */
+export function pickHouseProxyEnv(env: NodeJS.ProcessEnv): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const key of HOUSE_PROXY_ENV_KEYS) {
+    const v = env[key];
+    if (typeof v === 'string') out[key] = v;
+  }
+  return out;
 }

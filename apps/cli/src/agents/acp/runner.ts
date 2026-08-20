@@ -28,6 +28,9 @@
  */
 
 import { randomUUID } from 'node:crypto';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import {
   CommandRelayService,
   stopRelayWithGoodbye,
@@ -44,6 +47,9 @@ import { HistoryService } from '../../services/history.service';
 import { showInfo, showSuccess, showRelayNotice } from '../../ui/banner';
 import {
   AGENT_REGISTRY,
+  HOUSE_AGENT_ID,
+  HOUSE_AGENT_NAME,
+  HOUSE_AGENT_SUBTITLE,
   type AgentId,
   type HandoffProposal,
   type StreamingChunkKind,
@@ -83,6 +89,15 @@ import { isLocalSession } from '../../baton/gate';
 import { extractSelectPrompt } from './selectPromptExtractor';
 import { prewarmPreviewDetection } from '../../commands/start/handlers';
 import { getSquadAuto, loadCliConfig, setSessionAgent } from '../../config';
+import {
+  buildHouseProxyChildEnv,
+  clearHouseProxyConfig,
+  clearHouseProxyEnvOverrides,
+  isHouseProxyEnv,
+  persistHouseProxyConfig,
+  pickHouseProxyEnv,
+  type HouseProxyConfig,
+} from '../../commands/host/house-proxy-config';
 import { FileWatcherService } from '../../services/file-watcher.service';
 import { TurnFileAggregator } from '../../services/turn-files/turn-file-aggregator';
 import type { StartedBeads } from '../../beads';
@@ -1690,6 +1705,20 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
   // OPENAI_API_KEY) — merged into the adapter spawn env; the oauth path
   // writes login-state files and yields {}.
   let switchCredentialEnv: Record<string, string> = {};
+  // ── House agent (CodeAgent Cloud) switch state ──────────────────────────
+  // The house runtime IS claude, so `opts.agent` can never tell house from
+  // real Claude Code. `houseActive` is seeded from the spawn env (a house
+  // DEPLOY exports the managed-proxy env into this process) and flipped by
+  // every successful swap. `houseEnv` is the proxy env the claude adapter
+  // spawns with — seeded from the process env on house deploys, replaced by
+  // `provisionHouseProxy` on a mid-session switch TO house (a non-house box
+  // has no proxy env to inherit).
+  let houseActive = isHouseProxyEnv(process.env);
+  let houseEnv: Record<string, string> = houseActive ? pickHouseProxyEnv(process.env) : {};
+  // Pending config for `persistHouseProxyConfig` — written only AFTER the
+  // house swap succeeded (persisting on a failed swap would poison the
+  // self-hosted resume spawner's re-inject with a config nothing runs).
+  let pendingHouseConfig: HouseProxyConfig | null = null;
 
   /**
    * Tear down the current adapter and bring `nextAgent` fully up. Shared by
@@ -1698,7 +1727,10 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
    * AFTER the new adapter's start() succeeded, so a failed start leaves the
    * old references intact for the revert.
    */
-  const relaunchWith = async (nextAgent: AgentId): Promise<void> => {
+  const relaunchWith = async (
+    nextAgent: AgentId,
+    swapOpts: { house: boolean } = { house: false },
+  ): Promise<void> => {
     // Same teardown stop_task uses: cancel any in-flight turn, then flush
     // the streaming state so mobile never wedges on "Thinking…".
     try {
@@ -1722,13 +1754,27 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
     const disable1m =
       loadCliConfig().sessions.find((s) => s.pluginId === opts.pluginId)?.disable1mContext === true;
     clientOptions.adapter = adapter;
+    // Spawn-env layering (later wins):
+    //   1. per-agent knobs (1M-context opt-out, Codex full-access mode);
+    //   2. house handling — TO house: the managed-proxy env; AWAY from a
+    //      house-flavored process: `undefined` overrides that DELETE the
+    //      proxy env from the child (a real Claude switch on a house box
+    //      would otherwise inherit ANTHROPIC_BASE_URL and keep talking to
+    //      the managed proxy);
+    //   3. the target's own credential env (api_key provisioners), so a
+    //      real credential always wins over the clearing layer.
+    const leavingHouseEnv =
+      !swapOpts.house && (houseActive || isHouseProxyEnv(process.env) || Object.keys(houseEnv).length > 0)
+        ? clearHouseProxyEnvOverrides()
+        : {};
     clientOptions.extraEnv = {
       ...computeAdapterExtraEnv({
         agent: nextAgent,
         autoApprovePermissions: opts.autoApprovePermissions,
         disable1mContext: disable1m,
       }),
-      ...switchCredentialEnv,
+      ...leavingHouseEnv,
+      ...(swapOpts.house ? houseEnv : switchCredentialEnv),
     };
     const next = new AcpClient(clientOptions);
     const hs = await next.start();
@@ -1749,14 +1795,38 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
     });
     budgetRecovery = makeBudgetRecovery();
     pendingHandoff.current = buildHandoffPreamble(prevAgent, nextAgent, transcript);
+    // House-state transition — only AFTER the new adapter started (a failed
+    // start throws above and leaves the prior state intact for the revert).
+    const wasHouse = houseActive;
+    houseActive = swapOpts.house;
+    if (swapOpts.house) {
+      // Persist for the self-hosted resume spawner: a sleep/wake re-injects
+      // this env into the resumed child (the Rafael 2026-08-05 class of
+      // "woken house agent has no proxy env" bugs).
+      if (pendingHouseConfig) {
+        persistHouseProxyConfig(pendingHouseConfig);
+        pendingHouseConfig = null;
+      }
+    } else if (wasHouse) {
+      // This session left the house agent — drop the persisted proxy config
+      // so a resume can't re-inject it over the new agent's own credential
+      // (mirrors the BYO-deploy takeover in host-agent.ts). Scoped to
+      // sessions that WERE house so a co-located house session's config
+      // isn't clobbered by an unrelated swap.
+      clearHouseProxyConfig();
+    }
     // Fresh welcome card so the mobile chat flips to the new agent's brand.
+    // House target: white-label identity — never the runtime's name/model
+    // (packages/shared house-agent white-label rule).
     void publisher.publishOutput({
       type: 'agent_banner',
-      agentId: nextAgent,
+      agentId: swapOpts.house ? HOUSE_AGENT_ID : nextAgent,
       // A switch starts a FRESH conversation with the new agent — never "back".
-      title: bannerTitle(false),
-      subtitle: buildBannerSubtitle(nextAgent, hs.sessionId, hs.model, hs.tier),
-      path: bannerLocation(opts.cwd),
+      title: swapOpts.house ? HOUSE_AGENT_NAME : bannerTitle(false),
+      subtitle: swapOpts.house
+        ? HOUSE_AGENT_SUBTITLE
+        : buildBannerSubtitle(nextAgent, hs.sessionId, hs.model, hs.tier),
+      path: swapOpts.house ? '' : bannerLocation(opts.cwd),
       done: true,
     });
   };
@@ -1772,6 +1842,7 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
   );
   const switchDeps: SwitchAgentDeps = {
     currentAgent: () => opts.agent,
+    currentIsHouse: () => houseActive,
     postEvent: emitSwitchEvent,
     fetchCredential: (agentId) =>
       fetchProvisionCredentialDetailed({
@@ -1783,6 +1854,28 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
       }),
     provisionCredential: (agentId, auth) => {
       switchCredentialEnv = provisionAgentCredentials(agentId, auth);
+    },
+    provisionHouseProxy: ({ baseUrl, token }) => {
+      // Isolated per-session Claude config dir, mirroring the house DEPLOY's
+      // per-deploy isolation: the box may carry a personal ~/.claude login
+      // that Claude Code would prefer over ANTHROPIC_AUTH_TOKEN → 401 at the
+      // managed proxy.
+      const claudeConfigDir = path.join(
+        os.homedir(),
+        '.codeam',
+        'house-claude',
+        `switch-${opts.pluginId}`,
+      );
+      try {
+        fs.mkdirSync(claudeConfigDir, { recursive: true, mode: 0o700 });
+      } catch {
+        /* best-effort — claude creates it on first run */
+      }
+      houseEnv = buildHouseProxyChildEnv({ baseUrl, token, claudeConfigDir });
+      pendingHouseConfig = { baseUrl, token, claudeConfigDir };
+      // The house agent has no credential env of its own; drop the previous
+      // target's so it can't leak into the claude spawn.
+      switchCredentialEnv = {};
     },
     ensureBinary: (agentId, installScript, onRetry) =>
       ensureAgentBinaryForSwitch(agentId, installScript, { onRetry }),

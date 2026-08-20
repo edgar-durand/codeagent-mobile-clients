@@ -53,7 +53,38 @@ describe('resolveSwitchTarget', () => {
 
   it('accepts a known ACP agent different from the current one', () => {
     const r = resolveSwitchTarget('codex', 'claude');
-    expect(r).toEqual({ ok: true, agentId: 'codex' });
+    expect(r).toEqual({ ok: true, agentId: 'codex', wireId: 'codex', house: false });
+  });
+
+  // ── House agent (CodeAgent Cloud) ──────────────────────────────────────
+  it('accepts the house agent: claude runtime, public wire id, house flag', () => {
+    const r = resolveSwitchTarget('house-codeagent-cloud', 'kimi');
+    expect(r).toEqual({
+      ok: true,
+      agentId: 'claude',
+      wireId: 'house-codeagent-cloud',
+      house: true,
+    });
+  });
+
+  it('accepts house even when the current RUNTIME is claude (real Claude → house)', () => {
+    const r = resolveSwitchTarget('house-codeagent-cloud', 'claude');
+    expect(r).toMatchObject({ ok: true, agentId: 'claude', house: true });
+  });
+
+  it('rejects house when the session is ALREADY house-driven — white-label copy', () => {
+    const r = resolveSwitchTarget('house-codeagent-cloud', 'claude', true);
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.error).toMatch(/CodeAgent Cloud is already/);
+      // White-label rule: never leak the runtime's name.
+      expect(r.error).not.toMatch(/Claude/);
+    }
+  });
+
+  it('accepts REAL claude as a target on a house session (runtime collision)', () => {
+    const r = resolveSwitchTarget('claude', 'claude', true);
+    expect(r).toEqual({ ok: true, agentId: 'claude', wireId: 'claude', house: false });
   });
 });
 
@@ -315,6 +346,7 @@ function makeDeps(overrides: DepOverrides = {}) {
   const calls: string[] = [];
   const deps: SwitchAgentDeps = {
     currentAgent: () => 'claude' as AgentId,
+    currentIsHouse: () => false,
     postEvent: async (type, payload) => {
       events.push({ type, payload });
     },
@@ -326,6 +358,9 @@ function makeDeps(overrides: DepOverrides = {}) {
     }),
     provisionCredential: () => {
       calls.push('provision');
+    },
+    provisionHouseProxy: () => {
+      calls.push('provisionHouse');
     },
     ensureBinary: async () => {
       calls.push('ensureBinary');
@@ -390,6 +425,113 @@ describe('performAgentSwitch', () => {
       .filter((e) => e.type === 'switch_agent_progress')
       .map((e) => String(e.payload.step));
     expect(new Set(steps)).toEqual(new Set(['credential', 'install', 'restart']));
+  });
+
+  // ── House agent (CodeAgent Cloud) ──────────────────────────────────────
+  it('house target: fetches by the PUBLIC sentinel, provisions the proxy env, events carry the house id', async () => {
+    const fetched: string[] = [];
+    const houseCfgs: Array<{ baseUrl: string; token: string }> = [];
+    const swaps: Array<{ agentId: string; house: boolean }> = [];
+    const { deps, events, calls } = makeDeps({
+      currentAgent: () => 'kimi' as AgentId,
+      fetchCredential: async (agentId) => {
+        fetched.push(agentId);
+        return {
+          ok: true as const,
+          method: 'house_proxy' as const,
+          credential: 'proxy-jwt',
+          baseUrl: 'https://api.example.com/api/v1/agent-proxy',
+          installScript: 'echo install-claude',
+        };
+      },
+      provisionHouseProxy: (cfg) => {
+        houseCfgs.push(cfg);
+      },
+      swapRuntime: async (agentId, swapOpts) => {
+        swaps.push({ agentId, house: swapOpts.house });
+      },
+    });
+    const result = await performAgentSwitch(deps, 'house-codeagent-cloud');
+    expect(result).toEqual({ ok: true, agentId: 'house-codeagent-cloud' });
+    expect(fetched).toEqual(['house-codeagent-cloud']);
+    expect(houseCfgs).toEqual([
+      { baseUrl: 'https://api.example.com/api/v1/agent-proxy', token: 'proxy-jwt' },
+    ]);
+    // The runtime launched is claude, flagged house.
+    expect(swaps).toEqual([{ agentId: 'claude', house: true }]);
+    // The vault provisioner must NOT run for the house agent.
+    expect(calls).not.toContain('provision');
+    // Every event names the PUBLIC house id — mobile renders "CodeAgent
+    // Cloud"; the internal `claude` would break the white-label rule.
+    for (const e of events) {
+      expect(e.payload.agentId).toBe('house-codeagent-cloud');
+    }
+    expect(events.at(-1)?.payload).toMatchObject({
+      state: 'ready',
+      agentId: 'house-codeagent-cloud',
+      fromAgentId: 'kimi',
+    });
+  });
+
+  it('house target on an old backend (404, no house payload): honest generic-credential error', async () => {
+    const { deps, calls } = makeDeps({
+      fetchCredential: async () => ({ ok: false }),
+    });
+    const result = await performAgentSwitch(deps, 'house-codeagent-cloud');
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error).toMatch(/CodeAgent Cloud/);
+    expect(calls).toEqual([]);
+  });
+
+  it('house target with a malformed payload (no baseUrl): fails before touching the runtime', async () => {
+    const { deps, calls } = makeDeps({
+      fetchCredential: async () => ({
+        ok: true as const,
+        method: 'house_proxy' as const,
+        credential: 'proxy-jwt',
+      }),
+    });
+    const result = await performAgentSwitch(deps, 'house-codeagent-cloud');
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error).toMatch(/isn't available on this backend/);
+    expect(calls).toEqual([]);
+  });
+
+  it('leaving house: fromAgentId is the house sentinel and the revert restores the HOUSE state', async () => {
+    const reverts: Array<{ agentId: string; house: boolean }> = [];
+    const { deps, events } = makeDeps({
+      currentAgent: () => 'claude' as AgentId,
+      currentIsHouse: () => true,
+      swapRuntime: async () => {
+        throw new Error('spawn failed');
+      },
+      revertRuntime: async (agentId, swapOpts) => {
+        reverts.push({ agentId, house: swapOpts.house });
+      },
+    });
+    const result = await performAgentSwitch(deps, 'codex');
+    expect(result.ok).toBe(false);
+    // The revert relaunches claude WITH the house env — not bare claude.
+    expect(reverts).toEqual([{ agentId: 'claude', house: true }]);
+    expect(events[0]?.payload).toMatchObject({
+      state: 'switching',
+      agentId: 'codex',
+      fromAgentId: 'house-codeagent-cloud',
+    });
+  });
+
+  it('defensive: a house_proxy payload for a NON-house target is refused', async () => {
+    const { deps, calls } = makeDeps({
+      fetchCredential: async () => ({
+        ok: true as const,
+        method: 'house_proxy' as const,
+        credential: 'proxy-jwt',
+        baseUrl: 'https://api.example.com/api/v1/agent-proxy',
+      }),
+    });
+    const result = await performAgentSwitch(deps, 'codex');
+    expect(result.ok).toBe(false);
+    expect(calls).toEqual([]);
   });
 
   it('invalid target: no events, no side effects', async () => {
