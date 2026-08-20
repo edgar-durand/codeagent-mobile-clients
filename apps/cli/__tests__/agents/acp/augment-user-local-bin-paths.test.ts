@@ -31,7 +31,8 @@ vi.mock('node:os', async (importOriginal) => {
   };
 });
 
-import { augmentUserLocalBinPaths } from '../../../src/agents/acp/agent-binary';
+import { augmentUserLocalBinPaths, agentInstallBinDirs } from '../../../src/agents/acp/agent-binary';
+import { expandPathForAgentBinaries } from '../../../src/agents/acp/client';
 import { getAcpAdapter } from '../../../src/agents/acp/adapters';
 
 let fakeHome: string;
@@ -108,7 +109,49 @@ describe('augmentUserLocalBinPaths', () => {
     const posixEnv: NodeJS.ProcessEnv = { PATH: '/usr/bin:/bin' };
     augmentUserLocalBinPaths({ env: posixEnv, homedir: '/home/box', pathApi: path.posix });
     expect(posixEnv.PATH).toBe(
-      '/home/box/.local/bin:/home/box/.npm-global/bin:/home/box/.local/share/npm/bin:/usr/bin:/bin',
+      '/home/box/.local/bin:/home/box/.npm-global/bin:/home/box/.local/share/npm/bin:' +
+        '/home/box/.kimi-code/bin:/home/box/.opencode/bin:/usr/bin:/bin',
+    );
+  });
+
+  // fleet-1 (2026-08-20): the post-restart auto-resume spawned `kimi acp`
+  // under a systemd PATH that lacked `~/.kimi-code/bin` and no probe-side
+  // augment ran on that path — the child died `ENOENT — 'kimi' was not found
+  // on PATH` and the session went permanently stale. The vendor install dirs
+  // (kimi, opencode) must be part of the CANONICAL candidate list so BOTH the
+  // probe side (augmentUserLocalBinPaths) and the spawn side
+  // (expandPathForAgentBinaries) always see them.
+  it('includes each agent installer target dir (kimi, opencode) in the canonical list', () => {
+    const dirs = agentInstallBinDirs({ env: {}, homedir: '/home/box', pathApi: path.posix });
+    expect(dirs).toContain('/home/box/.kimi-code/bin');
+    expect(dirs).toContain('/home/box/.opencode/bin');
+    expect(dirs).toContain('/home/box/.local/bin');
+  });
+
+  it('honors the KIMI_CODE_HOME / OPENCODE_HOME overrides (same as the installers)', () => {
+    const dirs = agentInstallBinDirs({
+      env: { KIMI_CODE_HOME: '/data/kimi', OPENCODE_HOME: '/data/oc' },
+      homedir: '/home/box',
+      pathApi: path.posix,
+    });
+    expect(dirs).toContain('/data/kimi/bin');
+    expect(dirs).toContain('/data/oc/bin');
+    expect(dirs).not.toContain('/home/box/.kimi-code/bin');
+  });
+
+  // The SPAWN side is the fix that actually heals the fleet-1 resume: every
+  // `AcpClient.start` spawn folds `expandPathForAgentBinaries` into the child
+  // env, so `spawn('kimi')` must resolve even when the process PATH predates
+  // the install and no waitForBinary probe ever ran (the resume path).
+  it('expandPathForAgentBinaries folds an existing ~/.kimi-code/bin into the spawn PATH', () => {
+    const kimiBin = path.join(fakeHome, '.kimi-code', 'bin');
+    fs.mkdirSync(kimiBin, { recursive: true });
+    const expanded = expandPathForAgentBinaries(joinPath(SYS_BIN, BIN));
+    expect(expanded.split(path.delimiter)).toContain(kimiBin);
+    // A vendor dir that does NOT exist is filtered out (spawn-side existence
+    // filter) — no dead entries.
+    expect(expanded.split(path.delimiter)).not.toContain(
+      path.join(fakeHome, '.opencode', 'bin'),
     );
   });
 

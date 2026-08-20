@@ -25,6 +25,9 @@ import {
   headroomConfigPath,
   persistHeadroomConfig,
   maybeResumeLocalHeadroomReporter,
+  RESUME_RETRY_BACKOFF_MS,
+  RESUME_REPROBE_INTERVAL_MS,
+  RESUME_HEALTHY_AFTER_MS,
   type HeadroomRunner,
   type SelfUpdateResult,
   type DockerRunner,
@@ -800,6 +803,181 @@ describe('HostAgentSupervisor — control channel reuse', () => {
     sup.start();
     expect(resumeSpawner).not.toHaveBeenCalled();
     sup.stop();
+  });
+
+  // ── Resume-spawn retry + visible failure (fleet-1, 2026-08-20) ────────────
+  // The v2.65.13 self-update restarted the unit; the resumed kimi child died
+  // `ENOENT — 'kimi' was not found on PATH` ONCE and the supervisor gave up
+  // permanently + silently: the HOST heartbeat stayed online while the SESSION
+  // sat dead for 3+ hours with nothing in the chat. The resume must (a) retry
+  // with bounded backoff, (b) when exhausted, post ONE visible error bubble
+  // into the session's chat and (c) keep a slow heartbeat-ridden re-probe so a
+  // fixed cause heals without another manual restart.
+  describe('resume-spawn retry / visible failure / heartbeat re-probe', () => {
+    /** EventEmitter-backed fake child so tests can emit real 'exit' events. */
+    function makeFakeResumeProc() {
+      const proc = new EventEmitter() as EventEmitter & {
+        stdout: EventEmitter;
+        stderr: EventEmitter;
+        kill: ReturnType<typeof vi.fn>;
+      };
+      proc.stdout = new EventEmitter();
+      proc.stderr = new EventEmitter();
+      proc.kill = vi.fn();
+      return proc;
+    }
+
+    const SESSION = {
+      id: 'sess-resume-1',
+      pluginId: 'plug-resume-1',
+      pollSecret: 'sec',
+      agent: 'kimi',
+      userName: 'u',
+      userEmail: 'e',
+      plan: 'pro',
+      pairedAt: 0,
+      pluginAuthToken: 'auth-tok-1',
+    };
+
+    async function withRetryHarness(
+      run: (h: {
+        sup: HostAgentSupervisor;
+        procs: ReturnType<typeof makeFakeResumeProc>[];
+        resumeSpawner: ReturnType<typeof vi.fn>;
+        postResumeFailure: ReturnType<typeof vi.fn>;
+      }) => Promise<void>,
+    ): Promise<void> {
+      const prevSelfUpdate = process.env.CODEAM_HOST_SELF_UPDATE_MS;
+      process.env.CODEAM_HOST_SELF_UPDATE_MS = '0'; // keep fake-timer advances off npm
+      const config = await import('../src/config');
+      vi.mocked(config.getActiveSession).mockReturnValue(SESSION as never);
+      vi.stubGlobal(
+        'fetch',
+        vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => ({ success: true, data: {} }) }),
+      );
+      vi.useFakeTimers();
+      const procs: ReturnType<typeof makeFakeResumeProc>[] = [];
+      const resumeSpawner = vi.fn(() => {
+        const p = makeFakeResumeProc();
+        procs.push(p);
+        return p as never;
+      });
+      const postResumeFailure = vi.fn(async () => undefined);
+      const sup = new HostAgentSupervisor(IDENTITY, {
+        makeRelay: () => ({ start: vi.fn(), stop: vi.fn(), sendResult: vi.fn() }),
+        resumeSpawner,
+        postResumeFailure,
+      });
+      try {
+        sup.start();
+        await run({ sup, procs, resumeSpawner, postResumeFailure });
+      } finally {
+        sup.stop();
+        vi.useRealTimers();
+        // The persistent mockReturnValue would leak into later tests
+        // (restoreAllMocks does not reset module-factory vi.fn mocks) —
+        // restore the module mock's "no session" default explicitly.
+        vi.mocked(config.getActiveSession).mockReset();
+        vi.mocked(config.getActiveSession).mockImplementation(() => null);
+        if (prevSelfUpdate === undefined) delete process.env.CODEAM_HOST_SELF_UPDATE_MS;
+        else process.env.CODEAM_HOST_SELF_UPDATE_MS = prevSelfUpdate;
+      }
+    }
+
+    it('retries a dead resume child with the bounded backoff schedule', async () => {
+      await withRetryHarness(async ({ procs, resumeSpawner }) => {
+        expect(resumeSpawner).toHaveBeenCalledTimes(1);
+        procs[0].emit('exit', 1);
+        // Backoff: not a tick before the first delay elapses…
+        await vi.advanceTimersByTimeAsync(RESUME_RETRY_BACKOFF_MS[0] - 1);
+        expect(resumeSpawner).toHaveBeenCalledTimes(1);
+        // …and exactly at it, the retry spawns.
+        await vi.advanceTimersByTimeAsync(1);
+        expect(resumeSpawner).toHaveBeenCalledTimes(2);
+        // Second failure waits the SECOND backoff step (not the first again).
+        procs[1].emit('exit', 1);
+        await vi.advanceTimersByTimeAsync(RESUME_RETRY_BACKOFF_MS[0]);
+        expect(resumeSpawner).toHaveBeenCalledTimes(2);
+        await vi.advanceTimersByTimeAsync(RESUME_RETRY_BACKOFF_MS[1] - RESUME_RETRY_BACKOFF_MS[0]);
+        expect(resumeSpawner).toHaveBeenCalledTimes(3);
+      });
+    });
+
+    it('does NOT retry a clean exit (code 0)', async () => {
+      await withRetryHarness(async ({ procs, resumeSpawner }) => {
+        procs[0].emit('exit', 0);
+        await vi.advanceTimersByTimeAsync(RESUME_RETRY_BACKOFF_MS[RESUME_RETRY_BACKOFF_MS.length - 1]);
+        expect(resumeSpawner).toHaveBeenCalledTimes(1);
+      });
+    });
+
+    it('exhausts the retries, posts ONE visible error bubble carrying the child failure, then re-probes on the heartbeat', async () => {
+      await withRetryHarness(async ({ procs, resumeSpawner, postResumeFailure }) => {
+        // Burn the initial attempt + every backoff retry.
+        for (let i = 0; i < RESUME_RETRY_BACKOFF_MS.length; i++) {
+          procs[i].stderr.emit(
+            'data',
+            Buffer.from("acpClient — adapter spawn failed: ENOENT — 'kimi' was not found on PATH"),
+          );
+          procs[i].emit('exit', 1);
+          await vi.advanceTimersByTimeAsync(RESUME_RETRY_BACKOFF_MS[i]);
+        }
+        expect(resumeSpawner).toHaveBeenCalledTimes(RESUME_RETRY_BACKOFF_MS.length + 1);
+        // Final attempt dies too → exhausted → the visible bubble, exactly once,
+        // addressed with the session's pairing identity and an honest reason.
+        const last = procs[RESUME_RETRY_BACKOFF_MS.length];
+        last.stderr.emit('data', Buffer.from("'kimi' was not found on PATH"));
+        last.emit('exit', 1);
+        expect(postResumeFailure).toHaveBeenCalledTimes(1);
+        const [auth, message] = postResumeFailure.mock.calls[0] as unknown as [
+          { sessionId: string; pluginId: string; pluginAuthToken: string },
+          string,
+        ];
+        expect(auth).toEqual({
+          sessionId: SESSION.id,
+          pluginId: SESSION.pluginId,
+          pluginAuthToken: SESSION.pluginAuthToken,
+        });
+        expect(message).toContain('failed to restart');
+        expect(message).toContain("'kimi' was not found on PATH");
+        // No timer-driven retry is pending anymore…
+        await vi.advanceTimersByTimeAsync(RESUME_RETRY_BACKOFF_MS[RESUME_RETRY_BACKOFF_MS.length - 1]);
+        const afterExhaust = resumeSpawner.mock.calls.length;
+        expect(afterExhaust).toBe(RESUME_RETRY_BACKOFF_MS.length + 1);
+        // …but the heartbeat rider re-probes after the slow interval, so a
+        // fixed PATH heals WITHOUT a manual restart.
+        await vi.advanceTimersByTimeAsync(RESUME_REPROBE_INTERVAL_MS + 21_000);
+        expect(resumeSpawner.mock.calls.length).toBe(afterExhaust + 1);
+        // A re-probe that fails again does NOT re-post the bubble.
+        procs[procs.length - 1].emit('exit', 1);
+        await vi.advanceTimersByTimeAsync(RESUME_REPROBE_INTERVAL_MS + 21_000);
+        expect(postResumeFailure).toHaveBeenCalledTimes(1);
+      });
+    });
+
+    it('resets the retry budget only after a resumed child stays healthy past the age gate', async () => {
+      await withRetryHarness(async ({ procs, resumeSpawner }) => {
+        procs[0].emit('exit', 1);
+        await vi.advanceTimersByTimeAsync(RESUME_RETRY_BACKOFF_MS[0]);
+        expect(resumeSpawner).toHaveBeenCalledTimes(2);
+        // The retry child stays alive PAST the healthy-age gate (heartbeats
+        // tick throughout) → the episode is over, budget + bubble reset.
+        await vi.advanceTimersByTimeAsync(RESUME_HEALTHY_AFTER_MS + 21_000);
+        // A LATER death starts a fresh episode from the FIRST backoff step.
+        procs[1].emit('exit', 1);
+        await vi.advanceTimersByTimeAsync(RESUME_RETRY_BACKOFF_MS[0]);
+        expect(resumeSpawner).toHaveBeenCalledTimes(3);
+      });
+    });
+
+    it('stop() cancels a pending resume retry', async () => {
+      await withRetryHarness(async ({ sup, procs, resumeSpawner }) => {
+        procs[0].emit('exit', 1);
+        sup.stop();
+        await vi.advanceTimersByTimeAsync(RESUME_RETRY_BACKOFF_MS[RESUME_RETRY_BACKOFF_MS.length - 1]);
+        expect(resumeSpawner).toHaveBeenCalledTimes(1);
+      });
+    });
   });
 
   it('host_list_dir lists a directory (dirs first, dotfiles hidden) via the relay result', async () => {
