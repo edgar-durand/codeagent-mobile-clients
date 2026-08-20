@@ -603,7 +603,15 @@ function parseBackendErrorBody(
 }
 
 export type ProvisionCredentialResult =
-  | { ok: true; method: 'api_key' | 'oauth'; credential: string; installScript?: string }
+  | {
+      ok: true;
+      method: 'api_key' | 'oauth' | 'house_proxy';
+      credential: string;
+      /** Present for `house_proxy` (the house-agent switch target): the managed
+       *  agent-proxy origin the claude runtime is pointed at. */
+      baseUrl?: string;
+      installScript?: string;
+    }
   | { ok: false; status: number; code?: string; message?: string };
 
 /**
@@ -643,11 +651,18 @@ export async function fetchProvisionCredentialDetailed(input: {
       input.pluginAuthToken,
     );
     const data = (
-      res as { data?: { method?: unknown; credential?: unknown; installScript?: unknown } } | null
+      res as {
+        data?: {
+          method?: unknown;
+          credential?: unknown;
+          baseUrl?: unknown;
+          installScript?: unknown;
+        };
+      } | null
     )?.data;
     if (
       data &&
-      (data.method === 'api_key' || data.method === 'oauth') &&
+      (data.method === 'api_key' || data.method === 'oauth' || data.method === 'house_proxy') &&
       typeof data.credential === 'string' &&
       data.credential.length > 0
     ) {
@@ -655,6 +670,9 @@ export async function fetchProvisionCredentialDetailed(input: {
         ok: true,
         method: data.method,
         credential: data.credential,
+        ...(typeof data.baseUrl === 'string' && data.baseUrl.length > 0
+          ? { baseUrl: data.baseUrl }
+          : {}),
         ...(typeof data.installScript === 'string' && data.installScript.length > 0
           ? { installScript: data.installScript }
           : {}),
@@ -682,7 +700,10 @@ export async function fetchProvisionCredential(
   input: Parameters<typeof fetchProvisionCredentialDetailed>[0],
 ): Promise<{ method: 'api_key' | 'oauth'; credential: string; installScript?: string } | null> {
   const res = await fetchProvisionCredentialDetailed(input);
-  if (!res.ok) return null;
+  // `house_proxy` is a switch-only payload — the yes/no callers (CodeRabbit
+  // mention/provision) never request the house agent, and their provisioners
+  // couldn't write a proxy token anywhere sensible.
+  if (!res.ok || res.method === 'house_proxy') return null;
   return {
     method: res.method,
     credential: res.credential,

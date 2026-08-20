@@ -28,6 +28,11 @@ import {
   readHouseProxyChildEnv,
   clearHouseProxyConfig,
   houseProxyConfigPath,
+  buildHouseProxyChildEnv,
+  clearHouseProxyEnvOverrides,
+  isHouseProxyEnv,
+  pickHouseProxyEnv,
+  HOUSE_PROXY_ENV_KEYS,
 } from '../src/commands/host/house-proxy-config';
 
 let tmpHome: string;
@@ -87,5 +92,96 @@ describe('house-proxy-config — resume env persistence', () => {
     fs.mkdirSync(path.dirname(houseProxyConfigPath()), { recursive: true });
     fs.writeFileSync(houseProxyConfigPath(), '{ not json');
     expect(readHouseProxyChildEnv()).toEqual({});
+  });
+});
+
+
+// ── In-session switch helpers (house target / leaving house) ────────────────
+
+describe('buildHouseProxyChildEnv', () => {
+  it('house shape: proxy base URL + token + MiniMax pins + isolated config dir', () => {
+    const env = buildHouseProxyChildEnv({
+      baseUrl: 'https://api.example.com/api/v1/agent-proxy',
+      token: 'proxy-jwt',
+      claudeConfigDir: '/home/u/.codeam/house-claude/switch-p1',
+    });
+    expect(env).toMatchObject({
+      ANTHROPIC_BASE_URL: 'https://api.example.com/api/v1/agent-proxy',
+      ANTHROPIC_AUTH_TOKEN: 'proxy-jwt',
+      ANTHROPIC_MODEL: 'MiniMax-M3',
+      ANTHROPIC_DEFAULT_SONNET_MODEL: 'MiniMax-M3',
+      ANTHROPIC_DEFAULT_OPUS_MODEL: 'MiniMax-M3',
+      ANTHROPIC_DEFAULT_HAIKU_MODEL: 'MiniMax-M3',
+      CLAUDE_CODE_AUTO_COMPACT_WINDOW: '512000',
+      API_TIMEOUT_MS: '3000000',
+      CLAUDE_CONFIG_DIR: '/home/u/.codeam/house-claude/switch-p1',
+    });
+    expect(env.ANTHROPIC_API_KEY).toBeUndefined();
+  });
+
+  it('is the SAME env readHouseProxyChildEnv rebuilds from a persisted config', () => {
+    const cfg = {
+      baseUrl: 'https://api.example.com/api/v1/agent-proxy',
+      token: 'proxy-jwt',
+      claudeConfigDir: '/home/u/.codeam/house-claude/d1',
+    };
+    persistHouseProxyConfig(cfg);
+    expect(readHouseProxyChildEnv()).toEqual(buildHouseProxyChildEnv(cfg));
+  });
+});
+
+describe('isHouseProxyEnv / pickHouseProxyEnv', () => {
+  it('detects the managed-proxy env a house deploy exports', () => {
+    expect(
+      isHouseProxyEnv({
+        ANTHROPIC_BASE_URL: 'https://api.codeagent-mobile.com/api/v1/agent-proxy',
+        ANTHROPIC_AUTH_TOKEN: 'jwt',
+      }),
+    ).toBe(true);
+  });
+
+  it("does NOT match a user's own custom ANTHROPIC_BASE_URL", () => {
+    expect(
+      isHouseProxyEnv({
+        ANTHROPIC_BASE_URL: 'https://my-corp-gateway.example.com',
+        ANTHROPIC_AUTH_TOKEN: 'jwt',
+      }),
+    ).toBe(false);
+    expect(isHouseProxyEnv({})).toBe(false);
+    expect(
+      isHouseProxyEnv({ ANTHROPIC_BASE_URL: 'https://x/api/v1/agent-proxy' }),
+    ).toBe(false); // no token → not a house process
+  });
+
+  it('pickHouseProxyEnv keeps only the house keys that are actually set', () => {
+    const picked = pickHouseProxyEnv({
+      ANTHROPIC_BASE_URL: 'https://x/api/v1/agent-proxy',
+      ANTHROPIC_AUTH_TOKEN: 'jwt',
+      ANTHROPIC_MODEL: 'MiniMax-M3',
+      PATH: '/usr/bin',
+      HOME: '/home/u',
+    });
+    expect(picked).toEqual({
+      ANTHROPIC_BASE_URL: 'https://x/api/v1/agent-proxy',
+      ANTHROPIC_AUTH_TOKEN: 'jwt',
+      ANTHROPIC_MODEL: 'MiniMax-M3',
+    });
+  });
+});
+
+describe('clearHouseProxyEnvOverrides', () => {
+  it('maps every house key to undefined so spawn DELETES it from the child env', () => {
+    const overrides = clearHouseProxyEnvOverrides();
+    expect(Object.keys(overrides).sort()).toEqual([...HOUSE_PROXY_ENV_KEYS].sort());
+    for (const v of Object.values(overrides)) expect(v).toBeUndefined();
+  });
+
+  it('a later credential env WINS over the clearing layer (spread order contract)', () => {
+    const merged: Record<string, string | undefined> = {
+      ...clearHouseProxyEnvOverrides(),
+      ANTHROPIC_API_KEY: 'sk-real',
+    };
+    expect(merged.ANTHROPIC_API_KEY).toBe('sk-real');
+    expect(merged.ANTHROPIC_BASE_URL).toBeUndefined();
   });
 });
