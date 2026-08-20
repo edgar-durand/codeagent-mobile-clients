@@ -1,0 +1,87 @@
+# Catch-all Discord reporter for EVERY workflow in this repo.
+#
+# Owner request 2026-08-20: all Actions (tests, e2e, canaries, deploys,
+# terraform, agents) report to #ci_notifications. Triggered by workflow_run
+# so individual workflows need NO edits; adding a NEW workflow = add its
+# `name:` to the list below (workflow_run has no wildcard).
+#
+# Post rules: pull_request-event runs post only on FAILURE (green PRs stay
+# quiet); push/schedule/dispatch runs post always; cancelled/superseded runs
+# stay quiet. Per-job breakdown fetched via the API. Missing webhook secret →
+# warning, never a red job. Runs from the DEFAULT branch — it must land on
+# main (dev → promote) before it fires.
+name: Workflow results → Discord
+
+on:
+  workflow_run:
+    types: [completed]
+    workflows:
+      - ACP chrome-leak canary
+      - Agent implements issue
+      - Agent install integration
+      - Cross-PR review (Claude Code)
+      - VS Code extension E2E
+      # "CI" and "Release" are EXCLUDED - they self-report with richer context
+      # (ci.yml notify-discord: cross-OS matrix; release.yml: verify-published
+      # + npm/tag detail). Listing them here would double-post.
+
+jobs:
+  post:
+    name: Post to #ci_notifications
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: Summarise the completed run and post
+        env:
+          GH_TOKEN: ${{ github.token }}
+          WEBHOOK: ${{ secrets.DISCORD_RELEASE_WEBHOOK }}
+          REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+          RUN_URL: ${{ github.event.workflow_run.html_url }}
+          WF_NAME: ${{ github.event.workflow_run.name }}
+          EVENT: ${{ github.event.workflow_run.event }}
+          BRANCH: ${{ github.event.workflow_run.head_branch }}
+          SHA: ${{ github.event.workflow_run.head_sha }}
+          CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+          TITLE: ${{ github.event.workflow_run.display_title }}
+        run: |
+          set -uo pipefail
+          if [ "$CONCLUSION" = "cancelled" ] || [ "$CONCLUSION" = "skipped" ]; then
+            echo "Run $CONCLUSION — staying quiet."
+            exit 0
+          fi
+          if { [ "$EVENT" = "pull_request" ] || [ "$EVENT" = "pull_request_target" ]; } && [ "$CONCLUSION" = "success" ]; then
+            echo "Green PR run — staying quiet."
+            exit 0
+          fi
+          JOBS=$(gh api --paginate "repos/$REPO/actions/runs/$RUN_ID/jobs?per_page=100" \
+                 --jq '.jobs[] | [.name, (.conclusion // .status)] | @tsv')
+          LINES=""
+          while IFS=$'\t' read -r NAME RES; do
+            [ -z "$NAME" ] && continue
+            case "$RES" in
+              success)   ICON="✅";;
+              skipped)   ICON="⏭️";;
+              cancelled) ICON="⚪";;
+              failure)   ICON="❌";;
+              *)         ICON="❔";;
+            esac
+            LINES="$LINES"$'\n'"$ICON $NAME"
+          done <<< "$JOBS"
+          if [ "$CONCLUSION" = "success" ]; then HEAD="✅ **$WF_NAME passed**"; else HEAD="❌ **$WF_NAME $CONCLUSION**"; fi
+          case "$EVENT" in
+            schedule)          CTX="nightly on $BRANCH";;
+            workflow_dispatch) CTX="manual on $BRANCH";;
+            pull_request*)     CTX="PR — $TITLE";;
+            *)                 CTX="$EVENT on $BRANCH @ ${SHA:0:8}";;
+          esac
+          MSG=$(printf '%s · clients · %s%s\n%s' "$HEAD" "$CTX" "$LINES" "$RUN_URL")
+          echo "$MSG"
+          if [ -z "${WEBHOOK:-}" ]; then
+            echo "::warning::DISCORD_RELEASE_WEBHOOK not set — result not posted."
+            exit 0
+          fi
+          jq -n --arg c "$MSG" '{content:$c, flags:4}' \
+            | curl -sS -o /dev/null -w 'discord %{http_code}\n' -X POST -H 'Content-Type: application/json' -d @- "$WEBHOOK"
