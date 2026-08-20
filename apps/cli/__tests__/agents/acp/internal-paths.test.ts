@@ -78,6 +78,69 @@ describe('internal-paths — CodeAgent internals guard predicates', () => {
         toolCallReferencesInternal({ title: 'Bash', rawInput: { command: 'npm run build' } }),
       ).toBe(false);
     });
+    it('flags via the structured locations[].path field (any kind)', () => {
+      expect(
+        toolCallReferencesInternal(
+          { title: 'Read file', kind: 'read', locations: [{ path: `${HOME}/.codeam/host-agent.json` }] },
+          HOME,
+        ),
+      ).toBe(true);
+      expect(
+        toolCallReferencesInternal(
+          { title: 'Read file', kind: 'read', locations: [{ path: '/workspaces/project/src/app.ts' }] },
+          HOME,
+        ),
+      ).toBe(false);
+    });
+
+    // 2026-08-19 P0 (user yunduanmianliu): the agent's ExitPlanMode PLAN TEXT
+    // merely PRINTED its own cwd (`/home/box/.codeam/house-claude/…`); the
+    // free-text scan matched it and the plan-approval prompt was silently
+    // auto-rejected — the user was never asked, the agent said the USER
+    // rejected it, plan mode wedged, and a source file was destroyed. Prose
+    // kinds (switch_mode / think) must never be free-text scanned.
+    describe('prose-only kinds (switch_mode / think) — never free-text scanned', () => {
+      const planWithInternalMention = {
+        title: 'Ready to code?', // claude-agent-acp's ExitPlanMode title
+        kind: 'switch_mode',
+        rawInput: {
+          plan: 'Fix the bug in WorldBookEntry.swift. Note: the session runs from /home/box/.codeam/house-claude/workspace.',
+        },
+      };
+      it('an ExitPlanMode plan MENTIONING an internal path is NOT flagged', () => {
+        expect(toolCallReferencesInternal(planWithInternalMention, HOME)).toBe(false);
+      });
+      it('a think block mentioning ~/.codeam is NOT flagged', () => {
+        expect(
+          toolCallReferencesInternal(
+            { title: 'Thinking', kind: 'think', rawInput: { thought: 'config lives in ~/.codeam' } },
+            HOME,
+          ),
+        ).toBe(false);
+      });
+      it('a prose-kind call DECLARING an internal file location is still flagged', () => {
+        expect(
+          toolCallReferencesInternal(
+            { ...planWithInternalMention, locations: [{ path: `${HOME}/.codeam/host-agent.json` }] },
+            HOME,
+          ),
+        ).toBe(true);
+      });
+      it('real file-access kinds still get the free-text scan', () => {
+        expect(
+          toolCallReferencesInternal(
+            { title: 'Read', kind: 'read', rawInput: { file_path: `${HOME}/.codeam/host-agent.json` } },
+            HOME,
+          ),
+        ).toBe(true);
+        expect(
+          toolCallReferencesInternal(
+            { title: 'Bash', kind: 'execute', rawInput: { command: 'cat ~/.codeam/host-agent.json' } },
+            HOME,
+          ),
+        ).toBe(true);
+      });
+    });
   });
 
   // The REAL decision the runner's onRequestPermission uses (verbatim).
@@ -90,7 +153,7 @@ describe('internal-paths — CodeAgent internals guard predicates', () => {
         internalPathPermissionOutcome({ toolCall: cleanCall, options: [{ optionId: 'a', kind: 'allow_always' }] }),
       ).toBeNull();
     });
-    it('DENIES an internal-path call by selecting the broadest reject option', () => {
+    it('DENIES an internal-path call preferring reject_ONCE (a reject_always would poison the tool for the whole session — the 2026-08-19 plan-mode wedge)', () => {
       const out = internalPathPermissionOutcome({
         toolCall: internalCall,
         options: [
@@ -99,17 +162,33 @@ describe('internal-paths — CodeAgent internals guard predicates', () => {
           { optionId: 'r2', kind: 'reject_always' },
         ],
       });
-      expect(out).toEqual({ outcome: { outcome: 'selected', optionId: 'r2' } });
+      expect(out).toEqual({ outcome: { outcome: 'selected', optionId: 'r1' } });
     });
-    it('falls back to reject_once when reject_always is absent', () => {
+    it('falls back to reject_always when reject_once is absent', () => {
       const out = internalPathPermissionOutcome({
         toolCall: internalCall,
         options: [
           { optionId: 'a', kind: 'allow_once' },
-          { optionId: 'r1', kind: 'reject_once' },
+          { optionId: 'r2', kind: 'reject_always' },
         ],
       });
-      expect(out).toEqual({ outcome: { outcome: 'selected', optionId: 'r1' } });
+      expect(out).toEqual({ outcome: { outcome: 'selected', optionId: 'r2' } });
+    });
+    it('returns null for an ExitPlanMode approval whose plan text mentions an internal path (must surface to the user)', () => {
+      expect(
+        internalPathPermissionOutcome({
+          toolCall: {
+            title: 'Ready to code?',
+            kind: 'switch_mode',
+            rawInput: { plan: 'The box cwd is /home/box/.codeam/house-claude/ws — now edit src/app.ts' },
+          },
+          options: [
+            { optionId: 'auto', kind: 'allow_always' },
+            { optionId: 'default', kind: 'allow_once' },
+            { optionId: 'plan', kind: 'reject_once' },
+          ],
+        }),
+      ).toBeNull();
     });
     it('CANCELS the tool when the agent offers no reject option', () => {
       const out = internalPathPermissionOutcome({

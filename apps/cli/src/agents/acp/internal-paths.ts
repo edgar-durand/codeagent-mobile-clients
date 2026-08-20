@@ -39,6 +39,25 @@ import * as os from 'node:os';
 const INTERNAL_TOKENS = ['.codeam', 'house-claude'];
 
 /**
+ * ACP ToolKinds whose `rawInput`/`title` carry free-form PROSE ABOUT the work —
+ * a plan awaiting approval (`switch_mode`, e.g. Claude's ExitPlanMode with
+ * `rawInput.plan` = the whole plan text) or a thought (`think`) — not a path or
+ * command the tool will touch. Their text must NEVER be scanned for internal
+ * tokens: on 2026-08-19 a plan that merely PRINTED the agent's own cwd
+ * (`/home/box/.codeam/house-claude/…`) made the guard silently auto-reject the
+ * plan-approval prompt, the agent told the user THE USER rejected it, plan mode
+ * wedged for the rest of the session, and a source file was destroyed while the
+ * agent probed the broken state. Real file access declared by such a call is
+ * still caught via the structured `locations[].path` field.
+ */
+const PROSE_ONLY_TOOL_KINDS = new Set(['think', 'switch_mode']);
+
+/** True when the tool call's kind marks its input as prose (see above). */
+export function isProseOnlyToolKind(kind: string | null | undefined): boolean {
+  return kind != null && PROSE_ONLY_TOOL_KINDS.has(kind);
+}
+
+/**
  * The per-deploy WORKSPACE lives at `~/.codeam/self-hosted/<deployId>/` — that
  * subtree is the USER's cloned project (a warm codespace / self-hosted box
  * clones repos there), NOT a CodeAgent internal. Its path literally contains
@@ -82,13 +101,27 @@ export function pathIsInternal(p: string | null | undefined, homeDir: string = o
 
 /**
  * Inspect an ACP permission request's tool call for a reference to an internal
- * path. Serializes `rawInput` (holds the bash command / file path / glob) plus
- * the human `title` and matches the internal tokens.
+ * path. Checks the structured `locations[].path` field first (real paths, any
+ * kind), then — ONLY for tool kinds that actually operate on paths/commands
+ * (read/edit/delete/move/search/execute/fetch/other) — serializes `rawInput`
+ * (the bash command / file path / glob) plus the human `title` and matches the
+ * internal tokens. Prose-only kinds ({@link isProseOnlyToolKind}) are exempt
+ * from the free-text scan: an incidental internal-path MENTION inside plan text
+ * is not a file access (the 2026-08-19 ExitPlanMode silent-rejection P0).
  */
-export function toolCallReferencesInternal(call: {
-  title?: string | null;
-  rawInput?: unknown;
-}): boolean {
+export function toolCallReferencesInternal(
+  call: {
+    title?: string | null;
+    kind?: string | null;
+    rawInput?: unknown;
+    locations?: ReadonlyArray<{ path: string }> | null;
+  },
+  homeDir?: string,
+): boolean {
+  // Structured path field — authoritative for EVERY kind, prose ones included.
+  if (call.locations?.some((l) => pathIsInternal(l.path, homeDir))) return true;
+  // Free-text scan only for kinds whose input IS a path/command.
+  if (isProseOnlyToolKind(call.kind)) return false;
   if (textReferencesInternal(call.title)) return true;
   if (call.rawInput != null) {
     try {
@@ -108,16 +141,27 @@ export function toolCallReferencesInternal(call: {
  * then proceeds to auto-approve / interactive). Pure + exported so the guard's
  * decision is tested exactly as the handler runs it.
  */
-export function internalPathPermissionOutcome(request: {
-  toolCall: { title?: string | null; rawInput?: unknown };
-  options: ReadonlyArray<{ optionId: string; kind: string }>;
-}):
+export function internalPathPermissionOutcome(
+  request: {
+    toolCall: {
+      title?: string | null;
+      kind?: string | null;
+      rawInput?: unknown;
+      locations?: ReadonlyArray<{ path: string }> | null;
+    };
+    options: ReadonlyArray<{ optionId: string; kind: string }>;
+  },
+  homeDir?: string,
+):
   | { outcome: { outcome: 'selected'; optionId: string } | { outcome: 'cancelled' } }
   | null {
-  if (!toolCallReferencesInternal(request.toolCall)) return null;
+  if (!toolCallReferencesInternal(request.toolCall, homeDir)) return null;
+  // Prefer reject_ONCE: the guard re-evaluates every call anyway, and a
+  // `reject_always` permanently poisons the tool for the whole session (the
+  // 2026-08-19 plan-mode wedge). One blocked call must never disable a tool.
   const reject =
-    request.options.find((o) => o.kind === 'reject_always') ??
-    request.options.find((o) => o.kind === 'reject_once');
+    request.options.find((o) => o.kind === 'reject_once') ??
+    request.options.find((o) => o.kind === 'reject_always');
   if (reject) return { outcome: { outcome: 'selected', optionId: reject.optionId } };
   return { outcome: { outcome: 'cancelled' } };
 }

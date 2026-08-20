@@ -76,9 +76,8 @@ import {
 } from './handoff-protocol';
 import { maybeSendOnboardingWelcome, resolveRepoName } from './onboarding';
 import { registerTerminalHandlers, closeAllTerminals } from '../../services/terminal-ops.service';
-import { mapSessionUpdate, mapPermissionRequest } from './mappers';
-import { internalPathPermissionOutcome } from './internal-paths';
-import { guardrailDecision } from './guardrails';
+import { mapSessionUpdate } from './mappers';
+import { createOnRequestPermission } from './permission-gate';
 import { getGuardrailPolicy } from './guardrail-config';
 import { isLocalSession } from '../../baton/gate';
 import { extractSelectPrompt } from './selectPromptExtractor';
@@ -797,26 +796,10 @@ export interface AcpRunnerOptions {
  *  never blocks past the point where mobile could still answer. */
 const PERMISSION_TIMEOUT_MS = 5 * 60 * 1000;
 
-/** One ACP permission option (subset of the SDK's PermissionOption). */
-interface AcpPermissionOption {
-  optionId: string;
-  kind: string;
-}
-
-/**
- * AUTO-mode option picker: choose the broadest "allow" grant (allow_always,
- * else allow_once) from an ACP permission request's options, or null when the
- * agent offers no allow option (then the caller falls back to interactive).
- * Pure + exported so the auto-approve decision is unit-tested without spinning
- * up a full ACP session.
- */
-export function pickAllowOption<T extends AcpPermissionOption>(options: readonly T[]): T | null {
-  return (
-    options.find((o) => o.kind === 'allow_always') ??
-    options.find((o) => o.kind === 'allow_once') ??
-    null
-  );
-}
+// The AUTO-mode option picker moved into the extracted permission gate
+// (./permission-gate.ts) with the rest of the `session/request_permission`
+// decision path; re-exported here to keep the existing import surface.
+export { pickAllowOption } from './permission-gate';
 
 /**
  * Accumulator for the conversation history mobile expects when the
@@ -1258,66 +1241,19 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
     // Same guard the baton uses; the happy path never calls loadSession.
     beginLoadReplay: () => streaming.beginLoadReplay(),
     endLoadReplay: () => streaming.endLoadReplay(),
-    onRequestPermission: async (request) => {
-      // CodeAgent platform-internals guard (MANAGED deploys only). Deny a tool
-      // call (bash cat/ls, write, edit) that references an internal path BEFORE
-      // auto-approve would allow it. Agent-agnostic — every ACP agent asks the
-      // client here — so this covers claude/codex/gemini/cursor/opencode without
-      // any Claude-specific settings. Not applied on a local session (there
-      // ~/.codeam is the user's own config). See ./internal-paths.ts.
-      let guardrailConfirm = false;
-      if (!isLocalSession()) {
-        const denied = internalPathPermissionOutcome(request);
-        if (denied) {
-          log.warn(
-            'acpRunner',
-            'internal-path guard — denying tool call referencing a CodeAgent platform internal',
-          );
-          return denied;
-        }
-        // Native ACP guardrails (MANAGED only): classify the tool call against
-        // the session policy. `deny` blocks it here; `confirm` skips the AUTO
-        // auto-approve below and routes to the interactive approve/deny prompt.
-        const g = guardrailDecision(request, getGuardrailPolicy());
-        if (g?.kind === 'deny') {
-          log.warn('acpRunner', `guardrail [${g.category}] — denying tool call`);
-          return g.outcome;
-        }
-        if (g?.kind === 'confirm') {
-          guardrailConfirm = true;
-          log.info('acpRunner', `guardrail [${g.category}] — requiring confirmation`);
-        }
-      }
-      // AUTO mode (headless / codespace): no human at the phone to answer, so
-      // auto-pick an "allow" option instead of stalling the turn forever. Pick
-      // the broadest grant available (allow_always > allow_once). If the agent
-      // somehow offers no allow option, fall through to the interactive flow.
-      // A guardrail `confirm` overrides AUTO — the user must tap.
-      if (opts.autoApprovePermissions && !guardrailConfirm) {
-        const allow = pickAllowOption(request.options);
-        if (allow) {
-          log.info(
-            'acpRunner',
-            `AUTO mode — auto-approving permission (${allow.kind}) optionId=${allow.optionId}`,
-          );
-          return { outcome: { outcome: 'selected', optionId: allow.optionId } };
-        }
-        log.warn('acpRunner', 'AUTO mode — no allow option offered; falling back to interactive');
-      }
-      const { event, optionIdByLabel } = mapPermissionRequest(request);
-      await publisher.publishAwaitingAnswer(event);
-      // Event-driven: register a Promise resolver in streaming
-      // state. When mobile responds, the backend pushes a
-      // `select_option` command via the CLI's existing SSE relay
-      // (`/api/commands/pending/stream`); the `handleCommand` switch
-      // routes it back here through `streaming.resolveSelection()`.
-      // No polling.
-      return streaming.registerPermission({
-        questionId: event.questionId,
-        labels: event.options ?? [],
-        optionIdByLabel,
-      });
-    },
+    // The full `session/request_permission` decision path (internal-path guard
+    // → guardrails → AUTO auto-approve → interactive prompt) lives in
+    // ./permission-gate.ts so it is unit-tested exactly as it runs here.
+    // HARD RULE enforced there: every auto-REJECT publishes a visible chat
+    // line — a guard must never silently answer for the user (the 2026-08-19
+    // ExitPlanMode silent-rejection P0).
+    onRequestPermission: createOnRequestPermission({
+      autoApprovePermissions: opts.autoApprovePermissions === true,
+      isLocal: isLocalSession,
+      getPolicy: getGuardrailPolicy,
+      publisher,
+      registerPermission: (args) => streaming.registerPermission(args),
+    }),
     onStderr: (line) => {
       // AcpClient.start() already mirrors stderr to `log.info('acpAdapter')`
       // for CODEAM_DEBUG smoke tests. We ALSO keep a small ring of recent
