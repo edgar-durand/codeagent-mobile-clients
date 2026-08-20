@@ -599,3 +599,66 @@ export async function reportDeployProgress(
     /* best-effort telemetry — swallow all failures */
   }
 }
+
+/** What a session-chat error bubble needs to authenticate + address itself:
+ *  the persisted session's pairing identity (see `SavedSession`). */
+export type SessionBubbleAuth = {
+  sessionId: string;
+  pluginId: string;
+  pluginAuthToken: string;
+};
+
+/**
+ * Post a VISIBLE error bubble into a session's chat via the legacy
+ * chat-render pipeline (`POST /api/commands/output`, plugin-auth) — the same
+ * feed the ACP runner's `failureBubble` uses, so mobile renders it as a
+ * normal completed agent turn. Two chunks: `new_turn` (opens the turn) then
+ * `text` with `done: true` (closes it), mirroring `AcpPublisher.publishOutput`
+ * shapes.
+ *
+ * Exists for the SUPERVISOR-side failures no session child is alive to
+ * report: when the post-restart auto-resume exhausts its retries
+ * (`resumePersistedSession`), the relay/backend are reachable but the agent
+ * child is dead — without this the HOST heartbeat stayed green while the
+ * SESSION sat silently stale for hours (fleet-1, 2026-08-20).
+ *
+ * Best-effort with a short timeout, same contract as
+ * {@link reportDeployProgress}: every failure is swallowed — an unreachable
+ * backend must never take down the supervisor.
+ */
+export async function postSessionErrorBubble(
+  auth: SessionBubbleAuth,
+  message: string,
+): Promise<void> {
+  const chunks: Record<string, unknown>[] = [
+    { type: 'new_turn', done: false },
+    { type: 'text', content: message, done: true },
+  ];
+  for (const chunk of chunks) {
+    try {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), PROGRESS_TIMEOUT_MS);
+      timer.unref?.();
+      try {
+        await fetch(`${apiBase()}/api/commands/output`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Plugin-Auth-Token': auth.pluginAuthToken,
+            ...vercelBypassHeader(),
+          },
+          body: JSON.stringify({
+            sessionId: auth.sessionId,
+            pluginId: auth.pluginId,
+            ...chunk,
+          }),
+          signal: controller.signal,
+        });
+      } finally {
+        clearTimeout(timer);
+      }
+    } catch {
+      /* best-effort — swallow; the file log already carries the loud error */
+    }
+  }
+}

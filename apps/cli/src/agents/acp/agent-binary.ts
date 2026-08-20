@@ -256,14 +256,48 @@ export interface AugmentUserLocalBinPathsDeps {
   pathApi?: path.PlatformPath;
 }
 
-export function augmentUserLocalBinPaths(deps: AugmentUserLocalBinPathsDeps = {}): void {
+/**
+ * The CANONICAL list of directories where a supported agent's installer is
+ * known to land its binary. Single source for BOTH sides of the stale-PATH
+ * class:
+ *   - the probe side ({@link augmentUserLocalBinPaths}, called by the ACP
+ *     adapters' `waitForBinary`), and
+ *   - the spawn side (`knownAgentBinaryDirs` in `client.ts`, folded into
+ *     every `AcpClient.start` spawn via `expandPathForAgentBinaries`).
+ *
+ * WHY the vendor dirs are here (fleet-1, 2026-08-20 — the kimi resume
+ * incident): the supervisor's auto-resume after a self-update restart spawns
+ * a bare `codeam` under systemd, whose PATH has only `~/.local/bin` + system
+ * dirs. The resume path never runs the adapter's `waitForBinary` (that's the
+ * codespace spawn gate), so `augmentKimiPath()` never fired and the ACP spawn
+ * died `ENOENT — 'kimi' was not found on PATH` even though kimi was installed
+ * at `~/.kimi-code/bin/kimi`. Listing every agent's KNOWN install dir here —
+ * where the actual spawn reads it — fixes the whole class instead of the one
+ * probe path that happened to be exercised. A dir that doesn't exist is a
+ * harmless PATH entry (and the spawn side filters to existing dirs anyway).
+ *
+ * Audit of the supported agents' installers (keep in sync when adding one):
+ *   - claude   → SDK-bundled native binary, resolved by absolute path (n/a).
+ *   - codex    → `npm i -g @openai/codex` → npm global-prefix bin (below).
+ *   - gemini   → `npm i -g @google/gemini-cli` → npm global-prefix bin.
+ *   - cursor   → `~/.local/bin/cursor-agent` (posix) / `%LOCALAPPDATA%`
+ *                (win32, handled by `resolveCursorAgentBinary`).
+ *   - kimi     → `$KIMI_CODE_HOME/bin`, default `~/.kimi-code/bin`
+ *                (mirrors `kimi/installer.ts` `kimiBinDir`).
+ *   - opencode → `$OPENCODE_HOME/bin`, default `~/.opencode/bin`
+ *                (mirrors `opencode/installer.ts` `opencodeBinDir`).
+ *   - aider    → pip `--user` → `~/.local/bin`.
+ *   - coderabbit → vendor script → `~/.local/bin`.
+ */
+export function agentInstallBinDirs(deps: AugmentUserLocalBinPathsDeps = {}): string[] {
   const env = deps.env ?? process.env;
   const home = deps.homedir ?? os.homedir();
   const p = deps.pathApi ?? path;
-  const candidates = [
+  return [
     // XDG-style per-user bin — npm's default global-prefix bin dir on most
     // Linux setups (`npm config set prefix ~/.local` or an nvm-less
-    // per-user npm), and where curl-based agent installers commonly land.
+    // per-user npm), and where curl-based agent installers commonly land
+    // (cursor-agent, coderabbit, pip --user's aider).
     p.join(home, '.local', 'bin'),
     // Common explicit npm global-prefix conventions seen in the wild
     // (`npm config set prefix ~/.npm-global`, and Debian/Fedora's
@@ -271,7 +305,16 @@ export function augmentUserLocalBinPaths(deps: AugmentUserLocalBinPathsDeps = {}
     // ~/.local/share/npm`).
     p.join(home, '.npm-global', 'bin'),
     p.join(home, '.local', 'share', 'npm', 'bin'),
+    // Vendor curl-installer targets that are NOT on any default PATH.
+    p.join(env.KIMI_CODE_HOME || p.join(home, '.kimi-code'), 'bin'),
+    p.join(env.OPENCODE_HOME || p.join(home, '.opencode'), 'bin'),
   ];
+}
+
+export function augmentUserLocalBinPaths(deps: AugmentUserLocalBinPathsDeps = {}): void {
+  const env = deps.env ?? process.env;
+  const p = deps.pathApi ?? path;
+  const candidates = agentInstallBinDirs(deps);
   const parts = (env.PATH ?? '').split(p.delimiter).filter((s) => s.length > 0);
   const existing = new Set(parts);
   const additions = candidates.filter((dir) => !existing.has(dir));

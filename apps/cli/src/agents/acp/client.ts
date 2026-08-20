@@ -50,7 +50,7 @@ import {
 } from '@agentclientprotocol/sdk';
 import { tryGetContextWindow, type AgentModel, type AgentMode } from '@codeam/shared';
 import type { AdapterSpec } from './adapters';
-import { ADAPTER_MODULE_LOAD_ERROR_RE } from './agent-binary';
+import { ADAPTER_MODULE_LOAD_ERROR_RE, agentInstallBinDirs } from './agent-binary';
 import type { PromptBlock } from './buildAcpPromptBlocks';
 import { createIdleTimeout, type IdleTimeout } from './idleTimeout';
 import { pathIsInternal, INTERNAL_BLOCK_REASON } from './internal-paths';
@@ -1685,6 +1685,16 @@ function knownAgentBinaryDirs(): string[] {
   out.push('/usr/bin');
   out.push(path.join(home, '.local/bin'));
   out.push(path.join(home, 'bin'));
+
+  // Every supported agent's KNOWN installer target dir — the canonical list
+  // shared with the probe-side `augmentUserLocalBinPaths` (agent-binary.ts).
+  // Load-bearing for spawns that never ran a `waitForBinary` probe: the
+  // supervisor's post-restart auto-resume spawned `kimi acp` with a bare
+  // systemd PATH and died ENOENT even though kimi was installed at
+  // `~/.kimi-code/bin` (fleet-1, 2026-08-20). Folding the vendor dirs in HERE
+  // — the one place every ACP adapter spawn goes through — fixes the class
+  // for all agents, not just whichever probe path happened to run first.
+  out.push(...agentInstallBinDirs());
 
   // Windows: agent CLIs install under the user profile, and their
   // installers update the *User* PATH (setx) — which a long-running

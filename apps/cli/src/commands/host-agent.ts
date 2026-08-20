@@ -62,7 +62,7 @@ function resolveInputPricePerMillion(agentId: string): number {
 import { log } from '../services/logger';
 import { runAgentInstallScript } from './host/agent-install';
 import { killQuiet } from '../lib/quiet';
-import { getActiveSession } from '../config';
+import { getActiveSession, type SavedSession } from '../config';
 import { installRelayCrashGuards } from '../lib/process-guards';
 import {
   deleteHostIdentity,
@@ -70,6 +70,7 @@ import {
   isTerminalEnrollError,
   loadHostIdentity,
   MetricsCollector,
+  postSessionErrorBubble,
   redeemEnrollToken,
   reportDeployProgress,
   reportProgress,
@@ -81,6 +82,7 @@ import {
   type HostMetrics,
   type HostSession,
   type SealedHostIdentity,
+  type SessionBubbleAuth,
 } from './host/host-client';
 import { isAbsolutePathTarget, prepareWorkspace, selfHostedWorkspaceRoot } from './host/workspace';
 import { provisionAgentCredentials } from './host/agent-provisioning';
@@ -160,6 +162,37 @@ export { runSelfUpdate, type SelfUpdateResult, type SelfUpdater } from './host/s
 
 /** Liveness heartbeat cadence. State liveness only — NOT command polling. */
 const HEARTBEAT_INTERVAL_MS = 20_000;
+
+/**
+ * Bounded backoff for re-spawning a resumed session child that exits non-zero
+ * (retry N waits RESUME_RETRY_BACKOFF_MS[N-1]): 5 total spawn attempts over
+ * ~3.75 min. A transient failure (install race, half-written binary, network
+ * blip) heals inside this window; a permanent one (agent binary genuinely
+ * gone) exhausts it and falls through to the visible-error + slow re-probe
+ * path below. Exported for the fake-clock tests.
+ *
+ * WHY (fleet-1, 2026-08-20): the v2.65.13 self-update restart resumed the
+ * kimi session, the child died `ENOENT — 'kimi' was not found on PATH`, and
+ * the supervisor gave up PERMANENTLY and SILENTLY — the HOST heartbeat stayed
+ * online while the SESSION sat dead for 3+ hours with nothing in the chat.
+ */
+export const RESUME_RETRY_BACKOFF_MS = [15_000, 30_000, 60_000, 120_000] as const;
+
+/**
+ * After the bounded retries exhaust, keep a SLOW periodic re-probe riding the
+ * existing heartbeat tick (no new timers) so an externally-fixed cause (e.g.
+ * the missing binary reinstalled / symlinked) heals the session WITHOUT
+ * another manual restart. Exported for the fake-clock tests.
+ */
+export const RESUME_REPROBE_INTERVAL_MS = 5 * 60_000;
+
+/**
+ * A resumed child must stay alive this long before the retry state resets.
+ * Without the age gate, a child that survives ONE heartbeat tick (20 s) would
+ * refill the retry budget — a 25 s crash-loop would then retry silently
+ * forever and never reach the visible-error path. Exported for the tests.
+ */
+export const RESUME_HEALTHY_AFTER_MS = 10 * 60_000;
 
 /**
  * Context the Headroom reporter needs to authenticate its savings POST.
@@ -944,6 +977,13 @@ export interface HostAgentDeps {
   spawnChild?: ChildSpawner;
   /** Injectable resume spawner (bare `codeam`) so tests don't fork. */
   resumeSpawner?: ChildSpawner;
+  /**
+   * Posts the visible "agent failed to restart" bubble into the session's
+   * chat once the resume retries exhaust. Defaults to
+   * {@link postSessionErrorBubble}; injectable so tests assert the message
+   * without HTTP.
+   */
+  postResumeFailure?: (auth: SessionBubbleAuth, message: string) => Promise<void>;
   resolveAgentAuth?: AgentAuthResolver;
   /** Live-metrics collector; defaults to a real one. Injectable for tests. */
   metricsCollector?: HostMetricsCollector;
@@ -1058,6 +1098,23 @@ export class HostAgentSupervisor {
   private readonly docker: DockerRunner;
   /** Guards against firing the self-heal more than once. */
   private healing = false;
+  /** Visible-error poster for the exhausted-resume path (injectable). */
+  private readonly postResumeFailure: (
+    auth: SessionBubbleAuth,
+    message: string,
+  ) => Promise<void>;
+  /** How many resume re-spawns have failed since the last healthy child. */
+  private resumeRetryAttempts = 0;
+  /** Pending bounded-backoff resume retry (cleared on stop()). */
+  private resumeRetryTimer: NodeJS.Timeout | null = null;
+  /** Set once the bounded retries exhaust → heartbeat-ridden slow re-probe. */
+  private resumeExhausted = false;
+  /** Guards the one-shot visible error bubble per failure episode. */
+  private resumeFailurePosted = false;
+  /** Last slow re-probe attempt (epoch ms) — throttles the heartbeat rider. */
+  private lastResumeReprobeAt = 0;
+  /** True after stop() — no resume retries may be scheduled past teardown. */
+  private stopped = false;
 
   constructor(
     private readonly identity: SealedHostIdentity,
@@ -1077,6 +1134,7 @@ export class HostAgentSupervisor {
     this.selfUpdate = deps.selfUpdate ?? runSelfUpdate;
     this.onUpdated = deps.onUpdated ?? defaultOnUpdated;
     this.docker = deps.docker ?? defaultDockerRunner;
+    this.postResumeFailure = deps.postResumeFailure ?? postSessionErrorBubble;
   }
 
   /**
@@ -1168,6 +1226,11 @@ export class HostAgentSupervisor {
 
   /** Stop the control channel + heartbeats + kill every child. */
   stop(): void {
+    this.stopped = true;
+    if (this.resumeRetryTimer) {
+      clearTimeout(this.resumeRetryTimer);
+      this.resumeRetryTimer = null;
+    }
     if (this.heartbeatTimer) {
       clearInterval(this.heartbeatTimer);
       this.heartbeatTimer = null;
@@ -1184,6 +1247,12 @@ export class HostAgentSupervisor {
   }
 
   private async beat(): Promise<void> {
+    // Resume-recovery rider on the EXISTING heartbeat tick (no new timers,
+    // and synchronous scheduling only — the beat must stay punctual): resets
+    // the resume-retry state once a session child is alive again, and — after
+    // the bounded retries exhausted — re-probes the resume on a slow throttle
+    // so an externally-fixed cause heals without a manual restart.
+    this.resumeRecoveryTick();
     try {
       // Best-effort live metrics. If collection throws, send the heartbeat
       // WITHOUT metrics rather than failing the beat (back-compat: the
@@ -2182,15 +2251,13 @@ export class HostAgentSupervisor {
       proc.once('exit', (code) => {
         if (this.children.get(session.id)?.proc === proc) this.children.delete(session.id);
         if (typeof code === 'number' && code !== 0) {
-          log.warn(
-            'host-agent',
-            `resumed session ${session.id.slice(0, 8)} exited (${code}): ${tail.trim().slice(-300)}`,
-          );
+          this.onResumeChildExit(session, code, tail.trim().slice(-300));
         }
       });
       log.info(
         'host-agent',
-        `resumed session ${session.id.slice(0, 8)} pluginId=${session.pluginId.slice(0, 12)} (ACP)`,
+        `resumed session ${session.id.slice(0, 8)} pluginId=${session.pluginId.slice(0, 12)} (ACP)` +
+          (this.resumeRetryAttempts > 0 ? ` [retry ${this.resumeRetryAttempts}]` : ''),
       );
     } catch (err) {
       log.warn(
@@ -2198,6 +2265,108 @@ export class HostAgentSupervisor {
         `resume persisted session failed (best-effort): ${err instanceof Error ? err.message : String(err)}`,
       );
     }
+  }
+
+  /**
+   * A resumed session child died with a non-zero exit. Before 2026-08-20 this
+   * was ONE warn log and permanent, silent surrender: the v2.65.13 self-update
+   * restarted the fleet-1 unit, the resumed kimi child died `ENOENT — 'kimi'
+   * was not found on PATH`, and the session sat dead for 3+ hours while the
+   * HOST heartbeat stayed green (nothing retried, nothing surfaced anywhere).
+   * Now: bounded backoff retries ({@link RESUME_RETRY_BACKOFF_MS}); when they
+   * exhaust, post an HONEST error bubble into the session's chat (the relay/
+   * backend are up — only the agent child is dead) and hand off to the
+   * heartbeat-ridden slow re-probe ({@link resumeRecoveryTick}) so an
+   * externally-fixed cause heals without a manual restart.
+   */
+  private onResumeChildExit(session: SavedSession, code: number, detail: string): void {
+    if (this.stopped) return;
+    const reason = detail ? `exit ${code}: ${detail}` : `exit ${code}`;
+    if (this.resumeRetryAttempts < RESUME_RETRY_BACKOFF_MS.length) {
+      const delay = RESUME_RETRY_BACKOFF_MS[this.resumeRetryAttempts];
+      this.resumeRetryAttempts += 1;
+      log.warn(
+        'host-agent',
+        `resumed session ${session.id.slice(0, 8)} died (${reason}) — ` +
+          `retry ${this.resumeRetryAttempts}/${RESUME_RETRY_BACKOFF_MS.length} in ${Math.round(delay / 1000)}s`,
+      );
+      this.resumeRetryTimer = setTimeout(() => {
+        this.resumeRetryTimer = null;
+        this.resumePersistedSession();
+      }, delay);
+      this.resumeRetryTimer.unref?.();
+      return;
+    }
+    // Retries exhausted — fail LOUDLY and visibly, then keep the slow
+    // heartbeat re-probe alive (resumeRecoveryTick) instead of giving up.
+    this.resumeExhausted = true;
+    this.lastResumeReprobeAt = Date.now();
+    log.error(
+      'host-agent',
+      `resumed session ${session.id.slice(0, 8)} FAILED permanently after ` +
+        `${RESUME_RETRY_BACKOFF_MS.length + 1} attempts (${reason}) — ` +
+        `posting visible error, re-probing every ${Math.round(RESUME_REPROBE_INTERVAL_MS / 60_000)} min`,
+    );
+    if (!this.resumeFailurePosted) {
+      this.resumeFailurePosted = true;
+      if (session.pluginId && session.pluginAuthToken) {
+        void this.postResumeFailure(
+          {
+            sessionId: session.id,
+            pluginId: session.pluginId,
+            pluginAuthToken: session.pluginAuthToken,
+          },
+          `The agent failed to restart after a CLI update/restart (${reason}). ` +
+            `I tried ${RESUME_RETRY_BACKOFF_MS.length + 1} times without success. ` +
+            `The host stays online and keeps retrying about every ` +
+            `${Math.round(RESUME_REPROBE_INTERVAL_MS / 60_000)} minutes — once the cause is fixed ` +
+            `(for example the agent binary is reinstalled), the session reconnects automatically. ` +
+            `You can also redeploy this server from My Servers.`,
+        ).catch(() => undefined);
+      } else {
+        log.warn(
+          'host-agent',
+          'resume failure bubble skipped — persisted session has no pluginAuthToken',
+        );
+      }
+    }
+  }
+
+  /**
+   * Heartbeat rider for resume recovery (synchronous scheduling only — the
+   * beat must stay punctual, and this adds NO new timers):
+   *   - a live session child ⇒ the failure episode (if any) is over: reset
+   *     the retry counter + flags so a FUTURE restart gets fresh retries and
+   *     a fresh (single) error bubble.
+   *   - retries exhausted + no child ⇒ re-probe the resume, throttled to
+   *     {@link RESUME_REPROBE_INTERVAL_MS}, so a fixed PATH / reinstalled
+   *     binary heals the session WITHOUT another manual restart. A re-probe
+   *     that fails again stays in this state (the bubble is not re-posted).
+   */
+  private resumeRecoveryTick(): void {
+    if (this.children.size > 0) {
+      // Reset only once a child has PROVEN healthy (age gate) — a child that
+      // merely survived one heartbeat tick must not refill the retry budget,
+      // or a slow crash-loop would retry silently forever and never reach
+      // the visible-error path.
+      const now = Date.now();
+      const hasHealthyChild = [...this.children.values()].some(
+        (c) => now - c.startedAt >= RESUME_HEALTHY_AFTER_MS,
+      );
+      if (hasHealthyChild && (this.resumeRetryAttempts > 0 || this.resumeExhausted)) {
+        log.info('host-agent', 'resume recovered — session child healthy, retry state reset');
+        this.resumeRetryAttempts = 0;
+        this.resumeExhausted = false;
+        this.resumeFailurePosted = false;
+      }
+      return;
+    }
+    if (!this.resumeExhausted || this.resumeRetryTimer) return;
+    const now = Date.now();
+    if (now - this.lastResumeReprobeAt < RESUME_REPROBE_INTERVAL_MS) return;
+    this.lastResumeReprobeAt = now;
+    log.info('host-agent', 'resume re-probe (post-exhaustion heartbeat rider)');
+    this.resumePersistedSession();
   }
 
   /**
