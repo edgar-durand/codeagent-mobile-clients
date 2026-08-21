@@ -3814,6 +3814,15 @@ describe('HostAgentSupervisor — fleet control plane', () => {
     };
   }
 
+  function fleetPruneCmd(over: Partial<Record<string, unknown>> = {}): RemoteCommand {
+    return {
+      id: 'cmd-fleet-prune',
+      sessionId: 'sh-plugin-1',
+      type: 'fleet_prune_host',
+      payload: { images: true, buildCache: true, ...over },
+    };
+  }
+
   function fleetRefCmd(type: string, over: Partial<Record<string, unknown>> = {}): RemoteCommand {
     return {
       id: 'cmd-fleet-2',
@@ -4128,4 +4137,73 @@ describe('HostAgentSupervisor — fleet control plane', () => {
       expect(line).not.toContain(secret);
     }
   });
+
+  // ── Host disk housekeeping (2026-08-21) ─────────────────────────────────
+  // The shared VPS filled to 83% (160 GB of 193) because nothing reclaimed
+  // Docker's residue — `/var/lib/containerd` alone was 138 GB, since every
+  // `docker run --pull=always` of a new `codeam-box:latest` orphans the previous
+  // image. One prune freed 93.8 GB. A full disk takes down every rescued box AND
+  // the co-located 24/7 session.
+  //
+  // These tests exist for the SCOPE, which is the dangerous part: this handler
+  // runs as root on a host holding every rescued user's data.
+  it('fleet_prune_host prunes dangling images and the build cache', async () => {
+    const { docker, calls } = makeDockerMock({ stdout: 'Total reclaimed space: 93.8GB' });
+    const sup = new HostAgentSupervisor(IDENTITY, { docker });
+
+    await sup.handleCommand(fleetPruneCmd());
+
+    expect(calls).toEqual([
+      ['image', 'prune', '-f'],
+      ['builder', 'prune', '-f'],
+    ]);
+  });
+
+  it('NEVER prunes containers or volumes — a stopped fleet container is a sleeping box', async () => {
+    const { docker, calls } = makeDockerMock();
+    const sup = new HostAgentSupervisor(IDENTITY, { docker });
+
+    // Even if the wire tries to widen the scope, the handler must not comply.
+    await sup.handleCommand(
+      fleetPruneCmd({ containers: true, volumes: true, all: true }),
+    );
+
+    const flat = calls.map((c) => c.join(' '));
+    expect(flat).not.toContain('container prune -f');
+    expect(flat).not.toContain('volume prune -f');
+    expect(flat).not.toContain('system prune -f');
+    // `-a` would delete images no RUNNING container uses, which includes the
+    // image a SLEEPING box needs to be recreated from.
+    for (const c of calls) expect(c).not.toContain('-a');
+    for (const c of calls) expect(c[0]).not.toBe('container');
+    for (const c of calls) expect(c[0]).not.toBe('volume');
+    for (const c of calls) expect(c[0]).not.toBe('system');
+  });
+
+  it('honours the flags — buildCache:false prunes images only', async () => {
+    const { docker, calls } = makeDockerMock();
+    const sup = new HostAgentSupervisor(IDENTITY, { docker });
+    await sup.handleCommand(fleetPruneCmd({ buildCache: false }));
+    expect(calls).toEqual([['image', 'prune', '-f']]);
+  });
+
+  it('a failing prune step does not stop the next one (best-effort housekeeping)', async () => {
+    const { docker, calls } = makeDockerMock({ code: 1, stderr: 'daemon not reachable' });
+    const sup = new HostAgentSupervisor(IDENTITY, { docker });
+    await expect(sup.handleCommand(fleetPruneCmd())).resolves.toBeUndefined();
+    expect(calls).toHaveLength(2);
+  });
+
+  it('ignores a malformed fleet_prune_host instead of running docker', async () => {
+    const { docker, calls } = makeDockerMock();
+    const sup = new HostAgentSupervisor(IDENTITY, { docker });
+    await sup.handleCommand({
+      id: 'cmd-bad',
+      sessionId: 'sh-plugin-1',
+      type: 'fleet_prune_host',
+      payload: { images: 'yes' },
+    } as unknown as RemoteCommand);
+    expect(calls).toEqual([]);
+  });
+
 });
