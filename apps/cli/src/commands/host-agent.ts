@@ -696,6 +696,43 @@ function isMissingContainerError(stderr: string): boolean {
   return /no such container/i.test(stderr);
 }
 
+/**
+ * The `fleet_prune_host` payload (mirrors backend `FleetPruneHostCommand`).
+ *
+ * Host disk housekeeping. Nothing reclaimed Docker's residue on the shared VPS,
+ * so it grew until the provider warned at 83% (160 GB of 193 used;
+ * `/var/lib/containerd` alone 138 GB, because every `docker run --pull=always`
+ * of a new `codeam-box:latest` orphans the previous image). One prune freed
+ * 93.8 GB.
+ *
+ * ⚠️ THE SCOPE IS THE SAFETY PROPERTY. This handler runs as root on a host that
+ * holds every rescued user's data, so it does exactly two things and refuses to
+ * be steered anywhere else:
+ *   - `docker image prune` — DANGLING ONLY, never `-a`. Safe because Docker
+ *     refuses to delete an image any container references, INCLUDING stopped
+ *     ones.
+ *   - `docker builder prune` — pure derived data.
+ * It must NEVER prune containers or volumes, no matter what the wire says:
+ *   - a STOPPED fleet container IS A SLEEPING BOX (the wake path `docker start`s
+ *     it), so `docker container prune` would destroy every sleeping user's box;
+ *   - a box's named volume holds the user's workspace + sealed identity and
+ *     deliberately OUTLIVES its container (the reap sweep removes it explicitly,
+ *     and post-mortem debugging reads it), so `docker volume prune` — which
+ *     removes any volume no container currently uses — would delete exactly the
+ *     data we keep on purpose.
+ * The flags are read but can only ever SUBTRACT from that fixed set.
+ */
+interface FleetPruneHostPayload {
+  images: boolean;
+  buildCache: boolean;
+}
+
+function isFleetPruneHostPayload(v: unknown): v is FleetPruneHostPayload {
+  if (typeof v !== 'object' || v === null) return false;
+  const p = v as Record<string, unknown>;
+  return typeof p.images === 'boolean' && typeof p.buildCache === 'boolean';
+}
+
 /** Same idempotency treatment for `docker volume rm` on reap. */
 function isMissingVolumeError(stderr: string): boolean {
   return /no such volume/i.test(stderr);
@@ -1428,6 +1465,14 @@ export class HostAgentSupervisor {
       await this.fleetDeleteBox(cmd.payload);
       return;
     }
+    if (cmd.type === 'fleet_prune_host') {
+      if (!isFleetPruneHostPayload(cmd.payload)) {
+        log.warn('host-agent', `ignoring malformed fleet_prune_host id=${cmd.id}`);
+        return;
+      }
+      await this.fleetPruneHost(cmd.payload);
+      return;
+    }
     if (cmd.type === 'self_hosted_deploy') {
       if (!isDeployPayload(cmd.payload)) {
         log.warn('host-agent', `ignoring malformed self_hosted_deploy id=${cmd.id}`);
@@ -1688,6 +1733,44 @@ export class HostAgentSupervisor {
   /** `fleet_stop_box` — sleep an idle box (`docker stop`). MUST be
    *  idempotent — the backend's reap sweeps may re-send a stop for a box
    *  the host already stopped/removed; "No such container" is success. */
+  /**
+   * `fleet_prune_host` — reclaim Docker residue. Best-effort and idempotent: a
+   * prune with nothing to collect exits 0 with "Total reclaimed space: 0B".
+   *
+   * ⚠️ Only ever `image prune` (dangling) and `builder prune`. NEVER
+   * `container prune` (a stopped fleet container is a SLEEPING BOX) and NEVER
+   * `volume prune` (a box's volume is the user's workspace and outlives its
+   * container by design). See `FleetPruneHostPayload`.
+   */
+  private async fleetPruneHost(payload: FleetPruneHostPayload): Promise<void> {
+    log.info(
+      'host-agent',
+      `fleet_prune_host images=${payload.images} buildCache=${payload.buildCache}`,
+    );
+    // `-f` only skips the interactive confirmation; it does not widen scope.
+    const steps: Array<{ label: string; args: string[] }> = [];
+    if (payload.images) steps.push({ label: 'image', args: ['image', 'prune', '-f'] });
+    if (payload.buildCache) steps.push({ label: 'builder', args: ['builder', 'prune', '-f'] });
+
+    for (const step of steps) {
+      const res = await this.docker.run(step.args);
+      if (res.code !== 0) {
+        log.warn(
+          'host-agent',
+          `fleet_prune_host ${step.label} failed (code=${res.code}): ${res.stderr.trim().slice(-300)}`,
+        );
+        continue;
+      }
+      // The rail returns no result to the backend, so the freed total is only
+      // ever visible here — worth logging, it is the only record.
+      const reclaimed = /Total reclaimed space:\s*(.+)/i.exec(res.stdout || '');
+      log.info(
+        'host-agent',
+        `fleet_prune_host ${step.label} ok${reclaimed ? ` reclaimed=${reclaimed[1].trim()}` : ''}`,
+      );
+    }
+  }
+
   private async fleetStopBox(payload: FleetBoxRefPayload): Promise<void> {
     log.info('host-agent', `fleet_stop_box id=${payload.boxId} name=${payload.containerName}`);
     const res = await this.docker.run(['stop', payload.containerName]);
