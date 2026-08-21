@@ -4,6 +4,16 @@ All notable changes to `codeam-cli` are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.66.0] — 2026-08-21
+
+### Added
+
+- **cli:** Handle fleet_prune_host — reclaim Docker residue on the fleet host
+
+### Documentation
+
+- **cli:** Document the least-privilege Headroom installer resolution
+
 ## [2.65.17] — 2026-08-21
 
 ### Fixed
