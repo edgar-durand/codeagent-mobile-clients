@@ -23,7 +23,8 @@ import { spawnHeadroomProxy } from '../../services/headroom/proxy-process';
 import {
   defaultHeadroomRunner,
   ensureModernPython,
-  ensurePip,
+  ensurePythonInstaller,
+  type PyInstaller,
   type HeadroomRunner,
 } from './os-packages';
 import { backupAgentHeadroomConfig } from './headroom-config';
@@ -229,10 +230,15 @@ export async function setupHeadroomForSelfHosted(
   // ── Step 0: Ensure pip is available ──────────────────────────────────────
   // Disk preflight lives in the deploy caller (it owns the app-feedback
   // channel) — see the headroom step in prepareAndSpawn.
-  const pipAvailable = await ensurePip(runner);
-  if (!pipAvailable) {
+  const installerResult = await ensurePythonInstaller(runner);
+  if (!installerResult.ok) {
+    // Log the REASON, not just "skipping". Until the on-demand path propagates
+    // it to the app (bead codeagent-2m2z) this line is the only place a human
+    // can find out why Cost-saving failed.
+    log.warn('host-agent', `Headroom: ${installerResult.reason}`);
     return false;
   }
+  const installer: PyInstaller = installerResult.installer;
 
   // ── Step 0b: Resolve a Python ≥3.10 interpreter ─────────────────────────
   // headroom-ai ships abi3 wheels tagged cp310. The macOS default `python3` is
@@ -267,6 +273,22 @@ export async function setupHeadroomForSelfHosted(
     extraArgs: string[],
     timeoutMs: number,
   ): Promise<boolean> => {
+    // uv route — the box has no pip at all, so `<py> -m pip` would fail
+    // instantly. `--python <py>` targets the SAME environment pip would have,
+    // which is why the `headroom` console script still lands on PATH and no
+    // caller below needs a PATH tweak. `--break-system-packages` is passed
+    // unconditionally here (rather than as a retry) because the interpreter we
+    // target is a distro python on every box that needs this route, and uv
+    // refuses an externally-managed environment without it.
+    if (installer.kind === 'uv') {
+      const r = await runner.run(
+        installer.bin,
+        ['pip', 'install', '--quiet', '--python', py, '--break-system-packages', ...extraArgs, ...pkgs],
+        { timeoutMs },
+      );
+      return r.code === 0;
+    }
+
     const base = ['-m', 'pip', 'install', '--quiet', ...extraArgs, ...pkgs];
     const r = await runner.run(py, base, { timeoutMs });
     if (r.code === 0) return true;

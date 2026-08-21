@@ -235,34 +235,89 @@ function escalateCommand(argv: string[]): { cmd: string; args: string[] } {
 }
 
 /**
- * Ensure pip is available. Fast path: if `pip` or `pip3` already resolves on
- * PATH, return true immediately — a box that has pip almost certainly already
- * has python3, ca-certificates, and curl too, so we do NOT run any
- * package-manager install (no `apt-get update` on every healthy deploy).
+ * Which tool installs Python packages on this box.
  *
- * Only when pip is ABSENT do we treat the box as bare and run the full
- * provision via the detected package manager — installing python3 + pip
- * alongside `ca-certificates` (PyPI TLS) and `curl`. Best-effort and bounded:
- * a missing package manager or a failed install returns false. Never throws.
+ * `uv` is a first-class alternative, not a curiosity: it needs neither pip nor
+ * root, and `uv pip install --python <py> --break-system-packages` lands the
+ * console scripts in the SAME place pip would, so nothing downstream has to
+ * change how it resolves `headroom` on PATH.
  */
-export async function ensurePip(runner: HeadroomRunner): Promise<boolean> {
-  // Fast path: pip or pip3 is already on PATH → skip the bare-box provision.
+export type PyInstaller = { kind: 'pip' } | { kind: 'uv'; bin: string };
+
+/** Resolved installer, or a human-readable reason we could not get one. */
+export type PythonInstallerResult =
+  | { ok: true; installer: PyInstaller }
+  | { ok: false; reason: string };
+
+/**
+ * Resolve a way to install Python packages, in order of least privilege.
+ *
+ *   1. `pip` / `pip3` already on PATH → use it. A box with pip almost certainly
+ *      has python3, ca-certificates and curl too, so we run NO package-manager
+ *      install (no `apt-get update` on every healthy deploy).
+ *   2. `uv` on PATH → use it. ROOT-FREE, so it is preferred over the package
+ *      manager even when one exists.
+ *   3. Package manager + (root OR passwordless sudo) → install the minimal
+ *      toolchain (python3 + pip + ca-certificates for PyPI TLS + curl).
+ *   4. Otherwise → a REASON, not a bare false.
+ *
+ * ⚠️ Step 2 and the sudo pre-flight in step 3 both exist because of one live
+ * failure (2026-08-21, fleet-1). A session running as a non-root user inside a
+ * TTY-less systemd unit cannot answer a sudo password prompt, so step 3 was
+ * guaranteed to fail — after burning up to 180 s on `sudo apt-get update`:
+ *
+ *   headroom[sudo]: sudo: a terminal is required to read the password
+ *   apt-get bare-box provision failed (code=1) — skipping Headroom
+ *
+ * It repeated on every Retry and reached the user as a bare "Cost-saving
+ * failed". On that box pip was genuinely missing (Ubuntu 24.04 splits out
+ * `python3-pip`) and `python3 -m ensurepip` was missing too (Debian strips it
+ * from stdlib, so there is no stdlib bootstrap) — but `uv` was installed and
+ * resolved headroom-ai[proxy,code,image] in one command with no root at all.
+ *
+ * Never throws. The `reason` is user-facing: it is what the CLI reports so the
+ * Cost-saving surface can say something actionable instead of "Something went
+ * wrong."
+ */
+export async function ensurePythonInstaller(
+  runner: HeadroomRunner,
+): Promise<PythonInstallerResult> {
+  // 1. pip already present.
   if (runner.which('pip') || runner.which('pip3')) {
-    return true;
+    return { ok: true, installer: { kind: 'pip' } };
   }
 
-  // pip is absent → assume a bare box and provision the full minimal toolchain.
+  // 2. uv — root-free, so it beats the package manager even when one exists.
+  if (runner.which('uv')) {
+    log.info('host-agent', 'pip absent but uv is available — installing without root');
+    return { ok: true, installer: { kind: 'uv', bin: 'uv' } };
+  }
+
+  // 3. pip is absent → assume a bare box and provision the minimal toolchain.
   const pm = detectPackageManager(runner);
   if (!pm) {
-    log.warn(
-      'host-agent',
-      'pip is absent and no known package manager (apt-get/apk/dnf/yum/pacman/zypper) found — skipping Headroom',
-    );
-    return false;
+    return {
+      ok: false,
+      reason:
+        'Python pip is not installed and no supported package manager (apt-get/apk/dnf/yum/pacman/zypper) was found. Install pip — or uv — on this machine, then retry.',
+    };
   }
 
   // Prefix each command with sudo only when NOT running as root.
   const escalate = escalateCommand;
+
+  // Pre-flight the escalation. Without this we would run the real install and
+  // wait out its timeout only to discover sudo cannot prompt for a password.
+  if (process.getuid?.() !== 0) {
+    const probe = await runner.run('sudo', ['-n', 'true'], { timeoutMs: 10_000 });
+    if (probe.code !== 0) {
+      return {
+        ok: false,
+        reason:
+          'Python pip is not installed here and this session cannot install it: it runs as a non-root user and sudo requires a password (there is no terminal to type it into). Install python3-pip — or uv — on the machine, then retry.',
+      };
+    }
+  }
 
   const recipe = PROVISION_RECIPES[pm];
   log.info(
@@ -286,23 +341,25 @@ export async function ensurePip(runner: HeadroomRunner): Promise<boolean> {
     const { cmd, args } = escalate(recipe.install);
     const installResult = await runner.run(cmd, args, { timeoutMs: PM_INSTALL_TIMEOUT_MS });
     if (installResult.code !== 0) {
+      const detail = installResult.stderr.trim().split('\n').slice(-1)[0] ?? '';
       log.warn(
         'host-agent',
         `${pm} bare-box provision failed (code=${String(installResult.code)}) — skipping Headroom`,
       );
-      return false;
+      return {
+        ok: false,
+        reason: `Installing python3-pip via ${pm} failed (exit ${String(installResult.code)})${detail ? `: ${detail}` : ''}.`,
+      };
     }
   } catch (e) {
     // Unexpected error (should never happen with the runner contract, but guard anyway).
-    log.warn(
-      'host-agent',
-      `bare-box provision threw unexpectedly: ${e instanceof Error ? e.message : String(e)} — skipping Headroom`,
-    );
-    return false;
+    const msg = e instanceof Error ? e.message : String(e);
+    log.warn('host-agent', `bare-box provision threw unexpectedly: ${msg} — skipping Headroom`);
+    return { ok: false, reason: `Installing python3-pip via ${pm} threw: ${msg}` };
   }
 
   log.info('host-agent', `bare box provisioned via ${pm} (python3+pip+ca-certificates+curl)`);
-  return true;
+  return { ok: true, installer: { kind: 'pip' } };
 }
 
 /**
