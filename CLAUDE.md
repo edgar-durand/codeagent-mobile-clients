@@ -367,6 +367,34 @@ it into the fleet command.
 - **Auth notices that arrive as a COMPLETED-turn reply** (Claude prints `Not logged in · Please run /login` as plain text and ends cleanly — no throw, no exit) are caught by `replyIsAuthFailure` (length-guarded ≤200 chars so a reply that merely *discusses* login isn't misclassified) → swapped for the re-auth bubble + `reportCredentialInvalid`.
 - **1M-context usage-credits gate → reconnect the subscription (`v2.43.0`, reworked).** claude Code v2.1.x ALWAYS sends the `anthropic-beta: …,context-1m-2025-08-07` header even when the account has `s1mAccessCache.hasAccess=false`; a credit-less account then 429s every turn with "Usage credits required for 1M context" (confirmed in the codespace's `~/.headroom/logs/proxy.log` — claude's inbound request carries the beta; Headroom forwards it unchanged, NOT its fault). Detected by `looksLike1mContextCreditsError`. **The original "Disable 1M context and continue" `select_prompt` recovery did NOT fix a credential-type credits gate (2026-06-24 incident)** — the account's credential simply lacks the entitlement. The recovery is now to **reconnect the Claude subscription via the in-app OAuth**: `failureBubble` classifies the 429 as `ONE_M_CREDITS_MESSAGE` (a `codeam://reauth` reconnect bubble) and the runner calls `reportCredentialInvalid` so Profile › Agents surfaces the reconnect CTA — identical to the auth-failure path. Both surfacing points are covered: the completed-turn-reply path and the thrown-error path. (The old `oneMContextRecovery.ts` disable/re-spawn DI factory — `createOneMRecovery` + its runner wiring — was removed; `oneMContextRecovery.ts` now exports only the pure detectors `looksLike1mContextCreditsError` / `shouldOfferOneMRecovery`.)
 
+### Headroom provisioning — resolve an installer by LEAST PRIVILEGE, never assume sudo
+
+`apps/cli/src/commands/host/os-packages.ts` **`ensurePythonInstaller`** (renamed from `ensurePip` in
+`v2.65.17`) returns a resolved `PyInstaller` (`pip` | `uv`) **or a reason** — never a bare boolean.
+Resolution order is deliberate:
+
+1. `pip` / `pip3` on PATH → use it (no `apt-get update` on a healthy box).
+2. **`uv` on PATH → use it. Root-free, so it BEATS the package manager even when one exists.**
+3. Package manager + (root OR passwordless sudo) → install python3+pip+ca-certificates+curl.
+4. Otherwise → a user-facing `reason`.
+
+⚠️ **Step 3 pre-flights `sudo -n true` when non-root.** A host-agent running as a non-root user
+inside a TTY-less systemd unit can never answer a password prompt — before this it burned the full
+180 s `sudo apt-get update` timeout and died with `apt-get bare-box provision failed (code=1)`, once
+per user Retry, reaching the app as a bare "Cost-saving failed" (live on fleet-1's `codeam-edgar`,
+2026-08-21: python3 3.12.3 present, pip genuinely absent — Ubuntu 24.04 splits out `python3-pip` —
+and `python3 -m ensurepip` absent too, because Debian strips it from stdlib).
+
+`headroom-bootstrap.ts`'s `pipInstall` routes by installer kind: pip → `<py> -m pip install` with the
+PEP-668 `--break-system-packages` retry; uv → `uv pip install --python <py> --break-system-packages`
+(unconditional there — every box needing that route targets a distro python, and uv refuses an
+externally-managed environment without it). **uv installs into the SAME environment pip would**, so
+the `headroom` console script still resolves via `which('headroom')` and no caller needs a PATH tweak.
+
+⚠️ `setupHeadroomForSelfHosted` still returns a `boolean`, so the `reason` is only LOGGED
+(`Headroom: <reason>`) — the on-demand surface can't show it yet. Propagating it is tracked
+separately; the backend wire already carries `error?: string` on `headroom_status`.
+
 ### Heartbeat must stay punctual — no synchronous work on the 20 s tick
 
 `command-relay.service.ts`'s heartbeat is a `setInterval(20s)` in the SAME event loop as the ACP turn. It must do ZERO synchronous I/O: the git branch is seeded once at `start()` then refreshed via the async `detectCurrentBranchAsync` off the hot path (`v2.42.0`). A synchronous `execFileSync` on the tick couples the beat to git latency during a turn and can starve it (the "LAST PING —" stall).
