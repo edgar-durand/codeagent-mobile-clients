@@ -210,8 +210,22 @@ class RemoteCommandRouter(private val project: Project) {
                             sessionId = command.sessionId,
                         )
                     )
+                    // ⚠️ An undeliverable prompt MUST fail, not "complete".
+                    // Answering "completed" with a clipboard-fallback message
+                    // made the app render the turn as dispatched — the user
+                    // stared at "Thinking…" forever while nothing ran (the
+                    // 2026-08-21 JetBrains silent-black-hole replays). A
+                    // "failed" result flips the bubble to the retry
+                    // affordance with an actionable reason instead.
+                    if (!sent) {
+                        throw CommandFailed(
+                            "Could not deliver the prompt to ${targetAgent?.name ?: "the selected agent"} " +
+                                "from the IDE plugin. Run it with the codeam CLI instead: " +
+                                "npm i -g codeam-cli && codeam pair.",
+                        )
+                    }
                     com.google.gson.JsonObject().apply {
-                        addProperty("message", if (sent) "Task started: $prompt" else "Could not deliver prompt — copied to clipboard")
+                        addProperty("message", "Task started: $prompt")
                     }
                 }
                 "stop_task", "escape_key" -> respondWith(command, relay) {
