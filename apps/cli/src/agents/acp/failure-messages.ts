@@ -74,6 +74,35 @@ export function looksLikeHouseAgentLimit(text: string): boolean {
   return HOUSE_AGENT_LIMIT_RE.test(text);
 }
 
+/**
+ * True when the failure is the LOCAL Headroom proxy being unreachable, not a
+ * credential problem.
+ *
+ * Headroom rewrites the agent's own settings to route through
+ * `http://127.0.0.1:8787`, so while the proxy is restarting every call the
+ * agent makes fails to connect — and Claude Code wraps ANY API failure as
+ * "Failed to authenticate. API Error: …", which `AUTH_FAILURE_RE` matches on
+ * "failed to authenticate".
+ *
+ * That told a user his credentials were invalid while they were perfectly
+ * fine, on a session that then went on to work: the CLI log shows
+ * `headroom-supervisor — proxy :8787 not answering before a turn` 0.4 s before
+ * the CLI reported the credential invalid, and `proxy :8787 ready after ~9s`
+ * right after (edgar@privacyhawk.com, 2026-08-24). Re-authenticating can never
+ * fix it, and every occurrence re-flags a healthy credential as expired —
+ * exactly the house-proxy 403 lesson (`looksLikeHouseAgentLimit`).
+ *
+ * Deliberately NARROW: it requires BOTH a connection-level error AND the
+ * loopback address, so a real 401 from a real provider can never match.
+ */
+const LOCAL_PROXY_RE = /(?:127\.0\.0\.1|localhost|\[::1\]):\d+/i;
+const CONNECTION_ERROR_RE =
+  /ECONNREFUSED|ECONNRESET|ETIMEDOUT|EHOSTUNREACH|socket hang up|fetch failed|network error|connection (?:refused|reset|closed)/i;
+
+export function looksLikeLocalProxyUnavailable(text: string): boolean {
+  return LOCAL_PROXY_RE.test(text) && CONNECTION_ERROR_RE.test(text);
+}
+
 export function looksLikeAuthFailure(text: string): boolean {
   // A house-proxy 403 (usage ceiling / temporarily unavailable) arrives wrapped
   // as "Failed to authenticate. API Error: 403 …" and would otherwise match
@@ -81,6 +110,9 @@ export function looksLikeAuthFailure(text: string): boolean {
   // — never let it drive the re-auth path (which also fires
   // reportCredentialInvalid). Checked first, everywhere, via this one guard.
   if (looksLikeHouseAgentLimit(text)) return false;
+  // The local Headroom proxy being unreachable is a transient infrastructure
+  // blip the supervisor already respawns — never a credential problem.
+  if (looksLikeLocalProxyUnavailable(text)) return false;
   return AUTH_FAILURE_RE.test(text);
 }
 
@@ -152,7 +184,12 @@ export function houseAgentLimitMessage(text: string): string {
  * supports it (same as the welcome banner).
  */
 export const AUTH_FAILURE_MESSAGE =
-  '🔒 **Authentication failed — your agent credentials are invalid or expired (API 401).**\n\n' +
+  // ⚠️ Do NOT name a status code here. This bubble fires for several
+  // different failures, and the old hard-coded "(API 401)" told users the API
+  // had answered 401 when it never had — it also sent a live investigation
+  // hunting for 401s in proxy logs that were serving 200s throughout
+  // (2026-08-24). Say what happened, not a number we did not see.
+  '🔒 **Authentication failed — your agent credentials are invalid or expired.**\n\n' +
   // `codeam://reauth` is an in-app deep-link the mobile chat intercepts
   // (MarkdownAppLinkProvider → Profile › Agents, preselecting this agent).
   // On any surface that can't handle the scheme it just renders as a tappable

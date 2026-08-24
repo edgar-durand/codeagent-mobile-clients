@@ -10,6 +10,7 @@
 
 import { resolveApiBaseUrl } from '@codeam/shared';
 import { fetchCurrentPluginAuthToken } from '../../services/pairing.service';
+import { log } from '../../services/logger';
 
 /**
  * WHY a credential is unusable. Optional on the wire (older backends ignore an
@@ -50,6 +51,17 @@ export async function reportCredentialInvalid(
     pluginId: opts.pluginId,
     ...(opts.reason ? { reason: opts.reason } : {}),
   });
+  // ⚠️ LOG IT. This used to run completely silently — no record that it fired,
+  // for which agent, or what the backend said, and the catch swallowed
+  // everything. When a user got a false "your credentials are invalid" bubble
+  // (2026-08-24) the CLI logs held no trace of the report at all, so even with
+  // shell access to the box there was no way to see what had triggered it.
+  // Flagging a user's credential as dead is not a step that should be
+  // invisible.
+  log.info(
+    'acpRunner',
+    `credential-invalid → reporting agent=${opts.agent} reason=${opts.reason ?? 'unspecified'}`,
+  );
   try {
     const makeHeaders = (token: string): Record<string, string> => ({
       'Content-Type': 'application/json',
@@ -69,11 +81,22 @@ export async function reportCredentialInvalid(
         opts.pollSecret,
       );
       if (freshToken !== null) {
-        await fetchImpl(url, { method: 'POST', headers: makeHeaders(freshToken), body });
+        const retried = await fetchImpl(url, {
+          method: 'POST',
+          headers: makeHeaders(freshToken),
+          body,
+        });
+        log.info('acpRunner', `credential-invalid ← ${retried.status} (after token refresh)`);
+        return;
       }
     }
-  } catch {
-    // Best-effort — credential recovery must never break the runner.
+    log.info('acpRunner', `credential-invalid ← ${response.status}`);
+  } catch (err) {
+    // Best-effort — credential recovery must never break the runner. But say so.
+    log.warn(
+      'acpRunner',
+      `credential-invalid → failed: ${err instanceof Error ? err.message : String(err)}`,
+    );
   }
 }
 
