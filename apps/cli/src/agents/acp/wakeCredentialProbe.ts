@@ -30,9 +30,29 @@ export type CredentialExpiryStatus = 'valid' | 'expired' | 'unknown';
  * codespace agents. Other agents return `unknown` (a safe no-op); wiring their
  * peer validators (codex/gemini local-token) is an additive follow-up.
  */
+/**
+ * True when this session's agent authenticates through OUR metered proxy — the
+ * CodeAgent Cloud (house) agent — rather than with the user's own credential.
+ *
+ * Such a session has NO local credential to judge: it carries
+ * `ANTHROPIC_BASE_URL` pointing at `/agent-proxy` plus a short-lived proxy
+ * token, and the `~/.claude/.credentials.json` on the box is a placeholder it
+ * never fills in. Probing it produced the re-auth bubble on every new
+ * house-agent session while the agent worked perfectly
+ * (edgar@privacyhawk.com, 2026-08-24).
+ *
+ * ⚠️ Matches the PROXY PATH, not merely "the base URL was rewritten" — Headroom
+ * rewrites it too, to `http://127.0.0.1:8787`, and that hop sits in front of
+ * the user's OWN credential, which still deserves the check.
+ */
+export function usesHouseProxy(env: NodeJS.ProcessEnv = process.env): boolean {
+  return /\/agent-proxy(\/|$)/.test(env.ANTHROPIC_BASE_URL ?? '');
+}
+
 export async function localCredentialExpiryStatus(
   agent: string,
 ): Promise<CredentialExpiryStatus> {
+  if (usesHouseProxy()) return 'unknown';
   if (!/claude/i.test(agent)) return 'unknown';
   const token = await extractLocalClaudeToken();
   if (!token) return 'unknown';

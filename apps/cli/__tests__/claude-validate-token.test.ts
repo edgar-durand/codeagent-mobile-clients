@@ -20,7 +20,16 @@ describe('validateClaudeToken', () => {
   });
 
   it('expired when the access token is expired AND no refresh token', () => {
-    const c = tok({ credential: cred({ expiresAt: Date.now() - 1000, refreshToken: '' }) });
+    // ⚠️ The fixture now carries an accessToken, which is what the test's own
+    // name describes. It did not before, so it was really asserting on a blob
+    // with NO tokens at all — and that shape is the house-agent PLACEHOLDER
+    // (`{expiresAt: 0}`, no tokens), which must be `unknown`: reading it as
+    // expired fired the re-auth bubble on every new CodeAgent Cloud session
+    // while the agent worked fine (2026-08-24). See
+    // `claude.placeholder-credential.test.ts`, which pins both shapes.
+    const c = tok({
+      credential: cred({ expiresAt: Date.now() - 1000, accessToken: 'a', refreshToken: '' }),
+    });
     expect(validateClaudeToken(c).status).toBe('expired');
   });
 

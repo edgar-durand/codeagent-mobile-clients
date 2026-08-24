@@ -47,6 +47,18 @@ export function validateClaudeToken(token: LocalAgentToken): LocalAgentTokenVali
   }
   const expiresAt = typeof oauth.expiresAt === 'number' ? oauth.expiresAt : null;
   if (expiresAt === null) return { status: 'unknown' };
+  // ⚠️ A blob with NO tokens is the ABSENCE of a local credential, not an
+  // expired one. A CodeAgent Cloud (house) session writes exactly that
+  // placeholder — `{expiresAt: 0}`, no accessToken, no refreshToken — because
+  // it authenticates through ANTHROPIC_BASE_URL + the proxy token and never
+  // uses this file. Reading it as `expired` made `wakeCredentialProbe` fire the
+  // re-auth bubble on EVERY new house-agent session while the agent worked
+  // perfectly (edgar@privacyhawk.com, 2026-08-24). The probe's own contract is
+  // that it must "NEVER false-trigger a re-auth on a working credential".
+  const hasAnyToken =
+    (typeof oauth.accessToken === 'string' && oauth.accessToken.length > 0) ||
+    (typeof oauth.refreshToken === 'string' && oauth.refreshToken.length > 0);
+  if (!hasAnyToken) return { status: 'unknown' };
   if (expiresAt >= Date.now()) return { status: 'valid' };
   // Expired access token. Recoverable only if a refresh token is present.
   const hasRefresh =
