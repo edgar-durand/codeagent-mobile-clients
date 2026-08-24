@@ -4,6 +4,12 @@ All notable changes to the CodeAgent-Mobile JetBrains plugin are documented here
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.67.2] — 2026-08-24
+
+### Fixed
+
+- **cli:** Stop the wake probe firing re-auth on house-agent sessions
+
 ## [2.67.1] — 2026-08-24
 
 ### Fixed
