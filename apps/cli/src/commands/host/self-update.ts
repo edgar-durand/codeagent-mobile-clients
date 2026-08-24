@@ -39,6 +39,13 @@ const SELF_UPDATE_VIEW_TIMEOUT_MS = 30_000;
 /** Timeout for the `npm install -g <pkg>@latest` install. */
 const SELF_UPDATE_INSTALL_TIMEOUT_MS = 180_000;
 
+/** Timeout for `npm ls -g` — purely local, no registry round-trip. */
+const SELF_UPDATE_LS_TIMEOUT_MS = 15_000;
+
+/** Timeout for the `sudo -n true` pre-flight. Non-interactive, so it either
+ *  answers immediately or is refused immediately. */
+const SUDO_PREFLIGHT_TIMEOUT_MS = 5_000;
+
 /**
  * The current running CLI version, read from the tsup-injected
  * `__CLI_VERSION__` constant (single source of truth — same one
@@ -70,6 +77,45 @@ export interface SelfUpdateResult {
  * runs and `process.exit` is never reached.
  */
 export type SelfUpdater = () => Promise<SelfUpdateResult>;
+
+/**
+ * The three effects {@link runSelfUpdateWith} needs, injected so the decision
+ * logic is testable without shelling out to npm or being root.
+ */
+export interface SelfUpdateDeps {
+  run: (
+    cmd: string,
+    args: string[],
+    timeoutMs: number,
+  ) => Promise<{ code: number | null; stdout: string; stderr: string }>;
+  /** Version of the code CURRENTLY EXECUTING (build-time constant). */
+  currentVersion: () => string | null;
+  isRoot: () => boolean;
+}
+
+/**
+ * Version of `codeam-cli` INSTALLED IN THE GLOBAL PREFIX — which is not
+ * necessarily the version running. Local `npm ls`, no network, no privileges.
+ * Returns null when the output can't be read or parsed, which the caller
+ * treats as "no local answer" and falls through to the registry path.
+ */
+async function installedVersion(deps: SelfUpdateDeps): Promise<string | null> {
+  const ls = await deps.run(
+    'npm',
+    ['ls', '-g', '--depth=0', '--json', SELF_UPDATE_PKG],
+    SELF_UPDATE_LS_TIMEOUT_MS,
+  );
+  // `npm ls` exits non-zero on unmet peer deps while still printing valid
+  // JSON, so parse regardless of the exit code and let the parse decide.
+  try {
+    const parsed = JSON.parse(ls.stdout) as {
+      dependencies?: Record<string, { version?: string }>;
+    };
+    return parsed.dependencies?.[SELF_UPDATE_PKG]?.version ?? null;
+  } catch {
+    return null;
+  }
+}
 
 /**
  * Run a command via execFile, resolving to `{ code, stdout, stderr }` on
@@ -114,15 +160,41 @@ function runCmd(
  *      `'updated'` with it (the caller restarts so systemd relaunches new code).
  */
 export async function runSelfUpdate(): Promise<SelfUpdateResult> {
+  return runSelfUpdateWith({
+    run: runCmd,
+    currentVersion: currentCliVersion,
+    isRoot: () => process.getuid?.() === 0,
+  });
+}
+
+export async function runSelfUpdateWith(deps: SelfUpdateDeps): Promise<SelfUpdateResult> {
   try {
-    const current = currentCliVersion();
+    const current = deps.currentVersion();
     if (!current) {
       // No build-time version (dev/tsx) — can't reason about "newer". Skip.
       log.trace('host-agent', 'self-update: no __CLI_VERSION__ — skipping');
       return { status: 'skipped' };
     }
 
-    const view = await runCmd(
+    // STEP 0 — is a newer build ALREADY on disk? We are not necessarily the
+    // only thing that can update this package: fleet-1 runs four host-agents
+    // off one npm global prefix, and the root one installs versions the
+    // unprivileged three cannot. When that has happened there is nothing to
+    // install — the process just needs to restart onto what is already there.
+    // Skipping this check is what pinned the shared demo session on 2.65.16
+    // for days while `/usr/bin/codeam --version` said 2.66.0, and logged 318
+    // hourly EACCES failures for an install that was never needed
+    // (codeagent-53em follow-up). Local, no network, no privileges.
+    const onDisk = await installedVersion(deps);
+    if (onDisk && compareSemver(onDisk, current) > 0) {
+      log.info(
+        'host-agent',
+        `self-update: ${onDisk} already installed on disk (running ${current}) — restarting onto it`,
+      );
+      return { status: 'updated', version: onDisk };
+    }
+
+    const view = await deps.run(
       'npm',
       ['view', SELF_UPDATE_PKG, 'version'],
       SELF_UPDATE_VIEW_TIMEOUT_MS,
@@ -144,14 +216,30 @@ export async function runSelfUpdate(): Promise<SelfUpdateResult> {
 
     log.info('host-agent', `self-update: ${current} → ${latest} available — installing`);
     const installArgs = ['install', '-g', `${SELF_UPDATE_PKG}@latest`];
-    let install = await runCmd('npm', installArgs, SELF_UPDATE_INSTALL_TIMEOUT_MS);
+    let install = await deps.run('npm', installArgs, SELF_UPDATE_INSTALL_TIMEOUT_MS);
 
     // EACCES + not-root → retry once under sudo (the global prefix needs
     // escalation on a box where host-agent isn't root, e.g. a dev box).
-    const isRoot = process.getuid?.() === 0;
-    if (install.code !== 0 && !isRoot && /EACCES/i.test(install.stderr)) {
-      log.info('host-agent', 'self-update: install hit EACCES — retrying with sudo');
-      install = await runCmd('sudo', ['npm', ...installArgs], SELF_UPDATE_INSTALL_TIMEOUT_MS);
+    //
+    // ⚠️ PRE-FLIGHT `sudo -n true` FIRST. A host-agent running as an
+    // unprivileged user inside a TTY-less systemd unit can never answer a
+    // password prompt, so an un-preflighted `sudo npm install` can only burn
+    // its full 180 s timeout and log a failure whose cause we already knew.
+    // Same lesson, same fix as `ensurePythonInstaller` in the Headroom
+    // provisioner.
+    if (install.code !== 0 && !deps.isRoot() && /EACCES/i.test(install.stderr)) {
+      const canSudo = await deps.run('sudo', ['-n', 'true'], SUDO_PREFLIGHT_TIMEOUT_MS);
+      if (canSudo.code === 0) {
+        log.info('host-agent', 'self-update: install hit EACCES — retrying with sudo');
+        install = await deps.run('sudo', ['npm', ...installArgs], SELF_UPDATE_INSTALL_TIMEOUT_MS);
+      } else {
+        log.warn(
+          'host-agent',
+          'self-update: the npm global prefix is not writable by this user and passwordless ' +
+            'sudo is unavailable — install codeam-cli under a user-writable prefix, or let a ' +
+            'privileged agent on this host install it (this box restarts onto it automatically)',
+        );
+      }
     }
 
     if (install.code !== 0) {
@@ -164,7 +252,7 @@ export async function runSelfUpdate(): Promise<SelfUpdateResult> {
 
     // Confirm the install actually changed the on-disk version before we
     // tell the supervisor to restart (guards against a no-op install).
-    const after = await runCmd(
+    const after = await deps.run(
       'npm',
       ['view', SELF_UPDATE_PKG, 'version'],
       SELF_UPDATE_VIEW_TIMEOUT_MS,
