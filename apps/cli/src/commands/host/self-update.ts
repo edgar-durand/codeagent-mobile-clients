@@ -33,6 +33,23 @@ const SELF_UPDATE_PKG = 'codeam-cli';
  */
 export const SELF_UPDATE_INTERVAL_MS = 60 * 60 * 1000;
 
+/**
+ * How long a restart owed to an installed update may be deferred because a
+ * child session is running, before we restart regardless.
+ *
+ * WHY A CEILING EXISTS AT ALL — codeagent-e1uo. The deferral guards against
+ * yanking a turn mid-flight, but it keyed on `children.size`, and a child is a
+ * LONG-LIVED SESSION PROCESS, not a turn: a paired box has one permanently. So
+ * "defer until idle" meant "defer forever" — a fleet box logged
+ * `installed but 1 child(ren) busy — deferring restart` once an hour for three
+ * days while sitting on a release two versions old.
+ *
+ * 24 h is deliberately generous: it is a whole day of chances to restart
+ * cleanly, and only a box that is never idle pays the one dropped turn — which
+ * beats running stale code indefinitely.
+ */
+export const SELF_UPDATE_DEFER_MAX_MS = 24 * 60 * 60 * 1000;
+
 /** Timeout for the `npm view <pkg> version` registry lookup. */
 const SELF_UPDATE_VIEW_TIMEOUT_MS = 30_000;
 

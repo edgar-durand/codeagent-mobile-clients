@@ -11,6 +11,7 @@ import { encodeCwd } from '../src/agents/claude/history';
 
 import {
   HostAgentSupervisor,
+  SELF_UPDATE_DEFER_MAX_MS,
   resolveHostIdentity,
   defaultOnIdentityRejected,
   type ChildSpawner,
@@ -3370,11 +3371,103 @@ describe('HostAgentSupervisor — periodic self-update', () => {
     child.emit('exit', 0);
     expect(sup.childCount()).toBe(0);
 
-    // Next idle tick: no re-install (still 1 call), and the deferred restart fires.
+    // Next idle tick: the deferred restart fires. `selfUpdate` IS consulted
+    // again — it must be, or a box that cannot restart also stops noticing new
+    // versions (codeagent-e1uo) — but it is a `'current'` no-op when nothing is
+    // newer, so nothing is re-installed. Once the restart happens the tick
+    // returns, so a single deferred update yields exactly one restart.
     await sup.selfUpdateTick();
-    expect(selfUpdate).toHaveBeenCalledTimes(1);
     expect(onUpdated).toHaveBeenCalledTimes(1);
     expect(onUpdated).toHaveBeenCalledWith('9.9.9');
+
+    fs.rmSync(cwdTarget, { recursive: true, force: true });
+  });
+
+  /**
+   * The deferral had no ceiling, and `children.size` is not what it claims.
+   *
+   * WHY THIS EXISTS — codeagent-e1uo, fleet box `…cmshfvyu9` (2026-08-24).
+   * The log said, once an hour for over three days:
+   *
+   *   self-update: 2.65.17 installed but 1 child(ren) busy — deferring restart
+   *
+   * `children` holds LONG-LIVED SESSION PROCESSES, not turns in flight — a
+   * `ChildSession` is `{deployId, proc, agent, startedAt}` with no notion of
+   * activity at all. A paired box therefore has a child permanently, so the
+   * restart was deferred permanently: the box sat on 2.65.16 with 2.66.1
+   * published, and the `pendingRestartVersion` fast path meant it stopped even
+   * LOOKING for newer versions — pinning it to a release from days earlier.
+   *
+   * We still prefer not to yank an active turn, so the deferral stays. It just
+   * cannot be forever: past the ceiling we restart anyway (systemd brings the
+   * session back), and while a restart is owed we keep checking the registry so
+   * the pending version tracks the newest one available.
+   */
+  it('restarts anyway once the deferral ceiling is exceeded', async () => {
+    const cwdTarget = fs.mkdtempSync(path.join(os.tmpdir(), 'codeam-su-'));
+    const child = fakeChildWithStreams();
+    const selfUpdate = vi
+      .fn<() => Promise<SelfUpdateResult>>()
+      .mockResolvedValue({ status: 'updated', version: '9.9.9' });
+    const onUpdated = vi.fn();
+    const now = vi.fn<() => number>().mockReturnValue(1_000_000);
+    const sup = new HostAgentSupervisor(IDENTITY, {
+      makeRelay: () => ({ start: vi.fn(), stop: vi.fn(), sendResult: vi.fn() }),
+      spawnChild: () => child,
+      resolveAgentAuth: vi.fn().mockResolvedValue({ kind: 'oauth_token', value: '{}' }),
+      selfUpdate,
+      onUpdated,
+      now,
+    });
+
+    await sup.handleCommand(deployCmd({ repoOrPath: cwdTarget }));
+    expect(sup.childCount()).toBe(1);
+
+    // The child NEVER exits — exactly the fleet-box shape.
+    await sup.selfUpdateTick();
+    expect(onUpdated).not.toHaveBeenCalled();
+
+    // Still inside the ceiling: keep deferring.
+    now.mockReturnValue(1_000_000 + SELF_UPDATE_DEFER_MAX_MS - 1);
+    await sup.selfUpdateTick();
+    expect(onUpdated).not.toHaveBeenCalled();
+
+    // Past it: a box pinned on old code is worse than one dropped turn.
+    now.mockReturnValue(1_000_000 + SELF_UPDATE_DEFER_MAX_MS + 1);
+    await sup.selfUpdateTick();
+    expect(onUpdated).toHaveBeenCalledWith('9.9.9');
+
+    fs.rmSync(cwdTarget, { recursive: true, force: true });
+  });
+
+  it('keeps checking for newer versions while a restart is owed', async () => {
+    const cwdTarget = fs.mkdtempSync(path.join(os.tmpdir(), 'codeam-su-'));
+    const child = fakeChildWithStreams();
+    const selfUpdate = vi
+      .fn<() => Promise<SelfUpdateResult>>()
+      .mockResolvedValueOnce({ status: 'updated', version: '2.65.17' })
+      .mockResolvedValue({ status: 'updated', version: '2.66.1' });
+    const onUpdated = vi.fn();
+    const now = vi.fn<() => number>().mockReturnValue(1_000_000);
+    const sup = new HostAgentSupervisor(IDENTITY, {
+      makeRelay: () => ({ start: vi.fn(), stop: vi.fn(), sendResult: vi.fn() }),
+      spawnChild: () => child,
+      resolveAgentAuth: vi.fn().mockResolvedValue({ kind: 'oauth_token', value: '{}' }),
+      selfUpdate,
+      onUpdated,
+      now,
+    });
+
+    await sup.handleCommand(deployCmd({ repoOrPath: cwdTarget }));
+    await sup.selfUpdateTick(); // owes a restart to 2.65.17, child busy
+    await sup.selfUpdateTick(); // must NOT stop looking — 2.66.1 is out
+    expect(selfUpdate).toHaveBeenCalledTimes(2);
+
+    // When it finally restarts it must land on the NEWEST version seen, not
+    // the one frozen at the first deferral.
+    child.emit('exit', 0);
+    await sup.selfUpdateTick();
+    expect(onUpdated).toHaveBeenCalledWith('2.66.1');
 
     fs.rmSync(cwdTarget, { recursive: true, force: true });
   });

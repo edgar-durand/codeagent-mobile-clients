@@ -127,6 +127,7 @@ import {
 import {
   runSelfUpdate,
   SELF_UPDATE_INTERVAL_MS,
+  SELF_UPDATE_DEFER_MAX_MS,
   type SelfUpdater,
   type SelfUpdateResult,
 } from './host/self-update';
@@ -158,7 +159,12 @@ export {
   readHeadroomChildEnv,
   restoreAgentHeadroomConfig,
 } from './host/headroom-config';
-export { runSelfUpdate, type SelfUpdateResult, type SelfUpdater } from './host/self-update';
+export {
+  runSelfUpdate,
+  SELF_UPDATE_DEFER_MAX_MS,
+  type SelfUpdateResult,
+  type SelfUpdater,
+} from './host/self-update';
 
 /** Liveness heartbeat cadence. State liveness only — NOT command polling. */
 const HEARTBEAT_INTERVAL_MS = 20_000;
@@ -1069,6 +1075,11 @@ export interface HostAgentDeps {
    */
   getFreeDisk?: (dir: string) => Promise<number | null>;
   /**
+   * Clock. Injectable so the self-update deferral CEILING is testable without
+   * waiting a day. Defaults to `Date.now`.
+   */
+  now?: () => number;
+  /**
    * Periodic self-update check + install. Defaults to {@link runSelfUpdate}
    * (the real npm-backed updater). Injectable so tests assert the update
    * logic without touching real npm or `process.exit`.
@@ -1112,6 +1123,7 @@ export class HostAgentSupervisor {
   private selfUpdateTimer: NodeJS.Timeout | null = null;
   /** Self-update check + install (injectable; defaults to runSelfUpdate). */
   private readonly selfUpdate: SelfUpdater;
+  private readonly now: () => number;
   /** Restart action after a successful self-update (defaults to process.exit). */
   private readonly onUpdated: (version: string) => void;
   /** Guards against overlapping self-update ticks (a slow npm install). */
@@ -1122,6 +1134,9 @@ export class HostAgentSupervisor {
    * already-installed version for the restart log.
    */
   private pendingRestartVersion: string | null = null;
+  /** epoch ms when the CURRENT pending restart was first owed — the ceiling
+   *  in {@link SELF_UPDATE_DEFER_MAX_MS} is measured from here. */
+  private pendingRestartSince: number | null = null;
   /** Guards the one-shot 'connected' telemetry on the first heartbeat. */
   private reportedConnected = false;
   /** Live-metrics collector — stateful across beats (CPU delta + latency). */
@@ -1169,6 +1184,7 @@ export class HostAgentSupervisor {
     this.disableService = deps.disableService ?? defaultDisableService;
     this.teardownHeadroom = deps.teardownHeadroom ?? defaultTeardownHeadroom;
     this.selfUpdate = deps.selfUpdate ?? runSelfUpdate;
+    this.now = deps.now ?? (() => Date.now());
     this.onUpdated = deps.onUpdated ?? defaultOnUpdated;
     this.docker = deps.docker ?? defaultDockerRunner;
     this.postResumeFailure = deps.postResumeFailure ?? postSessionErrorBubble;
@@ -1359,19 +1375,29 @@ export class HostAgentSupervisor {
     if (this.selfUpdating) return;
     this.selfUpdating = true;
     try {
-      // Fast path: a restart is already owed from a prior install — don't
-      // re-run npm, just restart as soon as the box is idle.
+      // A restart already owed from a prior install: try it first — on a
+      // healthy box this exits the process and nothing below runs.
       if (this.pendingRestartVersion !== null) {
-        this.maybeRestartForUpdate(this.pendingRestartVersion);
-        return;
+        // On a healthy box `onUpdated` exits the process, but it is injectable
+        // (and a no-op in tests), so stop here rather than falling through and
+        // firing a second restart for the same version.
+        if (this.maybeRestartForUpdate(this.pendingRestartVersion)) return;
       }
 
+      // ⚠️ We keep checking even while a restart is owed. The old fast path
+      // `return`ed here, so a box that could not restart ALSO stopped looking
+      // for new versions — it stayed pinned to whatever was pending when the
+      // first deferral happened, days-old by the time anyone noticed
+      // (codeagent-e1uo). `selfUpdate` is a no-op `'current'` when there is
+      // nothing newer, so this costs one registry lookup per hour, which the
+      // non-pending path already paid anyway.
       const result = await this.selfUpdate();
       if (result.status !== 'updated') return;
 
       // A strictly-newer version is now installed on disk. Mark the restart
       // as owed, then restart if idle (else defer to the next idle tick).
       const version = result.version ?? 'latest';
+      if (this.pendingRestartVersion === null) this.pendingRestartSince = this.now();
       this.pendingRestartVersion = version;
       this.maybeRestartForUpdate(version);
     } catch (err) {
@@ -1391,15 +1417,31 @@ export class HostAgentSupervisor {
    * When a child is busy we DEFER (the version stays pending for the next
    * idle tick) rather than yank an active turn.
    */
-  private maybeRestartForUpdate(version: string): void {
+  private maybeRestartForUpdate(version: string): boolean {
     if (this.children.size > 0) {
-      log.info(
+      // ⚠️ `children` holds long-lived SESSION processes, not turns in flight
+      // (a `ChildSession` carries no activity state at all), so on a paired
+      // box this branch is the permanent state, not a transient one. Without a
+      // ceiling "defer until idle" means "defer forever" — see
+      // SELF_UPDATE_DEFER_MAX_MS.
+      const since = this.pendingRestartSince ?? this.now();
+      const waited = this.now() - since;
+      if (waited < SELF_UPDATE_DEFER_MAX_MS) {
+        log.info(
+          'host-agent',
+          `self-update: ${version} installed but ${this.children.size} child(ren) busy — deferring restart`,
+        );
+        return false;
+      }
+      log.warn(
         'host-agent',
-        `self-update: ${version} installed but ${this.children.size} child(ren) busy — deferring restart`,
+        `self-update: ${version} has been owed for ${Math.round(waited / 3_600_000)}h with ` +
+          `${this.children.size} child(ren) still running — restarting anyway rather than ` +
+          'staying on old code',
       );
-      return;
     }
     this.onUpdated(version);
+    return true;
   }
 
   /** Number of live children — for tests + diagnostics. */
