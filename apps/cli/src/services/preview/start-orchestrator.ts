@@ -26,6 +26,8 @@ import { killQuiet } from '../../lib/quiet';
 import * as previewSvc from './index';
 import { applyPreviewHostAllow } from './host-allow';
 import { restoreProjectEnvIfMissing } from '../project-env';
+import { resolveNamedTunnel } from './named-tunnel';
+import { fetchNamedPreviewTunnel } from '../pairing.service';
 
 /**
  * Time budgets for the preview bring-up's blocking command steps
@@ -779,8 +781,23 @@ async function establishTunnel(ctx: StageCtx, dev: DevServerUp): Promise<TunnelU
   // -1003 the user hit. Delivered via env for BOTH surfaces: the
   // codespace bootstrap exports it; the host-agent exports it into the
   // child. On ANY failure we fall through to the quick-tunnel loop below.
-  const namedToken = process.env.PREVIEW_TUNNEL_TOKEN;
-  const namedHostname = process.env.PREVIEW_TUNNEL_HOSTNAME;
+  //
+  // ⚠️ The env is no longer the ONLY source. A fleet box, a self-hosted host
+  // and the shared demo session never got these exported — only the codespace
+  // bootstrap does — so they rode the quick tunnel on every preview
+  // (codeagent-xsot). `resolveNamedTunnel` falls back to asking the backend to
+  // mint one on demand, and answers null (never throws) when there is none, so
+  // the quick-tunnel loop below stays the safety net.
+  const named = await resolveNamedTunnel(
+    {
+      sessionId: ctx.sessionId,
+      pluginId: ctx.projectEnvAuth?.pluginId ?? '',
+      pluginAuthToken: ctx.projectEnvAuth?.pluginAuthToken ?? '',
+    },
+    (c) => fetchNamedPreviewTunnel({ pluginId: c.pluginId, pluginAuthToken: c.pluginAuthToken }),
+  );
+  const namedToken = named?.token;
+  const namedHostname = named?.hostname;
   if (namedToken && namedHostname) {
     try {
       emitProgress('TUNNEL_STARTING', `named tunnel ${namedHostname}`);
