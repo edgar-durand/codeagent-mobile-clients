@@ -365,6 +365,27 @@ export async function postAiResult(input: {
  * (the user's dev server + tunnel keep running, they just can't see
  * the state in the mobile / web client).
  */
+/**
+ * Ask the backend to mint (or reuse) this session's NAMED preview tunnel.
+ *
+ * Returns null when there is none to give — Cloudflare unconfigured, the DNS
+ * record quota full, or a backend that predates the route. The caller falls
+ * back to a quick tunnel; see `services/preview/named-tunnel.ts`.
+ */
+export async function fetchNamedPreviewTunnel(input: {
+  pluginId: string;
+  pluginAuthToken: string;
+}): Promise<{ hostname: string; token: string } | null> {
+  const res = await _transport.postJsonAuthed(
+    `${API_BASE}/api/preview/tunnel`,
+    { pluginId: input.pluginId },
+    input.pluginAuthToken,
+  );
+  const body = res as { hostname?: unknown; token?: unknown } | null;
+  if (typeof body?.hostname !== 'string' || typeof body?.token !== 'string') return null;
+  return { hostname: body.hostname, token: body.token };
+}
+
 export async function postPreviewEvent(input: {
   sessionId: string;
   pluginId: string;
