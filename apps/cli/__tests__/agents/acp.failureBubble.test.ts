@@ -560,6 +560,32 @@ describe('house-agent 403 (CodeAgent Cloud ceiling) is NOT an auth failure', () 
     expect(msg).not.toMatch(/daily/i);
   });
 
+  it('the availability bubble explicitly rules out a charge, and never upsells', () => {
+    // ⚠️ 2026-08-25 churn. When this condition still leaked the upstream
+    // provider's raw `402 insufficient balance (1008)`, a day-2 trial user
+    // concluded HE had to buy credits and left for a competitor. The backend no
+    // longer leaks that text, but this bubble is what he would have seen
+    // instead — so it has to close the money question, not just the login one.
+    for (const t of [UNAVAILABLE, DISABLED]) {
+      const msg = houseAgentLimitMessage(t);
+      // Says whose fault it is.
+      expect(msg).toMatch(/on us|our side/i);
+      // Says the user owes nothing — the assertion that matters.
+      expect(msg).toMatch(/nothing to buy and nothing owed/i);
+      // Never tells the user to purchase anything, and never upsells PRO: an
+      // outage on our side is not a monetisation moment.
+      expect(msg).not.toMatch(
+        /(?:purchase|buy|add|top\s?-?up|recharge)\s+(?:more\s+)?(?:credits?|tokens?|balance)/i,
+      );
+      expect(msg).not.toMatch(/upgrade to \*\*pro\*\*/i);
+      // Never leaks the provider or its numbers.
+      expect(msg).not.toMatch(/minimax|insufficient balance|1008|402/i);
+      // Keeps the working escape route, named with agents the user recognises.
+      expect(msg).toMatch(/Claude Code/);
+      expect(msg).toMatch(/Profile . Agents/);
+    }
+  });
+
   it('the ceiling arriving as a COMPLETED reply is caught before replyIsAuthFailure', () => {
     // Rafael's reply text — short, single line — must route to the house path,
     // NOT the auth-in-reply path (which would fire reportCredentialInvalid).

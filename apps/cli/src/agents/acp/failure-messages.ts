@@ -157,12 +157,23 @@ export function replyIsHouseAgentLimit(finalText: string): boolean {
  */
 export function houseAgentLimitMessage(text: string): string {
   if (/temporarily (?:unavailable|disabled)/i.test(text)) {
+    // ⚠️ "There's nothing to buy and nothing owed" is LOAD-BEARING — do not
+    // trim it as filler. 2026-08-25: a day-2 trial user hit this condition when
+    // it still leaked the upstream provider's raw `402 insufficient balance
+    // (1008)`, concluded HE had to purchase credits ("This made my small,
+    // personal project start to sound very expensive") and left for a
+    // competitor. The backend no longer leaks that text, but the lesson stands:
+    // when OUR side fails, saying "not your login" is not enough — a user
+    // reading an availability error will reach for the money explanation unless
+    // it is explicitly ruled out. Say it out loud.
+    // Never name the provider, a balance, or an amount here (repo Copy rule #1:
+    // no internal mechanism), and never route this to an upgrade — nothing the
+    // user buys fixes an outage on our side.
     return (
-      '⏳ **CodeAgent Cloud is temporarily unavailable.**\n\n' +
-      'The free CodeAgent Cloud agent is paused server-side right now — this isn’t a ' +
-      'problem with your login, so re-authenticating won’t help. Please send your message ' +
-      'again in a bit, or connect your own agent (Claude, Codex, …) in **Profile › Agents** ' +
-      'to run independently.'
+      '⏳ **CodeAgent Cloud is temporarily unavailable — this one’s on us, not your account.**\n\n' +
+      'There’s nothing to buy and nothing owed, and it isn’t a problem with your login, so ' +
+      're-authenticating won’t help. Send your message again in a bit, or connect your own ' +
+      'agent (Claude Code, Codex, Cursor, Gemini) in **Profile › Agents** to keep going now.'
     );
   }
   const canUpgrade = /upgrade to pro/i.test(text);
