@@ -4,6 +4,13 @@ All notable changes to the CodeAgent Mobile VS Code extension are documented her
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.67.3] — 2026-08-25
+
+### Fixed
+
+- **cli:** House-agent outage copy must rule out a user charge
+- **cli:** Raise the house-notice reply guard to 400 chars (measured)
+
 ## [2.67.2] — 2026-08-24
 
 ### Fixed
