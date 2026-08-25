@@ -139,11 +139,21 @@ export function replyIsAuthFailure(finalText: string): boolean {
  * {@link replyIsAuthFailure} — otherwise the "Failed to authenticate" wrapper
  * routes it to the (wrong) re-auth bubble. Length-guarded like the auth variant
  * so a long, substantive reply that merely mentions the product isn't
- * misclassified — a genuine proxy 403 notice is a single short line.
+ * misclassified — a genuine proxy notice is a single short line.
+ *
+ * ⚠️ The bound is 400, not 300. Measured 2026-08-25 against the backend's new
+ * provider-unavailable response: Claude wraps it as
+ * `Failed to authenticate. API Error: 503 {"success":false,"error":{"code":…,"message":…}}`
+ * — **357 characters**, because the error envelope alone costs ~120 on top of
+ * the message. At 300 this returned false, the notice fell through to the
+ * generic path, and the user got the raw JSON blob rendered as an assistant
+ * reply. The guard's purpose is unaffected: matching still requires the very
+ * specific `HOUSE_AGENT_LIMIT_RE` phrasing, so a substantive reply that merely
+ * MENTIONS CodeAgent Cloud inside 400 chars is not a realistic false positive.
  */
 export function replyIsHouseAgentLimit(finalText: string): boolean {
   const t = finalText.trim();
-  return t.length > 0 && t.length <= 300 && looksLikeHouseAgentLimit(t);
+  return t.length > 0 && t.length <= 400 && looksLikeHouseAgentLimit(t);
 }
 
 /**

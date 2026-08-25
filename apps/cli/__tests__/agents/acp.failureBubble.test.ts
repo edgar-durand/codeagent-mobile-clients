@@ -560,6 +560,27 @@ describe('house-agent 403 (CodeAgent Cloud ceiling) is NOT an auth failure', () 
     expect(msg).not.toMatch(/daily/i);
   });
 
+  it("catches the backend's provider-unavailable reply, envelope and all", () => {
+    // The REAL bytes Claude renders for the new backend 503: the honest message
+    // wrapped in our error envelope and prefixed by the SDK. Measured at 357
+    // chars — over the old 300 bound, which let the raw JSON blob through as an
+    // assistant reply instead of the honest bubble.
+    const message =
+      'CodeAgent Cloud is temporarily unavailable — this one’s on us, not your account. ' +
+      'There’s nothing to buy and nothing owed. Use your own agent (Claude Code, Codex, ' +
+      'Cursor, Gemini) from Profile › Agents to keep going, or try again shortly.';
+    const wrapped = `Failed to authenticate. API Error: 503 ${JSON.stringify({
+      success: false,
+      error: { code: 'HOUSE_AGENT_PROVIDER_UNAVAILABLE', message },
+    })}`;
+
+    expect(wrapped.length).toBeGreaterThan(300);
+    expect(replyIsHouseAgentLimit(wrapped)).toBe(true);
+    // …and it must NOT be routed to the re-auth path despite the wrapper.
+    expect(replyIsAuthFailure(wrapped)).toBe(false);
+    expect(houseAgentLimitMessage(wrapped)).toMatch(/nothing to buy and nothing owed/i);
+  });
+
   it('the availability bubble explicitly rules out a charge, and never upsells', () => {
     // ⚠️ 2026-08-25 churn. When this condition still leaked the upstream
     // provider's raw `402 insufficient balance (1008)`, a day-2 trial user
