@@ -372,12 +372,12 @@ jobs:
       - name: Package VS Code plugin (.vsix)
         working-directory: apps/vsc-plugin
         run: |
-          npx @vscode/vsce package --no-dependencies --out "codeagent-mobile-${{ needs.setup.outputs.version }}.vsix"
+          npx --no-install @vscode/vsce package --no-dependencies --out "codeagent-mobile-${{ needs.setup.outputs.version }}.vsix"
 
       - name: Publish VS Code plugin to Marketplace
         working-directory: apps/vsc-plugin
         run: |
-          npx @vscode/vsce publish --no-dependencies --pat "$VSCE_PAT" \
+          npx --no-install @vscode/vsce publish --no-dependencies --pat "$VSCE_PAT" \
             --packagePath "codeagent-mobile-${{ needs.setup.outputs.version }}.vsix"
         env:
           VSCE_PAT: ${{ secrets.VSCE_PAT }}

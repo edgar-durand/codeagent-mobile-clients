@@ -477,7 +477,7 @@ jobs:
 
       - name: VS Code plugin package (.vsix)
         working-directory: apps/vsc-plugin
-        run: npx @vscode/vsce package --no-dependencies
+        run: npx --no-install @vscode/vsce package --no-dependencies
 
   jetbrains-plugin:
     name: JetBrains plugin — gradle build
