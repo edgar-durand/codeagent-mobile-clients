@@ -2200,6 +2200,22 @@ export function maybeAttachBuildHeal(ctx: HandlerContext, pluginAuthToken: strin
     sessionId: ctx.sessionId,
     restart: () => {
       void (async () => {
+        // ⚠️ A stopped preview must NEVER come back. This closure is async and
+        // sleeps between the kill and the respawn, so a user stop (or any
+        // other teardown) can land inside that window — and `killPreview`
+        // below also runs while the caller may already have torn things down.
+        // Without re-checking, self-healing resurrects a preview the user
+        // deliberately stopped, which is worse than the bug it fixes.
+        //
+        // Caught by CI on Linux, not on macOS: `fs.watch` delivery timing
+        // differs enough that the race only lost there. The guard makes the
+        // outcome independent of that timing.
+        //
+        // Only ONE check, and it goes BEFORE the kill. A second check after
+        // the wait looks symmetric but is wrong: `killPreview` deregisters the
+        // session, so re-testing presence there blocks the very restart this
+        // exists to perform.
+        if (!previewSvc.activePreviews.has(ctx.sessionId)) return;
         await previewSvc.killPreview(ctx.sessionId);
         // 150 ms so the port is fully released before the fresh spawn binds
         // it — same grace period `previewRestartH` waits below.
