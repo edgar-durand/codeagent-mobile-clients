@@ -42,6 +42,7 @@ import {
 import { showInfo } from '../../ui/banner';
 import { applyFileReview } from '../../services/apply-file-review.service';
 import { buildLinkContext } from '../link';
+import { makeSerializedEmitter } from '../../services/preview/serialized-emitter';
 import { postLinkCredential, postAiResult, postPreviewEvent, postHeadroomEvent, postBeadsEvent, postCliUpdateEvent, postCoderabbitEvent, postAgentReviewReport, fetchProvisionCredential } from '../../services/pairing.service';
 import { configureCoderabbit, type CoderabbitAction } from '../../agents/coderabbit/configure';
 import { deliverPendingCoderabbitCallback, type CoderabbitAuthEvent } from '../../agents/coderabbit/oauth';
@@ -1958,6 +1959,25 @@ function parseInsightText(text: string): {
 // `activePreviews` (services/preview/index.ts). The backend's
 // PreviewController is a thin SSE-fanout + Redis-snapshot mirror.
 
+/**
+ * The ONE ordered channel every preview lifecycle POST goes through — the same
+ * guarantee Headroom (`_headroomEmitChain`) and Beads (`_beadsEmitChain`)
+ * already give their streams. Preview was the last one still firing bare
+ * `void postPreviewEvent(...)`, so its events raced on the wire; see
+ * `makeSerializedEmitter` for what that race actually cost.
+ */
+// ⚠️ La llamada va envuelta, NO pasada por referencia
+// (`makeSerializedEmitter(postPreviewEvent)`): pasarla directamente resuelve
+// el export al IMPORTAR este módulo, y este módulo se carga desde
+// `agents/acp/runner.ts`. Cuatro suites de ACP mockean `pairing.service`
+// parcialmente y no declaran `postPreviewEvent` — legítimamente, porque nada
+// del ACP lo usa —, así que la referencia temprana las hacía fallar al
+// cargar. Envolverla mantiene la búsqueda en tiempo de llamada, que es
+// exactamente donde estaba antes de encauzar los emisores.
+const emitPreviewEvent = makeSerializedEmitter(
+  (args: Parameters<typeof postPreviewEvent>[0]) => postPreviewEvent(args),
+);
+
 const requestPreviewDetectH: CommandHandler = (ctx) => {
   if (!ctx.pluginAuthToken) {
     log.info('preview', 'no pluginAuthToken — skipping detect');
@@ -1965,7 +1985,7 @@ const requestPreviewDetectH: CommandHandler = (ctx) => {
   }
   if (typeof ctx.runtime.generateOneShot !== 'function') {
     log.info('preview', `runtime ${ctx.runtime.id} has no generateOneShot — emitting unsupported`);
-    void postPreviewEvent({
+    emitPreviewEvent({
       sessionId: ctx.sessionId,
       pluginId: ctx.pluginId,
       pluginAuthToken: ctx.pluginAuthToken,
@@ -1986,7 +2006,7 @@ const requestPreviewDetectH: CommandHandler = (ctx) => {
     const fromFile = await readPreviewConfig(process.cwd());
     if (fromFile) {
       log.info('preview', `detect: using .codeam/preview.json (${fromFile.framework})`);
-      void postPreviewEvent({
+      emitPreviewEvent({
         sessionId: ctx.sessionId,
         pluginId: ctx.pluginId,
         pluginAuthToken,
@@ -1996,7 +2016,7 @@ const requestPreviewDetectH: CommandHandler = (ctx) => {
       return;
     }
 
-    void postPreviewEvent({
+    emitPreviewEvent({
       sessionId: ctx.sessionId,
       pluginId: ctx.pluginId,
       pluginAuthToken,
@@ -2012,7 +2032,7 @@ const requestPreviewDetectH: CommandHandler = (ctx) => {
     const detection = safeParseDetection(raw);
     if (!detection) {
       log.info('preview', `detect: invalid agent output after ${tookMs}ms`);
-      void postPreviewEvent({
+      emitPreviewEvent({
         sessionId: ctx.sessionId,
         pluginId: ctx.pluginId,
         pluginAuthToken,
@@ -2027,7 +2047,7 @@ const requestPreviewDetectH: CommandHandler = (ctx) => {
     }
     if (detection.framework === 'unsupported') {
       log.info('preview', 'detect: framework=unsupported');
-      void postPreviewEvent({
+      emitPreviewEvent({
         sessionId: ctx.sessionId,
         pluginId: ctx.pluginId,
         pluginAuthToken,
@@ -2047,7 +2067,7 @@ const requestPreviewDetectH: CommandHandler = (ctx) => {
     void writePreviewConfig(process.cwd(), detection).catch((err) => {
       log.info('preview', `detect: writePreviewConfig failed (non-fatal): ${String(err)}`);
     });
-    void postPreviewEvent({
+    emitPreviewEvent({
       sessionId: ctx.sessionId,
       pluginId: ctx.pluginId,
       pluginAuthToken,
@@ -2142,7 +2162,7 @@ export function startPreviewFromDetection(
   pluginAuthToken: string,
 ): void {
   const emit: EmitPreviewEvent = (type, payload) => {
-    void postPreviewEvent({
+    emitPreviewEvent({
       sessionId: ctx.sessionId,
       pluginId: ctx.pluginId,
       pluginAuthToken,
@@ -2224,7 +2244,7 @@ export function maybeAttachBuildHeal(ctx: HandlerContext, pluginAuthToken: strin
       })();
     },
     notify: (message) => {
-      void postPreviewEvent({
+      emitPreviewEvent({
         sessionId: ctx.sessionId,
         pluginId: ctx.pluginId,
         pluginAuthToken,
@@ -2249,7 +2269,7 @@ const previewStopH: CommandHandler = (ctx) => {
     // isn't penalized by rebuilds that happened during a previous run.
     previewSvc.resetBuildHealState(ctx.sessionId);
     log.info('preview', `stopped session=${ctx.sessionId}`);
-    void postPreviewEvent({
+    emitPreviewEvent({
       sessionId: ctx.sessionId,
       pluginId: ctx.pluginId,
       pluginAuthToken,
