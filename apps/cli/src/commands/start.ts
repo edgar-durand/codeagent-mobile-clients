@@ -23,11 +23,7 @@ import { RepoDirtyTracker } from '../services/turn-files/repo-dirty-tracker';
 import { StreamingEmitterService } from '../services/streaming-emitter.service';
 import { fetchQuotaUsage } from './start/quota-fetcher';
 import { buildKeepAlive } from './start/keep-alive';
-import {
-  dispatchCommand,
-  cleanupAttachmentTempFiles,
-  type HandlerContext,
-} from './start/handlers';
+import { dispatchCommand, cleanupAttachmentTempFiles, type HandlerContext, makePreviewReaffirm } from './start/handlers';
 import { registerTerminalHandlers, closeAllTerminals } from '../services/terminal-ops.service';
 import { killActiveSpawnAndCaptureChildren } from '../services/spawn-and-capture';
 import {
@@ -741,9 +737,23 @@ export async function start(
     pluginAuthToken: session.pluginAuthToken ?? undefined,
   };
 
-  const relay = new CommandRelayService(pluginId, async (cmd) => {
-    await dispatchCommand(ctx, cmd);
-  }, runtime.meta);
+  const relay = new CommandRelayService(
+    pluginId,
+    async (cmd) => {
+      await dispatchCommand(ctx, cmd);
+    },
+    runtime.meta,
+    undefined,
+    undefined,
+    // Pasajero del tick de 20 s que ya existe: re-afirma el preview para que
+    // su snapshot (1 h de TTL en Redis) no caduque con el dev server vivo.
+    // Ni un temporizador nuevo. Ver `services/preview/reaffirm.ts`.
+    makePreviewReaffirm({
+      sessionId: session.id,
+      pluginId,
+      pluginAuthToken: session.pluginAuthToken,
+    }),
+  );
   ctx.relay = relay;
 
   // Expose the composition-root-provisioned Beads handle on `ctx` once it

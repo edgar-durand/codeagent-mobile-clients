@@ -43,6 +43,7 @@ import { showInfo } from '../../ui/banner';
 import { applyFileReview } from '../../services/apply-file-review.service';
 import { buildLinkContext } from '../link';
 import { makeSerializedEmitter } from '../../services/preview/serialized-emitter';
+import { makePreviewHeartbeatReaffirm } from '../../services/preview/reaffirm';
 import { postLinkCredential, postAiResult, postPreviewEvent, postHeadroomEvent, postBeadsEvent, postCliUpdateEvent, postCoderabbitEvent, postAgentReviewReport, fetchProvisionCredential } from '../../services/pairing.service';
 import { configureCoderabbit, type CoderabbitAction } from '../../agents/coderabbit/configure';
 import { deliverPendingCoderabbitCallback, type CoderabbitAuthEvent } from '../../agents/coderabbit/oauth';
@@ -2092,6 +2093,55 @@ let previewPrewarmStarted = false;
  * AI summaries). Idempotent (cache + once-guard) and strictly non-fatal:
  * a failure just means the first preview pays the detect cost, as today.
  */
+/**
+ * Rider del heartbeat que impide que el snapshot del preview caduque mientras
+ * el dev server siga vivo.
+ *
+ * El backend guarda ese estado en Redis con 1 h de TTL y el CLI solo publicaba
+ * en las transiciones, así que un preview de más de una hora perdía su
+ * snapshot: el usuario refrescaba y volvía al estado vacío con el dev server
+ * corriendo. Ver `services/preview/reaffirm.ts` para el porqué completo.
+ *
+ * ⚠️ Va por `emitPreviewEvent`, el MISMO emisor serializado que las
+ * transiciones: una re-afirmación no puede adelantar a un `preview_stopped`
+ * real y resucitar en el backend un preview que el usuario acaba de parar.
+ *
+ * ⚠️ El gate mira el PROCESO, no un recuerdo: `exitCode === null` es que el
+ * dev server sigue vivo. Si murió, no se re-afirma y la clave caduca sola —
+ * que es la verdad.
+ */
+export function makePreviewReaffirm(args: {
+  sessionId: string | undefined;
+  pluginId: string;
+  pluginAuthToken: string | undefined;
+}): ((info: { firstAfterConnect: boolean }) => void) | undefined {
+  const token = args.pluginAuthToken;
+  const sessionId = args.sessionId;
+  // Sin sesión o sin token no hay nada que afirmar NI a quién afirmárselo: no
+  // se instala rider, en vez de instalar uno que no haga nada en cada beat.
+  if (!token || !sessionId) return undefined;
+  return makePreviewHeartbeatReaffirm({
+    serving: () => {
+      const active = previewSvc.activePreviews.get(sessionId);
+      if (!active || active.devServer.exitCode !== null) return null;
+      return {
+        url: active.url,
+        framework: active.framework,
+        port: active.detection.port,
+      };
+    },
+    emitReady: (payload) => {
+      emitPreviewEvent({
+        sessionId,
+        pluginId: args.pluginId,
+        pluginAuthToken: token,
+        type: USER_EVENTS.PREVIEW_READY,
+        payload,
+      });
+    },
+  });
+}
+
 export function prewarmPreviewDetection(runtime: RuntimeStrategy): void {
   if (previewPrewarmStarted) return;
   previewPrewarmStarted = true;
