@@ -2160,18 +2160,64 @@ export function startPreviewFromDetection(
     // this repo picks up its saved `.env` before the dev server spawns. Optional
     // — a caller without a token just skips the restore.
     projectEnvAuth: { pluginId: ctx.pluginId, pluginAuthToken },
-  }).catch((err) => {
-    // Safety net: any UNEXPECTED throw in the detached bring-up (a malformed
-    // detection field, a parser bug, etc.) must NOT become a silent unhandled
-    // rejection that leaves the mobile preview on a black screen forever.
-    // Surface it as a preview_error so the UI can show something actionable.
-    const message = err instanceof Error ? err.message : String(err);
-    log.warn('preview', `start crashed before ready: ${message}`);
-    emit(USER_EVENTS.PREVIEW_ERROR, {
-      stage: 'spawn',
-      message: `Preview failed to start: ${message}`,
+  })
+    .then(() => maybeAttachBuildHeal(ctx, pluginAuthToken))
+    .catch((err) => {
+      // Safety net: any UNEXPECTED throw in the detached bring-up (a malformed
+      // detection field, a parser bug, etc.) must NOT become a silent unhandled
+      // rejection that leaves the mobile preview on a black screen forever.
+      // Surface it as a preview_error so the UI can show something actionable.
+      const message = err instanceof Error ? err.message : String(err);
+      log.warn('preview', `start crashed before ready: ${message}`);
+      emit(USER_EVENTS.PREVIEW_ERROR, {
+        stage: 'spawn',
+        message: `Preview failed to start: ${message}`,
+      });
     });
+}
+
+/**
+ * Arms the Next.js build-clobber self-heal (`services/preview/build-heal.ts`)
+ * for a preview that just finished bring-up. Called after EVERY
+ * `startPreviewFromDetection` resolution — the initial `preview_start`, a
+ * `preview_restart` (env-var reload), and a heal-triggered restart all funnel
+ * through here, which is what re-arms the watcher across a heal restart's
+ * kill+respawn cycle (the restart-count cap itself lives outside the watcher
+ * instance, in `build-heal.ts`, so it survives that recreation intact).
+ *
+ * No-ops when: bring-up didn't register a preview (it ended in
+ * `preview_error`, or `.catch()` above is about to fire instead), the
+ * framework isn't Next.js, or this preview instance already has a watcher
+ * (the `runPreviewStart` reuse-guard resolved without touching the existing
+ * `ActivePreview`, whose watcher is already live).
+ */
+export function maybeAttachBuildHeal(ctx: HandlerContext, pluginAuthToken: string): void {
+  const preview = previewSvc.activePreviews.get(ctx.sessionId);
+  if (!preview || preview.buildHealStop) return;
+  if (!previewSvc.isBuildHealSupported(preview.framework)) return;
+  const { stop } = previewSvc.watchForBuildClobber({
+    cwd: preview.cwd,
+    sessionId: ctx.sessionId,
+    restart: () => {
+      void (async () => {
+        await previewSvc.killPreview(ctx.sessionId);
+        // 150 ms so the port is fully released before the fresh spawn binds
+        // it — same grace period `previewRestartH` waits below.
+        await new Promise((r) => setTimeout(r, 150));
+        self.startPreviewFromDetection(ctx, preview.detection, pluginAuthToken);
+      })();
+    },
+    notify: (message) => {
+      void postPreviewEvent({
+        sessionId: ctx.sessionId,
+        pluginId: ctx.pluginId,
+        pluginAuthToken,
+        type: USER_EVENTS.PREVIEW_PROGRESS,
+        payload: { step: 'BUILD_HEAL', message, timestamp: Date.now() },
+      });
+    },
   });
+  preview.buildHealStop = stop;
 }
 
 const previewStopH: CommandHandler = (ctx) => {
@@ -2182,6 +2228,10 @@ const previewStopH: CommandHandler = (ctx) => {
   const pluginAuthToken = ctx.pluginAuthToken;
   void (async () => {
     await killPreview(ctx.sessionId);
+    // A genuine user stop, not a heal-triggered restart — clear the
+    // build-heal restart cap so a later fresh preview for this session
+    // isn't penalized by rebuilds that happened during a previous run.
+    previewSvc.resetBuildHealState(ctx.sessionId);
     log.info('preview', `stopped session=${ctx.sessionId}`);
     void postPreviewEvent({
       sessionId: ctx.sessionId,
