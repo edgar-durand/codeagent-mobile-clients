@@ -3,6 +3,7 @@ import { forgetPreviewPort } from './port-registry';
 import { restorePreviewHostAllow } from './host-allow';
 import type { PreviewDetection } from '@codeam/shared';
 
+export * from './build-heal';
 export * from './cloudflared';
 export * from './codespace';
 export * from './config-file';
@@ -34,6 +35,12 @@ export interface ActivePreview {
   /** The project cwd this preview runs in — needed to restore the
    *  dev-server host-allow config edit (`host-allow.ts`) on teardown. */
   cwd: string;
+  /** Stops the Next.js build-clobber watcher (`build-heal.ts`) attached to
+   *  THIS preview instance, if any. Set by `maybeAttachBuildHeal`
+   *  (`commands/start/handlers.ts`) right after a successful bring-up.
+   *  `killPreview` calls it so a stopped/replaced preview never leaves a
+   *  dangling fs.watch handle or a pending debounce timer running. */
+  buildHealStop?: () => void;
 }
 
 export const activePreviews = new Map<string, ActivePreview>();
@@ -94,6 +101,11 @@ export function killProcessTree(
 export async function killPreview(sessionId: string): Promise<void> {
   const preview = activePreviews.get(sessionId);
   if (!preview) return;
+
+  // Close the build-heal fs.watch handle (if any) BEFORE anything else, so a
+  // debounced restart it already scheduled can never fire against a preview
+  // we're in the middle of tearing down.
+  preview.buildHealStop?.();
 
   // Drop the persistent port-ownership record — a clean teardown means the
   // next start should probe the LIVE port, not trust a now-stale record.
