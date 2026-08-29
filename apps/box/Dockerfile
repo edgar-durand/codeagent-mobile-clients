@@ -93,6 +93,22 @@ RUN useradd --create-home --home-dir /home/box box
 # ships none and the entrypoint runs as `box`); the pre-installed agents never
 # re-install (findInPath skip), so leaking the prefix to box costs nothing —
 # host isolation is entirely the fleet_create_box caller's flags.
+#
+# ⚠️ **PGlite va aquí, PRE-INSTALADO, y esa es la clave.**
+#
+# Es Postgres compilado a WASM: corre EN PROCESO, sin demonio, sin Docker y sin
+# privilegios. Es la única forma de darle una base de datos a un proyecto
+# dentro de una Box, donde `fleet_create_box` prohíbe expresamente
+# `--privileged`, el montaje de `docker.sock` y cualquier bind del host — así
+# que ahí no hay Docker que valga y un proyecto con Prisma arrancaba sin BD.
+#
+# `pglite-socket` le pone un puerto TCP hablando el protocolo de Postgres, así
+# que para la app es un Postgres normal: su `DATABASE_URL=postgres://…` no
+# cambia.
+#
+# Instalado en la imagen y no al vuelo porque bajarlo en el primer preview
+# metería su descarga en el camino crítico del usuario — el mismo motivo por el
+# que aquí ya viven el CLI, los agentes y el modelo de Headroom.
 ARG CODEAM_CLI_VERSION=latest
 RUN npm install -g --omit=optional \
         "codeam-cli@${CODEAM_CLI_VERSION}" \
@@ -100,6 +116,8 @@ RUN npm install -g --omit=optional \
         @google/gemini-cli \
         opencode-ai \
         @beads/bd \
+        @electric-sql/pglite \
+        @electric-sql/pglite-socket \
     && codeam --version \
     && npm cache clean --force \
     && chown -R box:box /usr/local/lib/node_modules /usr/local/bin
