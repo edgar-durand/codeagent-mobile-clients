@@ -64,10 +64,33 @@ export function inspectorClientSource(opts: InspectorClientOptions): string {
       return ALLOWED.indexOf(origin) !== -1;
     }
 
+    // ¿Estamos dentro del WebView de la app movil?
+    //
+    // ⚠️ En un WebView el documento es de NIVEL SUPERIOR, asi que
+    // \`window.parent === window\` y la via del iframe no existe: el script
+    // hablaba solo, y en movil el inspector no devolvia nada. React Native
+    // expone su propio canal, que es el unico que sale de ahi.
+    function rnBridge() {
+      return typeof window.ReactNativeWebView !== 'undefined' &&
+        window.ReactNativeWebView &&
+        typeof window.ReactNativeWebView.postMessage === 'function'
+        ? window.ReactNativeWebView
+        : null;
+    }
+
     function send(type, payload) {
-      if (!driver || window.parent === window) return;
+      if (!driver) return;
       var msg = { source: CHANNEL, type: type };
       for (var k in payload) if (Object.prototype.hasOwnProperty.call(payload, k)) msg[k] = payload[k];
+
+      var rn = rnBridge();
+      if (rn) {
+        // El canal de RN transporta CADENAS, no objetos: pasarle el objeto
+        // llega al otro lado como "[object Object]".
+        rn.postMessage(JSON.stringify(msg));
+        return;
+      }
+      if (window.parent === window) return;
       window.parent.postMessage(msg, driver);
     }
 
@@ -214,6 +237,25 @@ export function inspectorClientSource(opts: InspectorClientOptions): string {
       if (data.type === 'enable') enable(e.origin);
       else if (data.type === 'disable') disable();
     });
+
+    /**
+     * La puerta para React Native, que no puede usar \`postMessage\`.
+     *
+     * ⚠️ Aqui NO hay lista blanca de origenes, y no es un descuido: quien
+     * llama esto es la app anfitriona sobre SU PROPIO WebView, via
+     * \`injectJavaScript\` — no hay un tercero al que filtrar. La lista blanca
+     * protege el caso del iframe, donde cualquier pagina puede embeber el
+     * preview y mandar mensajes; ese caso sigue exactamente igual de cerrado.
+     *
+     * Solo se expone donde ese puente existe, para no dejar en una pagina
+     * normal una funcion global que encienda el inspector sin permiso.
+     */
+    if (rnBridge()) {
+      window.__codeamInspector = {
+        enable: function () { enable('react-native'); },
+        disable: disable,
+      };
+    }
   } catch (e) {
     // Pase lo que pase, la app del usuario sigue funcionando.
   }

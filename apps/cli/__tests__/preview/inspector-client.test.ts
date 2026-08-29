@@ -276,6 +276,113 @@ describe('inspector client — apagarlo lo deja todo como estaba', () => {
   });
 });
 
+/**
+ * El puente de React Native.
+ *
+ * ⚠️ En un WebView el documento es de NIVEL SUPERIOR, asi que
+ * `window.parent === window` y la via del iframe no existe: el script hablaba
+ * solo y en movil el inspector no devolvia NADA. Reportado el 2026-08-29 —
+ * seguian llegando coordenadas donde debia llegar el elemento.
+ */
+describe('inspector client — dentro del WebView de la app', () => {
+  interface RnHarness {
+    win: Window & typeof globalThis;
+    sent: string[];
+    hoverOver: (selector: string) => void;
+  }
+
+  function mountInWebView(html: string): RnHarness {
+    const dom = new JSDOM(
+      `<!doctype html><html><head><title>t</title></head><body>${html}</body></html>`,
+      { runScripts: 'dangerously', url: 'https://preview-abc.codeagent-mobile.com/' },
+    );
+    const win = dom.window as unknown as Window & typeof globalThis;
+
+    // El canal de RN, tal cual lo inyecta react-native-webview.
+    const sent: string[] = [];
+    (win as unknown as { ReactNativeWebView: unknown }).ReactNativeWebView = {
+      postMessage: (s: string) => sent.push(s),
+    };
+
+    const source = inspectorClientSource({ allowedOrigins: [DASHBOARD] });
+    win.eval(source.replace(/^<script[^>]*>/, '').replace(/<\/script>$/, ''));
+
+    win.Element.prototype.getBoundingClientRect = function () {
+      return {
+        left: 0, top: 0, width: 10, height: 5,
+        right: 0, bottom: 0, x: 0, y: 0, toJSON: () => ({}),
+      } as DOMRect;
+    };
+
+    return {
+      win,
+      sent,
+      hoverOver: (selector) => {
+        const el = win.document.querySelector(selector);
+        if (!el) throw new Error(`no existe ${selector}`);
+        el.dispatchEvent(new win.MouseEvent('mousemove', { bubbles: true }));
+      },
+    };
+  }
+
+  it('expone la puerta que RN puede invocar', () => {
+    const h = mountInWebView('<button id="cta">x</button>');
+    const api = (h.win as unknown as { __codeamInspector?: { enable: () => void } })
+      .__codeamInspector;
+    expect(typeof api?.enable).toBe('function');
+  });
+
+  /**
+   * ⚠️ Esa puerta solo existe DENTRO del WebView. En una pagina normal seria
+   * una funcion global que enciende el inspector sin permiso de nadie —
+   * exactamente lo que la lista blanca de origenes existe para impedir.
+   */
+  it('y NO la expone en una pagina normal', () => {
+    const h = mount('<button id="cta">x</button>');
+    expect(
+      (h.win as unknown as { __codeamInspector?: unknown }).__codeamInspector,
+    ).toBeUndefined();
+  });
+
+  it('publica por el canal de RN, no por window.parent', () => {
+    const h = mountInWebView('<button id="cta" class="btn">Comprar</button>');
+    (h.win as unknown as { __codeamInspector: { enable: () => void } })
+      .__codeamInspector.enable();
+    h.hoverOver('#cta');
+    const msgs = h.sent.map((s) => JSON.parse(s) as { type: string });
+    expect(msgs.map((m) => m.type)).toContain('ready');
+    expect(msgs.map((m) => m.type)).toContain('hover');
+  });
+
+  // El canal de RN transporta CADENAS: pasarle el objeto llega al otro lado
+  // como "[object Object]".
+  it('serializa el mensaje, porque ese canal solo lleva texto', () => {
+    const h = mountInWebView('<button id="cta">Comprar</button>');
+    (h.win as unknown as { __codeamInspector: { enable: () => void } })
+      .__codeamInspector.enable();
+    h.hoverOver('#cta');
+    for (const raw of h.sent) {
+      expect(typeof raw).toBe('string');
+      expect(raw).not.toContain('[object Object]');
+    }
+    const hover = h.sent.map((s) => JSON.parse(s)).find((m) => m.type === 'hover');
+    expect(hover.element).toMatchObject({ tag: 'button', text: 'Comprar' });
+  });
+
+  it('apagarlo desde RN deja de publicar', () => {
+    const h = mountInWebView('<button id="cta">x</button>');
+    const api = (h.win as unknown as {
+      __codeamInspector: { enable: () => void; disable: () => void };
+    }).__codeamInspector;
+    api.enable();
+    h.hoverOver('#cta');
+    const before = h.sent.length;
+    api.disable();
+    h.hoverOver('#cta');
+    expect(h.sent.length).toBe(before);
+  });
+});
+
 describe('inspector client — la fuente', () => {
   // Un origen con una comilla rompería el script y dejaría la página del
   // usuario SIN CARGAR. Por eso la lista va serializada, no interpolada.
