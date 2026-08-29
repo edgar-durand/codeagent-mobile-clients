@@ -41,6 +41,15 @@ export interface ActivePreview {
    *  `killPreview` calls it so a stopped/replaced preview never leaves a
    *  dangling fs.watch handle or a pending debounce timer running. */
   buildHealStop?: () => void;
+  /**
+   * El proxy del inspector, cuando se interpuso entre el túnel y el dev
+   * server. `undefined` = camino directo (Expo, o el proxy no arrancó).
+   *
+   * Cerrarlo es parte del apagado: es un servidor HTTP nuestro escuchando en
+   * localhost, y sus websockets de recarga en caliente mantienen vivo el
+   * proceso si nadie los mata.
+   */
+  inspector?: { close(): Promise<void> } | null;
 }
 
 export const activePreviews = new Map<string, ActivePreview>();
@@ -69,7 +78,13 @@ export function killProcessTree(
   signal: NodeJS.Signals = 'SIGTERM',
 ): void {
   const pid = child.pid;
-  if (pid == null) return;
+  // ⚠️ `!pid`, no `pid == null`. Con `pid === 0`, `-pid` es `0` y
+  // `process.kill(0, …)` señaliza al GRUPO DE PROCESOS ACTUAL — o sea, el CLI
+  // se mata a sí mismo y se lleva por delante al agente y al dev server. Hoy
+  // no es alcanzable (`child.pid` es `undefined` en un spawn fallido, nunca
+  // `0`), pero la distancia entre «no alcanzable» y «catastrófico» es un
+  // carácter, y lo destapó un test al matar a su propio runner.
+  if (!pid) return;
   if (process.platform !== 'win32') {
     try {
       // Negative pid → the whole process group (child spawned detached).
@@ -115,6 +130,19 @@ export async function killPreview(sessionId: string): Promise<void> {
     killProcessTree(preview.tunnel, 'SIGTERM');
   }
   await new Promise((r) => setTimeout(r, 100));
+
+  // ⚠️ El proxy va DESPUÉS del túnel y ANTES del dev server, en su sitio de la
+  // cadena. Antes que el túnel, dejaría al túnel apuntando a un puerto muerto
+  // y el usuario vería un 502 en el instante de parar; después del dev server,
+  // el dev server intentaría escribir en sockets que ya nadie atiende.
+  // Best-effort: un cierre que falle no puede impedir que se mate el proceso
+  // que de verdad hay que matar.
+  try {
+    await preview.inspector?.close();
+  } catch {
+    /* nunca bloquear el apagado */
+  }
+
   killProcessTree(preview.devServer, 'SIGTERM');
 
   const sigkillTimer = setTimeout(() => {
