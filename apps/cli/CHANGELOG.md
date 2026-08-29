@@ -4,6 +4,12 @@ All notable changes to `codeam-cli` are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.68.0] — 2026-08-29
+
+### Added
+
+- **cli:** Inspector de preview — proxy inyector, script y E2E en navegador (#665)
+
 ## [2.67.6] — 2026-08-27
 
 ### Fixed
