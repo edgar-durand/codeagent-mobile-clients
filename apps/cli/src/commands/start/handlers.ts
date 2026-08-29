@@ -1975,9 +1975,33 @@ function parseInsightText(text: string): {
 // del ACP lo usa —, así que la referencia temprana las hacía fallar al
 // cargar. Envolverla mantiene la búsqueda en tiempo de llamada, que es
 // exactamente donde estaba antes de encauzar los emisores.
-const emitPreviewEvent = makeSerializedEmitter(
+const emitPreviewEventRaw = makeSerializedEmitter(
   (args: Parameters<typeof postPreviewEvent>[0]) => postPreviewEvent(args),
 );
+
+/**
+ * Todo error de preview sale por aqui llevando las dependencias que NO pudimos
+ * levantarle al proyecto.
+ *
+ * ⚠️ El enriquecido vive en el EMISOR, no en los catorce sitios que emiten un
+ * error. Repetirlo en cada uno es un olvido garantizado —y el proximo error que
+ * alguien añada nacería mudo—; aqui la regla existe una sola vez y todos la
+ * heredan, incluidos los del orquestador, que reciben esta misma closure.
+ *
+ * Solo se adjunta cuando de verdad falta algo: `missing` vacio significa que
+ * las dependencias estan servidas y el fallo es de otra cosa, asi que ofrecer
+ * ahi una variable de entorno mandaria al usuario a arreglar lo que no esta
+ * roto. `null` (aun no corrio, o sesion local) tampoco adjunta nada.
+ */
+const emitPreviewEvent = (args: Parameters<typeof postPreviewEvent>[0]): void => {
+  if (args.type !== USER_EVENTS.PREVIEW_ERROR) return emitPreviewEventRaw(args);
+  const missing = previewSvc.getLastProvisionOutcome()?.missing ?? [];
+  if (missing.length === 0) return emitPreviewEventRaw(args);
+  return emitPreviewEventRaw({
+    ...args,
+    payload: { ...(args.payload ?? {}), missingServices: missing },
+  });
+};
 
 const requestPreviewDetectH: CommandHandler = (ctx) => {
   if (!ctx.pluginAuthToken) {

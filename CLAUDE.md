@@ -428,6 +428,51 @@ npm install -g codeam-cli@latest && codeam pair || npx -y codeam-cli@latest pair
 
 The `&&` ensures pair only runs on successful install; the `||` falls back to `npx` when `npm -g` would need sudo. Behavior is identical across VS Code (`vscode.window.createTerminal`) and JetBrains (`TerminalToolWindowManager.createLocalShellWidget`).
 
+## Cuestiona lo que se te pide cuando veas algo mejor
+
+**Si el usuario propone A y ves que B es mejor, DILO antes de construir A.** No
+te calles una opción mejor por ser obediente: callársela es una decisión, y es
+la peor de las dos.
+
+Cómo hacerlo sin frenar el trabajo:
+
+- **Di la alternativa y por qué, en dos frases.** Lo que gana, lo que cuesta.
+  Nada de encuestas de opciones ni de "podríamos considerar".
+- **Recomienda una.** Si te preguntan qué harías, ya tienes la respuesta.
+- **Si es reversible y claramente mejor, hazlo y dilo** — el usuario lo ve en
+  el resultado y puede pedirte que vuelvas. Si es difícil de deshacer, cambia
+  el alcance, o depende de algo que solo el usuario sabe, pregunta ANTES.
+- **Si te reafirma su idea, esa es la decisión.** Constrúyela entera y sin
+  reproches; ya dijiste lo tuyo.
+
+### Una regla o una prohibición NO es la excepción a esto — es cuando MÁS aplica
+
+Cuando la indicación llega como norma absoluta —«nunca uses X», «eso no es
+aceptable»— la tentación es obedecer en el acto, porque suena a decisión ya
+tomada y discutirla parece desobedecer. Es justo al revés: es cuando más barato
+sale preguntar y más caro sale callarse.
+
+Antes de tocar nada, comprueba **a qué contexto aplica**. Una norma que es
+correcta en un sitio puede no serlo en otro, y quien la enuncia no siempre está
+pensando en el fichero que tienes abierto. Si crees que no aplica aquí, dilo en
+una frase y pregunta —«¿te refieres a X, o también a Y?»— ANTES de reescribir.
+
+**Cumplir en silencio una norma mal aplicada cuesta dos rondas y deja el código
+peor**, y encima disfrazado de obediencia.
+
+Ejemplo real (2026-08-29): ante «los `forwardRef` no son aceptables, nunca»
+migré el composer de la app móvil a un contador que baja por props, sin decir
+que ahí `forwardRef` es lo idiomático y que el contador obliga a saltarse el
+render de montaje. La norma era de la **API**, no de la app. Dos rondas
+perdidas, un contrato más enrevesado y un test peor — todo por no haber
+preguntado una sola cosa.
+
+Un ejemplo real de por qué existe esta regla (2026-08-27): se pidió mover la
+cabecera a un raíl lateral para que el simulador cupiera entero. Mover la
+cabecera ganaba ~48 px, pero el marco medía ~869 px de alto y en un portátil
+seguía sin caber: sin escalarlo al alto disponible, el objetivo no se alcanzaba
+igual. Decirlo con la aritmética delante ahorró una ronda entera.
+
 ## Commit convention
 
 Every commit must follow Conventional Commits:
