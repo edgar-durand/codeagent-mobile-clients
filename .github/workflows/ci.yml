@@ -143,6 +143,26 @@ jobs:
         working-directory: apps/cli
         run: npm run build
 
+      # Inspector de preview — E2E en un NAVEGADOR REAL.
+      #
+      # ⚠️ Es la única capa que puede juzgar las dos mitades juntas. El proxy
+      # se prueba contra sockets de verdad y el script inyectado se evalúa en
+      # un DOM, pero ninguno demuestra lo que importa: que una página cargada
+      # A TRAVÉS del proxy trae el script vivo, que el dashboard puede
+      # encenderlo por `postMessage` cross-origin, y que un clic devuelve el
+      # elemento con su caja real medida por el navegador.
+      #
+      # Una sola celda (Linux + Node 20): descarga un Chromium, y el
+      # comportamiento que se prueba es del motor, no del sistema operativo.
+      # Fuera de `npm test` a propósito, para no obligar a bajar navegadores en
+      # cada instalación de quien solo quiere correr los unitarios.
+      - name: CLI Preview inspector E2E (navegador real)
+        if: matrix.os == 'ubuntu-latest' && matrix.node == '20'
+        working-directory: apps/cli
+        run: |
+          npx playwright install --with-deps chromium
+          npm run e2e
+
       # Self-hosted host-agent REAL Docker integration test (Phase 3
       # acceptance gate). Boots a Node-20 container running the built
       # `codeam host-agent` against an in-test stub backend and asserts the

@@ -27,6 +27,8 @@ import * as previewSvc from './index';
 import { applyPreviewHostAllow } from './host-allow';
 import { restoreProjectEnvIfMissing } from '../project-env';
 import { resolveNamedTunnel } from './named-tunnel';
+import { bringUpInspector } from './inspector-bringup';
+import type { InspectorProxy } from './inspector-proxy';
 import { fetchNamedPreviewTunnel } from '../pairing.service';
 
 /**
@@ -321,6 +323,7 @@ export async function runPreviewStart(args: PreviewStartArgs): Promise<void> {
     sessionId,
     devServer: dev.devServer,
     tunnel: tun.tunnel,
+    inspector: tun.inspector,
     url: tun.url,
     framework: detection.framework,
     detection,
@@ -700,6 +703,14 @@ interface TunnelUp {
   url: string;
   /** Null when the framework manages its own tunnel (Expo). */
   tunnel: ReturnType<typeof spawn> | null;
+  /**
+   * El proxy del inspector, cuando se pudo levantar.
+   *
+   * `null` significa camino directo — o porque es Expo (se auto-tunela y no
+   * hay puerto nuestro que interponer), o porque el proxy no arrancó y se
+   * cayó al camino de siempre. Hay que cerrarlo al parar el preview.
+   */
+  inspector: InspectorProxy | null;
 }
 
 /**
@@ -742,7 +753,11 @@ async function establishTunnel(ctx: StageCtx, dev: DevServerUp): Promise<TunnelU
       });
       return null;
     }
-    return { url: expoUrl, tunnel: null };
+    // ⚠️ Expo NO lleva proxy, y no es una omisión. Expo se auto-tunela: la
+    // URL sale de su propia salida (`exp://…exp.host`) y nosotros no
+    // levantamos `cloudflared`, así que no hay puerto nuestro que interponer.
+    // Y un inspector de DOM no significa nada contra una app nativa.
+    return { url: expoUrl, tunnel: null, inspector: null };
   }
 
   // ALWAYS a Cloudflare Quick Tunnel — the same public-URL path for
@@ -750,6 +765,23 @@ async function establishTunnel(ctx: StageCtx, dev: DevServerUp): Promise<TunnelU
   // behaves identically everywhere. We deliberately do NOT use GitHub
   // Codespaces port-forwarding (it required CODESPACE_NAME, which the
   // detached CLI env doesn't carry, and split behaviour by environment).
+  /**
+   * El proxy del inspector se interpone AQUÍ, y solo aquí.
+   *
+   * Después de la rama de Expo (que no lleva) y antes de que se decida el
+   * túnel, porque lo único que cambia es QUÉ PUERTO recibe: `cloudflared`
+   * apunta al proxy y el proxy al dev server. Si no arranca, `port` es el del
+   * dev server y todo lo de abajo es byte por byte lo de siempre.
+   *
+   * ⚠️ Va después de la readiness a propósito. La readiness se mide contra el
+   * dev server (`ready_pattern` + la sonda TCP), nunca contra el proxy: así el
+   * inspector no puede hacer que un preview sano parezca roto.
+   */
+  const inspection = await bringUpInspector(detection.port, {
+    log: (m) => log.info('preview', m),
+  });
+  const tunnelPort = inspection.port;
+
   let bin: string;
   try {
     bin = await previewSvc.resolveCloudflared();
@@ -801,7 +833,7 @@ async function establishTunnel(ctx: StageCtx, dev: DevServerUp): Promise<TunnelU
   if (namedToken && namedHostname) {
     try {
       emitProgress('TUNNEL_STARTING', `named tunnel ${namedHostname}`);
-      const candidate = await previewSvc.spawnNamedTunnel(bin, namedToken, detection.port);
+      const candidate = await previewSvc.spawnNamedTunnel(bin, namedToken, tunnelPort);
       const outcome = await previewSvc.awaitTunnelRegistered(
         candidate,
         namedHostname,
@@ -839,7 +871,7 @@ async function establishTunnel(ctx: StageCtx, dev: DevServerUp): Promise<TunnelU
     }
     const candidate = spawn(
       bin,
-      ['tunnel', '--url', `http://localhost:${detection.port}`],
+      ['tunnel', '--url', `http://localhost:${tunnelPort}`],
       { stdio: ['ignore', 'pipe', 'pipe'] },
     );
     // Wait for BOTH the URL and the registered-connection line (the
@@ -869,5 +901,5 @@ async function establishTunnel(ctx: StageCtx, dev: DevServerUp): Promise<TunnelU
     });
     return null;
   }
-  return { url: parsedUrl, tunnel };
+  return { url: parsedUrl, tunnel, inspector: inspection.proxy };
 }

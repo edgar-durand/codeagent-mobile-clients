@@ -2,3 +2,7 @@ node_modules/
 dist/
 coverage/
 *.js.map
+
+# Playwright — artefactos del E2E del inspector
+/test-results/
+/playwright-report/
