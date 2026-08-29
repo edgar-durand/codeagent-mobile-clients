@@ -303,6 +303,29 @@ export function stopEmbeddedPostgres(): void {
   embeddedPg = null;
 }
 
+/**
+ * Lo ultimo que supimos de las dependencias del proyecto.
+ *
+ * ⚠️ Vive a nivel de modulo A PROPOSITO. El aprovisionamiento corre UNA vez, al
+ * arrancar la sesion y ANTES que el agente; el preview puede pedirse minutos
+ * despues y desde otro handler. Sin este puente el dato —que YA sabiamos: que
+ * falta Postgres y que `DATABASE_URL` lo arreglaria— se perdia, y el usuario
+ * solo veia morir el dev server sin una sola pista.
+ *
+ * `null` = todavia no corrio (sesion local, o aun en marcha). No es lo mismo
+ * que «no falta nada», asi que no se colapsan.
+ */
+let lastOutcome: ProvisionOutcome | null = null;
+
+/** Lo guarda el arranque; lo lee el preview cuando algo falla. */
+export function noteProvisionOutcome(outcome: ProvisionOutcome): void {
+  lastOutcome = outcome;
+}
+
+export function getLastProvisionOutcome(): ProvisionOutcome | null {
+  return lastOutcome;
+}
+
 export interface ProvisionOutcome {
   /** Servicios que el proyecto necesita y no están sirviendo. */
   missing: Array<{ service: string; envVar: string }>;

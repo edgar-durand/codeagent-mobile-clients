@@ -30,6 +30,7 @@ import {
   activePreviewSessionIds,
   killAllPreviews,
   provisionProjectDependencies,
+  noteProvisionOutcome,
 } from '../services/preview';
 import {
   fetchCurrentPluginAuthToken,
@@ -323,7 +324,13 @@ export async function start(
   // inventar otro que acabaría divergiendo.
   const managedBox = !isLocalSession();
   const depsReady: Promise<unknown> = managedBox
-    ? provisionProjectDependencies(cwd).catch(() => undefined)
+    ? provisionProjectDependencies(cwd)
+        // ⚠️ El resultado se GUARDA, no se tira. Trae que servicios faltan y
+        // con que variable los arreglaria el usuario; sin esto el preview no
+        // tiene nada accionable que ofrecerle cuando el dev server muere sin
+        // base de datos.
+        .then((outcome) => noteProvisionOutcome(outcome))
+        .catch(() => undefined)
     : Promise.resolve();
 
   // Gate the agent spawn on dep provisioning + the agent binary.
