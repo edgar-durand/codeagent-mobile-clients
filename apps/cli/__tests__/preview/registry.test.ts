@@ -63,13 +63,13 @@ describe('preview registry', () => {
         // a direct child.kill and never touches process.kill(-pid).
         expect(killSpy).not.toHaveBeenCalled();
         expect(preview.tunnel!.kill).toHaveBeenCalledWith('SIGTERM');
-        expect(preview.devServer.kill).toHaveBeenCalledWith('SIGTERM');
+        expect(preview.devServer!.kill).toHaveBeenCalledWith('SIGTERM');
       } else {
         // POSIX: both are torn down via their process group (negative pid).
         expect(killSpy).toHaveBeenCalledWith(-preview.tunnel!.pid!, 'SIGTERM');
-        expect(killSpy).toHaveBeenCalledWith(-preview.devServer.pid!, 'SIGTERM');
+        expect(killSpy).toHaveBeenCalledWith(-preview.devServer!.pid!, 'SIGTERM');
         // Group-kill succeeded, so the direct child.kill is NOT used.
-        expect(preview.devServer.kill).not.toHaveBeenCalled();
+        expect(preview.devServer!.kill).not.toHaveBeenCalled();
       }
       expect(activePreviews.has('sess-2')).toBe(false);
     } finally {
@@ -105,7 +105,7 @@ describe('killProcessTree', () => {
     if (process.platform === 'win32') return; // POSIX-only behaviour
     killSpy = vi.spyOn(process, 'kill').mockImplementation(() => true);
     const child = makeFakeChild();
-    killProcessTree(child as unknown as ActivePreview['devServer'], 'SIGTERM');
+    killProcessTree(child as unknown as NonNullable<ActivePreview['devServer']>, 'SIGTERM');
     expect(killSpy).toHaveBeenCalledWith(-child.pid!, 'SIGTERM');
     // Group signal succeeded → no direct fallback kill.
     expect(child.kill).not.toHaveBeenCalled();
@@ -117,7 +117,7 @@ describe('killProcessTree', () => {
       throw new Error('ESRCH');
     });
     const child = makeFakeChild();
-    killProcessTree(child as unknown as ActivePreview['devServer'], 'SIGKILL');
+    killProcessTree(child as unknown as NonNullable<ActivePreview['devServer']>, 'SIGKILL');
     expect(killSpy).toHaveBeenCalledWith(-child.pid!, 'SIGKILL');
     // Group gone → direct kill is the fallback.
     expect(child.kill).toHaveBeenCalledWith('SIGKILL');
@@ -128,7 +128,7 @@ describe('killProcessTree', () => {
     const child = new EventEmitter() as FakeChild;
     child.kill = vi.fn();
     child.pid = undefined;
-    killProcessTree(child as unknown as ActivePreview['devServer'], 'SIGTERM');
+    killProcessTree(child as unknown as NonNullable<ActivePreview['devServer']>, 'SIGTERM');
     expect(killSpy).not.toHaveBeenCalled();
     expect(child.kill).not.toHaveBeenCalled();
   });

@@ -289,7 +289,9 @@ export async function runPreviewStart(args: PreviewStartArgs): Promise<void> {
   // re-opening the preview must NOT re-spawn it on the same port
   // (that hits EADDRINUSE → ERR_SPAWN_FAILED "Port N already in use").
   const existing = previewSvc.activePreviews.get(sessionId);
-  if (existing && existing.devServer.exitCode === null) {
+  // Un preview adoptado (`devServer === null`) está vivo por definición: solo
+  // se adopta lo que está sirviendo.
+  if (existing && existing.devServer?.exitCode !== 0 && existing.devServer?.exitCode == null) {
     log.info(
       'preview',
       `reusing running preview for session=${sessionId} url=${existing.url}`,
@@ -333,7 +335,12 @@ export async function runPreviewStart(args: PreviewStartArgs): Promise<void> {
   // that orphaned this dev server) can reclaim it instead of dead-ending on
   // "port already in use" (Rafael 2026-07-14). Best-effort; the in-memory
   // registry above is still the primary record for the live process.
-  previewSvc.recordPreviewPort(detection.port, dev.devServer.pid, sessionId, Date.now());
+  // Un adoptado no se registra como puerto NUESTRO: el registro existe para
+  // poder reclamar un huérfano propio, y matar el servidor del usuario en un
+  // arranque posterior sería exactamente el daño que se está evitando.
+  if (dev.devServer) {
+    previewSvc.recordPreviewPort(detection.port, dev.devServer.pid, sessionId, Date.now());
+  }
   log.info('preview', `ready: ${detection.framework} at ${tun.url}`);
   emit(USER_EVENTS.PREVIEW_READY, {
     url: tun.url,
@@ -506,7 +513,8 @@ async function provisionDeps(ctx: StageCtx): Promise<boolean> {
 
 /** What stage 2 hands to stage 3. */
 interface DevServerUp {
-  devServer: ReturnType<typeof spawn>;
+  /** `null` = adoptado: ya estaba corriendo y no lo arrancamos nosotros. */
+  devServer: ReturnType<typeof spawn> | null;
   /**
    * Live ref — the readiness watcher's `data` listener stays attached
    * and keeps updating this after ready, so the Expo tunnel stage can
@@ -546,7 +554,7 @@ async function startDevServer(ctx: StageCtx): Promise<DevServerUp | null> {
     // was already up (or the top-of-run guard above was bypassed because
     // exitCode had already been set by the time we checked it).
     const raceExisting = previewSvc.activePreviews.get(sessionId);
-    if (raceExisting && raceExisting.devServer.exitCode === null) {
+    if (raceExisting && raceExisting.devServer?.exitCode == null) {
       log.info(
         'preview',
         `port race: reusing running preview for session=${sessionId} url=${raceExisting.url}`,
@@ -569,7 +577,7 @@ async function startDevServer(ctx: StageCtx): Promise<DevServerUp | null> {
     if (raceExisting) {
       log.info(
         'preview',
-        `reclaiming stale preview holding port ${detection.port} for session=${sessionId} (exit=${raceExisting.devServer.exitCode})`,
+        `reclaiming stale preview holding port ${detection.port} for session=${sessionId} (exit=${raceExisting.devServer?.exitCode})`,
       );
       await previewSvc.killPreview(sessionId);
       const freeDeadline = Date.now() + 4_000;
@@ -607,11 +615,40 @@ async function startDevServer(ctx: StageCtx): Promise<DevServerUp | null> {
       }
       // Port freed — continue to the spawn below.
     } else {
-      // A genuinely foreign process owns the port (never recorded as ours).
-      // Don't kill it — fail fast with an actionable error.
+      /**
+       * Algo que no hemos registrado como nuestro tiene el puerto.
+       *
+       * ⚠️ Antes esto era un callejón sin salida: «Port N is already in use by
+       * another process. Stop whatever is listening…». Esa rama asumía
+       * «ajeno», y el caso MUCHO más frecuente es el contrario — el dev server
+       * del propio proyecto, arrancado por el agente o a mano en una terminal.
+       * Eso no es ajeno: es exactamente lo que se quiere previsualizar. Un
+       * usuario se quedó atascado ahí (replay de PostHog, 2026-08-29).
+       *
+       * Así que se le PREGUNTA al puerto qué sirve. Si es una app, se adopta y
+       * se tunela. Si es un listado de directorios —el `http.server` olvidado
+       * en `:3000` que motivó el error original— o cualquier otra cosa, se
+       * falla como antes: tunelar eso publicaría los ficheros del usuario
+       * creyendo que es su app.
+       */
+      const verdict = await previewSvc.canAdoptPort(detection.port);
+      if (verdict.adopt) {
+        log.info(
+          'preview',
+          `adopting the dev server already serving on port ${detection.port}`,
+        );
+        emitProgress('READY_DETECTED', `adopted the server already on port ${detection.port}`);
+        // `devServer: null` = adoptado. No es nuestro, así que parar el
+        // preview no lo mata.
+        return { devServer: null, expoUrlRef: { current: null } };
+      }
+
       emit(USER_EVENTS.PREVIEW_ERROR, {
         stage: 'spawn',
-        message: `Port ${detection.port} is already in use by another process, so the dev server can't start there. Stop whatever is listening on port ${detection.port} and try the preview again.`,
+        message:
+          verdict.reason === 'directory-listing'
+            ? `Port ${detection.port} is serving a directory listing, not your app — that's usually a leftover \`python -m http.server\`. Stop it and try the preview again.`
+            : `Port ${detection.port} is already in use by something that isn't a dev server, so the preview can't start there. Stop whatever is listening on port ${detection.port} and try again.`,
       });
       return null;
     }
@@ -746,7 +783,9 @@ async function establishTunnel(ctx: StageCtx, dev: DevServerUp): Promise<TunnelU
     }
     const expoUrl = dev.expoUrlRef.current;
     if (!expoUrl) {
-      previewSvc.killProcessTree(devServer, 'SIGTERM');
+      // Solo se mata lo que arrancamos nosotros: un adoptado es el servidor
+      // del usuario y matarlo sería el daño que la adopción evita.
+      if (devServer) previewSvc.killProcessTree(devServer, 'SIGTERM');
       emit(USER_EVENTS.PREVIEW_ERROR, {
         stage: 'tunnel',
         message: 'Expo did not report a tunnel URL.',
@@ -786,7 +825,7 @@ async function establishTunnel(ctx: StageCtx, dev: DevServerUp): Promise<TunnelU
   try {
     bin = await previewSvc.resolveCloudflared();
   } catch (e) {
-    previewSvc.killProcessTree(devServer, 'SIGTERM');
+    if (devServer) previewSvc.killProcessTree(devServer, 'SIGTERM');
     emit(USER_EVENTS.PREVIEW_ERROR, {
       stage: 'tunnel',
       message: (e as Error).message,
@@ -894,7 +933,7 @@ async function establishTunnel(ctx: StageCtx, dev: DevServerUp): Promise<TunnelU
     }
   }
   if (!parsedUrl) {
-    previewSvc.killProcessTree(devServer, 'SIGTERM');
+    if (devServer) previewSvc.killProcessTree(devServer, 'SIGTERM');
     emit(USER_EVENTS.PREVIEW_ERROR, {
       stage: 'tunnel',
       message: `Tunnel did not become reachable after ${MAX_TUNNEL_ATTEMPTS} attempts (${lastTunnelErr}). Cloudflare Quick Tunnels occasionally fail to register — please retry.`,

@@ -2123,7 +2123,9 @@ export function makePreviewReaffirm(args: {
   return makePreviewHeartbeatReaffirm({
     serving: () => {
       const active = previewSvc.activePreviews.get(sessionId);
-      if (!active || active.devServer.exitCode !== null) return null;
+      // Un preview ADOPTADO no tiene proceso nuestro (`devServer === null`) y
+      // está vivo por definición: solo se adopta lo que está sirviendo.
+      if (!active || (active.devServer && active.devServer.exitCode !== null)) return null;
       return {
         url: active.url,
         framework: active.framework,
