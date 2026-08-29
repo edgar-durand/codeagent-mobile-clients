@@ -322,7 +322,7 @@ export async function start(
   // pregunta —lo usa el batón para lo mismo— así que se reutiliza en vez de
   // inventar otro que acabaría divergiendo.
   const managedBox = !isLocalSession();
-  const depsReady: Promise<void> = managedBox
+  const depsReady: Promise<unknown> = managedBox
     ? provisionProjectDependencies(cwd).catch(() => undefined)
     : Promise.resolve();
 
