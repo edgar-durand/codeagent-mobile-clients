@@ -50,13 +50,50 @@ export type WatchDirFn = (
   onEvent: (filename: string | null) => void,
 ) => (() => void) | null;
 
-function defaultWatchDir(
+/** Exportada para poder probarla: es la que ata el listener de error. */
+export function defaultWatchDir(
   dir: string,
   onEvent: (filename: string | null) => void,
 ): (() => void) | null {
   try {
     const w = fs.watch(dir, { persistent: false }, (_eventType, filename) => onEvent(filename));
-    return () => w.close();
+
+    /**
+     * ⚠️ El `try/catch` de arriba solo cubre la llamada SÍNCRONA. Una vez
+     * creado el watcher, todo lo que pueda ir mal —el directorio borrado a
+     * media vida, un `EPERM` de Windows— llega como evento `'error'`, y un
+     * `FSWatcher` SIN listener de error lanza una excepción no capturada que
+     * **mata el proceso**.
+     *
+     * O sea: la promesa de este comentario («removed mid-watch … el llamador
+     * degrada en vez de crashear») no se estaba cumpliendo, porque ese caso
+     * es asíncrono. En producción significa que borrar `.next`, cambiar de
+     * rama o mover el proyecto mientras corre un preview se lleva por delante
+     * el CLI entero.
+     *
+     * Se vio en CI de Windows, donde el temporal del test desaparece antes que
+     * el watcher: `EPERM: operation not permitted, watch`, 2655 tests en verde
+     * y la ejecución en rojo por una excepción suelta. Llevaba fallando desde
+     * el 2026-08-27.
+     */
+    w.on('error', () => {
+      // Cerrar y callar: aquí no hay nada que salvar. El preview sigue vivo,
+      // solo pierde el auto-heal — que es exactamente lo que promete el
+      // `return null` del camino síncrono.
+      try {
+        w.close();
+      } catch {
+        /* ya estaba cerrado */
+      }
+    });
+
+    return () => {
+      try {
+        w.close();
+      } catch {
+        /* cerrar dos veces no es un error que nadie deba ver */
+      }
+    };
   } catch {
     return null;
   }
