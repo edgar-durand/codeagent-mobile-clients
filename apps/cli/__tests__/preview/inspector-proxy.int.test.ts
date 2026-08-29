@@ -7,6 +7,7 @@ import {
   startInspectorProxy,
   injectAt,
   isHtmlResponse,
+  isNavigation,
   wantsHtml,
   type InspectorProxy,
 } from '../../src/services/preview/inspector-proxy';
@@ -376,10 +377,54 @@ describe('inspector proxy — la tubería', () => {
 });
 
 describe('inspector proxy — las decisiones puras', () => {
-  it('reconoce una navegación por su Accept', () => {
+  it('reconoce una navegación por su Accept cuando no hay Sec-Fetch', () => {
     expect(wantsHtml('text/html,application/xhtml+xml')).toBe(true);
     expect(wantsHtml('application/json')).toBe(false);
     expect(wantsHtml(undefined)).toBe(false);
+  });
+
+  /**
+   * ⚠️ `Sec-Fetch-Dest` es la señal PRECISA, y manda sobre el `Accept`.
+   *
+   * Un `fetch` de un HTML parcial para meterlo en el DOM llega con
+   * `Accept: text/html` igual que una navegación; inyectar ahí volvería a
+   * ejecutar el script DENTRO de la misma página y registraría sus listeners
+   * dos veces. El navegador ya distingue los dos casos — solo habia que
+   * mirarlo.
+   */
+  /**
+   * ⚠️ El dashboard carga el preview DENTRO de un iframe, así que
+   * `Sec-Fetch-Dest: iframe` es el caso NORMAL, no el excepcional. Aceptar
+   * solo `document` rompía el inspector en web por completo — lo cazó el E2E
+   * de navegador al instante, no este fichero.
+   */
+  it('un iframe es una navegación: es como se carga el preview', () => {
+    expect(isNavigation({ accept: 'text/html', secFetchDest: 'iframe' })).toBe(true);
+  });
+
+  it('un fetch de HTML parcial NO es una navegación', () => {
+    expect(
+      isNavigation({ accept: 'text/html', secFetchDest: 'empty', secFetchMode: 'cors' }),
+    ).toBe(false);
+    expect(isNavigation({ accept: 'text/html', secFetchDest: 'document' })).toBe(true);
+  });
+
+  // Y al revés: una navegación de verdad se reconoce aunque su `Accept` sea
+  // generico.
+  it('una navegación con Accept genérico sí lo es', () => {
+    expect(isNavigation({ accept: '*/*', secFetchDest: 'document' })).toBe(true);
+  });
+
+  /**
+   * ⚠️ La comprobacion que se documenta en el RUNBOOK es un `curl`, y `curl`
+   * manda `Accept: * / *` sin ninguna cabecera `Sec-Fetch`. Con la regla vieja
+   * decia que no habia inyeccion aunque el proxy estuviera puesto — un
+   * diagnostico que miente sobre su propio sujeto. Se conserva el respaldo por
+   * `Accept` justo para que ese caso siga funcionando cuando se pide bien.
+   */
+  it('sin cabeceras Sec-Fetch se cae al Accept, que es lo que usa el diagnóstico', () => {
+    expect(isNavigation({ accept: 'text/html,application/xhtml+xml' })).toBe(true);
+    expect(isNavigation({ accept: '*/*' })).toBe(false);
   });
 
   it('reconoce HTML con charset y en mayúsculas', () => {
