@@ -1,7 +1,7 @@
 {
   "name": "codeam-cli",
   "version": "2.39.18",
-  "description": "Workflow-continuity bridge for AI coding agents. Wrap Claude Code or Codex in a PTY and supervise, approve, and redirect the session from any device — async. The terminal companion for CodeAgent Mobile.",
+  "description": "Workflow-continuity bridge for AI coding agents. Wrap Claude Code or Codex in a PTY and supervise, approve, and redirect the session from any device \u2014 async. The terminal companion for CodeAgent Mobile.",
   "type": "commonjs",
   "main": "dist/index.js",
   "bin": {
@@ -22,7 +22,8 @@
     "test:coverage": "vitest run --coverage",
     "typecheck": "tsc --noEmit",
     "postinstall": "node dist/postinstall.js || true",
-    "prepublishOnly": "npm run build"
+    "prepublishOnly": "npm run build",
+    "e2e": "playwright test"
   },
   "keywords": [
     "claude",
@@ -90,6 +91,7 @@
   },
   "devDependencies": {
     "@codeam/shared": "*",
+    "@playwright/test": "^1.62.1",
     "@types/jsdom": "^30.0.0",
     "@types/node": "^22.0.0",
     "@types/qrcode-terminal": "^0.12.0",
