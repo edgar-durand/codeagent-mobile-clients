@@ -115,6 +115,27 @@ import { getActiveSession, getActiveSessionForAgent } from '../../../src/config'
 import { createRuntimeStrategy } from '../../../src/agents/registry';
 import { runAcpSession, surfaceStartupFailure } from '../../../src/agents/acp/runner';
 
+/**
+ * ⚠️ Estos dos casos necesitan MAS de los 5000 ms por defecto de vitest.
+ *
+ * Conducen el orquestador `start()` DE VERDAD —solo se stubean sus
+ * dependencias con efectos— y eso toca disco. En Linux y macOS entra holgado;
+ * en el runner de Windows se pasaba por poco, y el sintoma no era un rojo
+ * limpio sino DOS:
+ *
+ *   1. «Test timed out in 5000ms» en el caso de claude.
+ *   2. «expected vi.fn() to not be called at all, but actually been called 1
+ *      times» en el de aider — que NO es un fallo suyo: es el `start()` del
+ *      caso anterior, que seguia vivo y llamaba a `surfaceStartupFailure`
+ *      dentro de la ventana del siguiente. `vi.clearAllMocks()` en el
+ *      `beforeEach` no lo evita, porque la llamada llega DESPUES de limpiar.
+ *
+ * Por eso el arreglo es el plazo y no el aserto: la prueba estaba pasando, y
+ * el unico fallo real era medirla con un cronometro pensado para una maquina
+ * mas rapida. `main` llevaba en rojo por esto desde el 2026-08-27.
+ */
+const SLOW_ORCHESTRATOR_MS = 30_000;
+
 describe('start() dispatch — ACP-required agent with an unresolvable adapter', () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -137,7 +158,7 @@ describe('start() dispatch — ACP-required agent with an unresolvable adapter',
     // runtime, whatever else goes wrong resolving its adapter.
     expect(createRuntimeStrategy).not.toHaveBeenCalled();
     expect(runAcpSession).not.toHaveBeenCalled();
-  });
+  }, SLOW_ORCHESTRATOR_MS);
 
   it('aider: has no ACP adapter — still takes the legacy PTY runtime unchanged', async () => {
     const session = { ...fakeSessionBase, agent: 'aider' as const };
@@ -152,5 +173,5 @@ describe('start() dispatch — ACP-required agent with an unresolvable adapter',
     expect(createRuntimeStrategy).toHaveBeenCalledWith('aider');
     expect(runAcpSession).not.toHaveBeenCalled();
     expect(surfaceStartupFailure).not.toHaveBeenCalled();
-  });
+  }, SLOW_ORCHESTRATOR_MS);
 });
