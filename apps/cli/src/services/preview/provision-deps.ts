@@ -1,6 +1,7 @@
 import { promises as fs } from 'fs';
 import path from 'path';
 import { log } from '../logger';
+import { startEmbeddedPostgres, type EmbeddedPostgres } from './embedded-postgres';
 import { runSetupCommand, type SetupRunResult } from './run-setup';
 
 /**
@@ -282,6 +283,26 @@ function runDockerComposeUp(cwd: string, composeArgs: string[]): Promise<SetupRu
  * relanza»— en vez de morir en silencio. Es el último recurso: lo normal sigue
  * siendo que Docker se lo dé todo.
  */
+/**
+ * El Postgres embebido que se levantó, si se levantó.
+ *
+ * ⚠️ Vive fuera de la función porque hay que poder PARARLO al terminar la
+ * sesión: es un proceso hijo, y dejarlo suelto ataría el puerto para el
+ * siguiente preview.
+ */
+let embeddedPg: EmbeddedPostgres | null = null;
+
+function registerEmbeddedPostgres(pg: EmbeddedPostgres): void {
+  embeddedPg?.stop();
+  embeddedPg = pg;
+}
+
+/** Para el Postgres embebido, si lo hay. Idempotente. */
+export function stopEmbeddedPostgres(): void {
+  embeddedPg?.stop();
+  embeddedPg = null;
+}
+
 export interface ProvisionOutcome {
   /** Servicios que el proyecto necesita y no están sirviendo. */
   missing: Array<{ service: string; envVar: string }>;
@@ -359,7 +380,32 @@ export async function provisionProjectDependencies(
       if (prismaNeed && !needed.some((n) => n.name === prismaNeed.name)) {
         needed.push(prismaNeed);
       }
-      return outcome('no-docker');
+      /**
+       * ⚠️ Sin Docker todavía queda una vía, y es la que salva a las Boxes de
+       * flota: `fleet_create_box` prohíbe `--privileged`, el montaje de
+       * `docker.sock` y cualquier bind del host, así que ahí Docker NUNCA va a
+       * estar. PGlite es Postgres compilado a WASM — corre en proceso, sin
+       * demonio y sin permisos— y `pglite-socket` le pone un puerto que habla
+       * el protocolo de Postgres, así que para la app es un Postgres normal.
+       *
+       * Solo cubre Postgres, que es el caso dominante y el proveedor más común
+       * de Prisma. MySQL y Mongo se quedan en la lista de lo que falta, y ahí
+       * el usuario tendrá que apuntar su propia URL.
+       */
+      const pgIndex = needed.findIndex((n) => n.name === 'postgres');
+      if (pgIndex !== -1) {
+        const embedded = await startEmbeddedPostgres({
+          port: 5432,
+          log: (m) => log.info('provision', m),
+        });
+        if (embedded) {
+          registerEmbeddedPostgres(embedded);
+          await ensureEnvFile(cwd, [needed[pgIndex]]);
+          needed.splice(pgIndex, 1);
+        }
+      }
+
+      return outcome(needed.length === 0 ? 'ok' : 'no-docker');
     }
 
     const pkg = await readPackageJson(cwd);
