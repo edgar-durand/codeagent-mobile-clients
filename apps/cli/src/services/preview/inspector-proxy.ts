@@ -64,9 +64,43 @@ export interface InspectorProxy {
   close(): Promise<void>;
 }
 
-/** ¿Esta petición es una navegación que puede acabar en HTML inyectable? */
+/**
+ * ¿Esta petición es una NAVEGACIÓN — una página que el usuario está viendo —
+ * y no un `fetch` que casualmente devuelve HTML?
+ *
+ * ⚠️ La distinción importa: inyectar en el HTML parcial que una app se trae
+ * por XHR para meterlo en el DOM volveria a ejecutar el script dentro de la
+ * misma página, registrando sus listeners dos veces.
+ *
+ * `Sec-Fetch-Dest: document` es la señal PRECISA, y la mandan todos los
+ * navegadores actuales; el `Accept` es el respaldo para los que no. Antes solo
+ * estaba el respaldo, y eso hacia que la comprobacion obvia —`curl` de la URL
+ * del preview, que manda `Accept: * / *`— dijera que no habia inyeccion
+ * aunque el proxy estuviera puesto. Un diagnostico que miente sobre su propio
+ * sujeto es peor que no tenerlo: el 2026-08-29 me llevo a dar por buena una
+ * comprobacion que no valia.
+ */
+export function isNavigation(headers: {
+  accept?: string;
+  secFetchDest?: string;
+  secFetchMode?: string;
+}): boolean {
+  // ⚠️ `iframe` TAMBIÉN, y no es un detalle: el dashboard carga el preview
+  // DENTRO de un iframe, así que ese es el caso normal — no el excepcional.
+  // Aceptar solo `document` rompía el inspector en web por completo, y lo
+  // cazó el E2E de navegador: 2 de sus 3 casos en rojo al instante. Un
+  // `fetch` de HTML parcial llega como `empty`, que es lo que hay que
+  // distinguir.
+  if (headers.secFetchDest !== undefined) {
+    return headers.secFetchDest === 'document' || headers.secFetchDest === 'iframe';
+  }
+  if (headers.secFetchMode !== undefined) return headers.secFetchMode === 'navigate';
+  return typeof headers.accept === 'string' && headers.accept.includes('text/html');
+}
+
+/** @deprecated Se conserva por compatibilidad; usa {@link isNavigation}. */
 export function wantsHtml(accept: string | undefined): boolean {
-  return typeof accept === 'string' && accept.includes('text/html');
+  return isNavigation({ accept });
 }
 
 /** ¿Esta respuesta es HTML? Tolera `; charset=utf-8` y mayúsculas. */
@@ -109,7 +143,12 @@ export async function startInspectorProxy(
   const upgraded = new Set<import('stream').Duplex>();
 
   const server = http.createServer((req, res) => {
-    const inject = wantsHtml(req.headers.accept);
+    const one = (v: string | string[] | undefined) => (Array.isArray(v) ? v[0] : v);
+    const inject = isNavigation({
+      accept: one(req.headers.accept),
+      secFetchDest: one(req.headers['sec-fetch-dest']),
+      secFetchMode: one(req.headers['sec-fetch-mode']),
+    });
     const headers = { ...req.headers };
 
     // ⚠️ No se puede inyectar dentro de bytes comprimidos. Se renuncia a la

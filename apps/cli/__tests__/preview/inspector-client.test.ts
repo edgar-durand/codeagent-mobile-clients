@@ -383,6 +383,101 @@ describe('inspector client — dentro del WebView de la app', () => {
   });
 });
 
+/**
+ * Las marcas fijadas viven DENTRO de la pagina.
+ *
+ * ⚠️ Antes las pintaba el dashboard, en una capa sobre el iframe. Esa capa vive
+ * fuera del documento, asi que sus coordenadas son del VIEWPORT: al hacer
+ * scroll dentro del preview las marcas se quedaban clavadas en la pantalla
+ * mientras el elemento se iba (reportado el 2026-08-29). Ancladas al DOCUMENTO
+ * acompañan al contenido como cualquier otro nodo.
+ */
+describe('inspector client — las marcas fijadas', () => {
+  const boxes = (h: Harness) =>
+    Array.from(h.win.document.querySelectorAll('[data-codeam="mark"]')) as HTMLElement[];
+
+  it('al pulsar deja una marca DENTRO de la pagina', () => {
+    const h = mount('<button id="cta">Comprar</button>');
+    h.drive('enable');
+    h.clickOn('#cta');
+    expect(boxes(h)).toHaveLength(1);
+  });
+
+  /**
+   * ⚠️ EL detalle reportado. `absolute` + el scroll sumado = la marca viaja con
+   * el contenido. Con `fixed` —o dibujandola fuera— se queda en la pantalla.
+   */
+  it('se ancla al documento, no al viewport', () => {
+    const h = mount('<button id="cta">Comprar</button>');
+    (h.win as unknown as { scrollY: number }).scrollY = 500;
+    h.drive('enable');
+    h.clickOn('#cta');
+    const box = boxes(h)[0];
+    expect(box.style.position).toBe('absolute');
+    // La caja simulada esta en top:0, asi que con 500 de scroll el documento
+    // la situa en 500.
+    expect(box.style.top).toBe('500px');
+  });
+
+  it('el identificador de la marca viaja con el pick', () => {
+    const h = mount('<button id="cta">Comprar</button>');
+    h.drive('enable');
+    h.clickOn('#cta');
+    const pick = h.sent.find((m) => m.type === 'pick');
+    expect((pick?.element as { markId?: string }).markId).toMatch(/^p\d+$/);
+  });
+
+  /**
+   * La otra mitad de «la marca es UN objeto»: si el usuario borra su chip en el
+   * composer, tiene que desaparecer de la pagina — y las que quedan
+   * renumerarse, porque lo que escribe («① se sale») mira a estos numeros.
+   */
+  it('el dashboard puede sincronizar cuales siguen vivas', () => {
+    const h = mount('<button id="a">A</button><button id="b">B</button>');
+    h.drive('enable');
+    h.clickOn('#a');
+    h.clickOn('#b');
+    expect(boxes(h)).toHaveLength(2);
+
+    const ids = h.sent
+      .filter((m) => m.type === 'pick')
+      .map((m) => (m.element as { markId: string }).markId);
+
+    // Se borra la primera: queda una, y renumerada a 1.
+    const ev = new h.win.MessageEvent('message', {
+      data: { source: INSPECTOR_CHANNEL, type: 'marks', ids: [ids[1]] },
+    });
+    Object.defineProperty(ev, 'origin', { value: DASHBOARD });
+    h.win.dispatchEvent(ev);
+
+    const left = boxes(h);
+    expect(left).toHaveLength(1);
+    expect(left[0].querySelector('[data-codeam="mark-badge"]')?.textContent).toBe('1');
+  });
+
+  // Salir del modo NO borra lo fijado: sigue siendo el contexto del mensaje
+  // que el usuario esta escribiendo.
+  it('salir del modo conserva las marcas', () => {
+    const h = mount('<button id="cta">Comprar</button>');
+    h.drive('enable');
+    h.clickOn('#cta');
+    h.drive('disable');
+    expect(boxes(h)).toHaveLength(1);
+  });
+
+  it('sincronizar a lista vacia las quita todas', () => {
+    const h = mount('<button id="cta">Comprar</button>');
+    h.drive('enable');
+    h.clickOn('#cta');
+    const ev = new h.win.MessageEvent('message', {
+      data: { source: INSPECTOR_CHANNEL, type: 'marks', ids: [] },
+    });
+    Object.defineProperty(ev, 'origin', { value: DASHBOARD });
+    h.win.dispatchEvent(ev);
+    expect(boxes(h)).toHaveLength(0);
+  });
+});
+
 describe('inspector client — la fuente', () => {
   // Un origen con una comilla rompería el script y dejaría la página del
   // usuario SIN CARGAR. Por eso la lista va serializada, no interpolada.

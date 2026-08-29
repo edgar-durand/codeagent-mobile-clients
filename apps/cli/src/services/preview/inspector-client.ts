@@ -202,13 +202,107 @@ export function inspectorClientSource(opts: InspectorClientOptions): string {
     // Captura, y se traga el evento: mientras el modo esta activo un clic
     // SELECCIONA, no navega. Sin esto, pulsar un enlace se llevaria el
     // preview a otra pagina en mitad del gesto.
+    /**
+     * Las marcas FIJADAS, dibujadas DENTRO de la pagina.
+     *
+     * ⚠️ Antes las pintaba el dashboard, en una capa sobre el iframe. Como esa
+     * capa vive fuera del documento, sus coordenadas son del VIEWPORT: al
+     * hacer scroll dentro del preview las marcas se quedaban clavadas en la
+     * pantalla mientras el elemento se iba (reportado el 2026-08-29).
+     *
+     * Aqui se anclan al DOCUMENTO (position:absolute mas el scroll sumado), asi
+     * que acompañan al contenido igual que cualquier otro nodo de la pagina — y
+     * ademas se recolocan si el layout cambia, que una capa externa no puede
+     * saber.
+     */
+    var picked = [];
+    var seq = 0;
+    var marksHost = null;
+
+    function ensureMarksHost() {
+      if (marksHost && marksHost.parentNode) return marksHost;
+      marksHost = document.createElement('div');
+      marksHost.setAttribute('data-codeam', 'marks');
+      marksHost.style.cssText = 'position:absolute;left:0;top:0;width:0;height:0;z-index:2147483646';
+      document.body.appendChild(marksHost);
+      return marksHost;
+    }
+
+    function redrawMarks() {
+      if (picked.length === 0) {
+        if (marksHost && marksHost.parentNode) marksHost.parentNode.removeChild(marksHost);
+        marksHost = null;
+        return;
+      }
+      var host = ensureMarksHost();
+      host.innerHTML = '';
+      for (var i = 0; i < picked.length; i++) {
+        var r = picked[i].el.getBoundingClientRect();
+        // Coordenadas de DOCUMENTO: es lo que hace que la marca viaje con el
+        // contenido en vez de quedarse pegada a la pantalla.
+        var top = r.top + (window.scrollY || window.pageYOffset || 0);
+        var left = r.left + (window.scrollX || window.pageXOffset || 0);
+
+        var box = document.createElement('div');
+        box.setAttribute('data-codeam', 'mark');
+        box.style.cssText = [
+          'position:absolute', 'pointer-events:none', 'box-sizing:border-box',
+          'border:1.5px solid #a855f7', 'background:rgba(168,85,247,0.12)',
+          'border-radius:3px',
+          'left:' + left + 'px', 'top:' + top + 'px',
+          'width:' + r.width + 'px', 'height:' + r.height + 'px'
+        ].join(';');
+
+        var badge = document.createElement('div');
+        badge.setAttribute('data-codeam', 'mark-badge');
+        badge.style.cssText = [
+          'position:absolute', 'left:-10px', 'top:-10px', 'width:20px', 'height:20px',
+          'border-radius:10px', 'background:#a855f7', 'color:#000',
+          'font:700 11px/20px ui-monospace,SFMono-Regular,Menlo,monospace',
+          'text-align:center', 'pointer-events:none'
+        ].join(';');
+        badge.textContent = String(i + 1);
+
+        box.appendChild(badge);
+        host.appendChild(box);
+      }
+    }
+
+    function reposition() { if (picked.length) redrawMarks(); }
+
+    // Captura, y se traga el evento: mientras el modo esta activo un clic
+    // SELECCIONA, no navega. Sin esto, pulsar un enlace se llevaria el
+    // preview a otra pagina en mitad del gesto.
     function onClick(e) {
       if (!enabled) return;
       var el = e.target;
       if (el && el.getAttribute && el.getAttribute('data-codeam')) return;
       e.preventDefault();
       e.stopPropagation();
-      if (el) send('pick', { element: describe(el) });
+      if (!el) return;
+      var id = 'p' + (++seq);
+      picked.push({ id: id, el: el });
+      redrawMarks();
+      var described = describe(el);
+      described.markId = id;
+      send('pick', { element: described });
+    }
+
+    /**
+     * El dashboard manda la lista de ids que SIGUEN vivos, en su orden.
+     *
+     * Es la otra mitad de «la marca es un objeto»: si el usuario borra un chip
+     * en el composer, la marca tiene que desaparecer de la pagina — y las que
+     * quedan renumerarse, porque lo que el usuario escribe («① se sale») mira
+     * a estos numeros.
+     */
+    function syncMarks(ids) {
+      var byId = {};
+      for (var i = 0; i < picked.length; i++) byId[picked[i].id] = picked[i];
+      var next = [];
+      for (var j = 0; j < ids.length; j++) if (byId[ids[j]]) next.push(byId[ids[j]]);
+      picked = next;
+      redrawMarks();
     }
 
     function enable(origin) {
@@ -217,6 +311,9 @@ export function inspectorClientSource(opts: InspectorClientOptions): string {
       driver = origin;
       document.addEventListener('mousemove', onMove, true);
       document.addEventListener('click', onClick, true);
+      // El scroll y el resize mueven los elementos; las marcas los siguen.
+      window.addEventListener('scroll', reposition, true);
+      window.addEventListener('resize', reposition);
       send('ready', {});
     }
 
@@ -226,7 +323,11 @@ export function inspectorClientSource(opts: InspectorClientOptions): string {
       current = null;
       document.removeEventListener('mousemove', onMove, true);
       document.removeEventListener('click', onClick, true);
+      window.removeEventListener('scroll', reposition, true);
+      window.removeEventListener('resize', reposition);
       removeOverlay();
+      // Las marcas fijadas SI sobreviven a salir del modo: siguen siendo el
+      // contexto del mensaje que el usuario esta escribiendo.
       driver = null;
     }
 
@@ -236,6 +337,7 @@ export function inspectorClientSource(opts: InspectorClientOptions): string {
       if (!data || data.source !== CHANNEL) return;
       if (data.type === 'enable') enable(e.origin);
       else if (data.type === 'disable') disable();
+      else if (data.type === 'marks' && data.ids) syncMarks(data.ids);
     });
 
     /**

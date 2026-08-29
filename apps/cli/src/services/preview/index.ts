@@ -24,7 +24,16 @@ export * from './port-registry';
  */
 export interface ActivePreview {
   sessionId: string;
-  devServer: ChildProcess;
+  /**
+   * El dev server que ARRANCAMOS nosotros.
+   *
+   * ⚠️ `null` significa ADOPTADO: el puerto ya estaba servido por el dev
+   * server del propio usuario (arrancado por el agente, o a mano en una
+   * terminal) y lo estamos tunelando en vez de morir con «port already in
+   * use». No es nuestro, así que **no se mata al parar el preview** — pararlo
+   * mataría el servidor que el usuario tenía corriendo antes de abrir esto.
+   */
+  devServer: ChildProcess | null;
   /** Null when the framework manages its own tunnel (Expo / codespace). */
   tunnel: ChildProcess | null;
   url: string;
@@ -143,10 +152,13 @@ export async function killPreview(sessionId: string): Promise<void> {
     /* nunca bloquear el apagado */
   }
 
-  killProcessTree(preview.devServer, 'SIGTERM');
+  // Adoptado (`devServer === null`) = no es nuestro y no se toca. Parar el
+  // preview cierra el túnel y el proxy; el dev server del usuario sigue como
+  // estaba.
+  if (preview.devServer) killProcessTree(preview.devServer, 'SIGTERM');
 
   const sigkillTimer = setTimeout(() => {
-    killProcessTree(preview.devServer, 'SIGKILL');
+    if (preview.devServer) killProcessTree(preview.devServer, 'SIGKILL');
     if (preview.tunnel) killProcessTree(preview.tunnel, 'SIGKILL');
   }, 250);
   // Don't block process exit on this safety timer.
@@ -178,3 +190,6 @@ export async function killAllPreviews(): Promise<void> {
 export function activePreviewSessionIds(): string[] {
   return Array.from(activePreviews.keys());
 }
+
+export { canAdoptPort, verdictFor, probePort } from './adopt-port';
+export type { AdoptVerdict } from './adopt-port';
