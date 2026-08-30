@@ -163,12 +163,23 @@ describe('waitForAdapterModuleGraph (real node subprocess)', () => {
     expect(attempts).toBeGreaterThan(installedAtAttempt!);
   });
 
+  // ⚠️ La ventana de liveness se CALIBRA, igual que en el test de arriba, en vez
+  // de ir fija en 300 ms. Con el valor fijo, una maquina cargada (la suite
+  // completa en paralelo) tarda mas de 300 ms solo en tumbar el subproceso, asi
+  // que la sonda lo veia VIVO y `waitForAdapterModuleGraph` devolvia true: el
+  // fallo `expected true to be false` que aparecia solo dentro de la suite
+  // entera y nunca en aislado. Lo que se mide —que se rinde dentro de su
+  // plazo— no cambia; lo que se quita es la carrera contra el reloj del host.
   it('gives up (returns false) within the timeout when the adapter never loads', async () => {
+    const livenessMs = await calibrateLivenessMs();
     const ok = await waitForAdapterModuleGraph(NODE, [path.join(dir, 'broken.mjs')], {
-      livenessMs: 300,
+      livenessMs,
       pollMs: 50,
-      timeoutMs: 1_500,
+      // Multiplo de la ventana para que el bucle llegue a sondear de verdad
+      // antes de rendirse — con un plazo por debajo de una sola sonda el test
+      // pasaria por el motivo equivocado.
+      timeoutMs: livenessMs * 3,
     });
     expect(ok).toBe(false);
-  });
+  }, 60_000);
 });

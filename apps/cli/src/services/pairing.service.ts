@@ -539,6 +539,48 @@ export async function postBatonEvent(
  * Post a Headroom lifecycle event (enable / disable / progress) to the backend.
  * Mirrors `postPreviewEvent` — fire-and-forget, non-fatal.
  */
+/**
+ * Reporta al backend en que fase va UN comando. La mitad del embudo que el
+ * servidor no puede ver.
+ *
+ * Con la instrumentacion de entrega ya medida (2026-08-30: el backend entrega
+ * 82 de 82 `start_task` y reencola cero), el 43,5% de lanzamientos sin
+ * respuesta NO se pierde en el servidor. Se pierde de aqui en adelante, y
+ * desde fuera "el CLI nunca lo vio", "lo vio y el turno murio" y "el turno fue
+ * bien pero el cliente no lo conto" son el MISMO silencio con tres arreglos
+ * opuestos. `phase` es lo unico que los separa.
+ *
+ * ⚠️ Nunca lleva el prompt ni el mensaje de error del agente — solo un CODIGO.
+ * Esto va a telemetria y el texto puede llevar contenido del usuario.
+ *
+ * Fire-and-forget con su propio catch: un reporte perdido jamas puede afectar
+ * al turno que describe.
+ */
+export async function postTurnEvent(input: {
+  pluginId: string;
+  pluginAuthToken: string;
+  commandId: string;
+  phase: 'received' | 'started' | 'completed' | 'failed';
+  agentId?: string;
+  errorCode?: string;
+}): Promise<void> {
+  try {
+    await _transport.postJsonAuthed(
+      `${API_BASE}/api/commands/turn-events`,
+      {
+        pluginId: input.pluginId,
+        commandId: input.commandId,
+        phase: input.phase,
+        agentId: input.agentId,
+        errorCode: input.errorCode,
+      },
+      input.pluginAuthToken,
+    );
+  } catch {
+    /* observabilidad: nunca romper el turno que observa */
+  }
+}
+
 export async function postHeadroomEvent(input: {
   sessionId: string;
   pluginId: string;
