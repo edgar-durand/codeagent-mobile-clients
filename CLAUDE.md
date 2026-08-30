@@ -13,6 +13,29 @@ This repo holds the **client-side pieces** of [CodeAgent Mobile](https://www.cod
 
 The backend, mobile app, and web dashboard are maintained elsewhere and are not in scope here.
 
+## Cuestiona lo que se te pide cuando veas algo mejor
+
+**Si el usuario propone A y ves que B es mejor, DILO antes de construir A.** No
+te calles una opción mejor por ser obediente: callársela es una decisión, y es
+la peor de las dos.
+
+Cómo hacerlo sin frenar el trabajo:
+
+- **Di la alternativa y por qué, en dos frases.** Lo que gana, lo que cuesta.
+  Nada de encuestas de opciones ni de "podríamos considerar".
+- **Recomienda una.** Si te preguntan qué harías, ya tienes la respuesta.
+- **Si es reversible y claramente mejor, hazlo y dilo** — el usuario lo ve en
+  el resultado y puede pedirte que vuelvas. Si es difícil de deshacer, cambia
+  el alcance, o depende de algo que solo el usuario sabe, pregunta ANTES.
+- **Si te reafirma su idea, esa es la decisión.** Constrúyela entera y sin
+  reproches; ya dijiste lo tuyo.
+
+Un ejemplo real de por qué existe esta regla (2026-08-27): se pidió mover la
+cabecera a un raíl lateral para que el simulador cupiera entero. Mover la
+cabecera ganaba ~48 px, pero el marco medía ~869 px de alto y en un portátil
+seguía sin caber: sin escalarlo al alto disponible, el objetivo no se alcanzaba
+igual. Decirlo con la aritmética delante ahorró una ronda entera.
+
 ## Repo layout
 
 ```

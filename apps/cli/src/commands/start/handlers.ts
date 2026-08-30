@@ -44,7 +44,7 @@ import { applyFileReview } from '../../services/apply-file-review.service';
 import { buildLinkContext } from '../link';
 import { makeSerializedEmitter } from '../../services/preview/serialized-emitter';
 import { makePreviewHeartbeatReaffirm } from '../../services/preview/reaffirm';
-import { postLinkCredential, postAiResult, postPreviewEvent, postHeadroomEvent, postBeadsEvent, postCliUpdateEvent, postCoderabbitEvent, postAgentReviewReport, fetchProvisionCredential } from '../../services/pairing.service';
+import { postLinkCredential, postAiResult, postPreviewEvent, postHeadroomEvent, postBeadsEvent, postCliUpdateEvent, postCoderabbitEvent, postAgentReviewReport, postTurnEvent, fetchProvisionCredential } from '../../services/pairing.service';
 import { configureCoderabbit, type CoderabbitAction } from '../../agents/coderabbit/configure';
 import { deliverPendingCoderabbitCallback, type CoderabbitAuthEvent } from '../../agents/coderabbit/oauth';
 import { CoderabbitRuntimeStrategy } from '../../agents/coderabbit/runtime';
@@ -225,10 +225,14 @@ function dispatchPrompt(ctx: HandlerContext, prompt: string): void {
 
 const startTask: CommandHandler = async (ctx, cmd, parsed) => {
   const { prompt, files } = parsed;
+  // El comando llego hasta aqui. Es la primera de las tres fases que separan
+  // "el CLI nunca lo vio" de "lo vio y murio" — ver `postTurnEvent`.
+  reportTurn(ctx, cmd.id, 'received');
   // PTY sessions can't switch agents mid-session — a routed task naming a
   // DIFFERENT agent would otherwise silently run on the wrong one instead of
   // failing honestly (the ACP path has `switchAgentH`'s equivalent guard).
   if (parsed.agentId && parsed.agentId !== ctx.agentId) {
+    reportTurn(ctx, cmd.id, 'failed', 'AGENT_SWITCH_UNSUPPORTED');
     await ctx.relay.sendResult(cmd.id, 'failed', {
       error: "Switching agents isn't supported on this session.",
     });
@@ -248,8 +252,34 @@ const startTask: CommandHandler = async (ctx, cmd, parsed) => {
     }, 120_000);
   } else if (effectivePrompt) {
     dispatchPrompt(ctx, effectivePrompt);
+  } else {
+    // Ni ficheros ni prompt: no hay turno que arrancar. Silencioso hasta ahora,
+    // e indistinguible desde el servidor de un agente que se cuelga.
+    reportTurn(ctx, cmd.id, 'failed', 'EMPTY_PROMPT');
+    return;
   }
+  // El prompt ya esta en el agente. A partir de aqui, un silencio es del
+  // AGENTE, no del reparto.
+  reportTurn(ctx, cmd.id, 'started');
 };
+
+/** Fire-and-forget: un reporte perdido nunca puede afectar al turno. */
+function reportTurn(
+  ctx: { pluginId?: string; pluginAuthToken?: string; agentId?: string },
+  commandId: string,
+  phase: 'received' | 'started' | 'completed' | 'failed',
+  errorCode?: string,
+): void {
+  if (!ctx.pluginId || !ctx.pluginAuthToken) return;
+  void postTurnEvent({
+    pluginId: ctx.pluginId,
+    pluginAuthToken: ctx.pluginAuthToken,
+    commandId,
+    phase,
+    agentId: ctx.agentId,
+    errorCode,
+  });
+}
 
 const provideInput: CommandHandler = (ctx, _cmd, parsed) => {
   if (parsed.input) dispatchPrompt(ctx, parsed.input);
