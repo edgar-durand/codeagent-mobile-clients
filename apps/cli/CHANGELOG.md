@@ -4,6 +4,16 @@ All notable changes to `codeam-cli` are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.71.1] — 2026-08-30
+
+### Added
+
+- **cli:** Reportar en qué fase va cada turno — la mitad del embudo que el servidor no ve (#670)
+
+### Tests
+
+- **cli:** Dar plazo realista a los dos tests que conducen start() de verdad (#669)
+
 ## [2.71.0] — 2026-08-29
 
 ### Added
