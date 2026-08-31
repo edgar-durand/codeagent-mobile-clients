@@ -64,6 +64,17 @@ export const USER_EVENTS = {
   SELF_HOSTED_HOST_STATUS: 'self_hosted_host_status',
   SELF_HOSTED_HOST_REMOVED: 'self_hosted_host_removed',
   SELF_HOSTED_HOST_TELEMETRY: 'self_hosted_host_telemetry',
+  /**
+   * Una orden que NINGUN CLI recogio y que expiro de la cola.
+   *
+   * La cola `commands:<pluginId>` caduca a los 600 s y Redis no avisa a nadie:
+   * la tarea deja de existir en silencio. Medido el 2026-08-30 en un usuario
+   * real, SIETE de sus 17 `start_task` acabaron asi — no recibio nada y no
+   * habia forma de saber que se habian descartado. Lo publica el barrido
+   * `command-expiry-sweep` del backend; nadie puede notificar su propio
+   * silencio.
+   */
+  COMMAND_EXPIRED: 'command_expired',
   SELF_HOSTED_HOST_METRICS: 'self_hosted_host_metrics',
   SELF_HOSTED_HOST_SESSIONS: 'self_hosted_host_sessions',
   SELF_HOSTED_DEPLOY_PROGRESS: 'self_hosted_deploy_progress',
