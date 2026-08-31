@@ -80,6 +80,7 @@ import {
   ENV_KEY_RE,
   readPreviewConfig,
   safeParseDetection,
+  describeDetectionFailure,
   writePreviewConfig,
 } from '../../services/preview';
 import { log } from '../../services/logger';
@@ -2086,7 +2087,19 @@ const requestPreviewDetectH: CommandHandler = (ctx) => {
     const tookMs = Date.now() - startedAt;
     const detection = safeParseDetection(raw);
     if (!detection) {
-      log.info('preview', `detect: invalid agent output after ${tookMs}ms`);
+      // codeagent-k9q4. Antes esta linea era `detect: invalid agent output
+      // after Xms` y nada mas: sin la salida cruda no se podia distinguir
+      // "el agente devolvio prosa" de "devolvio JSON al que le faltan campos"
+      // de "no devolvio NADA" — tres fallos con tres arreglos distintos. Un
+      // usuario encadeno CINCO de estos en 19 minutos (2026-08-30) y no habia
+      // forma de saber cual de los tres era.
+      const failure = describeDetectionFailure(raw);
+      log.info(
+        'preview',
+        `detect: failed after ${tookMs}ms reason=${failure?.reason ?? 'unknown'}` +
+          (failure?.missing ? ` missing=${failure.missing.join(',')}` : '') +
+          `\n--- salida cruda del agente (acotada) ---\n${failure?.rawExcerpt ?? ''}`,
+      );
       emitPreviewEvent({
         sessionId: ctx.sessionId,
         pluginId: ctx.pluginId,
@@ -2094,7 +2107,10 @@ const requestPreviewDetectH: CommandHandler = (ctx) => {
         type: USER_EVENTS.PREVIEW_ERROR,
         payload: {
           stage: 'detection',
+          // El mensaje sale del diagnostico: decir "JSON invalido" cuando el
+          // agente no contesto manda al usuario a mirar un JSON que no existe.
           message:
+            failure?.message ??
             'Agent returned invalid JSON. Try again, or add a .codeam/preview.json override.',
         },
       });
@@ -2208,7 +2224,14 @@ export function prewarmPreviewDetection(runtime: RuntimeStrategy): void {
       if (await readPreviewConfig(cwd)) return; // already pinned/cached — nothing to do
       const raw = await runtime.generateOneShot!(PREVIEW_DETECT_PROMPT).catch(() => null);
       const detection = safeParseDetection(raw);
-      if (!detection || detection.framework === 'unsupported') return;
+      if (!detection) {
+        // Silencioso para el usuario (es un pre-calentamiento), pero NO para
+        // el log: es la misma ceguera de codeagent-k9q4.
+        const failure = describeDetectionFailure(raw);
+        log.info('preview', `prewarm: detection failed reason=${failure?.reason ?? 'unknown'}`);
+        return;
+      }
+      if (detection.framework === 'unsupported') return;
       await writePreviewConfig(cwd, detection);
       log.info(
         'preview',
