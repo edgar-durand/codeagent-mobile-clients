@@ -648,10 +648,17 @@ export class CommandRelayService {
         // A host whose secret was never enrolled can NEVER self-recover by
         // retrying — say so the first time instead of burying it in a counter.
         if (/PLUGIN_SECRET_REQUIRED|INVALID_PLUGIN_SECRET/.test(reason)) {
+          // ⚠️ Precise about the blast radius, because overstating it is its
+          // own bug. This client does NOT send `x-codeam-cmd-ack`, so the
+          // stream drains destructively on RECEIVE (`popCommands`) and
+          // delivery keeps working — the rejected ack is a dead safety rail,
+          // not a stalled queue. It becomes a stalled queue the moment any
+          // client opts into ack-mode, which is where the design is heading.
           log.warn(
             'relay',
-            `ack REJECTED (${reason}) — this host needs to be re-paired; ` +
-              'commands will be redelivered forever until it is',
+            `ack REJECTED (${reason}) — this host must be re-paired; retrying will ` +
+              'never fix it. Delivery still works while this client drains on receive, ' +
+              'but the ack rail is dead and ack-mode would stall here.',
           );
           return;
         }
