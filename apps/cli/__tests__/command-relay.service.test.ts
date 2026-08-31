@@ -589,10 +589,13 @@ describe('CommandRelayService — a stuck ack is not allowed to be silent', () =
     await vi.advanceTimersByTimeAsync(10);
 
     const said = written.join('\n');
-    // The operator must learn the two things that matter: it will never
-    // self-recover, and the queue is stuck until someone re-pairs the host.
+    // The operator must learn what is true: it never self-recovers, and the
+    // ack rail is dead — WITHOUT overstating it as a stalled queue, which it
+    // is not while this client drains on receive.
     expect(said).toMatch(/re-paired/i);
-    expect(said).toMatch(/redelivered forever/i);
+    expect(said).toMatch(/never fix it/i);
+    expect(said).toMatch(/ack rail is dead/i);
+    expect(said).not.toMatch(/redelivered forever/i);
     relay.stop();
     warn.mockRestore();
   });
