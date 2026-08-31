@@ -77,10 +77,15 @@ export class CommandRelayService {
   // evicted (a command that old is long gone from the server queue anyway).
   private readonly processedIds = new Set<string>();
   private static readonly PROCESSED_ID_CAP = 1000;
+  /** After the first, re-warn every Nth consecutive ack failure — loud enough
+   *  to notice, quiet enough not to drown the log during a network outage. */
+  private static readonly ACK_WARN_EVERY = 20;
 
   /** Polling backoff state (only used on the fallback). */
   private pollTimer: NodeJS.Timeout | null = null;
   private pollFailures = 0;
+  /** Consecutive ack POST failures — drives the visibility escalation below. */
+  private ackFailures = 0;
   // Successive polls that returned no commands. Drives an idle
   // backoff so a CLI sitting on the polling fallback (SSE was
   // unavailable) doesn't keep hammering the API every 2 s when
@@ -611,13 +616,54 @@ export class CommandRelayService {
   }
 
   /** Confirm receipt of command ids so the backend removes them from the queue
-   *  (the at-least-once delivery guarantee). Best-effort — never throws. */
+   *  (the at-least-once delivery guarantee). Best-effort — never throws.
+   *
+   * ⚠️ A ONE-OFF failure here is harmless (the command redelivers and we dedupe),
+   * but a PERSISTENT one is not: the queue never drains, so every batch is
+   * redelivered forever and the host looks perfectly healthy from outside —
+   * heartbeats land, commands still arrive, `status` stays `online`. That is
+   * exactly how the fleet host ran from 2026-07-15 to 2026-08-31 with NO poll
+   * secret enrolled, 401-ing every single ack, with nobody the wiser: the
+   * failure lived in `log.trace`, below the level anyone reads.
+   *
+   * So: keep it best-effort, but make a SUSTAINED failure impossible to miss,
+   * and name `PLUGIN_SECRET_REQUIRED` explicitly — it is not a network blip,
+   * it is a host that must be re-enrolled and will never recover on its own.
+   */
   private ackCommands(ids: string[]): void {
     const commandIds = ids.filter((id): id is string => typeof id === 'string' && id.length > 0);
     if (commandIds.length === 0) return;
     void _postJson(`${API_BASE}/api/commands/ack`, { pluginId: this.pluginId, commandIds }, {
       ...this.pollSecretHeader(),
-    }).catch((err) => log.trace('relay', 'ack post failed (will redeliver+dedupe)', err));
+    })
+      .then(() => {
+        if (this.ackFailures > 0) {
+          log.warn('relay', `ack recovered after ${this.ackFailures} consecutive failure(s)`);
+          this.ackFailures = 0;
+        }
+      })
+      .catch((err: unknown) => {
+        this.ackFailures += 1;
+        const reason = err instanceof Error ? err.message : String(err);
+        // A host whose secret was never enrolled can NEVER self-recover by
+        // retrying — say so the first time instead of burying it in a counter.
+        if (/PLUGIN_SECRET_REQUIRED|INVALID_PLUGIN_SECRET/.test(reason)) {
+          log.warn(
+            'relay',
+            `ack REJECTED (${reason}) — this host needs to be re-paired; ` +
+              'commands will be redelivered forever until it is',
+          );
+          return;
+        }
+        if (this.ackFailures === 1 || this.ackFailures % CommandRelayService.ACK_WARN_EVERY === 0) {
+          log.warn(
+            'relay',
+            `ack failed ${this.ackFailures}x in a row — the backend queue is not draining: ${reason}`,
+          );
+          return;
+        }
+        log.trace('relay', 'ack post failed (will redeliver+dedupe)', err);
+      });
   }
 
   // ─── Heartbeat + agents ──────────────────────────────────────────
