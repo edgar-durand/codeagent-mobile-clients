@@ -79,8 +79,20 @@ describe('startDevServer cross-restart port reclaim', () => {
     expect(err?.payload.message).not.toContain('another process');
   });
 
-  it('leaves a genuinely FOREIGN port alone and surfaces the actionable error', async () => {
+  /**
+   * ⚠️ La copia cambió el 2026-08-29 (a mejor), la CONDUCTA no: un puerto que
+   * no sirve una app sigue sin spawnear nada y sigue emitiendo el error. Lo
+   * que cambió es que ahora se distingue POR LO QUE SIRVE, así que el mensaje
+   * puede decir la verdad — «something that isn't a dev server» — en vez de
+   * llamar «otro proceso» a lo que muchas veces era el dev server del propio
+   * usuario.
+   */
+  it('leaves a port that ISN\'T serving an app alone, with an actionable error', async () => {
     vi.spyOn(preview, 'isPortListening').mockResolvedValue(true);
+    vi.spyOn(preview, 'canAdoptPort').mockResolvedValue({
+      adopt: false,
+      reason: 'unreachable',
+    });
     const reclaim = vi.spyOn(preview, 'reclaimOwnOrphanPort').mockReturnValue(false);
 
     const { events, emit } = collectEvents();
@@ -94,6 +106,40 @@ describe('startDevServer cross-restart port reclaim', () => {
     expect(reclaim).toHaveBeenCalledWith(3000);
     expect(spawnSpy).not.toHaveBeenCalled();
     const err = events.find((e) => e.type.endsWith('preview_error'));
-    expect(err?.payload.message).toContain('already in use by another process');
+    expect(err?.payload.message).toContain("isn't a dev server");
+  });
+
+  /**
+   * ⚠️ **EL caso que motivó el cambio.** Si lo que tiene el puerto ES el dev
+   * server del proyecto —arrancado por el agente, o a mano en una terminal—
+   * antes se moría con «port already in use» y el usuario se quedaba
+   * atascado sin salida (replay de PostHog, 2026-08-29). Ahora se adopta: se
+   * tunela lo que ya está sirviendo, sin spawnear un segundo servidor.
+   */
+  it('ADOPTA el dev server que ya está sirviendo en vez de morir', async () => {
+    vi.spyOn(preview, 'isPortListening').mockResolvedValue(true);
+    vi.spyOn(preview, 'canAdoptPort').mockResolvedValue({ adopt: true });
+    vi.spyOn(preview, 'reclaimOwnOrphanPort').mockReturnValue(false);
+    // Se corta en el túnel a propósito: lo que se quiere demostrar es que la
+    // ejecución PASÓ DE LARGO por la rama del puerto, no que llegue a tunelar
+    // (eso pide un cloudflared, y aquí no lo hay).
+    vi.spyOn(preview, 'resolveCloudflared').mockRejectedValue(new Error('sin cloudflared'));
+
+    const { events, emit } = collectEvents();
+    await runPreviewStart({
+      sessionId: 'sess-3',
+      detection,
+      cwd: '/tmp/fake-project',
+      emit: emit as never,
+    });
+
+    // No se arranca un SEGUNDO servidor: el que hay ya sirve.
+    expect(spawnSpy).not.toHaveBeenCalled();
+
+    const err = events.find((e) => e.type.endsWith('preview_error'));
+    // Y el error que sale es el del túnel, no el del puerto — o sea que la
+    // adopción ocurrió.
+    expect(err?.payload.stage).toBe('tunnel');
+    expect(String(err?.payload.message)).not.toContain('in use');
   });
 });

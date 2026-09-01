@@ -562,7 +562,16 @@ class AgentOutputMonitor {
         if (msg.isDone == true) {
             if (!responseDoneSent) {
                 val canonical = finalizeMarkdown(extractor, project, tw, md)
-                extractorLastSentMarkdown = canonical
+                // ⚠️ Se guarda el RASPADO (`md`), no el canonico.
+                // `extractorLastSentMarkdown` es la referencia contra la que se
+                // compara `md` en el siguiente sondeo, y `md` siempre es el
+                // raspado. Guardar aqui el canonico hacia que la comparacion
+                // fallara SIEMPRE —difieren por construccion: el canonico
+                // existe justamente porque el raspado pierde la estructura—,
+                // asi que cada sondeo parecia "contenido nuevo", reseteaba
+                // `responseDoneSent` y volvia a emitir `done` al estabilizarse.
+                // Medido en produccion: ~1,5 POST/s indefinidamente.
+                extractorLastSentMarkdown = md
                 hasEverCapturedContent = true
                 responseDoneSent = true
                 AgentOutputPublisher.pushOutput(sessionId, "text", canonical, done = true)
@@ -587,7 +596,9 @@ class AgentOutputMonitor {
                 if (extractorStableCount >= STABLE_THRESHOLD) {
                     responseDoneSent = true
                     val canonical = finalizeMarkdown(extractor, project, tw, md)
-                    extractorLastSentMarkdown = canonical
+                    // ⚠️ El RASPADO, no el canonico — ver el comentario del
+                    // otro sitio donde se emite `done`. Mismo bucle.
+                    extractorLastSentMarkdown = md
                     AgentOutputPublisher.pushOutput(sessionId, "text", canonical, done = true)
                     logger.info("Extractor done (stability): emitted final chunk (${canonical.length} chars, canonical=${canonical !== md})")
                 }

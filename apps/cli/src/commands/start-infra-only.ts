@@ -3,7 +3,7 @@ import { CommandRelayService, type RemoteCommand } from '../services/command-rel
 import { FileWatcherService } from '../services/file-watcher.service';
 import { ChunkEmitter } from '../services/output/chunk-emitter';
 import { registerTerminalHandlers, closeAllTerminals } from '../services/terminal-ops.service';
-import { handlers as commandHandlers, cleanupAttachmentTempFiles } from './start/handlers';
+import { handlers as commandHandlers, cleanupAttachmentTempFiles, makePreviewReaffirm } from './start/handlers';
 import { buildKeepAlive } from './start/keep-alive';
 import type { HandlerContext } from './start/handlers';
 import { getActiveSession } from '../config';
@@ -226,6 +226,14 @@ export async function startInfraOnly(agentId: AgentId): Promise<void> {
     },
     agentMeta,
     [], // empty agents list → dashboard renders NoAgentHero
+    undefined,
+    // El camino infra-only NO tiene agente, pero SÍ puede tener preview (es la
+    // ruta del panel de archivos), así que su snapshot caduca igual.
+    makePreviewReaffirm({
+      sessionId: session.id,
+      pluginId,
+      pluginAuthToken: session.pluginAuthToken ?? undefined,
+    }),
   );
   ctx.relay = relay;
   relayRef = relay;

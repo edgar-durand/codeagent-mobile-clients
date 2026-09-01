@@ -42,7 +42,9 @@ import {
 import { showInfo } from '../../ui/banner';
 import { applyFileReview } from '../../services/apply-file-review.service';
 import { buildLinkContext } from '../link';
-import { postLinkCredential, postAiResult, postPreviewEvent, postHeadroomEvent, postBeadsEvent, postCliUpdateEvent, postCoderabbitEvent, postAgentReviewReport, fetchProvisionCredential } from '../../services/pairing.service';
+import { makeSerializedEmitter } from '../../services/preview/serialized-emitter';
+import { makePreviewHeartbeatReaffirm } from '../../services/preview/reaffirm';
+import { postLinkCredential, postAiResult, postPreviewEvent, postHeadroomEvent, postBeadsEvent, postCliUpdateEvent, postCoderabbitEvent, postAgentReviewReport, postTurnEvent, fetchProvisionCredential } from '../../services/pairing.service';
 import { configureCoderabbit, type CoderabbitAction } from '../../agents/coderabbit/configure';
 import { deliverPendingCoderabbitCallback, type CoderabbitAuthEvent } from '../../agents/coderabbit/oauth';
 import { CoderabbitRuntimeStrategy } from '../../agents/coderabbit/runtime';
@@ -78,6 +80,7 @@ import {
   ENV_KEY_RE,
   readPreviewConfig,
   safeParseDetection,
+  describeDetectionFailure,
   writePreviewConfig,
 } from '../../services/preview';
 import { log } from '../../services/logger';
@@ -223,10 +226,14 @@ function dispatchPrompt(ctx: HandlerContext, prompt: string): void {
 
 const startTask: CommandHandler = async (ctx, cmd, parsed) => {
   const { prompt, files } = parsed;
+  // El comando llego hasta aqui. Es la primera de las tres fases que separan
+  // "el CLI nunca lo vio" de "lo vio y murio" — ver `postTurnEvent`.
+  reportTurn(ctx, cmd.id, 'received');
   // PTY sessions can't switch agents mid-session — a routed task naming a
   // DIFFERENT agent would otherwise silently run on the wrong one instead of
   // failing honestly (the ACP path has `switchAgentH`'s equivalent guard).
   if (parsed.agentId && parsed.agentId !== ctx.agentId) {
+    reportTurn(ctx, cmd.id, 'failed', 'AGENT_SWITCH_UNSUPPORTED');
     await ctx.relay.sendResult(cmd.id, 'failed', {
       error: "Switching agents isn't supported on this session.",
     });
@@ -246,8 +253,34 @@ const startTask: CommandHandler = async (ctx, cmd, parsed) => {
     }, 120_000);
   } else if (effectivePrompt) {
     dispatchPrompt(ctx, effectivePrompt);
+  } else {
+    // Ni ficheros ni prompt: no hay turno que arrancar. Silencioso hasta ahora,
+    // e indistinguible desde el servidor de un agente que se cuelga.
+    reportTurn(ctx, cmd.id, 'failed', 'EMPTY_PROMPT');
+    return;
   }
+  // El prompt ya esta en el agente. A partir de aqui, un silencio es del
+  // AGENTE, no del reparto.
+  reportTurn(ctx, cmd.id, 'started');
 };
+
+/** Fire-and-forget: un reporte perdido nunca puede afectar al turno. */
+function reportTurn(
+  ctx: { pluginId?: string; pluginAuthToken?: string; agentId?: string },
+  commandId: string,
+  phase: 'received' | 'started' | 'completed' | 'failed',
+  errorCode?: string,
+): void {
+  if (!ctx.pluginId || !ctx.pluginAuthToken) return;
+  void postTurnEvent({
+    pluginId: ctx.pluginId,
+    pluginAuthToken: ctx.pluginAuthToken,
+    commandId,
+    phase,
+    agentId: ctx.agentId,
+    errorCode,
+  });
+}
 
 const provideInput: CommandHandler = (ctx, _cmd, parsed) => {
   if (parsed.input) dispatchPrompt(ctx, parsed.input);
@@ -1958,6 +1991,49 @@ function parseInsightText(text: string): {
 // `activePreviews` (services/preview/index.ts). The backend's
 // PreviewController is a thin SSE-fanout + Redis-snapshot mirror.
 
+/**
+ * The ONE ordered channel every preview lifecycle POST goes through — the same
+ * guarantee Headroom (`_headroomEmitChain`) and Beads (`_beadsEmitChain`)
+ * already give their streams. Preview was the last one still firing bare
+ * `void postPreviewEvent(...)`, so its events raced on the wire; see
+ * `makeSerializedEmitter` for what that race actually cost.
+ */
+// ⚠️ La llamada va envuelta, NO pasada por referencia
+// (`makeSerializedEmitter(postPreviewEvent)`): pasarla directamente resuelve
+// el export al IMPORTAR este módulo, y este módulo se carga desde
+// `agents/acp/runner.ts`. Cuatro suites de ACP mockean `pairing.service`
+// parcialmente y no declaran `postPreviewEvent` — legítimamente, porque nada
+// del ACP lo usa —, así que la referencia temprana las hacía fallar al
+// cargar. Envolverla mantiene la búsqueda en tiempo de llamada, que es
+// exactamente donde estaba antes de encauzar los emisores.
+const emitPreviewEventRaw = makeSerializedEmitter(
+  (args: Parameters<typeof postPreviewEvent>[0]) => postPreviewEvent(args),
+);
+
+/**
+ * Todo error de preview sale por aqui llevando las dependencias que NO pudimos
+ * levantarle al proyecto.
+ *
+ * ⚠️ El enriquecido vive en el EMISOR, no en los catorce sitios que emiten un
+ * error. Repetirlo en cada uno es un olvido garantizado —y el proximo error que
+ * alguien añada nacería mudo—; aqui la regla existe una sola vez y todos la
+ * heredan, incluidos los del orquestador, que reciben esta misma closure.
+ *
+ * Solo se adjunta cuando de verdad falta algo: `missing` vacio significa que
+ * las dependencias estan servidas y el fallo es de otra cosa, asi que ofrecer
+ * ahi una variable de entorno mandaria al usuario a arreglar lo que no esta
+ * roto. `null` (aun no corrio, o sesion local) tampoco adjunta nada.
+ */
+const emitPreviewEvent = (args: Parameters<typeof postPreviewEvent>[0]): void => {
+  if (args.type !== USER_EVENTS.PREVIEW_ERROR) return emitPreviewEventRaw(args);
+  const missing = previewSvc.getLastProvisionOutcome()?.missing ?? [];
+  if (missing.length === 0) return emitPreviewEventRaw(args);
+  return emitPreviewEventRaw({
+    ...args,
+    payload: { ...(args.payload ?? {}), missingServices: missing },
+  });
+};
+
 const requestPreviewDetectH: CommandHandler = (ctx) => {
   if (!ctx.pluginAuthToken) {
     log.info('preview', 'no pluginAuthToken — skipping detect');
@@ -1965,7 +2041,7 @@ const requestPreviewDetectH: CommandHandler = (ctx) => {
   }
   if (typeof ctx.runtime.generateOneShot !== 'function') {
     log.info('preview', `runtime ${ctx.runtime.id} has no generateOneShot — emitting unsupported`);
-    void postPreviewEvent({
+    emitPreviewEvent({
       sessionId: ctx.sessionId,
       pluginId: ctx.pluginId,
       pluginAuthToken: ctx.pluginAuthToken,
@@ -1986,7 +2062,7 @@ const requestPreviewDetectH: CommandHandler = (ctx) => {
     const fromFile = await readPreviewConfig(process.cwd());
     if (fromFile) {
       log.info('preview', `detect: using .codeam/preview.json (${fromFile.framework})`);
-      void postPreviewEvent({
+      emitPreviewEvent({
         sessionId: ctx.sessionId,
         pluginId: ctx.pluginId,
         pluginAuthToken,
@@ -1996,7 +2072,7 @@ const requestPreviewDetectH: CommandHandler = (ctx) => {
       return;
     }
 
-    void postPreviewEvent({
+    emitPreviewEvent({
       sessionId: ctx.sessionId,
       pluginId: ctx.pluginId,
       pluginAuthToken,
@@ -2011,15 +2087,30 @@ const requestPreviewDetectH: CommandHandler = (ctx) => {
     const tookMs = Date.now() - startedAt;
     const detection = safeParseDetection(raw);
     if (!detection) {
-      log.info('preview', `detect: invalid agent output after ${tookMs}ms`);
-      void postPreviewEvent({
+      // codeagent-k9q4. Antes esta linea era `detect: invalid agent output
+      // after Xms` y nada mas: sin la salida cruda no se podia distinguir
+      // "el agente devolvio prosa" de "devolvio JSON al que le faltan campos"
+      // de "no devolvio NADA" — tres fallos con tres arreglos distintos. Un
+      // usuario encadeno CINCO de estos en 19 minutos (2026-08-30) y no habia
+      // forma de saber cual de los tres era.
+      const failure = describeDetectionFailure(raw);
+      log.info(
+        'preview',
+        `detect: failed after ${tookMs}ms reason=${failure?.reason ?? 'unknown'}` +
+          (failure?.missing ? ` missing=${failure.missing.join(',')}` : '') +
+          `\n--- salida cruda del agente (acotada) ---\n${failure?.rawExcerpt ?? ''}`,
+      );
+      emitPreviewEvent({
         sessionId: ctx.sessionId,
         pluginId: ctx.pluginId,
         pluginAuthToken,
         type: USER_EVENTS.PREVIEW_ERROR,
         payload: {
           stage: 'detection',
+          // El mensaje sale del diagnostico: decir "JSON invalido" cuando el
+          // agente no contesto manda al usuario a mirar un JSON que no existe.
           message:
+            failure?.message ??
             'Agent returned invalid JSON. Try again, or add a .codeam/preview.json override.',
         },
       });
@@ -2027,7 +2118,7 @@ const requestPreviewDetectH: CommandHandler = (ctx) => {
     }
     if (detection.framework === 'unsupported') {
       log.info('preview', 'detect: framework=unsupported');
-      void postPreviewEvent({
+      emitPreviewEvent({
         sessionId: ctx.sessionId,
         pluginId: ctx.pluginId,
         pluginAuthToken,
@@ -2047,7 +2138,7 @@ const requestPreviewDetectH: CommandHandler = (ctx) => {
     void writePreviewConfig(process.cwd(), detection).catch((err) => {
       log.info('preview', `detect: writePreviewConfig failed (non-fatal): ${String(err)}`);
     });
-    void postPreviewEvent({
+    emitPreviewEvent({
       sessionId: ctx.sessionId,
       pluginId: ctx.pluginId,
       pluginAuthToken,
@@ -2072,6 +2163,57 @@ let previewPrewarmStarted = false;
  * AI summaries). Idempotent (cache + once-guard) and strictly non-fatal:
  * a failure just means the first preview pays the detect cost, as today.
  */
+/**
+ * Rider del heartbeat que impide que el snapshot del preview caduque mientras
+ * el dev server siga vivo.
+ *
+ * El backend guarda ese estado en Redis con 1 h de TTL y el CLI solo publicaba
+ * en las transiciones, así que un preview de más de una hora perdía su
+ * snapshot: el usuario refrescaba y volvía al estado vacío con el dev server
+ * corriendo. Ver `services/preview/reaffirm.ts` para el porqué completo.
+ *
+ * ⚠️ Va por `emitPreviewEvent`, el MISMO emisor serializado que las
+ * transiciones: una re-afirmación no puede adelantar a un `preview_stopped`
+ * real y resucitar en el backend un preview que el usuario acaba de parar.
+ *
+ * ⚠️ El gate mira el PROCESO, no un recuerdo: `exitCode === null` es que el
+ * dev server sigue vivo. Si murió, no se re-afirma y la clave caduca sola —
+ * que es la verdad.
+ */
+export function makePreviewReaffirm(args: {
+  sessionId: string | undefined;
+  pluginId: string;
+  pluginAuthToken: string | undefined;
+}): ((info: { firstAfterConnect: boolean }) => void) | undefined {
+  const token = args.pluginAuthToken;
+  const sessionId = args.sessionId;
+  // Sin sesión o sin token no hay nada que afirmar NI a quién afirmárselo: no
+  // se instala rider, en vez de instalar uno que no haga nada en cada beat.
+  if (!token || !sessionId) return undefined;
+  return makePreviewHeartbeatReaffirm({
+    serving: () => {
+      const active = previewSvc.activePreviews.get(sessionId);
+      // Un preview ADOPTADO no tiene proceso nuestro (`devServer === null`) y
+      // está vivo por definición: solo se adopta lo que está sirviendo.
+      if (!active || (active.devServer && active.devServer.exitCode !== null)) return null;
+      return {
+        url: active.url,
+        framework: active.framework,
+        port: active.detection.port,
+      };
+    },
+    emitReady: (payload) => {
+      emitPreviewEvent({
+        sessionId,
+        pluginId: args.pluginId,
+        pluginAuthToken: token,
+        type: USER_EVENTS.PREVIEW_READY,
+        payload,
+      });
+    },
+  });
+}
+
 export function prewarmPreviewDetection(runtime: RuntimeStrategy): void {
   if (previewPrewarmStarted) return;
   previewPrewarmStarted = true;
@@ -2082,7 +2224,14 @@ export function prewarmPreviewDetection(runtime: RuntimeStrategy): void {
       if (await readPreviewConfig(cwd)) return; // already pinned/cached — nothing to do
       const raw = await runtime.generateOneShot!(PREVIEW_DETECT_PROMPT).catch(() => null);
       const detection = safeParseDetection(raw);
-      if (!detection || detection.framework === 'unsupported') return;
+      if (!detection) {
+        // Silencioso para el usuario (es un pre-calentamiento), pero NO para
+        // el log: es la misma ceguera de codeagent-k9q4.
+        const failure = describeDetectionFailure(raw);
+        log.info('preview', `prewarm: detection failed reason=${failure?.reason ?? 'unknown'}`);
+        return;
+      }
+      if (detection.framework === 'unsupported') return;
       await writePreviewConfig(cwd, detection);
       log.info(
         'preview',
@@ -2142,7 +2291,7 @@ export function startPreviewFromDetection(
   pluginAuthToken: string,
 ): void {
   const emit: EmitPreviewEvent = (type, payload) => {
-    void postPreviewEvent({
+    emitPreviewEvent({
       sessionId: ctx.sessionId,
       pluginId: ctx.pluginId,
       pluginAuthToken,
@@ -2224,7 +2373,7 @@ export function maybeAttachBuildHeal(ctx: HandlerContext, pluginAuthToken: strin
       })();
     },
     notify: (message) => {
-      void postPreviewEvent({
+      emitPreviewEvent({
         sessionId: ctx.sessionId,
         pluginId: ctx.pluginId,
         pluginAuthToken,
@@ -2249,7 +2398,7 @@ const previewStopH: CommandHandler = (ctx) => {
     // isn't penalized by rebuilds that happened during a previous run.
     previewSvc.resetBuildHealState(ctx.sessionId);
     log.info('preview', `stopped session=${ctx.sessionId}`);
-    void postPreviewEvent({
+    emitPreviewEvent({
       sessionId: ctx.sessionId,
       pluginId: ctx.pluginId,
       pluginAuthToken,

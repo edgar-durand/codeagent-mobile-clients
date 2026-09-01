@@ -87,7 +87,7 @@ import { createOnRequestPermission } from './permission-gate';
 import { getGuardrailPolicy } from './guardrail-config';
 import { isLocalSession } from '../../baton/gate';
 import { extractSelectPrompt } from './selectPromptExtractor';
-import { prewarmPreviewDetection } from '../../commands/start/handlers';
+import { makePreviewReaffirm, prewarmPreviewDetection } from '../../commands/start/handlers';
 import { getSquadAuto, loadCliConfig, setSessionAgent } from '../../config';
 import {
   buildHouseProxyChildEnv,
@@ -1666,6 +1666,21 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
       );
     },
     { id: opts.agent, name: opts.agent, displayName: opts.agent } as never,
+    undefined,
+    undefined,
+    // Pasajero del tick de 20 s que YA existe: re-afirma el preview mientras su
+    // dev server siga vivo, para que el snapshot (1 h de TTL en Redis) no
+    // caduque y la sesión no vuelva al estado vacío al refrescar. Ni un
+    // temporizador nuevo. Ver `services/preview/reaffirm.ts`.
+    //
+    // ⚠️ Va en ESTE relay, el que vive lo que dura la sesión — no en el
+    // `errRelay` del camino de fallo, que es efímero y donde no hay preview
+    // ninguno que afirmar.
+    makePreviewReaffirm({
+      sessionId: opts.sessionId,
+      pluginId: opts.pluginId,
+      pluginAuthToken: opts.pluginAuthToken,
+    }),
   );
 
   // ─── In-session agent switch (`switch_agent`) ─────────────────────────────

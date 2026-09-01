@@ -23,17 +23,14 @@ import { RepoDirtyTracker } from '../services/turn-files/repo-dirty-tracker';
 import { StreamingEmitterService } from '../services/streaming-emitter.service';
 import { fetchQuotaUsage } from './start/quota-fetcher';
 import { buildKeepAlive } from './start/keep-alive';
-import {
-  dispatchCommand,
-  cleanupAttachmentTempFiles,
-  type HandlerContext,
-} from './start/handlers';
+import { dispatchCommand, cleanupAttachmentTempFiles, type HandlerContext, makePreviewReaffirm } from './start/handlers';
 import { registerTerminalHandlers, closeAllTerminals } from '../services/terminal-ops.service';
 import { killActiveSpawnAndCaptureChildren } from '../services/spawn-and-capture';
 import {
   activePreviewSessionIds,
   killAllPreviews,
   provisionProjectDependencies,
+  noteProvisionOutcome,
 } from '../services/preview';
 import {
   fetchCurrentPluginAuthToken,
@@ -313,12 +310,36 @@ export async function start(
   // the agent never peak together (the v2.39.0 regression was the pull running
   // DURING the live agent). If a dep still isn't up, the preview error-card is
   // the safety net.
-  const depsReady: Promise<void> =
-    process.env.CODESPACES === 'true'
-      ? provisionProjectDependencies(cwd).catch(() => undefined)
-      : Promise.resolve();
+  //
+  // ⚠️ **El gate era `CODESPACES === 'true'`, y se quedaba corto.** Su
+  // justificación —«locally the user owns their own services»— es cierta solo
+  // para el portátil del usuario. En una caja de FLOTA o self-hosted el
+  // usuario no tiene nada instalado: esa caja la ponemos nosotros y llega
+  // vacía. Un proyecto con Prisma arrancaba ahí sin base de datos y el dev
+  // server moría; el usuario no tenía forma de saber por qué (replay de
+  // PostHog, 2026-08-29).
+  //
+  // `isLocalSession()` es el predicado que ya existe para exactamente esta
+  // pregunta —lo usa el batón para lo mismo— así que se reutiliza en vez de
+  // inventar otro que acabaría divergiendo.
+  const managedBox = !isLocalSession();
+  const depsReady: Promise<unknown> = managedBox
+    ? provisionProjectDependencies(cwd)
+        // ⚠️ El resultado se GUARDA, no se tira. Trae que servicios faltan y
+        // con que variable los arreglaria el usuario; sin esto el preview no
+        // tiene nada accionable que ofrecerle cuando el dev server muere sin
+        // base de datos.
+        .then((outcome) => noteProvisionOutcome(outcome))
+        .catch(() => undefined)
+    : Promise.resolve();
 
-  // Gate the agent spawn on dep provisioning + the agent binary — codespace only.
+  // Gate the agent spawn on dep provisioning + the agent binary.
+  //
+  // ⚠️ Se abre con el gate de arriba, y tiene que hacerlo: la razón de este
+  // gate es que el pull de imágenes y el agente —el que se come la memoria— no
+  // coincidan (la regresión OOM de v2.39.0). Provisionar en una caja de flota
+  // sin abrir también este gate reintroduciría exactamente ese pico en las
+  // cajas más pequeñas que tenemos.
   // ⚠️ BEADS IS NO LONGER GATED (2026-07-25 speed fix). It used to block here so
   // bd's SessionStart `bd prime` hook landed before the agent inited (else the
   // agent "never learns to use bd" and writes files instead of `bd remember`).
@@ -335,7 +356,7 @@ export async function start(
   // The docker pull is still gated (else it OOMs with the agent).
   // The onboarding welcome is published hardcoded by the runner, so this delays
   // ONLY the agent, never the welcome. Local `codeam start` keeps fire-and-forget.
-  if (process.env.CODESPACES === 'true') {
+  if (managedBox) {
     const GATE_TIMEOUT_MS = 240_000;
     // An agent's launch binary can still be installing when this gate
     // would otherwise release: on a fresh codespace the CLI, each agent's
@@ -741,9 +762,23 @@ export async function start(
     pluginAuthToken: session.pluginAuthToken ?? undefined,
   };
 
-  const relay = new CommandRelayService(pluginId, async (cmd) => {
-    await dispatchCommand(ctx, cmd);
-  }, runtime.meta);
+  const relay = new CommandRelayService(
+    pluginId,
+    async (cmd) => {
+      await dispatchCommand(ctx, cmd);
+    },
+    runtime.meta,
+    undefined,
+    undefined,
+    // Pasajero del tick de 20 s que ya existe: re-afirma el preview para que
+    // su snapshot (1 h de TTL en Redis) no caduque con el dev server vivo.
+    // Ni un temporizador nuevo. Ver `services/preview/reaffirm.ts`.
+    makePreviewReaffirm({
+      sessionId: session.id,
+      pluginId,
+      pluginAuthToken: session.pluginAuthToken,
+    }),
+  );
   ctx.relay = relay;
 
   // Expose the composition-root-provisioned Beads handle on `ctx` once it

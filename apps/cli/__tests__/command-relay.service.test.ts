@@ -533,3 +533,94 @@ describe('CommandRelayService — goodbye heartbeat', () => {
     expect(done).toBe(true);
   });
 });
+
+/**
+ * A sustained ack failure must be VISIBLE (2026-08-31 nightly).
+ *
+ * A one-off ack failure is harmless — the command redelivers and the relay
+ * dedupes it. A permanent one is not: the backend queue never drains, every
+ * batch is redelivered forever, and the host still looks perfectly healthy
+ * from outside (heartbeats land, commands arrive, `status` stays `online`).
+ *
+ * That is exactly how the fleet host ran from 2026-07-15 to 2026-08-31 with no
+ * poll secret enrolled — 401 `PLUGIN_SECRET_REQUIRED` on every single ack —
+ * and nobody noticed, because the failure was logged at `trace`.
+ */
+describe('CommandRelayService — a stuck ack is not allowed to be silent', () => {
+  const realRandom = Math.random;
+  const realLevel = process.env.CODEAM_LOG;
+  beforeEach(() => {
+    vi.useFakeTimers();
+    Math.random = () => 0.5;
+    // `warn` ALWAYS reaches the debug file (where the fleet host's log lives);
+    // stderr is gated by the user's level, so raise it to observe it here.
+    process.env.CODEAM_LOG = 'warn';
+  });
+  afterEach(() => {
+    vi.useRealTimers(); vi.clearAllMocks(); Math.random = realRandom;
+    if (realLevel === undefined) delete process.env.CODEAM_LOG;
+    else process.env.CODEAM_LOG = realLevel;
+  });
+
+  const ackRejectsWith = (message: string) => {
+    vi.mocked(pairing._postJson).mockImplementation(async (url: string) => {
+      if (String(url).includes('/api/commands/ack')) throw new Error(message);
+      return { success: true } as never;
+    });
+  };
+
+  it('names PLUGIN_SECRET_REQUIRED as re-pair, not as a retryable blip', async () => {
+    const written: string[] = [];
+    const warn = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(((chunk: string | Uint8Array) => {
+        written.push(String(chunk));
+        return true;
+      }) as never);
+    ackRejectsWith('HTTP 401 PLUGIN_SECRET_REQUIRED');
+
+    const relay = new CommandRelayService('plugin-1', vi.fn(), META);
+    relay.start();
+    await vi.advanceTimersByTimeAsync(10);
+    // Drive one dispatch so an ack is attempted.
+    await (relay as unknown as {
+      dispatchCommands: (c: Array<{ id: string; type: string }>) => Promise<void>;
+    }).dispatchCommands([{ id: 'c1', type: 'noop' }]);
+    await vi.advanceTimersByTimeAsync(10);
+
+    const said = written.join('\n');
+    // The operator must learn what is true: it never self-recovers, and the
+    // ack rail is dead — WITHOUT overstating it as a stalled queue, which it
+    // is not while this client drains on receive.
+    expect(said).toMatch(/re-paired/i);
+    expect(said).toMatch(/never fix it/i);
+    expect(said).toMatch(/ack rail is dead/i);
+    expect(said).not.toMatch(/redelivered forever/i);
+    relay.stop();
+    warn.mockRestore();
+  });
+
+  it('escalates a plain network ack failure to a warning instead of burying it', async () => {
+    const written: string[] = [];
+    const warn = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(((chunk: string | Uint8Array) => {
+        written.push(String(chunk));
+        return true;
+      }) as never);
+    ackRejectsWith('network unreachable');
+
+    const relay = new CommandRelayService('plugin-1', vi.fn(), META);
+    relay.start();
+    await vi.advanceTimersByTimeAsync(10);
+    await (relay as unknown as {
+      dispatchCommands: (c: Array<{ id: string; type: string }>) => Promise<void>;
+    }).dispatchCommands([{ id: 'c1', type: 'noop' }]);
+    await vi.advanceTimersByTimeAsync(10);
+
+    const said = written.join('\n');
+    expect(said).toMatch(/not draining/i);
+    relay.stop();
+    warn.mockRestore();
+  });
+});

@@ -4,6 +4,54 @@ All notable changes to `codeam-cli` are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.71.2] — 2026-08-31
+
+### Fixed
+
+- **preview:** Nombrar por qué falló la detección, y declarar command_expired (#671)
+- **relay:** Un ack que falla para siempre deja de ser invisible
+
+## [2.71.1] — 2026-08-30
+
+### Added
+
+- **cli:** Reportar en qué fase va cada turno — la mitad del embudo que el servidor no ve (#670)
+
+### Tests
+
+- **cli:** Dar plazo realista a los dos tests que conducen start() de verdad (#669)
+
+## [2.71.0] — 2026-08-29
+
+### Added
+
+- **cli:** Decir que base de datos falta, y con que variable se arregla (#668)
+
+## [2.70.0] — 2026-08-29
+
+### Fixed
+
+- **cli:** Distinguir una navegacion de un fetch, no solo mirar el Accept (#667)
+
+## [2.69.0] — 2026-08-29
+
+### Added
+
+- **cli:** El inspector habla tambien dentro del WebView de la app movil (#666)
+
+## [2.68.0] — 2026-08-29
+
+### Added
+
+- **cli:** Inspector de preview — proxy inyector, script y E2E en navegador (#665)
+
+## [2.67.6] — 2026-08-27
+
+### Fixed
+
+- **cli:** Ordena los POST del ciclo de vida del preview
+- **cli:** Re-afirma el preview en el heartbeat para que su snapshot no caduque
+
 ## [2.67.5] — 2026-08-27
 
 ### Fixed

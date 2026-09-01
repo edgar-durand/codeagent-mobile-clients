@@ -24,7 +24,16 @@ export * from './port-registry';
  */
 export interface ActivePreview {
   sessionId: string;
-  devServer: ChildProcess;
+  /**
+   * El dev server que ARRANCAMOS nosotros.
+   *
+   * ⚠️ `null` significa ADOPTADO: el puerto ya estaba servido por el dev
+   * server del propio usuario (arrancado por el agente, o a mano en una
+   * terminal) y lo estamos tunelando en vez de morir con «port already in
+   * use». No es nuestro, así que **no se mata al parar el preview** — pararlo
+   * mataría el servidor que el usuario tenía corriendo antes de abrir esto.
+   */
+  devServer: ChildProcess | null;
   /** Null when the framework manages its own tunnel (Expo / codespace). */
   tunnel: ChildProcess | null;
   url: string;
@@ -41,6 +50,15 @@ export interface ActivePreview {
    *  `killPreview` calls it so a stopped/replaced preview never leaves a
    *  dangling fs.watch handle or a pending debounce timer running. */
   buildHealStop?: () => void;
+  /**
+   * El proxy del inspector, cuando se interpuso entre el túnel y el dev
+   * server. `undefined` = camino directo (Expo, o el proxy no arrancó).
+   *
+   * Cerrarlo es parte del apagado: es un servidor HTTP nuestro escuchando en
+   * localhost, y sus websockets de recarga en caliente mantienen vivo el
+   * proceso si nadie los mata.
+   */
+  inspector?: { close(): Promise<void> } | null;
 }
 
 export const activePreviews = new Map<string, ActivePreview>();
@@ -69,7 +87,13 @@ export function killProcessTree(
   signal: NodeJS.Signals = 'SIGTERM',
 ): void {
   const pid = child.pid;
-  if (pid == null) return;
+  // ⚠️ `!pid`, no `pid == null`. Con `pid === 0`, `-pid` es `0` y
+  // `process.kill(0, …)` señaliza al GRUPO DE PROCESOS ACTUAL — o sea, el CLI
+  // se mata a sí mismo y se lleva por delante al agente y al dev server. Hoy
+  // no es alcanzable (`child.pid` es `undefined` en un spawn fallido, nunca
+  // `0`), pero la distancia entre «no alcanzable» y «catastrófico» es un
+  // carácter, y lo destapó un test al matar a su propio runner.
+  if (!pid) return;
   if (process.platform !== 'win32') {
     try {
       // Negative pid → the whole process group (child spawned detached).
@@ -115,10 +139,26 @@ export async function killPreview(sessionId: string): Promise<void> {
     killProcessTree(preview.tunnel, 'SIGTERM');
   }
   await new Promise((r) => setTimeout(r, 100));
-  killProcessTree(preview.devServer, 'SIGTERM');
+
+  // ⚠️ El proxy va DESPUÉS del túnel y ANTES del dev server, en su sitio de la
+  // cadena. Antes que el túnel, dejaría al túnel apuntando a un puerto muerto
+  // y el usuario vería un 502 en el instante de parar; después del dev server,
+  // el dev server intentaría escribir en sockets que ya nadie atiende.
+  // Best-effort: un cierre que falle no puede impedir que se mate el proceso
+  // que de verdad hay que matar.
+  try {
+    await preview.inspector?.close();
+  } catch {
+    /* nunca bloquear el apagado */
+  }
+
+  // Adoptado (`devServer === null`) = no es nuestro y no se toca. Parar el
+  // preview cierra el túnel y el proxy; el dev server del usuario sigue como
+  // estaba.
+  if (preview.devServer) killProcessTree(preview.devServer, 'SIGTERM');
 
   const sigkillTimer = setTimeout(() => {
-    killProcessTree(preview.devServer, 'SIGKILL');
+    if (preview.devServer) killProcessTree(preview.devServer, 'SIGKILL');
     if (preview.tunnel) killProcessTree(preview.tunnel, 'SIGKILL');
   }, 250);
   // Don't block process exit on this safety timer.
@@ -150,3 +190,6 @@ export async function killAllPreviews(): Promise<void> {
 export function activePreviewSessionIds(): string[] {
   return Array.from(activePreviews.keys());
 }
+
+export { canAdoptPort, verdictFor, probePort } from './adopt-port';
+export type { AdoptVerdict } from './adopt-port';

@@ -100,6 +100,32 @@ class PairingService {
             // SEC crit1 (#813): enroll the PoP hash so /status + /reconnect
             // require this install's secret. Older backends ignore it.
             addProperty("pluginSecretHash", settings.pollSecretHash())
+            // ⚠️ Repo y rama, como los envian el CLI y el plugin de VS Code.
+            //
+            // El backend acepta `branch` desde hace tiempo y las apps titulan la
+            // sesion con el repo — pero este plugin no enviaba ninguno de los
+            // dos, PESE A CALCULARLOS: `detectRepoSlug()` y `gitStatus()` ya
+            // existian y solo se usaban para redactar el texto de un dialogo de
+            // fallback. Resultado: en la lista de sesiones, toda sesion de
+            // JetBrains salia sin proyecto y sin rama, y habia que titularla por
+            // la herramienta.
+            //
+            // Best-effort: si el proyecto no es un repo git, o no tiene remoto
+            // de GitHub, se omiten y el emparejamiento sigue igual que antes.
+            runCatching {
+                val ops = ProjectOpsService.getInstance()
+                ops.detectRepoSlug()?.let {
+                    addProperty("repoIdentifier", "${'$'}{it.owner}/${'$'}{it.repo}")
+                }
+                ops.gitStatus()
+                    .get("branch")
+                    ?.takeIf { !it.isJsonNull }
+                    ?.asString
+                    ?.takeIf { it.isNotBlank() && it != "(detached)" }
+                    ?.let { addProperty("branch", it) }
+            }.onFailure {
+                logger.info("[pairing] no git context for this project: ${'$'}{it.message}")
+            }
         }
 
         val request = Request.Builder()

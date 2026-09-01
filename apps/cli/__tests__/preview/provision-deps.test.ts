@@ -45,8 +45,19 @@ describe('provisionProjectDependencies — OOM resource discipline', () => {
 
     await provisionProjectDependencies(dir);
 
-    // Only the `docker info` probe ran — no compose up after it failed.
-    expect(spy).toHaveBeenCalledTimes(1);
+    /**
+     * ⚠️ Lo que importa es que NO se siga con el compose, no cuántas llamadas
+     * hubo. Antes se afirmaba «exactamente 1» y eso se rompió en cuanto se
+     * añadieron los intentos de ARRANCAR el demonio — que es justo lo que hay
+     * que hacer antes de rendirse: en un codespace o un self-hosted recién
+     * levantado, lo normal es que Docker esté instalado y parado, no ausente.
+     *
+     * Contar llamadas fija el número de pasos; lo que hay que fijar es que no
+     * se intente levantar servicios sobre un Docker que no responde.
+     */
+    const argvs = spy.mock.calls.map((c) => [c[0], ...(c[1] as string[])].join(' '));
+    expect(argvs.some((a) => a.includes('compose'))).toBe(false);
+    expect(argvs[0]).toContain('docker info');
     fs.rmSync(dir, { recursive: true, force: true });
   });
 });

@@ -1,6 +1,7 @@
 import { promises as fs } from 'fs';
 import path from 'path';
 import { log } from '../logger';
+import { startEmbeddedPostgres, type EmbeddedPostgres } from './embedded-postgres';
 import { runSetupCommand, type SetupRunResult } from './run-setup';
 
 /**
@@ -79,6 +80,54 @@ const REDIS: ServiceSpec = {
  * Pure + exported for tests. De-dupes (one service even if several drivers
  * pull it in) and is conservative (only well-known drivers).
  */
+/**
+ * El proveedor de base de datos que declara un `schema.prisma`.
+ *
+ * ⚠️ **Prisma no aparece en `package.json` como driver.** Un proyecto Prisma
+ * trae `@prisma/client`, no `pg` ni `mysql2`, así que `detectServicesFromDeps`
+ * no le veía NINGUNA base de datos y no se le provisionaba nada — aunque
+ * Docker estuviera perfecto. El dev server arrancaba sin BD y moría, y el
+ * usuario no tenía forma de saber por qué (replay de PostHog, 2026-08-29).
+ *
+ * El proveedor real vive en el propio esquema, en el bloque `datasource`.
+ */
+/** Lee el `schema.prisma` del proyecto, en los sitios donde Prisma lo busca. */
+export async function readPrismaProvider(cwd: string): Promise<string | null> {
+  for (const rel of ['prisma/schema.prisma', 'schema.prisma', 'src/prisma/schema.prisma']) {
+    try {
+      return prismaProvider(await fs.readFile(path.join(cwd, rel), 'utf8'));
+    } catch {
+      // Ese sitio no lo tiene; se prueba el siguiente.
+    }
+  }
+  return null;
+}
+
+export function prismaProvider(schema: string): string | null {
+  // `datasource db { provider = "postgresql" … }` — el bloque puede tener
+  // cualquier nombre y el orden de sus campos no está fijado.
+  const m = /datasource\s+\w+\s*\{[^}]*?provider\s*=\s*"([^"]+)"/s.exec(schema);
+  return m ? m[1] : null;
+}
+
+/** Del proveedor de Prisma al servicio que hay que levantar. */
+export function serviceForPrismaProvider(provider: string | null): ServiceSpec | null {
+  switch (provider) {
+    case 'postgresql':
+    case 'postgres':
+      return POSTGRES;
+    case 'mysql':
+    // PlanetScale habla el protocolo de MySQL.
+    case 'planetscale':
+      return MYSQL;
+    case 'mongodb':
+      return MONGO;
+    // `sqlite` es un FICHERO: no necesita contenedor y no es un hueco.
+    default:
+      return null;
+  }
+}
+
 export function detectServicesFromDeps(pkg: {
   dependencies?: Record<string, string>;
   devDependencies?: Record<string, string>;
@@ -220,13 +269,166 @@ function runDockerComposeUp(cwd: string, composeArgs: string[]): Promise<SetupRu
   );
 }
 
-export async function provisionProjectDependencies(cwd: string): Promise<void> {
+/**
+ * Qué necesitaba el proyecto y qué NO se pudo levantar.
+ *
+ * ⚠️ Antes esto devolvía `void`: provisionar era «mejor esfuerzo» y su fracaso
+ * no dejaba rastro que nadie pudiera usar. El resultado era el peor de los
+ * mundos — el dev server arrancaba sin base de datos y moría con un error del
+ * framework, y el usuario no tenía forma de saber que le faltaba una BD ni qué
+ * hacer al respecto.
+ *
+ * Ahora el fracaso es un dato: quién falta y qué variable de entorno lo
+ * resolvería. Con eso el preview puede PROPONER —«pon tu `DATABASE_URL` y
+ * relanza»— en vez de morir en silencio. Es el último recurso: lo normal sigue
+ * siendo que Docker se lo dé todo.
+ */
+/**
+ * El Postgres embebido que se levantó, si se levantó.
+ *
+ * ⚠️ Vive fuera de la función porque hay que poder PARARLO al terminar la
+ * sesión: es un proceso hijo, y dejarlo suelto ataría el puerto para el
+ * siguiente preview.
+ */
+let embeddedPg: EmbeddedPostgres | null = null;
+
+function registerEmbeddedPostgres(pg: EmbeddedPostgres): void {
+  embeddedPg?.stop();
+  embeddedPg = pg;
+}
+
+/** Para el Postgres embebido, si lo hay. Idempotente. */
+export function stopEmbeddedPostgres(): void {
+  embeddedPg?.stop();
+  embeddedPg = null;
+}
+
+/**
+ * Lo ultimo que supimos de las dependencias del proyecto.
+ *
+ * ⚠️ Vive a nivel de modulo A PROPOSITO. El aprovisionamiento corre UNA vez, al
+ * arrancar la sesion y ANTES que el agente; el preview puede pedirse minutos
+ * despues y desde otro handler. Sin este puente el dato —que YA sabiamos: que
+ * falta Postgres y que `DATABASE_URL` lo arreglaria— se perdia, y el usuario
+ * solo veia morir el dev server sin una sola pista.
+ *
+ * `null` = todavia no corrio (sesion local, o aun en marcha). No es lo mismo
+ * que «no falta nada», asi que no se colapsan.
+ */
+let lastOutcome: ProvisionOutcome | null = null;
+
+/** Lo guarda el arranque; lo lee el preview cuando algo falla. */
+export function noteProvisionOutcome(outcome: ProvisionOutcome): void {
+  lastOutcome = outcome;
+}
+
+export function getLastProvisionOutcome(): ProvisionOutcome | null {
+  return lastOutcome;
+}
+
+export interface ProvisionOutcome {
+  /** Servicios que el proyecto necesita y no están sirviendo. */
+  missing: Array<{ service: string; envVar: string }>;
+  /** Por qué, para poder decirlo con palabras. */
+  reason: 'ok' | 'no-docker' | 'compose-failed' | 'unknown';
+}
+
+/** La variable que el usuario tendría que rellenar por cada servicio. */
+function envVarFor(service: ServiceSpec): string {
+  // La PRIMERA línea de `envLines` es la principal por construcción
+  // (`DATABASE_URL=…`, `REDIS_URL=…`).
+  const first = service.envLines[0] ?? '';
+  return first.split('=')[0] || 'DATABASE_URL';
+}
+
+export async function provisionProjectDependencies(
+  cwd: string,
+): Promise<ProvisionOutcome> {
+  /** Lo que el proyecto necesita, se haya podido levantar o no. */
+  let needed: ServiceSpec[] = [];
+  const outcome = (reason: ProvisionOutcome['reason']): ProvisionOutcome => ({
+    reason,
+    missing:
+      reason === 'ok'
+        ? []
+        : needed.map((sv) => ({ service: sv.name, envVar: envVarFor(sv) })),
+  });
+
   try {
     // 1. Docker must be usable (a missing binary or dead daemon → 'failed').
-    const docker = await runSetupCommand('docker', ['info'], cwd, undefined, { timeoutMs: 15_000 });
+    let docker = await runSetupCommand('docker', ['info'], cwd, undefined, {
+      timeoutMs: 15_000,
+    });
+
+    /**
+     * ⚠️ Un `docker info` que falla NO significa «aquí no hay Docker».
+     *
+     * El caso más común en un codespace o en un self-hosted recién arrancado
+     * es el demonio PARADO, no ausente: el binario está, y basta con
+     * levantarlo. Antes se abandonaba en el primer intento y el proyecto se
+     * quedaba sin base de datos — con Docker instalado en la máquina.
+     *
+     * Se intenta con las dos formas que cubren todo lo que usamos (systemd y
+     * el `service` de las imágenes sin init), en NO INTERACTIVO (`sudo -n`):
+     * un box sin TTY jamás podría contestar a una petición de contraseña, y
+     * quedarse colgado ahí sería peor que fallar.
+     */
+    if (docker.status !== 'ok') {
+      log.info('provision', 'docker not responding — trying to start the daemon');
+      for (const argv of [
+        ['-n', 'systemctl', 'start', 'docker'],
+        ['-n', 'service', 'docker', 'start'],
+      ]) {
+        const started = await runSetupCommand('sudo', argv, cwd, undefined, {
+          timeoutMs: 45_000,
+        });
+        if (started.status !== 'ok') continue;
+        docker = await runSetupCommand('docker', ['info'], cwd, undefined, {
+          timeoutMs: 20_000,
+        });
+        if (docker.status === 'ok') {
+          log.info('provision', `docker daemon started via ${argv[1]}`);
+          break;
+        }
+      }
+    }
+
     if (docker.status !== 'ok') {
       log.info('provision', 'docker not usable — skipping dependency provisioning');
-      return;
+      // Se mira igualmente QUÉ hacía falta: sin Docker no se puede dar, pero
+      // sí se puede decir, que es lo que permite proponer el fallback.
+      const pkgForNeeds = await readPackageJson(cwd);
+      needed = pkgForNeeds ? detectServicesFromDeps(pkgForNeeds) : [];
+      const prismaNeed = serviceForPrismaProvider(await readPrismaProvider(cwd));
+      if (prismaNeed && !needed.some((n) => n.name === prismaNeed.name)) {
+        needed.push(prismaNeed);
+      }
+      /**
+       * ⚠️ Sin Docker todavía queda una vía, y es la que salva a las Boxes de
+       * flota: `fleet_create_box` prohíbe `--privileged`, el montaje de
+       * `docker.sock` y cualquier bind del host, así que ahí Docker NUNCA va a
+       * estar. PGlite es Postgres compilado a WASM — corre en proceso, sin
+       * demonio y sin permisos— y `pglite-socket` le pone un puerto que habla
+       * el protocolo de Postgres, así que para la app es un Postgres normal.
+       *
+       * Solo cubre Postgres, que es el caso dominante y el proveedor más común
+       * de Prisma. MySQL y Mongo se quedan en la lista de lo que falta, y ahí
+       * el usuario tendrá que apuntar su propia URL.
+       */
+      const pgIndex = needed.findIndex((n) => n.name === 'postgres');
+      if (pgIndex !== -1) {
+        const embedded = await startEmbeddedPostgres({
+          port: 5432,
+          log: (m) => log.info('provision', m),
+        });
+        if (embedded) {
+          registerEmbeddedPostgres(embedded);
+          await ensureEnvFile(cwd, [needed[pgIndex]]);
+          needed.splice(pgIndex, 1);
+        }
+      }
+
+      return outcome(needed.length === 0 ? 'ok' : 'no-docker');
     }
 
     const pkg = await readPackageJson(cwd);
@@ -245,6 +447,18 @@ export async function provisionProjectDependencies(cwd: string): Promise<void> {
     } else if (pkg) {
       // 3. Heuristic generation when the repo declares no compose.
       generated = detectServicesFromDeps(pkg);
+
+      /**
+       * ⚠️ Y lo que Prisma declara en su esquema, que NO está en las
+       * dependencias: un proyecto Prisma trae `@prisma/client`, no `pg` ni
+       * `mysql2`, así que la heurística de arriba no le veía ninguna base de
+       * datos y no se le levantaba nada.
+       */
+      const prismaSvc = serviceForPrismaProvider(await readPrismaProvider(cwd));
+      if (prismaSvc && !generated.some((g) => g.name === prismaSvc.name)) {
+        generated.push(prismaSvc);
+      }
+      needed = generated;
       if (generated.length > 0) {
         const dir = path.join(cwd, '.codeam', 'provision');
         await fs.mkdir(dir, { recursive: true });
@@ -269,7 +483,11 @@ export async function provisionProjectDependencies(cwd: string): Promise<void> {
     if (started && pkg?.scripts) await runMigrationsIfPresent(cwd, pkg.scripts);
 
     log.info('provision', 'project dependency provisioning complete');
+    // `started` es false cuando el compose no llegó a levantar; ahí lo que el
+    // proyecto necesita sigue faltando, y decirlo es lo que permite proponer.
+    return outcome(needed.length > 0 && !started ? 'compose-failed' : 'ok');
   } catch (err) {
     log.warn('provision', 'provisionProjectDependencies failed (non-fatal)', err);
+    return outcome('unknown');
   }
 }
