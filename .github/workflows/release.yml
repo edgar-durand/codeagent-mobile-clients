@@ -732,6 +732,122 @@ jobs:
           jq -n --arg c "$MSG" '{content:$c, flags:4}' \
             | curl -sS -X POST -H 'Content-Type: application/json' -d @- "$WEBHOOK"
 
+  # ── Release notes → #changelog (Discord) + Announcements (Discussions) ───
+  #
+  # SEPARATE from `notify-success` on purpose. That job posts a one-line "it
+  # shipped" ping to the release-notifications channel and must stay exactly as
+  # it is; this one publishes the full NOTES to the changelog channel, which is
+  # a different audience reading for a different reason.
+  #
+  # The notes are read back from the GitHub Release rather than passed between
+  # jobs: `release` already generates them with git-cliff and sets them as the
+  # release body, so re-reading is one API call and cannot drift from what is
+  # published. It also means this job needs no artifact plumbing.
+  publish-changelog:
+    name: Publish release notes (changelog)
+    needs: [setup, release, verify-published]
+    if: success()
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      discussions: write
+    steps:
+      - name: Publish the notes
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          WEBHOOK: ${{ secrets.DISCORD_CHANGELOG_WEBHOOK }}
+          TAG: ${{ github.ref_name }}
+          VERSION: ${{ needs.setup.outputs.version }}
+          REPO: ${{ github.repository }}
+          RELEASE_URL: ${{ github.server_url }}/${{ github.repository }}/releases/tag/${{ github.ref_name }}
+        run: |
+          set -uo pipefail
+
+          # The release body IS the notes (git-cliff output, set by the
+          # `release` job). Empty is legitimate: a tag whose commits were all
+          # skippable chores produces no notes, and announcing an empty
+          # changelog is worse than announcing nothing.
+          NOTES=$(gh release view "$TAG" --repo "$REPO" --json body -q .body 2>/dev/null || true)
+          if [ -z "${NOTES// /}" ]; then
+            echo "::notice::No release notes for $TAG (git-cliff found no conventional commits) — nothing to publish."
+            exit 0
+          fi
+
+          # ── Discord ──────────────────────────────────────────────────────
+          if [ -z "${WEBHOOK:-}" ]; then
+            echo "::warning::DISCORD_CHANGELOG_WEBHOOK is not set — the notes were NOT posted to Discord." \
+                 "Add the repo secret (Settings → Secrets and variables → Actions)."
+          else
+            # Discord caps `content` at 2000 characters and REJECTS the whole
+            # message when it is longer, so the notes are split on line
+            # boundaries — never mid-line, which would break the markdown.
+            printf '%s\n' "$NOTES" > notes.md
+            HEADER="📝 **Release $TAG** — codeam-cli@$VERSION · @codeam/shared@$VERSION"
+            python3 - "$HEADER" "$RELEASE_URL" <<'PYEOF' > chunks.jsonl
+          import json, sys
+          header, url = sys.argv[1], sys.argv[2]
+          lines = open('notes.md', encoding='utf-8').read().splitlines()
+          LIMIT = 1900          # headroom under Discord's 2000
+          chunks, cur = [], header
+          for ln in lines:
+              # A single monstrous line still has to go somewhere: send it on
+              # its own and let Discord truncate rather than dropping it.
+              piece = ln if len(ln) <= LIMIT else ln[:LIMIT]
+              if len(cur) + 1 + len(piece) > LIMIT:
+                  chunks.append(cur)
+                  cur = piece
+              else:
+                  cur = f"{cur}\n{piece}" if cur else piece
+          if cur:
+              chunks.append(cur)
+          chunks.append(url)
+          for c in chunks:
+              print(json.dumps({"content": c, "flags": 4}))
+          PYEOF
+            n=0
+            while IFS= read -r payload; do
+              n=$((n+1))
+              code=$(printf '%s' "$payload" \
+                | curl -sS -o /dev/null -w '%{http_code}' -X POST \
+                    -H 'Content-Type: application/json' -d @- "$WEBHOOK")
+              echo "discord chunk $n -> $code"
+              # Webhooks are rate-limited (5/2s per webhook); a short pause is
+              # cheaper than handling a 429 retry.
+              sleep 1
+            done < chunks.jsonl
+          fi
+
+          # ── GitHub Discussions (Announcements) ───────────────────────────
+          # Idempotent: a re-run of this workflow must not post the same
+          # changelog twice, so an existing discussion for this tag wins.
+          TITLE="Release $TAG"
+          EXISTING=$(gh api graphql -f query="
+            { search(query: \"repo:$REPO in:title \\\"$TITLE\\\"\", type: DISCUSSION, first: 5) {
+                nodes { ... on Discussion { title url } } } }" \
+            --jq '.data.search.nodes[] | select(.title == "'"$TITLE"'") | .url' 2>/dev/null | head -1 || true)
+          if [ -n "${EXISTING:-}" ]; then
+            echo "::notice::Discussion for $TAG already exists: $EXISTING"
+            exit 0
+          fi
+
+          REPO_ID=$(gh api graphql -f query="{ repository(owner: \"${REPO%%/*}\", name: \"${REPO##*/}\") { id } }" --jq .data.repository.id)
+          CAT_ID=$(gh api graphql -f query="
+            { repository(owner: \"${REPO%%/*}\", name: \"${REPO##*/}\") {
+                discussionCategories(first: 20) { nodes { id slug } } } }" \
+            --jq '.data.repository.discussionCategories.nodes[] | select(.slug == "announcements") | .id')
+          if [ -z "${CAT_ID:-}" ]; then
+            echo "::warning::No 'announcements' discussion category — notes not posted to Discussions."
+            exit 0
+          fi
+
+          BODY=$(printf '%s\n\n%s\n' "$NOTES" "[Full release]($RELEASE_URL)")
+          gh api graphql \
+            -f query='mutation($repo:ID!,$cat:ID!,$title:String!,$body:String!){
+              createDiscussion(input:{repositoryId:$repo,categoryId:$cat,title:$title,body:$body}){
+                discussion { url } } }' \
+            -f repo="$REPO_ID" -f cat="$CAT_ID" -f title="$TITLE" -f body="$BODY" \
+            --jq .data.createDiscussion.discussion.url
+
   # ── Release succeeded → Discord ──────────────────────────────────────────
   notify-success:
     name: Announce release
