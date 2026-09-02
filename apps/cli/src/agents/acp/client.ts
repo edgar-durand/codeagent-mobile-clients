@@ -343,6 +343,17 @@ export class AcpClient {
    *  them mid-turn and break turn A's idle watchdog (mobile "send-while-active"
    *  can fire two prompts back-to-back). See {@link prompt}. */
   private promptChain: Promise<unknown> = Promise.resolve();
+  /**
+   * Coalescing state for {@link reprovisionMcp}. A burst of integration events
+   * (the user linking several connectors in a row) used to fire one respawn per
+   * event, each killing the adapter the previous had just started — see the
+   * comment on that method.
+   */
+  /** True once a start has fully succeeded (handshake + session). Distinguishes
+   *  "never started" (a programming error) from "the adapter died" (recoverable). */
+  private startedOnce = false;
+  private mcpReprovisionQueued = false;
+  private mcpReprovisionPending: McpServer[] | null = null;
   /** Last few adapter stderr lines — so a startup failure surfaces the REAL
    *  cause (e.g. gemini's `IneligibleTierError`) instead of a bare timeout. */
   private recentStderr: string[] = [];
@@ -638,6 +649,10 @@ export class AcpClient {
       // unexpected-exit, not a startup abort.
       this.startAbortReject = null;
       this.sessionId = newSession.sessionId;
+      // From here on, a missing connection means the adapter DIED rather than
+      // "was never started" — which is what lets `runPrompt` restart it instead
+      // of failing every turn forever. See the note there.
+      this.startedOnce = true;
       // Capture the NATIVE model config option (category:'model' select) — the
       // single source of truth for `list_models` / `change_model`. Sets
       // modelConfigId + availableModels + currentModelId (all empty/undefined
@@ -730,8 +745,28 @@ export class AcpClient {
   }
 
   private async runPrompt(input: string | ReadonlyArray<PromptBlock>): Promise<PromptResponse> {
+    // ⚠️ RECOVER a dead adapter rather than failing forever. This used to throw
+    // immediately, which turned any one-off adapter death into a permanently
+    // broken session: every subsequent turn answered "The agent hit an error and
+    // couldn't finish this turn" and nothing ever re-started the adapter, so the
+    // user retried into the same wall (live incident 2026-09-02 — three "Hola"s,
+    // three identical errors, session unusable until restarted).
+    //
+    // `startedOnce` is the discriminator: before the first successful start,
+    // "called before start()" is a genuine programming error and must still
+    // throw. After it, a missing connection means the adapter DIED, and the
+    // session is recoverable — that is exactly what `startOnce()` does.
     if (!this.connection || !this.sessionId) {
-      throw new Error('AcpClient.prompt called before start()');
+      if (!this.startedOnce) {
+        throw new Error('AcpClient.prompt called before start()');
+      }
+      log.warn('acpClient', 'adapter is gone — restarting it before this turn');
+      this.stopping = false;
+      await this.startOnce();
+      if (!this.connection || !this.sessionId) {
+        throw new Error('AcpClient.prompt: adapter could not be restarted');
+      }
+      log.info('acpClient', 'adapter restarted — resuming the turn');
     }
     // Self-heal the shared Headroom proxy BEFORE every turn (best-effort). On a
     // codespace resume / host-agent restart the detached :8787 proxy can be
@@ -1087,6 +1122,50 @@ export class AcpClient {
    * the caller can tell the user "active now" vs "active on next restart".
    */
   async reprovisionMcp(servers: McpServer[]): Promise<'reloaded' | 'deferred'> {
+    this.opts.mcpServers = servers;
+    if (!this.connection || !this.sessionId) return 'deferred';
+
+    // ⚠️ COALESCE, then run on the PROMPT CHAIN. Two bugs came out of doing
+    // neither (live incident 2026-09-02, rafaelph90.br@gmail.com):
+    //
+    // 1. A burst of integration events — the user linking several connectors in
+    //    a row — fired SEVEN respawns in 34 s. Each one `stop()`s the adapter
+    //    and `startOnce()`s a new one, with no mutual exclusion, so respawn N+1
+    //    SIGKILLed the adapter respawn N had started 500 ms earlier, mid
+    //    `initialize`. The log reads:
+    //      reprovisionMcp respawn failed — ACP connection closed
+    //      adapter exited unexpectedly code=null signal=SIGKILL
+    //    and the last one left NO adapter at all, so every later turn died on
+    //    "AcpClient.prompt called before start()" — permanently, until the
+    //    session was restarted. Only the FINAL server set matters, so a burst
+    //    collapses to one respawn.
+    //
+    // 2. It respawned mid-TURN. The user's "Hola" came back
+    //    `stopReason=cancelled` because the respawn killed the agent while it
+    //    was answering. `prompt()` already serializes turns through
+    //    `promptChain`; joining that chain means a respawn waits for the
+    //    in-flight turn instead of cancelling it — and serializes against
+    //    other respawns for free, since they share the one queue.
+    this.mcpReprovisionPending = servers;
+    if (this.mcpReprovisionQueued) return 'deferred';
+    this.mcpReprovisionQueued = true;
+
+    const run = this.promptChain.then(() => {
+      this.mcpReprovisionQueued = false;
+      const latest = this.mcpReprovisionPending ?? servers;
+      this.mcpReprovisionPending = null;
+      return this.runReprovisionMcp(latest);
+    });
+    this.promptChain = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    return run;
+  }
+
+  /** The actual respawn. Only ever called from {@link reprovisionMcp}'s queued
+   *  slot, so it can assume no turn and no other respawn is running. */
+  private async runReprovisionMcp(servers: McpServer[]): Promise<'reloaded' | 'deferred'> {
     this.opts.mcpServers = servers;
     const prevConversationId = this.sessionId;
     if (!this.connection || !prevConversationId) return 'deferred';
