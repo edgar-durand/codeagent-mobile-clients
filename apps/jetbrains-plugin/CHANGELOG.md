@@ -4,6 +4,21 @@ All notable changes to the CodeAgent-Mobile JetBrains plugin are documented here
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.73.1] — 2026-09-02
+
+### Added
+
+- **cli:** Env_parse — import a pasted .env instead of typing variables one by one (#675)
+- **cli:** Fleet_migrate_box_image — re-point a sleeping box at :latest (#678)
+
+### Documentation
+
+- **shared:** Warn that Trello's "Secret" is not the token (#676)
+
+### Fixed
+
+- **cli:** Register a resumed child under its DEPLOY id, not the paired-session id (#679)
+
 ## [2.73.0] — 2026-09-02
 
 ### Added
