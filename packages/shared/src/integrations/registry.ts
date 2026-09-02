@@ -743,7 +743,12 @@ export const INTEGRATION_REGISTRY: Record<IntegrationId, IntegrationDefinition> 
           label: 'Token',
           placeholder: 'Your Trello token',
           secret: true,
-          help: 'On the API-key page, click the "Token" link to authorize + generate a token (scope read,write, never-expiring).',
+          // WARNING - the Power-Up API-key page also shows a "Secret", and it is
+          // NOT the token: both are 64 hex characters and look identical, so it
+          // is the natural thing to copy. Pasting the Secret fails with Trello's
+          // misleading `invalid key`, which then sends the user to regenerate a
+          // perfectly good API key (owner report, 2026-09-01). Say so here.
+          help: 'On that same API-key page, click the "Token" link to authorize and generate a token (read,write, never-expiring). NOT the "Secret" on that page - it looks identical but will not work.',
         },
       ],
     },
