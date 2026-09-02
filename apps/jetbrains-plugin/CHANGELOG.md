@@ -4,6 +4,16 @@ All notable changes to the CodeAgent-Mobile JetBrains plugin are documented here
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.73.2] — 2026-09-02
+
+### CI
+
+- **release:** Publish the release notes to #changelog and Discussions (#680)
+
+### Fixed
+
+- **cli:** An MCP reprovision burst must not kill the session (#682)
+
 ## [2.73.1] — 2026-09-02
 
 ### Added
