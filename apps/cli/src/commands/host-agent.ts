@@ -596,6 +596,20 @@ interface FleetCreateBoxPayload {
 
 /** The `fleet_start_box` / `fleet_stop_box` / `fleet_delete_box` payload
  *  (mirrors backend `FleetBoxRefCommand`). */
+/**
+ * `fleet_migrate_box_image` — re-point a SLEEPING box at the current `:latest`
+ * WITHOUT waking it. Backend shape: `FleetMigrateBoxImageCommand`.
+ *
+ * Deliberately has NO `enrollToken`, which is the difference that makes this
+ * safe to apply in a batch. See `fleetMigrateBoxImage`.
+ */
+interface FleetMigrateBoxImagePayload {
+  boxId: string;
+  containerName: string;
+  limits: FleetCreateBoxPayload['limits'];
+  apiOrigin: string;
+}
+
 interface FleetBoxRefPayload {
   boxId: string;
   containerName: string;
@@ -655,6 +669,24 @@ function isFleetCreateBoxPayload(
     typeof p.apiOrigin === 'string' &&
     p.apiOrigin.length > 0 &&
     isFleetLimits(p.limits)
+  );
+}
+
+function isFleetMigrateBoxImagePayload(
+  p: Record<string, unknown>,
+): p is FleetMigrateBoxImagePayload & Record<string, unknown> {
+  return (
+    typeof p.boxId === 'string' &&
+    isFleetContainerName(p.containerName) &&
+    typeof p.apiOrigin === 'string' &&
+    p.apiOrigin.length > 0 &&
+    isFleetLimits(p.limits) &&
+    // ⚠️ REJECT a token outright rather than ignoring it. A migrate that
+    // carried one would bake a 15-minute credential into a container that may
+    // not start for days — a terminal 4xx at boot, i.e. a box that never comes
+    // back. If a future backend starts sending one, this must fail loudly here
+    // rather than silently produce that box.
+    p.enrollToken === undefined
   );
 }
 
@@ -763,6 +795,36 @@ function resolveFleetBoxImage(): string {
  * `opts.env` (a bare `-e CODEAM_ENROLL_TOKEN`), NEVER argv → never visible in
  * `ps` on the shared host, never logged.
  */
+/**
+ * Args for the sleeping-box image migration: `docker create`, not `run`.
+ *
+ * Built by rewriting the create args so the container gets the IDENTICAL
+ * caps/limits/mounts a real box has — a hand-rolled second arg list would
+ * drift from `buildFleetBoxRunArgs` the first time a security flag changes,
+ * and the drift would only show up as a box that behaves subtly differently
+ * after it wakes.
+ *
+ * Two substitutions, both load-bearing:
+ *   · `run` → `create`: binds the container to the new image and leaves it
+ *     STOPPED, so the box stays asleep. `run` would start it, and migrating a
+ *     batch would wake every sleeping box at once (on fleet-1 that is
+ *     9 × 1536 MB against 16 GB) only for the sleep sweep to re-sleep them.
+ *   · `--pull=always` is DROPPED. The backend dispatches this right after the
+ *     wake path has already pulled, and more importantly a create must not sit
+ *     inside a registry round-trip per box; the pull happens once, explicitly,
+ *     before the loop.
+ */
+function buildFleetBoxMigrateArgs(p: {
+  boxId: string;
+  containerName: string;
+  apiOrigin: string;
+  limits: FleetCreateBoxPayload['limits'];
+}): string[] {
+  return buildFleetBoxRunArgs(p)
+    .map((a) => (a === 'run' ? 'create' : a))
+    .filter((a) => a !== '--pull=always' && a !== '-d');
+}
+
 function buildFleetBoxRunArgs(p: {
   boxId: string;
   containerName: string;
@@ -1483,6 +1545,14 @@ export class HostAgentSupervisor {
       await this.fleetCreateBox(cmd.payload);
       return;
     }
+    if (cmd.type === 'fleet_migrate_box_image') {
+      if (!isFleetMigrateBoxImagePayload(cmd.payload)) {
+        log.warn('host-agent', `ignoring malformed fleet_migrate_box_image id=${cmd.id}`);
+        return;
+      }
+      await this.fleetMigrateBoxImage(cmd.payload);
+      return;
+    }
     if (cmd.type === 'fleet_start_box') {
       if (!isFleetBoxRefPayload(cmd.payload)) {
         log.warn('host-agent', `ignoring malformed fleet_start_box id=${cmd.id}`);
@@ -1678,6 +1748,103 @@ export class HostAgentSupervisor {
 
   /** `fleet_start_box` — wake a sleeping box (`docker start`). Idempotent: a
    *  container the host already removed is treated as success. */
+  /**
+   * `fleet_migrate_box_image` — re-point a SLEEPING box at the current
+   * `:latest` without waking it, so the version it was pinned to becomes
+   * reclaimable by the (already automated) dangling-image prune.
+   *
+   * WHY THIS IS NEEDED AT ALL. Boxes are created with `--pull=always` on
+   * purpose, so each stays pinned to the image it was born on, and Docker
+   * refuses to delete an image any container references INCLUDING stopped
+   * ones — which is precisely what stops the prune from destroying a sleeping
+   * user's box. So every image release strands ~7.7 GB per lagging box until it
+   * wakes or is reaped on day 7 (fleet-1, 2026-09-02: 9 boxes across 4
+   * versions, ~31 GB held).
+   *
+   * ⚠️ THE HOST RE-CHECKS THAT THE BOX IS STOPPED, even though the backend only
+   * selects `status: 'SLEEPING'`. The DB's view can lag the host by a sweep —
+   * a box that woke seconds ago is still SLEEPING in the row — and re-creating
+   * a RUNNING container kills a live agent mid-turn. The authority on whether a
+   * container is running is the daemon, so we ask it here and refuse rather
+   * than trust the payload.
+   *
+   * ⚠️ `docker create`, and NO enroll token. `run` would start the container,
+   * so migrating the sleeping set in a batch would wake all of them (9 ×
+   * 1536 MB on a 16 GB host) only for the sleep sweep to re-sleep them 30
+   * minutes later. And a token would be a 15-minute credential baked into a
+   * container that may not start for days — a terminal 4xx at boot, i.e. a box
+   * that never comes back. The sealed identity is in the named volume, which
+   * `rm` WITHOUT `-v` preserves.
+   *
+   * Idempotent and best-effort: a box already on `:latest` is skipped, a
+   * missing container is success (a concurrent reap), and nothing here may
+   * throw into the relay — this is housekeeping.
+   */
+  private async fleetMigrateBoxImage(payload: FleetMigrateBoxImagePayload): Promise<void> {
+    const { containerName } = payload;
+
+    // Authority check: the daemon, not the payload.
+    const state = await this.docker.run([
+      'inspect',
+      '--format',
+      '{{.State.Running}}',
+      containerName,
+    ]);
+    if (state.code !== 0) {
+      if (isMissingContainerError(state.stderr)) return; // reaped meanwhile
+      log.warn(
+        'host-agent',
+        `fleet_migrate_box_image: inspect of ${containerName} failed (code=${state.code}) — skipping`,
+      );
+      return;
+    }
+    if (state.stdout.trim() === 'true') {
+      log.info(
+        'host-agent',
+        `fleet_migrate_box_image: ${containerName} is RUNNING — skipping (never touch a live box)`,
+      );
+      return;
+    }
+
+    // Nothing to do when it already runs the freshest image. `fleetBoxImageStale`
+    // pulls `:latest` first, so the pull happens ONCE here rather than per box
+    // inside the create.
+    if (!(await this.fleetBoxImageStale(containerName))) {
+      log.info('host-agent', `fleet_migrate_box_image: ${containerName} already current`);
+      return;
+    }
+
+    // rm WITHOUT -v → the named volume (workspace + sealed identity) survives.
+    const rm = await this.docker.run(['rm', '-f', containerName], {
+      timeoutMs: DOCKER_RUN_TIMEOUT_MS,
+    });
+    if (rm.code !== 0 && !isMissingContainerError(rm.stderr)) {
+      log.warn(
+        'host-agent',
+        `fleet_migrate_box_image: rm of ${containerName} failed (code=${rm.code}): ` +
+          `${rm.stderr.trim().slice(-200)} — NOT creating a replacement`,
+      );
+      return; // ⚠️ Bail. A create with the old container still present would
+      // fail on the name clash and leave the box in neither state.
+    }
+
+    const res = await this.docker.run(buildFleetBoxMigrateArgs(payload), {
+      timeoutMs: DOCKER_RUN_TIMEOUT_MS,
+    });
+    if (res.code !== 0) {
+      log.warn(
+        'host-agent',
+        `fleet_migrate_box_image: create of ${containerName} failed (code=${res.code}): ` +
+          `${res.stderr.trim().slice(-200)}`,
+      );
+      return;
+    }
+    log.info(
+      'host-agent',
+      `fleet_migrate_box_image: ${containerName} re-pointed at :latest (still stopped)`,
+    );
+  }
+
   private async fleetStartBox(payload: FleetBoxRefPayload): Promise<void> {
     const { containerName } = payload;
     // SELF-HEAL: when the backend sent recreate credentials (fresh token + api
