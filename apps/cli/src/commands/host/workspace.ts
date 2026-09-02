@@ -43,6 +43,33 @@ export function selfHostedWorkspaceRoot(): string {
 }
 
 /**
+ * Recover a deploy's id from its workspace path.
+ *
+ * A deploy's workspace is `~/.codeam/self-hosted/<deployId>` (created by
+ * `prepareWorkspace`), and the CLI persists that path on the session
+ * (`SavedSession.cwd`) but NOT the deployId itself. On a supervisor-boot resume
+ * the deployId is what every upward signal must be keyed on — the backend
+ * matches `SelfHostedSession.deployId` — so it has to be recovered, and the
+ * basename of the workspace IS it.
+ *
+ * Returns null for anything that is not a direct child of the self-hosted root:
+ * a local pairing (arbitrary repo cwd) has no deployId at all, and inventing
+ * one would be worse than admitting we don't have it.
+ */
+export function deployIdFromWorkspace(cwd?: string | null): string | null {
+  if (!cwd) return null;
+  const root = selfHostedWorkspaceRoot();
+  const resolved = path.resolve(cwd);
+  const rel = path.relative(root, resolved);
+  // Must be INSIDE the root (no `..`), not the root itself, and exactly one
+  // level deep — `<root>/<deployId>` and nothing more.
+  if (!rel || rel.startsWith('..') || path.isAbsolute(rel)) return null;
+  const parts = rel.split(path.sep).filter(Boolean);
+  if (parts.length !== 1) return null;
+  return parts[0];
+}
+
+/**
  * Non-interactive git environment: never prompt for credentials on the
  * terminal, never invoke an askpass helper, never pop a Git Credential
  * Manager dialog. A missing/invalid credential therefore fails fast with a

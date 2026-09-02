@@ -84,7 +84,12 @@ import {
   type SealedHostIdentity,
   type SessionBubbleAuth,
 } from './host/host-client';
-import { isAbsolutePathTarget, prepareWorkspace, selfHostedWorkspaceRoot } from './host/workspace';
+import {
+  deployIdFromWorkspace,
+  isAbsolutePathTarget,
+  prepareWorkspace,
+  selfHostedWorkspaceRoot,
+} from './host/workspace';
 import { provisionAgentCredentials } from './host/agent-provisioning';
 import {
   ensureGhCli,
@@ -2526,13 +2531,32 @@ export class HostAgentSupervisor {
         { ...readHeadroomChildEnv(), ...readHouseProxyChildEnv() },
         cwd,
       );
+      // ⚠️ The child MUST be registered under its DEPLOY id, never the
+      // paired-session id. `deployId` is the key every upward signal is matched
+      // against server-side: the boot reconcile below reports it, and
+      // `recordSessionEvent` compares it to `SelfHostedSession.deployId`. Using
+      // `session.id` (a PairedSession id) reported an id from the WRONG SPACE,
+      // so no row matched, the backend read the live session as unlisted, and
+      // ENDED its link — moments after this very function resumed it. That row
+      // is the only thing tying the session to its host, so the app then showed
+      // a live CodeAgent Box session as **LOCAL** with a reconnect the user
+      // cannot perform (they have no shell on our VPS). Reported by
+      // rafaelph90.br@gmail.com 2026-09-01 and again 2026-09-02, by which point
+      // 9 of 16 fleet boxes had lost their link this way.
+      //
+      // `SavedSession` doesn't persist the deployId, but it persists the deploy
+      // WORKSPACE (`~/.codeam/self-hosted/<deployId>`), so the id is the
+      // basename. Fall back to `session.id` only when the cwd isn't a deploy
+      // workspace (a local pairing has no deployId at all) — there the backend
+      // has no link row to protect either way.
+      const deployId = deployIdFromWorkspace(session.cwd) ?? session.id;
       const child: ChildSession = {
-        deployId: session.id,
+        deployId,
         proc,
         agent: session.agent,
         startedAt: Date.now(),
       };
-      this.children.set(session.id, child);
+      this.children.set(deployId, child);
 
       let tail = '';
       const appendTail = (buf: Buffer): void => {
@@ -2541,7 +2565,7 @@ export class HostAgentSupervisor {
       proc.stdout?.on('data', appendTail);
       proc.stderr?.on('data', appendTail);
       proc.once('exit', (code) => {
-        if (this.children.get(session.id)?.proc === proc) this.children.delete(session.id);
+        if (this.children.get(deployId)?.proc === proc) this.children.delete(deployId);
         if (typeof code === 'number' && code !== 0) {
           this.onResumeChildExit(session, code, tail.trim().slice(-300));
         }
