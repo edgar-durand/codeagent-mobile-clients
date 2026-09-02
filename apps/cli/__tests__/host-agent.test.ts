@@ -1727,6 +1727,75 @@ describe('reportSessionEvent — discrete session lifecycle (event-driven)', () 
     });
   });
 
+  // ⚠️ THE bug this whole block exists to prevent (rafaelph90.br@gmail.com,
+  // 2026-09-01 and again 2026-09-02; 9 of 16 fleet boxes affected).
+  //
+  // The boot reconcile runs right after `resumePersistedSession`, and the id it
+  // reports is matched server-side against `SelfHostedSession.deployId`. The
+  // resume used to register its child under `session.id` — a PAIRED-SESSION id,
+  // a different id space — so the backend found no match, read the live session
+  // as unlisted, and ENDED its link. That row is the only thing tying the
+  // session to its host, so the app then rendered a live CodeAgent Box session
+  // as LOCAL, offering a reconnect the user cannot perform (no shell on our
+  // VPS). This asserts the reported id is the DEPLOY id recovered from the
+  // session's persisted workspace, and that the paired-session id is NOT sent.
+  it('boot reconcile reports the resumed child under its DEPLOY id, never the paired-session id', async () => {
+    const config = await import('../src/config');
+    const fs = await import('node:fs');
+    const path = await import('node:path');
+    const { selfHostedWorkspaceRoot } = await import('../src/commands/host/workspace');
+
+    const deployId = 'dep-11111111-2222-3333-4444-555555555555';
+    const sessionId = 'sess-cmthdm5y6005pa69r4f56naoz';
+    // A REAL directory at the real convention — `resumePersistedSession` only
+    // honours a persisted cwd that exists on disk.
+    const workspace = path.join(selfHostedWorkspaceRoot(), deployId);
+    fs.mkdirSync(workspace, { recursive: true });
+
+    try {
+      vi.mocked(config.getActiveSession).mockReturnValueOnce({
+        id: sessionId,
+        pluginId: 'plug-1',
+        pollSecret: 'sec',
+        agent: 'claude',
+        userName: 'u',
+        userEmail: 'e',
+        plan: 'pro',
+        pairedAt: 0,
+        pluginAuthToken: 't',
+        cwd: workspace,
+      } as never);
+
+      const fetchMock = vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: async () => ({ success: true, data: { ok: true } }),
+      });
+      vi.stubGlobal('fetch', fetchMock);
+
+      const fakeProc = { stdout: { on: vi.fn() }, stderr: { on: vi.fn() }, once: vi.fn(), kill: vi.fn() };
+      const sup = new HostAgentSupervisor(IDENTITY, {
+        makeRelay: () => ({ start: vi.fn(), stop: vi.fn(), sendResult: vi.fn() }),
+        resumeSpawner: vi.fn(() => fakeProc as never),
+      });
+      sup.start();
+      await vi.waitFor(() => {
+        expect(
+          fetchMock.mock.calls.some((c) => String(c[0]).includes('/api/self-hosted/session-event')),
+        ).toBe(true);
+      });
+
+      const body = lastSessionEventBody(fetchMock);
+      expect(body.event).toBe('reconcile');
+      expect(body.activeDeployIds).toEqual([deployId]);
+      // The whole failure was reporting THIS instead.
+      expect(body.activeDeployIds).not.toContain(sessionId);
+      sup.stop();
+    } finally {
+      fs.rmSync(workspace, { recursive: true, force: true });
+    }
+  });
+
   it("posts a 'reconcile' event with the live deployId set", async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,
