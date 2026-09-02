@@ -223,6 +223,13 @@ export const startCommandSchema = z.object({
     )
     .max(512)
     .optional(),
+  // `env_parse` — how a pasted `.env` blob meets the project's current one.
+  // `merge` (the default when absent) keeps variables the paste does not
+  // mention, because a PARTIAL paste is the common case: people copy the block
+  // they care about, not the whole file. `replace` is opt-in and destructive
+  // in intent, so it must be asked for explicitly. The blob itself rides the
+  // existing `content` field.
+  mode: z.enum(['merge', 'replace']).optional(),
   // `skills_configure` — the curated `SkillId` to add/remove. `list` (and a
   // malformed/unknown id on add/remove) sends no `skillId` or an invalid one;
   // `configureSkill` itself validates against the shared registry.

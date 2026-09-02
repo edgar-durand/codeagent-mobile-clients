@@ -534,6 +534,95 @@ const envReadH: CommandHandler = async (ctx, cmd) => {
   }
 };
 
+/**
+ * Parse a pasted `.env` blob and merge it over the project's current one.
+ *
+ * ⚠️ WHY THIS LIVES IN THE CLI AND NOT IN THE APP. `dotenv.ts` is the ONLY
+ * owner of `.env` syntax — quotes, `export `, `#`, `=`-in-value, round-trip.
+ * A second parser on the phone would drift from this one, and the drift would
+ * surface as a value that is subtly wrong in the file the dev server reads:
+ * the worst possible failure, because it looks like the app's bug.
+ *
+ * ⚠️ IT DOES NOT WRITE. It returns the merged list and `env_write` still owns
+ * the disk, so there is exactly one writer and the user reviews 40 pasted
+ * variables before any of them land. Importing straight to disk would be one
+ * paste away from clobbering a working `.env`.
+ *
+ * A bad line does NOT fail the import. Pasted `.env` files carry stray lines,
+ * and refusing all 40 variables because of one is the tedium this exists to
+ * remove.
+ *
+ * ⚠️ BUT IT MUST NOT DROP THEM IN SILENCE, which is what `parseDotenv` does on
+ * its own: a line whose key fails `ENV_KEY_RE` is simply `continue`d. That is
+ * right for reading a file the CLI wrote, and wrong here — on a 40-variable
+ * paste nobody can eyeball that two went missing. `unrecognized` is the count
+ * the app surfaces so the user knows to look.
+ *
+ * It is a COUNT, deliberately, not a list of the offending keys. Extracting
+ * keys from the lines this parser rejected would mean deciding what a key is,
+ * which is precisely the `.env` syntax ownership that must stay in one place.
+ * "Something in your paste did not make it" needs no such knowledge.
+ */
+const envParseH: CommandHandler = async (ctx, cmd, parsed) => {
+  const content = typeof parsed.content === 'string' ? parsed.content : null;
+  if (content === null) {
+    await ctx.relay.sendResult(cmd.id, 'failed', { error: 'Missing content' });
+    return;
+  }
+  // `replace` is opt-in: the default keeps variables the paste does not
+  // mention, because a partial paste is the common case (someone copies the
+  // block they care about, not the whole file).
+  const replace = parsed.mode === 'replace';
+
+  const incoming = new Map<string, string>();
+  // `parseDotenv` already applies last-wins on a duplicated key, matching a
+  // shell sourcing the file.
+  for (const v of parseDotenv(content)) incoming.set(v.key, v.value);
+
+  // How many lines LOOKED like assignments but did not survive the parse. The
+  // test is intentionally cruder than `.env` syntax — non-empty, not a
+  // comment, contains `=` — because its only job is to notice a shortfall, not
+  // to interpret the line. Duplicates are excluded so a legitimately repeated
+  // key is not reported as lost.
+  const distinctAssignments = new Set(
+    content
+      .split(/\r?\n/)
+      .map((l) => l.trim())
+      .filter((l) => l !== '' && !l.startsWith('#') && l.includes('='))
+      .map((l) => (l.startsWith('export ') ? l.slice('export '.length).trim() : l))
+      .map((l) => l.slice(0, l.indexOf('=')).trim()),
+  );
+  const unrecognized = Math.max(0, distinctAssignments.size - incoming.size);
+
+  const existing = new Map<string, string>();
+  if (!replace) {
+    try {
+      const raw = await fs.promises.readFile(path.join(process.cwd(), '.env'), 'utf8');
+      for (const v of parseDotenv(raw)) existing.set(v.key, v.value);
+    } catch {
+      /* no `.env` yet — importing into an empty file is the main case */
+    }
+  }
+
+  let added = 0;
+  let updated = 0;
+  for (const [key, value] of incoming) {
+    if (existing.has(key)) {
+      if (existing.get(key) !== value) updated += 1;
+    } else {
+      added += 1;
+    }
+    existing.set(key, value);
+  }
+
+  await ctx.relay.sendResult(cmd.id, 'completed', {
+    vars: [...existing].map(([key, value]) => ({ key, value })),
+    added,
+    updated,
+    unrecognized,
+  });
+};
+
 const envWriteH: CommandHandler = async (ctx, cmd, parsed) => {
   const vars = parsed.vars;
   if (!Array.isArray(vars)) {
@@ -2517,6 +2606,7 @@ export const handlers: Record<string, CommandHandler> = {
   save_preview_config: savePreviewConfigH,
   env_read: envReadH,
   env_write: envWriteH,
+  env_parse: envParseH,
   skills_configure: skillsConfigureH,
   take_control: takeControlH,
   handback: handbackH,

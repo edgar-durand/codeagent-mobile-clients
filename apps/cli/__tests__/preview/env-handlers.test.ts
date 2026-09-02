@@ -155,3 +155,117 @@ describe('preview_restart', () => {
     expect(sendResult).toHaveBeenCalledWith('r2', 'completed', { restarted: true });
   });
 });
+
+/**
+ * `env_parse` — pasting a whole `.env` instead of typing variables one by one.
+ *
+ * WHY IT EXISTS: configuring an app that already has a `.env` meant copying
+ * each variable from the laptop to the phone and typing it in, one at a time.
+ * Owner feedback, 2026-09-01.
+ *
+ * ⚠️ IT DOES NOT WRITE. `env_write` still owns the disk, so there is exactly
+ * one writer and the user reviews what was parsed before anything lands. That
+ * is the difference between "import" and "clobber my working .env".
+ *
+ * ⚠️ The parse itself stays here rather than on the phone because `dotenv.ts`
+ * is the only owner of `.env` syntax. A second parser would drift, and the
+ * drift would show up as a subtly wrong value in the file the dev server
+ * reads — a failure that looks like the app's bug.
+ */
+describe('env_parse', () => {
+  it('parses a pasted blob into vars without touching the file', async () => {
+    const sendResult = vi.fn();
+    await handlers.env_parse(makeCtx(sendResult), { id: 'p1' } as any, {
+      content: 'A=1\nB=2\n',
+    } as any);
+    expect(sendResult).toHaveBeenCalledWith('p1', 'completed', {
+      vars: [{ key: 'A', value: '1' }, { key: 'B', value: '2' }],
+      added: 2,
+      updated: 0,
+      unrecognized: 0,
+    });
+    // Nothing written — the disk is `env_write`'s job.
+    await expect(fs.readFile(path.join(dir, '.env'), 'utf8')).rejects.toThrow();
+  });
+
+  it('merges over the existing .env by default — a partial paste is the common case', async () => {
+    await fs.writeFile(path.join(dir, '.env'), 'KEEP=me\nA=old\n');
+    const sendResult = vi.fn();
+    await handlers.env_parse(makeCtx(sendResult), { id: 'p2' } as any, {
+      content: 'A=new\nNEW=1\n',
+    } as any);
+    const res = sendResult.mock.calls[0][2];
+    // The variable the paste never mentioned survives.
+    expect(res.vars).toEqual([
+      { key: 'KEEP', value: 'me' },
+      { key: 'A', value: 'new' },
+      { key: 'NEW', value: '1' },
+    ]);
+    expect(res.added).toBe(1);
+    expect(res.updated).toBe(1);
+  });
+
+  it('replace drops what the paste does not mention — opt-in only', async () => {
+    await fs.writeFile(path.join(dir, '.env'), 'GONE=1\n');
+    const sendResult = vi.fn();
+    await handlers.env_parse(makeCtx(sendResult), { id: 'p3' } as any, {
+      content: 'ONLY=1\n',
+      mode: 'replace',
+    } as any);
+    expect(sendResult.mock.calls[0][2].vars).toEqual([{ key: 'ONLY', value: '1' }]);
+  });
+
+  it('a bad line does NOT fail the import, and is NOT dropped in silence', async () => {
+    // Refusing 2 good variables because of one stray line is the exact tedium
+    // this feature removes. But `parseDotenv` drops an invalid key with a bare
+    // `continue`, and on a 40-variable paste nobody can eyeball what went
+    // missing — so the shortfall has to be reported.
+    const sendResult = vi.fn();
+    await handlers.env_parse(makeCtx(sendResult), { id: 'p4' } as any, {
+      content: 'GOOD=1\n1BAD=x\nALSO_GOOD=2\n',
+    } as any);
+    const res = sendResult.mock.calls[0][2];
+    expect(res.vars).toEqual([
+      { key: 'GOOD', value: '1' },
+      { key: 'ALSO_GOOD', value: '2' },
+    ]);
+    expect(res.unrecognized).toBe(1);
+  });
+
+  it('does not cry wolf: a clean paste reports nothing unrecognized', async () => {
+    const sendResult = vi.fn();
+    await handlers.env_parse(makeCtx(sendResult), { id: 'p4b' } as any, {
+      content: '# comment\n\nexport A="x y"\nB=has=equals\nA=dupe\n',
+    } as any);
+    // The duplicate is not a loss — last-wins is correct — so it must not be
+    // counted as an unrecognized line.
+    expect(sendResult.mock.calls[0][2].unrecognized).toBe(0);
+  });
+
+  it('last wins on a duplicated key, like a shell sourcing the file', async () => {
+    const sendResult = vi.fn();
+    await handlers.env_parse(makeCtx(sendResult), { id: 'p5' } as any, {
+      content: 'A=first\nA=second\n',
+    } as any);
+    expect(sendResult.mock.calls[0][2].vars).toEqual([{ key: 'A', value: 'second' }]);
+  });
+
+  it('preserves the quoting and `export ` cases the one parser handles', async () => {
+    // The whole reason this runs CLI-side: these are the cases a second,
+    // phone-side parser would get subtly wrong.
+    const sendResult = vi.fn();
+    await handlers.env_parse(makeCtx(sendResult), { id: 'p6' } as any, {
+      content: 'export A="has spaces"\nB=has=equals\n# comment\n',
+    } as any);
+    expect(sendResult.mock.calls[0][2].vars).toEqual([
+      { key: 'A', value: 'has spaces' },
+      { key: 'B', value: 'has=equals' },
+    ]);
+  });
+
+  it('rejects a missing blob rather than silently importing nothing', async () => {
+    const sendResult = vi.fn();
+    await handlers.env_parse(makeCtx(sendResult), { id: 'p7' } as any, {} as any);
+    expect(sendResult).toHaveBeenCalledWith('p7', 'failed', { error: 'Missing content' });
+  });
+});
