@@ -282,7 +282,32 @@ export interface AcpClientOptions {
    * so if unset the bracket is a no-op. Mirrors the baton's load-replay guard. */
   beginLoadReplay?: () => void;
   endLoadReplay?: () => void;
+  /**
+   * Override the MCP reprovision debounce window (ms). Test seam only —
+   * production leaves it unset and gets {@link MCP_REPROVISION_DEBOUNCE_MS}.
+   * Faking timers instead would freeze the adapter handshake too.
+   */
+  mcpReprovisionDebounceMs?: number;
 }
+
+/**
+ * How long to wait after the LAST integration change before respawning.
+ *
+ * A respawn is expensive and its cost is visible: measured on a real box, 29 s
+ * to bind 14 MCP servers — ~13 s for `session/new` (each integration is a node
+ * process with its own MCP handshake, ~0.9 s each) plus ~13 s for
+ * `session/load` to replay the conversation. There is no cheaper path: MCP
+ * servers bind at `session/new`, so a live session cannot gain one without a
+ * full respawn.
+ *
+ * Without this window, EVERY change pays that price. A user adding connectors
+ * one at a time — the natural way to do it — triggered one respawn each, so ten
+ * integrations meant ten respawns back to back (rafaelph90.br@gmail.com,
+ * 2026-09-02). Ten seconds is longer than the gap between two deliberate taps
+ * and far shorter than the respawn itself, so a burst of changes collapses into
+ * the single respawn it should always have been.
+ */
+export const MCP_REPROVISION_DEBOUNCE_MS = 10_000;
 
 export class AcpClient {
   private child: ChildProcess | null = null;
@@ -352,8 +377,9 @@ export class AcpClient {
   /** True once a start has fully succeeded (handshake + session). Distinguishes
    *  "never started" (a programming error) from "the adapter died" (recoverable). */
   private startedOnce = false;
-  private mcpReprovisionQueued = false;
   private mcpReprovisionPending: McpServer[] | null = null;
+  private mcpDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+  private mcpDebounceWaiters: Array<(v: 'reloaded' | 'deferred') => void> = [];
   /** Last few adapter stderr lines — so a startup failure surfaces the REAL
    *  cause (e.g. gemini's `IneligibleTierError`) instead of a bare timeout. */
   private recentStderr: string[] = [];
@@ -1146,21 +1172,45 @@ export class AcpClient {
     //    `promptChain`; joining that chain means a respawn waits for the
     //    in-flight turn instead of cancelling it — and serializes against
     //    other respawns for free, since they share the one queue.
+    // DEBOUNCE first (see MCP_REPROVISION_DEBOUNCE_MS): hold the change for a
+    // moment so a run of them becomes one respawn instead of one each. Then run
+    // on the PROMPT CHAIN, which is what keeps the respawn from cancelling a
+    // turn and from racing another respawn.
+    //
+    // Returning a promise that settles when the respawn does keeps the caller's
+    // 'reloaded' | 'deferred' contract intact. Nothing user-facing waits on it:
+    // the backend relays `integrations_sync` fire-and-forget (`pushCommand`),
+    // and the app already has its answer from the REST call.
     this.mcpReprovisionPending = servers;
-    if (this.mcpReprovisionQueued) return 'deferred';
-    this.mcpReprovisionQueued = true;
+    if (this.mcpDebounceTimer) clearTimeout(this.mcpDebounceTimer);
 
-    const run = this.promptChain.then(() => {
-      this.mcpReprovisionQueued = false;
+    const settled = new Promise<'reloaded' | 'deferred'>((resolve) => {
+      this.mcpDebounceWaiters.push(resolve);
+    });
+
+    this.mcpDebounceTimer = setTimeout(() => {
+      this.mcpDebounceTimer = null;
       const latest = this.mcpReprovisionPending ?? servers;
       this.mcpReprovisionPending = null;
-      return this.runReprovisionMcp(latest);
-    });
-    this.promptChain = run.then(
-      () => undefined,
-      () => undefined,
-    );
-    return run;
+      const waiters = this.mcpDebounceWaiters;
+      this.mcpDebounceWaiters = [];
+
+      const run = this.promptChain.then(() => this.runReprovisionMcp(latest));
+      this.promptChain = run.then(
+        () => undefined,
+        () => undefined,
+      );
+      run.then(
+        (result) => waiters.forEach((w) => w(result)),
+        // `runReprovisionMcp` already swallows its own failures into
+        // 'deferred'; this is the belt for anything the chain itself throws.
+        () => waiters.forEach((w) => w('deferred')),
+      );
+    }, this.opts.mcpReprovisionDebounceMs ?? MCP_REPROVISION_DEBOUNCE_MS);
+    // Never hold the process open for a pending respawn.
+    this.mcpDebounceTimer.unref?.();
+
+    return settled;
   }
 
   /** The actual respawn. Only ever called from {@link reprovisionMcp}'s queued
@@ -1383,6 +1433,16 @@ export class AcpClient {
    */
   async stop(): Promise<void> {
     this.stopping = true;
+    // A respawn waiting out its debounce window must not fire against a client
+    // that is being torn down — and its callers must not be left hanging.
+    if (this.mcpDebounceTimer) {
+      clearTimeout(this.mcpDebounceTimer);
+      this.mcpDebounceTimer = null;
+      this.mcpReprovisionPending = null;
+      const waiters = this.mcpDebounceWaiters;
+      this.mcpDebounceWaiters = [];
+      waiters.forEach((w) => w('deferred'));
+    }
     const child = this.child;
     if (!child) return;
     this.child = null;
