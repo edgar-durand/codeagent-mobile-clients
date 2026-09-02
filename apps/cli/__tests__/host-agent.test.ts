@@ -4069,6 +4069,164 @@ describe('HostAgentSupervisor — fleet control plane', () => {
     expect(calls).toHaveLength(0);
   });
 
+
+  /**
+   * `fleet_migrate_box_image` — re-point a SLEEPING box at `:latest` without
+   * waking it, so the version it was pinned to becomes reclaimable.
+   *
+   * Boxes are created with `--pull=always` on purpose, so each stays pinned to
+   * the image it was born on, and Docker refuses to delete an image any
+   * container references INCLUDING stopped ones — which is exactly what stops
+   * the prune from destroying a sleeping user's box. Net: ~7.7 GB stranded per
+   * lagging box (fleet-1, 2026-09-02: 9 boxes, 4 versions, ~31 GB).
+   *
+   * ⚠️ These tests are mostly about the ways this could DESTROY something,
+   * because it operates on real users' boxes.
+   */
+  function makeMigrateDocker(opts: {
+    running: string;
+    containerImageId: string;
+    latestImageId: string;
+    rmCode?: number;
+  }) {
+    const calls: string[][] = [];
+    const docker: DockerRunner = {
+      run: vi.fn(async (args: string[]) => {
+        calls.push(args);
+        if (args[0] === 'inspect' && args.includes('{{.State.Running}}')) {
+          return { code: 0, stdout: opts.running, stderr: '' };
+        }
+        if (args[0] === 'inspect' && args.includes('{{.Image}}')) {
+          return { code: 0, stdout: opts.containerImageId, stderr: '' };
+        }
+        if (args[0] === 'inspect' && args.includes('{{.Id}}')) {
+          return { code: 0, stdout: opts.latestImageId, stderr: '' };
+        }
+        if (args[0] === 'rm') {
+          return { code: opts.rmCode ?? 0, stdout: '', stderr: opts.rmCode ? 'device busy' : '' };
+        }
+        return { code: 0, stdout: 'created', stderr: '' };
+      }),
+    };
+    return { docker, calls };
+  }
+
+  const migratePayload = {
+    boxId: 'box_1',
+    containerName: 'codeam-box-cmqg8pcy100e8u80jfpss4a6s',
+    apiOrigin: 'https://api.codeagent-mobile.com',
+    limits: { memoryMb: 1536, cpus: 1, pidsLimit: 512, diskGb: 5 },
+  };
+
+  it('migrates a STOPPED box with a stale image: rm (volume kept) then CREATE', async () => {
+    const { docker, calls } = makeMigrateDocker({
+      running: 'false',
+      containerImageId: 'sha256:old',
+      latestImageId: 'sha256:new',
+    });
+    const sup = new HostAgentSupervisor(IDENTITY, { docker });
+    await sup.handleCommand({
+      id: 'c1',
+      type: 'fleet_migrate_box_image',
+      payload: migratePayload,
+    } as never);
+
+    const rm = calls.find((c) => c[0] === 'rm');
+    expect(rm).toBeDefined();
+    // ⚠️ NO `-v`: the named volume holds the user's workspace and sealed
+    // identity, and losing it is the unrecoverable failure of this feature.
+    expect(rm).not.toContain('-v');
+
+    const create = calls.find((c) => c[0] === 'create');
+    expect(create).toBeDefined();
+    // `create`, never `run` — `run` would START the container, waking a box the
+    // user left asleep (and 9 of them at once on a 16 GB host).
+    expect(calls.some((c) => c[0] === 'run')).toBe(false);
+    // No inline pull per box: the staleness probe already pulled once.
+    expect(create).not.toContain('--pull=always');
+  });
+
+  it('REFUSES a RUNNING box even though the backend said SLEEPING', async () => {
+    // The DB's view lags the host by a sweep, so a box that woke seconds ago is
+    // still SLEEPING in its row. Re-creating it would kill a live agent
+    // mid-turn, so the daemon — not the payload — is the authority.
+    const { docker, calls } = makeMigrateDocker({
+      running: 'true',
+      containerImageId: 'sha256:old',
+      latestImageId: 'sha256:new',
+    });
+    const sup = new HostAgentSupervisor(IDENTITY, { docker });
+    await sup.handleCommand({
+      id: 'c2',
+      type: 'fleet_migrate_box_image',
+      payload: migratePayload,
+    } as never);
+
+    expect(calls.some((c) => c[0] === 'rm')).toBe(false);
+    expect(calls.some((c) => c[0] === 'create')).toBe(false);
+  });
+
+  it('skips a box already on :latest — idempotent, no churn', async () => {
+    const { docker, calls } = makeMigrateDocker({
+      running: 'false',
+      containerImageId: 'sha256:same',
+      latestImageId: 'sha256:same',
+    });
+    const sup = new HostAgentSupervisor(IDENTITY, { docker });
+    await sup.handleCommand({
+      id: 'c3',
+      type: 'fleet_migrate_box_image',
+      payload: migratePayload,
+    } as never);
+
+    expect(calls.some((c) => c[0] === 'rm')).toBe(false);
+    expect(calls.some((c) => c[0] === 'create')).toBe(false);
+  });
+
+  it('a failed rm does NOT create a replacement — never leave the box in neither state', async () => {
+    // A create with the old container still present fails on the name clash,
+    // and the box would end up with no container at all.
+    const { docker, calls } = makeMigrateDocker({
+      running: 'false',
+      containerImageId: 'sha256:old',
+      latestImageId: 'sha256:new',
+      rmCode: 1,
+    });
+    const sup = new HostAgentSupervisor(IDENTITY, { docker });
+    await sup.handleCommand({
+      id: 'c4',
+      type: 'fleet_migrate_box_image',
+      payload: migratePayload,
+    } as never);
+
+    expect(calls.some((c) => c[0] === 'create')).toBe(false);
+  });
+
+  it('rejects a payload carrying an enrollToken — docker never invoked', async () => {
+    // A 15-minute credential baked into a container that may not start for days
+    // is a terminal 4xx at boot: a box that never comes back. If a future
+    // backend starts sending one, this must fail loudly rather than produce it.
+    const { docker, calls } = makeDockerMock();
+    const sup = new HostAgentSupervisor(IDENTITY, { docker });
+    await sup.handleCommand({
+      id: 'c5',
+      type: 'fleet_migrate_box_image',
+      payload: { ...migratePayload, enrollToken: 'should-not-be-here' },
+    } as never);
+    expect(calls).toHaveLength(0);
+  });
+
+  it('rejects a malformed payload (no limits) — docker never invoked', async () => {
+    const { docker, calls } = makeDockerMock();
+    const sup = new HostAgentSupervisor(IDENTITY, { docker });
+    await sup.handleCommand({
+      id: 'c6',
+      type: 'fleet_migrate_box_image',
+      payload: { boxId: 'b', containerName: migratePayload.containerName, apiOrigin: 'https://x' },
+    } as never);
+    expect(calls).toHaveLength(0);
+  });
+
   it('fleet_start_box issues `docker start <containerName>` (no recreate creds → fast path)', async () => {
     const { docker, calls } = makeDockerMock();
     const sup = new HostAgentSupervisor(IDENTITY, { docker });
