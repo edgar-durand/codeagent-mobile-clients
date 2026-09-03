@@ -1189,7 +1189,50 @@ export class AcpClient {
       if (loadTimer) clearTimeout(loadTimer);
       this.opts.endLoadReplay?.();
     }
+    const abandoned = this.sessionId;
     this.sessionId = sessionId;
+    // ⚠️ CLOSE THE SESSION WE JUST WALKED AWAY FROM. `session/load` does not
+    // switch the existing `claude` into the loaded conversation — the adapter
+    // (`claude-agent-acp`) implements it by launching a SECOND `claude
+    // --resume <id>`, and it never tears the first one down (it is a
+    // multi-session protocol: sessions end only on `session/close`). So after
+    // the `session/new` that `start()` always performs, this load left TWO
+    // live `claude` processes under one adapter, each with its OWN copy of
+    // every MCP server.
+    //
+    // Live on a user's box (rafaelph90.br@gmail.com, 8e1405644222,
+    // 2026-09-03 16:45, a CLEAN start on a freshly recreated container):
+    //   16:45:36 newSession → sending  … ← ok sessionId=19c03d33   (claude #1)
+    //   16:45:51 loadSession → 98fb2cfe … ← ok                     (claude #2)
+    // `ps` then showed both `claude`s with the same parent (the adapter) and
+    // 14 `codeam mcp-run` shims EACH — 28 MCP servers on a 512-pid box. The
+    // second wave lost the fork race (`fork: Resource temporarily
+    // unavailable`) and clickup/trello/figma/supabase came up with NO server
+    // at all: `Server "clickup" is not connected`, from the first second, on
+    // every start. Every earlier fix (startup budget, image pre-warm, the
+    // stop() tree-reap) was real and none of them touched this, because this
+    // is not a respawn and nothing is slow — it is a second agent we asked
+    // for and never dismissed.
+    //
+    // Best-effort: the load already succeeded, so a failed close must not
+    // undo it. An adapter without `closeSession` just keeps the husk, as
+    // before.
+    if (abandoned && abandoned !== sessionId) {
+      try {
+        await this.connection.closeSession({ sessionId: abandoned });
+        log.info(
+          'acpClient',
+          `loadSession — closed the abandoned fresh session ${abandoned.slice(0, 8)}`,
+        );
+      } catch (err) {
+        log.warn(
+          'acpClient',
+          `loadSession — could not close abandoned session ${abandoned.slice(0, 8)}: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+      }
+    }
     // Re-capture the native model config from the resumed session — the loaded
     // conversation may sit on a different model than the one at spawn, and
     // `loadSession` returns the same `configOptions` shape as `newSession`.
