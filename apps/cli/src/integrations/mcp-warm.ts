@@ -37,6 +37,14 @@ export interface WarmTarget {
   /** The launcher the shim will use (`npx` / `uvx`). */
   launcher: string;
   /**
+   * The launcher flags that PRECEDE the package in the delivery (`-y`,
+   * `--ignore-scripts`, …). ⚠️ Carried through so the warm invocation matches
+   * the runtime one: postman only installs under `--ignore-scripts` (its
+   * `preinstall` is an `only-allow pnpm` guard), and warming it without the
+   * flag fails while the runtime would have succeeded — or worse, the reverse.
+   */
+  flags: string[];
+  /**
    * The exact spec the runtime resolves. ⚠️ It must match the runtime's spec
    * CHARACTER FOR CHARACTER: npx keys its cache by the spec string, so
    * `pkg@1.2.3` and `pkg` are different entries and warming one does nothing
@@ -61,6 +69,15 @@ export function specOf(delivery: IntegrationMcpDelivery): string | null {
   return spec ?? null;
 }
 
+/** The flags the delivery passes to the LAUNCHER — everything before the
+ *  package spec. Flags that follow it belong to the server itself (figma's
+ *  `--stdio`), and passing those to a warm run would be wrong. */
+export function launcherFlagsOf(delivery: IntegrationMcpDelivery): string[] {
+  const args = delivery.args ?? [];
+  const specIndex = args.findIndex((a) => !a.startsWith('-'));
+  return specIndex === -1 ? [...args] : args.slice(0, specIndex);
+}
+
 /** Every package the runtime could ask a launcher to fetch, de-duplicated by
  *  spec — jira and confluence share one `mcp-atlassian` pin, and warming it
  *  twice would just pay the same download twice. */
@@ -74,7 +91,12 @@ export function warmTargets(): WarmTarget[] {
     const spec = specOf(delivery);
     if (!spec) continue;
     if (!bySpec.has(spec)) {
-      bySpec.set(spec, { id: integration.id, launcher: delivery.command, spec });
+      bySpec.set(spec, {
+        id: integration.id,
+        launcher: delivery.command,
+        flags: launcherFlagsOf(delivery),
+        spec,
+      });
     }
   }
   return [...bySpec.values()];
@@ -91,7 +113,10 @@ export function warmTargets(): WarmTarget[] {
  */
 function warmCommand(target: WarmTarget): { command: string; args: string[] } | null {
   if (target.launcher === 'npx') {
-    return { command: 'npx', args: ['-y', '--package', target.spec, '-c', 'true'] };
+    // The delivery's own launcher flags first (minus `-y`, which we always
+    // pass), then `--package … -c true`.
+    const extra = target.flags.filter((f) => f !== '-y');
+    return { command: 'npx', args: ['-y', ...extra, '--package', target.spec, '-c', 'true'] };
   }
   if (target.launcher === 'uvx') {
     // `uvx pkg` runs the tool; `uv tool install` only puts it in the cache.
@@ -141,10 +166,17 @@ export async function mcpWarm(argv: string[] = []): Promise<void> {
       // eslint-disable-next-line no-console
       console.log(`  OK   ${target.spec} (${secs}s)`);
     } else {
+      // ⚠️ Skip `npm warn` / `npm notice` lines. Taking the last stderr line
+      // verbatim reported "npm warn deprecated @faker-js/faker@5.5.3" as the
+      // reason postman failed, which HID the real cause (an `only-allow pnpm`
+      // preinstall guard) behind a harmless warning and cost a detour to find.
+      const noise = /^npm (warn|notice)\b/;
+      const lines = (run.stderr ?? '')
+        .split('\n')
+        .map((l) => l.trim())
+        .filter((l) => l.length > 0 && !noise.test(l));
       const reason =
-        run.error?.message ??
-        (run.stderr ?? '').trim().split('\n').slice(-1)[0] ??
-        `exit ${String(run.status)}`;
+        run.error?.message ?? lines[lines.length - 1] ?? `exit ${String(run.status)} (no stderr)`;
       result.failed.push({ spec: target.spec, reason });
       // eslint-disable-next-line no-console
       console.log(`  MISS ${target.spec} (${secs}s) — fetched at runtime instead: ${reason}`);

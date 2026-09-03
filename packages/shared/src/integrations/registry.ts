@@ -865,8 +865,27 @@ export const INTEGRATION_REGISTRY: Record<IntegrationId, IntegrationDefinition> 
       mcp: {
         // Postman's OFFICIAL stdio MCP server (Node). BYO key via POSTMAN_API_KEY
         // (env only). Version PINNED; bump only after re-verifying headless.
+        //
+        // ⚠️ `--ignore-scripts` IS LOAD-BEARING — without it this integration
+        // does not work at all, on any box, and never did. The package declares
+        // a `preinstall` guard of `npx only-allow pnpm`, so npm REFUSES to
+        // install it:
+        //   info run @postman/postman-mcp-server@2.11.2 preinstall npx only-allow pnpm
+        //   info run @postman/postman-mcp-server@2.11.2 preinstall { code: 1 }
+        // and `npx -y @postman/postman-mcp-server@2.11.2` exits 1 before the
+        // server is ever reached — which the agent reports as
+        // `Server "postman" is not connected`, indistinguishable from a slow
+        // start (found while pre-warming the box image, 2026-09-03; the user's
+        // report was "Postman: idem", alongside clickup/trello, whose cause was
+        // entirely different).
+        //
+        // Skipping scripts is safe here: the guard is the only preinstall step
+        // and the published tarball already ships the built
+        // `dist/src/index.js` its `bin` points at. Verified on node:22-slim:
+        // `npx -y <pkg>` → exit 1; `npx -y --ignore-scripts <pkg>` with a key in
+        // the env → starts; and warmed once, the bin resolves offline.
         command: 'npx',
-        args: ['-y', '@postman/postman-mcp-server@2.11.2'],
+        args: ['-y', '--ignore-scripts', '@postman/postman-mcp-server@2.11.2'],
         envMapping: {
           POSTMAN_API_KEY: 'accessToken',
         },
