@@ -42,6 +42,7 @@ import { startClaudeCredentialSync } from '../agents/claude/credential-sync';
 import { ensureBeadsWorkflowHint } from '../beads/workflow-hint';
 import { ensureAgentStandard } from '../agents/agent-standard';
 import { buildMcpServersForStart } from '../integrations/provision';
+import { refreshIntegrationsManifest } from '../integrations/refresh-manifest';
 import { mergeWithLocalMcpServers } from '../services/local-mcp-servers';
 import { provisionSkillsForStart } from '../skills/provision';
 import type { StartedBeads } from '../beads';
@@ -286,6 +287,19 @@ export async function start(
   // servers (integration wins on a name collision) so it always reaches the
   // agent even though `session/new` passes `mcpServers` explicitly and would
   // otherwise override whatever the agent's own native MCP config declares.
+  // ⚠️ Re-resolve the manifest from the backend FIRST — `buildMcpServersForStart`
+  // reads the file, and that file may be hours old. Without this a registry
+  // fix (a package re-pin, a new envMapping) never reached an existing box:
+  // the on-disk manifest wins over the bundled registry by design, and nothing
+  // rewrote it until the user next linked/unlinked an integration (2026-09-03,
+  // the ClickUp paywall switch). Best-effort: any failure keeps the file as-is.
+  if (session.pluginAuthToken) {
+    await refreshIntegrationsManifest({
+      sessionId: session.id,
+      pluginId,
+      pluginAuthToken: session.pluginAuthToken,
+    });
+  }
   const mcpServers = mergeWithLocalMcpServers(
     buildMcpServersForStart({
       sessionId: session.id,
