@@ -4,6 +4,16 @@ All notable changes to the CodeAgent-Mobile JetBrains plugin are documented here
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.74.0] — 2026-09-03
+
+### Added
+
+- **cli:** Tool router (4 schemas instead of hundreds) + house agent's real context window (#700)
+
+### Tests
+
+- **cli:** Two of today's tests were not Windows-portable — main went red (#699)
+
 ## [2.73.10] — 2026-09-03
 
 ### Fixed
