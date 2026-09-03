@@ -27,6 +27,14 @@ export interface RefreshManifestCtx {
   sessionId: string;
   pluginId: string;
   pluginAuthToken: string;
+  /**
+   * Public id of the agent about to launch — `house-codeagent-cloud` for the
+   * house agent, the runtime's own id otherwise. The backend does not know
+   * which agent a paired session runs (that is CLI state), and it applies
+   * per-agent policy to the manifest: today, `toolRouter` for the house agent
+   * only. Omit and the backend applies no agent policy.
+   */
+  agent?: string;
 }
 
 export type RefreshManifestResult =
@@ -58,7 +66,11 @@ export async function refreshIntegrationsManifest(
     const resp = await fetchImpl(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-Plugin-Auth-Token': ctx.pluginAuthToken },
-      body: JSON.stringify({ sessionId: ctx.sessionId, pluginId: ctx.pluginId }),
+      body: JSON.stringify({
+        sessionId: ctx.sessionId,
+        pluginId: ctx.pluginId,
+        ...(ctx.agent ? { agent: ctx.agent } : {}),
+      }),
       signal: ac.signal,
     });
     if (!resp.ok) {

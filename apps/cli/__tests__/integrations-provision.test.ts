@@ -140,4 +140,55 @@ describe('buildMcpServersForStart', () => {
     const envBlob = JSON.stringify(server.env);
     expect(envBlob).toContain('super-secret-plugin-token');
   });
+
+  // ── Tool router opt-in ─────────────────────────────────────────────────────
+  // The router replaces HOW tools reach the agent, so the contract that matters
+  // most is the one where nothing changes: no flag ⇒ byte-identical output.
+  const TWO_MANIFEST: IntegrationsManifest = {
+    integrations: [
+      ...JIRA_MANIFEST.integrations,
+      {
+        id: 'clickup',
+        delivery: {
+          mcp: { command: 'npx', args: ['-y', 'clickup-mcp-pro@1.0.1'], envMapping: { CLICKUP_API_TOKEN: 'accessToken' } },
+        },
+      },
+    ],
+  };
+  const CTX = { sessionId: 'sess-1', pluginId: 'plugin-1', pluginAuthToken: 'plugin-token-abc', pollSecret: 'poll-secret-xyz' };
+
+  it('WITHOUT toolRouter the output is exactly what it was — one shim per integration (no-regression contract)', () => {
+    writeManifest(TWO_MANIFEST);
+    const servers = buildMcpServersForStart(CTX) as McpServerStdio[];
+    expect(servers.map((s) => s.name)).toEqual(['jira', 'clickup']);
+    for (const s of servers) expect(s.args[1]).toBe('mcp-run');
+    // `toolRouter: false` must behave like absent, not like a third mode.
+    writeManifest({ ...TWO_MANIFEST, toolRouter: false });
+    expect(buildMcpServersForStart(CTX)).toEqual(servers);
+  });
+
+  it('WITH toolRouter the agent gets ONE server — the router — carrying the shim env minus the per-integration id', () => {
+    writeManifest({ ...TWO_MANIFEST, toolRouter: true });
+    const servers = buildMcpServersForStart(CTX) as McpServerStdio[];
+    expect(servers).toHaveLength(1);
+    const r = servers[0];
+    expect(r.name).toBe('codeam');
+    expect(r.command).toBe(process.execPath);
+    expect(r.args).toEqual([process.argv[1], 'mcp-router']);
+    const env = Object.fromEntries(r.env.map((e) => [e.name, e.value]));
+    // Everything a shim needs to broker its credential travels through the router…
+    expect(env.CODEAM_MCP_SESSION_ID).toBe('sess-1');
+    expect(env.CODEAM_MCP_PLUGIN_ID).toBe('plugin-1');
+    expect(env.CODEAM_MCP_PLUGIN_TOKEN).toBe('plugin-token-abc');
+    expect(env.CODEAM_MCP_POLL_SECRET).toBe('poll-secret-xyz');
+    // …except the integration id, which each child gets from its own argv.
+    expect(env.CODEAM_MCP_INTEGRATION_ID).toBeUndefined();
+    // And the token is still env-only, never argv.
+    expect(JSON.stringify(r.args)).not.toContain('plugin-token-abc');
+  });
+
+  it('WITH toolRouter but nothing to route, returns [] rather than an empty router', () => {
+    writeManifest({ integrations: [], toolRouter: true });
+    expect(buildMcpServersForStart(CTX)).toEqual([]);
+  });
 });

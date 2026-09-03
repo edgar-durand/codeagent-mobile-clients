@@ -289,6 +289,19 @@ jobs:
           RUN_MCP_INT: '1'
         run: npx vitest run integration/mcp-clickup-tools --reporter=verbose
 
+      # The tool ROUTER, end to end over real processes: the real `codeam
+      # mcp-router` fronting real `mcp-run` shims, which broker a token from a
+      # real (local) http server and spawn real MCP servers (the SDK's). Proves
+      # the agent sees 4 tools, calls reach the right child, and a broken child
+      # degrades instead of failing. Needs the built CLI (dist/), which the
+      # earlier build step produced.
+      - name: CLI tool router end-to-end (real router, real shims, real MCP servers)
+        if: matrix.os == 'ubuntu-latest' && matrix.node == '20'
+        working-directory: apps/cli
+        env:
+          RUN_MCP_INT: '1'
+        run: npx vitest run integration/mcp-router --reporter=verbose
+
       - name: CLI fleet box Docker integration test (create/inspect/lifecycle)
         if: matrix.os == 'ubuntu-latest' && matrix.node == '20'
         working-directory: apps/cli

@@ -107,6 +107,15 @@ export function readHouseProxyChildEnv(): Record<string, string> {
 }
 
 /**
+ * MiniMax-M3's context window as we declare it to claude: 1M advertised, 512K
+ * guaranteed minimum — we use the guaranteed figure. Both `MAX_CONTEXT_TOKENS`
+ * (the window claude ASSUMES for an unknown model) and `AUTO_COMPACT_WINDOW`
+ * (the compaction threshold) are set from this ONE constant so they cannot
+ * drift apart. See `buildHouseProxyChildEnv`.
+ */
+export const HOUSE_MODEL_CONTEXT_TOKENS = '512000';
+
+/**
  * The house/gateway agent env — the ONE builder shared by the deploy path
  * (host-agent childEnv), the resume path ({@link readHouseProxyChildEnv}),
  * and the in-session `switch_agent` house target (adapter spawn extraEnv).
@@ -117,7 +126,30 @@ export function buildHouseProxyChildEnv(cfg: HouseProxyConfig): Record<string, s
   const env: Record<string, string> = {
     ANTHROPIC_BASE_URL: cfg.baseUrl,
     ANTHROPIC_AUTH_TOKEN: cfg.token,
-    CLAUDE_CODE_AUTO_COMPACT_WINDOW: '512000',
+    // ⚠️ MAX_CONTEXT_TOKENS, not (only) AUTO_COMPACT_WINDOW — and this is
+    // HOUSE-AGENT ONLY: it lives in this builder precisely so a user's own
+    // Claude Code (a real Anthropic model claude knows) is never touched.
+    //
+    // claude does not know `MiniMax-M3`, so it falls back to its
+    // unknown-model default (200k). `CLAUDE_CODE_AUTO_COMPACT_WINDOW` is then
+    // applied as `Math.min(assumedWindow, env)` — it can only SHRINK the
+    // window, never grow it — so the 512000 we used to set here was inert:
+    // claude kept believing 200k. Meanwhile a session with a dozen linked
+    // integrations carries ~175k tokens of MCP tool schemas on EVERY turn
+    // (measured: 475 tools ≈ 698 KB on a real box), so the context started
+    // ~88% full and a 28-character prompt triggered a compaction, then the
+    // next small tool result triggered another: "Autocompact is thrashing:
+    // the context refilled to the limit within 3 turns", 13 compactions in
+    // one session (rafaelph90.br@gmail.com, 2026-09-03).
+    //
+    // claude's own unknown-model notice names the fix: "set
+    // CLAUDE_CODE_MAX_CONTEXT_TOKENS to its real window" — that variable is
+    // what `wL()` returns for an unrecognised model. MiniMax-M3 is a 1M-context
+    // model with a guaranteed minimum of 512K, so 512000 here is the
+    // conservative truth, not a wish. AUTO_COMPACT_WINDOW stays as the
+    // compaction threshold beneath it.
+    CLAUDE_CODE_MAX_CONTEXT_TOKENS: HOUSE_MODEL_CONTEXT_TOKENS,
+    CLAUDE_CODE_AUTO_COMPACT_WINDOW: HOUSE_MODEL_CONTEXT_TOKENS,
     API_TIMEOUT_MS: '3000000',
   };
   if (cfg.openRouter === true) {
@@ -153,6 +185,7 @@ export const HOUSE_PROXY_ENV_KEYS = [
   'ANTHROPIC_DEFAULT_OPUS_MODEL',
   'ANTHROPIC_DEFAULT_HAIKU_MODEL',
   'CLAUDE_CODE_AUTO_COMPACT_WINDOW',
+  'CLAUDE_CODE_MAX_CONTEXT_TOKENS',
   'API_TIMEOUT_MS',
   'CLAUDE_CONFIG_DIR',
 ] as const;

@@ -78,11 +78,20 @@ vi.mock('../src/commands/host/git-tooling', async (importActual) => {
 
 // House-proxy config: default `readHouseProxyChildEnv` → {} so existing tests are
 // unchanged; the resume-env test below opts in via mockReturnValueOnce.
-vi.mock('../src/commands/host/house-proxy-config', () => ({
-  readHouseProxyChildEnv: vi.fn(() => ({})),
-  persistHouseProxyConfig: vi.fn(),
-  clearHouseProxyConfig: vi.fn(),
-}));
+vi.mock('../src/commands/host/house-proxy-config', async (importActual) => {
+  const actual = await importActual<typeof import('../src/commands/host/house-proxy-config')>();
+  return {
+    // Keep the PURE builder real: `buildHouseProxyChildEnv` is what the deploy
+    // path now uses to shape the house env (one builder for deploy, resume and
+    // switch), and the house-deploy test below asserts that very shape. A stub
+    // here made the deploy throw `undefined is not a function` inside its own
+    // try/catch and the test saw "no spawn" instead of the real cause.
+    ...actual,
+    readHouseProxyChildEnv: vi.fn(() => ({})),
+    persistHouseProxyConfig: vi.fn(),
+    clearHouseProxyConfig: vi.fn(),
+  };
+});
 
 // getActiveSession reads the real ~/.codeam config — default it to "no session"
 // so start()'s auto-resume is a deterministic no-op unless a test opts in. Without
@@ -1236,6 +1245,11 @@ describe('HostAgentSupervisor — command routing', () => {
     expect(calls[0].env.ANTHROPIC_AUTH_TOKEN).toBe('proxy-token-xyz');
     expect(calls[0].env.ANTHROPIC_MODEL).toBe('MiniMax-M3');
     expect(calls[0].env.CODEAM_AUTO_TOKEN).toBe('auto-xyz');
+    // The deploy env comes from the ONE house builder now (it used to be a
+    // hand-copied duplicate that drifted): the real-window knob that stops
+    // autocompact thrashing must be here, not only on resume/switch.
+    expect(calls[0].env.CLAUDE_CODE_MAX_CONTEXT_TOKENS).toBe('512000');
+    expect(calls[0].env.CLAUDE_CODE_AUTO_COMPACT_WINDOW).toBe('512000');
     expect(calls[0].args).toEqual(['--agent=claude']);
     expect(sup.childCount()).toBe(1);
 

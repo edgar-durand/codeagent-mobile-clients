@@ -128,6 +128,7 @@ import {
   persistHouseProxyConfig,
   clearHouseProxyConfig,
   readHouseProxyChildEnv,
+  buildHouseProxyChildEnv,
 } from './host/house-proxy-config';
 import {
   runSelfUpdate,
@@ -2079,23 +2080,15 @@ export class HostAgentSupervisor {
       let extraArgs: string[] = [];
       if (payload.houseProxy) {
         const { baseUrl, token, agentKind, openRouter } = payload.houseProxy;
+        // ⚠️ ONE builder for the house env — this used to be a hand-copied
+        // duplicate of `buildHouseProxyChildEnv`, and the two drifted: the
+        // deploy path here kept setting only `CLAUDE_CODE_AUTO_COMPACT_WINDOW`
+        // (which can only SHRINK claude's assumed window) while the fix that
+        // stops autocompact thrashing on MiniMax lives in
+        // `CLAUDE_CODE_MAX_CONTEXT_TOKENS`. Deploy, resume and in-session switch
+        // now all get the exact same env. See house-proxy-config.ts.
         childEnv = {
-          ANTHROPIC_BASE_URL: baseUrl,
-          ANTHROPIC_AUTH_TOKEN: token,
-          // House pins MiniMax; OpenRouter routes the real Claude model names the
-          // agent sends, so it sets NO model overrides — but it DOES need
-          // ANTHROPIC_API_KEY empty so a stale key can't override the Bearer auth
-          // token (OpenRouter's Claude Code setup requires ANTHROPIC_API_KEY="").
-          ...(openRouter
-            ? { ANTHROPIC_API_KEY: '' }
-            : {
-                ANTHROPIC_MODEL: 'MiniMax-M3',
-                ANTHROPIC_DEFAULT_SONNET_MODEL: 'MiniMax-M3',
-                ANTHROPIC_DEFAULT_OPUS_MODEL: 'MiniMax-M3',
-                ANTHROPIC_DEFAULT_HAIKU_MODEL: 'MiniMax-M3',
-              }),
-          CLAUDE_CODE_AUTO_COMPACT_WINDOW: '512000',
-          API_TIMEOUT_MS: '3000000',
+          ...buildHouseProxyChildEnv({ baseUrl, token, openRouter: openRouter === true }),
           CODEAM_AUTO_TOKEN: payload.autoPairToken,
         };
         // Isolate the house agent's Claude config from the box's PERSONAL one.

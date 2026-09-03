@@ -205,6 +205,18 @@ export interface IntegrationsManifestEntry {
 }
 export interface IntegrationsManifest {
   integrations: IntegrationsManifestEntry[];
+  /**
+   * When true, the CLI fronts every integration MCP server with ONE router
+   * server (`codeam mcp-router`) so the agent carries 4 tool schemas instead of
+   * one per tool — the fix for autocompact thrashing on the house agent, where
+   * a dozen integrations meant ~175k tokens of schemas on every turn and
+   * Claude's own deferred loading is unavailable (non-Anthropic upstream).
+   *
+   * OPTIONAL and additive: absent/false = every server injected directly,
+   * exactly as before. The backend decides per session, so rollout can start
+   * with the house agent and be reverted without a client release.
+   */
+  toolRouter?: boolean;
 }
 
 /** `GET /api/integrations` row: registry definition merged with the user's link state. */

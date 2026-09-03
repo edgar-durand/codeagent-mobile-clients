@@ -14,6 +14,7 @@ import { doctor } from './commands/doctor';
 import { completion } from './commands/completion';
 import { mcpRun } from './integrations/mcp-run';
 import { mcpWarm } from './integrations/mcp-warm';
+import { mcpRouter } from './integrations/mcp-router';
 import { version } from './commands/version';
 import { help } from './commands/help';
 import { tryShowSubcommandHelp } from './commands/subcommand-help';
@@ -167,6 +168,14 @@ async function main(): Promise<void> {
   // by provisioning), not typed by a human.
   if (command === 'mcp-warm') {
     return mcpWarm(args);
+  }
+
+  // `codeam mcp-router` — ONE MCP server fronting every integration server, so
+  // the agent carries 4 tool schemas instead of hundreds. Launched by the
+  // agent's MCP config (like `mcp-run`), never typed by a human; hidden for the
+  // same reason.
+  if (command === 'mcp-router') {
+    return mcpRouter();
   }
 
   // `deploy` has a small sub-router (deploy / deploy ls / deploy

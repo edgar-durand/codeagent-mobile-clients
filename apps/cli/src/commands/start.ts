@@ -1,5 +1,5 @@
 import pc from 'picocolors';
-import { AGENT_REGISTRY, type AgentId } from '@codeam/shared';
+import { AGENT_REGISTRY, type AgentId, HOUSE_AGENT_ID } from '@codeam/shared';
 import { addSession, getActiveSession, getActiveSessionForAgent, ensurePluginId, loadCliConfig, type SavedSession } from '../config';
 import { acquireDaemonLock } from './pair-auto';
 import { maybeStartHeadroomReporter, maybeResumeLocalHeadroomReporter } from './host-agent';
@@ -43,6 +43,7 @@ import { ensureBeadsWorkflowHint } from '../beads/workflow-hint';
 import { ensureAgentStandard } from '../agents/agent-standard';
 import { buildMcpServersForStart } from '../integrations/provision';
 import { refreshIntegrationsManifest } from '../integrations/refresh-manifest';
+import { isHouseProxyEnv } from './host/house-proxy-config';
 import { mergeWithLocalMcpServers } from '../services/local-mcp-servers';
 import { provisionSkillsForStart } from '../skills/provision';
 import type { StartedBeads } from '../beads';
@@ -298,6 +299,10 @@ export async function start(
       sessionId: session.id,
       pluginId,
       pluginAuthToken: session.pluginAuthToken,
+      // The house agent runs the `claude` runtime, so `session.agent` cannot
+      // tell it apart; the managed-proxy env can (`isHouseProxyEnv`). The
+      // backend turns the tool router on for the house agent ONLY.
+      agent: isHouseProxyEnv(process.env) ? HOUSE_AGENT_ID : session.agent,
     });
   }
   const mcpServers = mergeWithLocalMcpServers(
