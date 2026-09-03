@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { getEnabledIntegrations, type IntegrationMcpDelivery } from '@codeam/shared';
-import { specOf, warmTargets } from '../../src/integrations/mcp-warm';
+import { launcherFlagsOf, specOf, warmTargets } from '../../src/integrations/mcp-warm';
 
 function delivery(over: Partial<IntegrationMcpDelivery>): IntegrationMcpDelivery {
   return { command: 'npx', args: [], envMapping: {}, ...over } as IntegrationMcpDelivery;
@@ -35,6 +35,40 @@ describe('specOf — the spec must be the one the RUNTIME asks for', () => {
     // tools in-process — there is nothing to download, so warming them would
     // be a no-op at best and a spurious build failure at worst.
     expect(specOf(delivery({ command: '', args: [] }))).toBeNull();
+  });
+});
+
+describe('launcherFlagsOf — the warm must invoke the launcher like the runtime does', () => {
+  it('keeps the flags BEFORE the package', () => {
+    // ⚠️ postman is why this exists: its package declares a `preinstall` guard
+    // of `npx only-allow pnpm`, so npm refuses to install it and
+    // `npx -y <pkg>` exits 1 before the server is reached. The delivery carries
+    // `--ignore-scripts` for that reason, and a warm run that dropped the flag
+    // would fail on the one package that most needs warming.
+    expect(
+      launcherFlagsOf(
+        delivery({ command: 'npx', args: ['-y', '--ignore-scripts', '@postman/x@1.0.0'] }),
+      ),
+    ).toEqual(['-y', '--ignore-scripts']);
+  });
+
+  it('drops the flags AFTER the package — those belong to the server', () => {
+    // figma's `--stdio --no-telemetry` are the server's own arguments; handing
+    // them to `npx --package … -c true` would be meaningless at best.
+    expect(
+      launcherFlagsOf(
+        delivery({
+          command: 'npx',
+          args: ['-y', 'figma-developer-mcp@0.13.2', '--stdio', '--no-telemetry'],
+        }),
+      ),
+    ).toEqual(['-y']);
+  });
+
+  it('is empty for a uvx delivery, whose spec is the first argument', () => {
+    expect(launcherFlagsOf(delivery({ command: 'uvx', args: ['mcp-atlassian==0.22.1'] }))).toEqual(
+      [],
+    );
   });
 });
 
@@ -73,6 +107,15 @@ describe('warmTargets — derived from the registry, never a second list', () =>
     // its own warm recipe, and `mcp-warm` reports it as skipped rather than
     // pretending it warmed.
     expect(new Set(warmTargets().map((t) => t.launcher))).toEqual(new Set(['npx', 'uvx']));
+  });
+
+  it("carries postman's --ignore-scripts through from the registry", () => {
+    // End-to-end over the REAL registry: the flag has to survive from the
+    // delivery into the warm target, or the box image warms postman with the
+    // wrong invocation and it fails there exactly as it does at runtime.
+    const postman = warmTargets().find((t) => t.spec.includes('postman-mcp-server'));
+    expect(postman).toBeDefined();
+    expect(postman?.flags).toContain('--ignore-scripts');
   });
 
   it('finds a non-trivial number of packages — a silently empty list is a bug', () => {
