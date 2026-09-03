@@ -82,10 +82,20 @@ describe.runIf(enabled)('every npx-delivered MCP server pin is a FREE licence', 
 
   for (const { id, spec } of npxPins) {
     it(`${id}: ${spec} is published under a free licence`, () => {
+      // ⚠️ Windows needs a shell for npm, and ONLY Windows. Two failures in a
+      // row taught this (2026-09-03): `execFileSync('npm')` → `ENOENT` (the
+      // binary is `npm.cmd`), then `execFileSync('npm.cmd')` → `EINVAL`, because
+      // Node ≥ 20.12 refuses to spawn .cmd/.bat WITHOUT a shell
+      // (CVE-2024-27980). `shell: true` there resolves `npm` via cmd.exe like
+      // a terminal would. Unix keeps the shell-less spawn — `spec` is a package
+      // name from our own registry, never user input, so the shell path carries
+      // no injection surface; the Unix path avoids it anyway.
+      const win = process.platform === 'win32';
       const licence = execFileSync('npm', ['view', spec, 'license'], {
         encoding: 'utf8',
         timeout: 60_000,
         stdio: ['ignore', 'pipe', 'ignore'],
+        shell: win,
       }).trim();
       if (licence === '' && VERIFIED_FREE_WITHOUT_FIELD[spec]) return;
       // A licence the maintainer changed to gate the tools reads as

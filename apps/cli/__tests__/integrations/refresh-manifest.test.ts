@@ -53,6 +53,10 @@ let home: string;
 let server: Server | null = null;
 let seenAuth: string | undefined;
 const origHome = process.env.HOME;
+// `os.homedir()` reads USERPROFILE on Windows, not HOME. Redirecting only HOME
+// made this test read and WRITE the real user manifest on the windows-latest
+// cell (2026-09-03) — the same convention host-agent.test.ts already uses.
+const origUserProfile = process.env.USERPROFILE;
 const origApi = process.env.CODEAM_API_URL;
 
 function manifestFile(): string {
@@ -87,12 +91,15 @@ async function serve(handler: (path: string) => { status: number; body?: unknown
 beforeEach(() => {
   home = mkdtempSync(join(tmpdir(), 'refresh-manifest-'));
   process.env.HOME = home;
+  process.env.USERPROFILE = home;
   seenAuth = undefined;
 });
 afterEach(async () => {
   if (server) await new Promise<void>((ok) => server!.close(() => ok()));
   server = null;
   process.env.HOME = origHome;
+  if (origUserProfile === undefined) delete process.env.USERPROFILE;
+  else process.env.USERPROFILE = origUserProfile;
   if (origApi === undefined) delete process.env.CODEAM_API_URL;
   else process.env.CODEAM_API_URL = origApi;
 });
