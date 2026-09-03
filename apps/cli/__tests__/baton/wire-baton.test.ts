@@ -170,18 +170,22 @@ describe('makeSerializedBatonPoster (SWITCHING can never overtake the steady sta
 });
 
 describe('makeMirrorOnNewMessages (LOCAL_DRIVE live mirror)', () => {
-  it('re-arm: pushes the conversation snapshot, but skips the live pipe on the first (catch-up) batch', async () => {
+  it('a PRE-EXISTING batch goes to the snapshot only, never down the live pipe', async () => {
     const publisher = fakePublisher();
     const onNewMessages = makeMirrorOnNewMessages({
       publisher,
       agentId: 'claude',
       conversationId: 'conv-1',
-      fresh: false, // handback re-arm — mobile already has the history
     });
 
-    // TranscriptMirror's first call after start() reports the whole
-    // pre-existing history — on a RE-ARM this must NOT replay live.
-    onNewMessages([msg('user', 'hi'), msg('agent', 'hello there')]);
+    // ⚠️ This is the churn bug. The mirror flags its catch-up read of an
+    // already-existing transcript as `preexisting`, and that batch must NOT be
+    // replayed as live turns: mobile already has this history (snapshot +
+    // `get_conversation` on open), and replaying it rewrote the phone's
+    // conversation message by message until the replay reached the end —
+    // "está cambiando constantemente los mensajes y no se detiene" (owner,
+    // 2026-09-03). It also churned pages the user had just scrolled up to load.
+    onNewMessages([msg('user', 'hi'), msg('agent', 'hello there')], { preexisting: true });
     await vi.waitFor(() => expect(publisher.pushConversation).toHaveBeenCalledTimes(1));
 
     expect(publisher.pushConversation).toHaveBeenCalledWith({
@@ -195,16 +199,19 @@ describe('makeMirrorOnNewMessages (LOCAL_DRIVE live mirror)', () => {
     expect(publisher.publishOutput).not.toHaveBeenCalled();
   });
 
-  it('fresh: live-publishes from the very first batch (mobile has nothing yet)', async () => {
+  it('live-publishes the FIRST batch of a brand-new transcript (nothing pre-existed)', async () => {
     const publisher = fakePublisher();
     const onNewMessages = makeMirrorOnNewMessages({
       publisher,
       agentId: 'claude',
       conversationId: 'conv-1',
-      fresh: true, // begin() — brand-new local session
     });
 
-    onNewMessages([msg('user', 'hi'), msg('agent', 'hello there')]);
+    // A brand-new local session's JSONL does not exist at mirror start, so the
+    // mirror attaches from its startup poll and flags the batch as live. This
+    // is the case the old `fresh` flag existed for and it must keep streaming
+    // from turn one (regression guard for the 2.60.2 "silent until re-open").
+    onNewMessages([msg('user', 'hi'), msg('agent', 'hello there')], { preexisting: false });
 
     await vi.waitFor(() => expect(publisher.publishOutput).toHaveBeenCalledTimes(4));
     expect(publisher.publishOutput.mock.calls.map((c) => c[0])).toEqual([
@@ -230,7 +237,6 @@ describe('makeMirrorOnNewMessages (LOCAL_DRIVE live mirror)', () => {
       publisher,
       agentId: 'claude',
       conversationId: 'conv-1',
-      fresh: true,
     });
 
     onNewMessages([msg('user', 'hi'), msg('agent', 'hello there')]); // turn 1
@@ -253,10 +259,9 @@ describe('makeMirrorOnNewMessages (LOCAL_DRIVE live mirror)', () => {
       publisher,
       agentId: 'claude',
       conversationId: 'conv-1',
-      fresh: false,
     });
 
-    onNewMessages([msg('user', 'hi'), msg('agent', 'hello there')]); // catch-up, skipped
+    onNewMessages([msg('user', 'hi'), msg('agent', 'hello there')], { preexisting: true }); // catch-up, skipped
     onNewMessages([msg('user', 'what time is it?'), msg('agent', "it's 3pm")]); // real new turn
 
     await vi.waitFor(() => expect(publisher.publishOutput).toHaveBeenCalledTimes(4));
@@ -277,10 +282,9 @@ describe('makeMirrorOnNewMessages (LOCAL_DRIVE live mirror)', () => {
       publisher,
       agentId: 'claude',
       conversationId: 'conv-1',
-      fresh: false,
     });
 
-    onNewMessages([msg('user', 'hi'), msg('agent', 'hello')]); // catch-up
+    onNewMessages([msg('user', 'hi'), msg('agent', 'hello')], { preexisting: true }); // catch-up
     onNewMessages([msg('system', 'internal note')]);
 
     await vi.waitFor(() => expect(publisher.pushConversation).toHaveBeenCalledTimes(1));
@@ -300,10 +304,9 @@ describe('makeMirrorOnNewMessages (LOCAL_DRIVE live mirror)', () => {
       publisher,
       agentId: 'claude',
       conversationId: 'conv-1',
-      fresh: false,
     });
 
-    onNewMessages([msg('user', 'hi'), msg('agent', 'hello')]); // catch-up
+    onNewMessages([msg('user', 'hi'), msg('agent', 'hello')], { preexisting: true }); // catch-up
     onNewMessages([msg('user', 'turn A')]);
     onNewMessages([msg('agent', 'reply A')]);
 

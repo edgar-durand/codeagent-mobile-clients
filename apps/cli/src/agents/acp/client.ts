@@ -181,6 +181,53 @@ export const FATAL_STARTUP_RE =
 const NEWSESSION_TIMEOUT_MS = 120_000;
 
 /**
+ * How long the AGENT waits for ONE MCP server to finish starting, handed to it
+ * as `MCP_TIMEOUT`.
+ *
+ * ⚠️ WITHOUT THIS THE AGENT USES 30 s AND SILENTLY DROPS OUR SLOWER
+ * INTEGRATIONS. Read from the shipped binary:
+ *   `MCP_TIMEOUT; return n && n>0 ? Math.min(n, 2147483647) : 30000`
+ * so 30 s is the default, and it is spent inside `session/new` — where the
+ * agent starts EVERY advertised server at once.
+ *
+ * 30 s does not cover what our servers do on a cold start. Each one is the
+ * `codeam mcp-run <id>` shim, whose first start has to provision the real
+ * launcher if absent (`ensureCommand`, which can run an installer), broker a
+ * short-lived credential over HTTPS, then spawn the vendor's server — usually
+ * `npx`, i.e. a package DOWNLOAD the first time. Times every linked
+ * integration, racing on one core.
+ *
+ * Live evidence (rafaelph90.br@gmail.com, box 8e1405644222, 2026-09-03):
+ *   01:40:45.887 integrations — injecting 14 MCP server(s): … postman, clickup, trello
+ *   01:40:47.047 acpClient — newSession → sending
+ *   01:41:06.535 acpClient — newSession ← ok        ← 19.5 s
+ * `session/new` reported ok, yet `/tmp/clickup-mcp-server.log` held ONE line,
+ * written by the PREVIOUS process an hour earlier — clickup/trello/postman
+ * never started under the new one, and every call came back
+ * `Server "clickup" is not connected`. There is no retry after that verdict, so
+ * those integrations stay dead for the whole session; and because which servers
+ * lose the race changes per spawn, the user sees connectors "connecting and
+ * disconnecting" rather than a clean failure.
+ *
+ * ⚠️ IT MUST STAY BELOW {@link NEWSESSION_TIMEOUT_MS}, which is why it is
+ * DERIVED from it rather than written as its own number. `MCP_TIMEOUT` is what
+ * the agent waits before giving up on one server and returning the session
+ * WITHOUT it — so `session/new` can legitimately take that long. Set it above
+ * our own ceiling and we would abort the whole handshake first, turning a
+ * degraded-but-usable session into no session at all. The 30 s margin covers
+ * the rest of the handshake.
+ *
+ * A generous budget costs nothing on the happy path — the agent waits only
+ * until each server answers — and it is not a way to hide a hung server: our
+ * own `TOOL_CALL_TIMEOUT_MS` still bounds every tool call. The startup work
+ * itself should also move out of this window (warm the launcher + package when
+ * the integration is LINKED); that is the follow-up. This constant is what
+ * stops a slow-but-healthy server from being declared dead in the meantime.
+ */
+export const MCP_STARTUP_TIMEOUT_MS = NEWSESSION_TIMEOUT_MS - 30_000;
+
+
+/**
  * Backstop ceiling for `session/load`. It was the ONE handshake RPC with no
  * timeout, and a wedged adapter simply never answered: the 2026-08-18 baton
  * incident logged `loadSession → sessionId=…` with no `← ok` and no error, ever
@@ -504,7 +551,15 @@ export class AcpClient {
       // extraEnv (e.g. CLAUDE_CODE_DISABLE_1M_CONTEXT=1 on an on-demand
       // re-spawn) layers over process.env; PATH stays last so the augmented
       // PATH always wins.
-      env: { ...process.env, ...(this.opts.extraEnv ?? {}), PATH: augmentedPath },
+      //
+      // MCP_TIMEOUT comes FIRST so the caller can still override it, and it is
+      // load-bearing — see MCP_STARTUP_TIMEOUT_MS.
+      env: {
+        ...process.env,
+        MCP_TIMEOUT: String(MCP_STARTUP_TIMEOUT_MS),
+        ...(this.opts.extraEnv ?? {}),
+        PATH: augmentedPath,
+      },
       stdio: ['pipe', 'pipe', 'pipe'],
     });
     this.child = child;
