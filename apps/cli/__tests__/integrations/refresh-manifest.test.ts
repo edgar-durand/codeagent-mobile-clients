@@ -52,6 +52,7 @@ const NEW: IntegrationsManifest = {
 let home: string;
 let server: Server | null = null;
 let seenAuth: string | undefined;
+let seenBody: Record<string, unknown> | undefined;
 const origHome = process.env.HOME;
 const origApi = process.env.CODEAM_API_URL;
 
@@ -73,6 +74,7 @@ async function serve(handler: (path: string) => { status: number; body?: unknown
     let raw = '';
     req.on('data', (c) => (raw += c));
     req.on('end', () => {
+      try { seenBody = JSON.parse(raw) as Record<string, unknown>; } catch { seenBody = undefined; }
       const r = handler(req.url ?? '');
       res.writeHead(r.status, { 'content-type': 'application/json' });
       res.end(r.body === undefined ? '' : JSON.stringify(r.body));
@@ -88,6 +90,7 @@ beforeEach(() => {
   home = mkdtempSync(join(tmpdir(), 'refresh-manifest-'));
   process.env.HOME = home;
   seenAuth = undefined;
+  seenBody = undefined;
 });
 afterEach(async () => {
   if (server) await new Promise<void>((ok) => server!.close(() => ok()));
@@ -115,6 +118,17 @@ describe('refreshIntegrationsManifest — the on-disk manifest stops being trust
     expect(Object.keys(onDisk()!.integrations[0].delivery.mcp!.envMapping)).toContain('CLICKUP_API_TOKEN');
     // And it authenticated as the plugin, like every other plugin call.
     expect(seenAuth).toBe('v1.test-token');
+  });
+
+  it('tells the backend WHICH agent is launching, so per-agent policy (the tool router) can apply', async () => {
+    writeOnDisk(NEW);
+    process.env.CODEAM_API_URL = await serve(() => ({ status: 200, body: { success: true, data: NEW } }));
+    const { refreshIntegrationsManifest } = await import('../../src/integrations/refresh-manifest');
+    await refreshIntegrationsManifest({ ...CTX, agent: 'house-codeagent-cloud' });
+    expect(seenBody).toMatchObject({ sessionId: 'sess-1', pluginId: 'plug-1', agent: 'house-codeagent-cloud' });
+    // Omitted when not known — the backend then applies no agent policy.
+    await refreshIntegrationsManifest(CTX);
+    expect(seenBody).not.toHaveProperty('agent');
   });
 
   it('leaves an up-to-date manifest untouched (no needless rewrite, key order ignored)', async () => {

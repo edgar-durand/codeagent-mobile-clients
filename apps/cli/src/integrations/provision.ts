@@ -10,6 +10,7 @@
 // yields fewer/zero servers.
 import type { McpServer } from '@agentclientprotocol/sdk';
 import { readIntegrationsManifest } from './manifest';
+import { MCP_ROUTER_SERVER_NAME } from './mcp-router';
 import { log } from '../services/logger';
 
 export interface ProvisionCtx {
@@ -57,6 +58,39 @@ export function buildMcpServersForStart(ctx: ProvisionCtx): McpServer[] {
       args: [process.argv[1], 'mcp-run', entry.id],
       env,
     });
+  }
+
+  // ⚠️ Router opt-in. When the backend-resolved manifest says `toolRouter`, the
+  // agent gets ONE server — `codeam mcp-router` — instead of every integration
+  // server. The router spawns exactly these same `mcp-run <id>` shims itself
+  // (same env, same broker, same watchdogs), so nothing below this line about
+  // credentials or process trees changes; only what the agent's context
+  // carries does: 4 tool schemas instead of hundreds. See mcp-router.ts for
+  // the measurement that made this necessary. Without the flag, behaviour is
+  // byte-identical to before.
+  if (manifest.toolRouter === true && servers.length > 0) {
+    const routed = servers.map((s) => s.name);
+    log.info(
+      'integrations',
+      `tool router ON — fronting ${routed.length} MCP server(s) behind one: ${routed.join(', ')}`,
+    );
+    return [
+      {
+        name: MCP_ROUTER_SERVER_NAME,
+        command: process.execPath,
+        args: [process.argv[1], 'mcp-router'],
+        // The router re-spawns each shim with THIS env: the same session /
+        // plugin id / token / secret the shims got when injected directly.
+        // No per-integration id — each child receives its own via
+        // `mcp-run <id>` argv, which the shim prefers.
+        env: [
+          { name: 'CODEAM_MCP_SESSION_ID', value: ctx.sessionId },
+          { name: 'CODEAM_MCP_PLUGIN_ID', value: ctx.pluginId },
+          { name: 'CODEAM_MCP_PLUGIN_TOKEN', value: ctx.pluginAuthToken },
+          ...(ctx.pollSecret ? [{ name: 'CODEAM_MCP_POLL_SECRET', value: ctx.pollSecret }] : []),
+        ],
+      },
+    ];
   }
 
   if (servers.length) {
