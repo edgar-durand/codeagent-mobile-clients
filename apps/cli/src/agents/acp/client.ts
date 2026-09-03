@@ -16,7 +16,7 @@
  *     caller.
  */
 
-import { spawn, type ChildProcess } from 'node:child_process';
+import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import * as fs from 'node:fs/promises';
 import * as fsSync from 'node:fs';
 import * as os from 'node:os';
@@ -561,8 +561,28 @@ export class AcpClient {
         PATH: augmentedPath,
       },
       stdio: ['pipe', 'pipe', 'pipe'],
+      // ⚠️ Own process group, so `stop()` can reap the WHOLE tree. The adapter
+      // is only the top of it: it spawns the real `claude`, which spawns one
+      // `codeam mcp-run` shim per integration, each of which spawns the
+      // vendor's MCP server. Killing the adapter alone orphaned all of that —
+      // see `stop()` for the incident. Windows has no process groups; there
+      // the tree is reaped with `taskkill /T` instead.
+      detached: process.platform !== 'win32',
     });
     this.child = child;
+    // ⚠️ Belt for `detached`: a group leader outlives a CLI that dies WITHOUT
+    // reaching `stop()` (SIGKILL, OOM, an uncaught throw). Before `detached`
+    // the broken stdio pipe took the tree down by itself; now nothing would, so
+    // a hard CLI exit reaps the group here. Synchronous by necessity — `exit`
+    // handlers get no event loop.
+    const pid = child.pid;
+    if (pid && process.platform !== 'win32') {
+      const reapOnExit = (): void => {
+        if (this.child === child) killQuiet(-pid, 'SIGKILL');
+      };
+      process.once('exit', reapOnExit);
+      child.once('exit', () => process.removeListener('exit', reapOnExit));
+    }
 
     child.stderr?.setEncoding('utf8');
     child.stderr?.on('data', (chunk: string) => {
@@ -1504,12 +1524,38 @@ export class AcpClient {
     this.connection = null;
     this.sessionId = null;
     try {
-      // SIGTERM first — adapters handle it cleanly and flush any
-      // pending notifications. Hard kill after 2 s if they hang.
-      child.kill('SIGTERM');
+      // ⚠️ SIGNAL THE WHOLE PROCESS TREE, not just the adapter.
+      //
+      // The adapter (`claude-agent-acp`) is only the top of a tree: it spawns
+      // the real `claude`, which spawns one `codeam mcp-run` shim per linked
+      // integration, and each shim spawns the vendor's MCP server. Killing the
+      // adapter alone left everything below it ALIVE and orphaned. Live on a
+      // user's box (rafaelph90.br@gmail.com, 8e1405644222, 2026-09-03), after
+      // two `reprovisionMcp` respawns 70 s apart, `ps` showed TWO `claude`
+      // processes at once — the previous one still running with `--resume`
+      // and its 14 shims — 28 MCP servers competing on one core, and the old
+      // tree's servers dying with `write EPIPE` as their reader went away.
+      // That is what the user saw as ClickUp "connecting and disconnecting"
+      // and the agent as `Server crasheó (Failed to connect)`. The startup
+      // budget and the image pre-warm did not touch this, because it was never
+      // slowness: it was a leak, and every respawn made it worse.
+      //
+      // The adapter is spawned as a process-group leader (`detached`, see
+      // `startOnce`), so a negative pid addresses the whole group. SIGTERM
+      // first so servers flush; SIGKILL the group after 2 s if anything hangs.
+      // On Windows there are no process groups; `taskkill /T` reaps the tree.
+      const pid = child.pid;
+      if (process.platform === 'win32') {
+        if (pid) spawnSync('taskkill', ['/F', '/T', '/PID', String(pid)], { stdio: 'ignore' });
+      } else if (pid) {
+        killQuiet(-pid, 'SIGTERM');
+      } else {
+        child.kill('SIGTERM');
+      }
       const grace = new Promise<void>((resolve) => {
         const t = setTimeout(() => {
-          killQuiet(child, 'SIGKILL');
+          if (process.platform !== 'win32' && pid) killQuiet(-pid, 'SIGKILL');
+          else killQuiet(child, 'SIGKILL');
           resolve();
         }, 2000);
         child.once('exit', () => {
