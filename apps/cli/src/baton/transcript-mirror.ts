@@ -6,7 +6,15 @@ export interface TranscriptMirrorDeps {
   runtime: Pick<RuntimeStrategy, 'resolveHistoryFile' | 'parseHistoryFile'>;
   cwd: string;
   conversationId: string;
-  onNewMessages: (messages: NormalizedMessage[]) => void;
+  /**
+   * @param messages the delta appended since the last emit.
+   * @param meta.preexisting TRUE only for the single emit produced when the
+   *   transcript ALREADY had content at `start()` — i.e. this batch is history
+   *   the mirror is catching up on, not something that just happened. The
+   *   handler needs this to decide whether the batch may be replayed as LIVE
+   *   turns; see `makeMirrorOnNewMessages`.
+   */
+  onNewMessages: (messages: NormalizedMessage[], meta: { preexisting: boolean }) => void;
   watch?: (file: string, onChange: () => void) => () => void;
   /** Startup poll cadence while waiting for the agent to create its JSONL
    *  (default 750 ms). Injectable so tests drive it deterministically. */
@@ -39,6 +47,11 @@ export class TranscriptMirror {
   private unwatch: (() => void) | null = null;
   private pollHandle: ReturnType<typeof setInterval> | null = null;
   private attached = false;
+  /** True while `start()`'s own synchronous attach attempt is running, so
+   *  `tryAttach` can tell "the file was already there" from "it appeared while
+   *  we waited". The distinction is the whole basis for whether the first
+   *  batch is history or live content. */
+  private attachingAtStart = false;
 
   private readonly pollIntervalMs: number;
   private readonly waitTimeoutMs: number;
@@ -53,7 +66,12 @@ export class TranscriptMirror {
   }
 
   start(): void {
-    if (this.tryAttach()) return; // file already present — attach now
+    this.attachingAtStart = true;
+    try {
+      if (this.tryAttach()) return; // file already present — attach now
+    } finally {
+      this.attachingAtStart = false;
+    }
     // File not yet created (the native TUI writes it on its first turn). Poll
     // for it, bounded by waitTimeoutMs, and attach the instant it appears.
     let waited = 0;
@@ -80,7 +98,11 @@ export class TranscriptMirror {
     const file = this.deps.runtime.resolveHistoryFile?.(this.deps.cwd, this.deps.conversationId);
     if (!file) return false;
     this.attached = true;
-    this.emit(file);
+    // Anything the file holds at THIS moment is pre-existing history only when
+    // the file was already there as `start()` ran. If we attached from the
+    // startup poll, the agent created it after we began watching, so its
+    // contents are turns that genuinely just happened.
+    this.emit(file, this.attachingAtStart);
     const watch = this.deps.watch ?? defaultWatch;
     this.unwatch = watch(file, () => this.emit(file));
     return true;
@@ -93,7 +115,7 @@ export class TranscriptMirror {
     }
   }
 
-  private emit(file: string): void {
+  private emit(file: string, preexisting = false): void {
     let all: NormalizedMessage[];
     try {
       all = this.deps.runtime.parseHistoryFile(file);
@@ -103,7 +125,7 @@ export class TranscriptMirror {
     if (all.length <= this.emitted) return;
     const delta = all.slice(this.emitted);
     this.emitted = all.length;
-    this.deps.onNewMessages(delta);
+    this.deps.onNewMessages(delta, { preexisting });
   }
 }
 

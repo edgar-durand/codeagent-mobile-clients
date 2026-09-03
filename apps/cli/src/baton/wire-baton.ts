@@ -138,20 +138,35 @@ async function publishMirroredTurnsLive(
  * {@link publishMirroredTurnsLive}, so a mobile client that already has the
  * session open sees each new local turn as it lands.
  *
- * ⚠️ FRESH vs RE-ARM decides whether the FIRST emit live-publishes:
- * {@link TranscriptMirror} starts its internal `emitted` counter at 0, so
- * the first `onNewMessages` call after `start()` reports everything the file
- * currently holds as "new".
- *  - `fresh: true` — the mirror was started by `controller.begin()` (the very
- *    first LOCAL_DRIVE). The mobile has NOTHING yet, so EVERY turn including
- *    the first must live-publish, or a mobile watching a brand-new local
- *    session would see no bubbles until a leave+re-open.
- *  - `fresh: false` — the mirror was RE-ARMED after a handback
- *    (MOBILE_DRIVE → LOCAL_DRIVE). The mobile already rendered the whole
- *    conversation during MOBILE_DRIVE, so the first emit is a pure catch-up
- *    read (the entire file to date) and MUST NOT be replayed over the live
- *    pipe — that would duplicate every past bubble. Only turns genuinely
- *    added during this local drive live-publish.
+ * ⚠️ ONLY LIVE CONTENT MAY BE LIVE-PUBLISHED, and the mirror is what knows
+ * the difference ({@link TranscriptMirror} reports `preexisting: true` for the
+ * one emit whose contents were ALREADY in the transcript when it attached).
+ *
+ * This used to be decided by a `fresh` flag — true for the first LOCAL_DRIVE,
+ * false for a handback re-arm — on the premise that a first LOCAL_DRIVE means
+ * "the mobile has nothing yet". That premise is FALSE whenever the transcript
+ * already has content at that moment: pairing in a folder whose conversation
+ * exists, or the native TUI's `/resume`. There the first emit is the ENTIRE
+ * history, and replaying it turn-by-turn over the live pipe rewrote the
+ * conversation on the phone message by message — for as long as the catch-up
+ * lasted — and stopped only when it reached the last message. Reported
+ * verbatim: "está cambiando constantemente los mensajes y no se detiene …
+ * cuando llega el último mensaje ya se para la locura" (owner, 2026-09-03).
+ * It also fought the scroll-up pagination: pages the user had just loaded were
+ * churned by the replay, which is why it read as an infinite-scroll bug.
+ *
+ * The replay was never needed for that content. Mobile obtains pre-existing
+ * history two other ways, both already in place: the `pushConversation`
+ * snapshot pushed on EVERY emit (cold-open / reconnect) and the app's own
+ * `get_conversation` when the session is opened. The live pipe is only for
+ * turns that land while someone is watching.
+ *
+ * So the rule is: push the snapshot always; live-publish only a batch the
+ * mirror did NOT flag as pre-existing. Both former cases still behave
+ * correctly — a brand-new local session's transcript does not exist at
+ * `start()`, so its first turn arrives flagged live and streams from turn one
+ * (the bug that put `fresh` here in the first place), and a handback re-arm's
+ * catch-up read is pre-existing by definition and stays silent.
  *
  * The snapshot is pushed on EVERY emit in both modes (it's idempotent —
  * `mode:'replace'` on the full list), so reconnect/cold-open always reflects
@@ -169,12 +184,7 @@ export function makeMirrorOnNewMessages(deps: {
   publisher: MirrorLivePublisher;
   agentId: AgentId;
   conversationId: string;
-  /** True when started by `begin()` (fresh local session, mobile has nothing
-   *  → live-publish from the first turn); false on a handback re-arm (mobile
-   *  already has the history → skip the first catch-up emit's live replay). */
-  fresh: boolean;
-}): (messages: NormalizedMessage[]) => void {
-  let isFirstEmit = true;
+}): (messages: NormalizedMessage[], meta?: { preexisting: boolean }) => void {
   let publishChain: Promise<void> = Promise.resolve();
   // Full running conversation the mirror has seen, so the snapshot is always
   // the COMPLETE history (the mirror only ever hands us the newest delta).
@@ -184,7 +194,7 @@ export function makeMirrorOnNewMessages(deps: {
     text: string;
     timestamp: number;
   }> = [];
-  return (messages: NormalizedMessage[]): void => {
+  return (messages: NormalizedMessage[], meta?: { preexisting: boolean }): void => {
     const relevant = messages.filter((m) => m.role !== 'system');
     if (relevant.length === 0) return;
     const mapped = relevant.map((m) => ({
@@ -199,8 +209,8 @@ export function makeMirrorOnNewMessages(deps: {
       sessionId: deps.conversationId,
       messages: conversation.slice(),
     });
-    // Live-publish every batch EXCEPT a re-arm's first (catch-up) read.
-    if (deps.fresh || !isFirstEmit) {
+    // Live-publish every batch EXCEPT the mirror's pre-existing catch-up read.
+    if (meta?.preexisting !== true) {
       publishChain = publishChain
         .then(() => publishMirroredTurnsLive(deps.publisher, relevant))
         .catch((err) => {
@@ -210,7 +220,6 @@ export function makeMirrorOnNewMessages(deps: {
           );
         });
     }
-    isFirstEmit = false;
   };
 }
 
@@ -484,21 +493,16 @@ export async function runBatonSession(opts: BatonSessionOptions): Promise<void> 
   // local turn over the chat-output pipe, so an open mobile renders
   // LOCAL_DRIVE turns per-turn instead of only after leave+re-open.
   let mirror: TranscriptMirror | null = null;
-  // The FIRST LOCAL_DRIVE is the one `begin()` publishes — a fresh local
-  // session the mobile has never seen (live-publish from turn one). Every
-  // later LOCAL_DRIVE entry can only be reached via a handback, i.e. a re-arm
-  // where the mobile already holds the conversation (skip the catch-up replay).
-  let firstLocalDrive = true;
-  // Last state the controller published. A LOCAL_DRIVE published while the
-  // previous publish was ALSO LOCAL_DRIVE (no SWITCHING in between) can only
-  // be a conversation SWITCH (`controller.switchConversation`, Claude `/clear`
-  // or `/resume`) — a handback always passes through SWITCHING first. The
-  // mobile is not showing that conversation yet, so its mirror is FRESH
-  // (live-publish everything it holds, then each new turn — a `/resume`
-  // replays the resumed history, mirroring what the terminal just rendered),
-  // exactly like the very first LOCAL_DRIVE.
+  // ⚠️ There is no longer a fresh/re-arm flag to compute here, and that is the
+  // point: whether a batch may be live-published is decided from what the
+  // TRANSCRIPT held when the mirror attached, which only the mirror can know
+  // (`preexisting`). The flag this replaced assumed a first LOCAL_DRIVE meant
+  // "the mobile has nothing yet" — false for a conversation that already
+  // exists, which made the mirror replay the whole history over the live pipe
+  // and rewrite the phone's conversation message by message. See
+  // `makeMirrorOnNewMessages`.
   let lastPublished: BatonState | null = null;
-  const startMirror = (conversationId: string, fresh: boolean): void => {
+  const startMirror = (conversationId: string): void => {
     mirror?.stop();
     mirror = new TranscriptMirror({
       runtime,
@@ -508,7 +512,6 @@ export async function runBatonSession(opts: BatonSessionOptions): Promise<void> 
         publisher,
         agentId: opts.agent,
         conversationId,
-        fresh,
       }),
     });
     mirror.start();
@@ -541,12 +544,12 @@ export async function runBatonSession(opts: BatonSessionOptions): Promise<void> 
     publishState: (state: BatonState, driver: DriverKind, conversationId: string | null) => {
       publishBatonState(state, driver, conversationId);
       // (Re-)arm the read-only mirror whenever the native TUI holds the baton.
-      // The first LOCAL_DRIVE (from `begin()`) is a fresh session; subsequent
-      // ones are handback re-arms.
+      // Every entry is armed the same way now — first drive, handback re-arm
+      // and a mid-drive conversation switch (`/clear`, `/resume`) alike. The
+      // mirror decides for itself what is history and what is live, so there is
+      // nothing for this call site to classify.
       if (state === 'LOCAL_DRIVE' && conversationId) {
-        const switched = lastPublished === 'LOCAL_DRIVE';
-        startMirror(conversationId, firstLocalDrive || switched);
-        firstLocalDrive = false;
+        startMirror(conversationId);
       } else if (state !== 'LOCAL_DRIVE') {
         mirror?.stop();
       }

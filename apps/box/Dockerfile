@@ -196,6 +196,61 @@ snapshot_download("chopratejas/kompress-v2-base", allow_patterns=["*.json", "onn
 snapshot_download("answerdotai/ModernBERT-base", allow_patterns=["*.json", "tokenizer*", "*.txt", "vocab*", "merges*"])
 PY
 
+# ── Integration MCP servers — launchers + packages, pre-fetched ────────────
+# Same rule as pglite/Headroom above, for the reason the agent makes expensive:
+# it starts EVERY advertised MCP server inside `session/new` and gives each one
+# a fixed budget (`MCP_TIMEOUT`; 30 s by default — see `MCP_STARTUP_TIMEOUT_MS`
+# in the CLI). Our servers run through the `codeam mcp-run` shim, whose cold
+# start had to fetch the vendor's package (`npx -y <pkg>@<version>`) — and, for
+# jira/confluence, INSTALL `uv` first via `curl … astral.sh/uv/install.sh | sh`,
+# a 180 s installer inside a 30 s budget. With a dozen integrations linked and
+# one core, the slow ones ran out of budget and the agent filed them as
+# `Server "<id>" is not connected`, with no retry for the rest of the session
+# (rafaelph90.br@gmail.com, 2026-09-03: clickup, trello and postman all dead
+# that way while `session/new` itself reported ok).
+#
+# ⚠️ THE PACKAGE LIST IS NOT WRITTEN HERE. `codeam mcp-warm` derives it from the
+# registry the shim itself resolves at runtime (`@codeam/shared`), so adding or
+# re-pinning an integration warms the right thing automatically. A list copied
+# into this file would drift on the next version bump — and a cache warmed for
+# the WRONG version is worse than a cold one, because it looks warm and still
+# downloads.
+#
+# ⚠️ VOLUME-SHADOW RULE: the caches CANNOT live under $HOME. npm's default is
+# `~/.npm` and uv's is `~/.local/share/uv`, both of which the runtime
+# `-v codeam-box-<userId>:/home/box` mount would shadow — the bake would be
+# invisible and every box would download from scratch anyway. They are moved to
+# /opt via env, which the runtime inherits, so the shim's `npx`/`uvx` read the
+# baked cache. Moving npm's cache also makes the hourly codeam-cli self-update
+# hit a warm cache instead of an empty one.
+#
+# ⚠️ SIZE RULE: the warm runs AS `box`, not as root, so the files land
+# box-owned and there is no `chown -R` of a multi-hundred-MB tree (which would
+# duplicate the whole cache into another layer). `box` needs write access at
+# runtime too — `npx` links each package into `_npx/` on first use.
+#
+# Measured on the real base (node:22-slim, aarch64, one package):
+#   npx --offline  before warming .............. FAILS (the download is real)
+#   npx -y --package <pkg> -c true ............. 16 s
+#   npx --offline  after warming ............... 0 s, no network
+# 16 s × every linked integration, racing on one core, against a 30 s
+# per-server budget — that is the arithmetic that killed clickup/trello/postman.
+#
+# ⚠️ NEVER FAILS THE BUILD — same contract as the curl-installer agents above.
+# A package that misses here is fetched at runtime exactly as it is today, and
+# `mcp-warm` is absent from CLI versions older than 2.73.4, so an older pinned
+# CODEAM_CLI_VERSION must build fine (it just reports MISS).
+ENV npm_config_cache=/opt/npm-cache
+ENV UV_CACHE_DIR=/opt/uv-cache
+ENV UV_TOOL_DIR=/opt/uv-tools
+ENV UV_NO_MODIFY_PATH=1
+RUN install -d -o box -g box /opt/npm-cache /opt/uv-cache /opt/uv-tools \
+    && (curl -LsSf --connect-timeout 15 --max-time 300 https://astral.sh/uv/install.sh \
+          | env UV_INSTALL_DIR=/usr/local/bin sh || true) \
+    && echo "uv (jira/confluence launcher; a MISS here means mcp-run installs it on first use):" \
+    && (command -v uv >/dev/null 2>&1 && echo "  OK   $(uv --version)" || echo "  MISS uv") \
+    && su box -s /bin/sh -c 'HOME=/home/box codeam mcp-warm' || true
+
 # ── PATH: expose the curl-installer bin dirs under the runtime HOME=/home/box ─
 ENV PATH="/opt/agents/.local/bin:/opt/agents/.kimi-code/bin:/opt/agents/bin:${PATH}"
 

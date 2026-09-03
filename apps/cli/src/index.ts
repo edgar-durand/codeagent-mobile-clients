@@ -13,6 +13,7 @@ import { invite } from './commands/invite';
 import { doctor } from './commands/doctor';
 import { completion } from './commands/completion';
 import { mcpRun } from './integrations/mcp-run';
+import { mcpWarm } from './integrations/mcp-warm';
 import { version } from './commands/version';
 import { help } from './commands/help';
 import { tryShowSubcommandHelp } from './commands/subcommand-help';
@@ -158,6 +159,14 @@ async function main(): Promise<void> {
   // derived from `Object.keys(commands)`, see below).
   if (command === 'mcp-run') {
     return mcpRun(args);
+  }
+
+  // `codeam mcp-warm [id…]` — pre-fetch the integration MCP server packages so
+  // the agent never pays for the download inside its own `session/new` budget.
+  // Hidden for the same reason as `mcp-run`: it is run by the IMAGE BUILD (and
+  // by provisioning), not typed by a human.
+  if (command === 'mcp-warm') {
+    return mcpWarm(args);
   }
 
   // `deploy` has a small sub-router (deploy / deploy ls / deploy

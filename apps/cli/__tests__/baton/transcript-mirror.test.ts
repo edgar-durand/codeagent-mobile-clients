@@ -47,6 +47,12 @@ describe('TranscriptMirror', () => {
     mirror.start();
     expect(onNewMessages).toHaveBeenCalledTimes(1);
     expect(onNewMessages.mock.calls[0][0]).toHaveLength(2); // initial snapshot
+    // ⚠️ The file was ALREADY on disk when start() ran, so this first batch is
+    // history the mirror is catching up on — not turns that just happened. The
+    // consumer replays only live batches over the output pipe; getting this
+    // wrong replayed whole conversations onto the phone message by message
+    // (owner report 2026-09-03).
+    expect(onNewMessages.mock.calls[0][1]).toEqual({ preexisting: true });
 
     fs.appendFileSync(file, '{"type":"user","message":{"role":"user","content":"more"}}\n');
     fireChange();
@@ -108,6 +114,10 @@ describe('TranscriptMirror', () => {
     // The native TUI writes its first turn; the next poll tick attaches.
     fs.copyFileSync(path.join(__dirname, '../fixtures/baton/conv.jsonl'), file);
     tick();
+    // Attached from the POLL: the agent created the transcript after we began
+    // watching, so its contents are live turns and must be flagged as such —
+    // this is the brand-new-session case that has to stream from turn one.
+    expect(onNewMessages.mock.calls[0][1]).toEqual({ preexisting: false });
     expect(onNewMessages).toHaveBeenCalledTimes(1);
     expect(onNewMessages.mock.calls[0][0]).toHaveLength(2); // initial snapshot
     expect(cleared).toBe(true); // poll stopped once attached
