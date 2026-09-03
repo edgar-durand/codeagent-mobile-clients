@@ -82,7 +82,11 @@ describe.runIf(enabled)('every npx-delivered MCP server pin is a FREE licence', 
 
   for (const { id, spec } of npxPins) {
     it(`${id}: ${spec} is published under a free licence`, () => {
-      const licence = execFileSync('npm', ['view', spec, 'license'], {
+      // `execFileSync` bypasses the shell, and on Windows `npm` is `npm.cmd` —
+      // without this the whole audit failed with `spawnSync npm ENOENT` on the
+      // windows-latest cell (2026-09-03, first run on main).
+      const npm = process.platform === 'win32' ? 'npm.cmd' : 'npm';
+      const licence = execFileSync(npm, ['view', spec, 'license'], {
         encoding: 'utf8',
         timeout: 60_000,
         stdio: ['ignore', 'pipe', 'ignore'],
