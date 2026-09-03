@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { execFileSync } from 'node:child_process';
-import { INTEGRATION_REGISTRY } from '../../src/integrations/registry';
+import { INTEGRATION_REGISTRY } from '@codeam/shared';
 
 /**
  * Every npm-delivered MCP server we pin must be FREE to use — and the registry
@@ -22,6 +22,11 @@ import { INTEGRATION_REGISTRY } from '../../src/integrations/registry';
  *
  * Network-dependent by design (it reads the registry). It runs in CI, where the
  * registry is reachable; skip it locally with RUN_NPM_LICENCE_CHECK=0.
+ *
+ * Lives in apps/cli rather than packages/shared on purpose: it shells out to
+ * `npm view`, and packages/shared is a pure-TS package whose tsconfig has no
+ * Node types — placing it there broke `tsc --noEmit` in the v2.73.8 release
+ * (`Publish @codeam/shared to npm` failed on TS2591 for `node:child_process`).
  */
 
 const FREE_LICENCES = new Set([
