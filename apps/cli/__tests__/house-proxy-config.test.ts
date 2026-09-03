@@ -33,6 +33,7 @@ import {
   isHouseProxyEnv,
   pickHouseProxyEnv,
   HOUSE_PROXY_ENV_KEYS,
+  HOUSE_MODEL_CONTEXT_TOKENS,
 } from '../src/commands/host/house-proxy-config';
 
 let tmpHome: string;
@@ -113,10 +114,36 @@ describe('buildHouseProxyChildEnv', () => {
       ANTHROPIC_DEFAULT_OPUS_MODEL: 'MiniMax-M3',
       ANTHROPIC_DEFAULT_HAIKU_MODEL: 'MiniMax-M3',
       CLAUDE_CODE_AUTO_COMPACT_WINDOW: '512000',
+      CLAUDE_CODE_MAX_CONTEXT_TOKENS: '512000',
       API_TIMEOUT_MS: '3000000',
       CLAUDE_CONFIG_DIR: '/home/u/.codeam/house-claude/switch-p1',
     });
     expect(env.ANTHROPIC_API_KEY).toBeUndefined();
+  });
+
+  // ⚠️ The thrashing bug. claude does not know MiniMax-M3 and assumes its
+  // unknown-model default (200k); CLAUDE_CODE_AUTO_COMPACT_WINDOW is applied as
+  // Math.min(assumed, env), so on its own it can only SHRINK that — the 512000
+  // we used to set was inert. With ~175k tokens of MCP tool schemas per turn the
+  // context started ~88% full and compacted on a 28-character prompt, 13 times
+  // in one session (2026-09-03). CLAUDE_CODE_MAX_CONTEXT_TOKENS is what claude
+  // reads for an unrecognised model's REAL window ("set
+  // CLAUDE_CODE_MAX_CONTEXT_TOKENS to its real window", its own notice).
+  it('declares the REAL window for the unknown model, from ONE constant, so the two knobs cannot drift', () => {
+    const env = buildHouseProxyChildEnv({ baseUrl: 'https://p/api/v1/agent-proxy', token: 't' });
+    expect(env.CLAUDE_CODE_MAX_CONTEXT_TOKENS).toBe(HOUSE_MODEL_CONTEXT_TOKENS);
+    expect(env.CLAUDE_CODE_AUTO_COMPACT_WINDOW).toBe(HOUSE_MODEL_CONTEXT_TOKENS);
+    // MiniMax-M3: 1M advertised, 512K guaranteed minimum. Declaring MORE than
+    // the guarantee would let claude overrun the provider; declaring the old
+    // 200k default would recreate the thrash. Pin both bounds.
+    expect(Number(HOUSE_MODEL_CONTEXT_TOKENS)).toBeGreaterThanOrEqual(512_000);
+    expect(Number(HOUSE_MODEL_CONTEXT_TOKENS)).toBeLessThanOrEqual(1_000_000);
+  });
+
+  it('the OpenRouter gateway shape carries the same window knobs (same builder, same fix)', () => {
+    const env = buildHouseProxyChildEnv({ baseUrl: 'https://p/api/v1/agent-proxy', token: 't', openRouter: true });
+    expect(env.CLAUDE_CODE_MAX_CONTEXT_TOKENS).toBe(HOUSE_MODEL_CONTEXT_TOKENS);
+    expect(env.ANTHROPIC_API_KEY).toBe('');
   });
 
   it('is the SAME env readHouseProxyChildEnv rebuilds from a persisted config', () => {
@@ -174,6 +201,19 @@ describe('clearHouseProxyEnvOverrides', () => {
     const overrides = clearHouseProxyEnvOverrides();
     expect(Object.keys(overrides).sort()).toEqual([...HOUSE_PROXY_ENV_KEYS].sort());
     for (const v of Object.values(overrides)) expect(v).toBeUndefined();
+  });
+
+  // ⚠️ THE guard for "house-agent only". Every key the house builder sets must
+  // be in the clearing list, or a switch AWAY from the house agent to the user's
+  // own Claude Code would inherit it. For MAX_CONTEXT_TOKENS that would mean
+  // telling a REAL Anthropic model a made-up window — exactly the cross-
+  // contamination this fix must never cause.
+  it('every key the house builder sets is cleared on a switch away — the fix cannot leak to a user\'s own Claude', () => {
+    const env = buildHouseProxyChildEnv({ baseUrl: 'https://p/api/v1/agent-proxy', token: 't', claudeConfigDir: '/x' });
+    const cleared = new Set<string>(Object.keys(clearHouseProxyEnvOverrides()));
+    for (const key of Object.keys(env)) {
+      expect(cleared.has(key), `${key} is set by the house builder but NOT cleared on switch-away`).toBe(true);
+    }
   });
 
   it('a later credential env WINS over the clearing layer (spread order contract)', () => {
