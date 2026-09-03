@@ -274,6 +274,21 @@ jobs:
       # flips it on, every other cell self-skips cleanly. Layer-caches the
       # box image build across runs (keyed on the Dockerfile hash), like
       # the Headroom step above.
+      # The PINNED integration MCP servers, driven for real over stdio: `npx`
+      # downloads the exact pin the registry hands the `codeam mcp-run` shim and
+      # the test asserts `tools/list` serves the tools users reach for. This is
+      # the gate that would have caught 2026-09-03: the ClickUp pin (0.14.4) had
+      # gone Proprietary and answered every tool with "LIMITED" behind a licence
+      # key — and the only thing that noticed was a user. The licence-field
+      # audit in packages/shared guards the pin; this guards what it SERVES.
+      # One cell (network + npx download); RUN_MCP_INT=1 flips it on.
+      - name: CLI pinned MCP servers serve their tools (real npx, tools/list)
+        if: matrix.os == 'ubuntu-latest' && matrix.node == '20'
+        working-directory: apps/cli
+        env:
+          RUN_MCP_INT: '1'
+        run: npx vitest run integration/mcp-clickup-tools --reporter=verbose
+
       - name: CLI fleet box Docker integration test (create/inspect/lifecycle)
         if: matrix.os == 'ubuntu-latest' && matrix.node == '20'
         working-directory: apps/cli

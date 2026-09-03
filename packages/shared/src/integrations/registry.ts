@@ -781,14 +781,34 @@ export const INTEGRATION_REGISTRY: Record<IntegrationId, IntegrationDefinition> 
     },
     delivery: {
       mcp: {
-        // @taazkareem/clickup-mcp-server (Node): CLICKUP_API_KEY (the OAuth
-        // access token — ClickUp accepts it in the Authorization header) +
-        // CLICKUP_TEAM_ID (the workspace id, captured at exchange) via env only.
-        // Version PINNED; bump only after re-verifying headless.
+        // clickup-mcp-pro (Node, MIT): 162 tools over `tools/list` — spaces,
+        // folders, lists, tasks (37 task tools incl. create/update/bulk),
+        // comments, time tracking, docs, custom fields, goals, webhooks. Reads
+        // CLICKUP_API_TOKEN (ClickUp accepts the OAuth access token there) +
+        // CLICKUP_TEAM_ID (the workspace id, captured at exchange), env only.
+        //
+        // ⚠️ WHY NOT @taazkareem/clickup-mcp-server ANY MORE. It was our pin at
+        // 0.14.4 and the maintainer had gone paid: 0.9.0–0.12.x `UNLICENSED`,
+        // 0.13.0+ `Proprietary` with an OBFUSCATED `build/license.js` that
+        // validates a Polar key and puts the tools behind
+        // `CLICKUP_MCP_LICENSE_KEY`. The server connected and found the user's
+        // workspace, then every tool was "LIMITED" (rafaelph90.br@gmail.com,
+        // 2026-09-03) — indistinguishable, to the agent and the user, from the
+        // connection failures fixed the same day. Its last MIT release, 0.8.5,
+        // exposes 36 tools; this one exposes 162 under a licence that cannot be
+        // pulled the same way. `mcp-package-licences.test.ts` now audits every
+        // npx pin's licence so a paywall fails in CI, not on a box.
+        //
+        // Verified 2026-09-03 over MCP with a dummy key (`tools/list` → 162, no
+        // licence gate, no paywall on stderr) and supply-chain audited from the
+        // tarball: the only network hosts are api.clickup.com /
+        // developer.clickup.com, no child_process/eval, deps = MCP SDK, axios,
+        // zod, dotenv, form-data. Young package (2 releases, one author) — the
+        // pin is EXACT and the licence audit watches every bump.
         command: 'npx',
-        args: ['-y', '@taazkareem/clickup-mcp-server@0.14.4'],
+        args: ['-y', 'clickup-mcp-pro@1.0.1'],
         envMapping: {
-          CLICKUP_API_KEY: 'accessToken',
+          CLICKUP_API_TOKEN: 'accessToken',
           CLICKUP_TEAM_ID: 'teamId',
         },
       },
