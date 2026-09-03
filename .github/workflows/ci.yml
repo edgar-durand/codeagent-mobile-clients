@@ -61,7 +61,7 @@ jobs:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
@@ -81,7 +81,7 @@ jobs:
     name: Dead-code check (knip)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - uses: actions/setup-node@v7
         with:
@@ -109,7 +109,7 @@ jobs:
       matrix:
         include: ${{ fromJSON(needs.matrix-setup.outputs.cli) }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - uses: actions/setup-node@v7
         with:
@@ -449,7 +449,7 @@ jobs:
     # cycles on a PR that already breaks tests on a target OS.
     needs: cli
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - uses: actions/setup-node@v7
         with:
@@ -488,7 +488,7 @@ jobs:
       matrix:
         os: ${{ fromJSON(needs.matrix-setup.outputs.vsc) }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - uses: actions/setup-node@v7
         with:
@@ -518,7 +518,7 @@ jobs:
     name: JetBrains plugin — gradle build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - uses: actions/setup-java@v5
         with:
