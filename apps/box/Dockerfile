@@ -76,6 +76,11 @@ RUN apt-get update \
         python3-venv \
         build-essential \
         procps \
+        # libglib2.0-0: React Native DevTools (`@react-native/debugger-shell`)
+        # dlopens libglib-2.0.so.0 when Expo/Metro starts; without it every
+        # Expo preview logs "error while loading shared libraries" (rafaelph90's
+        # box, 2026-09-04). Non-fatal for the server, but noise on every start.
+        libglib2.0-0 \
     && rm -rf /var/lib/apt/lists/*
 
 # The non-root box user — created UP FRONT so the in-place chown in the npm RUN
@@ -126,6 +131,12 @@ RUN npm install -g --omit=optional \
         @beads/bd \
         @electric-sql/pglite \
         @electric-sql/pglite-socket \
+        # @expo/ngrok: what `expo start --tunnel` (our Expo preview recipe)
+        # resolves for its tunnel. Missing → Expo stops on an interactive
+        # "install it globally?" prompt = exit 1 under the CLI's non-TTY spawn
+        # ("Server Failed to Start", rafaelph90's Expo 57 project, 2026-09-04).
+        # Baked WARM here; the CLI also installs it project-locally as a net.
+        "@expo/ngrok@^4.1.0" \
     && codeam --version \
     && npm cache clean --force \
     && chown -R box:box /usr/local/lib/node_modules /usr/local/bin
