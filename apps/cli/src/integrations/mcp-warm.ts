@@ -156,6 +156,11 @@ function runCapturing(command: string, args: string[], timeoutMs: number): Promi
     const child = spawn(command, args, {
       env: { ...process.env, ...LAUNCHER_ENV },
       stdio: ['ignore', 'ignore', 'pipe'],
+      // `npx`/`uv` are `.cmd` shims on Windows; Node ≥ 20.12 refuses to spawn a
+      // `.cmd` without a shell and a bare `npx` is ENOENT — the same reason the
+      // licence audit test needed it. The launchers here are ours, never user
+      // input, so the shell is safe.
+      shell: process.platform === 'win32',
     });
     let stderr = '';
     child.stderr?.setEncoding('utf8');
