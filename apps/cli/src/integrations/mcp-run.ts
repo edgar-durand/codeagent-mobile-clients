@@ -9,6 +9,7 @@
 // lifetime of the MCP session without the agent's MCP client ever seeing a
 // hiccup.
 import { execFileSync, execSync } from 'node:child_process';
+import { LAUNCHER_ENV } from './launcher-env';
 import { existsSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -133,6 +134,23 @@ function ensureCommand(command: string): void {
   }
 }
 
+/**
+ * The env the integration server is spawned with: our launcher defaults first
+ * (`LAUNCHER_ENV`), then the registry's static boot flags, then the brokered
+ * credential mapping — the credential wins on any collision.
+ */
+export function childEnvFor(
+  delivery: IntegrationMcpDelivery,
+  token: BrokeredIntegrationToken,
+): Record<string, string> {
+  const env: Record<string, string> = { ...LAUNCHER_ENV, ...delivery.staticEnv };
+  for (const [envVar, field] of Object.entries(delivery.envMapping)) {
+    const value = token[field as keyof BrokeredIntegrationToken];
+    if (typeof value === 'string' && value) env[envVar] = value;
+  }
+  return env;
+}
+
 export async function mcpRun(args: string[]): Promise<void> {
   const id = args[0] ?? process.env.CODEAM_MCP_INTEGRATION_ID;
   const sessionId = process.env.CODEAM_MCP_SESSION_ID;
@@ -195,13 +213,7 @@ export async function mcpRun(args: string[]): Promise<void> {
   const proxy = new RestartableStdioProxy({
     spawnSpec: async () => {
       current = await client.getToken(id);
-      // Static boot flags first; the credential mapping wins on any collision.
-      const env: Record<string, string> = { ...delivery.staticEnv };
-      for (const [envVar, field] of Object.entries(delivery.envMapping)) {
-        const value = current[field as keyof BrokeredIntegrationToken];
-        if (typeof value === 'string' && value) env[envVar] = value;
-      }
-      return { command: launcher, args: delivery.args, env };
+      return { command: launcher, args: delivery.args, env: childEnvFor(delivery, current) };
     },
     shouldRestartNow: () =>
       current !== null && new Date(current.expiresAt).getTime() - Date.now() < RESTART_AHEAD_MS,

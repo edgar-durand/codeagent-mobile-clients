@@ -304,6 +304,10 @@ jobs:
 
       - name: CLI fleet box Docker integration test (create/inspect/lifecycle)
         if: matrix.os == 'ubuntu-latest' && matrix.node == '20'
+        # The image build runs `npm install -g codeam-cli` and has no timeout of
+        # its own: on 2026-09-03 a slow npm registry wedged this step for over an
+        # hour (the job limit is 6 h). Normal duration is ~10 min; fail fast.
+        timeout-minutes: 25
         working-directory: apps/cli
         env:
           RUN_FLEET_INT: '1'

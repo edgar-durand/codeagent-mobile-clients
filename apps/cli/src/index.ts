@@ -167,7 +167,8 @@ async function main(): Promise<void> {
   // Hidden for the same reason as `mcp-run`: it is run by the IMAGE BUILD (and
   // by provisioning), not typed by a human.
   if (command === 'mcp-warm') {
-    return mcpWarm(args);
+    await mcpWarm(args);
+    return;
   }
 
   // `codeam mcp-router` — ONE MCP server fronting every integration server, so
