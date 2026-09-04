@@ -83,7 +83,40 @@ function extractText(content: unknown): string {
   return '';
 }
 
-const CONVERSATION_BATCH_SIZE = 30;
+/** Upper bounds of one upload batch: messages AND serialized bytes. The
+ *  backend body limit is 10 MB; 2 MB keeps each POST well under it while a
+ *  74 MB transcript ships in ~40 requests instead of ~900. */
+export const CONVERSATION_BATCH_MAX_MESSAGES = 150;
+export const CONVERSATION_BATCH_MAX_BYTES = 2 * 1024 * 1024;
+
+/**
+ * Split a conversation into upload batches bounded by BOTH message count and
+ * serialized size, so a long transcript costs tens of requests (not hundreds,
+ * which tripped the backend's 100 req/min throttle) and no single batch can
+ * exceed the body limit. A lone oversized message still ships alone.
+ */
+export function batchConversation<T>(
+  messages: readonly T[],
+  limits: { maxMessages?: number; maxBytes?: number } = {},
+): T[][] {
+  const maxMessages = limits.maxMessages ?? CONVERSATION_BATCH_MAX_MESSAGES;
+  const maxBytes = limits.maxBytes ?? CONVERSATION_BATCH_MAX_BYTES;
+  const out: T[][] = [];
+  let cur: T[] = [];
+  let curBytes = 0;
+  for (const m of messages) {
+    const size = Buffer.byteLength(JSON.stringify(m));
+    if (cur.length > 0 && (cur.length >= maxMessages || curBytes + size > maxBytes)) {
+      out.push(cur);
+      cur = [];
+      curBytes = 0;
+    }
+    cur.push(m);
+    curBytes += size;
+  }
+  if (cur.length > 0) out.push(cur);
+  return out;
+}
 
 /**
  * Scrub Agent Squad injected context out of a hydrated conversation.
@@ -180,11 +213,29 @@ function parseJsonl(filePath: string): ClaudeHistoryMessage[] {
 }
 
 /** POST JSON to the API. Returns true on 2xx, false on error/timeout/non-2xx. */
-function post(
+/** Outcome of one POST — `retryAfterMs` is set on 429 (Retry-After honoured, else 20 s). */
+export interface PostOutcome {
+  ok: boolean;
+  status: number | null;
+  retryAfterMs: number | null;
+}
+
+/**
+ * ⚠️ WHY THE 429 HANDLING. The backend throttles ~100 requests/min per client
+ * and `loadConversation` used to ship a long transcript in 30-message
+ * batches with a 500 ms→8 s backoff: a 74 MB session (owner, 2026-09-04) needed
+ * hundreds of POSTs, hit 429 on every one past the first hundred, exhausted
+ * the 8 s backoff and gave up — while the baton mirror uploaded the SAME
+ * conversation in parallel, doubling the traffic. The mobile then found no
+ * stored conversation, re-sent `get_conversation` every 20 s and kept the
+ * composer on "Connecting to your session" forever. A 429 now waits out the
+ * window instead of burning the retry budget.
+ */
+function postWithStatus(
   endpoint: string,
   body: Record<string, unknown>,
   pluginAuthToken?: string,
-): Promise<boolean> {
+): Promise<PostOutcome> {
   return new Promise((resolve) => {
     const payload = JSON.stringify(body);
     const u = new URL(`${API_BASE}${endpoint}`);
@@ -208,23 +259,37 @@ function post(
       },
       (res) => {
         res.resume(); // drain response body
-        const ok = res.statusCode !== undefined && res.statusCode >= 200 && res.statusCode < 300;
-        if (!ok) log.warn('history:post', `${endpoint} → HTTP ${res.statusCode}`);
-        resolve(ok);
+        const status = res.statusCode ?? null;
+        const ok = status !== null && status >= 200 && status < 300;
+        if (!ok) log.warn('history:post', `${endpoint} → HTTP ${status}`);
+        let retryAfterMs: number | null = null;
+        if (status === 429) {
+          const ra = Number(res.headers['retry-after']);
+          retryAfterMs = Number.isFinite(ra) && ra > 0 ? ra * 1000 : 20_000;
+        }
+        resolve({ ok, status, retryAfterMs });
       },
     );
     req.on('error', (err) => {
       log.warn('history:post', `${endpoint} network error`, err);
-      resolve(false);
+      resolve({ ok: false, status: null, retryAfterMs: null });
     });
     req.on('timeout', () => {
       log.warn('history:post', `${endpoint} timeout after 15s`);
       req.destroy();
-      resolve(false);
+      resolve({ ok: false, status: null, retryAfterMs: null });
     });
     req.write(payload);
     req.end();
   });
+}
+
+function post(
+  endpoint: string,
+  body: Record<string, unknown>,
+  pluginAuthToken?: string,
+): Promise<boolean> {
+  return postWithStatus(endpoint, body, pluginAuthToken).then((r) => r.ok);
 }
 
 export interface ContextUsage {
@@ -705,42 +770,56 @@ export class HistoryService {
     return parseJsonl(path.join(this.projectDir, `${sessionId}.jsonl`));
   }
 
+  /** One in-flight full upload per conversation — the baton mirror and a
+   *  `get_conversation` used to upload the same transcript concurrently. */
+  private readonly uploadsInFlight = new Map<string, Promise<void>>();
+
   async loadConversation(sessionId: string): Promise<void> {
+    const inFlight = this.uploadsInFlight.get(sessionId);
+    if (inFlight) return inFlight;
+    const run = this.loadConversationNow(sessionId).finally(() => {
+      this.uploadsInFlight.delete(sessionId);
+    });
+    this.uploadsInFlight.set(sessionId, run);
+    return run;
+  }
+
+  private async loadConversationNow(sessionId: string): Promise<void> {
     const messages = this.readConversation(sessionId);
     if (messages.length === 0) return;
-
-    const totalBatches = Math.ceil(messages.length / CONVERSATION_BATCH_SIZE);
+    const batches = batchConversation(messages);
     const RETRY_DELAYS = [500, 1000, 2000, 4000, 8000];
-
-    for (let i = 0; i < totalBatches; i++) {
-      const batch = messages.slice(i * CONVERSATION_BATCH_SIZE, (i + 1) * CONVERSATION_BATCH_SIZE);
+    for (let i = 0; i < batches.length; i++) {
       const body = {
         pluginId: this.pluginId,
-        // `agentId` keys the backend's per-agent conversation cache.
-        // Older backends that don't recognise the field silently
-        // ignore it and default to `claude-code` server-side — same
-        // outcome as before the per-agent split.
         agentId: this.runtime.id,
         sessionId,
-        messages: batch,
+        messages: batches[i],
         batchIndex: i,
-        totalBatches,
+        totalBatches: batches.length,
       };
-
-      let ok = await post('/api/sessions/conversation', body, this.pluginAuthToken);
-      for (let attempt = 0; !ok && attempt < RETRY_DELAYS.length; attempt++) {
-        await new Promise<void>((r) => setTimeout(r, RETRY_DELAYS[attempt]));
-        ok = await post('/api/sessions/conversation', body, this.pluginAuthToken);
+      let res = await postWithStatus('/api/sessions/conversation', body, this.pluginAuthToken);
+      let attempt = 0;
+      let throttled = 0;
+      // A 429 is not a transient blip: wait the window out (Retry-After or
+      // 20 s) without consuming the short-backoff budget; give up only after
+      // several full windows so a genuinely dead backend still surfaces.
+      while (
+        !res.ok &&
+        (res.retryAfterMs !== null ? throttled < 6 : attempt < RETRY_DELAYS.length)
+      ) {
+        const delay = res.retryAfterMs ?? RETRY_DELAYS[attempt];
+        if (res.retryAfterMs !== null) throttled++;
+        else attempt++;
+        await new Promise<void>((r) => setTimeout(r, delay));
+        res = await postWithStatus('/api/sessions/conversation', body, this.pluginAuthToken);
       }
-
-      if (!ok) {
+      if (!res.ok) {
         throw new Error(
-          `Failed to upload conversation batch ${i + 1}/${totalBatches} after all retries`,
+          `Failed to upload conversation batch ${i + 1}/${batches.length} after all retries (last HTTP ${res.status})`,
         );
       }
     }
-    // Mark the last message as the high-water mark so subsequent
-    // `uploadDelta()` calls only ship the tail.
     const last = messages[messages.length - 1];
     if (last) this.lastUploadedUuid.set(sessionId, last.id);
   }
