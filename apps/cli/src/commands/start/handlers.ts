@@ -80,6 +80,7 @@ import {
   ENV_KEY_RE,
   readPreviewConfig,
   safeParseDetection,
+  isUnsupportedDetection,
   describeDetectionFailure,
   writePreviewConfig,
 } from '../../services/preview';
@@ -2205,7 +2206,7 @@ const requestPreviewDetectH: CommandHandler = (ctx) => {
       });
       return;
     }
-    if (detection.framework === 'unsupported') {
+    if (isUnsupportedDetection(detection)) {
       log.info('preview', 'detect: framework=unsupported');
       emitPreviewEvent({
         sessionId: ctx.sessionId,
@@ -2320,7 +2321,7 @@ export function prewarmPreviewDetection(runtime: RuntimeStrategy): void {
         log.info('preview', `prewarm: detection failed reason=${failure?.reason ?? 'unknown'}`);
         return;
       }
-      if (detection.framework === 'unsupported') return;
+      if (isUnsupportedDetection(detection)) return;
       await writePreviewConfig(cwd, detection);
       log.info(
         'preview',

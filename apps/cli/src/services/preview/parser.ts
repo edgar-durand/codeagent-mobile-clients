@@ -24,14 +24,50 @@ const REQUIRED_FIELDS: Array<keyof PreviewDetection> = [
  * The shape-validation pass at the end checks every REQUIRED_FIELDS
  * entry, so a malformed JSON that happens to parse still fails fast.
  */
-export function safeParseDetection(raw: string | null): PreviewDetection | null {
+export function safeParseDetection(raw: string | null): ParsedDetection | null {
   if (!raw) return null;
   const parsed = parseDetectionObject(raw);
   if (!parsed) return null;
+  if (isUnsupportedAnswer(parsed)) {
+    return {
+      framework: 'unsupported',
+      notes: typeof parsed.notes === 'string' ? parsed.notes : undefined,
+    };
+  }
   for (const field of REQUIRED_FIELDS) {
     if (!(field in parsed)) return null;
   }
   return parsed as unknown as PreviewDetection;
+}
+
+/**
+ * The prompt's own answer for a project with no dev server:
+ * `{"framework":"unsupported","notes":"<reason>"}` — no command, no port.
+ *
+ * ⚠️ This has to be recognised BEFORE the required-field pass. Until
+ * 2026-09-04 it was not, so the one shape the prompt explicitly asks for was
+ * rejected as `missing command, args, port, ready_pattern` and the user saw
+ * "Detection Failed / ERR_MANIFEST_INVALID" with a Retry button — 11 times in
+ * three days for a native Android app (AssassinGhostYT/CodeStudio), whose
+ * agent had answered, every time, exactly "Native Android app … No dev server".
+ * The handler's `unsupported` branch (stage `unsupported`, the agent's reason
+ * as the message) already existed and was unreachable.
+ */
+function isUnsupportedAnswer(parsed: Record<string, unknown>): boolean {
+  return parsed.framework === 'unsupported';
+}
+
+/** A detection for a project that has no dev server — the agent's reason in `notes`. */
+export interface UnsupportedDetection {
+  framework: 'unsupported';
+  notes?: string;
+}
+
+export type ParsedDetection = PreviewDetection | UnsupportedDetection;
+
+/** Narrows a parsed detection; the false branch is a runnable `PreviewDetection`. */
+export function isUnsupportedDetection(d: ParsedDetection): d is UnsupportedDetection {
+  return d.framework === 'unsupported';
 }
 
 /**
@@ -191,6 +227,10 @@ export function describeDetectionFailure(raw: string | null): DetectionFailure |
       rawExcerpt,
     };
   }
+
+  // Same decision as `safeParseDetection`: an "unsupported" answer is a valid
+  // verdict, not a malformed one — never report it as missing fields.
+  if (isUnsupportedAnswer(parsed)) return null;
 
   const missing = REQUIRED_FIELDS.filter((f) => !(f in parsed)).map(String);
   if (missing.length > 0) {
