@@ -109,9 +109,7 @@ export function compileReadyPattern(pattern: string): RegExp {
 }
 
 export type ReadyOutcome =
-  | { kind: 'ready' }
-  | { kind: 'exited'; code: number | null }
-  | { kind: 'timeout' };
+  { kind: 'ready' } | { kind: 'exited'; code: number | null } | { kind: 'timeout' };
 
 /** Minimal child-process surface `waitForDevServerReady` reads. Keeps
  *  the helper testable with a real `child_process.spawn` result OR a
@@ -292,10 +290,7 @@ export async function runPreviewStart(args: PreviewStartArgs): Promise<void> {
   // Un preview adoptado (`devServer === null`) está vivo por definición: solo
   // se adopta lo que está sirviendo.
   if (existing && existing.devServer?.exitCode !== 0 && existing.devServer?.exitCode == null) {
-    log.info(
-      'preview',
-      `reusing running preview for session=${sessionId} url=${existing.url}`,
-    );
+    log.info('preview', `reusing running preview for session=${sessionId} url=${existing.url}`);
     ctx.emitProgress('READY_DETECTED', 'reusing running preview');
     emit(USER_EVENTS.PREVIEW_READY, {
       url: existing.url,
@@ -377,6 +372,12 @@ async function provisionDeps(ctx: StageCtx): Promise<boolean> {
   //    module …". Returns null (no-op) when deps already present;
   //    we trust an existing `node_modules/` rather than running a
   //    slow no-op install on every preview boot.
+  // Expo with a tunnel needs @expo/ngrok, or Expo halts on an interactive
+  // "install it globally?" prompt (exit 1 under our non-TTY spawn). The box
+  // image bakes it; this is the net for boxes/codespaces/locals that predate
+  // that bake. Runs AFTER node_modules exist (below) when they are missing,
+  // so the project-local install lands in a populated tree.
+  const needsExpoNgrok = previewSvc.isExpoTunnelCommand(detection.command, detection.args ?? []);
   const missingDeps = previewSvc.detectMissingNodeDeps(cwd);
   let preflightRan = false;
   if (missingDeps) {
@@ -441,6 +442,33 @@ async function provisionDeps(ctx: StageCtx): Promise<boolean> {
     preflightRan = true;
   }
 
+  if (needsExpoNgrok) {
+    const ensured = await previewSvc.ensureExpoTunnelDeps({
+      hasNgrok: async () => previewSvc.ngrokResolvesFrom(cwd),
+      installNgrok: async () => {
+        emitProgress(
+          'SETUP_RUN',
+          `npm install --no-save ${previewSvc.EXPO_NGROK_SPEC} (Expo tunnel needs ngrok; not found)`,
+        );
+        const r = await previewSvc.runSetupCommand(
+          'npm',
+          ['install', '--no-save', '--no-audit', '--no-fund', previewSvc.EXPO_NGROK_SPEC],
+          cwd,
+          detection.env,
+          { timeoutMs: INSTALL_TIMEOUT_MS },
+        );
+        return { ok: r.status === 'ok', code: r.code };
+      },
+    });
+    if (!ensured.ok) {
+      emit(USER_EVENTS.PREVIEW_ERROR, {
+        stage: 'spawn',
+        message: `Expo's tunnel needs @expo/ngrok and installing it automatically failed (npm install --no-save ${previewSvc.EXPO_NGROK_SPEC}, exit ${ensured.code}). Install it in the project and try the preview again.`,
+      });
+      return false;
+    }
+  }
+
   // 1. Setup commands from the agent — but skip any install command
   //    when the pre-flight just installed deps. The agent
   //    occasionally emits `npm install` for a pnpm-lock project (or
@@ -469,9 +497,7 @@ async function provisionDeps(ctx: StageCtx): Promise<boolean> {
       const o = (entry ?? {}) as { cmd?: unknown; args?: unknown };
       return {
         cmd: typeof o.cmd === 'string' ? o.cmd : '',
-        args: Array.isArray(o.args)
-          ? o.args.filter((a): a is string => typeof a === 'string')
-          : [],
+        args: Array.isArray(o.args) ? o.args.filter((a): a is string => typeof a === 'string') : [],
       };
     })
     .filter((s) => s.cmd.length > 0);
@@ -486,13 +512,9 @@ async function provisionDeps(ctx: StageCtx): Promise<boolean> {
     const timeoutMs = previewSvc.isJsInstallCommand(setup.cmd, setup.args)
       ? INSTALL_TIMEOUT_MS
       : SETUP_TIMEOUT_MS;
-    const result = await previewSvc.runSetupCommand(
-      setup.cmd,
-      setup.args,
-      cwd,
-      detection.env,
-      { timeoutMs },
-    );
+    const result = await previewSvc.runSetupCommand(setup.cmd, setup.args, cwd, detection.env, {
+      timeoutMs,
+    });
     if (result.status === 'timeout') {
       emit(USER_EVENTS.PREVIEW_ERROR, {
         stage: 'ready_timeout',
@@ -633,10 +655,7 @@ async function startDevServer(ctx: StageCtx): Promise<DevServerUp | null> {
        */
       const verdict = await previewSvc.canAdoptPort(detection.port);
       if (verdict.adopt) {
-        log.info(
-          'preview',
-          `adopting the dev server already serving on port ${detection.port}`,
-        );
+        log.info('preview', `adopting the dev server already serving on port ${detection.port}`);
         emitProgress('READY_DETECTED', `adopted the server already on port ${detection.port}`);
         // `devServer: null` = adoptado. No es nuestro, así que parar el
         // preview no lo mata.
@@ -726,7 +745,8 @@ async function startDevServer(ctx: StageCtx): Promise<DevServerUp | null> {
     previewSvc.killProcessTree(devServer, 'SIGTERM');
     emit(USER_EVENTS.PREVIEW_ERROR, {
       stage: 'ready_timeout',
-      message: "The dev server didn't become ready in time. It may be stuck waiting on a database or other service.",
+      message:
+        "The dev server didn't become ready in time. It may be stuck waiting on a database or other service.",
       stderrTail: outputTail.slice(-8000),
     });
     return null;
@@ -766,9 +786,7 @@ async function establishTunnel(ctx: StageCtx, dev: DevServerUp): Promise<TunnelU
   // 4. Tunnel — three branches per the user's session environment.
   emitProgress(
     'TUNNEL_STARTING',
-    detection.framework === 'Expo'
-      ? 'Expo (self-tunnelled)'
-      : 'cloudflared quick tunnel',
+    detection.framework === 'Expo' ? 'Expo (self-tunnelled)' : 'cloudflared quick tunnel',
   );
 
   if (detection.framework === 'Expo') {
@@ -897,22 +915,16 @@ async function establishTunnel(ctx: StageCtx, dev: DevServerUp): Promise<TunnelU
     }
   }
 
-  for (
-    let attempt = 1;
-    attempt <= MAX_TUNNEL_ATTEMPTS && !parsedUrl;
-    attempt += 1
-  ) {
+  for (let attempt = 1; attempt <= MAX_TUNNEL_ATTEMPTS && !parsedUrl; attempt += 1) {
     if (attempt > 1) {
       emitProgress(
         'TUNNEL_STARTING',
         `cloudflared quick tunnel (retry ${attempt}/${MAX_TUNNEL_ATTEMPTS})`,
       );
     }
-    const candidate = spawn(
-      bin,
-      ['tunnel', '--url', `http://localhost:${tunnelPort}`],
-      { stdio: ['ignore', 'pipe', 'pipe'] },
-    );
+    const candidate = spawn(bin, ['tunnel', '--url', `http://localhost:${tunnelPort}`], {
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
     // Wait for BOTH the URL and the registered-connection line (the
     // event-driven helper resolves straight off the child's output —
     // see tunnel-bringup.ts for why we don't DNS-probe from here).

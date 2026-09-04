@@ -6,6 +6,10 @@ import { vi } from 'vitest';
 import {
   detectMissingNodeDeps,
   ensureYarnInstalled,
+  ensureExpoTunnelDeps,
+  isExpoTunnelCommand,
+  ngrokResolvesFrom,
+  EXPO_NGROK_SPEC,
   isJsInstallCommand,
 } from '../../src/services/preview/setup-deps';
 
@@ -148,5 +152,57 @@ describe('isJsInstallCommand', () => {
     ['python', ['-m', 'pip', 'install', '-r', 'requirements.txt']],
   ])('does not detect %s %s as an install command', (cmd, args) => {
     expect(isJsInstallCommand(cmd, args as string[])).toBe(false);
+  });
+});
+
+describe('Expo tunnel needs @expo/ngrok (rafaelph90, 2026-09-04: "Server Failed to Start")', () => {
+  it('recognises our own Expo recipe and its normalized forms, and nothing else', () => {
+    expect(isExpoTunnelCommand('npx', ['expo', 'start', '--tunnel'])).toBe(true);
+    // After normalizeDetectionForSpawn: the project-local bin, args without the bin name.
+    expect(isExpoTunnelCommand('/repo/node_modules/.bin/expo', ['start', '--tunnel'])).toBe(true);
+    expect(isExpoTunnelCommand('npx', ['expo', 'start'])).toBe(false); // LAN mode: no ngrok
+    expect(isExpoTunnelCommand('npm', ['run', 'dev'])).toBe(false);
+  });
+
+  it('installs @expo/ngrok project-locally only when it does not resolve, then re-checks', async () => {
+    let present = false;
+    const installNgrok = async () => {
+      present = true;
+      return { ok: true, code: 0 };
+    };
+    const r = await ensureExpoTunnelDeps({ hasNgrok: async () => present, installNgrok });
+    expect(r).toEqual({ ok: true, code: 0, installed: true });
+
+    // Already there → no install at all (the baked box image case).
+    let calls = 0;
+    const r2 = await ensureExpoTunnelDeps({
+      hasNgrok: async () => true,
+      installNgrok: async () => {
+        calls++;
+        return { ok: true, code: 0 };
+      },
+    });
+    expect(r2).toEqual({ ok: true, code: 0, installed: false });
+    expect(calls).toBe(0);
+  });
+
+  it('reports a failed install honestly instead of letting Expo hit its interactive prompt', async () => {
+    const r = await ensureExpoTunnelDeps({
+      hasNgrok: async () => false,
+      installNgrok: async () => ({ ok: false, code: 243 }),
+    });
+    expect(r).toEqual({ ok: false, code: 243, installed: false });
+  });
+
+  it('resolves ngrok from a project tree, not from the CLI itself', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'expo-ngrok-'));
+    expect(ngrokResolvesFrom(dir)).toBe(false);
+    fs.mkdirSync(path.join(dir, 'node_modules', '@expo', 'ngrok'), { recursive: true });
+    fs.writeFileSync(
+      path.join(dir, 'node_modules', '@expo', 'ngrok', 'package.json'),
+      JSON.stringify({ name: '@expo/ngrok', version: '4.1.0' }),
+    );
+    expect(ngrokResolvesFrom(dir)).toBe(true);
+    expect(EXPO_NGROK_SPEC).toBe('@expo/ngrok@^4.1.0');
   });
 });
