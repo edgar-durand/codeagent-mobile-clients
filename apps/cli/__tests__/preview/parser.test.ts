@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
+  describeDetectionFailure,
+  isUnsupportedDetection,
   parseCloudflaredUrl,
   parseExpoUrl,
   safeParseDetection,
@@ -29,6 +31,27 @@ describe('safeParseDetection', () => {
     expect(safeParseDetection('{"framework":"X"}')).toBeNull();
   });
 
+  it('accepts the prompt\'s own "no dev server" answer instead of calling it malformed', () => {
+    // The exact answer a user's Claude gave 11 times in 3 days for a native
+    // Android app (2026-09-01→04). Until now it was rejected as "missing
+    // command, args, port, ready_pattern" and shown as Detection Failed with
+    // a Retry button — the handler's `unsupported` branch was unreachable.
+    const raw =
+      '{"framework":"unsupported","notes":"Native Android app (Kotlin + Jetpack Compose, Gradle multi-module). No dev server — run via Android emulator/device with `gradlew :app:installDebug`."}';
+    const result = safeParseDetection(raw);
+    expect(result).not.toBeNull();
+    if (!result || !isUnsupportedDetection(result))
+      throw new Error('expected an unsupported verdict');
+    expect(result.notes).toMatch(/Native Android app/);
+    // The diagnosis agrees with the decision: nothing to report as a failure.
+    expect(describeDetectionFailure(raw)).toBeNull();
+    // Fenced, as headless agents often wrap it.
+    expect(safeParseDetection('```json\n{"framework":"unsupported"}\n```')).toEqual({
+      framework: 'unsupported',
+      notes: undefined,
+    });
+  });
+
   it('returns null on null input', () => {
     expect(safeParseDetection(null)).toBeNull();
   });
@@ -56,7 +79,8 @@ Let me know if you need adjustments.`;
       'Sure — {"framework":"Custom","command":"node","args":["server.js"],"port":4000,"ready_pattern":"Server \\u007B ready \\u007D","env":{"HOST":"0.0.0.0"}}';
     const result = safeParseDetection(detection);
     expect(result).toMatchObject({ framework: 'Custom' });
-    expect(result?.env).toEqual({ HOST: '0.0.0.0' });
+    if (!result || isUnsupportedDetection(result)) throw new Error('expected a runnable detection');
+    expect(result.env).toEqual({ HOST: '0.0.0.0' });
   });
 
   it('handles leading whitespace + trailing newlines from headless mode', () => {
@@ -68,11 +92,8 @@ Let me know if you need adjustments.`;
 
 describe('parseCloudflaredUrl', () => {
   it('extracts the trycloudflare URL', () => {
-    const stderr =
-      'INF | https://random-words-abc.trycloudflare.com |\nINF | + |';
-    expect(parseCloudflaredUrl(stderr)).toBe(
-      'https://random-words-abc.trycloudflare.com',
-    );
+    const stderr = 'INF | https://random-words-abc.trycloudflare.com |\nINF | + |';
+    expect(parseCloudflaredUrl(stderr)).toBe('https://random-words-abc.trycloudflare.com');
   });
 
   it('returns null when not found', () => {
