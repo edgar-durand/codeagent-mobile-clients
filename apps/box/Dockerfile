@@ -109,6 +109,14 @@ RUN useradd --create-home --home-dir /home/box box
 # Instalado en la imagen y no al vuelo porque bajarlo en el primer preview
 # metería su descarga en el camino crítico del usuario — el mismo motivo por el
 # que aquí ya viven el CLI, los agentes y el modelo de Headroom.
+# npm never audits inside this image — not in this install, not in `mcp-warm`
+# below, not in any `npx` an integration server is launched with at runtime.
+# `npx` runs `npm audit` (POST /-/npm/v1/security/advisories/bulk) while it
+# populates its cache, and on 2026-09-03 that single request took 268 s (the
+# tarballs took under a second each): three packages of the warm hit the 300 s
+# fetch-timeout IN SERIES and the fleet-box CI build ran past its limit. An
+# audit of an exact-pinned package at bake or launch time informs nobody.
+ENV npm_config_audit=false npm_config_fund=false npm_config_update_notifier=false
 ARG CODEAM_CLI_VERSION=latest
 RUN npm install -g --omit=optional \
         "codeam-cli@${CODEAM_CLI_VERSION}" \

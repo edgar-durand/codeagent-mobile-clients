@@ -125,3 +125,59 @@ describe('warmTargets — derived from the registry, never a second list', () =>
     expect(warmTargets().length).toBeGreaterThan(10);
   });
 });
+
+describe('mcpWarm — the fetch budget is BOUNDED (the 2026-09-03 image-build hang)', () => {
+  it('abandons a launcher that never answers, per package AND overall, and reports every miss', async () => {
+    // A fake `npx` that hangs forever, first on PATH — the registry stalling.
+    // Three of the real 17 packages hit ETIMEDOUT after 300 s EACH, in series,
+    // and the warm alone passed 25 minutes. The bound must hold with nothing
+    // mocked in the code under test.
+    const { mkdtempSync, writeFileSync, chmodSync } = await import('node:fs');
+    const { tmpdir } = await import('node:os');
+    const { join } = await import('node:path');
+    const { mcpWarm } = await import('../../src/integrations/mcp-warm');
+    const dir = mkdtempSync(join(tmpdir(), 'warm-hang-'));
+    const fake = join(dir, process.platform === 'win32' ? 'npx.cmd' : 'npx');
+    writeFileSync(
+      fake,
+      process.platform === 'win32'
+        ? '@echo off\r\nping -n 600 127.0.0.1 >nul\r\n'
+        : '#!/bin/sh\nsleep 600\n',
+    );
+    chmodSync(fake, 0o755);
+    const origPath = process.env.PATH;
+    process.env.PATH = `${dir}${process.platform === 'win32' ? ';' : ':'}${origPath}`;
+    try {
+      const ids = warmTargets()
+        .filter((t) => t.launcher === 'npx')
+        .slice(0, 5)
+        .map((t) => t.id);
+      expect(ids.length).toBeGreaterThanOrEqual(3);
+
+      const started = Date.now();
+      const result = await mcpWarm(ids, {
+        packageTimeoutMs: 400,
+        totalBudgetMs: 700,
+        concurrency: 2,
+      });
+      const elapsed = Date.now() - started;
+
+      // 5 hanging packages, 2 at a time, 400 ms each → 3 rounds would be
+      // 1.2 s; the 700 ms budget cuts round 2 short (min(package, remaining))
+      // and the 5th package is never attempted. Well under the old 300 s × 5.
+      expect(elapsed).toBeLessThan(3_000);
+      expect(result.warmed).toEqual([]);
+      expect(result.failed.map((f) => f.spec).sort()).toEqual(
+        warmTargets()
+          .filter((t) => ids.includes(t.id))
+          .map((t) => t.spec)
+          .sort(),
+      );
+      // Two kinds of miss, both named: the per-package timeout, and the budget.
+      expect(result.failed.some((f) => /ETIMEDOUT/.test(f.reason))).toBe(true);
+      expect(result.failed.some((f) => f.reason === 'warm budget spent')).toBe(true);
+    } finally {
+      process.env.PATH = origPath;
+    }
+  }, 20_000);
+});

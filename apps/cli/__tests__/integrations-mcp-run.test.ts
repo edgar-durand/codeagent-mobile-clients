@@ -13,8 +13,15 @@ vi.mock('node:os', async (orig) => {
   return { ...actual, homedir: () => FAKE_HOME, default: { ...actual, homedir: () => FAKE_HOME } };
 });
 
-import { resolveDelivery, resolveLauncherPath, localBinCandidates } from '../src/integrations/mcp-run';
-import { persistIntegrationsManifest, clearIntegrationsManifest } from '../src/integrations/manifest';
+import {
+  resolveDelivery,
+  resolveLauncherPath,
+  localBinCandidates,
+} from '../src/integrations/mcp-run';
+import {
+  persistIntegrationsManifest,
+  clearIntegrationsManifest,
+} from '../src/integrations/manifest';
 import { INTEGRATION_REGISTRY } from '@codeam/shared';
 
 describe('mcp-run resolveDelivery — staticEnv rollout defense', () => {
@@ -78,7 +85,11 @@ describe('mcp-run resolveDelivery — staticEnv rollout defense', () => {
           // registry doesn't know. The manifest spec must be used verbatim.
           id: 'linear' as never,
           delivery: {
-            mcp: { command: 'npx', args: ['linear-mcp'], envMapping: { LINEAR_TOKEN: 'accessToken' } },
+            mcp: {
+              command: 'npx',
+              args: ['linear-mcp'],
+              envMapping: { LINEAR_TOKEN: 'accessToken' },
+            },
           },
         },
       ],
@@ -143,5 +154,39 @@ describe('resolveLauncherPath — per-user bin fallback (fleet-1 uvx incident)',
       p.join(FAKE_HOME, '.local', 'bin', 'uvx'),
       p.join(FAKE_HOME, '.cargo', 'bin', 'uvx'),
     ]);
+  });
+});
+
+describe('mcp-run childEnvFor — the launcher defaults ride under every server', () => {
+  it('disables npm audit/fund/notifier, keeps staticEnv, and lets the credential mapping win', async () => {
+    // 2026-09-03: a cold `npx -y clickup-mcp-pro@1.0.1` spent 268 s in
+    // `npm audit` (`/-/npm/v1/security/advisories/bulk`) while the install
+    // itself took 3 s — the server printed nothing and the agent filed it as
+    // "not connected". The audit is switched off through npm's env config.
+    const { childEnvFor } = await import('../src/integrations/mcp-run');
+    const { LAUNCHER_ENV } = await import('../src/integrations/launcher-env');
+    const delivery = {
+      command: 'npx',
+      args: ['-y', 'some-mcp@1.0.0'],
+      envMapping: { SOME_TOKEN: 'accessToken', SOME_TEAM: 'teamId' },
+      staticEnv: { SOME_MODE: 'stdio', npm_config_fund: 'true' },
+    } as unknown as import('@codeam/shared').IntegrationMcpDelivery;
+    const token = {
+      accessToken: 'tok-1',
+      teamId: 'team-9',
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    } as unknown as import('@codeam/shared').BrokeredIntegrationToken;
+
+    const env = childEnvFor(delivery, token);
+
+    expect(env.npm_config_audit).toBe('false');
+    expect(env.npm_config_update_notifier).toBe('false');
+    expect(LAUNCHER_ENV.npm_config_audit).toBe('false');
+    // Registry staticEnv sits ABOVE the launcher defaults (a registry entry may
+    // deliberately override one), and the credential mapping above both.
+    expect(env.npm_config_fund).toBe('true');
+    expect(env.SOME_MODE).toBe('stdio');
+    expect(env.SOME_TOKEN).toBe('tok-1');
+    expect(env.SOME_TEAM).toBe('team-9');
   });
 });
