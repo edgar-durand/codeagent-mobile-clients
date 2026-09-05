@@ -4,6 +4,7 @@ import {
   isUnsupportedDetection,
   parseCloudflaredUrl,
   parseExpoUrl,
+  expoTunnelDebugEnv,
   safeParseDetection,
 } from '../../src/services/preview/parser';
 
@@ -102,12 +103,37 @@ describe('parseCloudflaredUrl', () => {
 });
 
 describe('parseExpoUrl', () => {
-  it('extracts the exp.host URL', () => {
+  it('extracts the legacy exp.host URL', () => {
     const stdout = '› Tunnel ready.\nexp://xyz.exp.host';
     expect(parseExpoUrl(stdout)).toBe('exp://xyz.exp.host');
   });
 
-  it('returns null when not found', () => {
+  // 2026-09-05: every Expo preview on a Box timed out — modern `expo start
+  // --tunnel` yields `*.exp.direct` (@expo/cli AsyncNgrok), never `exp.host`.
+  it('extracts the modern exp.direct deep link (interactive UI line)', () => {
+    const out = '› Metro: exp://abc123-anonymous-8081.exp.direct\n› Scan the QR code above';
+    expect(parseExpoUrl(out)).toBe('exp://abc123-anonymous-8081.exp.direct');
+  });
+
+  // Without a TTY Expo prints only `Waiting on http://localhost:8081`; the
+  // tunnel URL is observable via the `expo:start:server:ngrok` debug channel.
+  it('derives the deep link from the ngrok debug line a non-TTY Expo emits', () => {
+    const stderr =
+      '  expo:start:server:ngrok Tunnel URL: https://abc123-anonymous-8081.exp.direct +2s\n' +
+      'Tunnel ready.\nWaiting on http://localhost:8081\n';
+    expect(parseExpoUrl(stderr)).toBe('exp://abc123-anonymous-8081.exp.direct');
+  });
+
+  it('never mistakes the LAN/localhost server line for a tunnel', () => {
+    expect(parseExpoUrl('Waiting on http://localhost:8081\nexp://192.168.1.5:8081')).toBeNull();
     expect(parseExpoUrl('no expo url')).toBeNull();
+  });
+});
+
+describe('expoTunnelDebugEnv', () => {
+  it('adds the ngrok debug channel, preserving whatever DEBUG the project already set', () => {
+    expect(expoTunnelDebugEnv(undefined)).toEqual({ DEBUG: 'expo:start:server:ngrok' });
+    expect(expoTunnelDebugEnv('metro:*')).toEqual({ DEBUG: 'metro:*,expo:start:server:ngrok' });
+    expect(expoTunnelDebugEnv('expo:start:server:ngrok')).toEqual({ DEBUG: 'expo:start:server:ngrok' });
   });
 });
