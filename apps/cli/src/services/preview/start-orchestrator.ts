@@ -682,9 +682,17 @@ async function startDevServer(ctx: StageCtx): Promise<DevServerUp | null> {
 
   const spawnable = normalizeDetectionForSpawn(detection, cwd);
   emitProgress('BOOT_SEQUENCE', `${spawnable.command} ${spawnable.args.join(' ')}`);
+  // Expo tunnel: without a TTY Expo never prints its `exp://` URL (that line
+  // is the interactive UI's). The ngrok debug channel does — opt into it so
+  // the URL is observable. See `parseExpoUrl` / `expoTunnelDebugEnv`.
+  const isExpo = detection.framework === 'Expo';
+  const expoDebugEnv =
+    isExpo && previewSvc.isExpoTunnelCommand(detection.command, detection.args ?? [])
+      ? previewSvc.expoTunnelDebugEnv(spawnable.env?.DEBUG ?? process.env.DEBUG)
+      : {};
   const devServer = spawn(spawnable.command, spawnable.args, {
     cwd,
-    env: { ...process.env, ...(spawnable.env ?? {}) },
+    env: { ...process.env, ...(spawnable.env ?? {}), ...expoDebugEnv },
     stdio: ['ignore', 'pipe', 'pipe'],
     // POSIX: lead a new process group so teardown can SIGTERM the whole
     // tree. Dev servers fork worker children that bind the port; killing
@@ -701,7 +709,16 @@ async function startDevServer(ctx: StageCtx): Promise<DevServerUp | null> {
   // event can carry the REAL reason the server never came up (e.g. an
   // "Unable to connect to the database" loop) instead of a black screen.
   let outputTail = '';
-  const readyRe = compileReadyPattern(detection.ready_pattern);
+  // Expo: the detect prompt's `ready_pattern` is a guess about interactive
+  // output ("Metro waiting"…) that a non-TTY Expo never prints. Its REAL
+  // ready signal is the tunnel deep link (or the debug `Tunnel URL:` line);
+  // gate on that, keeping the AI pattern only as an extra alternative.
+  const readyRe = isExpo
+    ? new RegExp(
+        `(?:${compileReadyPattern(detection.ready_pattern).source})|exp:\\/\\/[^\\s]+\\.exp\\.(?:direct|host)|Tunnel URL:`,
+        'i',
+      )
+    : compileReadyPattern(detection.ready_pattern);
   // Additive port-listening fallback (BUG 1) for the framework that
   // hit the hang in prod: Next.js prints `▲ Next.js 14.x` /
   // `- Local: http://localhost:3000` rather than a literal "ready"
@@ -721,8 +738,10 @@ async function startDevServer(ctx: StageCtx): Promise<DevServerUp | null> {
       // the unhelpful "N tasks failed · run with --verbose" footer.
       // 16 KB reliably includes the failing task's own stderr.
       outputTail = (outputTail + s).slice(-16_000);
-      if (!expoUrlRef.current && detection.framework === 'Expo') {
-        expoUrlRef.current = previewSvc.parseExpoUrl(s);
+      if (!expoUrlRef.current && isExpo) {
+        // Parse over the accumulated tail, not the single chunk — the debug
+        // line and its URL can straddle two `data` events.
+        expoUrlRef.current = previewSvc.parseExpoUrl(outputTail);
       }
     },
     portProbe: isNextJs

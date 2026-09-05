@@ -162,12 +162,47 @@ export function parseCloudflaredUrl(stderr: string): string | null {
   return match ? match[0] : null;
 }
 
-const EXPO_URL_RE = /exp:\/\/[^\s]+\.exp\.host/;
+/**
+ * Expo tunnel deep links. Modern `expo start --tunnel` (SDK 49+, @expo/cli
+ * `AsyncNgrok` → `NGROK_CONFIG.domain = 'exp.direct'`) yields
+ * `exp://<randomness>-<user>-<port>.exp.direct`; `exp.host` was only the
+ * legacy hosted domain. Also `.exp.direct` links have no port.
+ */
+const EXPO_DEEP_LINK_RE = /exp:\/\/[^\s"'`)]+\.exp\.(?:direct|host)(?::\d+)?/;
+/**
+ * ⚠️ In NON-interactive mode (how a preview spawns it: no TTY) Expo prints
+ * ONLY `Waiting on http://localhost:<port>` — the `Metro: exp://…` line
+ * belongs to the interactive terminal UI and never appears. The tunnel URL is
+ * still observable: `AsyncNgrok` emits `debug('Tunnel URL:', serverUrl)` on
+ * the `expo:start:server:ngrok` channel, so the preview spawns Expo with
+ * `DEBUG=expo:start:server:ngrok` (see `expoTunnelDebugEnv`) and reads it
+ * here — `https://<sub>.exp.direct` → `exp://<sub>.exp.direct`.
+ *
+ * 2026-09-05 (owner report, Rafael's expo-test on a Box): Expo started,
+ * tunnel connected, nothing ever matched → ERR_READY_TIMEOUT every time.
+ */
+const EXPO_DEBUG_TUNNEL_RE = /Tunnel URL:\s*(https?:\/\/([^\s"'`)]+\.exp\.(?:direct|host)))/;
 
-/** Extract the `exp://*.exp.host` deep link from Expo's stdout. */
-export function parseExpoUrl(stdout: string): string | null {
-  const match = stdout.match(EXPO_URL_RE);
-  return match ? match[0] : null;
+/** Extract the Expo tunnel deep link from Expo's stdout/stderr (any mode). */
+export function parseExpoUrl(output: string): string | null {
+  const direct = output.match(EXPO_DEEP_LINK_RE);
+  if (direct) return direct[0];
+  const dbg = output.match(EXPO_DEBUG_TUNNEL_RE);
+  if (dbg) return `exp://${dbg[2]}`;
+  return null;
+}
+
+/** `DEBUG` channel that makes `expo start --tunnel` print its tunnel URL when it has no TTY. */
+export const EXPO_TUNNEL_DEBUG_CHANNEL = 'expo:start:server:ngrok';
+
+/**
+ * Env to spawn an Expo tunnel with so its tunnel URL is observable without a
+ * TTY: appends the ngrok debug channel to any `DEBUG` the project already set.
+ */
+export function expoTunnelDebugEnv(existing: string | undefined): { DEBUG: string } {
+  const cur = (existing ?? '').split(',').map((s) => s.trim()).filter(Boolean);
+  if (!cur.includes(EXPO_TUNNEL_DEBUG_CHANNEL)) cur.push(EXPO_TUNNEL_DEBUG_CHANNEL);
+  return { DEBUG: cur.join(',') };
 }
 
 /** Por que no salio una deteccion utilizable. Cada motivo tiene otro arreglo. */
