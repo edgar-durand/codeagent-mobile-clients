@@ -87,7 +87,7 @@
     "zod": "^4.3.6"
   },
   "optionalDependencies": {
-    "@beads/bd": "1.0.5"
+    "@beads/bd": "1.1.2"
   },
   "devDependencies": {
     "@codeam/shared": "*",
