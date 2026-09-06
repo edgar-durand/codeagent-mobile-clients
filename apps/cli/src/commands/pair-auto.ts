@@ -222,6 +222,86 @@ function pairAutoLockPath(): string {
   return path.join(os.homedir(), '.codeam', 'pair-auto.lock');
 }
 
+/** Where the Linux procfs is mounted. Redirectable so tests can author fake
+ *  `/proc/<pid>` entries on any OS. */
+let procRoot = '/proc';
+
+/** Test-only escape hatches. */
+export const _lockHelpers = {
+  setProcRootForTests(root: string | undefined): void {
+    procRoot = root ?? '/proc';
+  },
+};
+
+function readProcFile(rel: string): string | undefined {
+  try {
+    return fs.readFileSync(path.join(procRoot, rel), 'utf8');
+  } catch {
+    return undefined;
+  }
+}
+
+/** `starttime` (field 22 of `/proc/<pid>/stat`, clock ticks since boot) — the
+ *  kernel's own "which incarnation of this pid" stamp. Anchored on the LAST
+ *  `)` because `comm` may contain spaces/parens. Undefined without procfs. */
+function procStartTicks(pid: number): string | undefined {
+  const stat = readProcFile(`${pid}/stat`);
+  if (!stat) return undefined;
+  const afterComm = stat.slice(stat.lastIndexOf(')') + 2).trim().split(/\s+/);
+  // afterComm[0] is field 3 (state); field 22 is index 19.
+  return afterComm[19];
+}
+
+/** Thread-group id from `/proc/<pid>/status`. For a real process it equals the
+ *  pid; for a THREAD it is the owning process's pid. */
+function procTgid(pid: number): number | undefined {
+  const m = readProcFile(`${pid}/status`)?.match(/^Tgid:\s+(\d+)/m);
+  return m ? Number(m[1]) : undefined;
+}
+
+function currentBootId(): string | undefined {
+  return readProcFile('sys/kernel/random/boot_id')?.trim() || undefined;
+}
+
+/**
+ * What a lock file records about its holder. `pid` alone is the legacy
+ * (pre-2026-09) format; `start` + `boot` let a later launch tell a REUSED pid
+ * from the original holder without trusting liveness heuristics.
+ */
+export interface LockRecord {
+  pid: number;
+  start?: string;
+  boot?: string;
+}
+
+/** Parse a lock file. First line = pid (kept bare so `head -1` and legacy
+ *  readers keep working); second line = `start=<ticks> boot=<id>`. */
+export function readLockRecord(lockPath: string): LockRecord | undefined {
+  let raw: string;
+  try {
+    raw = fs.readFileSync(lockPath, 'utf8');
+  } catch {
+    return undefined;
+  }
+  const [first = '', second = ''] = raw.split('\n');
+  const pid = Number(first.trim());
+  if (!Number.isInteger(pid) || pid <= 0) return undefined;
+  const rec: LockRecord = { pid };
+  const start = /(?:^|\s)start=(\S+)/.exec(second)?.[1];
+  const boot = /(?:^|\s)boot=(\S+)/.exec(second)?.[1];
+  if (start) rec.start = start;
+  if (boot) rec.boot = boot;
+  return rec;
+}
+
+/** Serialize THIS process's lock record (pid + its procfs identity when available). */
+function ownLockBody(): string {
+  const start = procStartTicks(process.pid);
+  const boot = currentBootId();
+  const tags = [start ? `start=${start}` : '', boot ? `boot=${boot}` : ''].filter(Boolean);
+  return tags.length ? `${process.pid}\n${tags.join(' ')}\n` : String(process.pid);
+}
+
 /** True only if `pid` is a LIVE `codeam` process (guards against PID reuse). */
 export function isLivePairAuto(pid: number): boolean {
   if (!Number.isInteger(pid) || pid <= 0 || pid === process.pid) return false;
@@ -233,10 +313,45 @@ export function isLivePairAuto(pid: number): boolean {
   // On Linux (codespaces) confirm it's actually a codeam process so a reused
   // PID doesn't make us defer to an unrelated process. No /proc → trust the
   // liveness check (macOS local pairs).
+  const cmdline = readProcFile(`${pid}/cmdline`);
+  if (cmdline === undefined) return true;
+  // ⚠️ Threads share the pid number space. `kill(tid, 0)` succeeds on a thread
+  // id and `/proc/<tid>/cmdline` is the OWNING process's cmdline — so a stale
+  // lock whose pid now lands inside another codeam process's thread-id range
+  // (the warm-codespace host-agent: pid N, threads N+1..N+13, and the previous
+  // boot's child pid was N+14 — deterministic boot layout, 2026-09-05) read as
+  // "live codeam" and the session child exit(0)-deferred to a phantom. A real
+  // process is its own thread-group leader.
+  const tgid = procTgid(pid);
+  if (tgid !== undefined && tgid !== pid) return false;
+  return cmdline.includes('codeam');
+}
+
+/**
+ * Is the recorded lock holder still the SAME live codeam process? A different
+ * kernel boot or a different process start time means the pid was reused —
+ * stale regardless of what now runs under that number. Falls back to the
+ * liveness heuristic for legacy pid-only records / no procfs.
+ */
+function isLiveLockHolder(rec: LockRecord | undefined): boolean {
+  if (!rec || rec.pid === process.pid) return false;
+  if (rec.boot) {
+    const boot = currentBootId();
+    if (boot && boot !== rec.boot) return false;
+  }
+  if (rec.start) {
+    const start = procStartTicks(rec.pid);
+    if (start !== undefined && start !== rec.start) return false;
+  }
+  return isLivePairAuto(rec.pid);
+}
+
+/** Delete `lockPath` iff THIS process still holds it (best-effort). */
+function releaseOwnLock(lockPath: string): void {
   try {
-    return fs.readFileSync(`/proc/${pid}/cmdline`, 'utf8').includes('codeam');
+    if (readLockRecord(lockPath)?.pid === process.pid) fs.unlinkSync(lockPath);
   } catch {
-    return true;
+    /* best-effort */
   }
 }
 
@@ -280,26 +395,15 @@ export function acquireDaemonLock(sessionId: string): boolean {
   try {
     fs.mkdirSync(path.dirname(lockPath), { recursive: true });
     try {
-      fs.writeFileSync(lockPath, String(process.pid), { flag: 'wx' });
+      fs.writeFileSync(lockPath, ownLockBody(), { flag: 'wx' });
     } catch (e) {
       if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e;
-      const holder = Number(fs.readFileSync(lockPath, 'utf8').trim());
-      if (holder && holder !== process.pid && isLiveCodeam(holder)) return false;
-      // Stale lock (crashed daemon) or re-acquire by the same process — reclaim.
-      fs.writeFileSync(lockPath, String(process.pid));
+      if (isLiveLockHolder(readLockRecord(lockPath))) return false;
+      // Stale lock (crashed daemon, previous boot) or re-acquire by the same
+      // process — reclaim.
+      fs.writeFileSync(lockPath, ownLockBody());
     }
-    const release = () => {
-      try {
-        if (
-          fs.existsSync(lockPath) &&
-          Number(fs.readFileSync(lockPath, 'utf8').trim()) === process.pid
-        ) {
-          fs.unlinkSync(lockPath);
-        }
-      } catch {
-        /* best-effort */
-      }
-    };
+    const release = () => releaseOwnLock(lockPath);
     process.once('exit', release);
     process.once('SIGTERM', () => {
       release();
@@ -335,25 +439,13 @@ export function acquireSingletonLock(): boolean {
   try {
     fs.mkdirSync(path.dirname(lockPath), { recursive: true });
     try {
-      fs.writeFileSync(lockPath, String(process.pid), { flag: 'wx' });
+      fs.writeFileSync(lockPath, ownLockBody(), { flag: 'wx' });
     } catch (e) {
       if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e;
-      const holder = Number(fs.readFileSync(lockPath, 'utf8').trim());
-      if (isLivePairAuto(holder)) return false; // another pair-auto owns it
-      fs.writeFileSync(lockPath, String(process.pid)); // reclaim stale lock
+      if (isLiveLockHolder(readLockRecord(lockPath))) return false; // another pair-auto owns it
+      fs.writeFileSync(lockPath, ownLockBody()); // reclaim stale lock
     }
-    process.once('exit', () => {
-      try {
-        if (
-          fs.existsSync(lockPath) &&
-          Number(fs.readFileSync(lockPath, 'utf8').trim()) === process.pid
-        ) {
-          fs.unlinkSync(lockPath);
-        }
-      } catch {
-        /* best-effort cleanup */
-      }
-    });
+    process.once('exit', () => releaseOwnLock(lockPath));
     return true;
   } catch {
     return true; // never block pairing on a lock-infra failure

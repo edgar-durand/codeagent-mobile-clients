@@ -921,6 +921,23 @@ describe('HostAgentSupervisor — control channel reuse', () => {
       });
     });
 
+    // 2026-09-05 (dev2.brico warm codespace): the resumed child exit(0)-deferred
+    // to a phantom daemon lock and the supervisor logged NOTHING — the only trace
+    // was the absence of a child debug log. A clean exit of a child that was
+    // supposed to run for hours is never "fine": say so, with the child's tail.
+    it('logs a WARN with the child tail when the resumed child exits 0 without a resume child log line', async () => {
+      const warnSpy = vi.spyOn(log, 'warn');
+      await withRetryHarness(async ({ procs }) => {
+        procs[0].stdout.emit(
+          'data',
+          Buffer.from('  A codeam daemon for this session is already running — deferring to it.\n'),
+        );
+        procs[0].emit('exit', 0);
+        const msgs = warnSpy.mock.calls.map((c) => String(c[1]));
+        expect(msgs.some((m) => /resumed session sess-res.*exited 0/.test(m) && /deferring to it/.test(m))).toBe(true);
+      });
+    });
+
     it('exhausts the retries, posts ONE visible error bubble carrying the child failure, then re-probes on the heartbeat', async () => {
       await withRetryHarness(async ({ procs, resumeSpawner, postResumeFailure }) => {
         // Burn the initial attempt + every backoff retry.
