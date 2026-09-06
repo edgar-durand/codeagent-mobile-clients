@@ -156,8 +156,8 @@ describe('acquireDaemonLock', () => {
     expect(acquireDaemonLock(sessionB)).toBe(true);
     expect(daemonLockPath(sessionA)).not.toBe(daemonLockPath(sessionB));
     // Both lockfiles exist, both owned by our pid.
-    expect(Number(fs.readFileSync(daemonLockPath(sessionA), 'utf8').trim())).toBe(process.pid);
-    expect(Number(fs.readFileSync(daemonLockPath(sessionB), 'utf8').trim())).toBe(process.pid);
+    expect(Number(fs.readFileSync(daemonLockPath(sessionA), 'utf8').split('\n')[0].trim())).toBe(process.pid);
+    expect(Number(fs.readFileSync(daemonLockPath(sessionB), 'utf8').split('\n')[0].trim())).toBe(process.pid);
   });
 
   it('fails open when the .codeam directory cannot be created (returns true)', () => {

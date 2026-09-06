@@ -44,13 +44,13 @@ describe('isLivePairAuto', () => {
 describe('acquireSingletonLock', () => {
   it('acquires when no lock exists and records our pid', () => {
     expect(acquireSingletonLock()).toBe(true);
-    expect(Number(fs.readFileSync(lockFile(), 'utf8'))).toBe(process.pid);
+    expect(Number(fs.readFileSync(lockFile(), 'utf8').split('\n')[0].trim())).toBe(process.pid);
   });
 
   it('reclaims a stale lock left by a dead process', () => {
     fs.mkdirSync(path.dirname(lockFile()), { recursive: true });
     fs.writeFileSync(lockFile(), String(DEAD_PID));
     expect(acquireSingletonLock()).toBe(true);
-    expect(Number(fs.readFileSync(lockFile(), 'utf8'))).toBe(process.pid);
+    expect(Number(fs.readFileSync(lockFile(), 'utf8').split('\n')[0].trim())).toBe(process.pid);
   });
 });
