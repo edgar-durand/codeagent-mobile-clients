@@ -75,7 +75,7 @@ describe('acquireDaemonLock', () => {
   it('acquires the lock when none exists and writes our pid to the lockfile', () => {
     expect(acquireDaemonLock(SESSION_ID)).toBe(true);
     const lockPath = daemonLockPath(SESSION_ID);
-    expect(Number(fs.readFileSync(lockPath, 'utf8').trim())).toBe(process.pid);
+    expect(Number(fs.readFileSync(lockPath, 'utf8').split('\n')[0].trim())).toBe(process.pid);
   });
 
   it('creates the .codeam directory if it does not exist', () => {
@@ -92,7 +92,7 @@ describe('acquireDaemonLock', () => {
     expect(acquireDaemonLock(SESSION_ID)).toBe(true);
     // Lockfile still holds our pid.
     const lockPath = daemonLockPath(SESSION_ID);
-    expect(Number(fs.readFileSync(lockPath, 'utf8').trim())).toBe(process.pid);
+    expect(Number(fs.readFileSync(lockPath, 'utf8').split('\n')[0].trim())).toBe(process.pid);
   });
 
   it('reclaims a stale lockfile left by a dead process', () => {
@@ -101,7 +101,7 @@ describe('acquireDaemonLock', () => {
     fs.writeFileSync(lockPath, String(DEAD_PID));
     // Should reclaim (dead holder) and return true.
     expect(acquireDaemonLock(SESSION_ID)).toBe(true);
-    expect(Number(fs.readFileSync(lockPath, 'utf8').trim())).toBe(process.pid);
+    expect(Number(fs.readFileSync(lockPath, 'utf8').split('\n')[0].trim())).toBe(process.pid);
   });
 
   it('returns false when another LIVE codeam process holds the lock', () => {
@@ -156,8 +156,8 @@ describe('acquireDaemonLock', () => {
     expect(acquireDaemonLock(sessionB)).toBe(true);
     expect(daemonLockPath(sessionA)).not.toBe(daemonLockPath(sessionB));
     // Both lockfiles exist, both owned by our pid.
-    expect(Number(fs.readFileSync(daemonLockPath(sessionA), 'utf8').trim())).toBe(process.pid);
-    expect(Number(fs.readFileSync(daemonLockPath(sessionB), 'utf8').trim())).toBe(process.pid);
+    expect(Number(fs.readFileSync(daemonLockPath(sessionA), 'utf8').split('\n')[0].trim())).toBe(process.pid);
+    expect(Number(fs.readFileSync(daemonLockPath(sessionB), 'utf8').split('\n')[0].trim())).toBe(process.pid);
   });
 
   it('fails open when the .codeam directory cannot be created (returns true)', () => {

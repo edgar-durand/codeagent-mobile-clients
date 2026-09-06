@@ -2557,11 +2557,25 @@ export class HostAgentSupervisor {
       };
       proc.stdout?.on('data', appendTail);
       proc.stderr?.on('data', appendTail);
-      proc.once('exit', (code) => {
+      proc.once('exit', (code, signal) => {
         if (this.children.get(deployId)?.proc === proc) this.children.delete(deployId);
         if (typeof code === 'number' && code !== 0) {
           this.onResumeChildExit(session, code, tail.trim().slice(-300));
+          return;
         }
+        // A resume child is meant to live for hours; a clean exit means it
+        // declined to run (start() deferred to a "live" daemon lock / found no
+        // session) and it never reached the logger — so without this line the
+        // ONLY trace is a missing child debug log. 2026-09-05 warm codespace:
+        // the child deferred to a phantom lock (previous boot's pid reused by
+        // a host-agent thread) and the session sat HOST_OFFLINE for 40 min
+        // with a silent supervisor. Not retried (a genuine live daemon would
+        // just defer again) — surfaced.
+        log.warn(
+          'host-agent',
+          `resumed session ${session.id.slice(0, 8)} exited ${signal ?? code ?? 0} without taking over` +
+            ` — tail: ${tail.trim().slice(-300) || '(no output)'}`,
+        );
       });
       log.info(
         'host-agent',
