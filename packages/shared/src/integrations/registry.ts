@@ -250,15 +250,16 @@ export const INTEGRATION_REGISTRY: Record<IntegrationId, IntegrationDefinition> 
         'groups:read',
         'groups:history',
         'chat:write',
-        'reactions:read',
         'reactions:write',
         'users:read',
         'im:read',
         'im:history',
         'mpim:read',
         'mpim:history',
-        // Message search across the user's channels/DMs (a user-only scope).
-        'search:read',
+        // ⚠️ No `search:read` / `reactions:read`: nothing uses them (the MCP
+        // server has no search tool and nothing reads reactions), and Slack's
+        // Marketplace review rejects requested-but-unused scopes. Trimmed for
+        // the 2026-09 listing submission; re-add WITH a tool that needs them.
       ],
     },
     delivery: {

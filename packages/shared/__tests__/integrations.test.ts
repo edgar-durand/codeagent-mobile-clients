@@ -130,22 +130,24 @@ describe('integrations registry', () => {
     expect(slack.name).toBe('Slack');
     expect(slack.icon).toBe('slack');
     expect(slack.auth.kind).toBe('oauth_redirect');
-    // Bot Token Scopes — read + write across channels/groups/DMs.
+    // User Token Scopes — read + write across channels/groups/DMs. Exactly the
+    // 11 the product uses; `search:read` / `reactions:read` were dropped for the
+    // 2026-09 Slack Marketplace listing (unused → review rejection).
     expect(slack.auth.scopes).toEqual([
       'channels:read',
       'channels:history',
       'groups:read',
       'groups:history',
       'chat:write',
-      'reactions:read',
       'reactions:write',
       'users:read',
       'im:read',
       'im:history',
       'mpim:read',
       'mpim:history',
-      'search:read',
     ]);
+    expect(slack.auth.scopes).not.toContain('search:read');
+    expect(slack.auth.scopes).not.toContain('reactions:read');
     // Official Slack MCP: bot token + team id via env (never argv). PINNED.
     expect(slack.delivery.mcp?.command).toBe('npx');
     expect(slack.delivery.mcp?.args).toEqual([
