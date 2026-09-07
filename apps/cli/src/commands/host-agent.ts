@@ -1814,8 +1814,11 @@ export class HostAgentSupervisor {
 
     // Nothing to do when it already runs the freshest image. `fleetBoxImageStale`
     // pulls `:latest` first, so the pull happens ONCE here rather than per box
-    // inside the create.
-    if (!(await this.fleetBoxImageStale(containerName))) {
+    // inside the create. A pull failure is `null` — reported there, and NOT
+    // "already current" here.
+    const stale = await this.fleetBoxImageStale(containerName);
+    if (stale === null) return;
+    if (!stale) {
       log.info('host-agent', `fleet_migrate_box_image: ${containerName} already current`);
       return;
     }
@@ -1923,10 +1926,10 @@ export class HostAgentSupervisor {
    * current registry `:latest` (a stale runtime), or the container is gone.
    * Pulls `:latest` first so the comparison is against the freshest image.
    * Best-effort + fail-SAFE: a local-image override (int test / operator) or any
-   * pull/inspect error returns false → the caller falls back to a plain
+   * pull/inspect error returns false (null for a failed pull, logged) → the caller falls back to a plain
    * `docker start`, so a transient docker hiccup can never wedge a wake.
    */
-  private async fleetBoxImageStale(containerName: string): Promise<boolean> {
+  private async fleetBoxImageStale(containerName: string): Promise<boolean | null> {
     // A CODEAM_FLEET_BOX_IMAGE override is a local-only tag that can't be
     // pulled/compared — never recreate under it.
     if (process.env.CODEAM_FLEET_BOX_IMAGE) return false;
@@ -1937,9 +1940,24 @@ export class HostAgentSupervisor {
       // Missing container → recreate; any other inspect error → play it safe.
       return isMissingContainerError(cur.stderr);
     }
-    // Pull so the local :latest reflects the registry before comparing.
-    const pull = await this.docker.run(['pull', image], { timeoutMs: DOCKER_RUN_TIMEOUT_MS });
-    if (pull.code !== 0) return false;
+    // Pull so the local :latest reflects the registry before comparing. This is
+    // THE slow step — the image is ~7.7 GB — so it gets the same budget the
+    // create/wake pulls get. Under the generic 120 s bound it timed out on every
+    // hourly sweep of fleet-1 (2026-09-07 00:00–03:02Z), each timeout read as
+    // "already current", and every sleeping box stayed on the previous release
+    // for four hours until enough layers had accumulated across the aborted
+    // pulls for one to finish in time.
+    const pull = await this.docker.run(['pull', image], {
+      timeoutMs: DOCKER_RUN_WITH_PULL_TIMEOUT_MS,
+    });
+    if (pull.code !== 0) {
+      log.warn(
+        'host-agent',
+        `fleet image pull failed (code=${pull.code}) — cannot tell whether ${containerName} is stale, leaving it: ` +
+          pull.stderr.trim().slice(-300),
+      );
+      return null;
+    }
     const latest = await this.docker.run(['inspect', '--format', '{{.Id}}', image]);
     if (latest.code !== 0) return false;
     return cur.stdout.trim() !== '' && cur.stdout.trim() !== latest.stdout.trim();
