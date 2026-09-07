@@ -3,6 +3,7 @@
  * `preview_start` command:
  *
  *   provisionDeps → startDevServer → establishTunnel → register + ready
+ *   (Expo: provisionDeps → bringUpPublicUrl → startDevServer → register + ready)
  *
  * Extracted from the former ~640-line `previewStartH` body in
  * `commands/start/handlers.ts`. The handler keeps the relay/session
@@ -136,8 +137,8 @@ export interface ChildProcessWithIO {
  * the inline implementation used.
  *
  * NOTE the `data` listeners deliberately stay attached after this
- * resolves: `opts.onChunk` keeps feeding the caller's output tail and
- * the Expo-URL parser during the post-ready tunnel stage.
+ * resolves: `opts.onChunk` keeps feeding the caller's output tail
+ * during the post-ready tunnel stage.
  */
 export async function waitForDevServerReady(
   devServer: ChildProcessWithIO,
@@ -308,13 +309,62 @@ export async function runPreviewStart(args: PreviewStartArgs): Promise<void> {
 
   if (!(await provisionDeps(ctx))) return;
 
+  // Expo inverts the order — tunnel FIRST, then the dev server — because Expo
+  // reads the public URL (`EXPO_PACKAGER_PROXY_URL`) from its env at startup.
+  // Every other framework keeps dev server → tunnel. See `./expo.ts`.
+  if (detection.framework === 'Expo') {
+    await runExpoBringUp(ctx);
+    return;
+  }
+
   const dev = await startDevServer(ctx);
   if (!dev) return;
 
   const tun = await establishTunnel(ctx, dev);
   if (!tun) return;
 
-  // Register + announce.
+  announceReady(ctx, dev, tun);
+}
+
+/**
+ * Expo bring-up: public URL first, then Metro spawned with that URL in its
+ * env, announced as the `exps://` deep link Expo Go opens.
+ *
+ * ⚠️ Expo used to self-tunnel (`expo start --tunnel` → ngrok). That rode the
+ * ngrok account whose token is hardcoded in `@expo/cli` and shared by every
+ * anonymous Expo user — at its 5000-session cap the agent exits and Expo dies
+ * with code 1, intermittently (2026-09-07, Rafael). Our own cloudflared in
+ * front of Metro has no such shared ceiling. Full write-up in `./expo.ts`.
+ */
+async function runExpoBringUp(ctx: StageCtx): Promise<void> {
+  const { detection, emit, emitProgress } = ctx;
+
+  emitProgress('TUNNEL_STARTING', `cloudflared quick tunnel → Expo :${detection.port}`);
+  const pub = await bringUpPublicUrl(ctx, detection.port);
+  if (!pub.ok) {
+    emit(USER_EVENTS.PREVIEW_ERROR, { stage: 'tunnel', message: pub.message });
+    return;
+  }
+
+  const dev = await startDevServer(ctx, { [previewSvc.EXPO_PACKAGER_PROXY_URL_ENV]: pub.url });
+  if (!dev) {
+    // Terminal event already emitted (error, or a `preview_ready` reuse that
+    // has its own tunnel) — don't leak the connector we brought up first.
+    killQuiet(pub.tunnel);
+    return;
+  }
+
+  announceReady(ctx, dev, {
+    url: previewSvc.expoGoDeepLink(pub.url),
+    tunnel: pub.tunnel,
+    // No inspector: a DOM inspector means nothing against a native app.
+    inspector: null,
+  });
+}
+
+/** Final stage — register the preview + announce `preview_ready`. */
+function announceReady(ctx: StageCtx, dev: DevServerUp, tun: TunnelUp): void {
+  const { sessionId, detection, emit } = ctx;
   ctx.emitProgress('TUNNEL_READY', tun.url);
   previewSvc.registerPreview(sessionId, {
     sessionId,
@@ -372,12 +422,6 @@ async function provisionDeps(ctx: StageCtx): Promise<boolean> {
   //    module …". Returns null (no-op) when deps already present;
   //    we trust an existing `node_modules/` rather than running a
   //    slow no-op install on every preview boot.
-  // Expo with a tunnel needs @expo/ngrok, or Expo halts on an interactive
-  // "install it globally?" prompt (exit 1 under our non-TTY spawn). The box
-  // image bakes it; this is the net for boxes/codespaces/locals that predate
-  // that bake. Runs AFTER node_modules exist (below) when they are missing,
-  // so the project-local install lands in a populated tree.
-  const needsExpoNgrok = previewSvc.isExpoTunnelCommand(detection.command, detection.args ?? []);
   const missingDeps = previewSvc.detectMissingNodeDeps(cwd);
   let preflightRan = false;
   if (missingDeps) {
@@ -440,33 +484,6 @@ async function provisionDeps(ctx: StageCtx): Promise<boolean> {
       return false;
     }
     preflightRan = true;
-  }
-
-  if (needsExpoNgrok) {
-    const ensured = await previewSvc.ensureExpoTunnelDeps({
-      hasNgrok: async () => previewSvc.ngrokResolvesFrom(cwd),
-      installNgrok: async () => {
-        emitProgress(
-          'SETUP_RUN',
-          `npm install --no-save ${previewSvc.EXPO_NGROK_SPEC} (Expo tunnel needs ngrok; not found)`,
-        );
-        const r = await previewSvc.runSetupCommand(
-          'npm',
-          ['install', '--no-save', '--no-audit', '--no-fund', previewSvc.EXPO_NGROK_SPEC],
-          cwd,
-          detection.env,
-          { timeoutMs: INSTALL_TIMEOUT_MS },
-        );
-        return { ok: r.status === 'ok', code: r.code };
-      },
-    });
-    if (!ensured.ok) {
-      emit(USER_EVENTS.PREVIEW_ERROR, {
-        stage: 'spawn',
-        message: `Expo's tunnel needs @expo/ngrok and installing it automatically failed (npm install --no-save ${previewSvc.EXPO_NGROK_SPEC}, exit ${ensured.code}). Install it in the project and try the preview again.`,
-      });
-      return false;
-    }
   }
 
   // 1. Setup commands from the agent — but skip any install command
@@ -537,20 +554,21 @@ async function provisionDeps(ctx: StageCtx): Promise<boolean> {
 interface DevServerUp {
   /** `null` = adoptado: ya estaba corriendo y no lo arrancamos nosotros. */
   devServer: ReturnType<typeof spawn> | null;
-  /**
-   * Live ref — the readiness watcher's `data` listener stays attached
-   * and keeps updating this after ready, so the Expo tunnel stage can
-   * pick up a URL that lands late.
-   */
-  expoUrlRef: { current: string | null };
 }
 
 /**
  * Stage 2 — port guard + dev-server spawn + readiness. Returns `null`
  * when the pipeline must stop (terminal event already emitted — which,
  * on the port-race path, is a `preview_ready` reuse, not an error).
+ *
+ * `extraEnv` is merged LAST into the child's env — it carries what the
+ * bring-up itself decided (Expo's `EXPO_PACKAGER_PROXY_URL`), which must
+ * win over anything the detection or the parent env happen to carry.
  */
-async function startDevServer(ctx: StageCtx): Promise<DevServerUp | null> {
+async function startDevServer(
+  ctx: StageCtx,
+  extraEnv: Record<string, string> = {},
+): Promise<DevServerUp | null> {
   const { sessionId, detection, cwd, emit, emitProgress } = ctx;
 
   // 2. Spawn the dev server.
@@ -659,7 +677,7 @@ async function startDevServer(ctx: StageCtx): Promise<DevServerUp | null> {
         emitProgress('READY_DETECTED', `adopted the server already on port ${detection.port}`);
         // `devServer: null` = adoptado. No es nuestro, así que parar el
         // preview no lo mata.
-        return { devServer: null, expoUrlRef: { current: null } };
+        return { devServer: null };
       }
 
       emit(USER_EVENTS.PREVIEW_ERROR, {
@@ -680,19 +698,20 @@ async function startDevServer(ctx: StageCtx): Promise<DevServerUp | null> {
   // the user's config is moved aside, never mutated, and restored on teardown.
   await applyPreviewHostAllow(cwd);
 
-  const spawnable = normalizeDetectionForSpawn(detection, cwd);
-  emitProgress('BOOT_SEQUENCE', `${spawnable.command} ${spawnable.args.join(' ')}`);
-  // Expo tunnel: without a TTY Expo never prints its `exp://` URL (that line
-  // is the interactive UI's). The ngrok debug channel does — opt into it so
-  // the URL is observable. See `parseExpoUrl` / `expoTunnelDebugEnv`.
   const isExpo = detection.framework === 'Expo';
-  const expoDebugEnv =
-    isExpo && previewSvc.isExpoTunnelCommand(detection.command, detection.args ?? [])
-      ? previewSvc.expoTunnelDebugEnv(spawnable.env?.DEBUG ?? process.env.DEBUG)
-      : {};
+  const normalized = normalizeDetectionForSpawn(detection, cwd);
+  // Expo: never `--tunnel` (that's Expo's shared-account ngrok — see
+  // `./expo.ts`), and pin `--port` so Metro binds the port OUR tunnel fronts.
+  const spawnable: PreviewDetection = isExpo
+    ? {
+        ...normalized,
+        args: previewSvc.expoSpawnArgs(normalized.command, normalized.args, detection.port),
+      }
+    : normalized;
+  emitProgress('BOOT_SEQUENCE', `${spawnable.command} ${spawnable.args.join(' ')}`);
   const devServer = spawn(spawnable.command, spawnable.args, {
     cwd,
-    env: { ...process.env, ...(spawnable.env ?? {}), ...expoDebugEnv },
+    env: { ...process.env, ...(spawnable.env ?? {}), ...extraEnv },
     stdio: ['ignore', 'pipe', 'pipe'],
     // POSIX: lead a new process group so teardown can SIGTERM the whole
     // tree. Dev servers fork worker children that bind the port; killing
@@ -704,18 +723,19 @@ async function startDevServer(ctx: StageCtx): Promise<DevServerUp | null> {
   });
   emitProgress('BIND_PORT', String(detection.port));
   emitProgress('WAITING_FOR_READY', detection.ready_pattern);
-  const expoUrlRef: DevServerUp['expoUrlRef'] = { current: null };
   // Bounded tail of the dev server's stdout+stderr so a `preview_failed`
   // event can carry the REAL reason the server never came up (e.g. an
   // "Unable to connect to the database" loop) instead of a black screen.
   let outputTail = '';
   // Expo: the detect prompt's `ready_pattern` is a guess about interactive
-  // output ("Metro waiting"…) that a non-TTY Expo never prints. Its REAL
-  // ready signal is the tunnel deep link (or the debug `Tunnel URL:` line);
-  // gate on that, keeping the AI pattern only as an extra alternative.
+  // output ("Metro waiting"…) that a non-TTY Expo never prints. What it DOES
+  // print once Metro is bound is `Waiting on http://localhost:<port>` and
+  // `Logs for your project will appear below`; gate on those, keeping the AI
+  // pattern only as an extra alternative. The manifest probe below is the
+  // authoritative signal — these lines just get there a beat sooner.
   const readyRe = isExpo
     ? new RegExp(
-        `(?:${compileReadyPattern(detection.ready_pattern).source})|exp:\\/\\/[^\\s]+\\.exp\\.(?:direct|host)|Tunnel URL:`,
+        `(?:${compileReadyPattern(detection.ready_pattern).source})|Waiting on http:\\/\\/localhost:${detection.port}|Logs for your project will appear below`,
         'i',
       )
     : compileReadyPattern(detection.ready_pattern);
@@ -725,10 +745,17 @@ async function startDevServer(ctx: StageCtx): Promise<DevServerUp | null> {
   // line, so a slightly-off `ready_pattern` stalled WAITING_FOR_READY
   // for the full 120 s while the server was already listening. The
   // regex stays primary; the probe only catches its misses. Scoped to
-  // Next.js (not Expo, whose true ready signal is its tunnel URL, nor
-  // generic frameworks where the regex is reliable) to avoid flipping
-  // ready before the real signal lands.
+  // Next.js and Expo (generic frameworks keep the reliable regex) to
+  // avoid flipping ready before the real signal lands.
+  // Expo's probe is stricter than "port listening": it asks Metro for the
+  // manifest the way Expo Go does (`GET /` + `expo-platform: ios`) and needs
+  // a 2xx — a bound port that still 5xx's mid-boot isn't ready.
   const isNextJs = /next/i.test(detection.framework);
+  const portProbe = isExpo
+    ? () => previewSvc.waitForExpoManifest(detection.port, { timeoutMs: 1_000, intervalMs: 250 })
+    : isNextJs
+      ? () => previewSvc.waitForPortListening(detection.port, { timeoutMs: 1_000, intervalMs: 250 })
+      : undefined;
   const outcome = await waitForDevServerReady(devServer, readyRe, {
     timeoutMs: 120_000,
     onChunk: (s) => {
@@ -738,15 +765,8 @@ async function startDevServer(ctx: StageCtx): Promise<DevServerUp | null> {
       // the unhelpful "N tasks failed · run with --verbose" footer.
       // 16 KB reliably includes the failing task's own stderr.
       outputTail = (outputTail + s).slice(-16_000);
-      if (!expoUrlRef.current && isExpo) {
-        // Parse over the accumulated tail, not the single chunk — the debug
-        // line and its URL can straddle two `data` events.
-        expoUrlRef.current = previewSvc.parseExpoUrl(outputTail);
-      }
     },
-    portProbe: isNextJs
-      ? () => previewSvc.waitForPortListening(detection.port, { timeoutMs: 1_000, intervalMs: 250 })
-      : undefined,
+    portProbe,
   });
   if (outcome.kind === 'exited') {
     // The dev server's parent exited, but it may have fork-exec'd a
@@ -771,30 +791,28 @@ async function startDevServer(ctx: StageCtx): Promise<DevServerUp | null> {
     return null;
   }
   emitProgress('READY_DETECTED', `port ${detection.port}`);
-  return { devServer, expoUrlRef };
+  return { devServer };
 }
 
 /** What stage 3 hands back for registration. */
 interface TunnelUp {
   url: string;
-  /** Null when the framework manages its own tunnel (Expo). */
-  tunnel: ReturnType<typeof spawn> | null;
+  /** The cloudflared child fronting the dev server (or the inspector proxy). */
+  tunnel: ReturnType<typeof spawn>;
   /**
    * El proxy del inspector, cuando se pudo levantar.
    *
-   * `null` significa camino directo — o porque es Expo (se auto-tunela y no
-   * hay puerto nuestro que interponer), o porque el proxy no arrancó y se
+   * `null` significa camino directo — o porque es Expo (un inspector de DOM no
+   * significa nada contra una app nativa), o porque el proxy no arrancó y se
    * cayó al camino de siempre. Hay que cerrarlo al parar el preview.
    */
   inspector: InspectorProxy | null;
 }
 
 /**
- * Stage 3 — public URL. Three branches per the user's session
- * environment: Expo self-tunnels; a backend-provisioned NAMED tunnel is
- * preferred; otherwise up to {@link MAX_TUNNEL_ATTEMPTS} quick-tunnel
- * attempts. Returns `null` when the pipeline must stop (error emitted,
- * dev server killed).
+ * Stage 3 — public URL for a dev server that is already up. Interposes the
+ * inspector proxy, then {@link bringUpPublicUrl}. Returns `null` when the
+ * pipeline must stop (error emitted, dev server killed).
  */
 const MAX_TUNNEL_ATTEMPTS = 3;
 
@@ -802,39 +820,8 @@ async function establishTunnel(ctx: StageCtx, dev: DevServerUp): Promise<TunnelU
   const { detection, emit, emitProgress } = ctx;
   const { devServer } = dev;
 
-  // 4. Tunnel — three branches per the user's session environment.
-  emitProgress(
-    'TUNNEL_STARTING',
-    detection.framework === 'Expo' ? 'Expo (self-tunnelled)' : 'cloudflared quick tunnel',
-  );
-
-  if (detection.framework === 'Expo') {
-    // Expo manages its own tunnel. The readiness watcher parsed the URL
-    // above — wait a touch longer if it hasn't landed yet (the still-
-    // attached `data` listener keeps updating `expoUrlRef`).
-    if (!dev.expoUrlRef.current) {
-      const expoDeadline = Date.now() + 15_000;
-      while (!dev.expoUrlRef.current && Date.now() < expoDeadline) {
-        await new Promise((r) => setTimeout(r, 250));
-      }
-    }
-    const expoUrl = dev.expoUrlRef.current;
-    if (!expoUrl) {
-      // Solo se mata lo que arrancamos nosotros: un adoptado es el servidor
-      // del usuario y matarlo sería el daño que la adopción evita.
-      if (devServer) previewSvc.killProcessTree(devServer, 'SIGTERM');
-      emit(USER_EVENTS.PREVIEW_ERROR, {
-        stage: 'tunnel',
-        message: 'Expo did not report a tunnel URL.',
-      });
-      return null;
-    }
-    // ⚠️ Expo NO lleva proxy, y no es una omisión. Expo se auto-tunela: la
-    // URL sale de su propia salida (`exp://…exp.host`) y nosotros no
-    // levantamos `cloudflared`, así que no hay puerto nuestro que interponer.
-    // Y un inspector de DOM no significa nada contra una app nativa.
-    return { url: expoUrl, tunnel: null, inspector: null };
-  }
+  // 4. Tunnel.
+  emitProgress('TUNNEL_STARTING', 'cloudflared quick tunnel');
 
   // ALWAYS a Cloudflare Quick Tunnel — the same public-URL path for
   // codespaces, self-hosted boxes, and local CLIs, so the preview
@@ -844,10 +831,11 @@ async function establishTunnel(ctx: StageCtx, dev: DevServerUp): Promise<TunnelU
   /**
    * El proxy del inspector se interpone AQUÍ, y solo aquí.
    *
-   * Después de la rama de Expo (que no lleva) y antes de que se decida el
-   * túnel, porque lo único que cambia es QUÉ PUERTO recibe: `cloudflared`
-   * apunta al proxy y el proxy al dev server. Si no arranca, `port` es el del
-   * dev server y todo lo de abajo es byte por byte lo de siempre.
+   * Antes de que se decida el túnel, porque lo único que cambia es QUÉ PUERTO
+   * recibe: `cloudflared` apunta al proxy y el proxy al dev server. Si no
+   * arranca, `port` es el del dev server y todo lo de abajo es byte por byte
+   * lo de siempre. (Expo no pasa por aquí: su túnel se levanta ANTES del dev
+   * server, en `runExpoBringUp`, y no lleva inspector.)
    *
    * ⚠️ Va después de la readiness a propósito. La readiness se mide contra el
    * dev server (`ready_pattern` + la sonda TCP), nunca contra el proxy: así el
@@ -856,18 +844,40 @@ async function establishTunnel(ctx: StageCtx, dev: DevServerUp): Promise<TunnelU
   const inspection = await bringUpInspector(detection.port, {
     log: (m) => log.info('preview', m),
   });
-  const tunnelPort = inspection.port;
+
+  const pub = await bringUpPublicUrl(ctx, inspection.port);
+  if (!pub.ok) {
+    // Solo se mata lo que arrancamos nosotros: un adoptado es el servidor
+    // del usuario y matarlo sería el daño que la adopción evita.
+    if (devServer) previewSvc.killProcessTree(devServer, 'SIGTERM');
+    emit(USER_EVENTS.PREVIEW_ERROR, { stage: 'tunnel', message: pub.message });
+    return null;
+  }
+  return { url: pub.url, tunnel: pub.tunnel, inspector: inspection.proxy };
+}
+
+/** A public https URL fronting a local port, and the connector serving it. */
+type PublicUrlOutcome =
+  { ok: true; url: string; tunnel: ReturnType<typeof spawn> } | { ok: false; message: string };
+
+/**
+ * "Get me a public https URL for local port N" — the tunnel bring-up proper,
+ * independent of WHEN it runs relative to the dev server. Non-Expo frameworks
+ * call it after readiness (`establishTunnel`); Expo calls it BEFORE spawning
+ * Metro (`runExpoBringUp`), because Expo reads the URL from its env at start.
+ *
+ * Named tunnel preferred, then up to {@link MAX_TUNNEL_ATTEMPTS} quick-tunnel
+ * attempts. Never throws; emits only TUNNEL_STARTING progress — the caller
+ * owns the terminal `preview_error` (it knows what else to tear down).
+ */
+async function bringUpPublicUrl(ctx: StageCtx, tunnelPort: number): Promise<PublicUrlOutcome> {
+  const { emitProgress } = ctx;
 
   let bin: string;
   try {
     bin = await previewSvc.resolveCloudflared();
   } catch (e) {
-    if (devServer) previewSvc.killProcessTree(devServer, 'SIGTERM');
-    emit(USER_EVENTS.PREVIEW_ERROR, {
-      stage: 'tunnel',
-      message: (e as Error).message,
-    });
-    return null;
+    return { ok: false, message: (e as Error).message };
   }
 
   // Cloudflare Quick Tunnels occasionally fail to register or are slow
@@ -963,13 +973,11 @@ async function establishTunnel(ctx: StageCtx, dev: DevServerUp): Promise<TunnelU
       killQuiet(candidate);
     }
   }
-  if (!parsedUrl) {
-    if (devServer) previewSvc.killProcessTree(devServer, 'SIGTERM');
-    emit(USER_EVENTS.PREVIEW_ERROR, {
-      stage: 'tunnel',
+  if (!parsedUrl || !tunnel) {
+    return {
+      ok: false,
       message: `Tunnel did not become reachable after ${MAX_TUNNEL_ATTEMPTS} attempts (${lastTunnelErr}). Cloudflare Quick Tunnels occasionally fail to register — please retry.`,
-    });
-    return null;
+    };
   }
-  return { url: parsedUrl, tunnel, inspector: inspection.proxy };
+  return { ok: true, url: parsedUrl, tunnel };
 }

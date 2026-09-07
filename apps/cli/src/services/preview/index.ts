@@ -8,6 +8,7 @@ export * from './cloudflared';
 export * from './codespace';
 export * from './config-file';
 export * from './dotenv';
+export * from './expo';
 export * from './parser';
 export * from './port-ready';
 export * from './provision-deps';
@@ -34,7 +35,9 @@ export interface ActivePreview {
    * mataría el servidor que el usuario tenía corriendo antes de abrir esto.
    */
   devServer: ChildProcess | null;
-  /** Null when the framework manages its own tunnel (Expo / codespace). */
+  /** The cloudflared child publishing this preview (Expo included — its
+   *  ngrok self-tunnel is gone; see `expo.ts`). Null only for legacy paths
+   *  where nothing of ours fronts the port (codespace port-forwarding). */
   tunnel: ChildProcess | null;
   url: string;
   framework: string;

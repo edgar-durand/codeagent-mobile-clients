@@ -83,56 +83,6 @@ export async function ensureYarnInstalled(deps: {
 }
 
 /**
- * `expo start --tunnel` needs `@expo/ngrok`. When it is missing, Expo asks
- * "would you like to install it globally?" — and under our spawn (no TTY,
- * `npx expo` in non-interactive mode) that question is a fatal
- * `CommandError: Input is required`, exit code 1, before Metro even starts.
- * That was the whole "Server Failed to Start / ERR_SPAWN_FAILED" on
- * rafaelph90's box for an Expo 57 project (2026-09-04): detection correct
- * (Expo on :8081, our own recipe), no ngrok on the box image.
- *
- * Detection helper: is this an Expo dev server started with a tunnel?
- */
-export function isExpoTunnelCommand(command: string, args: readonly string[]): boolean {
-  const flat = [path.basename(command), ...args];
-  return flat.includes('expo') && flat.includes('--tunnel');
-}
-
-/** The dependency Expo resolves for `--tunnel`, pinned to what it asks for. */
-export const EXPO_NGROK_SPEC = '@expo/ngrok@^4.1.0';
-
-/**
- * Ensure `@expo/ngrok` resolves from the project before spawning
- * `expo start --tunnel`. Same shape as `ensureYarnInstalled`: pure
- * orchestration over injected probes so it is testable without a network.
- *
- * The install is PROJECT-LOCAL and `--no-save`: Expo looks in the project's
- * node_modules first, so no global install (and no sudo) is needed, and
- * neither package.json nor the lockfile is touched.
- */
-export async function ensureExpoTunnelDeps(deps: {
-  hasNgrok: () => Promise<boolean>;
-  installNgrok: () => Promise<{ ok: boolean; code: number | null }>;
-}): Promise<{ ok: boolean; code: number | null; installed: boolean }> {
-  if (await deps.hasNgrok()) return { ok: true, code: 0, installed: false };
-  const res = await deps.installNgrok();
-  if (!res.ok) return { ...res, installed: false };
-  return (await deps.hasNgrok())
-    ? { ok: true, code: 0, installed: true }
-    : { ok: false, code: res.code, installed: false };
-}
-
-/** Does `@expo/ngrok` resolve from `cwd` (project node_modules) or globally? */
-export function ngrokResolvesFrom(cwd: string): boolean {
-  try {
-    require.resolve('@expo/ngrok/package.json', { paths: [cwd] });
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-/**
  * Detect whether a `PreviewDetection.setup_commands` entry is a
  * package-install command from any supported JS package manager.
  *
