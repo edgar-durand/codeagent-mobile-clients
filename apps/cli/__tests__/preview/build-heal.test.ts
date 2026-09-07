@@ -98,7 +98,15 @@ describe('watchForBuildClobber — real fs sequence', () => {
   it('debounces a burst of writes into a single restart', async () => {
     const restart = vi.fn();
     const notify = vi.fn();
-    const watcher = watchForBuildClobber({ cwd: dir, sessionId, restart, notify, debounceMs: 80 });
+    // ⚠️ The debounce window must dwarf the inter-write gap. With 80 ms vs
+    // 15 ms this flaked on a loaded ubuntu/node-22 runner (2026-09-06, main
+    // push after #715): one inotify delivery landed > 80 ms after the
+    // previous write, the debounce fired mid-burst with the marker already
+    // changed, and the tail of the burst produced a SECOND restart. Real fs
+    // events need real time, so the margin is the only lever — 20× instead
+    // of ~5×.
+    const debounceMs = 300;
+    const watcher = watchForBuildClobber({ cwd: dir, sessionId, restart, notify, debounceMs });
     try {
       await sleep(100);
       // A real `next build` touches many files under `.next/` in one pass —
@@ -107,7 +115,7 @@ describe('watchForBuildClobber — real fs sequence', () => {
         await fsp.writeFile(path.join(dir, '.next', 'BUILD_ID'), `prod-${i}`);
         await sleep(15);
       }
-      await sleep(400);
+      await sleep(debounceMs + 400);
       expect(restart).toHaveBeenCalledTimes(1);
     } finally {
       watcher.stop();
