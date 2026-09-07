@@ -4,6 +4,16 @@ All notable changes to the CodeAgent-Mobile JetBrains plugin are documented here
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.74.8] — 2026-09-07
+
+### Fixed
+
+- **cli:** Fleet image migration — pull-sized timeout, WARN instead of 'already current' (#718)
+
+### Tests
+
+- **cli:** Build-heal debounce test — 20x margin vs the write gap (flaked on ubuntu/node 22) (#717)
+
 ## [2.74.7] — 2026-09-06
 
 ### Fixed
