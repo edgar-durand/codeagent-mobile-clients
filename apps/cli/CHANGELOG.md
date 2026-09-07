@@ -4,6 +4,12 @@ All notable changes to `codeam-cli` are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.74.11] — 2026-09-07
+
+### Chore
+
+- **shared:** Slack registry requests the 11 scopes the product uses (#725)
+
 ## [2.74.10] — 2026-09-07
 
 ### Fixed
