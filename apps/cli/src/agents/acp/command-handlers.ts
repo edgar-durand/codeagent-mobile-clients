@@ -17,7 +17,7 @@
 
 import { log } from '../../services/logger';
 import { _postJsonAuthed, fetchProvisionCredential } from '../../services/pairing.service';
-import { resolveApiBaseUrl } from '@codeam/shared';
+import { HOUSE_AGENT_ID, publicToInternal, resolveApiBaseUrl } from '@codeam/shared';
 import { showInfo } from '../../ui/banner';
 import { createOsStrategy } from '../../os';
 import { createInteractiveAgentStrategy } from '../registry';
@@ -167,6 +167,13 @@ export interface AcpSessionContext {
   routeToAgent?: (agentId: string, opts?: { skipFastPath?: boolean }) => Promise<SquadRouteOutcome>;
   /** At most ONE un-resolved agent-proposed handoff at a time. */
   pendingProposal?: { current: HandoffProposal | null };
+  /**
+   * True when the RUNNING agent is CodeAgent Cloud (the house agent). Its
+   * runtime id is `claude`, so `opts.agent` alone can never tell house from
+   * real Claude Code — the `start_task` no-op check needs this to recognise
+   * `house-codeagent-cloud` as "the agent already driving this session".
+   */
+  currentIsHouse?: () => boolean;
   /** Serialized emitter — the SAME chain the switch events ride, so a
    *  `handoff_resolved` can never overtake the swap that resolved it. */
   postSquadEvent?: (
@@ -398,6 +405,31 @@ function rebindSessionHandles(
 ): SquadRouteOutcome {
   Object.assign(ctx, outcome.handles);
   return outcome;
+}
+
+/**
+ * Does `requested` name the agent ALREADY driving this session? Then the
+ * `start_task` is a plain prompt, not an @-mention — whatever id space the
+ * caller used.
+ *
+ * ⚠️ The launch controllers (Start-from-Work-Item / From-Conversation) send the
+ * CATALOG id of the agent the session was just provisioned FOR — the house
+ * agent's `house-codeagent-cloud`, or `claude_code` for Claude Code — while
+ * `opts.agent` is the runtime id (`claude`). Comparing the raw strings read
+ * every such launch as a mention of "another" agent; `routeSquadTask` then
+ * refused with "… is already this session's agent." and the TASK failed — the
+ * launch prompt never reached the agent (2026-09-07, Rafael, house session;
+ * the same class the Inngest PR-review worker hit on 2026-08-20). Ids that
+ * happened to coincide (codex, gemini) worked, which hid it.
+ */
+export function namesCurrentAgent(
+  requested: string,
+  currentAgent: string,
+  currentIsHouse: boolean,
+): boolean {
+  if (requested === currentAgent) return true;
+  if (currentIsHouse) return requested === HOUSE_AGENT_ID;
+  return publicToInternal(requested) === currentAgent;
 }
 
 async function routeSquadTask(
@@ -808,7 +840,10 @@ async function startTaskH(ctx: AcpCommandContext): Promise<void> {
     await relay.sendResult(cmd.id, 'failed', { error: 'empty prompt' });
     return;
   }
-  if (requestedAgentId.length > 0 && requestedAgentId !== opts.agent) {
+  if (
+    requestedAgentId.length > 0 &&
+    !namesCurrentAgent(requestedAgentId, opts.agent, ctx.currentIsHouse?.() ?? false)
+  ) {
     const routed = await routeSquadTask(ctx, requestedAgentId);
     if (!routed.ok) {
       log.warn('acpRunner', `start_task routing to ${requestedAgentId} failed: ${routed.error}`);

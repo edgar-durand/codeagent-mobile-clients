@@ -55,6 +55,8 @@ interface CtxOverrides {
   /** Queue of errors the fake adapter throws, one per prompt() call. A
    *  `null`/missing entry means that call succeeds. */
   promptFailures?: Array<unknown>;
+  /** The RUNNING agent is CodeAgent Cloud (runtime `claude` behind our proxy). */
+  currentIsHouse?: boolean;
 }
 
 function makeCtx(over: CtxOverrides = {}) {
@@ -182,6 +184,7 @@ function makeCtx(over: CtxOverrides = {}) {
     pendingProposal: { current: null },
     postSquadEvent,
     pendingHandoff: over.pendingHandoff,
+    currentIsHouse: () => over.currentIsHouse ?? false,
   } as unknown as AcpSessionContext;
 
   return {
@@ -290,6 +293,35 @@ describe('start_task — agentId routing', () => {
     const { session, routeToAgent, client } = makeCtx();
     await dispatchAcpCommand(
       assembleAcpCommandContext(session, startTask({ prompt: 'go', agentId: 'claude' })),
+    );
+    expect(routeToAgent).not.toHaveBeenCalled();
+    expect(client.prompt).toHaveBeenCalledOnce();
+  });
+
+  // 2026-09-07 (Rafael, Start-from-Conversation on a house session): the mobile
+  // launch controller sends `agentId: 'house-codeagent-cloud'` — the CATALOG id
+  // of the agent the session was just provisioned FOR. `'house-codeagent-cloud'
+  // !== 'claude'` read as an @-mention, `routeSquadTask` answered "CodeAgent
+  // Cloud is already this session's agent." and the task FAILED — the launch
+  // prompt never reached the agent (box log: `start_task routing to
+  // house-codeagent-cloud failed`). An id that names the agent already
+  // running is a plain no-op, whatever id space it comes from.
+  it('does not route when the agentId is the HOUSE id and the running agent is CodeAgent Cloud', async () => {
+    const { session, routeToAgent, client } = makeCtx({ agent: 'claude', currentIsHouse: true });
+    await dispatchAcpCommand(
+      assembleAcpCommandContext(
+        session,
+        startTask({ prompt: 'You are starting work from a team conversation.', agentId: 'house-codeagent-cloud' }),
+      ),
+    );
+    expect(routeToAgent).not.toHaveBeenCalled();
+    expect(client.prompt).toHaveBeenCalledOnce();
+  });
+
+  it('does not route when the agentId is the current agent under its PUBLIC (catalog) id', async () => {
+    const { session, routeToAgent, client } = makeCtx({ agent: 'claude' });
+    await dispatchAcpCommand(
+      assembleAcpCommandContext(session, startTask({ prompt: 'go', agentId: 'claude_code' })),
     );
     expect(routeToAgent).not.toHaveBeenCalled();
     expect(client.prompt).toHaveBeenCalledOnce();

@@ -1663,6 +1663,9 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
         routeToAgent,
         pendingProposal,
         emitSwitchEvent,
+        // Same live flag the switch deps read — a start_task naming the
+        // house agent on a house session is the agent already running.
+        () => houseActive,
       );
     },
     { id: opts.agent, name: opts.agent, displayName: opts.agent } as never,
@@ -2098,6 +2101,8 @@ export async function handleCommand(
     type: 'handoff_proposed' | 'handoff_resolved',
     payload: Record<string, unknown>,
   ) => Promise<unknown>,
+  /** Is the RUNNING agent CodeAgent Cloud? See AcpSessionContext.currentIsHouse. */
+  currentIsHouse?: () => boolean,
 ): Promise<void> {
   const session: AcpSessionContext = {
     client,
@@ -2121,6 +2126,7 @@ export async function handleCommand(
     routeToAgent,
     pendingProposal,
     postSquadEvent,
+    currentIsHouse,
   };
   await dispatchAcpCommand(assembleAcpCommandContext(session, cmd));
 }
