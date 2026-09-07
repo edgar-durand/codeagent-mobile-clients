@@ -4302,6 +4302,77 @@ describe('HostAgentSupervisor — fleet control plane', () => {
     expect(calls.some((c) => c[0] === 'create')).toBe(false);
   });
 
+  // fleet-1, 2026-09-07 00:00–03:02Z: four hourly sweeps logged "already
+  // current" for every sleeping box while `:latest` on the host was still the
+  // previous release (2.74.6). The pull of the ~7.7 GB image ran under the
+  // generic 120 s docker bound, timed out every hour, and the fail-safe `false`
+  // read as "current". Docker keeps the layers an interrupted pull already
+  // fetched, so the 04:00 sweep finally finished inside the bound and migrated
+  // — four hours late, silently. The pull is THE slow step: it gets the same
+  // budget the create/wake pulls get, and a failure is a WARN, not "current".
+  it('gives the :latest pull the pull-sized budget, not the 120 s generic bound', async () => {
+    const seen: Array<{ args: string[]; timeoutMs?: number }> = [];
+    const docker: DockerRunner = {
+      run: vi.fn(async (args: string[], opts?: { timeoutMs?: number }) => {
+        seen.push({ args, timeoutMs: opts?.timeoutMs });
+        if (args[0] === 'inspect' && args.includes('{{.State.Running}}')) {
+          return { code: 0, stdout: 'false', stderr: '' };
+        }
+        if (args[0] === 'inspect' && args.includes('{{.Image}}')) {
+          return { code: 0, stdout: 'sha256:old', stderr: '' };
+        }
+        if (args[0] === 'inspect' && args.includes('{{.Id}}')) {
+          return { code: 0, stdout: 'sha256:new', stderr: '' };
+        }
+        return { code: 0, stdout: '', stderr: '' };
+      }),
+    };
+    const sup = new HostAgentSupervisor(IDENTITY, { docker });
+    await sup.handleCommand({
+      id: 'c-pull',
+      type: 'fleet_migrate_box_image',
+      payload: migratePayload,
+    } as never);
+
+    const pull = seen.find((c) => c.args[0] === 'pull');
+    expect(pull).toBeDefined();
+    expect(pull!.timeoutMs).toBeGreaterThanOrEqual(600_000);
+  });
+
+  it('a failed :latest pull is logged as a WARN and the box is left alone (never "already current")', async () => {
+    const warn = vi.spyOn(log, 'warn');
+    const info = vi.spyOn(log, 'info');
+    const { docker, calls } = makeMigrateDocker({
+      running: 'false',
+      containerImageId: 'sha256:old',
+      latestImageId: 'sha256:new',
+    });
+    (docker.run as ReturnType<typeof vi.fn>).mockImplementation(async (args: string[]) => {
+      calls.push(args);
+      if (args[0] === 'pull') return { code: 124, stdout: '', stderr: 'timed out' };
+      if (args[0] === 'inspect' && args.includes('{{.State.Running}}')) {
+        return { code: 0, stdout: 'false', stderr: '' };
+      }
+      if (args[0] === 'inspect' && args.includes('{{.Image}}')) {
+        return { code: 0, stdout: 'sha256:old', stderr: '' };
+      }
+      return { code: 0, stdout: '', stderr: '' };
+    });
+    const sup = new HostAgentSupervisor(IDENTITY, { docker });
+    await sup.handleCommand({
+      id: 'c-pullfail',
+      type: 'fleet_migrate_box_image',
+      payload: migratePayload,
+    } as never);
+
+    expect(calls.some((c) => c[0] === 'rm')).toBe(false);
+    expect(calls.some((c) => c[0] === 'create')).toBe(false);
+    expect(warn.mock.calls.some(([, msg]) => /pull.*failed|failed.*pull/i.test(String(msg)))).toBe(true);
+    expect(info.mock.calls.some(([, msg]) => /already current/.test(String(msg)))).toBe(false);
+    warn.mockRestore();
+    info.mockRestore();
+  });
+
   it('rejects a payload carrying an enrollToken — docker never invoked', async () => {
     // A 15-minute credential baked into a container that may not start for days
     // is a terminal 4xx at boot: a box that never comes back. If a future
