@@ -141,13 +141,54 @@ describe('provisionAgentCredentials — codex', () => {
     expect(env).not.toHaveProperty('OPENAI_API_KEY');
   });
 
-  it('api_key: returns OPENAI_API_KEY and removes a stale auth.json (so it cannot shadow the key)', () => {
+  // Codex CLI does NOT read OPENAI_API_KEY from the environment for its login
+  // state (codex-cli 0.143.0 + codex-acp 1.1.4, 2026-09-08): env-only delivery
+  // → `codex login status` = "Not logged in" → ACP `session/new` fails
+  // `-32000 Authentication required`. What it honours is the file
+  // `codex login --with-api-key` writes. The env var is kept alongside it.
+  it('api_key: writes the apikey login file to ~/.codex/auth.json AND returns OPENAI_API_KEY', () => {
+    const authJson = path.join(tmpHome, '.codex', 'auth.json');
+    const env = provisionAgentCredentials('codex', { kind: 'api_key', value: 'sk-openai-NEW' }, tmpHome);
+    expect(env).toEqual({ OPENAI_API_KEY: 'sk-openai-NEW' });
+    expect(JSON.parse(fs.readFileSync(authJson, 'utf8'))).toEqual({
+      auth_mode: 'apikey',
+      OPENAI_API_KEY: 'sk-openai-NEW',
+    });
+  });
+
+  it('api_key: the login file is byte-identical to what the codespace bootstrap snippet writes', () => {
+    // api-v2 `CodexProvisioningStrategy.getAuthSnippet` (codeagent-mobile #2834):
+    //   printf '{"auth_mode":"apikey","OPENAI_API_KEY":"%s"}' "$KEY" > ~/.codex/auth.json
+    // Same key order, no whitespace, no trailing newline.
+    provisionAgentCredentials('codex', { kind: 'api_key', value: 'sk-openai-NEW' }, tmpHome);
+    const authJson = path.join(tmpHome, '.codex', 'auth.json');
+    expect(fs.readFileSync(authJson, 'utf8')).toBe(
+      '{"auth_mode":"apikey","OPENAI_API_KEY":"sk-openai-NEW"}',
+    );
+  });
+
+  it.skipIf(process.platform === 'win32')('api_key: the login file is mode 0600', () => {
+    provisionAgentCredentials('codex', { kind: 'api_key', value: 'sk-openai-NEW' }, tmpHome);
+    const authJson = path.join(tmpHome, '.codex', 'auth.json');
+    expect(fs.statSync(authJson).mode & 0o777).toBe(0o600);
+  });
+
+  it('api_key: a stale ChatGPT-subscription auth.json is REPLACED by the apikey login file (cannot shadow the key)', () => {
     const authJson = path.join(tmpHome, '.codex', 'auth.json');
     fs.mkdirSync(path.dirname(authJson), { recursive: true });
     fs.writeFileSync(authJson, '{"auth_mode":"chatgpt","tokens":{"access_token":"OLD"}}');
-    const env = provisionAgentCredentials('codex', { kind: 'api_key', value: 'sk-openai-NEW' }, tmpHome);
-    expect(env).toEqual({ OPENAI_API_KEY: 'sk-openai-NEW' });
-    expect(fs.existsSync(authJson)).toBe(false);
+    provisionAgentCredentials('codex', { kind: 'api_key', value: 'sk-openai-NEW' }, tmpHome);
+    const parsed = JSON.parse(fs.readFileSync(authJson, 'utf8'));
+    expect(parsed.auth_mode).toBe('apikey');
+    expect(parsed).not.toHaveProperty('tokens');
+    expect(fs.readFileSync(authJson, 'utf8')).not.toContain('OLD');
+  });
+
+  it('api_key: a key with JSON-significant characters is serialised, never string-concatenated', () => {
+    const nasty = 'sk-"quote"\\back\nslash';
+    provisionAgentCredentials('codex', { kind: 'api_key', value: nasty }, tmpHome);
+    const authJson = path.join(tmpHome, '.codex', 'auth.json');
+    expect(JSON.parse(fs.readFileSync(authJson, 'utf8')).OPENAI_API_KEY).toBe(nasty);
   });
 });
 

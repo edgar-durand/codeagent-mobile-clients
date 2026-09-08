@@ -15,8 +15,10 @@
  *   - Claude  → `~/.claude/.credentials.json` (oauth_token JSON) or the
  *               `ANTHROPIC_API_KEY` env var (api_key); plus a minimal
  *               `~/.claude.json` onboarding-skip file.
- *   - Codex   → `~/.codex/auth.json` (oauth_token JSON) or the
- *               `OPENAI_API_KEY` env var (api_key).
+ *   - Codex   → `~/.codex/auth.json` (oauth_token JSON verbatim, or the
+ *               `{"auth_mode":"apikey","OPENAI_API_KEY":…}` login file for
+ *               api_key — Codex ignores the bare env var for login state);
+ *               api_key ALSO exports `OPENAI_API_KEY`.
  *
  * We write the files directly (Node fs) instead of shelling out a bash
  * snippet — same destination + mode (0600), no `printf`/`bash`
@@ -65,9 +67,9 @@ export function toInternalAgentId(publicAgentId: string): AgentId | null {
 interface AgentProvisioner {
   /**
    * Write the credential files this agent reads at startup. Returns env
-   * vars to export into the child for the `api_key` path (Claude/Codex
-   * read the key from the environment, not a file). Empty for the
-   * `oauth_token` path (everything is a file).
+   * vars to export into the child for the `api_key` path (Claude reads the
+   * key from the environment; Codex needs the login FILE too). Empty for
+   * the `oauth_token` path (everything is a file).
    */
   write(auth: AgentAuth, home: string): Record<string, string>;
 }
@@ -151,10 +153,19 @@ const codexProvisioner: AgentProvisioner = {
   write(auth, home): Record<string, string> {
     const authJson = path.join(home, '.codex', 'auth.json');
     if (auth.kind === 'api_key') {
-      // Codex prefers ~/.codex/auth.json over OPENAI_API_KEY when both exist,
-      // so a stale auth.json from a prior ChatGPT-subscription deploy would
-      // shadow the new api_key. Remove it before handing back the env var.
-      rmIfExists(authJson);
+      // ⚠️ An api_key is a LOGIN FILE, not (only) an env var. Codex CLI does
+      // NOT read OPENAI_API_KEY from the environment for its login state
+      // (verified 2026-09-08 on codex-cli 0.143.0 + codex-acp 1.1.4: env set +
+      // no file → `codex login status` = "Not logged in", ACP `session/new` →
+      // `-32000 Authentication required`). The env-only delivery this used to
+      // do failed EVERY BYO-OpenAI-key warm deploy / in-session switch to Codex
+      // at startup. What Codex honours is the file `codex login --with-api-key`
+      // writes — same bytes as the codespace bootstrap snippet
+      // (api-v2 `CodexProvisioningStrategy.getAuthSnippet`). Overwriting also
+      // evicts a stale ChatGPT-subscription blob that would otherwise shadow
+      // the key. The env export stays alongside (older Codex builds and
+      // codex-acp's `authenticate` still read it).
+      writeFile0600(authJson, JSON.stringify({ auth_mode: 'apikey', OPENAI_API_KEY: auth.value }));
       return { OPENAI_API_KEY: auth.value };
     }
     // oauth_token → ~/.codex/auth.json verbatim (the ChatGPT subscription blob).
