@@ -14,6 +14,22 @@ export interface StartTaskPayload {
   agentId?: string;
 }
 
+/**
+ * `result` of a `start_task` acked `failed` (POST /api/commands/result).
+ *
+ * The backend refunds the FREE daily task slot on a failed `start_task` UNLESS
+ * `partialReplyKept` is true — that is the one bit it cannot infer: the CLI
+ * knows whether the turn had already streamed visible progress (assistant text
+ * OR thinking/tool activity) that `closeAll` then kept as the terminal frame.
+ * Such a turn delivered something and stays charged. Every other failed ack
+ * (auth bubble, generic no-content bubble, spawn/adapter error) omits the flag.
+ */
+export interface StartTaskFailedResult {
+  error: string;
+  /** Present + true ONLY when a streamed partial reply was kept as the terminal frame. */
+  partialReplyKept?: true;
+}
+
 export interface SquadRosterAgent {
   agentId: string; // internal runtime id
   displayName: string;

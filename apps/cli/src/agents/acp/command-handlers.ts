@@ -52,6 +52,7 @@ import {
   type SquadConfigurePayload,
   type SquadConfigureResult,
   type SquadStatsResult,
+  type StartTaskFailedResult,
   type StartTaskPayload,
 } from '@codeam/shared';
 import { buildDeltaBriefing, buildTeamPreamble, type SquadState } from './squad-roster';
@@ -1219,6 +1220,7 @@ async function startTaskH(ctx: AcpCommandContext): Promise<void> {
         hadText,
         agent: opts.agent,
       });
+      const failed: StartTaskFailedResult = { error: detail };
       if (bubble) {
         // REPLACE the streamed text with the actionable bubble as the SINGLE
         // terminal frame. `closeWithBubble` sets the in-flight text to '' and
@@ -1240,6 +1242,11 @@ async function startTaskH(ctx: AcpCommandContext): Promise<void> {
         // serves as the terminal frame. Finalise it (closeAll) so the
         // streamed text flips out of "Thinking…" without being clobbered.
         await streaming.closeAll();
+        // Tell the backend this failed turn DID deliver something: it refunds
+        // the FREE daily task slot on a failed `start_task` unless the CLI
+        // says the partial reply was kept (codeagent-mobile #2833). Only this
+        // branch sets it — the bubble paths above replaced whatever streamed.
+        failed.partialReplyKept = true;
       }
       if (bubble === AUTH_FAILURE_MESSAGE || bubble === ONE_M_CREDITS_MESSAGE) {
         // Same durable flag as onUnexpectedExit — covers the case where the
@@ -1249,7 +1256,7 @@ async function startTaskH(ctx: AcpCommandContext): Promise<void> {
         // 1M-credits gate reuses this to drive the subscription-reconnect CTA.
         void reportCredentialInvalid(opts);
       }
-      await relay.sendResult(cmd.id, 'failed', { error: detail });
+      await relay.sendResult(cmd.id, 'failed', failed);
       return;
     }
   }

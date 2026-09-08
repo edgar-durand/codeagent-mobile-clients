@@ -541,3 +541,142 @@ describe('ACP handleCommand — budget-reached POST fires exactly once (fire-onc
     expect(budgetRecovery.offer).toHaveBeenCalledTimes(2);
   });
 });
+
+/**
+ * `partialReplyKept` — the ONE bit the backend cannot infer on its own.
+ *
+ * codeagent-mobile #2833 refunds the FREE daily task slot when a `start_task`
+ * is acked `failed` and delivered nothing. A late failure that already streamed
+ * visible progress (text OR thinking/tool activity) is finalised by the
+ * non-destructive `closeAll` branch and DID deliver something, so that turn
+ * stays charged — the CLI says so with `result.partialReplyKept: true`. Every
+ * OTHER failed ack (auth bubble, generic no-content bubble, auth text in a
+ * completed reply) omits the flag → the backend refunds.
+ */
+describe('ACP start_task — `partialReplyKept` rides the failed ack ONLY on the closeAll branch', () => {
+  beforeEach(() => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => ({ ok: true, status: 200 }) as Response),
+    );
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  /** Drive one `start_task` through `handleCommand` with a scripted turn. */
+  async function runTurn(turn: (streaming: StreamingState) => Promise<{ stopReason: string }>) {
+    const publisher = new AcpPublisher({
+      sessionId: 'sess-k',
+      pluginId: 'plugin-k',
+      pluginAuthToken: 'tok-k',
+      apiBaseUrl: 'https://api.example.test',
+    });
+    const publishOutput = vi.spyOn(publisher, 'publishOutput').mockResolvedValue(undefined);
+    vi.spyOn(publisher, 'publishStreamingChunk').mockResolvedValue(undefined);
+    vi.spyOn(publisher, 'pushConversation').mockResolvedValue(undefined);
+    vi.spyOn(publisher, 'pushSessionList').mockResolvedValue(undefined);
+    const streaming = new StreamingState(publisher);
+    const client = {
+      prompt: vi.fn(async () => turn(streaming)),
+      cancel: vi.fn(async () => undefined),
+    };
+    const sendResult = vi.fn(async () => undefined);
+
+    await handleCommand(
+      { id: 'cmd-k', type: 'start_task', payload: { prompt: 'hi' } } as never,
+      client as never,
+      { sendResult } as never,
+      'acp-sess-k',
+      streaming,
+      {
+        agent: 'claude',
+        sessionId: 'sess-k',
+        pluginId: 'plugin-k',
+        pluginAuthToken: 'tok-k',
+        adapter: { command: 'noop', args: [] },
+        cwd: '/tmp',
+      } as never,
+      {
+        appendUserPrompt: vi.fn(),
+        appendAgentReply: vi.fn(),
+        flush: vi.fn(async () => undefined),
+      } as never,
+      { uploadConversationIfChanged: vi.fn(async () => undefined) } as never,
+      undefined,
+      { flushTurn: vi.fn(async () => undefined) } as never,
+      () => null,
+      publisher,
+      [],
+      { offer: vi.fn(async () => undefined), tryRecover: vi.fn(async () => false) } as never,
+      { get: () => false, set: vi.fn() },
+    );
+
+    const terminalText = publishOutput.mock.calls
+      .map((c) => c[0] as OutputCall)
+      .filter((b) => b.type === 'text' && b.done === true)
+      .map((b) => b.content);
+    expect(sendResult).toHaveBeenCalledTimes(1);
+    const [, status, result] = sendResult.mock.calls[0] as unknown as [
+      string,
+      string,
+      Record<string, unknown>,
+    ];
+    return { status, result, terminalText };
+  }
+
+  it('partial TEXT streamed + generic throw (closeAll keeps it) → failed + partialReplyKept:true', async () => {
+    const { status, result, terminalText } = await runTurn(async (s) => {
+      s.append({ chunkId: 'm1', kind: 'text', delta: 'Here is the first half' });
+      throw new Error('stream aborted mid-turn');
+    });
+    expect(terminalText).toEqual(['Here is the first half']);
+    expect(status).toBe('failed');
+    expect(result).toEqual({ error: 'stream aborted mid-turn', partialReplyKept: true });
+  });
+
+  it('thinking/tool-only progress + generic throw (closeAll keeps the transcript) → partialReplyKept:true', async () => {
+    const { status, result, terminalText } = await runTurn(async (s) => {
+      s.append({ chunkId: 'th', kind: 'thinking', delta: 'Planning…' });
+      s.append({ chunkId: 'tu', kind: 'tool_use', delta: 'edit_file src/app.ts' });
+      throw new Error('ACP prompt idle — adapter sent no updates for the idle window');
+    });
+    expect(terminalText).not.toContain(TURN_FAILURE_MESSAGE);
+    expect(status).toBe('failed');
+    expect(result).toEqual({
+      error: 'ACP prompt idle — adapter sent no updates for the idle window',
+      partialReplyKept: true,
+    });
+  });
+
+  it('NOTHING streamed + generic throw (TURN_FAILURE_MESSAGE bubble) → failed WITHOUT the flag', async () => {
+    const { status, result, terminalText } = await runTurn(async () => {
+      throw new Error('ECONNRESET');
+    });
+    expect(terminalText).toEqual([TURN_FAILURE_MESSAGE]);
+    expect(status).toBe('failed');
+    expect(result).toEqual({ error: 'ECONNRESET' });
+    expect(result).not.toHaveProperty('partialReplyKept');
+  });
+
+  it('streamed 401 + auth throw (AUTH bubble REPLACES the text) → failed WITHOUT the flag', async () => {
+    const { status, result, terminalText } = await runTurn(async (s) => {
+      s.append({ chunkId: 'm1', kind: 'text', delta: RAW_401 });
+      throw new Error(`Internal error: ${RAW_401}`);
+    });
+    expect(terminalText).toEqual([AUTH_FAILURE_MESSAGE]);
+    expect(status).toBe('failed');
+    expect(result).not.toHaveProperty('partialReplyKept');
+  });
+
+  it('completed turn whose reply IS an auth notice (auth bubble) → failed WITHOUT the flag', async () => {
+    const { status, result, terminalText } = await runTurn(async (s) => {
+      s.append({ chunkId: 'm1', kind: 'text', delta: 'Not logged in · Please run /login' });
+      return { stopReason: 'end_turn' };
+    });
+    expect(terminalText).toEqual([AUTH_FAILURE_MESSAGE]);
+    expect(status).toBe('failed');
+    expect(result).toEqual({ error: 'agent reply reported auth failure' });
+  });
+});
