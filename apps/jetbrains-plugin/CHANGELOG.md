@@ -4,6 +4,13 @@ All notable changes to the CodeAgent-Mobile JetBrains plugin are documented here
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.74.12] — 2026-09-09
+
+### Fixed
+
+- **cli:** Codex BYO API key — write the ~/.codex/auth.json login file, not just the env var (#728)
+- **cli:** Flag partialReplyKept on the failed start_task ack when closeAll kept a streamed reply (#729)
+
 ## [2.74.11] — 2026-09-07
 
 ### Chore
