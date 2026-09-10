@@ -52,6 +52,22 @@ export class VsCodeChatDetector implements AgentDetector {
     }
 
     const copilotExt = findExtension(COPILOT_EXTENSION_IDS, ctx.extensions);
+
+    // ⚠️ Do NOT advertise a Copilot agent the plugin cannot dispatch to.
+    // `selectChatModels()` returns [] before consent, so an empty probe alone
+    // is NOT proof of absence — but with NO Copilot extension installed AND no
+    // model found, there is nothing to consent to and every prompt would land
+    // in the void (mobile advertised what the router refuses; 2026-09-10 study).
+    // Register only when Copilot could actually answer: an extension is present
+    // (consent may still be pending, resolves on first prompt) OR a model was
+    // already found.
+    if (!copilotExt && !modelName) {
+      ctx.log.appendLine(
+        'VS Code Chat: no Copilot extension and no model available — not registering',
+      );
+      return null;
+    }
+
     const extensionId = copilotExt?.id ?? 'vscode.chat';
     ctx.log.appendLine(
       `Registered VS Code Chat (model detected: ${modelName ?? 'pending consent'})`,
