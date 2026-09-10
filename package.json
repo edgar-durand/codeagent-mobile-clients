@@ -33,7 +33,7 @@
   "devDependencies": {
     "@commitlint/cli": "^19.5.0",
     "@commitlint/config-conventional": "^19.5.0",
-    "knip": "^6.25.0"
+    "knip": "^6.34.0"
   },
   "dependencies": {
     "cac": "^7.0.0",
