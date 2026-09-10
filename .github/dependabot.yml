@@ -1,35 +1,41 @@
 version: 2
 updates:
+  # ⚠️ ONE npm entry, rooted at "/" — do NOT split it per app again.
+  #
+  # This is an npm WORKSPACES monorepo (root package.json declares
+  # apps/cli, apps/vsc-plugin, packages/*) with a SINGLE package-lock.json
+  # at the repository root. Dependabot was previously configured with
+  # `directory: /apps/cli` and `/apps/vsc-plugin`, which let it edit those
+  # workspaces' package.json but NOT the root lockfile it doesn't own — so
+  # every npm PR it opened failed at the very first step of every job:
+  #
+  #     npm error `npm ci` can only install packages when your package.json
+  #     and package-lock.json are in sync.
+  #     npm error Invalid: lock file's @beads/bd@1.0.5 does not satisfy 1.2.2
+  #
+  # It was 100% reproducible and chronic: on 2026-09-10 all 7 open npm PRs
+  # were red and all 5 gradle/github-actions ones were green — the split is
+  # the only thing they differ on. c203310d and 2c0632a0 ("resync lockfile
+  # … supersedes #324, #325") are earlier hand-repairs of the same thing.
+  #
+  # Rooting at "/" lets Dependabot resolve the workspace graph and update
+  # the workspace manifest AND the root lock in one commit, which is what
+  # `npm ci` requires. Labels are no longer per-app because one PR can now
+  # legitimately touch more than one workspace.
   - package-ecosystem: npm
-    directory: /apps/cli
+    directory: /
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
     labels:
       - dependencies
-      - cli
+      - npm
     ignore:
       # @types/node tracks the Node.js major it types against. The CLI's
-      # engines.node is ">=18.0.0" and .nvmrc pins 20 for build, so a
-      # major bump (e.g. PR #31's jump to v25) would let TS surface APIs
-      # that don't exist at runtime on end-users' Node 18/20 installs.
-      # Minor/patch updates within the current major remain allowed.
-      - dependency-name: "@types/node"
-        update-types:
-          - version-update:semver-major
-
-  - package-ecosystem: npm
-    directory: /apps/vsc-plugin
-    schedule:
-      interval: weekly
-    open-pull-requests-limit: 5
-    labels:
-      - dependencies
-      - vsc-plugin
-    ignore:
-      # VS Code 1.93 ships Node 20 as its embedded runtime; pin @types/node to
-      # the matching major so we don't typecheck against APIs that don't exist
-      # at runtime. Minor/patch updates within 20.x remain allowed.
+      # engines.node is ">=18.0.0", .nvmrc pins 20 for build, and VS Code
+      # 1.93 ships Node 20 as its embedded runtime — so a major bump (e.g.
+      # PR #31's jump to v25) would let TS surface APIs that don't exist at
+      # runtime for end users. Minor/patch within the major stay allowed.
       - dependency-name: "@types/node"
         update-types:
           - version-update:semver-major
