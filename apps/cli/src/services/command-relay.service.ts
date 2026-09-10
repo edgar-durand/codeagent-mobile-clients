@@ -9,6 +9,11 @@ import { computePollDelay } from '../lib/poll-delay';
 import { detectCurrentBranch, detectCurrentBranchAsync } from '../lib/git-branch';
 import { log } from './logger';
 import {
+  describeStreamHostFailure,
+  streamHost,
+  type StreamHostFailure,
+} from './stream-base-url';
+import {
   ensureHeadroomProxy,
   makeRealProxySupervisorDeps,
   type ProxySupervisorDeps,
@@ -29,6 +34,11 @@ function httpStatusOf(err: unknown): number | null {
 import { capture } from './telemetry.service';
 
 const API_BASE = resolveApiBaseUrl();
+// The ONE route that lives on the stream tier. Its base comes from the
+// process-wide `streamHost` latch (stream host, or the api host after the
+// one-time fallback — see `stream-base-url.ts`). Every other URL in this
+// file is REST and stays on API_BASE.
+const PENDING_STREAM_PATH = '/api/commands/pending/stream';
 // Server emits a `ping` SSE event every 30 s — give it 15 s of grace
 // before declaring the connection zombie. Probes every 10 s so the
 // max detection latency is ~55 s.
@@ -325,14 +335,38 @@ export class CommandRelayService {
 
   // ─── SSE pull (primary) ──────────────────────────────────────────
 
+  /**
+   * The stream-host → api-host fallback (runs BEFORE the SSE → polling one).
+   * Returns true when this failure just moved the process onto the api host,
+   * in which case the caller reconnects immediately and does NOT count the
+   * failure against the 2-strike polling budget — the api host has not been
+   * tried yet. Logs + emits telemetry exactly once per process.
+   */
+  private fallBackToApiHost(failure: StreamHostFailure, delivered: boolean): boolean {
+    const host = streamHost.current;
+    if (!streamHost.fallBackToApiHost(failure, delivered)) return false;
+    const reason = describeStreamHostFailure(failure);
+    log.debug('relay', `sse stream host ${host} failed (${reason}) — using ${API_BASE} from now`);
+    capture('sse_stream_host_fallback', {
+      pluginId: this.pluginId,
+      agentId: this.agentMeta.id,
+      host,
+      reason,
+    });
+    return true;
+  }
+
   private connectSSE(): void {
     if (!this._running) return;
 
-    const url = new URL(`${API_BASE}/api/commands/pending/stream`);
+    const url = new URL(`${streamHost.current}${PENDING_STREAM_PATH}`);
     url.searchParams.set('pluginId', this.pluginId);
     const transport = url.protocol === 'https:' ? https : http;
+    // First byte on a 200 flips this; a failure before it counts as "the
+    // stream host never answered" for the host fallback above.
+    let delivered = false;
 
-    log.info('relay', `sse connect pluginId=${this.pluginId.slice(0, 8)}`);
+    log.info('relay', `sse connect pluginId=${this.pluginId.slice(0, 8)} host=${url.host}`);
     const req = transport.request(
       {
         hostname: url.hostname,
@@ -351,6 +385,10 @@ export class CommandRelayService {
         if (res.statusCode !== 200) {
           log.info('relay', `sse status=${res.statusCode} — backing off`);
           res.resume();
+          if (this.fallBackToApiHost({ kind: 'status', status: res.statusCode ?? 0 }, delivered)) {
+            this.connectSSE();
+            return;
+          }
           this.sseFailures += 1;
           if (this.sseFailures >= 2) {
             // Switch to polling fallback for this session.
@@ -378,6 +416,7 @@ export class CommandRelayService {
         res.setEncoding('utf8');
         res.on('data', (chunk: string) => {
           // ANY byte counts as liveness — text, ping events, comments.
+          delivered = true;
           this.sseLastByteAt = Date.now();
           buffer += chunk;
           let frameEnd: number;
@@ -395,7 +434,12 @@ export class CommandRelayService {
         res.on('error', (err) => {
           log.info('relay', `sse res error — reconnecting (${(err as Error).message})`);
           this.disarmSseWatchdog();
-          if (this._running) this.scheduleSseReconnect();
+          if (!this._running) return;
+          if (this.fallBackToApiHost({ kind: 'network' }, delivered)) {
+            this.connectSSE();
+            return;
+          }
+          this.scheduleSseReconnect();
         });
       },
     );
@@ -416,6 +460,12 @@ export class CommandRelayService {
     req.on('error', (err) => {
       log.info('relay', `sse req error — ${(err as Error).message}`);
       this.disarmSseWatchdog();
+      // `stop()` destroys the request too — a teardown must never latch the
+      // process onto the api host, so only a live relay may fall back.
+      if (this._running && this.fallBackToApiHost({ kind: 'network' }, delivered)) {
+        this.connectSSE();
+        return;
+      }
       this.sseFailures += 1;
       if (this.sseFailures >= 2) {
         capture('sse_fallback_to_poll', {

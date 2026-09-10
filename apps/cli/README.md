@@ -153,6 +153,7 @@ Under the hood the installer runs `codeam host enroll` (redeems the token, seals
 | Variable | Default | Effect |
 |---|---|---|
 | `CODEAM_API_URL` | `https://api.codeagent-mobile.com` | Override the backend relay URL. Useful for hitting a staging environment or self-hosted backend. |
+| `CODEAM_STREAM_URL` | derived from the API URL | Override the base URL of the SSE command stream only (`/api/commands/pending/stream`). By default `api.` → `stream.codeagent-mobile.com` and `dev-api.` → `dev-stream.`; any other API URL keeps streams on that same URL. If the stream host is unreachable (network error / 5xx before any event), the CLI falls back to the API URL for the rest of the process. |
 | `CODEAM_DISABLE_UPDATE_CHECK` | unset | Set to `1` to suppress the "update available" banner. The check also auto-skips on non-TTY stdout, when `CI=true`, and during tests. |
 | `CODEAM_AUTO_TOKEN` | unset | One-shot pairing token consumed by `codeam pair-auto`. Used by the `codeam deploy` bootstrap; see *Advanced / scripted pairing* below. |
 
