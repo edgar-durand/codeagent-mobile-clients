@@ -4,6 +4,36 @@ All notable changes to the CodeAgent Mobile VS Code extension are documented her
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.74.13] — 2026-09-10
+
+### Added
+
+- **cli:** Open the command stream on the stream host with a one-time api-host fallback (#745)
+
+### Build
+
+- **deps:** Bump gradle-wrapper in /apps/jetbrains-plugin (#661)
+- **deps:** Bump com.squareup.okhttp3:okhttp in /apps/jetbrains-plugin (#641)
+- **deps:** Bump actions/setup-java from 5 to 6 (#662)
+
+### CI
+
+- **workflow:** Root the npm Dependabot config at the workspace, so its PRs can actually install (#737)
+
+### Chore
+
+- **deps:** Bump org.jetbrains.kotlin.jvm in /apps/jetbrains-plugin (#743)
+- **deps:** Bump docker/setup-buildx-action from 3 to 4 (#414)
+- **deps:** Bump actions/checkout from 4 to 7 (#366)
+- **deps:** Bump ws from 8.21.0 to 8.21.3 (#740)
+- **deps:** Bump posthog-node from 5.35.1 to 5.51.6 (#741)
+- **deps-dev:** Bump knip from 6.25.0 to 6.34.0 (#742)
+
+### Fixed
+
+- **cli:** Local baton sessions go silent on mobile after the mirror's 10-min startup wait (#744)
+- **vsc-plugin:** Stop advertising a Copilot agent the plugin cannot dispatch to (#746)
+
 ## [2.74.12] — 2026-09-09
 
 ### Fixed
