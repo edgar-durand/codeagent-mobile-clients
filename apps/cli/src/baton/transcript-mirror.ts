@@ -47,6 +47,11 @@ export class TranscriptMirror {
   private unwatch: (() => void) | null = null;
   private pollHandle: ReturnType<typeof setInterval> | null = null;
   private attached = false;
+  /** `stop()` is terminal: the controller stops the mirror on hand-off to
+   *  MOBILE_DRIVE (the ACP driver streams there), and a heartbeat `poke()` on
+   *  that stopped instance must never resurrect it — it would double-publish
+   *  every mobile-driven turn. */
+  private stopped = false;
   /** True while `start()`'s own synchronous attach attempt is running, so
    *  `tryAttach` can tell "the file was already there" from "it appeared while
    *  we waited". The distinction is the whole basis for whether the first
@@ -86,9 +91,22 @@ export class TranscriptMirror {
   }
 
   stop(): void {
+    this.stopped = true;
     this.clearPoll();
     this.unwatch?.();
     this.unwatch = null;
+  }
+
+  /** Re-try the attach OUTSIDE the bounded startup wait. Rides the relay's
+   *  existing 20 s heartbeat (no new timer): the native TUI creates its JSONL
+   *  only on the FIRST turn, so a user who pairs locally, walks away past the
+   *  startup wait, and then prompts from the phone would otherwise get nothing
+   *  for the rest of the session — the poll had expired and nothing re-tried.
+   *  Idempotent once attached; a no-op after `stop()`. Returns whether the
+   *  mirror is attached after the call. */
+  poke(): boolean {
+    if (this.stopped) return false;
+    return this.tryAttach();
   }
 
   /** Resolve the transcript file; if present, emit the current contents and

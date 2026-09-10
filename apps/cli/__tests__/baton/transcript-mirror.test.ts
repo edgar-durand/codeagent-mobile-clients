@@ -130,6 +130,99 @@ describe('TranscriptMirror', () => {
     mirror.stop();
   });
 
+  // ─── poke(): the transcript can appear AFTER the bounded startup wait ──────
+  // The native TUI creates the JSONL only on its FIRST turn. A user who pairs
+  // locally, walks away past the 10-minute startup wait, and then prompts from
+  // the phone used to get NOTHING for the rest of the session: the poll had
+  // expired and nothing ever re-tried. The relay's existing 20 s heartbeat now
+  // pokes the mirror, so a late transcript still attaches within one tick.
+  it('poke() attaches a transcript that appears AFTER the startup wait expired', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mirror-poke-'));
+    const file = path.join(dir, 'late.jsonl');
+    let tick: () => void = () => {};
+    let cleared = 0;
+    const onNewMessages = vi.fn();
+    const mirror = new TranscriptMirror({
+      runtime: {
+        resolveHistoryFile: () => (fs.existsSync(file) ? file : null),
+        parseHistoryFile: makeRuntime(file).parseHistoryFile,
+      },
+      cwd: dir,
+      conversationId: 'conv-1',
+      onNewMessages,
+      watch: () => () => {},
+      pollIntervalMs: 750,
+      waitTimeoutMs: 1500,
+      setInterval: (fn) => {
+        tick = fn;
+        return 1 as unknown as ReturnType<typeof setInterval>;
+      },
+      clearInterval: () => {
+        cleared += 1;
+      },
+    });
+    mirror.start();
+    tick();
+    tick(); // 1500 ms elapsed → the bounded wait gives up and clears the poll
+    expect(cleared).toBe(1);
+    expect(onNewMessages).not.toHaveBeenCalled();
+
+    // The agent's first turn finally lands (mobile-dispatched, ten minutes later).
+    fs.writeFileSync(file, '{"type":"user","message":{"role":"user","content":"late"}}\n');
+    expect(mirror.poke()).toBe(true);
+    expect(onNewMessages).toHaveBeenCalledTimes(1);
+    expect(onNewMessages.mock.calls[0][0]).toHaveLength(1);
+    // It appeared while we were watching for it → LIVE content, not history.
+    expect(onNewMessages.mock.calls[0][1]).toEqual({ preexisting: false });
+    mirror.stop();
+  });
+
+  it('poke() is idempotent once attached — no double emit', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mirror-poke2-'));
+    const file = path.join(dir, 'conv.jsonl');
+    fs.copyFileSync(path.join(__dirname, '../fixtures/baton/conv.jsonl'), file);
+    const onNewMessages = vi.fn();
+    const mirror = new TranscriptMirror({
+      runtime: makeRuntime(file),
+      cwd: dir,
+      conversationId: 'conv-1',
+      onNewMessages,
+      watch: () => () => {},
+    });
+    mirror.start();
+    expect(onNewMessages).toHaveBeenCalledTimes(1);
+    expect(mirror.poke()).toBe(true);
+    expect(mirror.poke()).toBe(true);
+    expect(onNewMessages).toHaveBeenCalledTimes(1);
+    mirror.stop();
+  });
+
+  // The controller stops the mirror on hand-off to MOBILE_DRIVE (the ACP
+  // driver streams there). A heartbeat poke on that stopped instance must NOT
+  // resurrect it — it would double-publish every mobile-driven turn.
+  it('poke() after stop() never attaches', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mirror-poke3-'));
+    const file = path.join(dir, 'conv.jsonl');
+    const onNewMessages = vi.fn();
+    const mirror = new TranscriptMirror({
+      runtime: {
+        resolveHistoryFile: () => (fs.existsSync(file) ? file : null),
+        parseHistoryFile: makeRuntime(file).parseHistoryFile,
+      },
+      cwd: dir,
+      conversationId: 'conv-1',
+      onNewMessages,
+      watch: () => () => {},
+      setInterval: () => 1 as unknown as ReturnType<typeof setInterval>,
+      clearInterval: () => {},
+    });
+    mirror.start();
+    mirror.stop();
+    fs.writeFileSync(file, '{"type":"user","message":{"role":"user","content":"x"}}\n');
+    expect(mirror.poke()).toBe(false);
+    expect(onNewMessages).not.toHaveBeenCalled();
+  });
+
   it('stop() clears the startup poll when the file never appears', () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mirror-stop-'));
     const file = path.join(dir, 'never.jsonl');
