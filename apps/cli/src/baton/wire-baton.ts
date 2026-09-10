@@ -263,6 +263,31 @@ export function makeSerializedBatonPoster<A>(
 export const BATON_REAFFIRM_INTERVAL_MS = 5 * 60_000;
 
 /**
+ * Compose several riders onto the relay's ONE heartbeat callback. The relay
+ * exposes a single `onHeartbeat` ("one timer" rule — see
+ * {@link makeBatonHeartbeatReaffirm}); the baton re-affirmation AND the
+ * transcript-mirror poke both need to ride it, so they are composed here
+ * rather than the relay growing a second hook. A rider that throws never
+ * stops the others: the heartbeat must stay punctual.
+ */
+export function composeHeartbeatRiders(
+  ...riders: Array<(info: { firstAfterConnect: boolean }) => void>
+): (info: { firstAfterConnect: boolean }) => void {
+  return (info): void => {
+    for (const rider of riders) {
+      try {
+        rider(info);
+      } catch (err) {
+        log.warn(
+          'wireBaton',
+          `heartbeat rider failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
+  };
+}
+
+/**
  * Builds the heartbeat rider that keeps the backend's baton snapshot alive.
  *
  * ⚠️ THE BUG THIS FIXES: the CLI only ever posted `baton_state` on a state
@@ -582,11 +607,22 @@ export async function runBatonSession(opts: BatonSessionOptions): Promise<void> 
     runtime.meta,
     undefined,
     undefined,
-    makeBatonHeartbeatReaffirm({
-      // Nothing to affirm once the session is torn down.
-      currentState: () => (torn ? null : controller.currentState()),
-      publish: publishBatonState,
-    }),
+    composeHeartbeatRiders(
+      makeBatonHeartbeatReaffirm({
+        // Nothing to affirm once the session is torn down.
+        currentState: () => (torn ? null : controller.currentState()),
+        publish: publishBatonState,
+      }),
+      // Re-try the transcript attach past the mirror's bounded startup wait:
+      // the native TUI writes its JSONL only on the FIRST turn, so a local
+      // session left idle past that wait went permanently silent on mobile
+      // (pair, walk away, prompt from the phone → nothing, ever). `poke()` is
+      // idempotent once attached and a no-op on the stopped (MOBILE_DRIVE)
+      // instance, so this is one cheap `resolveHistoryFile` per tick at most.
+      () => {
+        mirror?.poke();
+      },
+    ),
   );
 
   // ─── Lifecycle ───────────────────────────────────────────────────────────

@@ -5,6 +5,7 @@ import {
   makeMirrorOnNewMessages,
   makeSerializedBatonPoster,
   makeBatonHeartbeatReaffirm,
+  composeHeartbeatRiders,
 } from '../../src/baton/wire-baton';
 import type { RemoteCommand } from '../../src/services/command-relay.service';
 import { isLocalSession } from '../../src/baton/gate';
@@ -317,6 +318,34 @@ describe('makeMirrorOnNewMessages (LOCAL_DRIVE live mirror)', () => {
       { type: 'new_turn', done: false },
       { type: 'text', content: 'reply A', done: true },
     ]);
+  });
+});
+
+describe('composeHeartbeatRiders (one relay tick, several riders)', () => {
+  // The relay exposes ONE heartbeat callback ("one timer" rule). The baton
+  // re-affirmation and the transcript-mirror poke both need to ride it, so
+  // they are composed rather than the relay growing a second hook.
+  it('calls every rider once per tick, in order, with the same tick info', () => {
+    const calls: string[] = [];
+    const tick = composeHeartbeatRiders(
+      (info) => calls.push(`reaffirm:${info.firstAfterConnect}`),
+      (info) => calls.push(`poke:${info.firstAfterConnect}`),
+    );
+    tick({ firstAfterConnect: true });
+    tick({ firstAfterConnect: false });
+    expect(calls).toEqual(['reaffirm:true', 'poke:true', 'reaffirm:false', 'poke:false']);
+  });
+
+  it('a rider that throws does not stop the others (the heartbeat must stay punctual)', () => {
+    const later = vi.fn();
+    const tick = composeHeartbeatRiders(
+      () => {
+        throw new Error('boom');
+      },
+      later,
+    );
+    expect(() => tick({ firstAfterConnect: false })).not.toThrow();
+    expect(later).toHaveBeenCalledTimes(1);
   });
 });
 
