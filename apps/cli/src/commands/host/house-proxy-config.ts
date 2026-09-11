@@ -22,6 +22,7 @@
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { HOUSE_AGENT_ID, MANAGED_AGENT_ENV, isManagedProviderId } from '@codeam/shared';
 import { log } from '../../services/logger';
 import { restrictToOwner } from '../../lib/restrict-to-owner';
 
@@ -42,6 +43,13 @@ export interface HouseProxyConfig {
   /** Per-deploy isolated Claude config dir (CLAUDE_CONFIG_DIR) so the woken
    *  session boots clean in gateway mode, not the box's personal Claude login. */
   claudeConfigDir?: string;
+  /** MANAGED agent (Managed Agents + Credits): the upstream model to pin as
+   *  ANTHROPIC_MODEL (+ the sonnet/opus/haiku aliases). Unset ⇒ the house
+   *  MiniMax pin. The backend sends it on the `house_proxy` credential. */
+  model?: string;
+  /** MANAGED agent: its public id, exported as CODEAM_MANAGED_AGENT_ID so the
+   *  CLI announces the right agent (the proxy env alone only says "house"). */
+  managedAgentId?: string;
 }
 
 /**
@@ -100,6 +108,10 @@ export function readHouseProxyChildEnv(): Record<string, string> {
       ...(typeof o.claudeConfigDir === 'string' && o.claudeConfigDir
         ? { claudeConfigDir: o.claudeConfigDir }
         : {}),
+      ...(typeof o.model === 'string' && o.model ? { model: o.model } : {}),
+      ...(typeof o.managedAgentId === 'string' && o.managedAgentId
+        ? { managedAgentId: o.managedAgentId }
+        : {}),
     });
   } catch {
     return {};
@@ -157,15 +169,30 @@ export function buildHouseProxyChildEnv(cfg: HouseProxyConfig): Record<string, s
     // empty so a stale key can't override the Bearer auth token.
     env.ANTHROPIC_API_KEY = '';
   } else {
-    env.ANTHROPIC_MODEL = 'MiniMax-M3';
-    env.ANTHROPIC_DEFAULT_SONNET_MODEL = 'MiniMax-M3';
-    env.ANTHROPIC_DEFAULT_OPUS_MODEL = 'MiniMax-M3';
-    env.ANTHROPIC_DEFAULT_HAIKU_MODEL = 'MiniMax-M3';
+    // House ⇒ MiniMax; a MANAGED provider pins its own upstream model.
+    const model = typeof cfg.model === 'string' && cfg.model ? cfg.model : 'MiniMax-M3';
+    env.ANTHROPIC_MODEL = model;
+    env.ANTHROPIC_DEFAULT_SONNET_MODEL = model;
+    env.ANTHROPIC_DEFAULT_OPUS_MODEL = model;
+    env.ANTHROPIC_DEFAULT_HAIKU_MODEL = model;
   }
   if (typeof cfg.claudeConfigDir === 'string' && cfg.claudeConfigDir) {
     env.CLAUDE_CONFIG_DIR = cfg.claudeConfigDir;
   }
+  if (isManagedProviderId(cfg.managedAgentId)) {
+    env[MANAGED_AGENT_ENV] = cfg.managedAgentId;
+  }
   return env;
+}
+
+/**
+ * The WIRE id of the agent a house-rail process is running: the managed id
+ * when the bootstrap / switch exported one, else the classic house sentinel.
+ * Only meaningful when {@link isHouseProxyEnv} is true.
+ */
+export function houseRailWireId(env: NodeJS.ProcessEnv): string {
+  const managed = env[MANAGED_AGENT_ENV];
+  return isManagedProviderId(managed) ? managed : HOUSE_AGENT_ID;
 }
 
 /**
@@ -188,6 +215,7 @@ export const HOUSE_PROXY_ENV_KEYS = [
   'CLAUDE_CODE_MAX_CONTEXT_TOKENS',
   'API_TIMEOUT_MS',
   'CLAUDE_CONFIG_DIR',
+  MANAGED_AGENT_ENV,
 ] as const;
 
 /** extraEnv overrides that DELETE the house-proxy env from the child spawn. */

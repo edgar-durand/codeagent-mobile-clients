@@ -43,7 +43,10 @@ import { ensureBeadsWorkflowHint } from '../beads/workflow-hint';
 import { ensureAgentStandard } from '../agents/agent-standard';
 import { buildMcpServersForStart } from '../integrations/provision';
 import { refreshIntegrationsManifest } from '../integrations/refresh-manifest';
-import { isHouseProxyEnv } from './host/house-proxy-config';
+import {
+  isHouseProxyEnv,
+  houseRailWireId,
+} from './host/house-proxy-config';
 import { mergeWithLocalMcpServers } from '../services/local-mcp-servers';
 import { provisionSkillsForStart } from '../skills/provision';
 import type { StartedBeads } from '../beads';
@@ -302,7 +305,7 @@ export async function start(
       // The house agent runs the `claude` runtime, so `session.agent` cannot
       // tell it apart; the managed-proxy env can (`isHouseProxyEnv`). The
       // backend turns the tool router on for the house agent ONLY.
-      agent: isHouseProxyEnv(process.env) ? HOUSE_AGENT_ID : session.agent,
+      agent: isHouseProxyEnv(process.env) ? houseRailWireId(process.env) : session.agent,
     });
   }
   const mcpServers = mergeWithLocalMcpServers(

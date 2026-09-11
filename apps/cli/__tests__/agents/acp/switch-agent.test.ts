@@ -732,3 +732,63 @@ describe('performAgentSwitch', () => {
     expect(result).toEqual({ ok: true, agentId: 'codex' });
   });
 });
+
+// ─── Managed agents (Managed Agents + Credits, 2026-09-11) ───────────────────
+describe('performAgentSwitch — managed provider target', () => {
+  it('rides the house rail: claude runtime, house:true, provider model + id provisioned, events name the managed id', async () => {
+    const houseCfgs: Array<Record<string, unknown>> = [];
+    const swaps: Array<Record<string, unknown>> = [];
+    const { deps, events, calls } = makeDeps({
+      currentAgent: () => 'codex' as AgentId,
+      fetchCredential: async () => ({
+        ok: true as const,
+        method: 'house_proxy' as const,
+        credential: 'proxy-jwt',
+        baseUrl: 'https://api.example.com/api/v1/agent-proxy',
+        model: 'deepseek-ai/DeepSeek-V4',
+      }),
+      provisionHouseProxy: (cfg) => {
+        houseCfgs.push(cfg);
+      },
+      swapRuntime: async (agentId, swapOpts) => {
+        swaps.push({ agentId, ...swapOpts });
+      },
+    });
+    const result = await performAgentSwitch(deps, 'managed-deepseek');
+    expect(result).toEqual({ ok: true, agentId: 'managed-deepseek' });
+    expect(houseCfgs).toEqual([
+      {
+        baseUrl: 'https://api.example.com/api/v1/agent-proxy',
+        token: 'proxy-jwt',
+        model: 'deepseek-ai/DeepSeek-V4',
+        managedAgentId: 'managed-deepseek',
+      },
+    ]);
+    expect(swaps).toEqual([{ agentId: 'claude', house: true, wireId: 'managed-deepseek' }]);
+    expect(calls).not.toContain('provision');
+    for (const e of events) expect(e.payload.agentId).toBe('managed-deepseek');
+  });
+
+  it('refuses when the same managed agent is already running, but allows house ↔ managed', () => {
+    expect(resolveSwitchTarget('managed-deepseek', 'claude', true, 'managed-deepseek')).toMatchObject({
+      ok: false,
+    });
+    expect(resolveSwitchTarget('managed-deepseek', 'claude', true, 'house-codeagent-cloud')).toEqual({
+      ok: true,
+      agentId: 'claude',
+      wireId: 'managed-deepseek',
+      house: true,
+    });
+    expect(resolveSwitchTarget('house-codeagent-cloud', 'claude', true, 'managed-deepseek')).toEqual({
+      ok: true,
+      agentId: 'claude',
+      wireId: 'house-codeagent-cloud',
+      house: true,
+    });
+    // A managed session switching to another managed provider is a real change.
+    expect(resolveSwitchTarget('managed-codex', 'claude', true, 'managed-deepseek')).toMatchObject({
+      ok: true,
+      wireId: 'managed-codex',
+    });
+  });
+});
