@@ -1511,25 +1511,40 @@ async function selectOptionH(ctx: AcpCommandContext): Promise<void> {
   // Routes through `streaming.resolveSelection`: permission
   // questions unblock the SDK Promise; free-form selections
   // re-prompt the adapter with the picked text.
-  const payload = cmd.payload as { index?: number; from?: number };
+  // `index` is the position in the option list we put on the wire.
+  // `optionId` (or the `answer` value mobile echoes back — for a permission
+  // that value IS the ACP optionId) resolves the pick by id and wins over
+  // the index. `from` is deliberately NOT read: it is the PTY selector's
+  // keyboard cursor ("navigate from row X to row Y") and every client sends
+  // `from === index` when there is no cursor. This handler used to ADD it
+  // as an offset, so the second option resolved as the third — on Claude's
+  // [Yes, Yes-and-don't-ask-again, No] that turned "don't ask again" into
+  // `reject` ("User refused permission to run tool", replay 01a08b05,
+  // 2026-09-10) and "No" into an out-of-bounds cancel. Only "Yes" (0) ever
+  // worked.
+  const payload = cmd.payload as { index?: number; optionId?: string; answer?: string };
   const index = typeof payload?.index === 'number' ? payload.index : 0;
-  const offset = typeof payload?.from === 'number' ? payload.from : 0;
-  const absoluteIndex = index + offset;
+  const optionId =
+    typeof payload?.optionId === 'string' && payload.optionId.length > 0
+      ? payload.optionId
+      : typeof payload?.answer === 'string' && payload.answer.length > 0
+        ? payload.answer
+        : undefined;
   // On-demand Headroom budget-exceeded recovery: if THIS select is a
   // "Pause budget this session" or "Raise budget" action we offered
   // after a budget 429, handle it locally — never route into resolveSelection.
-  if (await budgetRecovery.tryRecover(cmd.id, absoluteIndex)) return;
-  const result = streaming.resolveSelection(absoluteIndex);
+  if (await budgetRecovery.tryRecover(cmd.id, index)) return;
+  const result = streaming.resolveSelection(index, optionId);
   switch (result.kind) {
     case 'resolved':
-      log.info('acpRunner', `select_option index=${absoluteIndex} → permission resolved`);
+      log.info(
+        'acpRunner',
+        `select_option index=${index} → permission resolved optionId=${result.optionId ?? 'cancelled'}`,
+      );
       await relay.sendResult(cmd.id, 'completed', {});
       return;
     case 'reprompt': {
-      log.info(
-        'acpRunner',
-        `select_option index=${absoluteIndex} → reprompt chars=${result.text.length}`,
-      );
+      log.info('acpRunner', `select_option index=${index} → reprompt chars=${result.text.length}`);
       await streaming.beginTurn();
       history.appendUserPrompt(result.text);
       try {
@@ -1552,7 +1567,7 @@ async function selectOptionH(ctx: AcpCommandContext): Promise<void> {
     case 'none':
       log.warn(
         'acpRunner',
-        `select_option index=${absoluteIndex} arrived with no pending question — likely stale`,
+        `select_option index=${index} arrived with no pending question — likely stale`,
       );
       await relay.sendResult(cmd.id, 'failed', {
         error: 'No pending interactive question — the prompt may have expired.',

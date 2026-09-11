@@ -6,7 +6,7 @@ import type { GuardrailPolicy } from '@codeam/shared';
 import { log } from '../../services/logger';
 import { internalPathPermissionOutcome } from './internal-paths';
 import { guardrailDecision, type GuardrailDecision } from './guardrails';
-import { mapPermissionRequest } from './mappers';
+import { mapPermissionRequest, type PermissionOption } from './mappers';
 
 /**
  * The `session/request_permission` decision path, extracted from the runner so
@@ -89,8 +89,7 @@ export interface PermissionGateDeps {
   /** StreamingState.registerPermission — resolves when mobile answers. */
   registerPermission(args: {
     questionId: string;
-    labels: string[];
-    optionIdByLabel: Record<string, string>;
+    options: PermissionOption[];
   }): Promise<RequestPermissionResponse>;
 }
 
@@ -156,7 +155,7 @@ export function createOnRequestPermission(
       }
       log.warn('acpRunner', 'AUTO mode — no allow option offered; falling back to interactive');
     }
-    const { event, optionIdByLabel } = mapPermissionRequest(request);
+    const { event, options } = mapPermissionRequest(request);
     await deps.publisher.publishAwaitingAnswer(event);
     // Event-driven: register a Promise resolver in streaming
     // state. When mobile responds, the backend pushes a
@@ -164,10 +163,6 @@ export function createOnRequestPermission(
     // (`/api/commands/pending/stream`); the `handleCommand` switch
     // routes it back here through `streaming.resolveSelection()`.
     // No polling.
-    return deps.registerPermission({
-      questionId: event.questionId,
-      labels: event.options ?? [],
-      optionIdByLabel,
-    });
+    return deps.registerPermission({ questionId: event.questionId, options });
   };
 }

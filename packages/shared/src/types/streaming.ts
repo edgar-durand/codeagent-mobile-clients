@@ -57,18 +57,33 @@ export interface StreamingChunkEvent {
 }
 
 /**
+ * One choice of an awaiting-answer prompt when the producer wants the
+ * answer resolved by a stable id rather than by position. `value` is
+ * echoed back verbatim by the client (`select_option.optionId` /
+ * `answer`) — for an ACP permission prompt it is the ACP `optionId`.
+ * The backend normalises a bare string option to `{ label, value:
+ * String(index) }`, so consumers always see this shape.
+ */
+export interface AwaitingAnswerOption {
+  label: string;
+  value: string;
+}
+
+/**
  * Body for `POST /api/sessions/:id/awaiting-answer`.
  *
  * `prompt` is the question text the agent rendered (free-form). When
  * the agent presented a multiple-choice selector, `options` is the
- * ordered list of choices the user can pick. `questionId` is the
- * producer-generated UUID the backend echoes back through the answer
- * channel so the CLI can correlate the user's reply with the prompt.
+ * ordered list of choices the user can pick — bare labels (resolved by
+ * position) or {@link AwaitingAnswerOption}s (resolved by `value`).
+ * `questionId` is the producer-generated UUID the backend echoes back
+ * through the answer channel so the CLI can correlate the user's reply
+ * with the prompt.
  */
 export interface AwaitingAnswerEvent {
   questionId: string;
   prompt: string;
-  options?: string[];
+  options?: Array<string | AwaitingAnswerOption>;
 }
 
 /**
