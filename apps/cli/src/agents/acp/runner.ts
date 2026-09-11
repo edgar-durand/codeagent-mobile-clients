@@ -84,6 +84,7 @@ import { maybeSendOnboardingWelcome, resolveRepoName } from './onboarding';
 import { registerTerminalHandlers, closeAllTerminals } from '../../services/terminal-ops.service';
 import { mapSessionUpdate } from './mappers';
 import { createOnRequestPermission } from './permission-gate';
+import type { PermissionOption } from './mappers';
 import { getGuardrailPolicy } from './guardrail-config';
 import { isLocalSession } from '../../baton/gate';
 import { extractSelectPrompt } from './selectPromptExtractor';
@@ -209,11 +210,11 @@ type PendingInteractive =
   | {
       kind: 'permission';
       questionId: string;
-      /** Ordered labels — `select_option {index}` looks the label up here. */
-      labels: string[];
-      optionIdByLabel: Record<string, string>;
+      /** Ordered like the ACP `options[]` we put on the wire —
+       *  `select_option` resolves by `optionId` first, `index` second. */
+      options: PermissionOption[];
       resolve: (response: RequestPermissionResponse) => void;
-      /** Auto-reject after this ms; matches the upstream Redis TTL. */
+      /** Auto-cancel after this ms; matches the upstream Redis TTL. */
       timeoutTimer: NodeJS.Timeout;
     }
   | {
@@ -329,14 +330,21 @@ export class StreamingState {
 
   /**
    * Register a permission Promise. The Promise stays pending until
-   * `resolveSelection(index)` is called from the relay handler, OR
-   * the safety timer fires after PERMISSION_TIMEOUT_MS and we
-   * default-reject. Caller is the SDK's `onRequestPermission`.
+   * `resolveSelection()` is called from the relay handler, OR the
+   * safety timer fires after PERMISSION_TIMEOUT_MS and we auto-cancel.
+   * Caller is the SDK's `onRequestPermission`.
+   *
+   * The auto-cancel is NEVER silent (same HARD RULE as the auto-denies
+   * in ./permission-gate.ts): a visible chat line says the request
+   * expired. The adapter reports a cancel to the model as a failed tool
+   * ("Tool use aborted"), which the model then narrates as a refusal —
+   * replay 01a08b05 (2026-09-10): two prompts expired while the user was
+   * in the preview, Claude told him HE had refused them twice, and he
+   * protested "J'ai rien refusé". The line is the user's evidence.
    */
   registerPermission(args: {
     questionId: string;
-    labels: string[];
-    optionIdByLabel: Record<string, string>;
+    options: PermissionOption[];
   }): Promise<RequestPermissionResponse> {
     return new Promise<RequestPermissionResponse>((resolve) => {
       const timeoutTimer = setTimeout(() => {
@@ -346,14 +354,20 @@ export class StreamingState {
             `permission ${args.questionId.slice(0, 8)} TTL expired — auto-cancel`,
           );
           this.pending = null;
+          // Fire-and-forget (publishOutput never throws) so the cancel
+          // reaches the agent immediately.
+          void this.publisher.publishOutput({
+            type: 'text',
+            content: permissionExpiredNotice(),
+            done: true,
+          });
           resolve({ outcome: { outcome: 'cancelled' } });
         }
       }, PERMISSION_TIMEOUT_MS);
       this.pending = {
         kind: 'permission',
         questionId: args.questionId,
-        labels: args.labels,
-        optionIdByLabel: args.optionIdByLabel,
+        options: args.options,
         resolve,
         timeoutTimer,
       };
@@ -375,33 +389,43 @@ export class StreamingState {
    * routing instruction the runner uses to drive the next ACP RPC:
    *
    *   - 'resolved' — permission Promise resolved; SDK is unblocked
-   *     and the runner just acks the relay command.
+   *     and the runner just acks the relay command. `optionId` is
+   *     what was answered (null = cancelled).
    *   - 'reprompt' — free-form selection; the runner must call
    *     `client.prompt(text)` with the returned text to send the
    *     user's pick to the adapter as a new turn.
    *   - 'none' — nothing pending; the runner acks the command as
    *     failed so mobile shows a stale-question affordance.
+   *
+   * For a permission, `optionId` (the wire `value` the client echoes
+   * back) wins when it names one of the registered options; otherwise
+   * `index` is the position in the options we put on the wire.
    */
   resolveSelection(
     index: number,
-  ): { kind: 'resolved' } | { kind: 'reprompt'; text: string } | { kind: 'none' } {
+    optionId?: string,
+  ):
+    | { kind: 'resolved'; optionId: string | null }
+    | { kind: 'reprompt'; text: string }
+    | { kind: 'none' } {
     if (!this.pending) return { kind: 'none' };
     if (this.pending.kind === 'permission') {
-      const label = this.pending.labels[index];
-      const optionId = label ? this.pending.optionIdByLabel[label] : undefined;
+      const byId = optionId
+        ? this.pending.options.find((o) => o.optionId === optionId)
+        : undefined;
+      const picked = byId ?? this.pending.options[index];
       clearTimeout(this.pending.timeoutTimer);
       const resolve = this.pending.resolve;
       this.pending = null;
-      if (!optionId) {
-        // Index out of range — the labels list on mobile drifted out
-        // of sync with what we registered (very unlikely but cheaper
-        // to handle than to assume).
+      if (!picked) {
+        // Index out of range and no id match — the option list on the
+        // client drifted from what we registered. Cancel, never guess.
         log.warn('acpRunner', `select_option index=${index} out of bounds — cancel`);
         resolve({ outcome: { outcome: 'cancelled' } });
-        return { kind: 'resolved' };
+        return { kind: 'resolved', optionId: null };
       }
-      resolve({ outcome: { outcome: 'selected', optionId } });
-      return { kind: 'resolved' };
+      resolve({ outcome: { outcome: 'selected', optionId: picked.optionId } });
+      return { kind: 'resolved', optionId: picked.optionId };
     }
     // Free-form path
     const text = this.pending.options[index];
@@ -809,7 +833,17 @@ export interface AcpRunnerOptions {
 /** Auto-cancel a permission Promise after this ms. Matches the
  *  upstream Redis TTL on the awaiting-answer record so the SDK
  *  never blocks past the point where mobile could still answer. */
-const PERMISSION_TIMEOUT_MS = 5 * 60 * 1000;
+export const PERMISSION_TIMEOUT_MS = 5 * 60 * 1000;
+
+/** Chat line published when a permission prompt hits the TTL unanswered. */
+export function permissionExpiredNotice(): string {
+  const minutes = Math.round(PERMISSION_TIMEOUT_MS / 60_000);
+  return (
+    `⏱ A permission request expired after ${minutes} minutes with no answer, so CodeAgent ` +
+    'cancelled it — this was a timeout, not a refusal by you. Ask the agent to try again ' +
+    'and approve it from here.'
+  );
+}
 
 // The AUTO-mode option picker moved into the extracted permission gate
 // (./permission-gate.ts) with the rest of the `session/request_permission`

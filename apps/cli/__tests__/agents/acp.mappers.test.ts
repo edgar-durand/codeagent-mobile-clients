@@ -217,7 +217,7 @@ describe('mapPermissionRequest', () => {
     kind: 'execute',
   } as const;
 
-  it('builds an awaiting-answer event with the tool title as prompt + option labels', () => {
+  it('builds an awaiting-answer event with the tool title as prompt + index-aligned {label,value:optionId} options', () => {
     const req: RequestPermissionRequest = {
       sessionId: 'sess-1',
       toolCall: baseToolCall,
@@ -226,13 +226,19 @@ describe('mapPermissionRequest', () => {
         { kind: 'reject_once', name: 'Reject', optionId: 'opt-reject' },
       ],
     };
-    const { event, optionIdByLabel } = mapPermissionRequest(req);
+    const { event, options } = mapPermissionRequest(req);
     expect(event.prompt).toBe('Run `rm -rf /`');
-    expect(event.options).toEqual(['Allow once', 'Reject']);
-    expect(optionIdByLabel).toEqual({
-      'Allow once': 'opt-allow',
-      Reject: 'opt-reject',
-    });
+    // The wire carries the ACP optionId as each option's `value` so the
+    // answer can be resolved by id — the positional index is only a
+    // fallback for clients that predate it.
+    expect(event.options).toEqual([
+      { label: 'Allow once', value: 'opt-allow' },
+      { label: 'Reject', value: 'opt-reject' },
+    ]);
+    expect(options).toEqual([
+      { label: 'Allow once', optionId: 'opt-allow', kind: 'allow_once' },
+      { label: 'Reject', optionId: 'opt-reject', kind: 'reject_once' },
+    ]);
     expect(event.questionId).toMatch(/^[0-9a-f-]{36}$/);
   });
 
@@ -246,7 +252,10 @@ describe('mapPermissionRequest', () => {
       ],
     };
     const { event } = mapPermissionRequest(req);
-    expect(event.options).toEqual(['Always allow', 'Always reject']);
+    expect(event.options).toEqual([
+      { label: 'Always allow', value: 'a' },
+      { label: 'Always reject', value: 'r' },
+    ]);
   });
 
   it('falls back to a generic prompt when the tool has no title / kind', () => {
@@ -259,17 +268,102 @@ describe('mapPermissionRequest', () => {
     expect(event.prompt).toBe('The agent requested permission to continue.');
   });
 
-  it('deduplicates options that collapse to the same label', () => {
+  it('keeps every option, index-aligned with the ACP array, even when labels collide', () => {
+    // Dropping a duplicate label used to shift every later index — the
+    // phone's positional pick would then land on the wrong ACP option.
     const req: RequestPermissionRequest = {
       sessionId: 'sess-1',
       toolCall: baseToolCall,
       options: [
         { kind: 'allow_once', name: 'Allow once', optionId: 'first' },
         { kind: 'allow_once', name: 'Allow once', optionId: 'second' },
+        { kind: 'reject_once', name: 'No', optionId: 'reject' },
       ],
     };
-    const { event, optionIdByLabel } = mapPermissionRequest(req);
-    expect(event.options).toEqual(['Allow once']);
-    expect(optionIdByLabel).toEqual({ 'Allow once': 'first' });
+    const { event, options } = mapPermissionRequest(req);
+    expect(event.options).toEqual([
+      { label: 'Allow once', value: 'first' },
+      { label: 'Allow once', value: 'second' },
+      { label: 'No', value: 'reject' },
+    ]);
+    expect(options.map((o) => o.optionId)).toEqual(['first', 'second', 'reject']);
+  });
+
+  // claude-agent-acp titles a Bash prompt with the model's `description`
+  // when there is one and the bare tool name ("Bash") when there is not —
+  // replay 01a08b05 (2026-09-10): the user was asked to approve "Bash"
+  // with no command in sight. The prompt must show the command.
+  it('appends the shell command from rawInput when the title is the bare tool name', () => {
+    const req: RequestPermissionRequest = {
+      sessionId: 'sess-1',
+      toolCall: {
+        toolCallId: 'tc-bash',
+        title: 'Bash',
+        kind: 'execute',
+        rawInput: { command: 'node --env-file=.env scripts/tmp-count-orders.mjs 2026-09-09' },
+      },
+      options: [{ kind: 'allow_once', optionId: 'allow-once', name: 'Yes' }],
+    };
+    const { event } = mapPermissionRequest(req);
+    expect(event.prompt).toBe(
+      'Bash\nnode --env-file=.env scripts/tmp-count-orders.mjs 2026-09-09',
+    );
+  });
+
+  it('appends the command under a descriptive title too, and the file path for file tools', () => {
+    const shell: RequestPermissionRequest = {
+      sessionId: 'sess-1',
+      toolCall: {
+        toolCallId: 'tc-bash',
+        title: 'Count yesterday\'s orders',
+        kind: 'execute',
+        rawInput: { command: 'node scripts/count.mjs', description: "Count yesterday's orders" },
+      },
+      options: [{ kind: 'allow_once', optionId: 'allow-once', name: 'Yes' }],
+    };
+    expect(mapPermissionRequest(shell).event.prompt).toBe(
+      "Count yesterday's orders\nnode scripts/count.mjs",
+    );
+
+    const edit: RequestPermissionRequest = {
+      sessionId: 'sess-1',
+      toolCall: {
+        toolCallId: 'tc-edit',
+        title: 'Edit',
+        kind: 'edit',
+        rawInput: { file_path: '/workspaces/app/src/index.ts', old_string: 'a', new_string: 'b' },
+      },
+      options: [{ kind: 'allow_once', optionId: 'allow-once', name: 'Yes' }],
+    };
+    expect(mapPermissionRequest(edit).event.prompt).toBe('Edit\n/workspaces/app/src/index.ts');
+  });
+
+  it('does not repeat a command the title already contains, and truncates a very long one', () => {
+    const same: RequestPermissionRequest = {
+      sessionId: 'sess-1',
+      toolCall: {
+        toolCallId: 'tc-1',
+        title: 'npm test',
+        kind: 'execute',
+        rawInput: { command: 'npm test' },
+      },
+      options: [{ kind: 'allow_once', optionId: 'allow-once', name: 'Yes' }],
+    };
+    expect(mapPermissionRequest(same).event.prompt).toBe('npm test');
+
+    const long: RequestPermissionRequest = {
+      sessionId: 'sess-1',
+      toolCall: {
+        toolCallId: 'tc-2',
+        title: 'Bash',
+        kind: 'execute',
+        rawInput: { command: 'x'.repeat(1000) },
+      },
+      options: [{ kind: 'allow_once', optionId: 'allow-once', name: 'Yes' }],
+    };
+    const prompt = mapPermissionRequest(long).event.prompt;
+    expect(prompt.startsWith('Bash\n')).toBe(true);
+    expect(prompt.length).toBeLessThanOrEqual('Bash\n'.length + 401);
+    expect(prompt.endsWith('…')).toBe(true);
   });
 });

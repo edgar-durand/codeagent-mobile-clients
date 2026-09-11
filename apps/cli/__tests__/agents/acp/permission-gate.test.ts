@@ -78,8 +78,8 @@ function makeGate(overrides: Partial<PermissionGateDeps> = {}): GateHarness {
   // The interactive path resolves as if the user tapped the FIRST option.
   const registerPermission = vi
     .fn()
-    .mockImplementation((args: { optionIdByLabel: Record<string, string> }) => {
-      const firstOptionId = Object.values(args.optionIdByLabel)[0];
+    .mockImplementation((args: { options: Array<{ optionId: string }> }) => {
+      const firstOptionId = args.options[0]?.optionId;
       return Promise.resolve({ outcome: { outcome: 'selected', optionId: firstOptionId } });
     });
   const gate = createOnRequestPermission({

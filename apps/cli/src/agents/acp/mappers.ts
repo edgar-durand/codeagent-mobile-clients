@@ -152,48 +152,53 @@ export function mapSessionUpdate(
   }
 }
 
+/** One ACP permission option as the runner tracks it: the label the
+ *  phone renders, the ACP `optionId` the answer must carry back, and
+ *  the kind (for logging the user's choice category). */
+export interface PermissionOption {
+  label: string;
+  optionId: string;
+  kind: string;
+}
+
 /**
  * Map an ACP `session/request_permission` request to our
  * `awaiting-answer` wire shape. Returns the AwaitingAnswerEvent the
- * publisher posts upstream, plus a lookup table the client uses to
- * resolve the user's reply back to one of the original ACP
- * `optionId` values.
+ * publisher posts upstream, plus the ordered option list the runner
+ * uses to resolve the user's reply back to an ACP `optionId`.
  *
- * The lookup is keyed by the user-facing option label (the same
- * string we send to mobile as `options[i]`) because the answer
- * channel echoes the picked label back — see `AnswerResolvedEvent`.
- * Two options sharing the same label collapse to one entry; this is
- * extremely unlikely in practice (adapters render distinct labels)
- * but we drop the second silently rather than throw.
+ * Every option goes on the wire as `{ label, value: optionId }`, in the
+ * SAME order as the ACP `options[]` array — nothing is dropped or
+ * deduplicated, so a client that still answers by position lands on
+ * the option it rendered, and a client that echoes `value` back
+ * (`select_option.optionId` / `answer`) is resolved by id regardless
+ * of position.
  */
 export function mapPermissionRequest(
   request: RequestPermissionRequest,
 ): {
   event: AwaitingAnswerEvent;
-  /** label → original ACP optionId, for resolving the reply back. */
-  optionIdByLabel: Record<string, string>;
-  /** label → kind, used to log the user's choice category. */
-  kindByLabel: Record<string, string>;
+  /** Ordered like the ACP `options[]` array — the wire index is this index. */
+  options: PermissionOption[];
 } {
-  const prompt = describeToolCall(request.toolCall) ?? 'The agent requested permission to continue.';
-  const optionIdByLabel: Record<string, string> = {};
-  const kindByLabel: Record<string, string> = {};
-  const labels: string[] = [];
-  for (const opt of request.options) {
-    const label = opt.name?.trim() || humanizeKind(opt.kind);
-    if (label in optionIdByLabel) continue;
-    optionIdByLabel[label] = opt.optionId;
-    kindByLabel[label] = opt.kind;
-    labels.push(label);
-  }
+  const prompt =
+    describePermissionToolCall(request.toolCall) ??
+    'The agent requested permission to continue.';
+  const options: PermissionOption[] = request.options.map((opt) => ({
+    label: opt.name?.trim() || humanizeKind(opt.kind),
+    optionId: opt.optionId,
+    kind: opt.kind,
+  }));
   return {
     event: {
       questionId: randomUUID(),
       prompt,
-      options: labels.length > 0 ? labels : undefined,
+      options:
+        options.length > 0
+          ? options.map((o) => ({ label: o.label, value: o.optionId }))
+          : undefined,
     },
-    optionIdByLabel,
-    kindByLabel,
+    options,
   };
 }
 
@@ -253,6 +258,49 @@ function describeToolCall(
     }
   }
   return null;
+}
+
+/** Longest tool-input detail (command / path) appended to a permission prompt. */
+const PERMISSION_DETAIL_MAX = 400;
+
+/**
+ * Pull the one input field a person needs to judge a permission
+ * request: the shell command for Bash/Terminal-style calls, else the
+ * file path for file tools. Returns null when the input has neither.
+ */
+function permissionInputDetail(rawInput: unknown): string | null {
+  if (!rawInput || typeof rawInput !== 'object') return null;
+  const input = rawInput as Record<string, unknown>;
+  for (const key of ['command', 'file_path', 'path']) {
+    const v = input[key];
+    if (typeof v === 'string' && v.trim().length > 0) {
+      const detail = v.trim();
+      return detail.length > PERMISSION_DETAIL_MAX
+        ? `${detail.slice(0, PERMISSION_DETAIL_MAX)}…`
+        : detail;
+    }
+  }
+  return null;
+}
+
+/**
+ * Prompt text for a permission card: the tool title, plus the command
+ * or path from `rawInput` on its own line whenever the title doesn't
+ * already show it. claude-agent-acp titles a Bash prompt with the
+ * model's optional `description` and falls back to the bare tool name
+ * ("Bash") — so without this the phone asked the user to approve
+ * "Bash" with no way to see WHAT would run (replay 01a08b05,
+ * 2026-09-10). The input is what the user is actually approving.
+ */
+function describePermissionToolCall(
+  call: RequestPermissionRequest['toolCall'],
+): string | null {
+  const title = describeToolCall(call);
+  const detail = permissionInputDetail(call.rawInput);
+  if (!detail) return title;
+  if (!title) return detail;
+  if (title.includes(detail)) return title;
+  return `${title}\n${detail}`;
 }
 
 /**

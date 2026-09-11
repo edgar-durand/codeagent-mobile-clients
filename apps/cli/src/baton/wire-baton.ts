@@ -423,13 +423,9 @@ export async function runBatonSession(opts: BatonSessionOptions): Promise<void> 
     beginLoadReplay: () => streaming.beginLoadReplay(),
     endLoadReplay: () => streaming.endLoadReplay(),
     onRequestPermission: async (request) => {
-      const { event, optionIdByLabel } = mapPermissionRequest(request);
+      const { event, options } = mapPermissionRequest(request);
       await publisher.publishAwaitingAnswer(event);
-      return streaming.registerPermission({
-        questionId: event.questionId,
-        labels: event.options ?? [],
-        optionIdByLabel,
-      });
+      return streaming.registerPermission({ questionId: event.questionId, options });
     },
     onStderr: (line) => {
       recentStderr.push(line);
