@@ -4,36 +4,53 @@
  * conventions an ACP adapter can use for `agent_message_chunk`:
  *
  *   - **true deltas** — each notification carries only the NEW bytes
- *     since the last one (the convention `mappers.ts` documents and
- *     real `claude-agent-acp` against Anthropic uses). Reconciliation
- *     appends.
+ *     since the last one. This is what the ACP spec defines for
+ *     `agent_message_chunk` and what `claude-agent-acp` forwards from
+ *     Anthropic's `text_delta` stream events (`dist/acp-agent.js`, the
+ *     `stream_event` case). Reconciliation appends.
  *
  *   - **cumulative snapshots** — each notification carries the FULL
- *     message-so-far. This is what an OpenAI-compatible / self-hosted
- *     proxy behind `claude-agent-acp` commonly emits (e.g. the house
- *     "CodeAgent Cloud" agent pointed at a MiniMax-M3 proxy): the
- *     upstream SSE ships `message.content` snapshots rather than
- *     incremental `delta`s, and the adapter forwards each as a fresh
- *     `agent_message_chunk`. Blind `+=` accumulation then concatenates
- *     the reply with itself ("…hoy?¡Hola!…hoy?") — the intra-reply
- *     duplication bug. Reconciliation REPLACES instead.
+ *     message-so-far. Two real sources:
+ *       1. The house "CodeAgent Cloud" agent's self-hosted MiniMax proxy:
+ *          the upstream SSE ships `message.content` snapshots as
+ *          `text_delta`s and the adapter forwards each as a fresh
+ *          `agent_message_chunk` (commit 926e81d0 — the "…hoy?¡Hola!…hoy?"
+ *          intra-reply duplication). Blind `+=` doubles the reply.
+ *       2. `claude-agent-acp`'s consolidated `assistant` message: it diffs
+ *          each assembled block against what already streamed and forwards
+ *          only the un-streamed tail (a true delta) — but when the streamed
+ *          text is NOT a prefix of the assembled block (whitespace /
+ *          segmentation drift) it re-sends the WHOLE block (the "Not
+ *          matched … forward the block in full" branch). That re-emit
+ *          shares a long prefix with `existing` and diverges near the end.
+ *     Reconciliation REPLACES (or keeps the shared prefix + the new tail).
  *
- * The decision is made by string containment, which is unambiguous for
- * the two real shapes:
+ * THE RULE — a snapshot is recognisable by SIZE, a delta is not:
  *
- *   - `incoming` starts with `existing`  → snapshot that grew → REPLACE
- *     with `incoming` (covers the very first chunk too, where
- *     `existing === ''` so every string trivially starts with it).
- *   - `existing` starts with `incoming`  → stale / shorter snapshot
- *     (re-send, retransmit) → KEEP `existing`.
- *   - incoming SHARES a long common prefix with existing but isn't an exact
- *     `startsWith` (real-Claude whitespace / segmentation drift on the
- *     consolidated re-emit) → still a snapshot, NOT a delta: take only the
- *     net-new suffix past the shared prefix so the reply doesn't double on a
- *     one-character drift. When the shared prefix covers ALL of existing it's
- *     a clean REPLACE; otherwise we keep existing + the divergent suffix.
- *   - neither is a prefix of the other AND the shared prefix is short →
- *     genuine delta → APPEND.
+ *   - `incoming` starts with `existing` → snapshot that grew (or an exact
+ *     re-send) → REPLACE with `incoming`. Covers the first chunk too
+ *     (`existing === ''`). A true delta can only land here when `existing`
+ *     is a run of repeated bytes the delta happens to extend ("\n" then
+ *     "\n\n") — a whitespace-only loss we accept.
+ *   - otherwise `incoming` is a snapshot ONLY IF it is long relative to
+ *     `existing`: a re-sent snapshot carries the whole message-so-far, so it
+ *     is at least about as long as what we hold (`>= half`, to absorb
+ *     drift), AND it shares a long common prefix with `existing`
+ *     (`>= half` of existing AND at least {@link MIN_SNAPSHOT_PREFIX} bytes,
+ *     so a one-byte coincidence on a two-byte reply can't qualify). Then
+ *     keep `existing`'s shared prefix + `incoming`'s divergent tail (a clean
+ *     REPLACE when the prefix covers all of existing; `existing` unchanged
+ *     when `incoming` is a strict prefix of it — a stale re-send never
+ *     truncates).
+ *   - everything else is a genuine delta → APPEND. In particular a SHORT
+ *     `incoming` that happens to be a prefix of `existing` ("\n\n" or
+ *     "\n\nMa" after a reply that opened with "\n\nMaintenant…") is a delta,
+ *     not a stale snapshot: the old `existing.startsWith(incoming) → keep`
+ *     rule dropped exactly those bytes and rendered "n°209).intenant" /
+ *     "signature.Je" (2026-09-10 review, wswp26jc9p f355–f374). ACP is a
+ *     JSON-RPC stream over stdio — notifications arrive in order, so a
+ *     shorter *earlier* snapshot re-arriving late is not a real shape; the
+ *     only real short-prefix case is the delta.
  *
  * Pure + exported so the snapshot-vs-delta behaviour is unit-tested
  * without spinning up a full ACP session.
@@ -44,25 +61,40 @@ export function reconcileCumulative(existing: string, incoming: string): string 
   // case for both the first chunk (existing === '') and every growing
   // snapshot. Replacing is idempotent for an exact re-send.
   if (incoming.startsWith(existing)) return incoming;
-  // Stale / shorter snapshot of the same prefix — ignore it so a
-  // late-arriving earlier frame can't truncate the reply.
-  if (existing.startsWith(incoming)) return existing;
-  // Prefix-drift snapshot: incoming re-sends most of existing but diverges
-  // partway (a whitespace/segmentation difference on the consolidated
-  // re-emit, observed on real Claude). Detect it by a shared common prefix
-  // that's a substantial fraction of existing — far longer than a few bytes
-  // a genuine first delta could coincidentally share. Treat as a snapshot:
-  // emit existing's prefix + incoming's divergent tail (the net-new suffix),
-  // so a tiny drift can't double the reply via APPEND.
   const shared = commonPrefixLength(existing, incoming);
-  if (shared > 0 && shared >= existing.length / 2) {
+  if (looksLikeSnapshot(existing, incoming, shared)) {
     // existing[0..shared) === incoming[0..shared); the canonical text is the
     // shared prefix followed by whatever the (longer/newer) snapshot carries
-    // past it. Equivalent to a REPLACE when shared === existing.length.
+    // past it. When `incoming` is a strict prefix of `existing` its tail is
+    // empty and that would TRUNCATE — a stale re-send must never shrink the
+    // reply, so keep `existing` whole.
+    if (shared === incoming.length) return existing;
     return existing.slice(0, shared) + incoming.slice(shared);
   }
-  // Disjoint (or only a trivial shared prefix) → true delta; append.
+  // Disjoint, a trivial shared prefix, or too short to be a re-sent
+  // snapshot → true delta; append.
   return existing + incoming;
+}
+
+/**
+ * Minimum shared-prefix length (bytes) before `incoming` can be read as a
+ * re-sent snapshot rather than a delta. A genuine delta never repeats the
+ * reply's opening bytes on purpose; a coincidental overlap is one or two
+ * bytes of whitespace/punctuation, never eight.
+ */
+const MIN_SNAPSHOT_PREFIX = 8;
+
+/**
+ * `incoming` is a re-sent snapshot of `existing` (see the rule on
+ * {@link reconcileCumulative}): long relative to existing AND sharing a long
+ * prefix with it. Everything else is a delta.
+ */
+function looksLikeSnapshot(existing: string, incoming: string, shared: number): boolean {
+  return (
+    shared >= MIN_SNAPSHOT_PREFIX &&
+    shared * 2 >= existing.length &&
+    incoming.length * 2 >= existing.length
+  );
 }
 
 /** Length of the longest common prefix of two strings. */

@@ -87,6 +87,37 @@ describe('reconcileCumulative', () => {
       'The quick brown fox jumps',
     );
   });
+
+  // 2026-09-10 review (wswp26jc9p f355-f374, dushkatech): streamed Claude
+  // replies rendered "n°209).intenant j'ajoute" / "signature.Je lance" — every
+  // dropped piece was a TRUE delta ("\n\n", "\n\nMa") that happened to be a
+  // prefix of the reply so far (the reply opened with "\n\nMaintenant…"). The
+  // old `existing.startsWith(incoming) → keep existing` treated it as a stale
+  // snapshot re-send and discarded it.
+  describe('a short true delta that is a prefix of the reply so far', () => {
+    it('appends a paragraph break (two newlines) to a reply that opened with one', () => {
+      const existing = '\n\nMaintenant je modifie la route (ligne n°209).';
+      expect(reconcileCumulative(existing, '\n\n')).toBe(`${existing}\n\n`);
+    });
+
+    it('appends a newline-led "Ma" (start of a new "Maintenant" paragraph) to a reply that opened with it', () => {
+      const existing = '\n\nMaintenant je modifie la route (ligne n°209).';
+      expect(reconcileCumulative(existing, '\n\nMa')).toBe(`${existing}\n\nMa`);
+    });
+
+    it('appends "Ma" to a reply that opened with "Maintenant"', () => {
+      const existing = 'Maintenant je modifie la route (ligne n°209).\n\n';
+      expect(reconcileCumulative(existing, 'Ma')).toBe(`${existing}Ma`);
+    });
+
+    it('appends a one-character delta that coincidentally matches the first char of a short reply', () => {
+      // `:60` on short replies — a 1-byte shared prefix is ≥ half of a 2-byte
+      // existing, so the drift branch used to swallow it. A real delta never
+      // re-sends the reply's opening bytes; the absolute-prefix floor guards it.
+      expect(reconcileCumulative('Je', 'J\'ai')).toBe('JeJ\'ai');
+      expect(reconcileCumulative('\n\n', '\nOk')).toBe('\n\n\nOk');
+    });
+  });
 });
 
 describe('StreamingState.append — chat-pipe text reconciliation', () => {
