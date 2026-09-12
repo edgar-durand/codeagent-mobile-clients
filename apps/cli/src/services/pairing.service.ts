@@ -673,6 +673,8 @@ export type ProvisionCredentialResult =
       /** Present for `house_proxy` (the house-agent switch target): the managed
        *  agent-proxy origin the claude runtime is pointed at. */
       baseUrl?: string;
+      /** MANAGED agents: the upstream model to pin (ANTHROPIC_MODEL). */
+      model?: string;
       installScript?: string;
     }
   | { ok: false; status: number; code?: string; message?: string };
@@ -719,6 +721,7 @@ export async function fetchProvisionCredentialDetailed(input: {
           method?: unknown;
           credential?: unknown;
           baseUrl?: unknown;
+          model?: unknown;
           installScript?: unknown;
         };
       } | null
@@ -736,6 +739,7 @@ export async function fetchProvisionCredentialDetailed(input: {
         ...(typeof data.baseUrl === 'string' && data.baseUrl.length > 0
           ? { baseUrl: data.baseUrl }
           : {}),
+        ...(typeof data.model === 'string' && data.model.length > 0 ? { model: data.model } : {}),
         ...(typeof data.installScript === 'string' && data.installScript.length > 0
           ? { installScript: data.installScript }
           : {}),

@@ -175,6 +175,9 @@ export interface AcpSessionContext {
    * `house-codeagent-cloud` as "the agent already driving this session".
    */
   currentIsHouse?: () => boolean;
+  /** WIRE id of the running house-rail agent — a MANAGED provider id when the
+   *  deploy/switch exported CODEAM_MANAGED_AGENT_ID, else the house sentinel. */
+  currentHouseWireId?: () => string;
   /** Serialized emitter — the SAME chain the switch events ride, so a
    *  `handoff_resolved` can never overtake the swap that resolved it. */
   postSquadEvent?: (
@@ -427,9 +430,11 @@ export function namesCurrentAgent(
   requested: string,
   currentAgent: string,
   currentIsHouse: boolean,
+  /** WIRE id of the running house-rail agent (managed id or house sentinel). */
+  currentHouseWireId: string = HOUSE_AGENT_ID,
 ): boolean {
   if (requested === currentAgent) return true;
-  if (currentIsHouse) return requested === HOUSE_AGENT_ID;
+  if (currentIsHouse) return requested === currentHouseWireId;
   return publicToInternal(requested) === currentAgent;
 }
 
@@ -843,7 +848,12 @@ async function startTaskH(ctx: AcpCommandContext): Promise<void> {
   }
   if (
     requestedAgentId.length > 0 &&
-    !namesCurrentAgent(requestedAgentId, opts.agent, ctx.currentIsHouse?.() ?? false)
+    !namesCurrentAgent(
+      requestedAgentId,
+      opts.agent,
+      ctx.currentIsHouse?.() ?? false,
+      ctx.currentHouseWireId?.() ?? HOUSE_AGENT_ID,
+    )
   ) {
     const routed = await routeSquadTask(ctx, requestedAgentId);
     if (!routed.ok) {

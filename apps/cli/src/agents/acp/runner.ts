@@ -50,6 +50,9 @@ import {
   HOUSE_AGENT_ID,
   HOUSE_AGENT_NAME,
   HOUSE_AGENT_SUBTITLE,
+  MANAGED_AGENT_SUBTITLE,
+  MANAGED_PROVIDER_DISPLAY_NAMES,
+  isManagedProviderId,
   type AgentId,
   type HandoffProposal,
   type StreamingChunkKind,
@@ -98,6 +101,7 @@ import {
   persistHouseProxyConfig,
   pickHouseProxyEnv,
   type HouseProxyConfig,
+  houseRailWireId,
 } from '../../commands/host/house-proxy-config';
 import { FileWatcherService } from '../../services/file-watcher.service';
 import { TurnFileAggregator } from '../../services/turn-files/turn-file-aggregator';
@@ -1700,6 +1704,8 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
         // Same live flag the switch deps read — a start_task naming the
         // house agent on a house session is the agent already running.
         () => houseActive,
+        // …and WHICH house-rail agent (a managed id, or the house sentinel).
+        () => houseWireId,
       );
     },
     { id: opts.agent, name: opts.agent, displayName: opts.agent } as never,
@@ -1766,6 +1772,9 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
   // `provisionHouseProxy` on a mid-session switch TO house (a non-house box
   // has no proxy env to inherit).
   let houseActive = isHouseProxyEnv(process.env);
+  // WIRE id of the house-rail agent this process runs: a MANAGED id when the
+  // deploy/switch exported CODEAM_MANAGED_AGENT_ID, else the house sentinel.
+  let houseWireId: string = houseRailWireId(process.env);
   let houseEnv: Record<string, string> = houseActive ? pickHouseProxyEnv(process.env) : {};
   // Pending config for `persistHouseProxyConfig` — written only AFTER the
   // house swap succeeded (persisting on a failed swap would poison the
@@ -1781,7 +1790,7 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
    */
   const relaunchWith = async (
     nextAgent: AgentId,
-    swapOpts: { house: boolean } = { house: false },
+    swapOpts: { house: boolean; wireId?: string } = { house: false },
   ): Promise<void> => {
     // Same teardown stop_task uses: cancel any in-flight turn, then flush
     // the streaming state so mobile never wedges on "Thinking…".
@@ -1852,6 +1861,7 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
     const wasHouse = houseActive;
     houseActive = swapOpts.house;
     if (swapOpts.house) {
+      houseWireId = swapOpts.wireId ?? HOUSE_AGENT_ID;
       // Persist for the self-hosted resume spawner: a sleep/wake re-injects
       // this env into the resumed child (the Rafael 2026-08-05 class of
       // "woken house agent has no proxy env" bugs).
@@ -1870,14 +1880,22 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
     // Fresh welcome card so the mobile chat flips to the new agent's brand.
     // House target: white-label identity — never the runtime's name/model
     // (packages/shared house-agent white-label rule).
+    const managedBanner = swapOpts.house && isManagedProviderId(houseWireId) ? houseWireId : null;
     void publisher.publishOutput({
       type: 'agent_banner',
-      agentId: swapOpts.house ? HOUSE_AGENT_ID : nextAgent,
+      agentId: swapOpts.house ? houseWireId : nextAgent,
       // A switch starts a FRESH conversation with the new agent — never "back".
-      title: swapOpts.house ? HOUSE_AGENT_NAME : bannerTitle(false),
-      subtitle: swapOpts.house
-        ? HOUSE_AGENT_SUBTITLE
-        : buildBannerSubtitle(nextAgent, hs.sessionId, hs.model, hs.tier),
+      // A managed target is named by its model; the house agent stays white-label.
+      title: managedBanner
+        ? MANAGED_PROVIDER_DISPLAY_NAMES[managedBanner]
+        : swapOpts.house
+          ? HOUSE_AGENT_NAME
+          : bannerTitle(false),
+      subtitle: managedBanner
+        ? MANAGED_AGENT_SUBTITLE
+        : swapOpts.house
+          ? HOUSE_AGENT_SUBTITLE
+          : buildBannerSubtitle(nextAgent, hs.sessionId, hs.model, hs.tier),
       path: swapOpts.house ? '' : bannerLocation(opts.cwd),
       done: true,
     });
@@ -1895,6 +1913,7 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
   const switchDeps: SwitchAgentDeps = {
     currentAgent: () => opts.agent,
     currentIsHouse: () => houseActive,
+    currentHouseWireId: () => houseWireId,
     postEvent: emitSwitchEvent,
     fetchCredential: (agentId) =>
       fetchProvisionCredentialDetailed({
@@ -1907,7 +1926,7 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
     provisionCredential: (agentId, auth) => {
       switchCredentialEnv = provisionAgentCredentials(agentId, auth);
     },
-    provisionHouseProxy: ({ baseUrl, token }) => {
+    provisionHouseProxy: ({ baseUrl, token, model, managedAgentId }) => {
       // Isolated per-session Claude config dir, mirroring the house DEPLOY's
       // per-deploy isolation: the box may carry a personal ~/.claude login
       // that Claude Code would prefer over ANTHROPIC_AUTH_TOKEN → 401 at the
@@ -1923,8 +1942,15 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
       } catch {
         /* best-effort — claude creates it on first run */
       }
-      houseEnv = buildHouseProxyChildEnv({ baseUrl, token, claudeConfigDir });
-      pendingHouseConfig = { baseUrl, token, claudeConfigDir };
+      const cfg: HouseProxyConfig = {
+        baseUrl,
+        token,
+        claudeConfigDir,
+        ...(model ? { model } : {}),
+        ...(managedAgentId ? { managedAgentId } : {}),
+      };
+      houseEnv = buildHouseProxyChildEnv(cfg);
+      pendingHouseConfig = cfg;
       // The house agent has no credential env of its own; drop the previous
       // target's so it can't leak into the claude spawn.
       switchCredentialEnv = {};
@@ -2137,6 +2163,8 @@ export async function handleCommand(
   ) => Promise<unknown>,
   /** Is the RUNNING agent CodeAgent Cloud? See AcpSessionContext.currentIsHouse. */
   currentIsHouse?: () => boolean,
+  /** WIRE id of the house-rail agent. See AcpSessionContext.currentHouseWireId. */
+  currentHouseWireId?: () => string,
 ): Promise<void> {
   const session: AcpSessionContext = {
     client,
@@ -2161,6 +2189,7 @@ export async function handleCommand(
     pendingProposal,
     postSquadEvent,
     currentIsHouse,
+    currentHouseWireId,
   };
   await dispatchAcpCommand(assembleAcpCommandContext(session, cmd));
 }

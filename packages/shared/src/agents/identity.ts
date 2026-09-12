@@ -35,6 +35,45 @@ export const HOUSE_AGENT_NAME = 'CodeAgent Cloud';
 export const HOUSE_AGENT_VENDOR = 'CodeAgent';
 export const HOUSE_AGENT_SUBTITLE = 'Included — no setup';
 
+// ─── Managed providers (Managed Agents + Credits, 2026-09-11) ────────────────
+// Agents that run on OUR provider accounts, prepaid from the user's credits.
+// Like the house agent they run the Claude Code runtime pointed at our proxy
+// (the token's claims pin the provider) and have no vaulted credential.
+// Byte-identical mirror of api-v2 `agent-proxy/managed-providers.ts` ids.
+
+export const MANAGED_PROVIDER_IDS = [
+  'managed-deepseek',
+  'managed-deepseek-flash',
+  'managed-qwen-coder',
+  'managed-codex',
+  'managed-claude',
+] as const;
+
+export type ManagedProviderId = (typeof MANAGED_PROVIDER_IDS)[number];
+
+export function isManagedProviderId(value: unknown): value is ManagedProviderId {
+  return typeof value === 'string' && (MANAGED_PROVIDER_IDS as readonly string[]).includes(value);
+}
+
+/** User-facing names — the MODEL is named, the upstream vendor is not. */
+export const MANAGED_PROVIDER_DISPLAY_NAMES: Readonly<Record<ManagedProviderId, string>> = {
+  'managed-deepseek': 'DeepSeek V4',
+  'managed-deepseek-flash': 'DeepSeek V4 Flash',
+  'managed-qwen-coder': 'Qwen3 Coder',
+  'managed-codex': 'Codex',
+  'managed-claude': 'Claude',
+};
+
+/** Card subtitle for a managed agent (vault-less; billed from prepaid credits). */
+export const MANAGED_AGENT_SUBTITLE = 'Prepaid usage credits';
+
+/**
+ * Env var the house-rail bootstrap exports for a MANAGED deploy so the CLI can
+ * tell WHICH managed agent it is running (the proxy env alone only says
+ * "house rail"). Absent ⇒ the classic house agent (CodeAgent Cloud).
+ */
+export const MANAGED_AGENT_ENV = 'CODEAM_MANAGED_AGENT_ID';
+
 // ─── Public (LinkedAgent) id space ───────────────────────────────────────────
 
 /**
@@ -52,7 +91,8 @@ export type LinkedAgentId =
   | 'kimi'
   | 'openrouter'
   | 'opencode'
-  | typeof HOUSE_AGENT_ID;
+  | typeof HOUSE_AGENT_ID
+  | ManagedProviderId;
 
 export const LINKED_AGENT_IDS: readonly LinkedAgentId[] = [
   'claude_code',
@@ -65,6 +105,7 @@ export const LINKED_AGENT_IDS: readonly LinkedAgentId[] = [
   'openrouter',
   'opencode',
   HOUSE_AGENT_ID,
+  ...MANAGED_PROVIDER_IDS,
 ];
 
 export function isLinkedAgentId(value: string): value is LinkedAgentId {
@@ -114,6 +155,12 @@ export const PUBLIC_TO_INTERNAL: Readonly<
   // The house agent runs Claude Code under the hood (pointed at the
   // MiniMax proxy). Its internal runtime is therefore `claude`.
   [HOUSE_AGENT_ID]: 'claude',
+  // Every managed provider runs Claude Code against our proxy too.
+  'managed-deepseek': 'claude',
+  'managed-deepseek-flash': 'claude',
+  'managed-qwen-coder': 'claude',
+  'managed-codex': 'claude',
+  'managed-claude': 'claude',
 };
 
 /**

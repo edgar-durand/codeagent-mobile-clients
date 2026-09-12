@@ -225,3 +225,70 @@ describe('clearHouseProxyEnvOverrides', () => {
     expect(merged.ANTHROPIC_BASE_URL).toBeUndefined();
   });
 });
+
+// ─── Managed agents (Managed Agents + Credits, 2026-09-11) ───────────────────
+// A managed provider rides the house rail with its OWN model pin and exports
+// CODEAM_MANAGED_AGENT_ID so the CLI announces the right agent.
+import { houseRailWireId } from '../src/commands/host/house-proxy-config';
+
+describe('house-proxy-config — managed agents', () => {
+  it('pins the managed model instead of MiniMax and exports the managed id', () => {
+    const env = buildHouseProxyChildEnv({
+      baseUrl: 'https://api.x/api/v1/agent-proxy',
+      token: 'tok',
+      model: 'deepseek-ai/DeepSeek-V4',
+      managedAgentId: 'managed-deepseek',
+    });
+    expect(env.ANTHROPIC_MODEL).toBe('deepseek-ai/DeepSeek-V4');
+    expect(env.ANTHROPIC_DEFAULT_SONNET_MODEL).toBe('deepseek-ai/DeepSeek-V4');
+    expect(env.ANTHROPIC_DEFAULT_OPUS_MODEL).toBe('deepseek-ai/DeepSeek-V4');
+    expect(env.ANTHROPIC_DEFAULT_HAIKU_MODEL).toBe('deepseek-ai/DeepSeek-V4');
+    expect(env.CODEAM_MANAGED_AGENT_ID).toBe('managed-deepseek');
+    expect(env.ANTHROPIC_BASE_URL).toBe('https://api.x/api/v1/agent-proxy');
+  });
+
+  it('keeps the MiniMax pin and exports no managed id for the classic house agent', () => {
+    const env = buildHouseProxyChildEnv({ baseUrl: 'https://api.x/api/v1/agent-proxy', token: 'tok' });
+    expect(env.ANTHROPIC_MODEL).toBe('MiniMax-M3');
+    expect(env.CODEAM_MANAGED_AGENT_ID).toBeUndefined();
+  });
+
+  it('ignores an unknown managedAgentId (never exports garbage)', () => {
+    const env = buildHouseProxyChildEnv({ baseUrl: 'u', token: 't', managedAgentId: 'managed-nope' });
+    expect(env.CODEAM_MANAGED_AGENT_ID).toBeUndefined();
+  });
+
+  it('clears the managed id on a switch away (it is in HOUSE_PROXY_ENV_KEYS)', () => {
+    expect(HOUSE_PROXY_ENV_KEYS).toContain('CODEAM_MANAGED_AGENT_ID');
+    expect(clearHouseProxyEnvOverrides().CODEAM_MANAGED_AGENT_ID).toBeUndefined();
+    expect('CODEAM_MANAGED_AGENT_ID' in clearHouseProxyEnvOverrides()).toBe(true);
+  });
+
+  it('houseRailWireId reads the managed id, else the house sentinel', () => {
+    expect(houseRailWireId({ CODEAM_MANAGED_AGENT_ID: 'managed-qwen-coder' } as NodeJS.ProcessEnv)).toBe(
+      'managed-qwen-coder',
+    );
+    expect(houseRailWireId({} as NodeJS.ProcessEnv)).toBe('house-codeagent-cloud');
+    expect(houseRailWireId({ CODEAM_MANAGED_AGENT_ID: 'bogus' } as NodeJS.ProcessEnv)).toBe(
+      'house-codeagent-cloud',
+    );
+  });
+
+  it('round-trips model + managed id through the persisted config', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'house-proxy-managed-'));
+    homeHolder.dir = dir;
+    try {
+      persistHouseProxyConfig({
+        baseUrl: 'https://api.x/api/v1/agent-proxy',
+        token: 'tok',
+        model: 'Qwen/Qwen3-Coder-Next',
+        managedAgentId: 'managed-qwen-coder',
+      });
+      const env = readHouseProxyChildEnv();
+      expect(env.ANTHROPIC_MODEL).toBe('Qwen/Qwen3-Coder-Next');
+      expect(env.CODEAM_MANAGED_AGENT_ID).toBe('managed-qwen-coder');
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
