@@ -17,7 +17,13 @@
 
 import { log } from '../../services/logger';
 import { _postJsonAuthed, fetchProvisionCredential } from '../../services/pairing.service';
-import { HOUSE_AGENT_ID, publicToInternal, resolveApiBaseUrl } from '@codeam/shared';
+import {
+  HOUSE_AGENT_ID,
+  MANAGED_PROVIDER_DISPLAY_NAMES,
+  isManagedProviderId,
+  publicToInternal,
+  resolveApiBaseUrl,
+} from '@codeam/shared';
 import { showInfo } from '../../ui/banner';
 import { createOsStrategy } from '../../os';
 import { createInteractiveAgentStrategy } from '../registry';
@@ -1426,6 +1432,21 @@ async function getConversationH(ctx: AcpCommandContext): Promise<void> {
 
 async function listModelsH(ctx: AcpCommandContext): Promise<void> {
   const { cmd, relay, client } = ctx;
+  // A MANAGED provider on the house rail is ONE model behind the Claude Code
+  // runtime (Codex = gpt-5.6-terra, DeepSeek V4 = deepseek-ai/…). The
+  // runtime's own picker (default/opus/sonnet/haiku aliases, all pinned to
+  // that model) is noise there — the app showed "GPT-5.6-TERRA (OPUS)" and a
+  // list of Claude aliases on a Codex session (owner, 2026-09-12).
+  // managed-claude keeps the native list: its aliases ARE real Claude models.
+  const wireId = ctx.currentHouseWireId?.();
+  if (ctx.currentIsHouse?.() && isManagedProviderId(wireId) && wireId !== 'managed-claude') {
+    const pinned = process.env.ANTHROPIC_MODEL?.trim() || client.getCurrentModelId() || wireId;
+    await relay.sendResult(cmd.id, 'completed', {
+      models: [{ id: pinned, label: MANAGED_PROVIDER_DISPLAY_NAMES[wireId] }],
+      currentModelId: pinned,
+    });
+    return;
+  }
   // NATIVE ACP is the SINGLE source of truth: the models come from the agent's
   // own `category:'model'` config option (captured on newSession/loadSession),
   // NOT a hardcoded per-agent strategy list. An agent that exposes no model
