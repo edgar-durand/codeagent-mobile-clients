@@ -1386,6 +1386,14 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
   // `agentId` is captured at construction, and every closure reads the
   // CURRENT `history`/`relay` bindings, so a rebuilt instance stays correct
   // after the swap reassigns those `let`s.
+  // House rail with a MANAGED provider: the runtime is Claude Code, but the
+  // agent the user chose (and pays for) is e.g. Codex — every wire id below
+  // carries the managed id, never the runtime's, so the app brands the
+  // session as Codex. (Owner, 2026-09-12: a Codex codespace opened as "Claude
+  // Code · opus" with Claude's logo.) The switch path already did this.
+  const initialWireId = houseRailWireId(process.env);
+  const initialManagedId =
+    isHouseProxyEnv(process.env) && isManagedProviderId(initialWireId) ? initialWireId : null;
   const makeBudgetRecovery = (): BudgetRecovery<PromptBlock> =>
     createBudgetRecovery<PromptBlock>({
       publishText: (text) => publisher.publishOutput({ type: 'text', content: text, done: true }),
@@ -1405,7 +1413,7 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
       appendAgentReply: (text) => history.appendAgentReply(text),
       flushHistory: () => void history.flush(),
       relaunchProxyWithoutBudget,
-      agentId: opts.agent,
+      agentId: initialManagedId ?? opts.agent,
       log: (msg) => log.info('acpRunner', msg),
     });
   let budgetRecovery = makeBudgetRecovery();
@@ -1479,7 +1487,7 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
   // users wonder if the pairing actually worked.
   void publisher.publishOutput({
     type: 'agent_banner',
-    agentId: opts.agent,
+    agentId: initialManagedId ?? opts.agent,
     // "Welcome back!" ONLY when we actually resumed a prior conversation.
     // A fresh pairing is somebody's FIRST turn — greeting them with "back"
     // is plainly wrong and was the top confusion in new-user recordings.
@@ -1488,7 +1496,9 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
     // (codex-acp returns `currentModelId` on newSession; claude /
     // gemini adapters omit it). Falls back to `<display name>`
     // alone so the card never renders with a dangling separator.
-    subtitle: buildBannerSubtitle(opts.agent, acpSessionId, handshakeModel, handshakeTier),
+    subtitle: initialManagedId
+      ? `${MANAGED_PROVIDER_DISPLAY_NAMES[initialManagedId]} · ${MANAGED_AGENT_SUBTITLE}`
+      : buildBannerSubtitle(opts.agent, acpSessionId, handshakeModel, handshakeTier),
     // A human location, NOT the raw cwd. On a self-hosted box the cwd is
     // `/home/box/.codeam/self-hosted/<uuid>` and on a codespace it's a UUID
     // directory — both are noise to the user and leak internal layout.
@@ -1592,7 +1602,7 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
     sessionId: opts.sessionId,
     pluginId: opts.pluginId,
     pluginAuthToken: opts.pluginAuthToken,
-    agentId: opts.agent,
+    agentId: initialManagedId ?? opts.agent,
   });
   // Prime the pre-session baseline so turn 1's end-of-turn flush is a REAL
   // flush (else turn 1's edits are swallowed as pre-existing dirt). The
