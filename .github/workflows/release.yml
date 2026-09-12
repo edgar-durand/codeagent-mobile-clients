@@ -655,15 +655,17 @@ jobs:
           MISSING=""
           for PKG in codeam-cli @codeam/shared; do
             FOUND=0
-            # The registry's read replicas lag a publish by seconds — retry
-            # before declaring a miss so a propagation delay isn't an incident.
-            for ATTEMPT in 1 2 3 4 5 6; do
+            # The registry's read replicas lag a publish — v2.75.1 (2026-09-12)
+            # took > 2 min to become visible, so a 6×20 s window called a landed
+            # publish "missing" and skipped the release notes. 15×30 s (7.5 min)
+            # covers the observed tail; a real miss still fails the run.
+            for ATTEMPT in $(seq 1 15); do
               if npm view "$PKG@$VERSION" version >/dev/null 2>&1; then
                 FOUND=1
                 break
               fi
-              echo "… $PKG@$VERSION not on the registry yet (attempt $ATTEMPT/6)"
-              sleep 20
+              echo "… $PKG@$VERSION not on the registry yet (attempt $ATTEMPT/15)"
+              sleep 30
             done
             if [ "$FOUND" = "1" ]; then
               echo "✓ $PKG@$VERSION is live on npm"
