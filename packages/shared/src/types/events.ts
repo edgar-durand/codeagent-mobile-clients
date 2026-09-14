@@ -134,6 +134,12 @@ export const USER_EVENTS = {
    *  posts to /api/packs/events; mobile's pack.store renders the pipeline.
    *  Mirrored in repo A's app-shared events.ts. */
   PACK_STATE: 'pack_state',
+  /** The prepaid credit balance moved by something the client could not have
+   *  predicted — a purchase landing, a refund, a grant. Carries the new
+   *  balance, so nothing has to be fetched to render it. ⚠️ NOT published on
+   *  debits: those are one per agent hop, and the client already walks its
+   *  own balance down as metered usage streams in. */
+  CREDITS_CHANGED: 'credits_changed',
 } as const;
 
 export type UserEventName = (typeof USER_EVENTS)[keyof typeof USER_EVENTS];
