@@ -1013,6 +1013,16 @@ export const INTEGRATION_REGISTRY: Record<IntegrationId, IntegrationDefinition> 
     // tools ourselves via a BUILT-IN MCP (delivery.builtin) against that admin
     // API — see apps/cli/src/integrations/convex-admin-mcp.ts. The user still
     // pastes a deploy key (Dashboard → Project Settings → Deploy Keys).
+    //
+    // ⚠️ That built-in ALSO owns `deploy`, and it is the only way an agent can
+    // push `convex/` changes. Deploying is bundle + push, not a REST call, so
+    // that one tool drives Convex's own CLI with the deploy key injected into
+    // THAT CHILD's env — the agent's shell never sees the credential. Before
+    // it existed the agent had the credential's power through the MCP but no
+    // way to deploy, so it looped on `npx convex dev` (interactive login) and
+    // asked the user to paste the token into the chat; the user ended up
+    // re-entering the SAME key by hand in Environment Variables, after burning
+    // real credits (2026-09-15).
     enabled: true,
     auth: {
       kind: 'api_key',
