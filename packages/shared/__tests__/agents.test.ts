@@ -69,3 +69,47 @@ describe('AGENT_REGISTRY', () => {
     }
   });
 });
+
+/**
+ * Gemini CLI — API key only, since Google retired the free/Pro/Ultra service.
+ *
+ * On **2026-06-18** Google stopped Gemini CLI (and the Gemini Code Assist IDE
+ * extensions) serving requests for AI Pro, AI Ultra and free users, as part of
+ * the move to Antigravity CLI. Its announcement is explicit about what lives
+ * on: *"Gemini CLI will remain accessible via paid Gemini and Gemini
+ * Enterprise Agent Platform API keys."*
+ *
+ * The package itself is NOT deprecated — `@google/gemini-cli` still ships
+ * weekly — so the agent stays. What must go is the OAuth door: it captures a
+ * `~/.gemini/oauth_creds.json` from a consumer Google account, which is
+ * precisely the tier that no longer serves requests.
+ *
+ * We had `preferredAuthKind: 'oauth_token'`, i.e. we RECOMMENDED the dead path
+ * first. Prod on 2026-09-15: 46 of 63 Gemini links were OAuth, 19 of them made
+ * after 2026-09-01 and the newest that same day — three months of sending
+ * people through a bricked door.
+ *
+ * ⚠️ Antigravity CLI is NOT a drop-in replacement for us: it has no official
+ * ACP mode (google-antigravity/antigravity-cli#31, still open, 192 comments,
+ * zero `acp` hits in the repo as of 2026-09-15) and every third-party adapter
+ * warns that driving `agy` that way matches what Google's FAQ calls a ToS
+ * violation, risking the USER's account. Our whole Gemini path is ACP. Revisit
+ * only when that issue ships.
+ */
+describe('gemini: the retired OAuth tier is not offered', () => {
+  it('accepts an API key and nothing else', () => {
+    expect(AGENT_REGISTRY.gemini.supportedAuthKinds).toEqual(['api_key']);
+  });
+
+  it('prefers the api key — we must not recommend the dead path', () => {
+    expect(AGENT_REGISTRY.gemini.preferredAuthKind).toBe('api_key');
+  });
+
+  it('does not offer oauth_token at all', () => {
+    expect(AGENT_REGISTRY.gemini.supportedAuthKinds).not.toContain('oauth_token');
+  });
+
+  it('stays enabled — the CLI itself is alive on paid keys', () => {
+    expect(AGENT_REGISTRY.gemini.enabled).toBe(true);
+  });
+});

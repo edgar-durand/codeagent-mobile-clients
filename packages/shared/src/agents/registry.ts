@@ -104,12 +104,34 @@ export const AGENT_REGISTRY: Record<AgentId, AgentMetadata> = {
     displayName: 'Gemini CLI',
     binaryName: 'gemini',
     enabled: true,
-    // OAuth via `gemini auth login` (captured by `codeam link gemini`
-    // from ~/.gemini/oauth_creds.json) AND GEMINI_API_KEY are both
-    // accepted by the backend's GeminiProvisioningStrategy and propagated
-    // into codespace deploys.
-    supportedAuthKinds: ['oauth_token', 'api_key'],
-    preferredAuthKind: 'oauth_token',
+    // ⚠️ API KEY ONLY since 2026-06-18, when Google stopped Gemini CLI (and the
+    // Gemini Code Assist IDE extensions) serving requests for AI Pro, AI Ultra
+    // and free users, in the move to Antigravity CLI. Its announcement is
+    // explicit about what survives: "Gemini CLI will remain accessible via paid
+    // Gemini and Gemini Enterprise Agent Platform API keys."
+    //
+    // So the agent stays — `@google/gemini-cli` is NOT deprecated, it still
+    // ships weekly — but the OAuth door has to go: it captures a
+    // `~/.gemini/oauth_creds.json` from a CONSUMER Google account, which is
+    // exactly the tier that no longer serves requests. We used to PREFER that
+    // path, so it was the one we recommended first; on 2026-09-15 prod held 63
+    // Gemini links, 46 of them OAuth, 19 created after 2026-09-01 and the
+    // newest that same day. Three months of sending people through a bricked
+    // door — each one landing on `isGeminiIneligibleTier` at first use.
+    //
+    // ⚠️ Antigravity CLI is NOT a drop-in replacement for us: no official ACP
+    // mode (google-antigravity/antigravity-cli#31 open, 192 comments, zero
+    // `acp` hits in the repo as of 2026-09-15), and every third-party ACP
+    // adapter warns that driving `agy` that way matches what Google's FAQ calls
+    // a ToS violation — risking the USER's Google account. Our whole Gemini
+    // path is ACP, so adopting it would mean shipping that risk. Revisit only
+    // when #31 ships an official mode.
+    //
+    // Existing OAuth rows are NOT migrated: `supportedAuthMethods` gates the
+    // LINK call only, so the 46 stay readable and simply keep failing at the
+    // provider, where the ineligible-tier message already explains why.
+    supportedAuthKinds: ['api_key'],
+    preferredAuthKind: 'api_key',
     // Not listed by `headroom wrap --help` — runs native.
     headroomWrappable: false,
     // Native ACP server: `gemini --skip-trust --acp`.
