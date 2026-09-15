@@ -13,7 +13,14 @@
  * CLAUDE.md "Agent-failure messaging" section.
  */
 
-import { AGENT_REGISTRY, isKnownAgentId, type AgentId } from '@codeam/shared';
+import {
+  AGENT_REGISTRY,
+  HOUSE_AGENT_NAME,
+  MANAGED_PROVIDER_DISPLAY_NAMES,
+  isKnownAgentId,
+  isManagedProviderId,
+  type AgentId,
+} from '@codeam/shared';
 import { looksLike1mContextCreditsError } from './oneMContextRecovery';
 import { looksLikeBudgetExceeded, extractBudgetPeriod } from './budgetRecovery';
 import { agentHooks } from './agent-hooks';
@@ -296,7 +303,20 @@ export function looksLikeProviderOutage(text: string): boolean {
  * Returns null for agents whose provider we don't have a status URL for — the
  * outage message then degrades gracefully to a vendor-less form.
  */
-export function agentStatusPage(agent: string): { vendor: string; url: string } | null {
+export function agentStatusPage(
+  agent: string,
+  railWireId?: string | null,
+): { vendor: string; url: string } | null {
+  // MANAGED/HOUSE RAIL — never attribute the outage to an upstream vendor.
+  // Every managed provider runs the Claude Code RUNTIME against OUR
+  // agent-proxy, so `agent` collapses to `claude` for the whole rail and the
+  // vendor table below would answer "Anthropic" for a DeepInfra/MiniMax
+  // overload, linking a status page that is green because Anthropic was never
+  // in the request path. (rafaelph90.br@gmail.com, 2026-09-15: working on
+  // `managed-qwen-coder`, told Anthropic was down, checked, found "All Systems
+  // Operational".) `railWireId` is the WIRE id the caller reads off the live
+  // rail env (`houseRailWireId`), non-null only on that rail.
+  if (railWireId) return null;
   // Normalise vendor aliases + the public id (`claude_code`) onto the runtime
   // AgentId, preserving the substring robustness callers rely on, then read the
   // per-vendor `{ vendor, url }` DATA from the per-agent hooks registry.
@@ -322,7 +342,20 @@ export function agentStatusPage(agent: string): { vendor: string; url: string } 
  * status page so they can follow the incident. Markdown (the chat renderer
  * supports links).
  */
-export function providerOutageMessage(agent: string): string {
+export function providerOutageMessage(agent: string, railWireId?: string | null): string {
+  // On our own rail WE are the provider the user bought from, so the bubble
+  // names the agent they picked and our service — no third-party vendor, no
+  // status link they can't act on. See {@link agentStatusPage}.
+  if (railWireId) {
+    const who = isManagedProviderId(railWireId)
+      ? MANAGED_PROVIDER_DISPLAY_NAMES[railWireId]
+      : HOUSE_AGENT_NAME;
+    return (
+      `🌐 **CodeAgent's agent service is having a disruption — this isn't your session.**\n\n` +
+      `Your ${who} agent couldn't finish this turn because our provider returned an ` +
+      'overload error. It usually clears up on its own — just send your message again in a bit.'
+    );
+  }
   const info = agentStatusPage(agent);
   const who = info ? info.vendor : 'The agent provider';
   return (
@@ -339,7 +372,12 @@ export function providerOutageMessage(agent: string): string {
  * rejecting the account). Surfaced so the session shows WHY instead of sitting
  * on "STILL LOADING SESSION HISTORY / offline" forever.
  */
-export function startupFailureMessage(agent: string, detail: string, recentStderr: string): string {
+export function startupFailureMessage(
+  agent: string,
+  detail: string,
+  recentStderr: string,
+  railWireId?: string | null,
+): string {
   const haystack = `${detail}\n${recentStderr}`;
   if (agentHooks(agent)?.classifyStartupFailure?.(haystack) === 'ineligible_tier') {
     return [
@@ -353,7 +391,7 @@ export function startupFailureMessage(agent: string, detail: string, recentStder
     ].join('\n');
   }
   if (looksLikeAuthFailure(haystack)) return AUTH_FAILURE_MESSAGE;
-  if (looksLikeProviderOutage(haystack)) return providerOutageMessage(agent);
+  if (looksLikeProviderOutage(haystack)) return providerOutageMessage(agent, railWireId);
   const tail = recentStderr.split('\n').filter(Boolean).slice(-3).join('\n');
   return [`⚠️ The ${agent} agent failed to start.`, '', tail ? `Details:\n${tail}` : detail].join(
     '\n',
@@ -418,6 +456,8 @@ export function failureBubble(opts: {
   recentStderr: string;
   hadText: boolean;
   agent: string;
+  /** Wire id of the managed/house rail, when running on it. See {@link agentStatusPage}. */
+  railWireId?: string | null;
 }): string | null {
   // House-proxy 403 (CodeAgent Cloud daily ceiling / temporarily unavailable)
   // FIRST — before auth. Claude wraps it as "Failed to authenticate. API Error:
@@ -448,7 +488,7 @@ export function failureBubble(opts: {
     return budgetBubbleMessage(opts.agent, extractBudgetPeriod(budgetHaystack));
   }
   if (looksLikeProviderOutage(opts.detail) || looksLikeProviderOutage(opts.recentStderr)) {
-    return providerOutageMessage(opts.agent);
+    return providerOutageMessage(opts.agent, opts.railWireId);
   }
   if (!opts.hadText) return TURN_FAILURE_MESSAGE;
   return null;
@@ -483,6 +523,8 @@ export function adapterExitMessage(opts: {
   authFail: boolean;
   outageFail: boolean;
   agent: string;
+  /** Wire id of the managed/house rail, when running on it. See {@link agentStatusPage}. */
+  railWireId?: string | null;
 }): string | null {
   // Benign, user-initiated shutdowns — never a crash bubble, never a
   // digest error.
@@ -490,6 +532,6 @@ export function adapterExitMessage(opts: {
   if (opts.signal === 'SIGINT') return null;
   // Real failures keep their actionable classification.
   if (opts.authFail) return AUTH_FAILURE_MESSAGE;
-  if (opts.outageFail) return providerOutageMessage(opts.agent);
+  if (opts.outageFail) return providerOutageMessage(opts.agent, opts.railWireId);
   return `Agent adapter exited unexpectedly (code=${opts.code ?? 'null'} signal=${opts.signal ?? 'null'}).`;
 }

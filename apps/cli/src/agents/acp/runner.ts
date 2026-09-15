@@ -102,6 +102,7 @@ import {
   pickHouseProxyEnv,
   type HouseProxyConfig,
   houseRailWireId,
+  currentRailWireId,
 } from '../../commands/host/house-proxy-config';
 import { FileWatcherService } from '../../services/file-watcher.service';
 import { TurnFileAggregator } from '../../services/turn-files/turn-file-aggregator';
@@ -1072,7 +1073,12 @@ export async function surfaceStartupFailure(opts: {
   pluginAuthToken?: string;
   pollSecret?: string;
 }): Promise<void> {
-  const msg = startupFailureMessage(opts.agent, opts.detail, opts.recentStderr);
+  const msg = startupFailureMessage(
+    opts.agent,
+    opts.detail,
+    opts.recentStderr,
+    currentRailWireId(),
+  );
   // Tell the BACKEND when the startup failure proves the credential is
   // permanently unusable (Gemini `ineligible_tier`). Until this existed the CLI
   // only printed the chat bubble, so `GET /api/agents/linked` kept reporting
@@ -1331,7 +1337,14 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
       // (Windows Ctrl+C / console-close 0xC000013A, or POSIX SIGINT) —
       // NOT a crash, so we flush but publish NO error bubble (it was
       // landing in the daily digest as a fake failed session).
-      const message = adapterExitMessage({ code, signal, authFail, outageFail, agent: opts.agent });
+      const message = adapterExitMessage({
+        code,
+        signal,
+        authFail,
+        outageFail,
+        agent: opts.agent,
+        railWireId: currentRailWireId(),
+      });
       const benign = message === null;
       if (authFail) {
         // Durably flag the LinkedAgent credential invalid so Profile › Agents

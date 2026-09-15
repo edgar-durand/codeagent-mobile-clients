@@ -238,6 +238,20 @@ export function isHouseProxyEnv(env: NodeJS.ProcessEnv): boolean {
   );
 }
 
+/**
+ * The wire id of the managed/house rail this PROCESS runs on, or `null` when the
+ * user is on their own agent (BYO). Read live from `env` — an in-session agent
+ * switch rewrites it — so a failure classified at turn time reflects the rail
+ * that actually served the turn.
+ *
+ * Callers use it to attribute a provider failure correctly: on our rail the
+ * runtime is Claude Code for EVERY managed provider, so the runtime agent id
+ * alone would name Anthropic for a DeepInfra/MiniMax outage.
+ */
+export function currentRailWireId(env: NodeJS.ProcessEnv = process.env): string | null {
+  return isHouseProxyEnv(env) ? houseRailWireId(env) : null;
+}
+
 /** Subset of `env` holding the house-proxy keys (seed for a later re-spawn). */
 export function pickHouseProxyEnv(env: NodeJS.ProcessEnv): Record<string, string> {
   const out: Record<string, string> = {};

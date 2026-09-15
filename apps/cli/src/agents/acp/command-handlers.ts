@@ -24,6 +24,7 @@ import {
   publicToInternal,
   resolveApiBaseUrl,
 } from '@codeam/shared';
+import { currentRailWireId } from '../../commands/host/house-proxy-config';
 import { showInfo } from '../../ui/banner';
 import { createOsStrategy } from '../../os';
 import { createInteractiveAgentStrategy } from '../registry';
@@ -1235,6 +1236,10 @@ async function startTaskH(ctx: AcpCommandContext): Promise<void> {
         recentStderr: recentStderr.join('\n'),
         hadText,
         agent: opts.agent,
+        // On the managed/house rail the runtime is Claude Code for EVERY
+        // provider, so without this the bubble names Anthropic for OUR
+        // proxy's outage. See `agentStatusPage`.
+        railWireId: currentRailWireId(),
       });
       const failed: StartTaskFailedResult = { error: detail };
       if (bubble) {
