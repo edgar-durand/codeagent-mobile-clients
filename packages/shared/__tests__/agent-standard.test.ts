@@ -25,4 +25,30 @@ describe('AGENT_STANDARD', () => {
     expect(AGENT_STANDARD_BLOCK.endsWith(AGENT_STANDARD_MARKER)).toBe(true);
     expect(AGENT_STANDARD_BLOCK).toContain(AGENT_STANDARD_TEXT);
   });
+
+  it('tells the agent it is being read on a phone, and does it FIRST', () => {
+    // El orden importa: en el riel no-Claude esto es un prefacio que se lee de
+    // arriba abajo, y gobierna CADA respuesta — mientras que las reglas de
+    // trabajo solo aplican a las tareas que tocan codigo.
+    const answering = AGENT_STANDARD_TEXT.indexOf('## How to answer');
+    const working = AGENT_STANDARD_TEXT.indexOf('## How to work');
+    expect(answering).toBeGreaterThan(-1);
+    expect(working).toBeGreaterThan(-1);
+    expect(answering).toBeLessThan(working);
+    expect(AGENT_STANDARD_TEXT).toContain('PHONE');
+  });
+
+  it('is concise by DEFAULT, not always short — la profundidad a peticion sigue disponible', () => {
+    // Sin esto el estandar se contradiria con las reglas de abajo, que exigen
+    // compartir un plan y ensenar la evidencia de los tests.
+    expect(AGENT_STANDARD_TEXT).toContain('Expand when asked');
+    expect(AGENT_STANDARD_TEXT).toContain("Brevity is the default, not a ceiling");
+    expect(AGENT_STANDARD_TEXT).toContain("Compress evidence, don't drop it");
+  });
+
+  it('prohibe lo que rompe una pantalla estrecha', () => {
+    expect(AGENT_STANDARD_TEXT).toContain('No wide tables');
+    expect(AGENT_STANDARD_TEXT).toContain('Lead with the answer');
+  });
+
 });
