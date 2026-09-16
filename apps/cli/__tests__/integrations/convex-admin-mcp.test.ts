@@ -73,3 +73,141 @@ describe('callConvexTool', () => {
     expect(r.ok).toBe(false);
   });
 });
+
+/**
+ * `deploy` — the tool that closes the gap that cost a real user $7.59.
+ *
+ * The user pastes a Convex DEPLOY KEY to connect the integration, so we hold
+ * the exact credential `npx convex deploy` reads from `CONVEX_DEPLOY_KEY`. But
+ * it lived only inside this MCP, and the agent's SHELL never saw it — so the
+ * agent looped on `npx convex dev`, which demands an interactive login, and at
+ * one point asked the user to paste the token into the chat. He ended up
+ * pasting the SAME key he had already given us into Environment Variables by
+ * hand (rafaelph90.br@gmail.com, 2026-09-15).
+ *
+ * Deploying is bundling + push, not a REST call, so this tool drives Convex's
+ * OWN CLI — with the key injected into THAT CHILD's env only. The secret never
+ * enters the agent's shell, never appears in argv (`ps`), and never comes back
+ * in the tool output.
+ */
+describe('runConvexDeploy', () => {
+  const KEY = 'prod:happy-animal-1|supersecret';
+
+  function fakeSpawn(result: { code: number; stdout: string; stderr: string }) {
+    return vi.fn(async () => result);
+  }
+
+  it('runs the Convex CLI with the deploy key in the CHILD env, never in argv', async () => {
+    const spawn = fakeSpawn({ code: 0, stdout: 'Deployed Convex functions', stderr: '' });
+    const { runConvexDeploy } = await import('../../src/integrations/convex-admin-mcp');
+    const res = await runConvexDeploy(KEY, {}, { cwd: '/repo', spawnImpl: spawn });
+
+    expect(res.ok).toBe(true);
+    const [, args, opts] = spawn.mock.calls[0] as unknown as [
+      string,
+      string[],
+      { env: NodeJS.ProcessEnv; cwd?: string },
+    ];
+    expect(args).toContain('deploy');
+    // The credential travels ONLY in the env — argv is world-readable via `ps`.
+    expect(args.join(' ')).not.toContain('supersecret');
+    expect(opts.env.CONVEX_DEPLOY_KEY).toBe(KEY);
+    expect(opts.cwd).toBe('/repo');
+  });
+
+  it('never echoes the key back in the tool output, even on failure', async () => {
+    const spawn = fakeSpawn({
+      code: 1,
+      stdout: '',
+      // Convex itself can print the key back at us; we must not relay it.
+      stderr: `auth failed for CONVEX_DEPLOY_KEY=${KEY}`,
+    });
+    const { runConvexDeploy } = await import('../../src/integrations/convex-admin-mcp');
+    const res = await runConvexDeploy(KEY, {}, { cwd: '/repo', spawnImpl: spawn });
+
+    expect(res.ok).toBe(false);
+    expect(res.text).not.toContain('supersecret');
+    expect(res.text).toContain('CONVEX_DEPLOY_KEY=***');
+  });
+
+  it('a non-zero exit is a failed tool call, with Convex own output surfaced', async () => {
+    const spawn = fakeSpawn({ code: 1, stdout: 'typecheck failed', stderr: 'error in convex/x.ts' });
+    const { runConvexDeploy } = await import('../../src/integrations/convex-admin-mcp');
+    const res = await runConvexDeploy(KEY, {}, { cwd: '/repo', spawnImpl: spawn });
+
+    expect(res.ok).toBe(false);
+    expect(res.text).toContain('typecheck failed');
+    expect(res.text).toContain('error in convex/x.ts');
+  });
+
+  it('passes --preview-create only when a preview name is asked for', async () => {
+    const plain = fakeSpawn({ code: 0, stdout: 'ok', stderr: '' });
+    const { runConvexDeploy } = await import('../../src/integrations/convex-admin-mcp');
+    await runConvexDeploy(KEY, {}, { cwd: '/repo', spawnImpl: plain });
+    expect((plain.mock.calls[0] as unknown as [string, string[]])[1]).not.toContain(
+      '--preview-create',
+    );
+
+    const preview = fakeSpawn({ code: 0, stdout: 'ok', stderr: '' });
+    await runConvexDeploy(KEY, { previewName: 'my-branch' }, { cwd: '/repo', spawnImpl: preview });
+    const args = (preview.mock.calls[0] as unknown as [string, string[]])[1];
+    expect(args).toContain('--preview-create');
+    expect(args).toContain('my-branch');
+  });
+
+  it('is reachable as a tool through callConvexTool', async () => {
+    const spawn = fakeSpawn({ code: 0, stdout: 'Deployed', stderr: '' });
+    const { callConvexTool } = await import('../../src/integrations/convex-admin-mcp');
+    const res = await callConvexTool(
+      'https://happy-animal-1.convex.cloud',
+      KEY,
+      'deploy',
+      {},
+      undefined,
+      { cwd: '/repo', spawnImpl: spawn },
+    );
+    expect(res.ok).toBe(true);
+    expect(res.text).toContain('Deployed');
+    expect(spawn).toHaveBeenCalled();
+  });
+});
+
+/**
+ * A `project:` deploy key is accepted by the backend validator ("project keys
+ * have no single deployment, so they pass on format alone") but no deployment
+ * name can be derived from it — so the admin REST base URL cannot be built.
+ *
+ * The server used to `process.exit(1)` in that case, leaving the user with NO
+ * Convex tools at all. But a project key deploys perfectly well: `deploy`
+ * drives Convex's CLI, which resolves the target from the key itself. So the
+ * REST-backed tools degrade with an actionable message and `deploy` stays live.
+ */
+describe('a project: key keeps deploy available', () => {
+  const PROJECT_KEY = 'project:acme:my-app|secret';
+
+  it('derives no deployment name (unchanged)', async () => {
+    const { deploymentNameFromKey } = await import('../../src/integrations/convex-admin-mcp');
+    expect(deploymentNameFromKey(PROJECT_KEY)).toBeNull();
+  });
+
+  it('deploy works with no base URL', async () => {
+    const spawn = vi.fn(async () => ({ code: 0, stdout: 'Deployed', stderr: '' }));
+    const { callConvexTool } = await import('../../src/integrations/convex-admin-mcp');
+    const res = await callConvexTool('', PROJECT_KEY, 'deploy', {}, undefined, {
+      cwd: '/repo',
+      spawnImpl: spawn,
+    });
+    expect(res.ok).toBe(true);
+    expect(spawn).toHaveBeenCalled();
+  });
+
+  it('a REST-backed tool says WHY instead of firing a request at an empty host', async () => {
+    const fetchSpy = vi.fn();
+    const { callConvexTool } = await import('../../src/integrations/convex-admin-mcp');
+    const res = await callConvexTool('', PROJECT_KEY, 'tables', {}, fetchSpy as unknown as typeof fetch);
+    expect(res.ok).toBe(false);
+    expect(res.text).toMatch(/deploy key/i);
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(res.text).not.toContain('secret');
+  });
+});
