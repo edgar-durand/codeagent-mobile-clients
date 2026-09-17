@@ -8,7 +8,7 @@
 # container: fake broker → token → uvx mcp-atlassian==<pin> → JSON-RPC over
 # stdio → expiry-driven child restart → post-restart traffic.
 #
-# ── Determinism strategy (mirrors headroom-provision.Dockerfile) ──────────────
+# ── Determinism strategy (shared with the other integration Dockerfiles) ─────
 # The network-bound work — NodeSource apt, `pip install uv`, and the uvx
 # resolve+download of mcp-atlassian and its ~115 wheels — happens at IMAGE
 # BUILD time so Docker layer-caches it. Test-time `uvx mcp-atlassian==X.Y.Z`
@@ -67,7 +67,7 @@ RUN npm install -g --omit=optional /tmp/codeam-cli.tgz \
 
 # ── Driver ────────────────────────────────────────────────────────────────────
 # Plain-JS driver (node stdlib only — http server + child_process + /proc
-# reads), so unlike the headroom driver it needs no tsup build step.
+# reads), so unlike the agent-install driver it needs no tsup build step.
 COPY mcp-shim-driver.js /opt/mcp-shim-driver.js
 
 # Default command: idle. The test starts the container detached and invokes

@@ -2108,7 +2108,6 @@ export async function handleCommand(
   getBeads: () => StartedBeads | null,
   publisher: AcpPublisher,
   recentStderr: string[],
-  /** Fire-once guard for the budget-reached backend POST. */
   /** resume_session re-points the owner's active-conversation id here —
    *  see AcpSessionContext.onActiveSessionChanged. Optional (tests / baton). */
   onActiveSessionChanged?: (id: string) => void,

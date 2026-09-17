@@ -3,9 +3,9 @@
  * terminal frame, never silence.
  *
  * The bug (recurring "first message never answers" on a fresh codespace): the
- * first user prompt is the first real agent call routed through the local
- * Headroom proxy on :8787. If the proxy isn't ready (or any non-auth error
- * hits before a token streams), the runner's `recoverFromFailedTurn` →
+ * first user prompt is the first real agent call to leave the box. If whatever
+ * it has to reach isn't up yet (or any non-auth error hits before a token
+ * streams), the runner's `recoverFromFailedTurn` →
  * `closeAll` publishes only an EMPTY `text done:true`. The mobile snapshot-guard
  * deliberately drops empty terminal frames, so the chat sits showing the
  * welcome card with NO reply and NO error — the user thinks the app is broken.
@@ -155,7 +155,7 @@ describe('failureBubble — every failed start_task ends with a visible terminal
   });
 
   it('NON-auth failure with NO streamed text → generic retry bubble (the silent first-message bug)', () => {
-    // The Headroom proxy not ready on :8787 — the exact first-prompt failure.
+    // A local hop refusing the connection — the exact first-prompt failure.
     expect(
       failureBubble({
         detail: 'connect ECONNREFUSED 127.0.0.1:8787',

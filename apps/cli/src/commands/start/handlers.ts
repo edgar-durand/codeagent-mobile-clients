@@ -50,8 +50,6 @@ import { deliverPendingCoderabbitCallback, type CoderabbitAuthEvent } from '../.
 import { CoderabbitRuntimeStrategy } from '../../agents/coderabbit/runtime';
 import { reviewPullRequest, defaultRunGh } from '../../agents/coderabbit/review-pr';
 import { createOsStrategy } from '../../os';
-import {
-} from '../../commands/host-agent';
 import { getGuardrailPolicy, setGuardrailPolicy } from '../../agents/acp/guardrail-config';
 import { AGENT_REGISTRY, isKnownAgentId, normalizeAgentId, PREVIEW_DETECT_PROMPT, USER_EVENTS, type PreviewDetection } from '@codeam/shared';
 import * as previewSvc from '../../services/preview';
@@ -700,7 +698,7 @@ const coderabbitConfigureH: CommandHandler = async (ctx, cmd, parsed) => {
   const token = ctx.pluginAuthToken;
 
   // Serialized event chain so `authUrl`/phase events reach the backend (and the
-  // app) strictly in emit order — same discipline as headroom's emit chain.
+  // app) strictly in emit order — the same emit-chain discipline used elsewhere.
   let emitChain: Promise<unknown> = Promise.resolve();
   const emit = (type: 'coderabbit_progress' | 'coderabbit_status', payload: Record<string, unknown>): void => {
     if (!token) return;

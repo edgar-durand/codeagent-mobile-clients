@@ -27,10 +27,10 @@
  *   · `revertAgentHook` against a live agent config (e.g. ~/.claude/settings.json)
  * Those remain as clearly annotated stubs with `TODO: exercise real bd binary`.
  *
- * Mirrors headroom-provision.int.test.ts ─────────────────────────────────────
- * The skip gate, logging pattern, and phase structure mirror the Headroom Docker
- * integration test (`headroom-provision.int.test.ts`) exactly; future authors
- * should keep the two in sync as both are extended.
+ * Shape ─────────────────────────────────────────────────────────────────────
+ * The skip gate, logging pattern and phase structure follow the same shape as
+ * the other Docker integration tests in this directory; keep them in sync as
+ * they are extended.
  */
 
 import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
@@ -39,8 +39,8 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 
 // ── Gate ─────────────────────────────────────────────────────────────────────
-// Probed synchronously (same pattern as headroom-provision.int.test.ts and
-// host-agent.docker.e2e.test.ts) — no top-level await.
+// Probed synchronously (same pattern as host-agent.docker.e2e.test.ts) — no
+// top-level await.
 const RUN_BEADS_INT = process.env.RUN_BEADS_INT === '1';
 
 if (!RUN_BEADS_INT) {
@@ -89,7 +89,7 @@ function makeDeps(overrides: Partial<ConfigureBeadsDeps> = {}): ConfigureBeadsDe
       prefix: 'inttest_proj',
       // TODO: replace stub with real provisionBeads() + BEADS_DIR temp redirect
       //       once the Docker-based bd+dolt layer is available (RUN_BEADS_INT
-      //       gates that heavier path in headroom-provision.int.test.ts style).
+      //       gates that heavier path).
     }),
     startWatcher: async () => {
       // TODO: wire real BeadsWatcher once a live feed file is available.

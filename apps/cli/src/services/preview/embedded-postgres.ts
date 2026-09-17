@@ -16,7 +16,7 @@ import * as net from 'net';
  * Postgres normal y su `DATABASE_URL=postgres://…` no cambia ni una letra.
  *
  * ⚠️ Los paquetes vienen PRE-INSTALADOS en la imagen de la Box (`apps/box/
- * Dockerfile`), igual que el CLI, los agentes y el modelo de Headroom.
+ * Dockerfile`), igual que el CLI y los agentes.
  * Bajarlos en el primer preview metería su descarga en el camino crítico del
  * usuario. Si no están —una caja vieja, o un `codeam start` local— esto
  * devuelve `null` y el preview sigue por donde iba: es una mejora, no un

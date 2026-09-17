@@ -23,7 +23,6 @@ vi.mock('../../src/services/pairing.service', () => ({
   postLinkCredential: vi.fn().mockResolvedValue(undefined),
   postAiResult: vi.fn().mockResolvedValue(undefined),
   postPreviewEvent: mockPostPreviewEvent,
-  postHeadroomEvent: vi.fn().mockResolvedValue(undefined),
   postBeadsEvent: vi.fn().mockResolvedValue(undefined),
   postCliUpdateEvent: vi.fn().mockResolvedValue(undefined),
   postCoderabbitEvent: vi.fn().mockResolvedValue(undefined),

@@ -109,10 +109,10 @@ describe('localCredentialExpiryStatus — house-agent sessions', () => {
     expect(usesHouseProxy()).toBe(false);
   });
 
-  // Headroom also rewrites the base URL, to a LOCAL address. That one is a
-  // compression hop in front of the user's own credential, so the local check
-  // still applies.
-  it('does not mistake the Headroom hop for the house proxy', async () => {
+  // A local hop in front of the user's OWN credential also rewrites the base
+  // URL — to a loopback address. The local check must still classify it as
+  // "not the house proxy".
+  it('does not mistake a loopback hop for the house proxy', async () => {
     process.env.ANTHROPIC_BASE_URL = 'http://127.0.0.1:8787';
     const { usesHouseProxy } = await import('../../src/agents/acp/wakeCredentialProbe');
     expect(usesHouseProxy()).toBe(false);

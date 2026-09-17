@@ -67,17 +67,17 @@ export default defineConfig([
     banner: { js: '#!/usr/bin/env node' },
   },
   {
-    // Headroom integration-test driver — invoked INSIDE the Docker container
-    // by `headroom-provision.int.test.ts`. Not part of the published CLI
-    // surface; compiled separately so the test can `node dist/headroom-runner-driver.js`
-    // against the REAL provisioning code without mocking pip / headroom init.
-    entry: ['src/headroom-runner-driver.ts', 'src/agent-install-driver.ts'],
+    // Integration-test driver — invoked INSIDE the Docker container by
+    // `agent-install.int.test.ts`. Not part of the published CLI surface;
+    // compiled separately so the test can `node dist/agent-install-driver.js`
+    // against the REAL provisioning code without mocking the installers.
+    entry: ['src/agent-install-driver.ts'],
     format: ['cjs'],
     target: 'node20',
     noExternal: ['@clack/prompts', '@clack/core', '@agentclientprotocol/sdk'],
     external: ['node-pty'],
     esbuildOptions: aliasSharedToSource,
-    // No banner: this file is invoked as `node dist/headroom-runner-driver.js`
+    // No banner: this file is invoked as `node dist/agent-install-driver.js`
     // (not as a directly-executable script), so it intentionally has NO shebang.
     // Unlike the `index.ts` and `postinstall.ts` entries (which keep their
     // `#!/usr/bin/env node` banner so the OS can exec them directly), the

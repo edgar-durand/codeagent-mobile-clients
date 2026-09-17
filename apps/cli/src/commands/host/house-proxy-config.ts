@@ -14,8 +14,8 @@
 // credential → every prompt failed LOCALLY with "Authentication required"
 // (~77 ms). The deploy-time `~/.bashrc` exports don't help: the woken host-agent
 // is relaunched by the container entrypoint in a NON-login shell that never
-// sources `~/.bashrc`. This is the exact gap `readHeadroomChildEnv` already
-// closes for HEADROOM_* — this file does the same for the house proxy.
+// sources `~/.bashrc`. Any per-deploy agent env must therefore be PERSISTED and
+// re-injected on every child spawn — this file does that for the house proxy.
 //
 // Path: `~/.codeam/house-proxy.json` — the LAST active house deploy, matching
 // the resume spawner's `CODEAM_RESUME_LATEST` ("resume the most-recent session").

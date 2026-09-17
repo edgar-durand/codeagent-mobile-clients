@@ -379,17 +379,6 @@ describe('StreamingState.hasVisibleProgress — text OR rich activity counts as 
   });
 });
 
-/**
- * M-3 — fire-once guard: `_budgetReachedPosted` must prevent the
- * `POST /api/sessions/:id/headroom-budget-reached` from firing more than
- * once per session, even when the budget-exceeded 429 fires on two
- * consecutive turns.
- *
- * Also validates I-1: when the budget signal arrives ONLY in `recentStderr`
- * (detail is a generic connection error) the period is still correctly
- * extracted and the offer() receives the combined haystack — so
- * `extractBudgetPeriod` yields "hourly", not "current".
- */
 describe('ACP start_task — `partialReplyKept` rides the failed ack ONLY on the closeAll branch', () => {
   beforeEach(() => {
     vi.stubGlobal(

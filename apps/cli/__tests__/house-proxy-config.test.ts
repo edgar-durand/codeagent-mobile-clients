@@ -1,10 +1,10 @@
 /**
  * Regression (Rafael, 2026-08-05): a warm-codespace house-agent session that
  * worked at deploy failed with "Authentication required" after a sleep/wake,
- * because the RESUME (bare `codeam`) re-injected the Headroom env but NOT the
- * house-proxy env — so the woken Claude agent had no ANTHROPIC_BASE_URL /
+ * because the RESUME (bare `codeam`) re-injected other per-deploy env but NOT
+ * the house-proxy env — so the woken Claude agent had no ANTHROPIC_BASE_URL /
  * AUTH_TOKEN. This suite locks the persist → read → child-env round-trip that
- * makes the house-proxy env survive a resume (mirrors headroom-config).
+ * makes the house-proxy env survive a resume.
  *
  * WHY IT WASN'T CAUGHT BEFORE: the house-proxy env only ever existed in the
  * deploy-time childEnv; there was no persist/read module for it, so no test

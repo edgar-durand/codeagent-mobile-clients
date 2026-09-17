@@ -21,7 +21,6 @@ vi.mock('../../../src/services/pairing.service', () => ({
   postCliUpdateEvent: vi.fn(),
   postAiResult: vi.fn(),
   postPreviewEvent: vi.fn(),
-  postHeadroomEvent: vi.fn(),
   postBeadsEvent: vi.fn(),
   _transport: { postJson: vi.fn(), getJson: vi.fn(), postJsonAuthed: vi.fn() },
 }));
