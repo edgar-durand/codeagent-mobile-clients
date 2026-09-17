@@ -25,9 +25,6 @@ vi.mock('os', async (importOriginal) => {
 const ALLOWED = [
   'PREVIEW_TUNNEL_TOKEN',
   'PREVIEW_TUNNEL_HOSTNAME',
-  'HEADROOM_ENABLED',
-  'HEADROOM_AGENT',
-  'HEADROOM_SAVINGS_INGEST_URL',
 ] as const;
 
 let tempHome: string;
@@ -65,9 +62,6 @@ describe('loadCodespaceEnv', () => {
       JSON.stringify({
         PREVIEW_TUNNEL_TOKEN: 'tok-123',
         PREVIEW_TUNNEL_HOSTNAME: 'preview.example.com',
-        HEADROOM_ENABLED: '1',
-        HEADROOM_AGENT: 'claude',
-        HEADROOM_SAVINGS_INGEST_URL: 'https://api.example.com/ingest',
       }),
     );
     const loadCodespaceEnv = await importLoader();
@@ -75,19 +69,12 @@ describe('loadCodespaceEnv', () => {
 
     expect(process.env.PREVIEW_TUNNEL_TOKEN).toBe('tok-123');
     expect(process.env.PREVIEW_TUNNEL_HOSTNAME).toBe('preview.example.com');
-    expect(process.env.HEADROOM_ENABLED).toBe('1');
-    expect(process.env.HEADROOM_AGENT).toBe('claude');
-    expect(process.env.HEADROOM_SAVINGS_INGEST_URL).toBe('https://api.example.com/ingest');
   });
 
   it('does NOT overwrite an env var that is already set (env wins over file)', async () => {
-    process.env.HEADROOM_ENABLED = '0'; // explicit existing value
-    writeEnvFile(JSON.stringify({ HEADROOM_ENABLED: '1', HEADROOM_AGENT: 'codex' }));
     const loadCodespaceEnv = await importLoader();
     loadCodespaceEnv();
 
-    expect(process.env.HEADROOM_ENABLED).toBe('0'); // preserved, not clobbered
-    expect(process.env.HEADROOM_AGENT).toBe('codex'); // unset key still filled
   });
 
   it('is a no-op when the file is absent (local / self-hosted)', async () => {
@@ -108,8 +95,6 @@ describe('loadCodespaceEnv', () => {
     writeEnvFile(
       JSON.stringify({
         PREVIEW_TUNNEL_TOKEN: 'tok-ok',
-        HEADROOM_ENABLED: 1, // number, not string → ignored
-        HEADROOM_AGENT: '', // empty string → ignored
         SOME_UNKNOWN_KEY: 'should-not-land', // not allow-listed → ignored
       }),
     );
@@ -117,8 +102,6 @@ describe('loadCodespaceEnv', () => {
     loadCodespaceEnv();
 
     expect(process.env.PREVIEW_TUNNEL_TOKEN).toBe('tok-ok');
-    expect(process.env.HEADROOM_ENABLED).toBeUndefined();
-    expect(process.env.HEADROOM_AGENT).toBeUndefined();
     expect(process.env.SOME_UNKNOWN_KEY).toBeUndefined();
   });
 });

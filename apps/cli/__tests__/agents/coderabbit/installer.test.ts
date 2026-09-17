@@ -8,7 +8,7 @@ import {
   summarizeInstallFailure,
 } from '../../../src/agents/coderabbit/installer';
 import type { OsStrategy } from '../../../src/os';
-import type { HeadroomRunner } from '../../../src/commands/host/os-packages';
+import type { OsRunner } from '../../../src/commands/host/os-packages';
 
 /**
  * Regression suite for the 2026-08-13 "CodeRabbit never worked" incident.
@@ -45,14 +45,14 @@ function fakeOs(present: Set<string>): OsStrategy {
 
 function fakeRunner(
   which: (cmd: string) => boolean,
-  run: HeadroomRunner['run'] = async () => ({ code: 0, stderr: '' }),
-): HeadroomRunner {
+  run: OsRunner['run'] = async () => ({ code: 0, stderr: '' }),
+): OsRunner {
   return { which, run };
 }
 
 describe('ensureInstallPrerequisites', () => {
   it('is a no-op when unzip + git are already on PATH', async () => {
-    const run = vi.fn<HeadroomRunner['run']>(async () => ({ code: 0, stderr: '' }));
+    const run = vi.fn<OsRunner['run']>(async () => ({ code: 0, stderr: '' }));
     const res = await ensureInstallPrerequisites(fakeOs(new Set(['unzip', 'git'])), {
       runner: fakeRunner(() => true, run),
     });
@@ -62,7 +62,7 @@ describe('ensureInstallPrerequisites', () => {
 
   it('installs the missing tools via the detected package manager (non-interactive sudo)', async () => {
     const present = new Set(['git']);
-    const run = vi.fn<HeadroomRunner['run']>(async () => {
+    const run = vi.fn<OsRunner['run']>(async () => {
       present.add('unzip'); // the install worked
       return { code: 0, stderr: '' };
     });

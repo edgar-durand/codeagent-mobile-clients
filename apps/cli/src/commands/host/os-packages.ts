@@ -1,9 +1,9 @@
 // src/commands/host/os-packages.ts
 //
-// OS-level provisioning for Headroom's Python toolchain: package-manager
+// Provisionamiento del toolchain de Python a nivel de SO: package-manager
 // detection + bare-box install recipes (`ensurePip`), and Python >=3.10
-// resolution / auto-install (`resolveHeadroomPython` / `ensureModernPython`),
-// plus the injectable `HeadroomRunner` subprocess abstraction they share.
+// resolution / auto-install (`resolveModernPython` / `ensureModernPython`),
+// plus the injectable `OsRunner` subprocess abstraction they share.
 // Moved VERBATIM out of host-agent.ts (Phase 3 refactor) — only the
 // import/export wiring changed. host-agent.ts re-exports the public surface.
 import { execFileSync, spawn } from 'node:child_process';
@@ -11,7 +11,7 @@ import { log } from '../../services/logger';
 import { killQuiet } from '../../lib/quiet';
 
 /**
- * Subprocess runner injectable for `setupHeadroomForSelfHosted`.
+ * Subprocess runner inyectable para el provisionamiento del box.
  *
  * `run` returns a Promise that resolves to `{ code, stderr }` on command
  * completion/timeout, never rejects. The `timeoutMs` bound is advisory —
@@ -24,7 +24,7 @@ import { killQuiet } from '../../lib/quiet';
  * a lookup function so no real subprocess runs and ESM module boundaries are
  * never crossed.
  */
-export interface HeadroomRunner {
+export interface OsRunner {
   run(
     cmd: string,
     args: string[],
@@ -43,7 +43,7 @@ const PM_INSTALL_TIMEOUT_MS = 180_000;
  * Streams stdout/stderr to the host-agent logger, waits for exit (or
  * timeout), and resolves — never rejects.
  */
-export const defaultHeadroomRunner: HeadroomRunner = {
+export const defaultOsRunner: OsRunner = {
   which(cmd: string): boolean {
     try {
       execFileSync('which', [cmd], { stdio: 'ignore' });
@@ -63,7 +63,7 @@ export const defaultHeadroomRunner: HeadroomRunner = {
         if (settled) return;
         settled = true;
         // stdout MUST be returned (not just logged) — callers like
-        // resolveHeadroomPython parse it (e.g. the `python --version` probe).
+        // resolveModernPython parse it (e.g. the `python --version` probe).
         resolve({ code, stderr: stderrBuf, stdout: stdoutBuf });
       };
 
@@ -71,13 +71,13 @@ export const defaultHeadroomRunner: HeadroomRunner = {
         const chunk = b.toString();
         stdoutBuf += chunk;
         const line = chunk.replace(/\n+$/, '');
-        if (line) log.info('host-agent', `headroom[${cmd}]: ${line}`);
+        if (line) log.info('host-agent', `os[${cmd}]: ${line}`);
       });
       child.stderr?.on('data', (b: Buffer) => {
         const chunk = b.toString();
         stderrBuf += chunk;
         const line = chunk.replace(/\n+$/, '');
-        if (line) log.info('host-agent', `headroom[${cmd}]: ${line}`);
+        if (line) log.info('host-agent', `os[${cmd}]: ${line}`);
       });
 
       const timeoutMs = opts.timeoutMs;
@@ -86,7 +86,7 @@ export const defaultHeadroomRunner: HeadroomRunner = {
         timer = setTimeout(() => {
           log.warn(
             'host-agent',
-            `headroom[${cmd}] timed out after ${timeoutMs / 1000}s — aborting`,
+            `os[${cmd}] timed out after ${timeoutMs / 1000}s — aborting`,
           );
           killQuiet(child);
           done(null);
@@ -99,7 +99,7 @@ export const defaultHeadroomRunner: HeadroomRunner = {
       });
       child.once('error', (e) => {
         if (timer !== undefined) clearTimeout(timer);
-        log.trace('host-agent', `headroom[${cmd}] spawn error: ${e.message}`);
+        log.trace('host-agent', `os[${cmd}] spawn error: ${e.message}`);
         done(null);
       });
     });
@@ -124,7 +124,7 @@ const PACKAGE_MANAGERS: readonly PackageManager[] = [
 
 /**
  * Per-package-manager bare-box provision recipe. A bare box may have *nothing*,
- * so every recipe installs the full minimal toolchain Headroom's pip install
+ * so every recipe installs the full minimal toolchain que una instalacion pip
  * needs: a Python interpreter + pip, plus `ca-certificates` (without which the
  * PyPI TLS handshake fails) and `curl`.
  *
@@ -187,7 +187,7 @@ const PROVISION_RECIPES: Record<PackageManager, ProvisionRecipe> = {
  * Detection delegates `which` to the supplied runner so tests can control
  * visibility without crossing ESM module boundaries.
  */
-export function detectPackageManager(runner: Pick<HeadroomRunner, 'which'>): PackageManager | null {
+export function detectPackageManager(runner: Pick<OsRunner, 'which'>): PackageManager | null {
   for (const pm of PACKAGE_MANAGERS) {
     if (runner.which(pm)) return pm;
   }
@@ -196,7 +196,7 @@ export function detectPackageManager(runner: Pick<HeadroomRunner, 'which'>): Pac
 
 /**
  * Per-manager "install these package names" argv prefix (WITHOUT sudo). Kept
- * separate from {@link PROVISION_RECIPES} (which is the fixed Headroom
+ * separate from {@link PROVISION_RECIPES} (which is the fixed
  * toolchain) so callers that need an ARBITRARY package — e.g. the CodeRabbit
  * installer's `unzip`/`git` prerequisites — can reuse the same manager
  * detection instead of hand-rolling a second table.
@@ -240,7 +240,7 @@ function escalateCommand(argv: string[]): { cmd: string; args: string[] } {
  * `uv` is a first-class alternative, not a curiosity: it needs neither pip nor
  * root, and `uv pip install --python <py> --break-system-packages` lands the
  * console scripts in the SAME place pip would, so nothing downstream has to
- * change how it resolves `headroom` on PATH.
+ * change how it resolves the binary on PATH.
  */
 export type PyInstaller = { kind: 'pip' } | { kind: 'uv'; bin: string };
 
@@ -266,21 +266,21 @@ export type PythonInstallerResult =
  * TTY-less systemd unit cannot answer a sudo password prompt, so step 3 was
  * guaranteed to fail — after burning up to 180 s on `sudo apt-get update`:
  *
- *   headroom[sudo]: sudo: a terminal is required to read the password
- *   apt-get bare-box provision failed (code=1) — skipping Headroom
+ *   os[sudo]: sudo: a terminal is required to read the password
+ *   apt-get bare-box provision failed (code=1) — skipping el provisionamiento
  *
  * It repeated on every Retry and reached the user as a bare "Cost-saving
  * failed". On that box pip was genuinely missing (Ubuntu 24.04 splits out
  * `python3-pip`) and `python3 -m ensurepip` was missing too (Debian strips it
  * from stdlib, so there is no stdlib bootstrap) — but `uv` was installed and
- * resolved headroom-ai[proxy,code,image] in one command with no root at all.
+ * resolvia el paquete entero en un solo comando y sin root.
  *
  * Never throws. The `reason` is user-facing: it is what the CLI reports so the
  * Cost-saving surface can say something actionable instead of "Something went
  * wrong."
  */
 export async function ensurePythonInstaller(
-  runner: HeadroomRunner,
+  runner: OsRunner,
 ): Promise<PythonInstallerResult> {
   // 1. pip already present.
   if (runner.which('pip') || runner.which('pip3')) {
@@ -344,7 +344,7 @@ export async function ensurePythonInstaller(
       const detail = installResult.stderr.trim().split('\n').slice(-1)[0] ?? '';
       log.warn(
         'host-agent',
-        `${pm} bare-box provision failed (code=${String(installResult.code)}) — skipping Headroom`,
+        `${pm} bare-box provision failed (code=${String(installResult.code)}) — skipping el provisionamiento`,
       );
       return {
         ok: false,
@@ -354,7 +354,7 @@ export async function ensurePythonInstaller(
   } catch (e) {
     // Unexpected error (should never happen with the runner contract, but guard anyway).
     const msg = e instanceof Error ? e.message : String(e);
-    log.warn('host-agent', `bare-box provision threw unexpectedly: ${msg} — skipping Headroom`);
+    log.warn('host-agent', `bare-box provision threw unexpectedly: ${msg} — skipping el provisionamiento`);
     return { ok: false, reason: `Installing python3-pip via ${pm} threw: ${msg}` };
   }
 
@@ -363,11 +363,11 @@ export async function ensurePythonInstaller(
 }
 
 /**
- * Probe candidates for a Python interpreter that meets headroom-ai's minimum
- * version requirement (≥3.10, the oldest abi3 wheel tag headroom-ai ships).
+ * Probe candidates for a Python interpreter que cumpla el minimo
+ * de version (≥3.10, el tag abi3 mas viejo que se publica).
  *
  * On macOS the bare `python3` resolves to Xcode's Python 3.9.6 (pip 21.2.4),
- * which has no headroom-ai wheel (`Could not find a version that satisfies the
+ * que no tiene wheel (`Could not find a version that satisfies the
  * requirement`). The same box may have `/opt/homebrew/bin/python3.13` that
  * installs fine. We therefore probe version-suffixed binaries FIRST (newest
  * first) so the newest available modern interpreter wins, then fall back to
@@ -383,7 +383,7 @@ export async function ensurePythonInstaller(
  * Best-effort: a probe that errors or times out just skips that candidate.
  * Never throws.
  */
-export async function resolveHeadroomPython(runner: HeadroomRunner): Promise<string | null> {
+export async function resolveModernPython(runner: OsRunner): Promise<string | null> {
   /** Short probe timeout — we're just asking for a version string. */
   const PROBE_TIMEOUT_MS = 5_000;
 
@@ -395,7 +395,7 @@ export async function resolveHeadroomPython(runner: HeadroomRunner): Promise<str
 
   /**
    * Probe a single candidate binary. Returns true when it is Python ≥3.10
-   * AND has a usable `pip` — both are required to install headroom-ai. The pip
+   * AND has a usable `pip` — both are required para instalar. The pip
    * check matters because the NEWEST python on a box can be a pip-less minimal
    * build (e.g. a distro's `python3.13-minimal` pulled as a transitive apt dep)
    * while an older-but-complete `python3.12` has pip; we must pick the latter.
@@ -490,27 +490,27 @@ const MODERN_PYTHON_RECIPES: Record<PackageManager, string[][]> = {
 };
 
 /**
- * Resolve a Python ≥3.10 interpreter for Headroom, AUTO-INSTALLING a modern
+ * Resolve a Python ≥3.10 interpreter, AUTO-INSTALLING a modern
  * Python when none is present rather than skipping. Wraps
- * {@link resolveHeadroomPython}:
+ * {@link resolveModernPython}:
  *
  *   1. If a ≥3.10 interpreter already exists, return it immediately (no install).
  *   2. Otherwise attempt a best-effort, bounded install of a modern Python:
  *      • macOS: `brew install python@3.12` when `brew` is on PATH (Homebrew
  *        drops it at /opt/homebrew/bin or /usr/local/bin — both already probed
- *        by resolveHeadroomPython). No brew → no safe auto-install, fall through.
+ *        by resolveModernPython). No brew → no safe auto-install, fall through.
  *      • Linux: reuse {@link detectPackageManager} + {@link escalateCommand}
  *        (the same PM detection + sudo policy as `ensurePip`) and run the
  *        per-manager modern-Python recipe (versioned package preferred).
  *      • Any other platform: no install.
- *   3. Re-run resolveHeadroomPython and return its result (the freshly-installed
+ *   3. Re-run resolveModernPython and return its result (the freshly-installed
  *      interpreter, or null when the install didn't yield a ≥3.10 Python).
  *
  * Best-effort throughout — never throws. Returns the interpreter string or null.
  */
-export async function ensureModernPython(runner: HeadroomRunner): Promise<string | null> {
+export async function ensureModernPython(runner: OsRunner): Promise<string | null> {
   // 1. Already have a qualifying interpreter — no install needed.
-  let py = await resolveHeadroomPython(runner);
+  let py = await resolveModernPython(runner);
   if (py !== null) return py;
 
   // 2. No ≥3.10 Python found → attempt a best-effort install.
@@ -570,6 +570,6 @@ export async function ensureModernPython(runner: HeadroomRunner): Promise<string
   }
 
   // 3. Re-resolve after the install attempt — newly-installed interpreter or null.
-  py = await resolveHeadroomPython(runner);
+  py = await resolveModernPython(runner);
   return py;
 }

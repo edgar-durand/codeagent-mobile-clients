@@ -25,7 +25,7 @@ import { killQuiet } from '../../lib/quiet';
 
 /**
  * Minimal injectable subprocess runner (same shape as host-agent's
- * `HeadroomRunner`, redeclared here to avoid a circular import). `run` resolves
+ * `OsRunner`, redeclared here to avoid a circular import). `run` resolves
  * — never rejects — with the exit code + captured stderr. `input`, when set, is
  * written to the child's stdin then closed (used for `gh auth login --with-token`).
  */
@@ -317,7 +317,7 @@ export async function ensureGlabAuth(
 
 /**
  * Default runner backed by node's spawn — supports stdin `input` for
- * `gh auth login --with-token`. Mirrors host-agent's `defaultHeadroomRunner`
+ * `gh auth login --with-token`. Mirrors host-agent's `defaultOsRunner`
  * but adds the stdin path. Never rejects.
  */
 export const defaultGitToolingRunner: GitToolingRunner = {

@@ -12,8 +12,6 @@ export const AGENT_REGISTRY: Record<AgentId, AgentMetadata> = {
     // `claude setup-token` → delivered via CLAUDE_CODE_OAUTH_TOKEN.
     supportedAuthKinds: ['setup_token', 'oauth_token', 'api_key'],
     preferredAuthKind: 'setup_token',
-    headroomWrappable: true,
-    headroomKind: 'claude',
     // npm adapter `@agentclientprotocol/claude-agent-acp`.
     acp: true,
   },
@@ -24,8 +22,6 @@ export const AGENT_REGISTRY: Record<AgentId, AgentMetadata> = {
     enabled: true,
     supportedAuthKinds: ['oauth_token', 'api_key'],
     preferredAuthKind: 'oauth_token',
-    headroomWrappable: true,
-    headroomKind: 'codex',
     // npm adapter `@agentclientprotocol/codex-acp`.
     acp: true,
     // OAuth device-code flow; the user_code on the OpenAI page IS a real
@@ -40,10 +36,7 @@ export const AGENT_REGISTRY: Record<AgentId, AgentMetadata> = {
     enabled: false,
     supportedAuthKinds: ['oauth_token'],
     preferredAuthKind: 'oauth_token',
-    // `headroom init --global copilot` exists even though the agent is
     // still disabled here (no runtime builder yet).
-    headroomWrappable: true,
-    headroomKind: 'copilot',
     acp: false,
   },
   coderabbit: {
@@ -59,7 +52,6 @@ export const AGENT_REGISTRY: Record<AgentId, AgentMetadata> = {
     // user's own machine, so linking is always CLI-mediated.
     supportedAuthKinds: ['oauth_token', 'api_key'],
     preferredAuthKind: 'oauth_token',
-    headroomWrappable: false,
     // Legacy PTY runtime — no ACP adapter registered.
     acp: false,
   },
@@ -75,9 +67,7 @@ export const AGENT_REGISTRY: Record<AgentId, AgentMetadata> = {
     // no longer offers api_key.
     supportedAuthKinds: ['oauth_token'],
     preferredAuthKind: 'oauth_token',
-    // `headroom wrap cursor` is "manual/print-only" (IDE settings; the
     // headless cursor-agent CLI has no base-URL override) — runs native.
-    headroomWrappable: false,
     // Native ACP server: `cursor-agent acp`.
     acp: true,
     // Reverse-engineered device/poll flow; `userCode` is the secret PKCE
@@ -95,7 +85,6 @@ export const AGENT_REGISTRY: Record<AgentId, AgentMetadata> = {
     // this via the existing --api-key escape hatch in commands/link.ts.
     supportedAuthKinds: ['api_key'],
     preferredAuthKind: 'api_key',
-    headroomWrappable: false,
     // Legacy PTY runtime — no ACP adapter registered.
     acp: false,
   },
@@ -132,8 +121,6 @@ export const AGENT_REGISTRY: Record<AgentId, AgentMetadata> = {
     // provider, where the ineligible-tier message already explains why.
     supportedAuthKinds: ['api_key'],
     preferredAuthKind: 'api_key',
-    // Not listed by `headroom wrap --help` — runs native.
-    headroomWrappable: false,
     // Native ACP server: `gemini --skip-trust --acp`.
     acp: true,
   },
@@ -149,8 +136,6 @@ export const AGENT_REGISTRY: Record<AgentId, AgentMetadata> = {
     // that blob server-side is a separate reverse-engineering spike (phase 2).
     supportedAuthKinds: ['api_key', 'oauth_token'],
     preferredAuthKind: 'api_key',
-    // Moonshot's `kimi` is not listed by `headroom wrap --help` — runs native.
-    headroomWrappable: false,
     // Native ACP server: `kimi acp` (stdio JSON-RPC, answers `initialize`).
     acp: true,
   },
@@ -165,8 +150,6 @@ export const AGENT_REGISTRY: Record<AgentId, AgentMetadata> = {
     // the matching env var (detected by prefix) at deploy. api_key only.
     supportedAuthKinds: ['api_key'],
     preferredAuthKind: 'api_key',
-    // Not listed by `headroom init --global` (claude/codex/copilot only) — native.
-    headroomWrappable: false,
     // Native ACP server: `opencode acp` (stdio JSON-RPC).
     acp: true,
   },

@@ -62,7 +62,6 @@ import type { McpServer, RequestPermissionResponse } from '@agentclientprotocol/
 import { createOsStrategy } from '../../os';
 import { createInteractiveAgentStrategy } from '../registry';
 import { AcpClient, nonEmptyString, type AcpClientOptions } from './client';
-import { relaunchProxyWithoutBudget } from './headroom-budget-proxy';
 import { resolveAcpAdapterWithRetry, type AdapterSpec } from './adapters';
 import {
   buildHandoffPreamble,
@@ -75,7 +74,6 @@ import { SquadState } from './squad-roster';
 import { provisionAgentCredentials } from '../../commands/host/agent-provisioning';
 import { AcpPublisher } from './publisher';
 import type { PromptBlock } from './buildAcpPromptBlocks';
-import { createBudgetRecovery, type BudgetRecovery } from './budgetRecovery';
 import { createWakeCredentialProbe, localCredentialExpiryStatus } from './wakeCredentialProbe';
 import { reconcileCumulative } from './reconcileDelta';
 import {
@@ -141,7 +139,6 @@ export {
   WINDOWS_CONTROL_C_EXIT,
   adapterExitMessage,
   agentStatusPage,
-  budgetBubbleMessage,
   emptyReplyMessage,
   failureBubble,
   houseAgentLimitMessage,
@@ -1038,7 +1035,6 @@ export class AcpHistory {
 // real-spawn integration tests). Re-exported so `acp.failureBubble.test` can
 // still import it from runner alongside the other classifiers.
 export { looksLike1mContextCreditsError } from './oneMContextRecovery';
-export { looksLikeBudgetExceeded } from './budgetRecovery';
 
 /**
  * Bring the plugin ONLINE with a minimal relay and publish a clear message when
@@ -1131,11 +1127,6 @@ export async function surfaceStartupFailure(opts: {
   errRelay.start();
 }
 
-// `buildRelaunchProxyEnv` + `relaunchProxyWithoutBudget` moved to
-// `./headroom-budget-proxy` so the baton AcpDriver can build its own
-// budget-recovery without importing this heavy runner graph. Re-exported here
-// verbatim so the existing `relaunchProxyEnv.test` importer keeps working.
-export { buildRelaunchProxyEnv } from './headroom-budget-proxy';
 
 /**
  * Adapter spawn env for an ACP session. Two independent knobs:
@@ -1384,17 +1375,6 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
   // subscription, not disable 1M — see failure-messages.ts).
   let client = new AcpClient(clientOptions);
 
-  // ─── On-demand Headroom budget-exceeded recovery ──────────────────────────
-  // When the local Headroom proxy 429s due to budget exhaustion, offer two
-  // tappable options: "Pause budget this session" (relaunch proxy w/o --budget)
-  // or "Raise budget" (deep-link to app settings). Fire-once POST to the
-  // backend's budget-reached endpoint so the app can reflect the state.
-  //
-  // Fire-once guard: we POST the backend notification at most once per session
-  // (not once per turn) so a repeated budget-exceeded series doesn't spam the
-  // backend endpoint. Subsequent occurrences still surface the recovery bubble.
-  let _budgetReachedPosted = false;
-
   // Factory (not a bare const) so the agent switch can rebuild it — the
   // `agentId` is captured at construction, and every closure reads the
   // CURRENT `history`/`relay` bindings, so a rebuilt instance stays correct
@@ -1407,29 +1387,6 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
   const initialWireId = houseRailWireId(process.env);
   const initialManagedId =
     isHouseProxyEnv(process.env) && isManagedProviderId(initialWireId) ? initialWireId : null;
-  const makeBudgetRecovery = (): BudgetRecovery<PromptBlock> =>
-    createBudgetRecovery<PromptBlock>({
-      publishText: (text) => publisher.publishOutput({ type: 'text', content: text, done: true }),
-      publishSelectPrompt: (question, options) =>
-        publisher.publishOutput({
-          type: 'select_prompt',
-          content: question,
-          options,
-          optionDescriptions: options.map(() => ''),
-          currentIndex: 0,
-          done: true,
-        }),
-      publishAwaitingAnswer: (prompt, options) =>
-        publisher.publishAwaitingAnswer({ questionId: randomUUID(), prompt, options }),
-      publishRawChunk: (chunk) => publisher.publishOutput(chunk),
-      sendResult: (commandId, status, result) => relay.sendResult(commandId, status, result),
-      appendAgentReply: (text) => history.appendAgentReply(text),
-      flushHistory: () => void history.flush(),
-      relaunchProxyWithoutBudget,
-      agentId: initialManagedId ?? opts.agent,
-      log: (msg) => log.info('acpRunner', msg),
-    });
-  let budgetRecovery = makeBudgetRecovery();
 
   showInfo(`Starting ${opts.agent} via ACP adapter (${opts.adapter.requiresAgentBinary})…`);
   let handshake: Awaited<ReturnType<typeof client.start>>;
@@ -1700,13 +1657,6 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
         getBeads,
         publisher,
         recentStderr,
-        budgetRecovery,
-        {
-          get: () => _budgetReachedPosted,
-          set: (v: boolean) => {
-            _budgetReachedPosted = v;
-          },
-        },
         // resume_session re-points the runner's active conversation: the
         // relay callback reads `acpSessionId` per command, so every FUTURE
         // get_conversation / upload / one-shot serves the RESUMED id — not
@@ -1877,7 +1827,6 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
     jsonlHistory = new HistoryService(runtime, opts.pluginId, opts.cwd, {
       pluginAuthToken: opts.pluginAuthToken,
     });
-    budgetRecovery = makeBudgetRecovery();
     pendingHandoff.current = buildHandoffPreamble(prevAgent, nextAgent, transcript);
     // House-state transition — only AFTER the new adapter started (a failed
     // start throws above and leaves the prior state intact for the revert).
@@ -2005,7 +1954,6 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
     history,
     jsonlHistory,
     agentCaps,
-    budgetRecovery,
   });
 
   /**
@@ -2160,10 +2108,7 @@ export async function handleCommand(
   getBeads: () => StartedBeads | null,
   publisher: AcpPublisher,
   recentStderr: string[],
-  /** On-demand Headroom budget-exceeded recovery (offer pause/raise options). */
-  budgetRecovery: BudgetRecovery<PromptBlock>,
   /** Fire-once guard for the budget-reached backend POST. */
-  budgetReachedFlag: { get: () => boolean; set: (v: boolean) => void },
   /** resume_session re-points the owner's active-conversation id here —
    *  see AcpSessionContext.onActiveSessionChanged. Optional (tests / baton). */
   onActiveSessionChanged?: (id: string) => void,
@@ -2202,8 +2147,6 @@ export async function handleCommand(
     getBeads,
     publisher,
     recentStderr,
-    budgetRecovery,
-    budgetReachedFlag,
     onActiveSessionChanged,
     switchAgent,
     pendingHandoff,

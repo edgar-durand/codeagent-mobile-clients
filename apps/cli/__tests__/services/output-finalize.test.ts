@@ -51,8 +51,6 @@ function makeRuntime(opts: StubRuntimeOptions): RuntimeStrategy {
       enabled: true,
       supportedAuthKinds: ['oauth_token'],
       preferredAuthKind: 'oauth_token',
-      headroomWrappable: true,
-      headroomKind: 'claude',
       acp: true,
     },
     mode: 'interactive' as const,

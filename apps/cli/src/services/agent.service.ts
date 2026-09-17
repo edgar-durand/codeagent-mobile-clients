@@ -1,7 +1,15 @@
 import { IPtyStrategy } from './pty/types';
 import { log } from './logger';
 import type { RuntimeStrategy } from '../agents/strategy';
-import { headroomPresent, wrapWithHeadroom, type LaunchSpec } from './headroom/wrap-launch';
+
+/**
+ * Lo que hace falta para lanzar un agente. El unico consumidor es este fichero.
+ */
+interface LaunchSpec {
+  cmd: string;
+  args: string[];
+  env?: Record<string, string>;
+}
 
 export interface ClaudeServiceOptions {
   cwd: string;
@@ -184,12 +192,7 @@ export class AgentService {
     // surfacing the agent-specific error to the user and exiting.
     let launch: LaunchSpec;
     try {
-      const launch0 = await this.runtime.prepareLaunch();
-      launch = wrapWithHeadroom(launch0, {
-        enabled: process.env['HEADROOM_ENABLED'] === '1',
-        agent: process.env['HEADROOM_AGENT'] ?? launch0.cmd,
-        headroomPresent: await headroomPresent(),
-      });
+      launch = await this.runtime.prepareLaunch();
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       console.error(

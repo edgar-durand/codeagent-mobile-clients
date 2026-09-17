@@ -2,7 +2,6 @@ import pc from 'picocolors';
 import { AGENT_REGISTRY, type AgentId, HOUSE_AGENT_ID } from '@codeam/shared';
 import { addSession, getActiveSession, getActiveSessionForAgent, ensurePluginId, loadCliConfig, type SavedSession } from '../config';
 import { acquireDaemonLock } from './pair-auto';
-import { maybeStartHeadroomReporter, maybeResumeLocalHeadroomReporter } from './host-agent';
 import { showIntro, showInfo, showError } from '../ui/banner';
 import {
   CommandRelayService,
@@ -177,43 +176,6 @@ export async function start(
     'pluginAuth',
     `boot triple sessionId=${session.id} pluginId=${pluginId} tokenLen=${tokenForLog.length} tokenHead=${tokenForLog.slice(0, 12)} tokenTail=${tokenForLog.slice(-8)} mintedEqualsCached=${refreshed === session.pluginAuthToken}`,
   );
-
-  // Best-effort Headroom savings reporter — the long-lived serving daemon
-  // funnels through start() (pair-auto→start, bare `codeam`→start, etc.), so
-  // this is where the reporter must live for the SERVING daemon (pair-auto.ts
-  // only covers the transient pairing process). Gated inside
-  // maybeStartHeadroomReporter on HEADROOM_ENABLED==='1', which the backend
-  // sets for PRO users and loadCodespaceEnv() restores into process.env at
-  // boot — so the gate passes on the codespace daemon and is a no-op locally.
-  // Skip entirely when pluginAuthToken is absent/empty: an empty token
-  // guarantees a 401 on every savings POST (metering lost, 401-storm).
-  const headroomReporter = session.pluginAuthToken
-    ? maybeStartHeadroomReporter({
-        sessionId: session.id,
-        pluginId,
-        pluginAuthToken: session.pluginAuthToken,
-        codespaceId: process.env['CODESPACE_NAME'] ?? session.id,
-      })
-    : null;
-  process.once('exit', () => {
-    headroomReporter?.stop();
-  });
-
-  // On-demand LOCAL Headroom resume — additive to the codespace path above and
-  // a strict no-op when HEADROOM_ENABLED==='1' (codespace/self-hosted). Local
-  // on-demand never sets that env, so without this a CLI restart would stop
-  // crediting savings until the user re-toggled Cost-saving. Reads the persisted
-  // ~/.codeam/headroom-config.json and posts to the CURRENT session's endpoint.
-  const localHeadroomReporter = session.pluginAuthToken
-    ? maybeResumeLocalHeadroomReporter({
-        sessionId: session.id,
-        pluginId,
-        pluginAuthToken: session.pluginAuthToken,
-      })
-    : null;
-  process.once('exit', () => {
-    localHeadroomReporter?.stop();
-  });
 
   // Claude credential-sync — keep the VAULT current from THIS session's local
   // credential as Claude rotates its OAuth token (Anthropic single-use refresh

@@ -22,7 +22,6 @@ import {
   type AgentId,
 } from '@codeam/shared';
 import { looksLike1mContextCreditsError } from './oneMContextRecovery';
-import { looksLikeBudgetExceeded, extractBudgetPeriod } from './budgetRecovery';
 import { agentHooks } from './agent-hooks';
 // TYPE-only import: keeps this leaf module free of `backend-reports`' runtime
 // graph (which pulls the pairing service) — erased at compile time.
@@ -82,18 +81,17 @@ export function looksLikeHouseAgentLimit(text: string): boolean {
 }
 
 /**
- * True when the failure is the LOCAL Headroom proxy being unreachable, not a
+ * True when the failure is un endpoint LOCAL de loopback inalcanzable, not a
  * credential problem.
  *
- * Headroom rewrites the agent's own settings to route through
- * `http://127.0.0.1:8787`, so while the proxy is restarting every call the
- * agent makes fails to connect — and Claude Code wraps ANY API failure as
+ * Cuando el agente enruta por un `http://127.0.0.1:<port>` que esta caido,
+ * every call the agent makes fails to connect — and Claude Code wraps ANY API failure as
  * "Failed to authenticate. API Error: …", which `AUTH_FAILURE_RE` matches on
  * "failed to authenticate".
  *
  * That told a user his credentials were invalid while they were perfectly
  * fine, on a session that then went on to work: the CLI log shows
- * `headroom-supervisor — proxy :8787 not answering before a turn` 0.4 s before
+ * `proxy :8787 not answering before a turn` 0.4 s before
  * the CLI reported the credential invalid, and `proxy :8787 ready after ~9s`
  * right after (edgar@privacyhawk.com, 2026-08-24). Re-authenticating can never
  * fix it, and every occurrence re-flags a healthy credential as expired —
@@ -117,7 +115,7 @@ export function looksLikeAuthFailure(text: string): boolean {
   // — never let it drive the re-auth path (which also fires
   // reportCredentialInvalid). Checked first, everywhere, via this one guard.
   if (looksLikeHouseAgentLimit(text)) return false;
-  // The local Headroom proxy being unreachable is a transient infrastructure
+  // Un endpoint local inalcanzable es un fallo transitorio de infraestructura
   // blip the supervisor already respawns — never a credential problem.
   if (looksLikeLocalProxyUnavailable(text)) return false;
   return AUTH_FAILURE_RE.test(text);
@@ -251,7 +249,7 @@ export const ONE_M_CREDITS_MESSAGE =
 
 /**
  * Persistent, actionable message for a NON-auth turn failure that produced no
- * assistant text (e.g. the local Headroom proxy not ready on the first prompt,
+ * assistant text (e.g. un endpoint local no listo en el primer prompt,
  * a network/adapter error). Without this the only frame published is the empty
  * `done:true` from `closeAll`, which the mobile snapshot-guard drops — leaving
  * the chat with no reply AND no error (the silent "first message never
@@ -427,18 +425,6 @@ export function startupCredentialInvalidReason(
 }
 
 /**
- * Build the budget-exceeded bubble. The `period` is extracted from the 429
- * detail string (e.g. "daily"). Exported so tests can compare it verbatim.
- */
-export function budgetBubbleMessage(agent: string, period: string): string {
-  return (
-    `💸 **Headroom budget reached for the ${period} period.**\n\n` +
-    `The local Headroom proxy rejected the ${agent} request because the configured spending cap was hit. ` +
-    'Choose an option below to continue.'
-  );
-}
-
-/**
  * Decide the terminal failure bubble to publish when a `start_task` turn
  * throws — the contract that guarantees a turn NEVER ends silently:
  *   - auth failure → the actionable re-auth bubble.
@@ -479,13 +465,6 @@ export function failureBubble(opts: {
     looksLike1mContextCreditsError(opts.recentStderr)
   ) {
     return ONE_M_CREDITS_MESSAGE;
-  }
-  // Budget-exceeded 429 from the local Headroom proxy — checked BEFORE the
-  // provider-outage branch so a budget 429 is never mis-classified as a
-  // provider outage. The proxy is local; the agent provider is healthy.
-  const budgetHaystack = `${opts.detail}\n${opts.recentStderr}`;
-  if (looksLikeBudgetExceeded(budgetHaystack)) {
-    return budgetBubbleMessage(opts.agent, extractBudgetPeriod(budgetHaystack));
   }
   if (looksLikeProviderOutage(opts.detail) || looksLikeProviderOutage(opts.recentStderr)) {
     return providerOutageMessage(opts.agent, opts.railWireId);

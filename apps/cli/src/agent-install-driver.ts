@@ -26,7 +26,7 @@
  * REAL `ensureAgentBinaryForSwitch` retry-once recovery over it.
  *
  * ─── Not shipped ────────────────────────────────────────────────────────────
- * Test-only, like `headroom-runner-driver.ts`: its own tsup entry, excluded
+ * Test-only: its own tsup entry, excluded
  * from the npm `files` allowlist, copied into the container by the test.
  */
 

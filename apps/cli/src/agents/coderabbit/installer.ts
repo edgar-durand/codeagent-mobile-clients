@@ -40,10 +40,10 @@ import * as path from 'node:path';
 import type { OsStrategy } from '../../os';
 import { log } from '../../services/logger';
 import {
-  defaultHeadroomRunner,
+  defaultOsRunner,
   detectPackageManager,
   osPackageInstallArgv,
-  type HeadroomRunner,
+  type OsRunner,
 } from '../../commands/host/os-packages';
 
 const INSTALL_URL = 'https://cli.coderabbit.ai/install.sh';
@@ -73,7 +73,7 @@ export interface CoderabbitInstallResult {
 
 export interface CoderabbitInstallDeps {
   /** Subprocess runner for the prerequisite probe/install (injected in tests). */
-  runner?: HeadroomRunner;
+  runner?: OsRunner;
   /** Run the curl|sh installer. Returns its exit code + combined output. */
   runInstallScript?: (env: NodeJS.ProcessEnv) => Promise<{ code: number | null; output: string }>;
   /**
@@ -109,7 +109,7 @@ function probeRuns(binary: string, env: NodeJS.ProcessEnv, deps: CoderabbitInsta
  * Human-readable "install it yourself" hint for the detected package manager
  * (or a generic one when no manager is detectable).
  */
-function manualInstallHint(runner: HeadroomRunner, tools: readonly string[]): string {
+function manualInstallHint(runner: OsRunner, tools: readonly string[]): string {
   const pkgs = tools.join(' ');
   const argv = osPackageInstallArgv(detectPackageManager(runner), [...tools]);
   return argv ? `\`sudo ${argv.join(' ')}\`` : `your package manager (e.g. \`${pkgs}\`)`;
@@ -123,7 +123,7 @@ function manualInstallHint(runner: HeadroomRunner, tools: readonly string[]): st
  *
  * Returns null when Python 3 isn't available (nothing to back the shim with).
  */
-function writeUnzipShim(os: OsStrategy, runner: HeadroomRunner): string | null {
+function writeUnzipShim(os: OsStrategy, runner: OsRunner): string | null {
   const python = ['python3', 'python'].find((p) => runner.which(p));
   if (!python) return null;
   const dir = os.scratchPath('codeam-cr-prereq');
@@ -161,7 +161,7 @@ export async function ensureInstallPrerequisites(
   os: OsStrategy,
   deps: CoderabbitInstallDeps = {},
 ): Promise<{ ok: true; extraPath: string[] } | { ok: false; error: string }> {
-  const runner = deps.runner ?? defaultHeadroomRunner;
+  const runner = deps.runner ?? defaultOsRunner;
   const missing = REQUIRED_TOOLS.filter((t) => os.findInPath(t) === null);
   if (missing.length === 0) return { ok: true, extraPath: [] };
 

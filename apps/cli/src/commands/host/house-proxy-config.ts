@@ -2,7 +2,7 @@
 //
 // Persistence for the house-agent (CodeAgent Cloud) proxy env the supervisor
 // writes on a successful house `self_hosted_deploy` and re-reads on every RESUME
-// child spawn. Mirrors `headroom-config.ts` (persist → read → child env).
+// child spawn. Patron: persist → read → child env.
 //
 // ⚠️ WHY THIS EXISTS (Rafael, 2026-08-05): the house-proxy env
 // (ANTHROPIC_BASE_URL + ANTHROPIC_AUTH_TOKEN + model pins + CLAUDE_CONFIG_DIR)

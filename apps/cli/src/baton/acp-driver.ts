@@ -5,9 +5,7 @@ import { HistoryService } from '../services/history.service';
 import { TurnFileAggregator } from '../services/turn-files/turn-file-aggregator';
 import type { AcpClient } from '../agents/acp/client';
 import type { AcpPublisher } from '../agents/acp/publisher';
-import { createBudgetRecovery } from '../agents/acp/budgetRecovery';
 import type { PromptBlock } from '../agents/acp/buildAcpPromptBlocks';
-import { relaunchProxyWithoutBudget } from '../agents/acp/headroom-budget-proxy';
 import { AcpHistory, StreamingState, type AcpRunnerOptions } from '../agents/acp/runner';
 import {
   assembleAcpCommandContext,
@@ -45,7 +43,7 @@ export interface AcpDriverDeps {
  * Beyond lifecycle, this driver OWNS the ACP command machinery: it builds the
  * same {@link AcpSessionContext} `runAcpSession` builds (models, on-disk JSONL
  * history, the conversation-history accumulator, the turn-file aggregator, the
- * Headroom budget-recovery) and routes each relayed command through
+ * y enruta cada comando relayado por
  * {@link dispatchAcpCommand}. The session context is built lazily on the first
  * command and rebuilt on every {@link start} (a fresh/resumed conversation), so
  * `start`/`stop`/`whenSafeToYield` stay cheap for a driver that never dispatches.
@@ -64,7 +62,6 @@ export class AcpDriver implements SessionDriver {
   /** Lazily-built, memoised per {@link start} — cleared when the conversation
    *  changes so history/models rebind to the current conversation. */
   private session: AcpSessionContext | null = null;
-  private budgetReachedPosted = false;
 
   constructor(private readonly deps: AcpDriverDeps) {}
 
@@ -129,7 +126,6 @@ export class AcpDriver implements SessionDriver {
     // New (re)spawn → drop the memoised session so history/models rebind to the
     // now-current conversation id.
     this.session = null;
-    this.budgetReachedPosted = false;
     return conversationId;
   }
 
@@ -211,33 +207,6 @@ export class AcpDriver implements SessionDriver {
       pluginAuthToken: opts.pluginAuthToken,
       agentId: opts.agent,
     });
-    const budgetReachedFlag = {
-      get: () => this.budgetReachedPosted,
-      set: (v: boolean) => {
-        this.budgetReachedPosted = v;
-      },
-    };
-    const budgetRecovery = createBudgetRecovery<PromptBlock>({
-      publishText: (text) => publisher.publishOutput({ type: 'text', content: text, done: true }),
-      publishSelectPrompt: (question, options) =>
-        publisher.publishOutput({
-          type: 'select_prompt',
-          content: question,
-          options,
-          optionDescriptions: options.map(() => ''),
-          currentIndex: 0,
-          done: true,
-        }),
-      publishAwaitingAnswer: (prompt, options) =>
-        publisher.publishAwaitingAnswer({ questionId: randomUUID(), prompt, options }),
-      publishRawChunk: (chunk) => publisher.publishOutput(chunk),
-      sendResult: (commandId, status, result) => relay.sendResult(commandId, status, result),
-      appendAgentReply: (text) => history.appendAgentReply(text),
-      flushHistory: () => void history.flush(),
-      relaunchProxyWithoutBudget,
-      agentId: opts.agent,
-    });
-
     this.session = {
       client: this.deps.client,
       relay,
@@ -251,8 +220,6 @@ export class AcpDriver implements SessionDriver {
       getBeads: opts.getBeads ?? (() => null),
       publisher,
       recentStderr,
-      budgetRecovery,
-      budgetReachedFlag,
     };
     return this.session;
   }

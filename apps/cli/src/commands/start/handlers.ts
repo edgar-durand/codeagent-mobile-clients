@@ -44,28 +44,16 @@ import { applyFileReview } from '../../services/apply-file-review.service';
 import { buildLinkContext } from '../link';
 import { makeSerializedEmitter } from '../../services/preview/serialized-emitter';
 import { makePreviewHeartbeatReaffirm } from '../../services/preview/reaffirm';
-import { postLinkCredential, postAiResult, postPreviewEvent, postHeadroomEvent, postBeadsEvent, postCliUpdateEvent, postCoderabbitEvent, postAgentReviewReport, postTurnEvent, fetchProvisionCredential } from '../../services/pairing.service';
+import { postLinkCredential, postAiResult, postPreviewEvent, postBeadsEvent, postCliUpdateEvent, postCoderabbitEvent, postAgentReviewReport, postTurnEvent, fetchProvisionCredential } from '../../services/pairing.service';
 import { configureCoderabbit, type CoderabbitAction } from '../../agents/coderabbit/configure';
 import { deliverPendingCoderabbitCallback, type CoderabbitAuthEvent } from '../../agents/coderabbit/oauth';
 import { CoderabbitRuntimeStrategy } from '../../agents/coderabbit/runtime';
 import { reviewPullRequest, defaultRunGh } from '../../agents/coderabbit/review-pr';
 import { createOsStrategy } from '../../os';
 import {
-  agentIdToHeadroomKind,
-  isHeadroomSupportedAgent,
-  persistHeadroomConfig,
-  headroomConfigPath,
-  restoreAgentHeadroomConfig,
-  setupHeadroomForSelfHosted,
 } from '../../commands/host-agent';
-import { buildBudgetProxyArgs } from '../../services/headroom/budget-args';
-import { configureHeadroom } from '../../services/headroom/configure';
-import { applyBudgetToHeadroom, makeRealApplyBudgetDeps, type BudgetSpec } from '../../services/headroom/budget-relaunch';
-import { fetchWithTimeout, HeadroomStatsReporter, mapStatsToSavings, type StatsShape, type Savings } from '../../services/headroom/stats-reporter';
-import { killHeadroomProxy } from '../../services/headroom/proxy-pid';
-import { readUsageReport } from '../../services/headroom/usage-report';
 import { getGuardrailPolicy, setGuardrailPolicy } from '../../agents/acp/guardrail-config';
-import { AGENT_REGISTRY, isKnownAgentId, normalizeAgentId, PREVIEW_DETECT_PROMPT, USER_EVENTS, type PreviewDetection, type HeadroomBudgetCommand } from '@codeam/shared';
+import { AGENT_REGISTRY, isKnownAgentId, normalizeAgentId, PREVIEW_DETECT_PROMPT, USER_EVENTS, type PreviewDetection } from '@codeam/shared';
 import * as previewSvc from '../../services/preview';
 import { runPreviewStart, type EmitPreviewEvent } from '../../services/preview/start-orchestrator';
 import {
@@ -128,7 +116,7 @@ export interface BaseHandlerContext {
   sessionId: string;
   /** The agent id this session is actually running (e.g. `claude`, `codex`).
    *  The authoritative source for "what agent am I?" — set by start.ts from
-   *  `session.agent`. Handlers (e.g. headroom_configure) must prefer this over
+   *  `session.agent`. Handlers must prefer this over
    *  any client-supplied agent hint, which can be absent or stale. */
   agentId: string;
   pluginAuthToken?: string;
@@ -696,159 +684,6 @@ const handbackH: CommandHandler = async (ctx, cmd) => {
   await ctx.relay.sendResult(cmd.id, 'completed', { state: ctx.baton.state });
 };
 
-// ─── Headroom on-demand configure ────────────────────────────────
-
-/** Per-session stats reporter instance — started on `enable`, stopped on `disable`. */
-let _activeReporter: HeadroomStatsReporter | null = null;
-
-/**
- * Serializes Headroom SSE event POSTs. `configureHeadroom` emits the
- * `headroom_progress` steps (pip…ready) and the terminal `headroom_status`
- * (enabled/disabled/error) back-to-back. If each POST were fired-and-forgotten
- * concurrently, the backend's per-event `findActiveSessionByPlugin` lookup
- * (variable latency) could `userEvents.publish` them out of order — a late
- * `proxy`/`ready` progress landing after `enabled` leaves the mobile UI stuck
- * on "Starting proxy…". Chaining each POST after the previous one guarantees
- * the backend receives — and republishes — them in emit order.
- */
-let _headroomEmitChain: Promise<unknown> = Promise.resolve();
-
-const headroomConfigureH: CommandHandler = async (ctx, cmd, parsed) => {
-  const action = parsed.action;
-  if (action !== 'enable' && action !== 'disable' && action !== 'status') {
-    await ctx.relay.sendResult(cmd.id, 'failed', { error: 'action must be enable|disable|status' });
-    return;
-  }
-
-  const savingsIngestUrl = parsed.savingsIngestUrl;
-
-  // Resolve which agent this is for. The running session's OWN agent
-  // (`ctx.agentId`, set by start.ts from `session.agent`) is authoritative — the
-  // CLI launched it, so it always knows the truth. A client-supplied hint
-  // (`parsed.agentId`) is only a fallback, and the persisted config is last.
-  //
-  // ⚠️ Previously this read ONLY `parsed.agentId`, but the mobile cost-saving
-  // flow sends `{action:'enable'}` with NO agentId → `rawAgentId === ''` →
-  // `isHeadroomSupportedAgent('')` is false → a real Claude session got a
-  // spurious `{supported:false}`. Preferring `ctx.agentId` fixes that.
-  // Normalize public-id aliases (`claude_code` → `claude`, …) via the shared
-  // normalizer so the value is consistent with what `requestLinkCredentialsH`
-  // writes; unknown ids pass through untouched for the downstream gate.
-  let rawAgentId = ctx.agentId || (typeof parsed.agentId === 'string' ? parsed.agentId : '');
-  rawAgentId = normalizeAgentId(rawAgentId) ?? rawAgentId;
-  let configuredAgent = rawAgentId;
-  if (!configuredAgent) {
-    try {
-      const raw = JSON.parse(fs.readFileSync(headroomConfigPath(), 'utf8')) as { agent?: string };
-      configuredAgent = raw.agent ?? '';
-    } catch { /* no config yet */ }
-  }
-
-  const result = await configureHeadroom(action, {
-    agent: configuredAgent,
-    pluginAuthToken: ctx.pluginAuthToken,
-    savingsIngestUrl,
-  }, {
-    setup: setupHeadroomForSelfHosted,
-    probeStats: async (): Promise<Savings | null> => {
-      try {
-        const res = await fetchWithTimeout('http://localhost:8787/stats');
-        if (!res.ok) return null;
-        const raw = await res.json() as StatsShape;
-        return mapStatsToSavings(raw, {
-          rawTokensEst: 0, sentTokensEst: 0, cachedTokens: 0, retrieveHops: 0,
-          cacheReadTokens: 0, cacheSavingsUsd: 0, compressionTokens: 0,
-          compressionSavingsUsd: 0, compressionPct: 0,
-        }).next;
-      } catch {
-        return null;
-      }
-    },
-    persist: persistHeadroomConfig,
-    readEnabled: () => {
-      try {
-        const raw = JSON.parse(fs.readFileSync(headroomConfigPath(), 'utf8')) as { enabled?: boolean };
-        return raw.enabled === true;
-      } catch {
-        return false;
-      }
-    },
-    startReporter: (opts) => {
-      _activeReporter?.stop();
-      const reporter = new HeadroomStatsReporter({
-        fetchStats: async () => {
-          const res = await fetchWithTimeout('http://localhost:8787/stats');
-          return res.json() as Promise<StatsShape>;
-        },
-        postSavings: async (delta, budget) => {
-          if (!opts.ingestUrl) return;
-          const res = await fetchWithTimeout(opts.ingestUrl, {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              ...(opts.pluginAuthToken ? { 'X-Plugin-Auth-Token': opts.pluginAuthToken } : {}),
-            },
-            // Body MUST match HeadroomSavingsDto + PluginAuthGuard, which read
-            // `sessionId` + `pluginId` from the body and 401 if either is
-            // missing. Mirror the self-hosted reporter in host-agent.ts exactly.
-            // Previously this sent `{ agentId, ...delta }` (no sessionId/pluginId,
-            // delta spread flat instead of nested under `savings`) → every POST
-            // was rejected 401 at the guard and silently swallowed (fetch status
-            // unchecked), so local on-demand savings never reached the backend.
-            body: JSON.stringify({
-              sessionId: ctx.sessionId,
-              pluginId: ctx.pluginId,
-              agentId: opts.agent,
-              savings: delta,
-              ...(budget ? {
-                periodSpendUsd: budget.periodSpendUsd,
-                budgetUsd: budget.budgetUsd,
-                budgetPeriod: budget.budgetPeriod,
-                budgetReached: budget.budgetReached,
-              } : {}),
-            }),
-          });
-          // A rejected POST (401 guard, 403 plan gate, 5xx) means the delta
-          // was NOT credited — surface it instead of silently swallowing (the
-          // exact failure mode of the incident recounted above).
-          if (!res.ok) {
-            log.warn('headroom', `savings POST rejected ${res.status} — delta not credited`);
-          }
-        },
-      });
-      reporter.start();
-      _activeReporter = reporter;
-    },
-    stopReporter: () => {
-      _activeReporter?.stop();
-      _activeReporter = null;
-    },
-    restoreAgentHeadroomConfig: (kind: string) => restoreAgentHeadroomConfig(kind),
-    // Targeted pidfile kill; falls back to the legacy pkill pattern only when
-    // no live recorded pid exists. Best-effort — never throws.
-    stopProxy: () => killHeadroomProxy(),
-    emit: (event) => {
-      const token = ctx.pluginAuthToken;
-      if (!token) return;
-      // Serialize: chain this POST after the previous one so the backend
-      // receives progress/status events strictly in emit order (see
-      // `_headroomEmitChain`). A failed POST resolves to `ok:false` rather than
-      // rejecting, so the chain never breaks for later events.
-      _headroomEmitChain = _headroomEmitChain.then(() =>
-        postHeadroomEvent({
-          sessionId: ctx.sessionId,
-          pluginId: ctx.pluginId,
-          pluginAuthToken: token,
-          type: event.type,
-          payload: 'step' in event ? { step: event.step } : { state: event.state },
-        }),
-      );
-    },
-  });
-
-  await ctx.relay.sendResult(cmd.id, 'completed', result);
-};
-
 // ─── CodeRabbit reviewer ─────────────────────────────────────────────────────
 
 /**
@@ -1142,168 +977,10 @@ const vcsAgentReviewH: CommandHandler = async (ctx, cmd, parsed) => {
   })();
 };
 
-// ─── Headroom budget ───────────────────────────────────────────────────────
-
-/**
- * `headroom_budget` relay handler.
- *
- * The backend fans this command to ALL active relay sessions for the user
- * (PairedSession has no agentId on the server). This handler therefore guards
- * on three conditions before touching anything:
- *   1. Headroom is ACTIVE (enabled) in THIS session's persisted config.
- *   2. This session's agent matches the command's `payload.agentId` (the
- *      backend carrier field that lets the CLI discriminate per-agent).
- *   3. `isHeadroomSupportedAgent(agent)` — cursor/gemini/aider are never
- *      Headroom-wrappable; skip silently so their sessions are unaffected.
- *
- * When all three pass:
- *   - Set/clear `HEADROOM_BUDGET` / `HEADROOM_BUDGET_PERIOD` on `process.env`
- *     so `readHeadroomChildEnv` picks them up on any future child spawn.
- *   - Kill the running proxy (pkill -TERM -f 'headroom.*proxy').
- *   - Relaunch the proxy detached with `buildBudgetProxyArgs` so it enforces
- *     the new budget immediately (no pip/init/model steps — just re-spawn).
- *   - Return `relay.sendResult(cmd.id, 'completed', { applied: true })`.
- *
- * Otherwise: no-op → `{ applied: false }` (no proxy restart, no env mutation).
- */
-/**
- * `headroom_usage` — return the session's token-usage report, read from the
- * local Headroom proxy's durable `/stats-history` and trimmed on-box (see
- * services/headroom/usage-report.ts for the size/fidelity/privacy rationale).
- *
- * Read-only and unconditional: it never mutates the proxy and it does NOT gate
- * on the agent, because the report is about the proxy running HERE. When
- * Headroom isn't active the proxy simply isn't listening and we answer
- * `{ available: false }` — an honest empty state instead of an error. The app
- * only offers the entry point for Headroom-capable agents anyway.
- */
-const headroomUsageH: CommandHandler = async (ctx, cmd) => {
-  try {
-    const report = await readUsageReport();
-    if (!report) {
-      await ctx.relay.sendResult(cmd.id, 'completed', {
-        available: false,
-        error: 'Headroom is not running in this session.',
-      });
-      return;
-    }
-    await ctx.relay.sendResult(cmd.id, 'completed', { available: true, report });
-  } catch (err) {
-    await ctx.relay.sendResult(cmd.id, 'completed', {
-      available: false,
-      error: (err as Error).message,
-    });
-  }
-};
-
-const headroomBudgetH: CommandHandler = async (ctx, cmd) => {
-  const payload = cmd.payload as unknown as HeadroomBudgetCommand;
-
-  // ── 1. Resolve this session's agent (same pattern as headroom_configure). ──
-  // ctx.agentId (set by start.ts from session.agent) is authoritative.
-  // payload.agentId is the backend-supplied carrier for the guard — used to
-  // identify WHICH agent's budget is being set; we compare it against ctx.agentId.
-  let rawAgentId = ctx.agentId || (typeof payload.agentId === 'string' ? payload.agentId : '');
-  rawAgentId = normalizeAgentId(rawAgentId) ?? rawAgentId;
-
-  // Normalise the payload carrier too, for comparison.
-  let payloadAgentId = typeof payload.agentId === 'string' ? payload.agentId : '';
-  payloadAgentId = normalizeAgentId(payloadAgentId) ?? payloadAgentId;
-
-  // ── 2. Guard: must be a supported agent. ────────────────────────────────
-  if (!rawAgentId || !isHeadroomSupportedAgent(rawAgentId)) {
-    await ctx.relay.sendResult(cmd.id, 'completed', { applied: false });
-    return;
-  }
-
-  // ── 3. Guard: payload.agentId must target THIS session's agent. ─────────
-  // The backend sends the same command to every open session. Only the session
-  // whose agent matches the budget target should apply it.
-  if (!payloadAgentId || payloadAgentId !== rawAgentId) {
-    await ctx.relay.sendResult(cmd.id, 'completed', { applied: false });
-    return;
-  }
-
-  // ── 4. Guard: Headroom must be ACTIVE in this session. ─────────────────
-  let headroomActive = false;
-  try {
-    const raw = JSON.parse(fs.readFileSync(headroomConfigPath(), 'utf8')) as {
-      enabled?: boolean;
-      agent?: string;
-    };
-    headroomActive = raw.enabled === true;
-  } catch {
-    /* no config file or bad JSON — treat as inactive */
-  }
-  if (!headroomActive) {
-    await ctx.relay.sendResult(cmd.id, 'completed', { applied: false });
-    return;
-  }
-
-  // ── 5. Persist budget into ~/.codeam/headroom-config.json AND process.env. ──
-  // Persisting to the config file means self-hosted supervisor restarts and
-  // reboots pick up the budget via `readHeadroomChildEnv` without needing the
-  // parent process env (which is ephemeral across restarts).
-  // We also mirror to process.env so the proxy relaunch below picks them up
-  // immediately for the current process's `buildBudgetProxyArgs` call.
-  let existingConfig: {
-    enabled?: boolean;
-    agent?: string;
-    ingestUrl?: string;
-    budgetEnabled?: boolean;
-    budgetUsd?: number;
-    budgetPeriod?: string;
-  } = { enabled: true };
-  try {
-    existingConfig = JSON.parse(fs.readFileSync(headroomConfigPath(), 'utf8')) as typeof existingConfig;
-  } catch {
-    /* use defaults */
-  }
-
-  if (payload.budgetEnabled && payload.budgetUsd != null) {
-    persistHeadroomConfig({
-      ...existingConfig,
-      enabled: existingConfig.enabled ?? true,
-      budgetEnabled: true,
-      budgetUsd: payload.budgetUsd,
-      budgetPeriod: (payload.budgetPeriod as 'hourly' | 'daily' | 'monthly' | undefined) ?? 'daily',
-    });
-    process.env['HEADROOM_BUDGET'] = String(payload.budgetUsd);
-    process.env['HEADROOM_BUDGET_PERIOD'] = payload.budgetPeriod ?? 'daily';
-  } else {
-    persistHeadroomConfig({
-      ...existingConfig,
-      enabled: existingConfig.enabled ?? true,
-      budgetEnabled: false,
-      budgetUsd: undefined,
-      budgetPeriod: undefined,
-    });
-    delete process.env['HEADROOM_BUDGET'];
-    delete process.env['HEADROOM_BUDGET_PERIOD'];
-  }
-
-  // ── 6+7. Kill+respawn OR amend supervised deployment manifest ───────────────
-  // When `headroom install` manages the proxy, direct kill+respawn loses the
-  // port race — the supervisor instantly respawns without --budget.
-  // applyBudgetToHeadroom detects supervised deployments (port===8787 manifests
-  // at ~/.headroom/deploy/*/manifest.json) and routes accordingly.
-  const budgetSpec: BudgetSpec | null =
-    payload.budgetEnabled && payload.budgetUsd != null
-      ? {
-          budgetUsd: payload.budgetUsd,
-          budgetPeriod: (payload.budgetPeriod as 'hourly' | 'daily' | 'monthly' | undefined) ?? 'daily',
-        }
-      : null;
-
-  await applyBudgetToHeadroom(budgetSpec, makeRealApplyBudgetDeps());
-
-  await ctx.relay.sendResult(cmd.id, 'completed', { applied: true });
-};
-
 // ─── Beads configure ─────────────────────────────────────────────
 
 /**
- * Serializes Beads SSE event POSTs. Mirrors `_headroomEmitChain` to guarantee
+ * Serializes Beads SSE event POSTs. Garantiza que
  * the backend receives — and republishes — `beads_status` events strictly in
  * emit order. A failed POST resolves to `ok:false` rather than rejecting, so
  * the chain never breaks for later events.
@@ -1317,7 +994,7 @@ const beadsConfigureH: CommandHandler = async (ctx, cmd, parsed) => {
     return;
   }
 
-  // Use the session's own running agent — same resolution as headroom_configure.
+  // Use the session's own running agent — la misma resolucion que el resto.
   let rawAgentId = ctx.agentId || (typeof parsed.agentId === 'string' ? parsed.agentId : '');
   rawAgentId = normalizeAgentId(rawAgentId) ?? rawAgentId;
 
@@ -2083,7 +1760,7 @@ function parseInsightText(text: string): {
 
 /**
  * The ONE ordered channel every preview lifecycle POST goes through — the same
- * guarantee Headroom (`_headroomEmitChain`) and Beads (`_beadsEmitChain`)
+ * guarantee Beads (`_beadsEmitChain`)
  * already give their streams. Preview was the last one still firing bare
  * `void postPreviewEvent(...)`, so its events raced on the wire; see
  * `makeSerializedEmitter` for what that race actually cost.
@@ -2611,11 +2288,8 @@ export const handlers: Record<string, CommandHandler> = {
   skills_configure: skillsConfigureH,
   take_control: takeControlH,
   handback: handbackH,
-  headroom_configure: headroomConfigureH,
-  headroom_usage: headroomUsageH,
   coderabbit_configure: coderabbitConfigureH,
   vcs_agent_review: vcsAgentReviewH,
-  headroom_budget: headroomBudgetH,
   beads_configure: beadsConfigureH,
   guardrail_configure: guardrailConfigureH,
   cli_self_update: cliSelfUpdateH(),

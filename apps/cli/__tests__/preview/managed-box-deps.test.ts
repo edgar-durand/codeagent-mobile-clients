@@ -28,7 +28,6 @@ describe('¿es una caja gestionada por nosotros?', () => {
     expect(managed({ CODEAM_AUTO_APPROVE: '1' })).toBe(true);
     expect(managed({ CODEAM_AUTO_TOKEN: 'x' })).toBe(true);
     expect(managed({ CODEAM_ENROLL_TOKEN: 'x' })).toBe(true);
-    expect(managed({ HEADROOM_ENABLED: '1' })).toBe(true);
   });
 
   /**

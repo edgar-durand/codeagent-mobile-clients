@@ -16,7 +16,7 @@ import {
   defaultOnIdentityRejected,
   type ChildSpawner,
   setupHeadroomForSelfHosted,
-  resolveHeadroomPython,
+  resolveModernPython,
   ensureModernPython,
   getFreeDiskBytes,
   agentIdToHeadroomKind,
@@ -29,7 +29,7 @@ import {
   RESUME_RETRY_BACKOFF_MS,
   RESUME_REPROBE_INTERVAL_MS,
   RESUME_HEALTHY_AFTER_MS,
-  type HeadroomRunner,
+  type OsRunner,
   type SelfUpdateResult,
   type DockerRunner,
 } from '../src/commands/host-agent';
@@ -2072,7 +2072,6 @@ describe('HostAgentSupervisor — self_hosted_wipe control command', () => {
 
     const relayStop = vi.fn();
     const disableService = vi.fn();
-    const teardownHeadroom = vi.fn();
     const onIdentityRejected = vi.fn(() => {
       fs.rmSync(hostIdentityPath(), { force: true });
     });
@@ -2080,7 +2079,6 @@ describe('HostAgentSupervisor — self_hosted_wipe control command', () => {
     const sup = new HostAgentSupervisor(IDENTITY, {
       makeRelay: () => ({ start: vi.fn(), stop: relayStop, sendResult: vi.fn() }),
       disableService,
-      teardownHeadroom,
       onIdentityRejected,
     });
     sup.start();
@@ -2093,140 +2091,16 @@ describe('HostAgentSupervisor — self_hosted_wipe control command', () => {
     });
 
     expect(relayStop).toHaveBeenCalled(); // children + channel torn down
-    expect(teardownHeadroom).toHaveBeenCalledTimes(1); // per-host proxy reaped
     expect(disableService).toHaveBeenCalledTimes(1);
     expect(onIdentityRejected).toHaveBeenCalledTimes(1);
     expect(fs.existsSync(hostIdentityPath())).toBe(false);
   });
 
-  it('does NOT tear down the Headroom proxy on a per-session self_hosted_stop (shared singleton)', async () => {
-    // No start() — the self_hosted_stop path goes straight through
-    // handleCommand → stopChild and needs neither the relay nor the
-    // heartbeat/self-update timers. Starting them here and not stopping the
-    // supervisor leaks a heartbeat timer that fires during a later test and
-    // trips the default onIdentityRejected → process.exit(1).
-    const teardownHeadroom = vi.fn();
-    const sup = new HostAgentSupervisor(IDENTITY, {
-      makeRelay: () => ({ start: vi.fn(), stop: vi.fn(), sendResult: vi.fn() }),
-      teardownHeadroom,
-    });
-
-    await sup.handleCommand({
-      id: 'cmd-stop',
-      sessionId: 'sh-plugin-1',
-      type: 'self_hosted_stop',
-      payload: { sessionId: 'sh-plugin-1' },
-    });
-
-    // The proxy is shared across sessions on the box — a single session stop
-    // must NOT reap it (only a full self_hosted_wipe does).
-    expect(teardownHeadroom).not.toHaveBeenCalled();
-  });
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Headroom — payload validator back-compat + env injection
 // ─────────────────────────────────────────────────────────────────────────────
-
-describe('isDeployPayload — headroom fields back-compat', () => {
-  /**
-   * Drive the validator indirectly: feed a `self_hosted_deploy` command to
-   * `handleCommand` and observe whether a child is spawned (validator passed)
-   * or not (validator rejected). We inject a no-op resolveAgentAuth so no real
-   * network call occurs, and point repoOrPath at a real tmp directory so
-   * prepareWorkspace doesn't throw.
-   */
-  async function assertValidatorAccepts(
-    overrides: Record<string, unknown>,
-  ): Promise<Record<string, string>> {
-    const cwdTarget = fs.mkdtempSync(path.join(os.tmpdir(), 'codeam-hr-'));
-    const calls: Array<{ env: Record<string, string> }> = [];
-    const spawnChild: ChildSpawner = (env) => {
-      calls.push({ env });
-      return fakeChild();
-    };
-    const resolveAgentAuth = vi
-      .fn<(i: SealedHostIdentity, s: string) => Promise<AgentAuth>>()
-      .mockResolvedValue({ kind: 'oauth_token', value: '{"claudeAiOauth":{}}' });
-    // setupHeadroom is mocked to succeed so the headroom env injection branch
-    // is exercised without real pip.
-    const setupHeadroom = vi.fn<(a: string) => Promise<boolean>>().mockResolvedValue(true);
-    const sup = new HostAgentSupervisor(IDENTITY, { spawnChild, resolveAgentAuth, setupHeadroom });
-
-    await sup.handleCommand(deployCmd({ repoOrPath: cwdTarget, ...overrides }));
-
-    fs.rmSync(cwdTarget, { recursive: true, force: true });
-    return calls[0]?.env ?? {};
-  }
-
-  it('accepts a payload with NO headroom fields (older backend — back-compat)', async () => {
-    const env = await assertValidatorAccepts({});
-    // No headroom env on the child — older payload treated as disabled.
-    expect(env.HEADROOM_ENABLED).toBeUndefined();
-    expect(env.HEADROOM_AGENT).toBeUndefined();
-    expect(env.HEADROOM_SAVINGS_INGEST_URL).toBeUndefined();
-  });
-
-  it('accepts a payload with headroomEnabled=false (feature explicitly off)', async () => {
-    const env = await assertValidatorAccepts({ headroomEnabled: false });
-    expect(env.HEADROOM_ENABLED).toBeUndefined();
-  });
-
-  it('accepts a payload with all 3 headroom fields present and valid', async () => {
-    const env = await assertValidatorAccepts({
-      headroomEnabled: true,
-      headroomAgent: 'claude',
-      headroomSavingsIngestUrl: 'https://api.codeagent.test/headroom-savings',
-    });
-    // All 3 HEADROOM_* vars injected because setupHeadroom mock returns true.
-    expect(env.HEADROOM_ENABLED).toBe('1');
-    expect(env.HEADROOM_AGENT).toBe('claude');
-    expect(env.HEADROOM_SAVINGS_INGEST_URL).toBe('https://api.codeagent.test/headroom-savings');
-  });
-
-  it('rejects a malformed headroomEnabled (wrong type)', async () => {
-    const spawnChild = vi.fn<ChildSpawner>(() => fakeChild());
-    const resolveAgentAuth = vi
-      .fn<(i: SealedHostIdentity, s: string) => Promise<AgentAuth>>()
-      .mockResolvedValue({ kind: 'oauth_token', value: '{}' });
-    const sup = new HostAgentSupervisor(IDENTITY, { spawnChild, resolveAgentAuth });
-
-    await sup.handleCommand(
-      deployCmd({ headroomEnabled: 'yes' }), // should be boolean
-    );
-
-    // Validator rejected the payload → no child spawned.
-    expect(spawnChild).not.toHaveBeenCalled();
-  });
-
-  it('rejects a malformed headroomAgent (wrong type)', async () => {
-    const spawnChild = vi.fn<ChildSpawner>(() => fakeChild());
-    const resolveAgentAuth = vi
-      .fn<(i: SealedHostIdentity, s: string) => Promise<AgentAuth>>()
-      .mockResolvedValue({ kind: 'oauth_token', value: '{}' });
-    const sup = new HostAgentSupervisor(IDENTITY, { spawnChild, resolveAgentAuth });
-
-    await sup.handleCommand(
-      deployCmd({ headroomEnabled: true, headroomAgent: 42 }), // agent must be a string
-    );
-
-    expect(spawnChild).not.toHaveBeenCalled();
-  });
-
-  it('rejects a malformed headroomSavingsIngestUrl (wrong type)', async () => {
-    const spawnChild = vi.fn<ChildSpawner>(() => fakeChild());
-    const resolveAgentAuth = vi
-      .fn<(i: SealedHostIdentity, s: string) => Promise<AgentAuth>>()
-      .mockResolvedValue({ kind: 'oauth_token', value: '{}' });
-    const sup = new HostAgentSupervisor(IDENTITY, { spawnChild, resolveAgentAuth });
-
-    await sup.handleCommand(
-      deployCmd({ headroomEnabled: true, headroomAgent: 'claude', headroomSavingsIngestUrl: 99 }),
-    );
-
-    expect(spawnChild).not.toHaveBeenCalled();
-  });
-});
 
 describe('isDeployPayload — suppressOnboardingWelcome back-compat + env injection', () => {
   async function deployAndCaptureEnv(
@@ -2277,697 +2151,7 @@ describe('isDeployPayload — suppressOnboardingWelcome back-compat + env inject
   });
 });
 
-describe('agentIdToHeadroomKind', () => {
-  it('maps claude / claude_code / claude-code → claude', () => {
-    expect(agentIdToHeadroomKind('claude')).toBe('claude');
-    expect(agentIdToHeadroomKind('claude_code')).toBe('claude');
-    expect(agentIdToHeadroomKind('claude-code')).toBe('claude');
-    expect(agentIdToHeadroomKind('Claude_Code')).toBe('claude'); // case-insensitive
-  });
-
-  it('maps codex / codex_cli → codex', () => {
-    expect(agentIdToHeadroomKind('codex')).toBe('codex');
-    expect(agentIdToHeadroomKind('codex_cli')).toBe('codex');
-  });
-
-  it('maps copilot → copilot', () => {
-    expect(agentIdToHeadroomKind('copilot')).toBe('copilot');
-    expect(agentIdToHeadroomKind('copilot-cli')).toBe('copilot');
-  });
-
-  it('defaults unknown / empty ids to claude (safe default)', () => {
-    expect(agentIdToHeadroomKind('something_else')).toBe('claude');
-    expect(agentIdToHeadroomKind('')).toBe('claude');
-    // Defensive: an undefined slipping through must not crash.
-    expect(agentIdToHeadroomKind(undefined as unknown as string)).toBe('claude');
-  });
-});
-
-describe('isHeadroomSupportedAgent', () => {
-  it('returns true for Headroom-wrappable agents', () => {
-    expect(isHeadroomSupportedAgent('claude_code')).toBe(true);
-    expect(isHeadroomSupportedAgent('codex')).toBe(true);
-    expect(isHeadroomSupportedAgent('copilot')).toBe(true);
-  });
-
-  it('returns false for agents Headroom cannot wrap (must run native, NOT mislaunch as claude)', () => {
-    // Regression: gemini/cursor mapped to claude via the kind default → mislaunched.
-    // cursor: `headroom wrap cursor` is manual/print-only (Cursor IDE settings),
-    // not a launcher for the headless cursor-agent CLI → run native (over ACP).
-    expect(isHeadroomSupportedAgent('cursor')).toBe(false);
-    expect(isHeadroomSupportedAgent('gemini')).toBe(false);
-    expect(isHeadroomSupportedAgent('aider')).toBe(false);
-    expect(isHeadroomSupportedAgent('coderabbit')).toBe(false);
-    expect(isHeadroomSupportedAgent('')).toBe(false);
-    expect(isHeadroomSupportedAgent(undefined as unknown as string)).toBe(false);
-  });
-});
-
-describe('HostAgentSupervisor — Headroom env injection', () => {
-  function makeHeadroomSupervisor(
-    setupHeadroomResult: boolean,
-    overrides: {
-      isHeadroomInstalled?: () => boolean;
-      getFreeDisk?: (dir: string) => Promise<number | null>;
-    } = {},
-  ) {
-    const setupHeadroom = vi
-      .fn<(a: string) => Promise<boolean>>()
-      .mockResolvedValue(setupHeadroomResult);
-    const resolveAgentAuth = vi
-      .fn<(i: SealedHostIdentity, s: string) => Promise<AgentAuth>>()
-      .mockResolvedValue({ kind: 'oauth_token', value: '{"claudeAiOauth":{}}' });
-    const calls: Array<{ env: Record<string, string>; cwd: string }> = [];
-    const spawnChild: ChildSpawner = (env, cwd) => {
-      calls.push({ env, cwd });
-      return fakeChildWithStreams();
-    };
-    const sup = new HostAgentSupervisor(IDENTITY, {
-      spawnChild,
-      resolveAgentAuth,
-      setupHeadroom,
-      ...overrides,
-    });
-    return { sup, setupHeadroom, calls };
-  }
-
-  /** 1 GB — below the 2 GB install gate. */
-  const LOW_DISK_BYTES = 1 * 1024 * 1024 * 1024;
-
-  it('bypasses the install disk gate when Headroom is already installed (low disk still reports)', async () => {
-    const cwdTarget = fs.mkdtempSync(path.join(os.tmpdir(), 'codeam-hr-'));
-    // Disk is BELOW the gate, but Headroom is already installed → setup should
-    // still run (idempotent) and the child should carry the HEADROOM_* env so
-    // savings keep being reported. This is the regression: a 2.0 GB box that was
-    // already compressing got reporting silently disabled.
-    const { sup, setupHeadroom, calls } = makeHeadroomSupervisor(true, {
-      isHeadroomInstalled: () => true,
-      getFreeDisk: async () => LOW_DISK_BYTES,
-    });
-
-    vi.stubGlobal(
-      'fetch',
-      vi
-        .fn()
-        .mockResolvedValue({
-          ok: true,
-          status: 200,
-          json: async () => ({ success: true, data: {} }),
-        }),
-    );
-
-    await sup.handleCommand(
-      deployCmd({
-        repoOrPath: cwdTarget,
-        headroomEnabled: true,
-        headroomAgent: 'claude',
-        headroomSavingsIngestUrl: 'https://ingest.test/savings',
-      }),
-    );
-
-    expect(setupHeadroom).toHaveBeenCalledWith('claude');
-    expect(calls).toHaveLength(1);
-    expect(calls[0].env.HEADROOM_ENABLED).toBe('1');
-    expect(calls[0].env.HEADROOM_SAVINGS_INGEST_URL).toBe('https://ingest.test/savings');
-
-    fs.rmSync(cwdTarget, { recursive: true, force: true });
-  });
-
-  it('honors the disk gate (skips setup) when Headroom is NOT already installed and disk is low', async () => {
-    const cwdTarget = fs.mkdtempSync(path.join(os.tmpdir(), 'codeam-hr-'));
-    const { sup, setupHeadroom, calls } = makeHeadroomSupervisor(true, {
-      isHeadroomInstalled: () => false,
-      getFreeDisk: async () => LOW_DISK_BYTES,
-    });
-
-    vi.stubGlobal(
-      'fetch',
-      vi
-        .fn()
-        .mockResolvedValue({
-          ok: true,
-          status: 200,
-          json: async () => ({ success: true, data: {} }),
-        }),
-    );
-
-    await sup.handleCommand(
-      deployCmd({
-        repoOrPath: cwdTarget,
-        headroomEnabled: true,
-        headroomAgent: 'claude',
-        headroomSavingsIngestUrl: 'https://ingest.test/savings',
-      }),
-    );
-
-    // Install skipped → setupHeadroom never called, no HEADROOM_* env injected.
-    expect(setupHeadroom).not.toHaveBeenCalled();
-    expect(calls).toHaveLength(1);
-    expect(calls[0].env.HEADROOM_ENABLED).toBeUndefined();
-
-    fs.rmSync(cwdTarget, { recursive: true, force: true });
-  });
-
-  it('injects HEADROOM_* env vars into the child when headroomEnabled=true and setup succeeds', async () => {
-    const cwdTarget = fs.mkdtempSync(path.join(os.tmpdir(), 'codeam-hr-'));
-    const { sup, setupHeadroom, calls } = makeHeadroomSupervisor(true);
-
-    // Stub fetch for the deploy-progress best-effort POSTs.
-    vi.stubGlobal(
-      'fetch',
-      vi
-        .fn()
-        .mockResolvedValue({
-          ok: true,
-          status: 200,
-          json: async () => ({ success: true, data: {} }),
-        }),
-    );
-
-    await sup.handleCommand(
-      deployCmd({
-        repoOrPath: cwdTarget,
-        headroomEnabled: true,
-        headroomAgent: 'claude',
-        headroomSavingsIngestUrl: 'https://ingest.test/savings',
-      }),
-    );
-
-    // setupHeadroom called with the right agent.
-    expect(setupHeadroom).toHaveBeenCalledWith('claude');
-
-    // Child env carries all 3 headroom vars.
-    expect(calls).toHaveLength(1);
-    expect(calls[0].env.HEADROOM_ENABLED).toBe('1');
-    expect(calls[0].env.HEADROOM_AGENT).toBe('claude');
-    expect(calls[0].env.HEADROOM_SAVINGS_INGEST_URL).toBe('https://ingest.test/savings');
-
-    // Standard deploy env vars still present (never-break check).
-    expect(calls[0].env.CODEAM_AUTO_TOKEN).toBe('auto-xyz');
-
-    fs.rmSync(cwdTarget, { recursive: true, force: true });
-  });
-
-  it('maps a raw LinkedAgentId (claude_code) to the headroom kind (claude) in HEADROOM_AGENT', async () => {
-    const cwdTarget = fs.mkdtempSync(path.join(os.tmpdir(), 'codeam-hr-'));
-    const { sup, setupHeadroom, calls } = makeHeadroomSupervisor(true);
-
-    vi.stubGlobal(
-      'fetch',
-      vi
-        .fn()
-        .mockResolvedValue({
-          ok: true,
-          status: 200,
-          json: async () => ({ success: true, data: {} }),
-        }),
-    );
-
-    await sup.handleCommand(
-      deployCmd({
-        repoOrPath: cwdTarget,
-        headroomEnabled: true,
-        headroomAgent: 'claude_code', // the real self-hosted LinkedAgentId
-        headroomSavingsIngestUrl: 'https://ingest.test/savings',
-      }),
-    );
-
-    // setupHeadroom still receives the raw agent id (it maps internally for init).
-    expect(setupHeadroom).toHaveBeenCalledWith('claude_code');
-
-    // But the env injected into the child is the MAPPED kind, matching what
-    // `headroom init` registered + what codespaces report.
-    expect(calls).toHaveLength(1);
-    expect(calls[0].env.HEADROOM_ENABLED).toBe('1');
-    expect(calls[0].env.HEADROOM_AGENT).toBe('claude');
-
-    fs.rmSync(cwdTarget, { recursive: true, force: true });
-  });
-
-  it('does NOT inject HEADROOM_* env vars when headroomEnabled=true but setup fails', async () => {
-    const cwdTarget = fs.mkdtempSync(path.join(os.tmpdir(), 'codeam-hr-'));
-    const { sup, setupHeadroom, calls } = makeHeadroomSupervisor(false); // setup fails
-
-    vi.stubGlobal(
-      'fetch',
-      vi
-        .fn()
-        .mockResolvedValue({
-          ok: true,
-          status: 200,
-          json: async () => ({ success: true, data: {} }),
-        }),
-    );
-
-    await sup.handleCommand(
-      deployCmd({
-        repoOrPath: cwdTarget,
-        headroomEnabled: true,
-        headroomAgent: 'claude',
-        headroomSavingsIngestUrl: 'https://ingest.test/savings',
-      }),
-    );
-
-    // setupHeadroom was called.
-    expect(setupHeadroom).toHaveBeenCalledWith('claude');
-
-    // Child was still spawned (never-break).
-    expect(calls).toHaveLength(1);
-
-    // No HEADROOM_* vars — broken install must not leave a dangling ANTHROPIC_BASE_URL.
-    expect(calls[0].env.HEADROOM_ENABLED).toBeUndefined();
-    expect(calls[0].env.HEADROOM_AGENT).toBeUndefined();
-    expect(calls[0].env.HEADROOM_SAVINGS_INGEST_URL).toBeUndefined();
-
-    // Standard token still present.
-    expect(calls[0].env.CODEAM_AUTO_TOKEN).toBe('auto-xyz');
-
-    fs.rmSync(cwdTarget, { recursive: true, force: true });
-  });
-
-  it('does NOT call setupHeadroom and injects no HEADROOM_* vars when headroomEnabled=false', async () => {
-    const cwdTarget = fs.mkdtempSync(path.join(os.tmpdir(), 'codeam-hr-'));
-    const { sup, setupHeadroom, calls } = makeHeadroomSupervisor(true);
-
-    vi.stubGlobal(
-      'fetch',
-      vi
-        .fn()
-        .mockResolvedValue({
-          ok: true,
-          status: 200,
-          json: async () => ({ success: true, data: {} }),
-        }),
-    );
-
-    await sup.handleCommand(
-      deployCmd({
-        repoOrPath: cwdTarget,
-        headroomEnabled: false,
-      }),
-    );
-
-    // Feature is off — setup helper never invoked.
-    expect(setupHeadroom).not.toHaveBeenCalled();
-
-    // Child spawned normally (never-break).
-    expect(calls).toHaveLength(1);
-    expect(calls[0].env.HEADROOM_ENABLED).toBeUndefined();
-
-    fs.rmSync(cwdTarget, { recursive: true, force: true });
-  });
-
-  it('does NOT call setupHeadroom when headroom fields are absent (old backend payload)', async () => {
-    const cwdTarget = fs.mkdtempSync(path.join(os.tmpdir(), 'codeam-hr-'));
-    const { sup, setupHeadroom, calls } = makeHeadroomSupervisor(true);
-
-    vi.stubGlobal(
-      'fetch',
-      vi
-        .fn()
-        .mockResolvedValue({
-          ok: true,
-          status: 200,
-          json: async () => ({ success: true, data: {} }),
-        }),
-    );
-
-    // Plain old deploy — no headroom fields.
-    await sup.handleCommand(deployCmd({ repoOrPath: cwdTarget }));
-
-    expect(setupHeadroom).not.toHaveBeenCalled();
-    expect(calls).toHaveLength(1);
-    expect(calls[0].env.HEADROOM_ENABLED).toBeUndefined();
-
-    fs.rmSync(cwdTarget, { recursive: true, force: true });
-  });
-});
-
-// NOTE: a previous "real subprocess" test called setupHeadroomForSelfHosted()
-// with the default runner. Now that the install pulls the real CPU-PyTorch +
-// engine wheels, that test actually downloaded PyTorch on every CI run (slow,
-// network-flaky, 30s timeout). The never-throw / false-when-absent contract is
-// covered deterministically by the injectable-runner suite below, so the
-// real-subprocess test was removed rather than have CI download torch.
-
-// ─────────────────────────────────────────────────────────────────────────────
-// setupHeadroomForSelfHosted — injectable runner tests
-//
-// These tests use a mock HeadroomRunner so no real apt/pip/python3 runs.
-// They verify:
-//   • Never-throw contract holds regardless of runner results.
-//   • When pip is ABSENT (which fails for pip+pip3), the package-manager
-//     install is attempted BEFORE the pip install.
-//   • A PEP 668 "externally-managed-environment" error on the first pip
-//     attempt triggers a retry with --break-system-packages.
-// ─────────────────────────────────────────────────────────────────────────────
-
-describe('setupHeadroomForSelfHosted — injectable runner (no real subprocess)', () => {
-  /**
-   * Build a complete mock HeadroomRunner from:
-   *   `presentCmds` — set of command names that `which()` should return true for
-   *   `runResponses` — map of `"<cmd>"` → result for `run()` calls; default
-   *                    is `{ code: 0, stderr: '' }` for anything unmatched.
-   *
-   * `run` dispatches by `cmd`; for `python3` the first unmatched-by-args call
-   * gets the plain 'python3' response; callers that need different per-args
-   * behaviour should build a custom runner directly.
-   */
-  function makeRunner(
-    presentCmds: string[],
-    runResponses: Record<string, { code: number | null; stderr: string; stdout?: string }> = {},
-  ): HeadroomRunner & { calls: Array<{ cmd: string; args: string[] }> } {
-    const present = new Set(presentCmds);
-    const calls: Array<{ cmd: string; args: string[] }> = [];
-    return {
-      calls,
-      which(cmd: string): boolean {
-        return present.has(cmd);
-      },
-      run(
-        cmd: string,
-        args: string[],
-      ): Promise<{ code: number | null; stderr: string; stdout?: string }> {
-        calls.push({ cmd, args });
-        // Version probe: ONLY bare `python3` reports a ≥3.10 version, so the
-        // resolver settles on `python3` (the interpreter these setup tests model
-        // their pip behavior on) rather than a suffixed candidate. A
-        // `runResponses[cmd]` carrying a `stdout` overrides this (lets a test pin
-        // a specific version), otherwise default 3.11.
-        if (args.length === 2 && args[0] === '-c' && args[1]?.includes('sys.version_info')) {
-          if (runResponses[cmd]?.stdout !== undefined) {
-            return Promise.resolve(runResponses[cmd]);
-          }
-          if (cmd === 'python3') {
-            return Promise.resolve({ code: 0, stderr: '', stdout: '3.11' });
-          }
-          return Promise.resolve({ code: 1, stderr: 'not found', stdout: '' });
-        }
-        // pip-presence probe (`-m pip --version`): pip is available on python3.
-        // PEP 668 affects `pip install`, not `--version`, so this stays code 0.
-        if (args[0] === '-m' && args[1] === 'pip' && args[2] === '--version') {
-          return Promise.resolve({
-            code: cmd === 'python3' ? 0 : 1,
-            stderr: '',
-            stdout: 'pip 24.0',
-          });
-        }
-        return Promise.resolve(runResponses[cmd] ?? { code: 0, stderr: '' });
-      },
-    };
-  }
-
-  it('never throws — returns boolean even when runner always fails', async () => {
-    // pip present (which returns true for pip), but python3 -m pip fails.
-    const runner = makeRunner(['pip'], {
-      python3: { code: 1, stderr: 'some random error, not pep668' },
-    });
-
-    const result = await setupHeadroomForSelfHosted('claude', runner);
-    expect(typeof result).toBe('boolean');
-    expect(result).toBe(false); // install failed → false (never throws)
-  });
-
-  it('when pip is absent, calls the package-manager (apt-get) before python3 -m pip', async () => {
-    // Simulate: pip absent, pip3 absent, apt-get present, headroom absent.
-    // apt-get update+install succeed; python3 -m pip succeeds.
-    // headroom not in presentCmds → init step skips → returns false.
-    // We assert ORDER: pm install before pip install.
-    //
-    // When not running as root (the common test environment), the code prefixes
-    // the pm command with `sudo`. The runner must therefore also accept `sudo`.
-    const isRoot = process.getuid?.() === 0;
-    const runner = makeRunner(
-      ['apt-get'], // pip and pip3 are absent; headroom absent
-      {
-        // Root: command is 'apt-get'; non-root: command is 'sudo'.
-        'apt-get': { code: 0, stderr: '' },
-        sudo: { code: 0, stderr: '' },
-        python3: { code: 0, stderr: '' },
-      },
-    );
-
-    await setupHeadroomForSelfHosted('claude', runner);
-
-    // When running as root the cmd is 'apt-get'; as non-root it is 'sudo'
-    // with 'apt-get' as the first arg (e.g. ['apt-get', 'update']).
-    const isAptUpdateCall = (c: { cmd: string; args: string[] }): boolean =>
-      isRoot
-        ? c.cmd === 'apt-get' && c.args.includes('update')
-        : c.cmd === 'sudo' && c.args.includes('apt-get') && c.args.includes('update');
-
-    const isAptInstallCall = (c: { cmd: string; args: string[] }): boolean =>
-      isRoot
-        ? c.cmd === 'apt-get' && c.args.includes('install')
-        : c.cmd === 'sudo' && c.args.includes('apt-get') && c.args.includes('install');
-
-    const aptUpdateIdx = runner.calls.findIndex(isAptUpdateCall);
-    // The pip install uses the resolved ≥3.10 interpreter (may be python3.13,
-    // python3.12, …, or python3 itself on modern Linux). Match any python3* cmd.
-    const pipIdx = runner.calls.findIndex((c) => /^python3/.test(c.cmd));
-
-    expect(aptUpdateIdx).toBeGreaterThanOrEqual(0);
-    expect(pipIdx).toBeGreaterThanOrEqual(0);
-    expect(aptUpdateIdx).toBeLessThan(pipIdx);
-
-    // The apt-get install call must include python3 and python3-pip.
-    const installCall = runner.calls.find(isAptInstallCall);
-    expect(installCall).toBeDefined();
-    expect(installCall!.args).toContain('python3');
-    expect(installCall!.args).toContain('python3-pip');
-  });
-
-  it('retries python3 -m pip with --break-system-packages on PEP 668 error', async () => {
-    // pip IS on PATH → ensurePip short-circuits.
-    // First python3 -m pip install fails with PEP 668; retry with
-    // --break-system-packages succeeds.
-    // headroom is absent → init skips → overall false.
-    const calls: Array<{ cmd: string; args: string[] }> = [];
-    const runner: HeadroomRunner = {
-      which(cmd: string): boolean {
-        return cmd === 'pip'; // pip found; headroom absent
-      },
-      run(
-        cmd: string,
-        args: string[],
-      ): Promise<{ code: number | null; stderr: string; stdout?: string }> {
-        calls.push({ cmd, args });
-        // Version probe (resolveHeadroomPython): any python binary probed via
-        // `-c "import sys; print(...)"` → report 3.11 so the resolver succeeds.
-        if (args.length === 2 && args[0] === '-c' && args[1]?.includes('sys.version_info')) {
-          return Promise.resolve({ code: 0, stderr: '', stdout: '3.11' });
-        }
-        // pip-presence probe (resolveHeadroomPython) — pip IS available.
-        if (args[0] === '-m' && args[1] === 'pip' && args[2] === '--version') {
-          return Promise.resolve({ code: 0, stderr: '', stdout: 'pip 24.0' });
-        }
-        if (args[0] === '-m') {
-          if (args.includes('--break-system-packages')) {
-            return Promise.resolve({ code: 0, stderr: '' }); // retry succeeds
-          }
-          // First attempt fails with PEP 668.
-          return Promise.resolve({
-            code: 1,
-            stderr: 'error: externally-managed-environment\ninstall in a venv',
-          });
-        }
-        return Promise.resolve({ code: 0, stderr: '' });
-      },
-    };
-
-    const result = await setupHeadroomForSelfHosted('claude', runner);
-
-    // All pip-related calls (install + model download) use the resolved interpreter.
-    // Filter by calls that are pip installs or model predownloads (not version probes).
-    const pipCalls = calls.filter(
-      (c) => c.args[0] === '-m' || (c.args[0] === '-c' && c.args[1]?.includes('snapshot_download')),
-    );
-
-    // PEP 668 retry path exercised: at least one call carries the override.
-    expect(pipCalls.some((c) => c.args.includes('--break-system-packages'))).toBe(true);
-
-    // The Headroom ENGINE package is installed with the ONNX `[proxy,code]`
-    // extras — this is the fix: no bare `headroom-ai`, and NO torch/`[ml]`.
-    const headroomCall = pipCalls.find((c) => c.args.some((a) => a.startsWith('headroom-ai')));
-    expect(headroomCall).toBeDefined();
-    expect(headroomCall!.args).toContain('headroom-ai[proxy,code]');
-
-    // Kompress runs on ONNX, not PyTorch — torch must NEVER be installed
-    // (it's heavy + fragile + can hang the proxy). No call mentions torch.
-    expect(
-      pipCalls.some((c) =>
-        c.args.some(
-          (a) => a === 'torch' || a.includes('download.pytorch.org') || a === '[code,ml]',
-        ),
-      ),
-    ).toBe(false);
-
-    // The Kompress model is pre-downloaded (both HF repos) so the proxy's
-    // eager-preload hits a warm cache and the first prompt isn't stalled.
-    const predownloadCall = pipCalls.find(
-      (c) => c.args[0] === '-c' && c.args[1]?.includes('snapshot_download'),
-    );
-    expect(predownloadCall).toBeDefined();
-    expect(predownloadCall!.args[1]).toContain('chopratejas/kompress-v2-base');
-    expect(predownloadCall!.args[1]).toContain('answerdotai/ModernBERT-base');
-
-    // Every pip INSTALL call uses `<py> -m pip install --quiet ...`. (The
-    // `-c "...snapshot_download..."` pre-download call is not a pip install.)
-    const installCalls = pipCalls.filter((c) => c.args[0] === '-m' && c.args[2] === 'install');
-    for (const c of installCalls) {
-      expect(c.args.slice(0, 4)).toEqual(['-m', 'pip', 'install', '--quiet']);
-    }
-
-    // Install ok, but headroom not on PATH → init skips → false.
-    expect(result).toBe(false);
-  });
-
-  it('returns false (never throws) when PEP 668 retry also fails', async () => {
-    // Both pip install attempts fail (first: PEP 668; second: still PEP 668).
-    const calls: Array<{ cmd: string; args: string[] }> = [];
-    const runner: HeadroomRunner = {
-      which(cmd: string): boolean {
-        return cmd === 'pip';
-      },
-      run(
-        cmd: string,
-        args: string[],
-      ): Promise<{ code: number | null; stderr: string; stdout?: string }> {
-        calls.push({ cmd, args });
-        // Version probe → succeed with 3.11 so the resolver passes.
-        if (args.length === 2 && args[0] === '-c' && args[1]?.includes('sys.version_info')) {
-          return Promise.resolve({ code: 0, stderr: '', stdout: '3.11' });
-        }
-        // pip-presence probe (resolveHeadroomPython) — pip IS available.
-        if (args[0] === '-m' && args[1] === 'pip' && args[2] === '--version') {
-          return Promise.resolve({ code: 0, stderr: '', stdout: 'pip 24.0' });
-        }
-        // All pip install attempts fail with PEP 668.
-        return Promise.resolve({
-          code: 1,
-          stderr: 'error: externally-managed-environment',
-        });
-      },
-    };
-
-    const result = await setupHeadroomForSelfHosted('claude', runner);
-
-    expect(result).toBe(false); // every install attempt failed → false (never throws)
-    // The PEP 668 override retry was attempted before giving up.
-    const pipCalls = calls.filter((c) => c.args[0] === '-m' && c.args[1] === 'pip');
-    expect(pipCalls.some((c) => c.args.includes('--break-system-packages'))).toBe(true);
-  });
-
-  it('getFreeDiskBytes returns a positive number for a real dir, null for a bogus path', async () => {
-    const real = await getFreeDiskBytes(os.tmpdir());
-    expect(typeof real).toBe('number');
-    expect(real as number).toBeGreaterThan(0);
-    // statfs on a nonexistent path errors → null (caller treats as "unknown").
-    expect(await getFreeDiskBytes('/no/such/path/xyzzy-12345')).toBeNull();
-  });
-
-  it('returns false (never throws) when no package manager is found and pip is absent', async () => {
-    // pip absent, pip3 absent, no known package manager — which() always false.
-    let runCalled = false;
-    const runner: HeadroomRunner = {
-      which(): boolean {
-        return false; // nothing is on PATH
-      },
-      run(): Promise<{ code: number | null; stderr: string }> {
-        runCalled = true;
-        return Promise.resolve({ code: 0, stderr: '' });
-      },
-    };
-
-    const result = await setupHeadroomForSelfHosted('claude', runner);
-
-    expect(result).toBe(false); // no PM detected → bail before any run() call
-    // runner.run must NOT have been called (ensurePip bailed with no PM found).
-    expect(runCalled).toBe(false);
-  });
-
-  it('bare-box provision installs ca-certificates and curl when pip is absent (apt-get)', async () => {
-    // Bare box: pip + pip3 absent, only apt-get present, headroom absent.
-    // The install must include the TLS + fetch prerequisites so the PyPI
-    // handshake during the later pip install can succeed.
-    const isRoot = process.getuid?.() === 0;
-    const runner = makeRunner(['apt-get'], {
-      'apt-get': { code: 0, stderr: '' },
-      sudo: { code: 0, stderr: '' },
-      python3: { code: 0, stderr: '' },
-    });
-
-    await setupHeadroomForSelfHosted('claude', runner);
-
-    const isInstallCall = (c: { cmd: string; args: string[] }): boolean =>
-      isRoot
-        ? c.cmd === 'apt-get' && c.args.includes('install')
-        : c.cmd === 'sudo' && c.args.includes('apt-get') && c.args.includes('install');
-
-    const installCall = runner.calls.find(isInstallCall);
-    expect(installCall).toBeDefined();
-    expect(installCall!.args).toContain('python3');
-    expect(installCall!.args).toContain('python3-pip');
-    expect(installCall!.args).toContain('ca-certificates');
-    expect(installCall!.args).toContain('curl');
-  });
-
-  it('bare-box provision installs ca-certificates and curl on pacman and zypper', async () => {
-    const isRoot = process.getuid?.() === 0;
-
-    for (const pm of ['pacman', 'zypper'] as const) {
-      const runner = makeRunner([pm], {
-        [pm]: { code: 0, stderr: '' },
-        sudo: { code: 0, stderr: '' },
-        python3: { code: 0, stderr: '' },
-      });
-
-      await setupHeadroomForSelfHosted('claude', runner);
-
-      // Find the package-manager install call (root: cmd is the pm; non-root: sudo <pm> …).
-      const installCall = runner.calls.find((c) =>
-        isRoot ? c.cmd === pm : c.cmd === 'sudo' && c.args[0] === pm,
-      );
-      expect(installCall, `expected a ${pm} install call`).toBeDefined();
-      const argv = isRoot ? [installCall!.cmd, ...installCall!.args] : installCall!.args;
-      expect(argv).toContain('ca-certificates');
-      expect(argv).toContain('curl');
-      // The Python interpreter package name differs per distro.
-      expect(argv.some((a) => a === 'python3' || a === 'python')).toBe(true);
-    }
-  });
-
-  it('fast-path: when pip is present, NO package-manager install runs', async () => {
-    // pip on PATH → ensurePip short-circuits. The runner must never see
-    // apt-get/apk/dnf/yum/pacman/zypper/sudo. This keeps healthy boxes from
-    // eating an apt-update on every deploy. headroom absent → init skips →
-    // overall false, but that's fine.
-    const runner = makeRunner(['pip', 'apt-get'], {
-      python3: { code: 0, stderr: '' },
-    });
-
-    await setupHeadroomForSelfHosted('claude', runner);
-
-    const pmCmds = new Set(['apt-get', 'apk', 'dnf', 'yum', 'pacman', 'zypper', 'sudo']);
-    const pmCalls = runner.calls.filter(
-      (c) => pmCmds.has(c.cmd) || c.args.some((a) => pmCmds.has(a)),
-    );
-    expect(pmCalls).toHaveLength(0);
-    // All non-probe run() calls must be python (pip install / model download).
-    // The resolver adds version-probe calls (python3.13, python3.12, … python3) —
-    // filter those out when asserting that only python commands ran.
-    const nonProbeCalls = runner.calls.filter(
-      (c) => !(c.args.length === 2 && c.args[0] === '-c' && c.args[1]?.includes('sys.version_info')),
-    );
-    expect(nonProbeCalls.every((c) => /^python3/.test(c.cmd))).toBe(true);
-  });
-});
-
-// ─────────────────────────────────────────────────────────────────────────────
-// resolveHeadroomPython — picks the newest Python ≥3.10, skips 3.9
-// ─────────────────────────────────────────────────────────────────────────────
-
-describe('resolveHeadroomPython', () => {
+describe('resolveModernPython', () => {
   /**
    * Build a fake runner whose `run` dispatches based on the `cmd` argument.
    * `versionMap` maps a candidate binary (e.g. 'python3.13', 'python3') to the
@@ -2976,12 +2160,12 @@ describe('resolveHeadroomPython', () => {
    */
   function makePyRunner(
     versionMap: Record<string, string>,
-  ): HeadroomRunner & { runCalls: string[] } {
+  ): OsRunner & { runCalls: string[] } {
     const runCalls: string[] = [];
     return {
       runCalls,
       which(): boolean {
-        return false; // which() is not used by resolveHeadroomPython
+        return false; // which() is not used by resolveModernPython
       },
       run(
         cmd: string,
@@ -3018,14 +2202,14 @@ describe('resolveHeadroomPython', () => {
         return Promise.resolve({ code: 1, stderr: '', stdout: '' });
       },
     };
-    const result = await resolveHeadroomPython(runner2);
+    const result = await resolveModernPython(runner2);
     expect(result).toBe('python3.13'); // suffix wins over bare python3
     // Bare python3 must NOT have been returned despite being reachable.
     expect(result).not.toBe('python3');
   });
 
   it('returns null when only bare python3=3.9 and no suffixed interpreter exists', async () => {
-    const runner: HeadroomRunner = {
+    const runner: OsRunner = {
       which(): boolean {
         return false;
       },
@@ -3037,12 +2221,12 @@ describe('resolveHeadroomPython', () => {
         return Promise.resolve({ code: 1, stderr: '', stdout: '' });
       },
     };
-    const result = await resolveHeadroomPython(runner);
+    const result = await resolveModernPython(runner);
     expect(result).toBeNull();
   });
 
   it('returns python3 when bare python3=3.11 and no suffixed interpreter exists', async () => {
-    const runner: HeadroomRunner = {
+    const runner: OsRunner = {
       which(): boolean {
         return false;
       },
@@ -3054,12 +2238,12 @@ describe('resolveHeadroomPython', () => {
         return Promise.resolve({ code: 1, stderr: '', stdout: '' });
       },
     };
-    const result = await resolveHeadroomPython(runner);
+    const result = await resolveModernPython(runner);
     expect(result).toBe('python3');
   });
 
   it('prefers python3.13 over python3.11 when both qualify (newest-first ordering)', async () => {
-    const runner: HeadroomRunner = {
+    const runner: OsRunner = {
       which(): boolean {
         return false;
       },
@@ -3073,7 +2257,7 @@ describe('resolveHeadroomPython', () => {
         return Promise.resolve({ code: 1, stderr: '', stdout: '' });
       },
     };
-    const result = await resolveHeadroomPython(runner);
+    const result = await resolveModernPython(runner);
     expect(result).toBe('python3.13');
   });
 
@@ -3081,7 +2265,7 @@ describe('resolveHeadroomPython', () => {
     // Regression: a box can have a pip-less newest python (e.g. a distro's
     // `python3.13-minimal` pulled as a transitive dep) alongside a complete
     // `python3.12` with pip. The resolver must pick the pip-capable one.
-    const runner: HeadroomRunner = {
+    const runner: OsRunner = {
       which(): boolean {
         return false;
       },
@@ -3107,7 +2291,7 @@ describe('resolveHeadroomPython', () => {
         return Promise.resolve({ code: 1, stderr: '', stdout: '' });
       },
     };
-    const result = await resolveHeadroomPython(runner);
+    const result = await resolveModernPython(runner);
     expect(result).toBe('python3.12'); // skipped the pip-less 3.13
   });
 });
@@ -3138,7 +2322,7 @@ describe('ensureModernPython — auto-install when no Python ≥3.10', () => {
     whichSet: string[],
     versions: Record<string, string>,
     onInstall?: (cmd: string, args: string[]) => void,
-  ): HeadroomRunner & { calls: Array<{ cmd: string; args: string[] }> } {
+  ): OsRunner & { calls: Array<{ cmd: string; args: string[] }> } {
     const present = new Set(whichSet);
     const calls: Array<{ cmd: string; args: string[] }> = [];
     return {
@@ -3251,82 +2435,9 @@ describe('ensureModernPython — auto-install when no Python ≥3.10', () => {
 // setupHeadroomForSelfHosted — uses resolved python, skips on no ≥3.10 python
 // ─────────────────────────────────────────────────────────────────────────────
 
-describe('setupHeadroomForSelfHosted — python resolver integration', () => {
-  /**
-   * Build a runner where:
-   *   - `whichSet`: commands that which() returns true for
-   *   - `pythonVersions`: cmd → version string for probe calls (if absent → code 1)
-   *   - all other run() calls (pip install, model download, headroom init) succeed
-   */
-  function makeFullRunner(
-    whichSet: string[],
-    pythonVersions: Record<string, string>,
-  ): HeadroomRunner & { calls: Array<{ cmd: string; args: string[] }> } {
-    const present = new Set(whichSet);
-    const calls: Array<{ cmd: string; args: string[] }> = [];
-    return {
-      calls,
-      which(cmd: string): boolean {
-        return present.has(cmd);
-      },
-      run(
-        cmd: string,
-        args: string[],
-      ): Promise<{ code: number | null; stderr: string; stdout?: string }> {
-        calls.push({ cmd, args });
-        // Version probe: single -c arg containing sys.version_info
-        if (args.length === 2 && args[0] === '-c' && args[1]?.includes('sys.version_info')) {
-          if (cmd in pythonVersions) {
-            return Promise.resolve({ code: 0, stderr: '', stdout: pythonVersions[cmd] });
-          }
-          return Promise.resolve({ code: 1, stderr: '', stdout: '' });
-        }
-        return Promise.resolve({ code: 0, stderr: '', stdout: '' });
-      },
-    };
-  }
-
-  it('uses python3.13 (not python3) for pip install when python3.13=3.13 and python3=3.9', async () => {
-    const runner = makeFullRunner(
-      ['pip', 'headroom'],
-      { python3: '3.9', 'python3.13': '3.13' },
-    );
-
-    const result = await setupHeadroomForSelfHosted('claude', runner);
-    // Setup should succeed (headroom on PATH, all commands return code 0).
-    expect(result).toBe(true);
-
-    // All pip install calls and model predownload must use python3.13, not python3.
-    const pipAndModelCalls = runner.calls.filter(
-      (c) =>
-        (c.args[0] === '-m' && c.args[1] === 'pip') ||
-        (c.args[0] === '-c' && c.args[1]?.includes('snapshot_download')),
-    );
-    expect(pipAndModelCalls.length).toBeGreaterThan(0);
-    for (const c of pipAndModelCalls) {
-      expect(c.cmd).toBe('python3.13');
-      expect(c.cmd).not.toBe('python3');
-    }
-  });
-
-  it('returns false and skips install when no Python ≥3.10 is available', async () => {
-    // pip is present (ensurePip passes), but every python binary returns 3.9.
-    const runner = makeFullRunner(['pip', 'headroom'], { python3: '3.9' });
-
-    const result = await setupHeadroomForSelfHosted('claude', runner);
-    expect(result).toBe(false);
-
-    // No pip install or model download should have been attempted.
-    const installCalls = runner.calls.filter(
-      (c) => c.args[0] === '-m' && c.args[1] === 'pip' && c.args[2] === 'install',
-    );
-    expect(installCalls).toHaveLength(0);
-  });
-});
-
 describe('detectPackageManager — coverage across distros', () => {
   /** Minimal runner that reports a fixed set of commands as present on PATH. */
-  function whichOnly(present: string[]): Pick<HeadroomRunner, 'which'> {
+  function whichOnly(present: string[]): Pick<OsRunner, 'which'> {
     const set = new Set(present);
     return { which: (cmd: string): boolean => set.has(cmd) };
   }
@@ -3643,338 +2754,6 @@ describe('HostAgentSupervisor — periodic self-update', () => {
 // a throwaway ~/.codeam.
 // ─────────────────────────────────────────────────────────────────────────────
 
-describe('readHeadroomChildEnv — persisted config → child env', () => {
-  it('returns the 3 HEADROOM_* env vars when the config is enabled + complete', () => {
-    persistHeadroomConfig({
-      enabled: true,
-      agent: 'claude',
-      ingestUrl: 'https://ingest.test/savings',
-    });
-
-    expect(readHeadroomChildEnv()).toEqual({
-      HEADROOM_ENABLED: '1',
-      HEADROOM_AGENT: 'claude',
-      HEADROOM_SAVINGS_INGEST_URL: 'https://ingest.test/savings',
-    });
-  });
-
-  it('returns {} when the config is disabled', () => {
-    persistHeadroomConfig({ enabled: false });
-    expect(readHeadroomChildEnv()).toEqual({});
-  });
-
-  it('returns {} when the config file is missing', () => {
-    // No file written → nothing to read.
-    expect(fs.existsSync(headroomConfigPath())).toBe(false);
-    expect(readHeadroomChildEnv()).toEqual({});
-  });
-
-  it('returns {} when enabled but agent/ingestUrl are absent (incomplete)', () => {
-    persistHeadroomConfig({ enabled: true }); // no agent / ingestUrl
-    expect(readHeadroomChildEnv()).toEqual({});
-  });
-
-  it('returns {} on a corrupt / non-JSON config file (never throws)', () => {
-    fs.mkdirSync(path.dirname(headroomConfigPath()), { recursive: true });
-    fs.writeFileSync(headroomConfigPath(), '{ this is not json');
-    expect(readHeadroomChildEnv()).toEqual({});
-  });
-
-  it('persists atomically + 0600 and round-trips through read', () => {
-    persistHeadroomConfig({
-      enabled: true,
-      agent: 'codex',
-      ingestUrl: 'https://ingest.test/x',
-    });
-    const file = headroomConfigPath();
-    expect(fs.existsSync(file)).toBe(true);
-    expect(isOwnerOnly(file)).toBe(true);
-    // No leftover temp file from the atomic write.
-    const leftovers = fs
-      .readdirSync(path.dirname(file))
-      .filter((n) => n.startsWith('headroom-config.json.tmp'));
-    expect(leftovers).toEqual([]);
-    expect(readHeadroomChildEnv().HEADROOM_AGENT).toBe('codex');
-  });
-
-  it('returns HEADROOM_BUDGET + HEADROOM_BUDGET_PERIOD when persisted config has budget', () => {
-    persistHeadroomConfig({
-      enabled: true,
-      agent: 'claude',
-      ingestUrl: 'https://ingest.test/savings',
-      budgetEnabled: true,
-      budgetUsd: 10,
-      budgetPeriod: 'daily',
-    });
-
-    expect(readHeadroomChildEnv()).toEqual({
-      HEADROOM_ENABLED: '1',
-      HEADROOM_AGENT: 'claude',
-      HEADROOM_SAVINGS_INGEST_URL: 'https://ingest.test/savings',
-      HEADROOM_BUDGET: '10',
-      HEADROOM_BUDGET_PERIOD: 'daily',
-    });
-  });
-
-  it('returns HEADROOM_BUDGET with default period "daily" when budgetPeriod is absent', () => {
-    persistHeadroomConfig({
-      enabled: true,
-      agent: 'codex',
-      ingestUrl: 'https://ingest.test/savings',
-      budgetEnabled: true,
-      budgetUsd: 5,
-    });
-
-    const env = readHeadroomChildEnv();
-    expect(env['HEADROOM_BUDGET']).toBe('5');
-    expect(env['HEADROOM_BUDGET_PERIOD']).toBe('daily');
-  });
-
-  it('omits HEADROOM_BUDGET when budgetEnabled is false in persisted config', () => {
-    persistHeadroomConfig({
-      enabled: true,
-      agent: 'claude',
-      ingestUrl: 'https://ingest.test/savings',
-      budgetEnabled: false,
-    });
-
-    const env = readHeadroomChildEnv();
-    expect(env['HEADROOM_BUDGET']).toBeUndefined();
-    expect(env['HEADROOM_BUDGET_PERIOD']).toBeUndefined();
-  });
-
-  it('omits HEADROOM_BUDGET when budgetEnabled is true but budgetUsd is absent', () => {
-    persistHeadroomConfig({
-      enabled: true,
-      agent: 'claude',
-      ingestUrl: 'https://ingest.test/savings',
-      budgetEnabled: true,
-      // budgetUsd deliberately omitted
-    });
-
-    const env = readHeadroomChildEnv();
-    expect(env['HEADROOM_BUDGET']).toBeUndefined();
-    expect(env['HEADROOM_BUDGET_PERIOD']).toBeUndefined();
-  });
-
-  it('omits HEADROOM_BUDGET when config has no budget fields (backward compat with old configs)', () => {
-    // Old config without budget fields — must NOT inject budget vars.
-    persistHeadroomConfig({
-      enabled: true,
-      agent: 'claude',
-      ingestUrl: 'https://ingest.test/savings',
-    });
-
-    const env = readHeadroomChildEnv();
-    expect(env['HEADROOM_BUDGET']).toBeUndefined();
-    expect(env['HEADROOM_BUDGET_PERIOD']).toBeUndefined();
-  });
-});
-
-describe('HostAgentSupervisor — deploy persists headroom config', () => {
-  function makeHeadroomSupervisor(setupHeadroomResult: boolean) {
-    const setupHeadroom = vi
-      .fn<(a: string) => Promise<boolean>>()
-      .mockResolvedValue(setupHeadroomResult);
-    const resolveAgentAuth = vi
-      .fn<(i: SealedHostIdentity, s: string) => Promise<AgentAuth>>()
-      .mockResolvedValue({ kind: 'oauth_token', value: '{"claudeAiOauth":{}}' });
-    const calls: Array<{ env: Record<string, string> }> = [];
-    const spawnChild: ChildSpawner = (env) => {
-      calls.push({ env });
-      return fakeChildWithStreams();
-    };
-    const sup = new HostAgentSupervisor(IDENTITY, { spawnChild, resolveAgentAuth, setupHeadroom });
-    return { sup, calls };
-  }
-
-  function readConfig(): Record<string, unknown> | null {
-    try {
-      return JSON.parse(fs.readFileSync(headroomConfigPath(), 'utf8')) as Record<string, unknown>;
-    } catch {
-      return null;
-    }
-  }
-
-  beforeEach(() => {
-    vi.stubGlobal(
-      'fetch',
-      vi
-        .fn()
-        .mockResolvedValue({
-          ok: true,
-          status: 200,
-          json: async () => ({ success: true, data: {} }),
-        }),
-    );
-  });
-
-  it('persists enabled config with the MAPPED agent + ingestUrl when setup succeeds', async () => {
-    const cwdTarget = fs.mkdtempSync(path.join(os.tmpdir(), 'codeam-hrp-'));
-    const { sup, calls } = makeHeadroomSupervisor(true);
-
-    await sup.handleCommand(
-      deployCmd({
-        repoOrPath: cwdTarget,
-        headroomEnabled: true,
-        headroomAgent: 'claude_code', // raw LinkedAgentId → mapped to `claude`
-        headroomSavingsIngestUrl: 'https://ingest.test/savings',
-      }),
-    );
-
-    // Persisted with the mapped kind, not the raw LinkedAgentId.
-    expect(readConfig()).toEqual({
-      enabled: true,
-      agent: 'claude',
-      ingestUrl: 'https://ingest.test/savings',
-    });
-
-    // And the spawned child got the env (read from the persisted file).
-    expect(calls[0].env.HEADROOM_ENABLED).toBe('1');
-    expect(calls[0].env.HEADROOM_AGENT).toBe('claude');
-    expect(calls[0].env.HEADROOM_SAVINGS_INGEST_URL).toBe('https://ingest.test/savings');
-
-    fs.rmSync(cwdTarget, { recursive: true, force: true });
-  });
-
-  it('persists disabled config when headroom setup fails (no dead-proxy on resume)', async () => {
-    const cwdTarget = fs.mkdtempSync(path.join(os.tmpdir(), 'codeam-hrp-'));
-    const { sup, calls } = makeHeadroomSupervisor(false); // setup fails
-
-    await sup.handleCommand(
-      deployCmd({
-        repoOrPath: cwdTarget,
-        headroomEnabled: true,
-        headroomAgent: 'claude',
-        headroomSavingsIngestUrl: 'https://ingest.test/savings',
-      }),
-    );
-
-    expect(readConfig()).toEqual({ enabled: false });
-    // Child still spawned, but with NO headroom env.
-    expect(calls[0].env.HEADROOM_ENABLED).toBeUndefined();
-
-    fs.rmSync(cwdTarget, { recursive: true, force: true });
-  });
-
-  it('persists disabled config when headroomEnabled is false (clears stale enabled)', async () => {
-    // Pre-seed an ENABLED config (as if a prior deploy turned it on).
-    persistHeadroomConfig({ enabled: true, agent: 'claude', ingestUrl: 'https://old/x' });
-
-    const cwdTarget = fs.mkdtempSync(path.join(os.tmpdir(), 'codeam-hrp-'));
-    const { sup, calls } = makeHeadroomSupervisor(true);
-
-    await sup.handleCommand(deployCmd({ repoOrPath: cwdTarget, headroomEnabled: false }));
-
-    // The explicit-off deploy cleared the stale enabled config.
-    expect(readConfig()).toEqual({ enabled: false });
-    expect(calls[0].env.HEADROOM_ENABLED).toBeUndefined();
-
-    fs.rmSync(cwdTarget, { recursive: true, force: true });
-  });
-});
-
-describe('HostAgentSupervisor — resume/restart spawn re-injects persisted headroom env', () => {
-  it('a spawn AFTER a prior deploy enabled headroom (no fresh headroom payload) gets HEADROOM_* env', async () => {
-    vi.stubGlobal(
-      'fetch',
-      vi
-        .fn()
-        .mockResolvedValue({
-          ok: true,
-          status: 200,
-          json: async () => ({ success: true, data: {} }),
-        }),
-    );
-
-    // Simulate the state a prior successful headroom deploy left behind: the
-    // persisted config on disk. This is exactly what survives a supervisor
-    // restart (systemd / self-update) — the in-memory deploy payload is gone.
-    persistHeadroomConfig({
-      enabled: true,
-      agent: 'claude',
-      ingestUrl: 'https://ingest.test/savings',
-    });
-
-    const calls: Array<{ env: Record<string, string> }> = [];
-    const spawnChild: ChildSpawner = (env) => {
-      calls.push({ env });
-      return fakeChildWithStreams();
-    };
-    const resolveAgentAuth = vi
-      .fn<(i: SealedHostIdentity, s: string) => Promise<AgentAuth>>()
-      .mockResolvedValue({ kind: 'oauth_token', value: '{"claudeAiOauth":{}}' });
-    // setupHeadroom must NOT be invoked on this spawn — the payload carries NO
-    // headroom fields (a resume/restart deploy), yet the env still flows from
-    // the persisted config.
-    const setupHeadroom = vi.fn<(a: string) => Promise<boolean>>().mockResolvedValue(true);
-    const sup = new HostAgentSupervisor(IDENTITY, { spawnChild, resolveAgentAuth, setupHeadroom });
-
-    const cwdTarget = fs.mkdtempSync(path.join(os.tmpdir(), 'codeam-hrr-'));
-    // A plain deploy with NO headroom fields (mirrors a resume that re-spawns
-    // the session child without the original headroom payload).
-    await sup.handleCommand(deployCmd({ repoOrPath: cwdTarget }));
-
-    // setupHeadroom was NOT called (no fresh headroom payload)…
-    expect(setupHeadroom).not.toHaveBeenCalled();
-    // …but the child STILL received the HEADROOM_* env from the persisted config.
-    expect(calls).toHaveLength(1);
-    expect(calls[0].env.HEADROOM_ENABLED).toBe('1');
-    expect(calls[0].env.HEADROOM_AGENT).toBe('claude');
-    expect(calls[0].env.HEADROOM_SAVINGS_INGEST_URL).toBe('https://ingest.test/savings');
-    // Standard token still present (never-break).
-    expect(calls[0].env.CODEAM_AUTO_TOKEN).toBe('auto-xyz');
-
-    fs.rmSync(cwdTarget, { recursive: true, force: true });
-  });
-});
-
-describe('maybeResumeLocalHeadroomReporter — on-demand local resume (additive)', () => {
-  const ctx = { sessionId: 'sess-1', pluginId: 'plug-1', pluginAuthToken: 'tok-1' };
-  let savedEnabled: string | undefined;
-
-  beforeEach(() => {
-    savedEnabled = process.env.HEADROOM_ENABLED;
-  });
-  afterEach(() => {
-    if (savedEnabled === undefined) delete process.env.HEADROOM_ENABLED;
-    else process.env.HEADROOM_ENABLED = savedEnabled;
-  });
-
-  it('returns null when HEADROOM_ENABLED=1 (codespace path owns it — never overlaps)', () => {
-    process.env.HEADROOM_ENABLED = '1';
-    persistHeadroomConfig({ enabled: true, agent: 'claude' });
-    expect(maybeResumeLocalHeadroomReporter(ctx)).toBeNull();
-  });
-
-  it('returns null when no config file exists', () => {
-    delete process.env.HEADROOM_ENABLED;
-    expect(maybeResumeLocalHeadroomReporter(ctx)).toBeNull();
-  });
-
-  it('returns null when the persisted config says enabled:false', () => {
-    delete process.env.HEADROOM_ENABLED;
-    persistHeadroomConfig({ enabled: false, agent: 'claude' });
-    expect(maybeResumeLocalHeadroomReporter(ctx)).toBeNull();
-  });
-
-  it('starts a reporter when config says enabled:true and it is not a codespace', () => {
-    delete process.env.HEADROOM_ENABLED;
-    persistHeadroomConfig({ enabled: true, agent: 'claude' });
-    const reporter = maybeResumeLocalHeadroomReporter(ctx);
-    expect(reporter).not.toBeNull();
-    reporter?.stop();
-  });
-});
-
-// ── Fleet control plane (CodeAgent Box rescue fleet) — Phase 2 ────────────
-//
-// Design of record: docs/superpowers/specs/2026-07-15-fleet-inhouse-selfhosted-rescue-design.md
-//
-// Unit-level: a mocked DockerRunner captures the exact argv the handlers
-// build so the isolation invariants + ops labels are pinned WITHOUT a real
-// Docker daemon. The real-Docker acceptance gate lives in the separate
-// `fleet-box.int.test.ts` (RUN_FLEET_INT=1).
 describe('HostAgentSupervisor — fleet control plane', () => {
   function makeDockerMock(
     result: { code?: number | null; stdout?: string; stderr?: string } = {},

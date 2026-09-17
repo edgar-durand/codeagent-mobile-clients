@@ -28,7 +28,6 @@ export function isLocalSession(env: NodeJS.ProcessEnv = process.env): boolean {
   return (
     env.CODESPACES !== 'true' &&
     env.CODEAM_AUTO_APPROVE !== '1' &&
-    env.HEADROOM_ENABLED !== '1' &&
     !env.CODEAM_AUTO_TOKEN &&
     !env.CODEAM_ENROLL_TOKEN
   );

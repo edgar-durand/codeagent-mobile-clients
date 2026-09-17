@@ -41,7 +41,7 @@ export type CredentialExpiryStatus = 'valid' | 'expired' | 'unknown';
  * house-agent session while the agent worked perfectly
  * (edgar@privacyhawk.com, 2026-08-24).
  *
- * ⚠️ Matches the PROXY PATH, not merely "the base URL was rewritten" — Headroom
+ * ⚠️ Matches the PROXY PATH, not merely "the base URL was rewritten" — un proxy local
  * rewrites it too, to `http://127.0.0.1:8787`, and that hop sits in front of
  * the user's OWN credential, which still deserves the check.
  */

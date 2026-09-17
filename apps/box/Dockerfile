@@ -19,14 +19,12 @@
 #
 # ── Pre-installed agents + tooling (deploy-speed optimization) ─────────────
 # EVERY supported agent CLI (claude-code, codex, cursor-agent, coderabbit,
-# gemini, kimi, aider), the GitHub + GitLab CLIs (gh, glab), and Beads + Dolt +
-# Headroom (with its Kompress ONNX model pre-warmed) are baked into the image so
-# a rescued user's FIRST deploy skips the per-session installs entirely (each of
-# those otherwise shells out to a curl|sh / pip / npm installer on first use;
-# Headroom's model download alone is ~840 MB). A box boots agent-ready. The
-# deploy provisioners are all skip-if-present (agents/beads/dolt via findInPath;
-# Headroom via the baked-image guard in headroom-bootstrap.ts), so the bake is
-# actually skipped at deploy time rather than re-run.
+# gemini, kimi, aider), the GitHub + GitLab CLIs (gh, glab), and Beads + Dolt
+# are baked into the image so a rescued user's FIRST deploy skips the
+# per-session installs entirely (each of those otherwise shells out to a
+# curl|sh / npm installer on first use). A box boots agent-ready. The deploy
+# provisioners are all skip-if-present (agents/beads/dolt via findInPath), so
+# the bake is actually skipped at deploy time rather than re-run.
 #
 # ⚠️ VOLUME-SHADOW RULE (load-bearing): at runtime the box mounts
 # `-v codeam-box-<userId>:/home/box`, which SHADOWS anything baked under
@@ -34,12 +32,11 @@
 # cache go to NON-home locations that survive the mount:
 #   • npm-global agents + codeam-cli → /usr/local/{lib,bin}
 #   • curl-installer agents (claude/cursor/kimi/coderabbit) → /opt/agents
-#   • dolt / aider / headroom / gh / glab → /usr/local/bin
-#   • Headroom's HF model cache → /opt/hf-cache (HF_HOME)
+#   • dolt / aider / gh / glab → /usr/local/bin
 #
 # ⚠️ SIZE RULE: NEVER `chown -R` a large tree in its own RUN — Docker's
 # copy-on-write duplicates every touched file into a new layer (a standalone
-# `chown -R /opt/hf-cache` once doubled the image by ~5 GB). The models +
+# `chown -R` sobre un arbol grande llego a doblar la imagen ~5 GB).
 # /opt/agents are read-only at runtime (box only needs read/execute → the
 # default root-owned 0755 suffices), so they are NEVER chowned. Only
 # /usr/local/{lib,bin} needs `box` ownership (the hourly codeam-cli self-update
@@ -55,7 +52,7 @@ FROM node:22-slim
 # git/ca-certificates: prepareWorkspace clones the rescued user's repo.
 # curl/unzip/xz-utils: the agent + dolt/glab installers are curl|sh recipes;
 #   coderabbit downloads a zip (unzip); dolt's tarball is xz.
-# python3/python3-pip/python3-venv: aider + headroom are pip packages, and the
+# python3/python3-pip/python3-venv: aider is a pip package, and the
 #   rescued project's own native-addon build (node-gyp) needs python3.
 # build-essential: C toolchain for node-gyp / native pip wheels.
 # ⚠️ procps (`ps`): LOAD-BEARING for Beads. node:slim ships NO `ps`, and both
@@ -118,7 +115,7 @@ RUN useradd --create-home --home-dir /home/box box
 #
 # Instalado en la imagen y no al vuelo porque bajarlo en el primer preview
 # metería su descarga en el camino crítico del usuario — el mismo motivo por el
-# que aquí ya viven el CLI, los agentes y el modelo de Headroom.
+# que aquí ya viven el CLI y los agentes.
 # npm never audits inside this image — not in this install, not in `mcp-warm`
 # below, not in any `npx` an integration server is launched with at runtime.
 # `npx` runs `npm audit` (POST /-/npm/v1/security/advisories/bulk) while it
@@ -194,28 +191,8 @@ RUN set -eux; \
     rm -rf /tmp/glab /tmp/glab.tgz; \
     gh --version; glab --version
 
-# ── Headroom (token-compression proxy) + pre-warmed ONNX model ─────────────
-# `[proxy,code]` = the self-hosted surface (HEADROOM_EXTRAS_BY_SURFACE.selfHosted),
-# which is exactly what a box's deploy uses. It pulls the ONNX backend, NOT torch
-# (multi-GB, cold-on-first-prompt). The Kompress model is pre-downloaded into
-# HF_HOME with the SAME allow_patterns the runtime uses (@codeam/shared's
-# HEADROOM_MODELS), so the layout is a byte-identical cache HIT at deploy time AND
-# the image skips the multi-GB torch .safetensors artifacts. /opt/hf-cache stays
-# root-owned (box only reads it → NO chown, avoiding a duplicate layer).
-ENV HF_HOME=/opt/hf-cache
-ENV HEADROOM_KOMPRESS_BACKEND=onnx_cpu
-RUN pip install --no-cache-dir --break-system-packages \
-        "headroom-ai[proxy,code]" fastapi uvicorn "httpx[http2]" websockets zstandard "huggingface-hub[cli]" \
-    && python3 - <<'PY'
-from huggingface_hub import snapshot_download
-# BYTE-IDENTICAL to the runtime pre-download (HEADROOM_MODELS + allow_patterns in
-# @codeam/shared's headroom manifest) → guaranteed cache HIT at deploy time.
-snapshot_download("chopratejas/kompress-v2-base", allow_patterns=["*.json", "onnx/*.onnx", "kompress-int8-wo.onnx"])
-snapshot_download("answerdotai/ModernBERT-base", allow_patterns=["*.json", "tokenizer*", "*.txt", "vocab*", "merges*"])
-PY
-
 # ── Integration MCP servers — launchers + packages, pre-fetched ────────────
-# Same rule as pglite/Headroom above, for the reason the agent makes expensive:
+# Same rule as pglite above, for the reason the agent makes expensive:
 # it starts EVERY advertised MCP server inside `session/new` and gives each one
 # a fixed budget (`MCP_TIMEOUT`; 30 s by default — see `MCP_STARTUP_TIMEOUT_MS`
 # in the CLI). Our servers run through the `codeam mcp-run` shim, whose cold
