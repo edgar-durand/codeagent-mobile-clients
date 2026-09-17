@@ -374,19 +374,40 @@ jobs:
         run: |
           npx --no-install @vscode/vsce package --no-dependencies --out "codeagent-mobile-${{ needs.setup.outputs.version }}.vsix"
 
+      # ⚠️ Los dos publicados toleran «ya existe», y eso es load-bearing para
+      # los REINTENTOS. Son dos registros independientes en un mismo job: el
+      # 2026-09-17 Open VSX devolvio un 503 suyo con el Marketplace ya
+      # publicado, y al reintentar el job murio en el PRIMER paso
+      # (`v2.75.5 already exists`) sin llegar nunca al segundo — la version se
+      # quedo fuera de Open VSX hasta el siguiente release. Un reintento tiene
+      # que poder avanzar por los pasos ya hechos.
       - name: Publish VS Code plugin to Marketplace
         working-directory: apps/vsc-plugin
         run: |
-          npx --no-install @vscode/vsce publish --no-dependencies --pat "$VSCE_PAT" \
-            --packagePath "codeagent-mobile-${{ needs.setup.outputs.version }}.vsix"
+          set +e
+          OUT=$(npx --no-install @vscode/vsce publish --no-dependencies --pat "$VSCE_PAT" \
+            --packagePath "codeagent-mobile-${{ needs.setup.outputs.version }}.vsix" 2>&1)
+          CODE=$?
+          echo "$OUT"
+          if [ $CODE -ne 0 ]; then
+            echo "$OUT" | grep -qi 'already exists' || exit $CODE
+            echo "→ ya publicado en el Marketplace; sigo."
+          fi
         env:
           VSCE_PAT: ${{ secrets.VSCE_PAT }}
 
       - name: Publish VS Code plugin to Open VSX
         working-directory: apps/vsc-plugin
         run: |
-          npx ovsx publish --no-dependencies --pat "$OVSX_TOKEN" \
-            "codeagent-mobile-${{ needs.setup.outputs.version }}.vsix"
+          set +e
+          OUT=$(npx ovsx publish --no-dependencies --pat "$OVSX_TOKEN" \
+            "codeagent-mobile-${{ needs.setup.outputs.version }}.vsix" 2>&1)
+          CODE=$?
+          echo "$OUT"
+          if [ $CODE -ne 0 ]; then
+            echo "$OUT" | grep -qi 'already exists' || exit $CODE
+            echo "→ ya publicado en Open VSX; sigo."
+          fi
         env:
           OVSX_TOKEN: ${{ secrets.OVSX_TOKEN }}
 
