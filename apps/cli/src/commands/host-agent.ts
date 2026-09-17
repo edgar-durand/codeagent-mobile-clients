@@ -123,8 +123,6 @@ import { defaultDisableService } from './host/teardown';
 // and the test suites) keep their import paths unchanged.
 export {
   detectPackageManager,
-  ensureModernPython,
-  resolveModernPython,
   type OsRunner,
   type PackageManager,
 } from './host/os-packages';
