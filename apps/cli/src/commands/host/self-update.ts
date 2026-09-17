@@ -242,8 +242,7 @@ export async function runSelfUpdateWith(deps: SelfUpdateDeps): Promise<SelfUpdat
     // unprivileged user inside a TTY-less systemd unit can never answer a
     // password prompt, so an un-preflighted `sudo npm install` can only burn
     // its full 180 s timeout and log a failure whose cause we already knew.
-    // Same lesson, same fix as `ensurePythonInstaller` en el
-    // provisioner.
+    // (Same lesson, same fix as the bare-box package provisioning.)
     if (install.code !== 0 && !deps.isRoot() && /EACCES/i.test(install.stderr)) {
       const canSudo = await deps.run('sudo', ['-n', 'true'], SUDO_PREFLIGHT_TIMEOUT_MS);
       if (canSudo.code === 0) {
