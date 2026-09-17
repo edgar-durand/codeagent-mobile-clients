@@ -164,7 +164,7 @@ If you find yourself reaching for `setTimeout` to "check again later", you're po
 - `protocol/constants.ts` — wire constants both clients embed (`PROTOCOL_VERSION`, `SSE_SOCKET_TIMEOUT_MS`, `OBSERVER_BRIDGE_PORT`, `HEARTBEAT_INTERVAL_MS_DEFAULT`).
 - `protocol/remote-command.ts` — the `RemoteCommand` envelope (SSE `commands` frames + `/api/commands/pending` polling) with its zod schema and `toRemoteCommand(raw): RemoteCommand | null` validator. The VS Code relay uses it; the CLI's parse path is a follow-up.
 - `models/pricing.ts` — Anthropic `MODEL_PRICING` and `MODEL_CONTEXT_WINDOW` tables plus `getPricing()` / `getContextWindow()` lookup helpers.
-- `types/` — cross-repo wire types (`preview`, `beads`, `headroom`, `streaming`, `file-change`) plus `types/events.ts`: the `USER_EVENTS` constant map of every per-user SSE event name (canonical here; mirrored at `codeagent-mobile/packages/shared/src/types/events.ts`). New event-producing/consuming code references `USER_EVENTS.*`, never a hand-typed string.
+- `types/` — cross-repo wire types (`preview`, `beads`, `streaming`, `file-change`) plus `types/events.ts`: the `USER_EVENTS` constant map of every per-user SSE event name (canonical here; mirrored at `codeagent-mobile/packages/shared/src/types/events.ts`). New event-producing/consuming code references `USER_EVENTS.*`, never a hand-typed string.
 
 ⚠️ **The TUI chrome/selector *parsers* do NOT live in shared anymore** (old `protocol/parseChrome.ts` / `selector.ts` / `filterChrome.ts` are gone). Glyphs and conventions vary per agent, so each PTY agent owns its own fixture-driven parsers next to its runtime strategy: `apps/cli/src/agents/<agent>/parsing.ts` (e.g. `cursor/parsing.ts`, `aider/parsing.ts` — `parse<Agent>Chrome` / `filter<Agent>Chrome` / `detect<Agent>Selector`), consumed via the runtime strategy and `streaming-emitter.service.ts`. ACP agents (claude/codex/gemini) get typed streaming and need no chrome parsing. `apps/cli/src/services/parseChrome.ts` is a vestigial one-line re-export of `@codeam/shared` with no remaining importers — don't add logic there.
 
@@ -189,8 +189,7 @@ user's terminal AND the mobile app can take turn-based control of the SAME conve
 over ACP. It is a purely ADDITIVE branch — codespace / self-hosted paths are untouched.
 
 - **Gate (`gate.ts`):** `isLocalSession(env)` = NOT (`CODESPACES==='true'` ||
-  `CODEAM_AUTO_APPROVE==='1'` || `HEADROOM_ENABLED==='1'` || `CODEAM_AUTO_TOKEN` ||
-  `CODEAM_ENROLL_TOKEN`). `commands/start.ts` runs the baton branch **before** the
+  `CODEAM_AUTO_APPROVE==='1'` || `CODEAM_AUTO_TOKEN` || `CODEAM_ENROLL_TOKEN`). `commands/start.ts` runs the baton branch **before** the
   `requiresAcp(agent)` fork, so cloud/self-hosted spawn byte-for-byte as before.
 - **Controller (`baton-controller.ts`):** owns exactly ONE active driver;
   `state ∈ {LOCAL_DRIVE, MOBILE_DRIVE, SWITCHING}`. `takeControl`/`handback` are turn-safe:
@@ -298,7 +297,7 @@ string also names the box's named volume, refusing anything else means these han
 steered into touching a non-fleet container/volume on the shared host.
 
 **`DockerRunner` abstraction** (exported from `host-agent.ts`, injected on `HostAgentDeps.docker`,
-defaults to `defaultDockerRunner`) — mirrors the `HeadroomRunner` shape: `run(args, opts)` spawns the
+defaults to `defaultDockerRunner`) — `run(args, opts)` spawns the
 real `docker` binary with **argv only, never `sh -c`**, and *resolves* (never rejects) with
 `{code, stderr, stdout}`. `opts.env` is merged OVER `process.env` for the `docker` CLI process's OWN
 env — this is the mechanism that keeps the enroll token off argv (below). Tests inject a fake runner
@@ -388,35 +387,7 @@ it into the fleet command.
 - **`failureBubble` is the SOLE arbiter of the failure bubble**, keyed on the agent's OWN error (`detail` / `recentStderr`): auth → re-auth bubble; `looksLikeProviderOutage` → outage bubble; non-auth/non-outage with no streamed text → generic retry; partial text already streamed → `null`.
 - **The provider-outage bubble fires ONLY from the agent's error — NEVER from polling the provider status page.** A status-page incident can be live while the user's local agent is perfectly fine (partial/regional degradation, or a stale/unrelated advisory like a model suspension). The old `checkProviderStatus` status-page catch-all was removed for exactly this false-positive (`v2.42.0`). The status page is informational only — it's the link *inside* the bubble, not a trigger.
 - **Auth notices that arrive as a COMPLETED-turn reply** (Claude prints `Not logged in · Please run /login` as plain text and ends cleanly — no throw, no exit) are caught by `replyIsAuthFailure` (length-guarded ≤200 chars so a reply that merely *discusses* login isn't misclassified) → swapped for the re-auth bubble + `reportCredentialInvalid`.
-- **1M-context usage-credits gate → reconnect the subscription (`v2.43.0`, reworked).** claude Code v2.1.x ALWAYS sends the `anthropic-beta: …,context-1m-2025-08-07` header even when the account has `s1mAccessCache.hasAccess=false`; a credit-less account then 429s every turn with "Usage credits required for 1M context" (confirmed in the codespace's `~/.headroom/logs/proxy.log` — claude's inbound request carries the beta; Headroom forwards it unchanged, NOT its fault). Detected by `looksLike1mContextCreditsError`. **The original "Disable 1M context and continue" `select_prompt` recovery did NOT fix a credential-type credits gate (2026-06-24 incident)** — the account's credential simply lacks the entitlement. The recovery is now to **reconnect the Claude subscription via the in-app OAuth**: `failureBubble` classifies the 429 as `ONE_M_CREDITS_MESSAGE` (a `codeam://reauth` reconnect bubble) and the runner calls `reportCredentialInvalid` so Profile › Agents surfaces the reconnect CTA — identical to the auth-failure path. Both surfacing points are covered: the completed-turn-reply path and the thrown-error path. (The old `oneMContextRecovery.ts` disable/re-spawn DI factory — `createOneMRecovery` + its runner wiring — was removed; `oneMContextRecovery.ts` now exports only the pure detectors `looksLike1mContextCreditsError` / `shouldOfferOneMRecovery`.)
-
-### Headroom provisioning — resolve an installer by LEAST PRIVILEGE, never assume sudo
-
-`apps/cli/src/commands/host/os-packages.ts` **`ensurePythonInstaller`** (renamed from `ensurePip` in
-`v2.65.17`) returns a resolved `PyInstaller` (`pip` | `uv`) **or a reason** — never a bare boolean.
-Resolution order is deliberate:
-
-1. `pip` / `pip3` on PATH → use it (no `apt-get update` on a healthy box).
-2. **`uv` on PATH → use it. Root-free, so it BEATS the package manager even when one exists.**
-3. Package manager + (root OR passwordless sudo) → install python3+pip+ca-certificates+curl.
-4. Otherwise → a user-facing `reason`.
-
-⚠️ **Step 3 pre-flights `sudo -n true` when non-root.** A host-agent running as a non-root user
-inside a TTY-less systemd unit can never answer a password prompt — before this it burned the full
-180 s `sudo apt-get update` timeout and died with `apt-get bare-box provision failed (code=1)`, once
-per user Retry, reaching the app as a bare "Cost-saving failed" (live on fleet-1's `codeam-edgar`,
-2026-08-21: python3 3.12.3 present, pip genuinely absent — Ubuntu 24.04 splits out `python3-pip` —
-and `python3 -m ensurepip` absent too, because Debian strips it from stdlib).
-
-`headroom-bootstrap.ts`'s `pipInstall` routes by installer kind: pip → `<py> -m pip install` with the
-PEP-668 `--break-system-packages` retry; uv → `uv pip install --python <py> --break-system-packages`
-(unconditional there — every box needing that route targets a distro python, and uv refuses an
-externally-managed environment without it). **uv installs into the SAME environment pip would**, so
-the `headroom` console script still resolves via `which('headroom')` and no caller needs a PATH tweak.
-
-⚠️ `setupHeadroomForSelfHosted` still returns a `boolean`, so the `reason` is only LOGGED
-(`Headroom: <reason>`) — the on-demand surface can't show it yet. Propagating it is tracked
-separately; the backend wire already carries `error?: string` on `headroom_status`.
+- **1M-context usage-credits gate → reconnect the subscription (`v2.43.0`, reworked).** claude Code v2.1.x ALWAYS sends the `anthropic-beta: …,context-1m-2025-08-07` header even when the account has `s1mAccessCache.hasAccess=false`; a credit-less account then 429s every turn with "Usage credits required for 1M context" (confirmed on the wire: claude's own outbound request carries the beta). Detected by `looksLike1mContextCreditsError`. **The original "Disable 1M context and continue" `select_prompt` recovery did NOT fix a credential-type credits gate (2026-06-24 incident)** — the account's credential simply lacks the entitlement. The recovery is now to **reconnect the Claude subscription via the in-app OAuth**: `failureBubble` classifies the 429 as `ONE_M_CREDITS_MESSAGE` (a `codeam://reauth` reconnect bubble) and the runner calls `reportCredentialInvalid` so Profile › Agents surfaces the reconnect CTA — identical to the auth-failure path. Both surfacing points are covered: the completed-turn-reply path and the thrown-error path. (The old `oneMContextRecovery.ts` disable/re-spawn DI factory — `createOneMRecovery` + its runner wiring — was removed; `oneMContextRecovery.ts` now exports only the pure detectors `looksLike1mContextCreditsError` / `shouldOfferOneMRecovery`.)
 
 ### Heartbeat must stay punctual — no synchronous work on the 20 s tick
 

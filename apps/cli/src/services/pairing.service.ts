@@ -773,7 +773,7 @@ export async function fetchSquadRoster(input: {
 
 /**
  * Post an agent-switch lifecycle event (progress step / terminal status) to
- * the backend. Mirrors `postHeadroomEvent` — non-fatal; callers serialize the
+ * the backend. Non-fatal; callers serialize the
  * POSTs (emit-chain) so the backend receives them strictly in emit order.
  *
  * `handoff_proposed` / `handoff_resolved` cover the Agent Squad agent-proposed
@@ -875,7 +875,7 @@ export async function postCoderabbitEvent(input: {
 
 /**
  * Post a Beads lifecycle event (enable / disable / status) to the backend.
- * Mirrors `postHeadroomEvent` — fire-and-forget, non-fatal. The backend
+ * Fire-and-forget, non-fatal. The backend
  * republishes these on the per-user SSE bus so the mobile UI can track
  * beads_configure progress in real time.
  */
@@ -910,7 +910,7 @@ export async function postBeadsEvent(input: {
 
 /**
  * Post a CLI self-update progress event to the backend so the mobile UI can
- * track the update in real time. Mirrors `postHeadroomEvent` — fire-and-forget,
+ * track the update in real time. Fire-and-forget,
  * non-fatal. The backend republishes on the per-user SSE bus.
  *
  * Phases:

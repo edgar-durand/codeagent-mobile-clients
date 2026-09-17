@@ -12,7 +12,7 @@ boundary (CLI ⇄ backend ⇄ mobile/web) must agree on byte-for-byte.
 - `protocol/chrome-types` — protocol-level shapes for TUI chrome steps and interactive selectors.
 - `models/pricing` — Anthropic model pricing and context-window tables with lookup helpers.
 - `agents/` — agent id types and registry shared by the clients.
-- `types/` — cross-repo wire types (`preview`, `beads`, `headroom`, `streaming`, `file-change`) and `types/events` (`USER_EVENTS`, the canonical map of per-user SSE event names).
+- `types/` — cross-repo wire types (`preview`, `beads`, `streaming`, `file-change`) and `types/events` (`USER_EVENTS`, the canonical map of per-user SSE event names).
 
 ## Consumers
 

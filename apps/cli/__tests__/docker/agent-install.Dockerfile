@@ -27,7 +27,7 @@
 FROM node:20-slim
 
 # Retry loop guards transient apt mirror hiccups (same pattern as
-# headroom-provision.Dockerfile).
+# mcp-shim.Dockerfile).
 RUN set -e; \
     for attempt in 1 2 3; do \
       echo "==> apt-get update + install attempt $attempt"; \
@@ -53,7 +53,7 @@ RUN set -e; \
 # and has no install snippet).
 #
 # agent-install-driver.js is test-only and excluded from the npm `files`
-# allowlist, so it is copied in separately — exactly like the headroom driver.
+# allowlist, so it is copied in separately — exactly like the mcp-shim driver.
 ARG CODEAM_TARBALL=codeam-cli.tgz
 COPY ${CODEAM_TARBALL} /tmp/codeam-cli.tgz
 COPY agent-install-driver.js /tmp/agent-install-driver.js

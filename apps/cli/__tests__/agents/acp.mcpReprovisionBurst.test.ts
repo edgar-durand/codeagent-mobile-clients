@@ -41,17 +41,6 @@ const { spawnMock, state } = vi.hoisted(() => ({
 
 vi.mock('node:child_process', () => ({ spawn: spawnMock }));
 
-// `runPrompt` self-heals the Headroom proxy before every turn. That probe is a
-// real network call with a retry budget — irrelevant here, and it is what makes
-// a recovery test hang instead of asserting.
-vi.mock('../../src/services/headroom/proxy-supervisor', async (importOriginal) => ({
-  // ⚠️ Keep the rest of the module. `client.ts` imports several symbols from
-  // here; a bare factory leaves them undefined and `start()` hangs before the
-  // test can assert anything.
-  ...(await importOriginal<Record<string, unknown>>()),
-  ensureHeadroomProxyReady: vi.fn().mockResolvedValue(undefined),
-}));
-
 vi.mock('@agentclientprotocol/sdk', () => {
   class ClientSideConnection {
     initialize = vi.fn().mockResolvedValue({ protocolVersion: 1, agentCapabilities: {} });

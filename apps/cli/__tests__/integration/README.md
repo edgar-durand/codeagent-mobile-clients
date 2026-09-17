@@ -9,7 +9,6 @@ them — they need real binaries / network / live credentials.
 | `acp-provision-smoke.int.test.ts` | `RUN_ACP_INT=1` | **Every ACP agent** — provisions the credential, spawns `<agent> acp`, drives a real handshake, asserts it AUTHENTICATES + answers. |
 | `kimi-acp-provision.int.test.ts` | `RUN_KIMI_INT=1` | Kimi-specific POSITIVE/NEGATIVE regression (credential slot). |
 | `beads-configure.int.test.ts` | `RUN_BEADS_INT=1` | Real beads/Dolt config store. |
-| `headroom-provision.int.test.ts` | `RUN_HEADROOM_INT=1` | Real Headroom enable/disable + `:8787/stats`. |
 | `baton-loop.int.test.ts` | `RUN_BATON_INT=1` | Cross-mode resume: a natively-created claude session resumes through the baton's ACP path. |
 | `baton-local.int.test.ts` | `RUN_BATON_INT=1` | **Whole local baton, real claude** — take-control BEFORE the first TUI turn → `MOBILE_DRIVE`, a real ACP turn, handback → `LOCAL_DRIVE`, take-control AGAIN over an on-disk transcript (`session/load`), zero TUI chrome in the chat pipe, the `online:false` goodbye heartbeat on SIGINT, and the mobile FOLLOWING the TUI through `/clear` (new conversation id), `/rename` and `/resume <id>`. **Runs as a real gate in `ci.yml`** — see below. |
 

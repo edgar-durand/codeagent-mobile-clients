@@ -1,8 +1,6 @@
 /**
  * Tests for the beads_configure command handler (Task 9).
  *
- * Mirrors the headroom_configure handler test harness
- * (`handlers.headroom-agent.test.ts`) — same mock / dispatch pattern.
  *
  * Key assertions:
  * - valid actions (enable / disable / status) call `configureBeads`
@@ -57,31 +55,8 @@ vi.mock('../../../src/services/pairing.service', () => ({
   postLinkCredential: vi.fn().mockResolvedValue({ ok: true }),
   postAiResult: vi.fn().mockResolvedValue({ ok: true }),
   postPreviewEvent: vi.fn().mockResolvedValue({ ok: true }),
-  postHeadroomEvent: vi.fn().mockResolvedValue({ ok: true }),
   postBeadsEvent: vi.fn().mockResolvedValue({ ok: true }),
   postBeadsProvisioning: vi.fn().mockResolvedValue({ ok: true }),
-}));
-
-// Many other services are transitively imported — mock them so module load succeeds.
-vi.mock('../../../src/services/headroom/configure', () => ({
-  configureHeadroom: vi.fn().mockResolvedValue({ enabled: false }),
-}));
-
-vi.mock('../../../src/commands/host-agent', () => ({
-  agentIdToHeadroomKind: vi.fn().mockReturnValue('claude'),
-  isHeadroomSupportedAgent: vi.fn().mockReturnValue(false),
-  persistHeadroomConfig: vi.fn(),
-  headroomConfigPath: vi.fn().mockReturnValue('/tmp/.codeam/headroom.json'),
-  restoreAgentHeadroomConfig: vi.fn().mockResolvedValue(undefined),
-  setupHeadroomForSelfHosted: vi.fn().mockResolvedValue({ enabled: false }),
-}));
-
-vi.mock('../../../src/services/headroom/stats-reporter', () => ({
-  HeadroomStatsReporter: vi.fn().mockImplementation(() => ({
-    start: vi.fn(),
-    stop: vi.fn(),
-  })),
-  mapStatsToSavings: vi.fn().mockReturnValue({ next: null }),
 }));
 
 // ── Imports after mocks ───────────────────────────────────────────────────────

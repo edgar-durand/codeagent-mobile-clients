@@ -42,7 +42,7 @@ import type { RemoteCommand } from '../src/services/command-relay.service';
 
 // Wrap execFileSync so ONE test (defaultOnIdentityRejected's disableService
 // call) can fake a single invocation without touching every other caller in
-// this file's dependency graph (git-tooling's probe, Headroom teardown, …):
+// this file's dependency graph (git-tooling's probe, service teardown, …):
 // the default implementation forwards to the REAL execFileSync, so every
 // existing test's behavior is unchanged unless a test explicitly overrides
 // it with `mockImplementationOnce`. A bare `vi.spyOn` doesn't work here —
@@ -750,10 +750,9 @@ describe('HostAgentSupervisor — control channel reuse', () => {
 
   // Regression (Rafael, 2026-08-05): a warm-codespace HOUSE-agent session broke
   // after sleep/wake with "Authentication required" because the resume re-injected
-  // the Headroom env but NOT the house-proxy env (ANTHROPIC_BASE_URL/AUTH_TOKEN).
+  // other per-deploy env but NOT the house-proxy env (ANTHROPIC_BASE_URL/AUTH_TOKEN).
   // The resume MUST carry the persisted house-proxy env so the woken agent still
-  // authenticates through the proxy. (Previously the resume passed only
-  // readHeadroomChildEnv() → this assertion would have caught it.)
+  // authenticates through the proxy.
   it('re-injects the persisted house-proxy env into the resume (survives sleep/wake)', async () => {
     const config = await import('../src/config');
     const houseCfg = await import('../src/commands/host/house-proxy-config');
@@ -2091,7 +2090,7 @@ describe('HostAgentSupervisor — self_hosted_wipe control command', () => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Headroom — payload validator back-compat + env injection
+// isDeployPayload — payload validator back-compat + env injection
 // ─────────────────────────────────────────────────────────────────────────────
 
 describe('isDeployPayload — suppressOnboardingWelcome back-compat + env injection', () => {
@@ -2409,7 +2408,7 @@ describe('ensureModernPython — auto-install when no Python ≥3.10', () => {
     expect(installs).toHaveLength(0);
   });
 
-  it('install fails to yield ≥3.10 → returns null (caller skips Headroom)', async () => {
+  it('install fails to yield ≥3.10 → returns null (caller skips the dependent setup)', async () => {
     setPlatform('darwin');
     // brew is present and is invoked, but the interpreter never appears.
     const runner = makeRunner(['brew'], { python3: '3.9' });
@@ -2424,7 +2423,7 @@ describe('ensureModernPython — auto-install when no Python ≥3.10', () => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// setupHeadroomForSelfHosted — uses resolved python, skips on no ≥3.10 python
+// detectPackageManager — coverage across distros
 // ─────────────────────────────────────────────────────────────────────────────
 
 describe('detectPackageManager — coverage across distros', () => {
@@ -2737,13 +2736,10 @@ describe('HostAgentSupervisor — periodic self-update', () => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Headroom config persistence — survives resume / restart
+// HostAgentSupervisor — fleet control plane
 //
-// The supervisor persists the headroom config on a successful deploy and
-// re-reads it on EVERY child spawn (fresh deploy AND resume/restart) so the
-// savings reporter starts even when no fresh deploy arrives. These tests rely
-// on the tmpHome isolation set up in the top-level beforeEach so writes land in
-// a throwaway ~/.codeam.
+// These tests rely on the tmpHome isolation set up in the top-level beforeEach
+// so any write lands in a throwaway ~/.codeam.
 // ─────────────────────────────────────────────────────────────────────────────
 
 describe('HostAgentSupervisor — fleet control plane', () => {

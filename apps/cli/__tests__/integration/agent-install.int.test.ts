@@ -297,7 +297,7 @@ suite('per-agent REAL install — Docker integration (stale-PATH / half-install 
     fs.unlinkSync(path.join(CLI_DIR, tarballName));
 
     // The driver is excluded from the published tarball (test-only), so it
-    // rides into the build context on its own — same as the headroom driver.
+    // rides into the build context on its own — same as the mcp-shim driver.
     driverCopyPath = path.join(DOCKER_DIR, 'agent-install-driver.js');
     fs.copyFileSync(driverDist, driverCopyPath);
 

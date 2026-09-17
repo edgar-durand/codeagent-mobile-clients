@@ -40,11 +40,6 @@ vi.mock('../../../src/commands/pair-auto', () => ({
   acquireDaemonLock: vi.fn(() => true),
 }));
 
-vi.mock('../../../src/commands/host-agent', () => ({
-  maybeStartHeadroomReporter: vi.fn(() => null),
-  maybeResumeLocalHeadroomReporter: vi.fn(() => null),
-}));
-
 vi.mock('../../../src/ui/banner', () => ({
   showIntro: vi.fn(),
   showInfo: vi.fn(),

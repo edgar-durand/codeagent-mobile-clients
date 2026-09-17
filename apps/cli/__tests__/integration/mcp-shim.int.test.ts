@@ -26,7 +26,7 @@
  * ── Container lifecycle ──────────────────────────────────────────────────────
  * Image build bakes the network-bound work (NodeSource apt, pip install uv,
  * uvx prewarm of the PINNED mcp-atlassian, npm -g of the packed CLI) into
- * layer-cached build steps — mirrors headroom-provision.Dockerfile. The test
+ * layer-cached build steps — shared with the other integration Dockerfiles. The test
  * starts a detached container and runs the plain-JS driver
  * (__tests__/docker/mcp-shim-driver.js) via `docker exec`.
  *
@@ -46,7 +46,7 @@ import { INTEGRATION_REGISTRY } from '@codeam/shared';
 
 const execFileP = promisify(execFile);
 
-// ── Gate checks (headroom-provision skeleton) ────────────────────────────────
+// ── Gate checks ──────────────────────────────────────────────────────────────
 const RUN_INTEGRATIONS_INT = process.env.RUN_INTEGRATIONS_INT === '1';
 
 function probeDockerSync(): boolean {
@@ -221,7 +221,7 @@ suite('mcp-run shim — real Docker integration (broker → uvx mcp-atlassian �
         stderr = result.stderr ?? '';
       } catch (err) {
         // Surface the driver's stdout/stderr instead of the opaque
-        // "Command failed: docker exec …" (headroom lesson).
+        // "Command failed: docker exec …".
         const e = err as { stdout?: string | Buffer | null; stderr?: string | Buffer | null; message?: string };
         throw new Error(
           `[mcp-shim] driver docker exec failed: ${e.message ?? String(err)}\n--- stdout (last 4000) ---\n${String(e.stdout ?? '').slice(-4000)}\n--- stderr (last 4000) ---\n${String(e.stderr ?? '').slice(-4000)}`,
