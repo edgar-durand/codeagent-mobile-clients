@@ -140,6 +140,14 @@ export const USER_EVENTS = {
    *  debits: those are one per agent hop, and the client already walks its
    *  own balance down as metered usage streams in. */
   CREDITS_CHANGED: 'credits_changed',
+  /** La recarga automatica NO se hizo, y el motivo significa algo para el
+   *  usuario (enfriamiento, tope diario o mensual, pausada, apagada).
+   *  ⚠️ Existe porque antes el saldo llegaba a cero EN SILENCIO: la sesion se
+   *  paraba y no habia una sola pista de por que no se habia recargado sola
+   *  (2026-09-17). Los motivos internos —`duplicate_intent` y compañia— no se
+   *  publican: no dicen nada a quien los lee. El CLI no lo consume; vive aqui
+   *  porque este fichero es la fuente del espejo que valida `shared-type-drift`. */
+  AUTO_RECHARGE_BLOCKED: 'auto_recharge_blocked',
 } as const;
 
 export type UserEventName = (typeof USER_EVENTS)[keyof typeof USER_EVENTS];
