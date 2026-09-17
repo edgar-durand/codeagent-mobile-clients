@@ -11,7 +11,6 @@ import { detectCurrentBranch } from '../lib/git-branch';
 import { resolveSessionHostname } from '../lib/session-hostname';
 import { start } from './start';
 import { startInfraOnly } from './start-infra-only';
-import { maybeStartHeadroomReporter } from './host-agent';
 import { installRelayCrashGuards } from '../lib/process-guards';
 
 /**
@@ -578,23 +577,6 @@ export async function pairAuto(args: string[]): Promise<void> {
 
   // eslint-disable-next-line no-console
   console.log('  Starting agent loop…');
-
-  // Best-effort Headroom savings reporter — enabled only when
-  // HEADROOM_ENABLED=1 (injected by the backend for PRO users). A missing
-  // or misbehaving Headroom proxy never blocks the agent from starting.
-  // Skip entirely when pluginAuthToken is absent/empty: an empty token
-  // guarantees a 401 on every savings POST (metering lost, 401-storm).
-  const headroomReporter = claimed.pluginAuthToken
-    ? maybeStartHeadroomReporter({
-        sessionId: claimed.sessionId,
-        pluginId,
-        pluginAuthToken: claimed.pluginAuthToken,
-        codespaceId: process.env['CODESPACE_NAME'] ?? claimed.sessionId,
-      })
-    : null;
-  process.once('exit', () => {
-    headroomReporter?.stop();
-  });
 
   // Hand off to the same long-running poller `codeam pair` ends with — PINNED to
   // this deploy's own session so concurrent host-agent children don't collide on

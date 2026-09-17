@@ -103,9 +103,6 @@ export const startCommandSchema = z.object({
       'list',
     ])
     .optional(),
-  // `headroom_configure` — savings ingest URL delivered from the session
-  // when enabling Headroom on-demand. Bounded to 2048 chars.
-  savingsIngestUrl: z.string().url().max(2048).optional(),
   // `coderabbit_configure` (action='link_apikey') — the CodeRabbit API key.
   apiKey: z.string().min(1).max(512).optional(),
   // `coderabbit_configure` (action='review') — review scope, mirroring the

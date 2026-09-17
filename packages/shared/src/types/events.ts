@@ -42,7 +42,6 @@ export const USER_EVENTS = {
   CREDENTIAL_INVALID: 'credential_invalid',
   CODESPACE_WAKING: 'codespace_waking',
   CODESPACE_BILLING_BLOCKED: 'codespace_billing_blocked',
-  COST_SAVING_UPDATED: 'cost_saving_updated',
   COMMAND_COMPLETED: 'command_completed',
   AI_SUMMARY_PENDING: 'ai_summary_pending',
   AI_SUMMARY_READY: 'ai_summary_ready',
@@ -84,10 +83,7 @@ export const USER_EVENTS = {
    *  a box never creates. */
   FLEET_BOX_READY: 'fleet_box_ready',
   REFERRAL_REWARD_EARNED: 'referral_reward_earned',
-  HEADROOM_PROGRESS: 'headroom_progress',
-  HEADROOM_STATUS: 'headroom_status',
   BEADS_STATUS: 'beads_status',
-  LINKED_AGENT_HEADROOM_BUDGET_UPDATED: 'linked_agent_headroom_budget_updated',
   CLI_UPDATE_AVAILABLE: 'cli_update_available',
   AGENT_INSTALL_PROGRESS: 'agent_install_progress',
   AGENT_INSTALL_FAILED: 'agent_install_failed',

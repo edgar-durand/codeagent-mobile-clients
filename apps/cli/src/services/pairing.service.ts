@@ -536,10 +536,6 @@ export async function postBatonEvent(
 }
 
 /**
- * Post a Headroom lifecycle event (enable / disable / progress) to the backend.
- * Mirrors `postPreviewEvent` — fire-and-forget, non-fatal.
- */
-/**
  * Reporta al backend en que fase va UN comando. La mitad del embudo que el
  * servidor no puede ver.
  *
@@ -581,38 +577,9 @@ export async function postTurnEvent(input: {
   }
 }
 
-export async function postHeadroomEvent(input: {
-  sessionId: string;
-  pluginId: string;
-  pluginAuthToken: string;
-  type: 'headroom_progress' | 'headroom_status';
-  payload?: Record<string, unknown>;
-}): Promise<{ ok: true } | { ok: false; status: number; message: string }> {
-  try {
-    await _transport.postJsonAuthed(
-      `${API_BASE}/api/headroom/events`,
-      {
-        sessionId: input.sessionId,
-        pluginId: input.pluginId,
-        type: input.type,
-        payload: input.payload ?? {},
-      },
-      input.pluginAuthToken,
-    );
-    return { ok: true };
-  } catch (err) {
-    const e = err as Error & { statusCode?: number };
-    return {
-      ok: false,
-      status: typeof e.statusCode === 'number' ? e.statusCode : 0,
-      message: e.message || 'unknown',
-    };
-  }
-}
-
 /**
  * Post a CodeRabbit reviewer lifecycle event (link progress / status / review
- * result) to the backend. Mirrors `postHeadroomEvent` — fire-and-forget,
+ * result) to the backend. Mirrors `postPreviewEvent` — fire-and-forget,
  * non-fatal. The backend republishes on the per-user SSE bus so the mobile UI
  * can render the OAuth `authUrl`, link progress, and review findings live.
  */

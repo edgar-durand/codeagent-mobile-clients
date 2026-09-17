@@ -4,7 +4,7 @@
 // every deploy/spawn: ~/.codeam/integrations.json — the set of integrations
 // (delivery shape only, never secrets) a deploy wired for this session.
 // Write mechanics (atomic tmp+rename, 0600, best-effort logging) mirror
-// `src/commands/host/headroom-config.ts` byte-for-byte.
+// `src/commands/host/house-proxy-config.ts` byte-for-byte.
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';

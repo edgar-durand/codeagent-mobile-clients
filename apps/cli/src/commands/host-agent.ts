@@ -99,31 +99,8 @@ import {
   defaultGitToolingRunner,
   codeamBinDir,
 } from './host/git-tooling';
-import {
-  fetchWithTimeout,
-  HeadroomStatsReporter,
-  type Savings,
-  type StatsShape,
-} from '../services/headroom/stats-reporter';
-import {
-  ensureHeadroomProxyReady,
-  makeRealProxySupervisorDeps,
-} from '../services/headroom/proxy-supervisor';
-import { defaultHeadroomRunner } from './host/os-packages';
+import { defaultOsRunner } from './host/os-packages';
 import { encodeCwd } from '../agents/claude/history';
-import {
-  agentIdToHeadroomKind,
-  getFreeDiskBytes,
-  HEADROOM_MIN_FREE_DISK_BYTES,
-  isHeadroomSupportedAgent,
-  setupHeadroomForSelfHosted,
-} from './host/headroom-bootstrap';
-import {
-  headroomConfigPath,
-  persistHeadroomConfig,
-  readHeadroomChildEnv,
-  type HeadroomConfig,
-} from './host/headroom-config';
 import {
   persistHouseProxyConfig,
   clearHouseProxyConfig,
@@ -137,34 +114,20 @@ import {
   type SelfUpdater,
   type SelfUpdateResult,
 } from './host/self-update';
-import { defaultDisableService, defaultTeardownHeadroom } from './host/teardown';
+import { defaultDisableService } from './host/teardown';
 
 // ── Re-exports (Phase 3 refactor) ──────────────────────────────────────────
 // The implementations moved into commands/host/* modules; every symbol that
 // host-agent.ts previously exported is re-exported here so external importers
-// (start/handlers, services/headroom/configure, the headroom runner driver,
+// (start/handlers y compania,
 // and the test suites) keep their import paths unchanged.
 export {
   detectPackageManager,
   ensureModernPython,
-  resolveHeadroomPython,
-  type HeadroomRunner,
+  resolveModernPython,
+  type OsRunner,
   type PackageManager,
 } from './host/os-packages';
-export {
-  agentIdToHeadroomKind,
-  getFreeDiskBytes,
-  isHeadroomSupportedAgent,
-  setupHeadroomForSelfHosted,
-  type HeadroomStep,
-} from './host/headroom-bootstrap';
-export {
-  backupAgentHeadroomConfig,
-  headroomConfigPath,
-  persistHeadroomConfig,
-  readHeadroomChildEnv,
-  restoreAgentHeadroomConfig,
-} from './host/headroom-config';
 export {
   runSelfUpdate,
   SELF_UPDATE_DEFER_MAX_MS,
@@ -205,169 +168,6 @@ export const RESUME_REPROBE_INTERVAL_MS = 5 * 60_000;
  * forever and never reach the visible-error path. Exported for the tests.
  */
 export const RESUME_HEALTHY_AFTER_MS = 10 * 60_000;
-
-/**
- * Context the Headroom reporter needs to authenticate its savings POST.
- * Mirrors the codespace session's auth fields; callers supply real values
- * from the claimed session (pair-auto) or the deploy payload (self-hosted).
- */
-export interface HeadroomReporterCtx {
-  sessionId: string;
-  pluginId: string;
-  pluginAuthToken: string;
-  codespaceId: string;
-}
-
-/**
- * Start a {@link HeadroomStatsReporter} scoped to the running codespace
- * agent session, or return `null` when the feature is disabled.
- *
- * Enabled only when `HEADROOM_ENABLED === '1'` (injected by the backend
- * bootstrap for PRO users whose plan has Headroom + the kill-switch is off).
- *
- * Never throws into the agent launch path — construction and `start()` are
- * wrapped in a try/catch so a misconfigured or unavailable Headroom proxy
- * can't prevent the session from starting.
- *
- * URL resolution order for the savings POST target:
- *   1. `HEADROOM_SAVINGS_INGEST_URL` (full URL, exported by the backend into
- *      the codespace env — preferred, avoids a round-trip resolution).
- *   2. Constructed from `resolveApiBaseUrl()` as the fallback:
- *      `${apiBase}/api/codespaces/${ctx.codespaceId}/headroom-savings`
- */
-export function maybeStartHeadroomReporter(ctx: HeadroomReporterCtx): HeadroomStatsReporter | null {
-  if (process.env['HEADROOM_ENABLED'] !== '1') return null;
-
-  try {
-    const ingestUrl =
-      process.env['HEADROOM_SAVINGS_INGEST_URL'] ??
-      `${resolveApiBaseUrl()}/api/codespaces/${ctx.codespaceId}/headroom-savings`;
-
-    const reporter = new HeadroomStatsReporter({
-      inputPricePerMillionUsd: resolveInputPricePerMillion(
-        process.env['HEADROOM_AGENT'] ?? 'claude',
-      ),
-      fetchStats: async () => {
-        const res = await fetchWithTimeout('http://localhost:8787/stats');
-        // res.json() returns unknown; cast at this validated boundary.
-        return res.json() as Promise<StatsShape>;
-      },
-      postSavings: async (delta, budget) => {
-        const res = await fetchWithTimeout(ingestUrl, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'X-Plugin-Auth-Token': ctx.pluginAuthToken,
-          },
-          body: JSON.stringify({
-            sessionId: ctx.sessionId,
-            pluginId: ctx.pluginId,
-            agentId: process.env['HEADROOM_AGENT'] ?? 'claude',
-            savings: delta,
-            ...(budget ? {
-              periodSpendUsd: budget.periodSpendUsd,
-              budgetUsd: budget.budgetUsd,
-              budgetPeriod: budget.budgetPeriod,
-              budgetReached: budget.budgetReached,
-            } : {}),
-          }),
-        });
-        if (!res.ok) {
-          log.warn('headroom', `savings POST rejected ${res.status} — delta not credited`);
-        }
-      },
-    });
-    reporter.start();
-    return reporter;
-  } catch (err) {
-    log.warn(
-      'headroom',
-      `failed to start Headroom reporter (best-effort): ${err instanceof Error ? err.message : String(err)}`,
-    );
-    return null;
-  }
-}
-
-/**
- * Resume the ON-DEMAND LOCAL Headroom savings reporter at boot from the
- * persisted `~/.codeam/headroom-config.json`.
- *
- * The codespace / self-hosted path uses {@link maybeStartHeadroomReporter},
- * gated on `HEADROOM_ENABLED === '1'` (env injected by the backend bootstrap).
- * A local on-demand session NEVER sets that env — only the JSON config records
- * `enabled:true` — so without this resume a CLI restart would silently stop
- * reporting savings until the user re-toggled Cost-saving from the app.
- *
- * Strictly additive to the codespace path: this returns `null` immediately when
- * `HEADROOM_ENABLED === '1'`, so the two paths can never both run and the
- * codespace reporter is completely untouched. Posts to the CURRENT session's
- * ingest endpoint (built from `ctx.sessionId`), NOT the URL baked into the
- * config at enable time — so a fresh session after restart credits the right
- * session. Best-effort; never throws into the launch path.
- */
-export function maybeResumeLocalHeadroomReporter(ctx: {
-  sessionId: string;
-  pluginId: string;
-  pluginAuthToken: string;
-}): HeadroomStatsReporter | null {
-  // Never overlap the codespace/self-hosted env-gated path.
-  if (process.env['HEADROOM_ENABLED'] === '1') return null;
-  try {
-    const file = headroomConfigPath();
-    if (!fs.existsSync(file)) return null;
-    const cfg = JSON.parse(fs.readFileSync(file, 'utf8')) as HeadroomConfig;
-    if (!cfg?.enabled) return null;
-
-    const agent = cfg.agent ?? 'claude';
-    // Build from the CURRENT session — the config's stored ingestUrl bakes the
-    // session id from enable time and is stale for any later session.
-    const ingestUrl = `${resolveApiBaseUrl()}/api/sessions/${ctx.sessionId}/headroom-savings`;
-
-    const reporter = new HeadroomStatsReporter({
-      inputPricePerMillionUsd: resolveInputPricePerMillion(agent),
-      fetchStats: async () => {
-        const res = await fetchWithTimeout('http://localhost:8787/stats');
-        return res.json() as Promise<StatsShape>;
-      },
-      // Body MUST match HeadroomSavingsDto + PluginAuthGuard (sessionId +
-      // pluginId in the body) — same shape as the codespace reporter above and
-      // the on-demand `startReporter` in handlers.ts.
-      postSavings: async (delta, budget) => {
-        const res = await fetchWithTimeout(ingestUrl, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'X-Plugin-Auth-Token': ctx.pluginAuthToken,
-          },
-          body: JSON.stringify({
-            sessionId: ctx.sessionId,
-            pluginId: ctx.pluginId,
-            agentId: agent,
-            savings: delta,
-            ...(budget ? {
-              periodSpendUsd: budget.periodSpendUsd,
-              budgetUsd: budget.budgetUsd,
-              budgetPeriod: budget.budgetPeriod,
-              budgetReached: budget.budgetReached,
-            } : {}),
-          }),
-        });
-        if (!res.ok) {
-          log.warn('headroom', `savings POST rejected ${res.status} — delta not credited`);
-        }
-      },
-    });
-    reporter.start();
-    log.info('headroom', 'resumed on-demand local savings reporter from config');
-    return reporter;
-  } catch (err) {
-    log.warn(
-      'headroom',
-      `failed to resume local Headroom reporter (best-effort): ${err instanceof Error ? err.message : String(err)}`,
-    );
-    return null;
-  }
-}
 
 /**
  * The managed "CodeAgent Cloud" house-agent proxy block (mirrors the
@@ -431,23 +231,6 @@ interface DeployPayload {
   previewTunnelToken?: string;
   /** Stable preview hostname for this box's tunnel; exported as `PREVIEW_TUNNEL_HOSTNAME`. */
   previewHostname?: string;
-  /**
-   * When true, set up the Headroom local compression proxy before spawning
-   * the pair-auto child and inject HEADROOM_* env vars so the child's
-   * maybeStartHeadroomReporter activates. Best-effort — a failed or absent
-   * Headroom install must NEVER block the deploy. Absent = false.
-   */
-  headroomEnabled?: boolean;
-  /**
-   * Agent identifier passed to `headroom init --global <agent>`.
-   * e.g. 'claude'. Required when headroomEnabled is true.
-   */
-  headroomAgent?: string;
-  /**
-   * Full ingest URL for the Headroom savings reporter (POST target).
-   * Required when headroomEnabled is true.
-   */
-  headroomSavingsIngestUrl?: string;
   /**
    * Agent Toolkits integrations manifest for this deploy — the same shape
    * the codespace bootstrap writes to `~/.codeam/integrations.json`.
@@ -522,21 +305,11 @@ function isDeployPayload(p: Record<string, unknown>): p is DeployPayload & Recor
   if (p.branch !== undefined && typeof p.branch !== 'string') {
     return false;
   }
-  // headroom fields are optional (back-compat: older backends omit them).
   // When present they must have the right types; absence is treated as disabled.
-  if (p.headroomEnabled !== undefined && typeof p.headroomEnabled !== 'boolean') {
-    return false;
-  }
-  if (p.headroomAgent !== undefined && typeof p.headroomAgent !== 'string') {
-    return false;
-  }
   if (
     p.suppressOnboardingWelcome !== undefined &&
     typeof p.suppressOnboardingWelcome !== 'boolean'
   ) {
-    return false;
-  }
-  if (p.headroomSavingsIngestUrl !== undefined && typeof p.headroomSavingsIngestUrl !== 'string') {
     return false;
   }
   // integrations is optional (back-compat: older backends omit it); when
@@ -890,7 +663,7 @@ function buildFleetBoxRunArgs(p: {
 
 /**
  * Subprocess runner injectable for the fleet `docker` control-plane
- * handlers. Mirrors {@link HeadroomRunner} (`commands/host/os-packages.ts`):
+ * handlers. Mirrors {@link OsRunner} (`commands/host/os-packages.ts`):
  * `run` resolves — never rejects — with `{code, stderr, stdout}`; `stdout`
  * is needed to capture the created container id off `docker run -d`. Argv
  * arrays only — the default runner NEVER shells through `sh -c`.
@@ -981,7 +754,6 @@ const CONTROL_AGENT_META: AgentMetadata = {
   supportedAuthKinds: ['oauth_token'],
   preferredAuthKind: 'oauth_token',
   // Synthetic control channel — capability flags are moot (no agent runs).
-  headroomWrappable: false,
   acp: false,
 };
 
@@ -1117,32 +889,6 @@ export interface HostAgentDeps {
   /** Best-effort de-provision for `self_hosted_wipe`. Injectable for tests. */
   disableService?: () => void;
   /**
-   * Best-effort Headroom proxy teardown for `self_hosted_wipe`. Defaults to
-   * {@link defaultTeardownHeadroom} (unwrap durable integration + kill the
-   * orphaned proxy on :8787). Injectable so tests assert the wipe path without
-   * running real pkill/headroom.
-   */
-  teardownHeadroom?: () => void;
-  /**
-   * Headroom setup function. Defaults to `setupHeadroomForSelfHosted`.
-   * Injectable so tests mock away real pip/spawn without touching the file system.
-   */
-  setupHeadroom?: (agent: string) => Promise<boolean>;
-  /**
-   * Probe whether Headroom is ALREADY installed on this box (binary on PATH).
-   * Defaults to a `which headroom` check. The disk gate uses it to bypass the
-   * install-disk preflight for a box that already has Headroom — so a low-disk
-   * reading never disables reporting on a proxy that's already running.
-   * Injectable so tests drive the bypass without a real PATH lookup.
-   */
-  isHeadroomInstalled?: () => boolean;
-  /**
-   * Read free disk bytes for the install preflight. Defaults to
-   * {@link getFreeDiskBytes}. Injectable so tests drive the disk gate
-   * deterministically without depending on the host's real free space.
-   */
-  getFreeDisk?: (dir: string) => Promise<number | null>;
-  /**
    * Clock. Injectable so the self-update deferral CEILING is testable without
    * waiting a day. Defaults to `Date.now`.
    */
@@ -1180,11 +926,6 @@ export class HostAgentSupervisor {
   private readonly spawnChild: ChildSpawner;
   private readonly resumeSpawner: ChildSpawner;
   private readonly resolveAgentAuth: AgentAuthResolver;
-  private readonly setupHeadroom: (agent: string) => Promise<boolean>;
-  /** Probe whether Headroom is already installed (defaults to `which headroom`). */
-  private readonly isHeadroomInstalled: () => boolean;
-  /** Free-disk reader for the install preflight (defaults to getFreeDiskBytes). */
-  private readonly getFreeDisk: (dir: string) => Promise<number | null>;
   private relay: Pick<CommandRelayService, 'start' | 'stop' | 'sendResult'> | null = null;
   private heartbeatTimer: NodeJS.Timeout | null = null;
   /** Periodic self-update timer (npm check + install + restart). */
@@ -1213,7 +954,6 @@ export class HostAgentSupervisor {
   private readonly onIdentityRejected: () => void;
   /** Best-effort systemd de-provision used by `self_hosted_wipe`. */
   private readonly disableService: () => void;
-  private readonly teardownHeadroom: () => void;
   /** Docker runner for the fleet `fleet_*` control-plane handlers. */
   private readonly docker: DockerRunner;
   /** Guards against firing the self-heal more than once. */
@@ -1243,14 +983,9 @@ export class HostAgentSupervisor {
     this.spawnChild = deps.spawnChild ?? defaultSpawner;
     this.resumeSpawner = deps.resumeSpawner ?? defaultResumeSpawner;
     this.resolveAgentAuth = deps.resolveAgentAuth ?? unsealAgentAuth;
-    this.setupHeadroom = deps.setupHeadroom ?? setupHeadroomForSelfHosted;
-    this.isHeadroomInstalled =
-      deps.isHeadroomInstalled ?? (() => defaultHeadroomRunner.which('headroom'));
-    this.getFreeDisk = deps.getFreeDisk ?? getFreeDiskBytes;
     this.metrics = deps.metricsCollector ?? new MetricsCollector();
     this.onIdentityRejected = deps.onIdentityRejected ?? defaultOnIdentityRejected;
     this.disableService = deps.disableService ?? defaultDisableService;
-    this.teardownHeadroom = deps.teardownHeadroom ?? defaultTeardownHeadroom;
     this.selfUpdate = deps.selfUpdate ?? runSelfUpdate;
     this.now = deps.now ?? (() => Date.now());
     this.onUpdated = deps.onUpdated ?? defaultOnUpdated;
@@ -1308,16 +1043,6 @@ export class HostAgentSupervisor {
     // native-TUI path OFF, exactly like a deploy child's CODEAM_AUTO_TOKEN).
     this.resumePersistedSession();
 
-    // Proactively warm the Headroom proxy on boot/resume. A codespace resume /
-    // container restart kills the detached :8787 proxy, and the resume path never
-    // relaunches it (readHeadroomChildEnv re-injects only the ENV, pointing the
-    // agent at a dead port), so the resumed session's FIRST turn would otherwise
-    // fail "API Error: ConnectionRefused" (Rafael, 2026-08-08). ensureHeadroom-
-    // ProxyReady no-ops when Headroom isn't configured; when it is + :8787 is
-    // down it respawns + warms the ONNX model NOW, so the user's first message
-    // doesn't pay the respawn latency mid-turn (the per-turn ensure in
-    // AcpClient.runPrompt is the reactive belt; this is the proactive one).
-    void ensureHeadroomProxyReady(makeRealProxySupervisorDeps()).catch(() => undefined);
 
     // Boot reconcile: a fresh supervisor owns NO children yet (a restart /
     // crash / reboot killed any previous ones), so the authoritative live
@@ -1634,10 +1359,6 @@ export class HostAgentSupervisor {
       // restart us into a cleanly-failing redeem.)
       log.warn('host-agent', `self_hosted_wipe received id=${cmd.id} — de-provisioning`);
       this.stop();
-      // Reap the per-host Headroom proxy too — stop() only kills tracked
-      // children, and the proxy is detached with no handle, so it would
-      // otherwise leak (holds :8787, keeps uvicorn + subscription polling alive).
-      this.teardownHeadroom();
       this.disableService();
       if (!this.healing) {
         this.healing = true;
@@ -2141,7 +1862,7 @@ export class HostAgentSupervisor {
         // (or a supervisor restart) re-injects it — otherwise the woken bare
         // `codeam` resume had no ANTHROPIC_BASE_URL/AUTH_TOKEN and every prompt
         // failed with "Authentication required" (Rafael, 2026-08-05). Mirrors
-        // the Headroom `persistHeadroomConfig` → `readHeadroomChildEnv` pattern.
+        // el mismo patron de config persistida → env de hijos.
         persistHouseProxyConfig({
           baseUrl,
           token,
@@ -2250,94 +1971,6 @@ export class HostAgentSupervisor {
         childEnv.CODEAM_ONBOARDING_DISABLED = '1';
       }
 
-      // 1d) Headroom local compression proxy — mirrors the codespace wiring.
-      //     Best-effort: a failed/absent headroom install must never block the
-      //     deploy. We PERSIST the result to ~/.codeam/headroom-config.json so a
-      //     later resume / supervisor restart (systemd / periodic self-update)
-      //     re-injects the same HEADROOM_* env from the persisted source of
-      //     truth — reporting survives, not just on the fresh-deploy path. We
-      //     only persist enabled:true when setup fully succeeded so a later
-      //     resume never points the agent at a dead proxy.
-      if (
-        payload.headroomEnabled &&
-        payload.headroomAgent &&
-        payload.headroomSavingsIngestUrl &&
-        isHeadroomSupportedAgent(payload.headroomAgent)
-      ) {
-        report('headroom', 'setting up Headroom proxy');
-        // Disk preflight: Headroom's compression engines (CPU PyTorch + ML/AST
-        // extras) need ~2 GB. On a host without the room, SKIP the install and
-        // tell the user in the app rather than fill their disk — the agent
-        // still runs, just without token-saving compression.
-        const freeBytes = await this.getFreeDisk(os.homedir());
-        // The disk gate is an INSTALL preflight — the ~1.5 GB of ONNX engines +
-        // the Kompress model. A box where Headroom is ALREADY installed needs
-        // none of that room to keep compressing + reporting, so a low-disk
-        // reading must NOT disable an existing, working proxy. (Observed live:
-        // a box compressing 22.8% had reporting silently turned off here —
-        // free=2.0GB rounding under the 2GB gate — dropping real savings.)
-        // setupHeadroom below is idempotent on an installed box: pip is a fast
-        // "already satisfied" no-op and `headroom init` re-runs cleanly.
-        const alreadyInstalled = this.isHeadroomInstalled();
-        if (!alreadyInstalled && freeBytes !== null && freeBytes < HEADROOM_MIN_FREE_DISK_BYTES) {
-          const freeGb = (freeBytes / 1e9).toFixed(1);
-          const needGb = Math.round(HEADROOM_MIN_FREE_DISK_BYTES / 1e9);
-          report(
-            'headroom',
-            `Token-saving optimizer skipped — needs ~${needGb} GB free, host has ${freeGb} GB. The agent runs normally without it.`,
-          );
-          log.warn(
-            'host-agent',
-            `Headroom skipped: insufficient disk (free=${freeGb}GB < ${needGb}GB)`,
-          );
-          persistHeadroomConfig({ enabled: false });
-          // fall through to spawn the agent without Headroom
-        } else {
-          if (alreadyInstalled && freeBytes !== null && freeBytes < HEADROOM_MIN_FREE_DISK_BYTES) {
-            log.info(
-              'host-agent',
-              `Headroom already installed — bypassing install disk gate (free=${(freeBytes / 1e9).toFixed(1)}GB); reporting stays enabled`,
-            );
-          }
-          const headroomOk = await this.setupHeadroom(payload.headroomAgent);
-          if (headroomOk) {
-            // Use the mapped headroom kind (e.g. `claude_code` → `claude`) so the
-            // persisted/env value matches what `headroom init` registered and what
-            // the reporter reports as `dto.agentId` — consistent with codespaces,
-            // which already report `claude`.
-            persistHeadroomConfig({
-              enabled: true,
-              agent: agentIdToHeadroomKind(payload.headroomAgent),
-              ingestUrl: payload.headroomSavingsIngestUrl,
-            });
-            log.info(
-              'host-agent',
-              'Headroom proxy ready; persisted headroom config for child spawns',
-            );
-          } else {
-            // Setup failed → persist disabled so a later resume doesn't point the
-            // agent at a dead proxy (and clears any stale enabled config).
-            persistHeadroomConfig({ enabled: false });
-            log.warn(
-              'host-agent',
-              'Headroom setup failed (best-effort) — child will run without Headroom',
-            );
-          }
-        }
-      } else if (payload.headroomEnabled === false) {
-        // Feature explicitly turned off for this deploy — clear any stale
-        // enabled config so a subsequent resume doesn't resurrect Headroom.
-        persistHeadroomConfig({ enabled: false });
-      } else if (payload.headroomEnabled && payload.headroomAgent && !isHeadroomSupportedAgent(payload.headroomAgent)) {
-        // Headroom can't wrap this agent (e.g. gemini). Wrapping would mislaunch
-        // it as the agentIdToHeadroomKind fallback (Claude), so disable Headroom
-        // and let the agent run natively via its own runtime.
-        log.info(
-          'host-agent',
-          `Headroom unsupported for agent '${payload.headroomAgent}' — running it natively (no wrap)`,
-        );
-        persistHeadroomConfig({ enabled: false });
-      }
 
       // 1e) Agent Toolkits integrations manifest — mirrors the codespace
       //     bootstrap write so the pair-auto child's `start()` (which reads
@@ -2394,7 +2027,7 @@ export class HostAgentSupervisor {
       }
 
       // 2) Spawn the supervised `pair-auto` child. Routed through
-      //    spawnSessionChild so the persisted HEADROOM_* env (the source of
+      //    spawnSessionChild so el env persistido (la fuente de
       //    truth shared with any resume / restart spawn) is merged in one
       //    place — reporting survives every spawn, not just this one.
       report('spawning', 'starting agent');
@@ -2484,22 +2117,16 @@ export class HostAgentSupervisor {
   }
 
   /**
-   * Spawn a supervised `pair-auto` session child, merging the persisted
-   * Headroom env on top of the caller's env. This is the SINGLE spawn site for
-   * session children: the fresh-deploy path and any future resume / restart
-   * path both go through here, so the HEADROOM_* env (read from
-   * `~/.codeam/headroom-config.json`, the source of truth a prior deploy wrote)
-   * is injected on EVERY spawn — reporting survives session resumes and
-   * supervisor restarts (systemd / periodic self-update), not just fresh
-   * deploys. `readHeadroomChildEnv()` returns `{}` when Headroom is disabled or
-   * was never set up, so this is a no-op there (never-break).
+   * Spawn a supervised `pair-auto` session child. Este es el UNICO sitio de
+   * spawn de hijos de sesion: el deploy fresco y cualquier resume / restart
+   * futuro pasan por aqui.
    */
   private spawnSessionChild(
     env: Record<string, string>,
     cwd: string,
     args: string[] = [],
   ): ChildProcess {
-    return this.spawnChild({ ...env, ...readHeadroomChildEnv() }, cwd, args);
+    return this.spawnChild(env, cwd, args);
   }
 
   /**
@@ -2531,7 +2158,7 @@ export class HostAgentSupervisor {
       // (2026-07-29). Fall back to process.cwd() for older sessions with no
       // persisted cwd (prior behavior).
       const cwd = session.cwd && fs.existsSync(session.cwd) ? session.cwd : process.cwd();
-      // Re-inject BOTH the Headroom env AND the house-proxy env
+      // Re-inject the house-proxy env
       // (ANTHROPIC_BASE_URL + AUTH_TOKEN + model pins + CLAUDE_CONFIG_DIR). The
       // resume is a bare `codeam` that does NOT re-process the deploy, so
       // without this the house agent woke without its proxy auth → every prompt
@@ -2539,7 +2166,7 @@ export class HostAgentSupervisor {
       // Returns `{}` when the box has no persisted house config (BYO deploy →
       // its own credential path is used instead).
       const proc = this.resumeSpawner(
-        { ...readHeadroomChildEnv(), ...readHouseProxyChildEnv() },
+        readHouseProxyChildEnv(),
         cwd,
       );
       // ⚠️ The child MUST be registered under its DEPLOY id, never the

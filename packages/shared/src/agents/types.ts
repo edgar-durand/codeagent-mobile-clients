@@ -11,14 +11,6 @@ export type AgentId =
 
 export type AgentAuthKind = 'oauth_token' | 'api_key' | 'setup_token';
 
-/**
- * The agent kinds Headroom (the token-compression proxy) can actually
- * wrap/route — the exact subcommands `headroom init --global <kind>`
- * accepts. NOT an alias of {@link AgentId}: cursor / gemini / aider run
- * native (Headroom disabled) because `headroom init` has no recipe that
- * routes them.
- */
-export type HeadroomKind = 'claude' | 'codex' | 'copilot';
 
 export interface AgentAuth {
   kind: AgentAuthKind;
@@ -75,20 +67,6 @@ export interface AgentMetadata {
   enabled: boolean;
   supportedAuthKinds: AgentAuthKind[];
   preferredAuthKind: AgentAuthKind;
-  /**
-   * Whether Headroom can wrap/route this agent (claude / codex / copilot
-   * only). Canonical truth previously scattered across two prefix-matching
-   * predicates: `isHeadroomSupportedAgent` (CLI `host-agent.ts`) and
-   * `isHeadroomWrappableAgent` (api-v2 `codespaces/headroom.ts`). When
-   * false the agent MUST run native — wrapping an unsupported agent
-   * mislaunches it as Claude (the 2026-06 Cursor incident).
-   */
-  headroomWrappable: boolean;
-  /**
-   * The `headroom init --global <kind>` subcommand for this agent.
-   * Present iff {@link headroomWrappable} is true.
-   */
-  headroomKind?: HeadroomKind;
   /**
    * Whether the agent runs over ACP (Agent Client Protocol) in the CLI —
    * mirrors which agents have an entry in the CLI's ACP adapter registry

@@ -88,11 +88,6 @@ import type { AcpPublisher } from './publisher';
 import { buildAcpPromptBlocks, type PromptBlock } from './buildAcpPromptBlocks';
 import { maybePrefaceAgentStandard } from '../agent-standard';
 import { shouldOfferOneMRecovery } from './oneMContextRecovery';
-import {
-  looksLikeBudgetExceeded,
-  extractBudgetPeriod,
-  type BudgetRecovery,
-} from './budgetRecovery';
 import { formatPromptEchoLine, formatAgentReplyLine } from './promptEcho';
 import {
   AUTH_FAILURE_MESSAGE,
@@ -106,7 +101,7 @@ import {
   replyIsHouseAgentLimit,
 } from './failure-messages';
 import { agentHooks } from './agent-hooks';
-import { postBudgetReached, reportCredentialInvalid } from './backend-reports';
+import { reportCredentialInvalid } from './backend-reports';
 import type { AcpHistory, AcpRunnerOptions, StreamingState } from './runner';
 
 /**
@@ -131,10 +126,6 @@ export interface AcpSessionContext {
   getBeads: () => StartedBeads | null;
   publisher: AcpPublisher;
   recentStderr: string[];
-  /** On-demand Headroom budget-exceeded recovery (offer pause/raise options). */
-  budgetRecovery: BudgetRecovery<PromptBlock>;
-  /** Fire-once guard for the budget-reached backend POST. */
-  budgetReachedFlag: { get: () => boolean; set: (v: boolean) => void };
   /**
    * Invoked by `resume_session` after a successful loadSession so the OWNER
    * of the session machinery re-points its active-conversation id — the
@@ -205,7 +196,7 @@ export interface AcpSessionContext {
  */
 export type AcpSessionHandles = Pick<
   AcpSessionContext,
-  'client' | 'acpSessionId' | 'history' | 'jsonlHistory' | 'agentCaps' | 'budgetRecovery'
+  'client' | 'acpSessionId' | 'history' | 'jsonlHistory' | 'agentCaps'
 >;
 
 /**
@@ -360,7 +351,7 @@ export function buildLegacyContextForACP(
     relay,
     pluginId: opts.pluginId,
     sessionId: opts.sessionId,
-    // The running ACP agent (claude/codex/gemini/cursor). REQUIRED: headroom_configure
+    // The running ACP agent (claude/codex/gemini/cursor). REQUIRED: los handlers
     // resolves the agent from ctx.agentId; without it the enable gate sees '' and
     // returns {supported:false} for a real Claude session.
     agentId: opts.agent,
@@ -564,7 +555,7 @@ function applySquadContext(
  * invalid-params-shaped rejection) — anything else propagates untouched, so a
  * genuinely failed turn is never silently re-run. The decision is remembered
  * on the squad member so the rest of the session goes straight to text.
- * `blocks` is mutated in place: downstream consumers (budget recovery) must
+ * `blocks` is mutated in place: downstream consumers must
  * see the array the agent actually received.
  */
 async function promptWithContextFallback(
@@ -822,8 +813,7 @@ async function startTaskH(ctx: AcpCommandContext): Promise<void> {
   // budgetRecovery, so those are read from `ctx` AFTER the routing block below
   // (see {@link AcpSessionHandles}); destructuring them here would pin this
   // turn to the adapter the swap just stopped.
-  const { cmd, relay, streaming, opts, turnFiles, publisher, recentStderr, budgetReachedFlag } =
-    ctx;
+  const { cmd, relay, streaming, opts, turnFiles, publisher, recentStderr } = ctx;
   const payload = cmd.payload as StartTaskPayload | undefined;
   // Agent Squad @-mention routing: the task carries the MENTIONED agent's id.
   // Swap onto it BEFORE anything else runs — a failed swap fails the TASK
@@ -928,7 +918,7 @@ async function startTaskH(ctx: AcpCommandContext): Promise<void> {
   for (;;) {
     // Re-read on EVERY iteration: an auto hop swaps the agent, which replaces
     // these handles exactly like the @-mention route does.
-    const { client, history, budgetRecovery } = ctx;
+    const { client, history } = ctx;
     // Tracks whether the turn already reached a terminal, VISIBLE close (reply
     // delivered + "Thinking…" cleared). Once true, the only awaited work left is
     // the command ACK — and a long (>10 min) turn's `command:<id>` record can
@@ -1207,26 +1197,6 @@ async function startTaskH(ctx: AcpCommandContext): Promise<void> {
       // is a false "service disruption" wall. The error text is the only
       // trustworthy signal that the provider actually rejected the call.
       //
-      // Headroom budget-exceeded 429 — checked BEFORE the 1M gate because
-      // both are 429s and the discriminator is the proxy's exact body.
-      // The proxy is local; the agent provider is healthy. Fire the backend
-      // notification once per session (idempotency is the backend's job);
-      // then offer the two-option tappable recovery.
-      if (looksLikeBudgetExceeded(`${detail}\n${recentStderr.join('\n')}`)) {
-        await streaming.closeAll();
-        if (!budgetReachedFlag.get()) {
-          budgetReachedFlag.set(true);
-          void postBudgetReached({
-            sessionId: opts.sessionId,
-            pluginId: opts.pluginId,
-            pluginAuthToken: opts.pluginAuthToken,
-            agent: opts.agent,
-            period: extractBudgetPeriod(`${detail}\n${recentStderr.join('\n')}`),
-          });
-        }
-        await budgetRecovery.offer(cmd.id, turnBlocks, `${detail}\n${recentStderr.join('\n')}`);
-        return;
-      }
       // 1M-context usage-credits gate (Rafael 2026-06-24) is classified by
       // failureBubble → ONE_M_CREDITS_MESSAGE (reconnect the Claude
       // subscription). Disabling 1M doesn't fix a credential-type credits
@@ -1285,14 +1255,14 @@ async function startTaskH(ctx: AcpCommandContext): Promise<void> {
 
 /**
  * `squad_configure` — read/write the session's autonomous-handoff mode
- * (`headroom_configure` shape). `set` persists to `~/.codeam/config.json` so
+ * (misma forma que el resto). `set` persists to `~/.codeam/config.json` so
  * the mode survives a CLI restart; both actions ack the state AFTER the
  * command, including the budget the CLI actually applied (a malformed
  * `hopBudget` is CLAMPED, never rejected — the ack is the source of truth for
  * what the UI should render).
  *
  * The PRO gate lives on the BACKEND's command-send path (403 PREMIUM_REQUIRED),
- * exactly like `headroom_configure`; the CLI's own gate is `roster.handoffsEnabled`
+ * exactly like `beads_configure`; the CLI's own gate is `roster.handoffsEnabled`
  * at proposal time, so enabling the mode on a FREE plan is inert rather than
  * an error.
  */
@@ -1540,7 +1510,7 @@ async function ackEmptyH(ctx: AcpCommandContext): Promise<void> {
 }
 
 async function selectOptionH(ctx: AcpCommandContext): Promise<void> {
-  const { cmd, client, relay, streaming, history, budgetRecovery } = ctx;
+  const { cmd, client, relay, streaming, history } = ctx;
   // Event-driven answer arrival — the user tapped an option on
   // mobile's awaiting-answer sheet or select_prompt block, and
   // the backend pushed the command via the CLI's SSE relay.
@@ -1566,10 +1536,6 @@ async function selectOptionH(ctx: AcpCommandContext): Promise<void> {
       : typeof payload?.answer === 'string' && payload.answer.length > 0
         ? payload.answer
         : undefined;
-  // On-demand Headroom budget-exceeded recovery: if THIS select is a
-  // "Pause budget this session" or "Raise budget" action we offered
-  // after a budget 429, handle it locally — never route into resolveSelection.
-  if (await budgetRecovery.tryRecover(cmd.id, index)) return;
   const result = streaming.resolveSelection(index, optionId);
   switch (result.kind) {
     case 'resolved':

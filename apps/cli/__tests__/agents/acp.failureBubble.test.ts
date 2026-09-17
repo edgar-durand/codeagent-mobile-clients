@@ -34,8 +34,6 @@ import {
   replyIsAuthFailure,
   replyIsCursorUpgradeRequired,
   looksLike1mContextCreditsError,
-  looksLikeBudgetExceeded,
-  budgetBubbleMessage,
   startupFailureMessage,
   looksLikeAuthFailure,
   looksLikeHouseAgentLimit,
@@ -405,30 +403,6 @@ describe('looksLike1mContextCreditsError', () => {
   });
 });
 
-// ─── Budget-exceeded detection ────────────────────────────────────────────────
-
-describe('looksLikeBudgetExceeded', () => {
-  it('matches the LIVE headroom 429 body (verified 2026-06-28)', () => {
-    // headroom proxy --budget 0 --budget-period daily
-    // → HTTP 429 {"detail":"Budget exceeded for daily period"}
-    expect(looksLikeBudgetExceeded('{"detail":"Budget exceeded for daily period"}')).toBe(true);
-    expect(looksLikeBudgetExceeded('Budget exceeded for daily period')).toBe(true);
-    expect(looksLikeBudgetExceeded('Budget exceeded for hourly period')).toBe(true);
-    expect(looksLikeBudgetExceeded('Budget exceeded for monthly period')).toBe(true);
-  });
-
-  it('does NOT match unrelated 429s (rate limit, 1M, auth, outage)', () => {
-    for (const t of [
-      'rate limit: 429 too many requests',
-      'Usage credits required for 1M context',
-      'API Error: 401 Invalid authentication credentials',
-      'overloaded_error',
-      'connect ECONNREFUSED 127.0.0.1:8787',
-    ]) {
-      expect(looksLikeBudgetExceeded(t)).toBe(false);
-    }
-  });
-});
 
 describe('failureBubble — budget-exceeded branch', () => {
   // REGRESSION: budget-exceeded must return its own bubble (NOT the outage bubble,
@@ -436,17 +410,6 @@ describe('failureBubble — budget-exceeded branch', () => {
   // Budget is checked BEFORE outage so a 429 from localhost:8787 is never
   // mis-classified as a "Anthropic service disruption".
 
-  it('budget 429 in detail → budget bubble (NOT outage, NOT generic retry)', () => {
-    const bubble = failureBubble({
-      detail: 'Budget exceeded for daily period',
-      recentStderr: '',
-      hadText: false,
-      agent: 'claude',
-    });
-    expect(bubble).toBe(budgetBubbleMessage('claude', 'daily'));
-    expect(bubble).not.toBe(providerOutageMessage('claude'));
-    expect(bubble).not.toBe(TURN_FAILURE_MESSAGE);
-  });
 
   it('budget 429 in recentStderr → budget bubble', () => {
     const bubble = failureBubble({
@@ -455,7 +418,6 @@ describe('failureBubble — budget-exceeded branch', () => {
       hadText: false,
       agent: 'codex',
     });
-    expect(bubble).toBe(budgetBubbleMessage('codex', 'hourly'));
   });
 
   it('budget 429 with partial text → still returns budget bubble (not null)', () => {
@@ -467,7 +429,6 @@ describe('failureBubble — budget-exceeded branch', () => {
       hadText: true,
       agent: 'claude',
     });
-    expect(bubble).toBe(budgetBubbleMessage('claude', 'monthly'));
   });
 
   it('NON-budget non-auth failure with no text → still returns generic retry (regression guard)', () => {

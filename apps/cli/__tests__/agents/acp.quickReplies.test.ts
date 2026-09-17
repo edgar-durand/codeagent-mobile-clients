@@ -108,8 +108,6 @@ function makeHarness(opts: {
       () => null,
       publisher,
       [],
-      { offer: vi.fn(async () => undefined), tryRecover: vi.fn(async () => false) } as never,
-      { get: () => false, set: vi.fn() },
     );
 
   return { run, publishOutput, inputSuggestionCalls, sendResult };

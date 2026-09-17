@@ -273,9 +273,6 @@ export function makeConfig(baseDir?: string) {
 const CODESPACE_ENV_KEYS = [
   'PREVIEW_TUNNEL_TOKEN',
   'PREVIEW_TUNNEL_HOSTNAME',
-  'HEADROOM_ENABLED',
-  'HEADROOM_AGENT',
-  'HEADROOM_SAVINGS_INGEST_URL',
 ] as const;
 
 /**
@@ -284,10 +281,9 @@ const CODESPACE_ENV_KEYS = [
  *
  * WHY: the codespace serving daemon is spawned via `setsid` with NO shell rc
  * sourced, so env vars exported by the backend bootstrap
- * (PREVIEW_TUNNEL_TOKEN/HOSTNAME, HEADROOM_*) never reach the daemon's
+ * (PREVIEW_TUNNEL_TOKEN/HOSTNAME) never reach the daemon's
  * `process.env`. Symptoms: preview falls back to a quick trycloudflare tunnel
- * instead of the NAMED tunnel (which fails to resolve → -1003), and the
- * Headroom savings reporter never starts (admin dashboard empty). The backend
+ * instead of the NAMED tunnel (which fails to resolve → -1003). The backend
  * now also drops those same vars into a JSON file; reading it here restores
  * them however the daemon was spawned.
  *

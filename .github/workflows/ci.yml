@@ -180,85 +180,6 @@ jobs:
           DOCKER_E2E: '1'
         run: npx vitest run host-agent.docker.e2e
 
-      # Headroom on-demand — REAL Docker integration test.
-      # Boots a container (Python 3.12 + Node 20 + the built codeam-cli) and
-      # runs the real Headroom provisioning lifecycle inside it:
-      #   enable  → headroom init --global claude + proxy spawn
-      #             (pip install + model download are baked into the image layer)
-      #   disable → restoreAgentHeadroomConfig + proxy teardown
-      # Unlike the host-agent Docker E2E (which stubs the backend), this test
-      # does NOT stub pip, headroom, or HuggingFace — the provisioning is REAL.
-      # Gated to Linux + Node 20 (one matrix cell) because:
-      #   • GitHub-hosted ubuntu runners ship a working Docker daemon.
-      #   • The model is baked into the image; Docker layer cache keeps it fast.
-      #   • The headroom binary is Linux-first; the macOS/Windows paths differ.
-      # RUN_HEADROOM_INT=1 flips the gate on; on every other cell (and on a
-      # developer's laptop without the env var) the suite self-skips cleanly.
-      #
-      # Layer-cache strategy:
-      # The Dockerfile bakes `pip install headroom-ai[proxy,code,image]` and the
-      # ~840 MB HuggingFace model download into Docker BUILD layers. We cache
-      # those layers across CI runs using `docker buildx` + GitHub Actions cache
-      # (type=gha). On the first run (cold cache) the build downloads ~840 MB
-      # and stores the layers; on subsequent runs the cache restores them in
-      # seconds. The cache key is the Dockerfile hash so a Dockerfile change
-      # (e.g. pinning a new headroom-ai version) busts the cache automatically.
-      - name: Set up Docker Buildx (for layer cache)
-        if: matrix.os == 'ubuntu-latest' && matrix.node == '20'
-        uses: docker/setup-buildx-action@v4
-
-      - name: CLI build (for Headroom Docker integration test)
-        if: matrix.os == 'ubuntu-latest' && matrix.node == '20'
-        working-directory: apps/cli
-        run: npm run build
-
-      - name: CLI Headroom Docker integration test (on-demand enable/disable)
-        if: matrix.os == 'ubuntu-latest' && matrix.node == '20'
-        working-directory: apps/cli
-        env:
-          RUN_HEADROOM_INT: '1'
-          # The test reads HEADROOM_IMAGE_TAG and, when set, skips its own
-          # docker build and reuses the pre-built image loaded below.
-          HEADROOM_IMAGE_TAG: codeam-headroom-provision-e2e:ci
-        run: |
-          # Pre-build the headroom test image with Docker BuildKit layer cache.
-          # This separates image-build (cached) from test execution so failures
-          # in each phase are easy to distinguish in CI logs.
-          DOCKERFILE="$GITHUB_WORKSPACE/apps/cli/__tests__/docker/headroom-provision.Dockerfile"
-          DOCKER_DIR="$GITHUB_WORKSPACE/apps/cli/__tests__/docker"
-
-          # Copy the built driver + packed tarball into the docker build context.
-          # Must happen BEFORE the buildx build — the Dockerfile COPYs both files.
-          cd "$GITHUB_WORKSPACE/apps/cli"
-          npm pack --silent
-          TARBALL=$(ls codeam-cli-*.tgz | tail -1)
-          cp "$TARBALL" "$DOCKER_DIR/codeam-cli.tgz"
-          rm -f "$TARBALL"
-          cp dist/headroom-runner-driver.js "$DOCKER_DIR/headroom-runner-driver.js"
-
-          # Build the image with GHA layer cache and LOAD it into the local daemon
-          # so `docker run`/`docker exec` can use it without a second build.
-          # cache-to exports the layers; cache-from restores them on the next run.
-          # Mode=max caches intermediate layers too (pip install and model download
-          # are two separate RUN steps, each its own layer — max mode caches both).
-          docker buildx build \
-            --cache-from type=gha,scope=headroom-provision \
-            --cache-to   type=gha,scope=headroom-provision,mode=max \
-            --load \
-            -f "$DOCKERFILE" \
-            -t codeam-headroom-provision-e2e:ci \
-            --build-arg CODEAM_TARBALL=codeam-cli.tgz \
-            "$DOCKER_DIR"
-
-          # Clean up context copies — the test reuses the pre-built image via
-          # HEADROOM_IMAGE_TAG and does NOT run its own docker build, so these
-          # files are no longer needed.
-          rm -f "$DOCKER_DIR/codeam-cli.tgz" "$DOCKER_DIR/headroom-runner-driver.js"
-
-          # Run the integration test. HEADROOM_IMAGE_TAG tells the test to reuse
-          # the image loaded above instead of doing a redundant second build.
-          npx vitest run headroom-provision
-
       # Fleet control plane — REAL Docker integration test (Phase 2 gate).
       # Builds the real apps/box image (installs codeam-cli from npm — the
       # box is NOT built from this branch's tarball, by design: it tracks
@@ -273,7 +194,7 @@ jobs:
       # Gated to Linux + Node 20 (Docker-capable, one cell); RUN_FLEET_INT=1
       # flips it on, every other cell self-skips cleanly. Layer-caches the
       # box image build across runs (keyed on the Dockerfile hash), like
-      # the Headroom step above.
+      # the fleet step's own cache key.
       # The PINNED integration MCP servers, driven for real over stdio: `npx`
       # downloads the exact pin the registry hands the `codeam mcp-run` shim and
       # the test asserts `tools/list` serves the tools users reach for. This is

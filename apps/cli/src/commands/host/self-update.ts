@@ -137,7 +137,7 @@ async function installedVersion(deps: SelfUpdateDeps): Promise<string | null> {
 /**
  * Run a command via execFile, resolving to `{ code, stdout, stderr }` on
  * completion/timeout — never rejects. Mirrors the best-effort, bounded
- * shape the Headroom runner uses. `cmd` is `npm` for the normal path and
+ * shape the OS runner uses. `cmd` is `npm` for the normal path and
  * `sudo` for the EACCES escalation retry (args then lead with `npm`).
  */
 function runCmd(
@@ -242,7 +242,7 @@ export async function runSelfUpdateWith(deps: SelfUpdateDeps): Promise<SelfUpdat
     // unprivileged user inside a TTY-less systemd unit can never answer a
     // password prompt, so an un-preflighted `sudo npm install` can only burn
     // its full 180 s timeout and log a failure whose cause we already knew.
-    // Same lesson, same fix as `ensurePythonInstaller` in the Headroom
+    // Same lesson, same fix as `ensurePythonInstaller` en el
     // provisioner.
     if (install.code !== 0 && !deps.isRoot() && /EACCES/i.test(install.stderr)) {
       const canSudo = await deps.run('sudo', ['-n', 'true'], SUDO_PREFLIGHT_TIMEOUT_MS);

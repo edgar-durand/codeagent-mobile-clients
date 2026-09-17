@@ -16,7 +16,7 @@
 //
 // Raising the budget stops a healthy-but-slow server from being declared dead.
 // This removes the reason it was slow. The download belongs in the image build,
-// next to the CLI, the agents and Headroom's model — the Dockerfile already
+// next to the CLI and the agents — the Dockerfile already
 // states the rule for pglite: "Instalado en la imagen y no al vuelo porque
 // bajarlo en el primer preview metería su descarga en el camino crítico del
 // usuario".

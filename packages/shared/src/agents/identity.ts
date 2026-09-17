@@ -15,7 +15,7 @@
  *   - mobile `apps/mobile/src/lib/agent-id-map.ts`.
  */
 
-import type { AgentId, HeadroomKind } from './types';
+import type { AgentId } from './types';
 import { AGENT_REGISTRY, isKnownAgentId } from './registry';
 
 // ─── House agent constants ───────────────────────────────────────────────────
@@ -244,42 +244,3 @@ export function normalizeAgentId(raw: string): AgentId | null {
   return AGENT_ID_ALIASES[unprefixed] ?? null;
 }
 
-// ─── Headroom kind derivation ────────────────────────────────────────────────
-
-/**
- * The `headroom init --global <kind>` subcommand for an agent id, derived
- * from the registry's `headroomKind` flags — or `null` for unknown or
- * non-wrappable agents (cursor / gemini / aider / anything else).
- *
- * ⚠️ NEVER falls back to `'claude'`. The historical CLI fallback is how
- * the 2026-06 Cursor incident happened: an unsupported agent slipped
- * through, defaulted to `claude`, and `headroom wrap claude` launched
- * Claude Code instead of the user's agent. Callers that genuinely need a
- * default (e.g. picking an init subcommand AFTER the wrappable gate has
- * already passed) apply it themselves — see the CLI's
- * `agentIdToHeadroomKind` wrapper.
- *
- * Matching mirrors the historical predicates on BOTH sides (CLI
- * `isHeadroomSupportedAgent`, api-v2 `isHeadroomWrappableAgent`):
- * case-insensitive, `_`/`-` tolerant, prefix match — so `claude_code`,
- * `Claude-Code`, `codex_cli`, `copilot-cli` all resolve.
- */
-export function headroomKindFor(agentId: string): HeadroomKind | null {
-  const normalized = (agentId ?? '').toLowerCase().replace(/[_-]/g, '');
-  if (!normalized) return null;
-  for (const meta of Object.values(AGENT_REGISTRY)) {
-    if (meta.headroomKind !== undefined && normalized.startsWith(meta.id)) {
-      return meta.headroomKind;
-    }
-  }
-  return null;
-}
-
-/**
- * Registry-derived replacement for the two scattered predicates
- * (`isHeadroomSupportedAgent` in the CLI, `isHeadroomWrappableAgent` in
- * api-v2). Accepts both id spaces (`claude_code` and `claude`).
- */
-export function isHeadroomWrappable(agentId: string): boolean {
-  return headroomKindFor(agentId) !== null;
-}

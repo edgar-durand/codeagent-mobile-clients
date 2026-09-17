@@ -14,7 +14,7 @@
  *   5. persist + re-announce so mobile, heartbeats, and future restarts all
  *      agree on the new agent.
  *
- * Progress/status events mirror the `headroom_configure` discipline: POSTs
+ * Progress/status events mirror the `beads_configure` discipline: POSTs
  * are serialized on a local chain so the backend republishes them strictly
  * in emit order; the terminal ack still rides the command relay.
  *
@@ -371,7 +371,7 @@ export type SquadEventPoster = (
   payload: Record<string, unknown>,
 ) => Promise<unknown>;
 
-/** Build a serialized emitter over a raw poster (headroom emit-chain shape).
+/** Build a serialized emitter over a raw poster (emit-chain serializada).
  *  Accepts the WIDE {@link SquadEventType} union so ONE chain serves both the
  *  switch events and the handoff events; the returned emitter is still
  *  assignable to the narrower {@link SwitchAgentDeps.postEvent}. */
