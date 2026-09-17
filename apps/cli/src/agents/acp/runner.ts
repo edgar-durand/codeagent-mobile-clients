@@ -152,7 +152,7 @@ export {
   startupCredentialInvalidReason,
   startupFailureMessage,
 } from './failure-messages';
-export { postBudgetReached, reportCredentialInvalid } from './backend-reports';
+export { reportCredentialInvalid } from './backend-reports';
 export {
   ACP_QUICK_REPLIES,
   assembleAcpCommandContext,

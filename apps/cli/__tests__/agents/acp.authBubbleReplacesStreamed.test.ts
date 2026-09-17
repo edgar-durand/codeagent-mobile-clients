@@ -112,8 +112,6 @@ function makeHarness() {
       () => null,
       publisher,
       [],
-      { offer: vi.fn(async () => undefined), tryRecover: vi.fn(async () => false) } as never,
-      { get: () => false, set: vi.fn() },
     );
 
   return { run, client, sendResult, terminalTextFrames, publishOutput };
@@ -229,8 +227,6 @@ describe('ACP start_task — generic failure with partial text keeps the partial
       () => null,
       publisher,
       [],
-      { offer: vi.fn(async () => undefined), tryRecover: vi.fn(async () => false) } as never,
-      { get: () => false, set: vi.fn() },
     );
 
     const finals = publishOutput.mock.calls
@@ -321,8 +317,6 @@ describe('ACP start_task — tool/thinking-only turn that throws keeps its trans
       () => null,
       publisher,
       [],
-      { offer: vi.fn(async () => undefined), tryRecover: vi.fn(async () => false) } as never,
-      { get: () => false, set: vi.fn() },
     );
 
     // The generic destructive bubble must NEVER be published.
@@ -452,8 +446,6 @@ describe('ACP start_task — `partialReplyKept` rides the failed ack ONLY on the
       () => null,
       publisher,
       [],
-      { offer: vi.fn(async () => undefined), tryRecover: vi.fn(async () => false) } as never,
-      { get: () => false, set: vi.fn() },
     );
 
     const terminalText = publishOutput.mock.calls
