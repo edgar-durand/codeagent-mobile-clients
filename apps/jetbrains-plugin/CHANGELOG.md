@@ -4,6 +4,13 @@ All notable changes to the CodeAgent-Mobile JetBrains plugin are documented here
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.75.7] — 2026-09-19
+
+### Fixed
+
+- **cli:** Strip the retired Headroom proxy from ~/.claude/settings.json on start
+- **cli:** Log.info takes (tag, msg) — caught by CI typecheck
+
 ## [2.75.6] — 2026-09-17
 
 ### CI
