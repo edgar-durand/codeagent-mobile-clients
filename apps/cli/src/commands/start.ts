@@ -244,7 +244,7 @@ export async function start(
   if (!isLocalSession()) {
     const cleaned = sanitizeRetiredProxyConfig();
     if (cleaned.changed) {
-      log.info(`claude — removed retired Headroom config: ${cleaned.removed.join(', ')}`);
+      log.info('claude', `removed retired Headroom config: ${cleaned.removed.join(', ')}`);
     }
   }
   const beadsReady = provisionBeadsForStart({
