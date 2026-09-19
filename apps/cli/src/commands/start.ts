@@ -39,6 +39,7 @@ import { capture, identifyUser, shutdownTelemetry } from '../services/telemetry.
 import { provisionBeadsForStart } from '../beads/wiring';
 import { startClaudeCredentialSync } from '../agents/claude/credential-sync';
 import { ensureBeadsWorkflowHint } from '../beads/workflow-hint';
+import { sanitizeRetiredProxyConfig } from '../agents/retired-proxy-cleanup';
 import { ensureAgentStandard } from '../agents/agent-standard';
 import { buildMcpServersForStart } from '../integrations/provision';
 import { refreshIntegrationsManifest } from '../integrations/refresh-manifest';
@@ -228,6 +229,23 @@ export async function start(
   // ACP agents get it as a one-time prompt preface in the runner. Best-effort.
   if (!isLocalSession() && session.agent === 'claude') {
     ensureAgentStandard();
+  }
+  // Strip the RETIRED Headroom proxy out of ~/.claude/settings.json. Removing
+  // Headroom changed the image and the code but NOT the disk of boxes that
+  // already existed, and ~ on a box is a persistent volume that outlives any
+  // bake — so a box provisioned while Headroom shipped still points Claude at a
+  // dead 127.0.0.1:8787 and every turn dies "Connection refused" (edgar-ph,
+  // 2026-09-19). Runtime, every start, for the same shadowing reason
+  // `ensureBeadsWorkflowHint` above is.
+  //
+  // ⚠️ MANAGED surfaces only, like `ensureAgentStandard`: Headroom is a
+  // third-party tool, and a user running their OWN copy on 8787 locally is a
+  // legitimate setup we do not get to delete. On our boxes we know it is gone.
+  if (!isLocalSession()) {
+    const cleaned = sanitizeRetiredProxyConfig();
+    if (cleaned.changed) {
+      log.info('claude', `removed retired Headroom config: ${cleaned.removed.join(', ')}`);
+    }
   }
   const beadsReady = provisionBeadsForStart({
     sessionId: session.id,
