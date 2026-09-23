@@ -4,6 +4,12 @@ All notable changes to the CodeAgent Mobile VS Code extension are documented her
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.75.8] — 2026-09-23
+
+### Fixed
+
+- **cli:** Heartbeat failures visible + retried, exit when the backend says the session is gone
+
 ## [2.75.7] — 2026-09-19
 
 ### Fixed
