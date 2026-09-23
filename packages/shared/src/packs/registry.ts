@@ -29,6 +29,8 @@ export const PACK_REGISTRY: Record<PackId, PackDefinition> = {
         prompt: REVIEWER_PROMPT,
         // Review-only: approving clean with no change is success, not a stall.
         requiresCommit: false,
+        // Leaves REVIEW-FINDINGS.pack.json — the next stage gets a list, not prose.
+        producesFindings: true,
       },
     ],
   },
@@ -60,6 +62,8 @@ export const PACK_REGISTRY: Record<PackId, PackDefinition> = {
         prompt: REVIEWER_PROMPT,
         // Review-only: approving clean with no change is success, not a stall.
         requiresCommit: false,
+        // Leaves REVIEW-FINDINGS.pack.json — the next stage gets a list, not prose.
+        producesFindings: true,
       },
       {
         role: 'qa',

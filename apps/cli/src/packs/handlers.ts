@@ -1,33 +1,42 @@
-import {
-  isPackId,
-  type PackActionPayload,
-  type PackStartPayload,
-} from '@codeam/shared';
+import { isPackId, type PackActionPayload, type PackStartPayload } from '@codeam/shared';
 import { log } from '../services/logger';
 import { configureSkill } from '../skills/configure';
 import type { AcpCommandContext, AcpCommandHandler } from '../agents/acp/command-handlers';
 import {
   canonicalCommit,
+  changedFiles,
   defaultCommandRunner,
   detectChecksCommand,
   diffStat,
   gitHead,
+  readWorkspaceFile,
   runChecks,
 } from './gates';
-import { ensureLedgerIgnored, loadLatestRun, newRunId, saveRun, saveStageHandoff } from './run-store';
+import {
+  ensureLedgerIgnored,
+  loadLatestRun,
+  newRunId,
+  saveRun,
+  saveStageHandoff,
+} from './run-store';
 import { postPackState } from './events';
-import { PackRunner, type PackRunnerDeps } from './runner';
+import { PackRunner, TERMINAL_PACK_STATUSES, type PackRunnerDeps } from './runner';
 import { getActivePackRunner, setActivePackRunner } from './active';
 
 /**
  * Relay handlers for Agent Packs. `pack_start` validates, acks IMMEDIATELY
  * (a run can take hours — the relay must never wait on it), and detaches the
- * loop; `pack_action` mutates the live run; `pack_status` hydrates (falling
- * back to the workspace ledger after a CLI restart, where the run reports as
- * paused/stalled rather than pretending to still be live).
+ * loop; `pack_action` mutates the live run; `pack_status` hydrates.
+ *
+ * After a CLI restart the in-memory runner is gone but the workspace ledger
+ * is not: both `pack_action` and `pack_status` REHYDRATE a non-terminal run
+ * from `run.json` (interrupted stage marked failed, run paused/stalled with
+ * the reason) so the user's Resume / Retry / Skip / Abort keep working. Before
+ * this, `pack_action` answered "no active pack run" and the backend sealed the
+ * run as aborted — the spec's "resume at the stage boundary" never existed.
  */
 
-const TERMINAL_STATUSES = new Set(['completed', 'aborted', 'failed']);
+const TERMINAL_STATUSES = TERMINAL_PACK_STATUSES;
 
 const PACK_ACTIONS = new Set(['pause', 'resume', 'retry_stage', 'skip_stage', 'abort']);
 
@@ -59,10 +68,13 @@ export function buildPackRunnerDeps(ctx: AcpCommandContext): PackRunnerDeps {
         ctx.history.appendUserPrompt(displayLine);
         await ctx.client.prompt(prompt);
         const text = ctx.streaming.getCurrentText();
-        await ctx.streaming.closeTurnWithInteractiveDetection();
+        // True when the reply ended on a numbered-options question: the app
+        // renders a select prompt and the user's pick re-prompts THIS
+        // conversation. The runner must park the stage, not nudge over it.
+        const awaitingUser = await ctx.streaming.closeTurnWithInteractiveDetection();
         ctx.history.appendAgentReply(text);
         await ctx.history.flush();
-        return text;
+        return { text, awaitingUser };
       },
       cancel: () => ctx.client.cancel(),
       mountSkills: (skillIds) => {
@@ -74,15 +86,26 @@ export function buildPackRunnerDeps(ctx: AcpCommandContext): PackRunnerDeps {
           }
         }
       },
+      unmountSkills: (skillIds) => {
+        for (const id of skillIds) {
+          try {
+            configureSkill('remove', id);
+          } catch (err) {
+            log.warn('packs', `skill unmount failed for ${id}: ${(err as Error).message}`);
+          }
+        }
+      },
     },
     gates: {
       head: () => gitHead(run, cwd),
       canonicalCommit: (sha) => canonicalCommit(run, cwd, sha),
       diffStat: (from, to) => diffStat(run, cwd, from, to),
+      changedFiles: (from, to) => changedFiles(run, cwd, from, to),
       runChecks: async () => {
         const command = detectChecksCommand(cwd);
         return command ? runChecks(run, cwd, command) : null;
       },
+      readFile: async (relPath) => readWorkspaceFile(cwd, relPath),
     },
     ledger: {
       saveRun: (state) => saveRun(cwd, state),
@@ -103,19 +126,45 @@ export function buildPackRunnerDeps(ctx: AcpCommandContext): PackRunnerDeps {
   };
 }
 
+/**
+ * The session's runner, rebuilt from the ledger when the process that owned
+ * it is gone. Returns null when there is nothing live or resumable. A
+ * rehydrated run is announced (ledger + backend) so the app stops showing a
+ * stage that is "running" in a process that no longer exists.
+ */
+async function ensureRunner(ctx: AcpCommandContext): Promise<PackRunner | null> {
+  const active = getActivePackRunner();
+  if (active) return active;
+  const stored = loadLatestRun(ctx.opts.cwd);
+  if (!stored || TERMINAL_STATUSES.has(stored.status)) return null;
+  const runner = PackRunner.rehydrate(buildPackRunnerDeps(ctx), stored);
+  if (!runner) return null;
+  setActivePackRunner(runner);
+  log.info(
+    'packs',
+    `rehydrated run ${stored.runId} from the ledger (was ${stored.status}) → ${runner.getState().status}`,
+  );
+  await runner.announce();
+  return runner;
+}
+
 export const packStartH: AcpCommandHandler = async (ctx) => {
   const payload = ctx.cmd.payload as Partial<PackStartPayload> | undefined;
   const packId = typeof payload?.packId === 'string' ? payload.packId : '';
   const task = typeof payload?.task === 'string' ? payload.task.trim() : '';
   if (!isPackId(packId)) {
-    await ctx.relay.sendResult(ctx.cmd.id, 'failed', { error: `unknown pack: ${packId || '(none)'}` });
+    await ctx.relay.sendResult(ctx.cmd.id, 'failed', {
+      error: `unknown pack: ${packId || '(none)'}`,
+    });
     return;
   }
   if (task.length === 0) {
-    await ctx.relay.sendResult(ctx.cmd.id, 'failed', { error: 'pack_start requires a non-empty task' });
+    await ctx.relay.sendResult(ctx.cmd.id, 'failed', {
+      error: 'pack_start requires a non-empty task',
+    });
     return;
   }
-  const existing = getActivePackRunner();
+  const existing = await ensureRunner(ctx);
   if (existing && !TERMINAL_STATUSES.has(existing.getState().status)) {
     await ctx.relay.sendResult(ctx.cmd.id, 'failed', {
       error: 'a pack run is already active on this session — pause/abort it first',
@@ -141,10 +190,12 @@ export const packActionH: AcpCommandHandler = async (ctx) => {
   const payload = ctx.cmd.payload as Partial<PackActionPayload> | undefined;
   const action = typeof payload?.action === 'string' ? payload.action : '';
   if (!PACK_ACTIONS.has(action)) {
-    await ctx.relay.sendResult(ctx.cmd.id, 'failed', { error: `unknown pack action: ${action || '(none)'}` });
+    await ctx.relay.sendResult(ctx.cmd.id, 'failed', {
+      error: `unknown pack action: ${action || '(none)'}`,
+    });
     return;
   }
-  const runner = getActivePackRunner();
+  const runner = await ensureRunner(ctx);
   if (!runner) {
     await ctx.relay.sendResult(ctx.cmd.id, 'failed', {
       error: 'no active pack run in this session',
@@ -152,11 +203,20 @@ export const packActionH: AcpCommandHandler = async (ctx) => {
     });
     return;
   }
-  const state = await runner.applyAction(action as PackActionPayload['action']);
-  await ctx.relay.sendResult(ctx.cmd.id, 'completed', { state });
+  const outcome = await runner.applyAction(action as PackActionPayload['action']);
+  if (outcome.rejected) {
+    log.info('packs', `pack_action ${action} rejected: ${outcome.rejected}`);
+    await ctx.relay.sendResult(ctx.cmd.id, 'failed', {
+      error: outcome.rejected,
+      state: outcome.state,
+    });
+    return;
+  }
+  await ctx.relay.sendResult(ctx.cmd.id, 'completed', { state: outcome.state });
 };
 
 export const packStatusH: AcpCommandHandler = async (ctx) => {
-  const state = getActivePackRunner()?.getState() ?? loadLatestRun(ctx.opts.cwd);
+  const runner = await ensureRunner(ctx);
+  const state = runner?.getState() ?? loadLatestRun(ctx.opts.cwd);
   await ctx.relay.sendResult(ctx.cmd.id, 'completed', { state });
 };

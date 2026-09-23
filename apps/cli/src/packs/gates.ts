@@ -21,14 +21,20 @@ export type CommandRunner = (
   args: string[],
   cwd: string,
   timeoutMs: number,
+  env?: Record<string, string>,
 ) => Promise<ExecResult>;
 
-export const defaultCommandRunner: CommandRunner = (file, args, cwd, timeoutMs) =>
+export const defaultCommandRunner: CommandRunner = (file, args, cwd, timeoutMs, env) =>
   new Promise((resolve) => {
     execFile(
       file,
       args,
-      { cwd, timeout: timeoutMs, maxBuffer: 4 * 1024 * 1024 },
+      {
+        cwd,
+        timeout: timeoutMs,
+        maxBuffer: 4 * 1024 * 1024,
+        env: env ? { ...process.env, ...env } : process.env,
+      },
       (err, stdout, stderr) => {
         let code = 0;
         if (err) {
@@ -55,7 +61,12 @@ export async function canonicalCommit(
   cwd: string,
   sha: string,
 ): Promise<string | null> {
-  const verify = await run('git', ['rev-parse', '--verify', `${sha}^{commit}`], cwd, GIT_TIMEOUT_MS);
+  const verify = await run(
+    'git',
+    ['rev-parse', '--verify', `${sha}^{commit}`],
+    cwd,
+    GIT_TIMEOUT_MS,
+  );
   if (verify.code !== 0) return null;
   const short = await run('git', ['rev-parse', '--short=10', sha], cwd, GIT_TIMEOUT_MS);
   return short.code === 0 ? short.stdout.trim() : null;
@@ -72,6 +83,30 @@ export async function diffStat(
   if (res.code !== 0) return '';
   const lines = res.stdout.trim().split('\n').filter(Boolean);
   return lines.length > 0 ? lines[lines.length - 1].trim() : '';
+}
+
+/** Repo-relative paths changed between two commits (`git diff --name-only`). */
+export async function changedFiles(
+  run: CommandRunner,
+  cwd: string,
+  from: string,
+  to: string,
+): Promise<string[]> {
+  const res = await run('git', ['diff', '--name-only', `${from}..${to}`], cwd, GIT_TIMEOUT_MS);
+  if (res.code !== 0) return [];
+  return res.stdout
+    .split('\n')
+    .map((l) => l.trim())
+    .filter(Boolean);
+}
+
+/** A repo-relative file from the working tree; null when it does not exist. */
+export function readWorkspaceFile(cwd: string, relPath: string): string | null {
+  try {
+    return fs.readFileSync(path.join(cwd, relPath), 'utf8');
+  } catch {
+    return null;
+  }
 }
 
 const NO_TEST_PLACEHOLDER = 'echo "Error: no test specified"';
@@ -109,13 +144,15 @@ export function detectChecksCommand(cwd: string): string | null {
 }
 
 /** Run the checks command (via the shell — it's a user-configured command
- *  line) bounded by a hard timeout; returns the captured verdict. */
+ *  line) bounded by a hard timeout; returns the captured verdict. `CI=1`
+ *  keeps test runners in single-run mode — a watch-mode `npm test` would
+ *  otherwise sit on the 5-minute timeout at EVERY stage boundary. */
 export async function runChecks(
   run: CommandRunner,
   cwd: string,
   command: string,
 ): Promise<PackHandoffRecord['checks']> {
-  const res = await run('sh', ['-c', command], cwd, CHECKS_TIMEOUT_MS);
+  const res = await run('sh', ['-c', command], cwd, CHECKS_TIMEOUT_MS, { CI: '1' });
   const combined = `${res.stdout}\n${res.stderr}`.trim();
   const tail = combined.split('\n').slice(-12).join('\n').slice(-1500);
   return { command, passed: res.code === 0, tail };
