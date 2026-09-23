@@ -10,7 +10,7 @@ import { PACK_REGISTRY } from '@codeam/shared';
  * production — no agent, no git.
  */
 
-type TurnMode = 'commit' | 'no-commit' | 'throw' | 'ask';
+type TurnMode = 'commit' | 'no-commit' | 'throw' | 'ask' | 'permission-mid-turn';
 
 interface FakeWorld {
   deps: PackRunnerDeps;
@@ -43,11 +43,19 @@ function fakeWorld(): FakeWorld {
   const deps: PackRunnerDeps = {
     driver: {
       newConversation: async () => `conv-${++convSeq}`,
-      runTurn: async (prompt, displayLine) => {
+      runTurn: async (prompt, displayLine, onAwaiting) => {
         const idx = turnSeq++;
         turns.push({ prompt, displayLine });
         const mode = behavior(idx);
         if (mode === 'throw') throw new Error('adapter exploded');
+        if (mode === 'permission-mid-turn') {
+          // A guardrail confirm opens a permission prompt, the user answers, the turn goes on.
+          onAwaiting?.(true);
+          await new Promise((r) => setTimeout(r, 5));
+          onAwaiting?.(false);
+          advanceHead(`${idx}`);
+          return { text: `stage reply ${idx}\n\n## Handoff\nok`, awaitingUser: false };
+        }
         if (mode === 'ask')
           return { text: 'Which database?\n1. Postgres\n2. SQLite', awaitingUser: true };
         if (mode === 'commit') {
@@ -407,6 +415,32 @@ describe('PackRunner — hardening', () => {
     await vi.waitFor(() => expect(runner.getState().status).toBe('completed'));
     expect(w.turns[1].displayLine).toContain('Waiting for the stage commit');
     expect(runner.getState().stages[0].conversationId).toBe('conv-1');
+  });
+
+  it('a permission prompt MID-turn shows the stage as awaitingUser while the run stays running, then clears', async () => {
+    const w = fakeWorld();
+    w.setTurnBehavior((i) => (i === 0 ? 'permission-mid-turn' : 'commit'));
+    const runner = PackRunner.create(w.deps, 'quick-pack', 't', 'run-h14');
+    await runner.run();
+    const midTurn = w.states.find((s) => s.stages[0].awaitingUser === true);
+    expect(midTurn?.status).toBe('running');
+    expect(midTurn?.stages[0].status).toBe('active');
+    const final = runner.getState();
+    expect(final.status).toBe('completed');
+    expect(final.stages[0].awaitingUser).toBeUndefined();
+    // No pause, no nudge: the answer went through the chat and the turn finished on its own.
+    expect(w.turns).toHaveLength(2);
+  });
+
+  it('a findings-producing stage that approves clean WITHOUT committing gets an honest findingsNote', async () => {
+    const w = fakeWorld();
+    w.setTurnBehavior((i) => (i === 0 ? 'commit' : 'no-commit'));
+    const runner = PackRunner.create(w.deps, 'quick-pack', 't', 'run-h15');
+    await runner.run();
+    const reviewer = runner.getState().stages[1];
+    expect(reviewer.status).toBe('done');
+    expect(reviewer.handoff?.findings).toBeUndefined();
+    expect(reviewer.handoff?.findingsNote).toContain('no REVIEW-FINDINGS.pack.json committed');
   });
 
   it('retry_stage / skip_stage are REJECTED while a stage is running (no racing the in-flight stage)', async () => {

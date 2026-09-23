@@ -241,6 +241,28 @@ export class StreamingState {
    */
   private text = '';
   private pending: PendingInteractive | null = null;
+  /** Observer for "is a question pending?" flips. The Agent Packs runner marks
+   *  its stage `awaitingUser` while a permission prompt waits on the user
+   *  MID-turn, instead of a stage that looks silently "working" for the 5-min
+   *  permission TTL (live run 2026-09-23). Never throws into the turn. */
+  private pendingListener: ((pending: boolean) => void) | null = null;
+
+  setPendingListener(listener: ((pending: boolean) => void) | null): void {
+    this.pendingListener = listener;
+  }
+
+  private setPending(next: PendingInteractive | null): void {
+    const was = this.pending !== null;
+    this.pending = next;
+    const is = next !== null;
+    if (was !== is) {
+      try {
+        this.pendingListener?.(is);
+      } catch {
+        /* an observer error must never touch the turn */
+      }
+    }
+  }
   /**
    * While true, {@link append} drops incoming session/update deltas instead of
    * publishing them. Used by the baton {@link AcpDriver} to swallow the
@@ -355,7 +377,7 @@ export class StreamingState {
             'acpRunner',
             `permission ${args.questionId.slice(0, 8)} TTL expired — auto-cancel`,
           );
-          this.pending = null;
+          this.setPending(null);
           // Fire-and-forget (publishOutput never throws) so the cancel
           // reaches the agent immediately.
           void this.publisher.publishOutput({
@@ -366,13 +388,13 @@ export class StreamingState {
           resolve({ outcome: { outcome: 'cancelled' } });
         }
       }, PERMISSION_TIMEOUT_MS);
-      this.pending = {
+      this.setPending({
         kind: 'permission',
         questionId: args.questionId,
         options: args.options,
         resolve,
         timeoutTimer,
-      };
+      });
     });
   }
 
@@ -382,7 +404,7 @@ export class StreamingState {
    * `resolveSelection()` (user picked).
    */
   registerFreeformOptions(options: string[]): void {
-    this.pending = { kind: 'free-form', options };
+    this.setPending({ kind: 'free-form', options });
   }
 
   /**
@@ -412,13 +434,11 @@ export class StreamingState {
     | { kind: 'none' } {
     if (!this.pending) return { kind: 'none' };
     if (this.pending.kind === 'permission') {
-      const byId = optionId
-        ? this.pending.options.find((o) => o.optionId === optionId)
-        : undefined;
+      const byId = optionId ? this.pending.options.find((o) => o.optionId === optionId) : undefined;
       const picked = byId ?? this.pending.options[index];
       clearTimeout(this.pending.timeoutTimer);
       const resolve = this.pending.resolve;
-      this.pending = null;
+      this.setPending(null);
       if (!picked) {
         // Index out of range and no id match — the option list on the
         // client drifted from what we registered. Cancel, never guess.
@@ -431,7 +451,7 @@ export class StreamingState {
     }
     // Free-form path
     const text = this.pending.options[index];
-    this.pending = null;
+    this.setPending(null);
     if (!text) {
       log.warn('acpRunner', `select_option index=${index} out of bounds (free-form) — drop`);
       return { kind: 'none' };
@@ -495,7 +515,7 @@ export class StreamingState {
     if (this.pending?.kind === 'permission') {
       clearTimeout(this.pending.timeoutTimer);
     }
-    this.pending = null;
+    this.setPending(null);
     // `clear` flushes the backend output buffer — the source SSE catchup
     // replays when a client opens the session. The onboarding welcome turn
     // passes { clear: false } because it runs right AFTER the agent_banner
@@ -776,7 +796,7 @@ export class StreamingState {
     }
     // Register pending so the matching select_option relay command
     // can resolve via reprompt to the picked text.
-    this.pending = { kind: 'free-form', options: extracted.options };
+    this.setPending({ kind: 'free-form', options: extracted.options });
     await this.publisher.publishOutput({
       type: 'select_prompt',
       content: extracted.question ?? 'Pick an option',
@@ -1126,7 +1146,6 @@ export async function surfaceStartupFailure(opts: {
   );
   errRelay.start();
 }
-
 
 /**
  * Adapter spawn env for an ACP session. Two independent knobs:
@@ -1798,7 +1817,8 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
     //   3. the target's own credential env (api_key provisioners), so a
     //      real credential always wins over the clearing layer.
     const leavingHouseEnv =
-      !swapOpts.house && (houseActive || isHouseProxyEnv(process.env) || Object.keys(houseEnv).length > 0)
+      !swapOpts.house &&
+      (houseActive || isHouseProxyEnv(process.env) || Object.keys(houseEnv).length > 0)
         ? clearHouseProxyEnvOverrides()
         : {};
     clientOptions.extraEnv = {
