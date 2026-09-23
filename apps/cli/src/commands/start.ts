@@ -782,6 +782,13 @@ export async function start(
     }),
   );
   ctx.relay = relay;
+  // The backend answers `paired:false` on the heartbeat once this session no
+  // longer exists (deleted / disconnected from the app). Exit exactly like a
+  // Ctrl-C would — the alternative is a zombie keeping the agent alive for an
+  // hour after the user already moved on (2026-09-23).
+  relay.setOnSessionGone(() => {
+    void sigintHandler();
+  });
 
   // Expose the composition-root-provisioned Beads handle on `ctx` once it
   // resolves, so the PTY-path command handlers route relayed `beads_action`

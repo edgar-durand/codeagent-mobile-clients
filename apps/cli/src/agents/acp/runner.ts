@@ -2070,6 +2070,9 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
   };
   process.once('SIGINT', () => void shutdown('SIGINT'));
   process.once('SIGTERM', () => void shutdown('SIGTERM'));
+  // `paired:false` on the heartbeat = the session is gone server-side; same
+  // teardown as a signal so no zombie outlives its session (2026-09-23).
+  relay.setOnSessionGone(() => void shutdown('SIGTERM'));
   process.once('SIGHUP', () => void shutdown('SIGHUP'));
 
   // Block forever — the relay runs in the background; lifecycle
