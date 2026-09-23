@@ -5,6 +5,11 @@ vi.mock('../src/services/pairing.service', () => ({
   _postJson: vi.fn().mockResolvedValue({ success: true }),
   _getJson: vi.fn().mockResolvedValue({ data: [] }),
 }));
+vi.mock('../src/services/telemetry.service', () => ({
+  capture: vi.fn(),
+}));
+import * as telemetry from '../src/services/telemetry.service';
+import { log } from '../src/services/logger';
 
 import {
   CommandRelayService,
@@ -622,5 +627,131 @@ describe('CommandRelayService — a stuck ack is not allowed to be silent', () =
     expect(said).toMatch(/not draining/i);
     relay.stop();
     warn.mockRestore();
+  });
+});
+
+
+/**
+ * 2026-09-23 — a user's heartbeats stopped reaching the origin while every
+ * other request from the same process kept landing. The failure was a
+ * `log.trace` (invisible), there was no retry (one dropped POST = one 20 s slot
+ * gone against a 50 s key), and a process whose session had been deleted kept
+ * running for an hour. Each of those is now a contract.
+ */
+describe('CommandRelayService heartbeat resilience', () => {
+  const realRandom = Math.random;
+  const heartbeatCalls = (): unknown[][] =>
+    vi
+      .mocked(pairing._postJson)
+      .mock.calls.filter(([url]) => String(url).includes('/api/plugin/heartbeat'));
+  const failWarns = (warn: { mock: { calls: unknown[][] } }): number =>
+    warn.mock.calls.filter(([, msg]) => String(msg).includes('heartbeat failed')).length;
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    Math.random = () => 0.5;
+    vi.mocked(pairing._postJson).mockReset().mockResolvedValue({ success: true });
+    vi.mocked(telemetry.capture).mockReset();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+    Math.random = realRandom;
+  });
+
+  it('retries a failed heartbeat ONCE after 3 s, inside the same 20 s slot', async () => {
+    vi.mocked(pairing._postJson).mockRejectedValueOnce(new Error('ECONNRESET'));
+    const relay = new CommandRelayService('plugin-1', vi.fn(), META);
+    relay.start();
+    await vi.advanceTimersByTimeAsync(10);
+    expect(heartbeatCalls().length).toBe(1);
+    await vi.advanceTimersByTimeAsync(3_000);
+    expect(heartbeatCalls().length).toBe(2);
+    // No third attempt until the regular 20 s tick.
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(heartbeatCalls().length).toBe(2);
+    relay.stop();
+  });
+
+  it('a failed heartbeat is a WARN + a PostHog event (never a trace again), rate-limited per streak', async () => {
+    const warn = vi.spyOn(log, 'warn');
+    const err = Object.assign(new Error('timeout'), { code: 'ETIMEDOUT' });
+    vi.mocked(pairing._postJson).mockRejectedValue(err);
+    const relay = new CommandRelayService('plugin-1', vi.fn(), META);
+    relay.start();
+    await vi.advanceTimersByTimeAsync(10);
+    expect(failWarns(warn)).toBe(1);
+    expect(telemetry.capture).toHaveBeenCalledWith(
+      'heartbeat_failed',
+      expect.objectContaining({ pluginId: 'plugin-1', reason: 'ETIMEDOUT', streak: 1 }),
+    );
+    // Retry + next tick also fail, all inside the 60 s warn window → still ONE warn.
+    await vi.advanceTimersByTimeAsync(25_000);
+    expect(failWarns(warn)).toBe(1);
+    // Past the window the streak is re-reported.
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(failWarns(warn)).toBeGreaterThanOrEqual(2);
+    relay.stop();
+  });
+
+  it('a 4xx/5xx is reported by status, and a success resets the streak', async () => {
+    const http = Object.assign(new Error('Forbidden'), { statusCode: 403 });
+    vi.mocked(pairing._postJson).mockRejectedValueOnce(http);
+    const relay = new CommandRelayService('plugin-1', vi.fn(), META);
+    relay.start();
+    await vi.advanceTimersByTimeAsync(10);
+    expect(telemetry.capture).toHaveBeenCalledWith(
+      'heartbeat_failed',
+      expect.objectContaining({ reason: 'status_403', streak: 1 }),
+    );
+    // The 3 s retry succeeds → streak back to 0 → the next failure is a fresh
+    // streak (streak=1 again) and is reported immediately.
+    await vi.advanceTimersByTimeAsync(3_000);
+    vi.mocked(pairing._postJson).mockRejectedValueOnce(new Error('boom'));
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect(telemetry.capture).toHaveBeenLastCalledWith(
+      'heartbeat_failed',
+      expect.objectContaining({ reason: 'boom', streak: 1 }),
+    );
+    relay.stop();
+  });
+
+  it('`paired:false` on the heartbeat stops the relay and fires onSessionGone exactly once', async () => {
+    vi.mocked(pairing._postJson).mockResolvedValue({
+      success: true,
+      data: { pluginId: 'plugin-1', online: true, paired: false },
+    });
+    const gone = vi.fn();
+    const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    const relay = new CommandRelayService('plugin-1', vi.fn(), META);
+    relay.setOnSessionGone(gone);
+    relay.start();
+    await vi.advanceTimersByTimeAsync(10);
+    expect(gone).toHaveBeenCalledTimes(1);
+    // The goodbye still went out (the relay stopped itself).
+    expect(
+      heartbeatCalls().some(([, body]) => (body as { online: boolean }).online === false),
+    ).toBe(true);
+    const beats = heartbeatCalls().length;
+    // No further ONLINE beats, no second callback.
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(heartbeatCalls().length).toBe(beats);
+    expect(gone).toHaveBeenCalledTimes(1);
+    expect(stderr).toHaveBeenCalledWith(expect.stringContaining('deleted or disconnected'));
+    expect(telemetry.capture).toHaveBeenCalledWith(
+      'session_gone_detected',
+      expect.objectContaining({ pluginId: 'plugin-1' }),
+    );
+  });
+
+  it('an older backend (no `paired` field) changes nothing', async () => {
+    const gone = vi.fn();
+    const relay = new CommandRelayService('plugin-1', vi.fn(), META);
+    relay.setOnSessionGone(gone);
+    relay.start();
+    await vi.advanceTimersByTimeAsync(45_000);
+    expect(gone).not.toHaveBeenCalled();
+    expect(heartbeatCalls().length).toBeGreaterThanOrEqual(3);
+    relay.stop();
   });
 });

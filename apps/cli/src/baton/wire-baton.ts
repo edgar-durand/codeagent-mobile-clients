@@ -643,6 +643,9 @@ export async function runBatonSession(opts: BatonSessionOptions): Promise<void> 
   process.once('SIGINT', onSignal);
   process.once('SIGTERM', onSignal);
   process.once('SIGHUP', onSignal);
+  // `paired:false` on the heartbeat = the session is gone server-side; tear
+  // down like a signal so a local baton never outlives its session (2026-09-23).
+  relay.setOnSessionGone(onSignal);
 
   showInfo(`Starting ${opts.agent} baton (local) — native TUI + mobile take-control…`);
   await controller.begin(); // LOCAL_DRIVE: spawns the native TUI, publishes state

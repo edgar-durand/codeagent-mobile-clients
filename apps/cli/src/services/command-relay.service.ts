@@ -19,6 +19,10 @@ declare const __CLI_VERSION__: string;
 
 /** Narrow an unknown thrown value to its numeric HTTP status, when the
  *  transport attached one (pairing.service errors carry `statusCode`). */
+function isRecord(v: unknown): v is Record<string, unknown> {
+  return typeof v === 'object' && v !== null;
+}
+
 function httpStatusOf(err: unknown): number | null {
   if (typeof err === 'object' && err !== null && 'statusCode' in err) {
     const status = (err as { statusCode: unknown }).statusCode;
@@ -38,6 +42,15 @@ const PENDING_STREAM_PATH = '/api/commands/pending/stream';
 // before declaring the connection zombie. Probes every 10 s so the
 // max detection latency is ~55 s.
 const SSE_LIVENESS_TIMEOUT_MS = 45_000;
+/**
+ * One quick retry after a failed heartbeat. The backend key lives 50 s and the
+ * beat is every 20 s, so TWO dropped POSTs in a row read as "offline" — and a
+ * single dropped POST used to burn a full 20 s slot. 3 s keeps the retry well
+ * inside the same slot without hammering a host that is really down.
+ */
+const HEARTBEAT_RETRY_MS = 3_000;
+/** Warn about a heartbeat failure streak at most this often (first one always). */
+const HEARTBEAT_WARN_INTERVAL_MS = 60_000;
 const SSE_WATCHDOG_INTERVAL_MS = 10_000;
 
 export interface RemoteCommand {
@@ -63,6 +76,18 @@ export interface RemoteCommand {
 export class CommandRelayService {
   private _running = false;
   private pairingInvalid = false;
+  /**
+   * Heartbeat health. Before 2026-09-23 a failed heartbeat was a `log.trace`,
+   * i.e. INVISIBLE in a normal `~/.codeam/debug-*.log` — a user whose beats
+   * never reached the origin (every other request did) spent a day on "Server
+   * Failed to Start" with nothing in his log to show for it. Failures are now
+   * WARN (rate-limited per streak) + a PostHog event, and the process exits
+   * when the backend answers `paired:false`.
+   */
+  private heartbeatFailStreak = 0;
+  private heartbeatLastWarnAt = 0;
+  private sessionGone = false;
+  private onSessionGone?: () => void;
   private heartbeatTimer: NodeJS.Timeout | null = null;
   private agentsTimer: NodeJS.Timeout | null = null;
   /** Injectable for tests; defaults to real fs/fetch/spawn wiring. */
@@ -274,6 +299,18 @@ export class CommandRelayService {
    */
   stop(): void {
     void this.stopAndFlush();
+  }
+
+  /**
+   * Called ONCE when a heartbeat answers `paired:false` — the backend no longer
+   * has a live session for this pluginId (deleted / disconnected from the
+   * app). The relay has already stopped itself by then; the owner should exit
+   * the process like a Ctrl-C would. Backstop for a process whose
+   * `session_terminated` command was consumed by a sibling on the same
+   * pluginId (two `codeam start` on one saved session, 2026-09-23).
+   */
+  setOnSessionGone(cb: () => void): void {
+    this.onSessionGone = cb;
   }
 
   /**
@@ -709,7 +746,8 @@ export class CommandRelayService {
 
   // ─── Heartbeat + agents ──────────────────────────────────────────
 
-  private async sendHeartbeat(online: boolean): Promise<void> {
+  private async sendHeartbeat(online: boolean, attempt = 0): Promise<void> {
+    if (this.sessionGone && online) return;
     // `agentId` lets the backend fire the auto-link side-effect when
     // the user hasn't vaulted credentials for this agent yet. The
     // server normalizes between the internal id (e.g. `claude`) and
@@ -722,7 +760,7 @@ export class CommandRelayService {
     // a healthy repo (execFileSync `git branch --show-current` with a
     // 1 s timeout); the backend dedupes — a stable branch costs only
     // the bytes on the wire.
-    await _postJson(`${API_BASE}/api/plugin/heartbeat`, {
+    const body = {
       pluginId: this.pluginId,
       online,
       agentId: this.agentMeta.id,
@@ -734,9 +772,69 @@ export class CommandRelayService {
       ...(typeof __CLI_VERSION__ !== 'undefined' && __CLI_VERSION__
         ? { ideVersion: __CLI_VERSION__ }
         : {}),
-    })
-      .then(() => log.trace('relay', `heartbeat ok online=${online}`))
-      .catch((err: unknown) => log.trace('relay', `heartbeat failed online=${online}`, err));
+    };
+    try {
+      const res = await _postJson(`${API_BASE}/api/plugin/heartbeat`, body);
+      this.heartbeatFailStreak = 0;
+      log.trace('relay', `heartbeat ok online=${online}`);
+      // Backends ≥ 2026-09-23 say whether this pluginId still has a live
+      // session. Older ones omit the field → nothing to act on.
+      const data = res?.data;
+      if (online && isRecord(data) && data.paired === false) this.handleSessionGone();
+    } catch (err) {
+      if (!online) {
+        // The goodbye is best-effort by design: the process is exiting.
+        log.trace('relay', 'goodbye heartbeat failed', err);
+        return;
+      }
+      this.heartbeatFailStreak += 1;
+      this.noteHeartbeatFailure(err);
+      if (attempt === 0 && this._running) {
+        const t = setTimeout(() => {
+          void this.sendHeartbeat(true, 1);
+        }, HEARTBEAT_RETRY_MS);
+        t.unref?.();
+      }
+    }
+  }
+
+  private noteHeartbeatFailure(err: unknown): void {
+    const status = httpStatusOf(err);
+    const code = (err as NodeJS.ErrnoException | null)?.code;
+    const reason = status
+      ? `status_${status}`
+      : typeof code === 'string'
+        ? code
+        : (err instanceof Error ? err.message : String(err)).slice(0, 80);
+    const now = Date.now();
+    const firstOfStreak = this.heartbeatFailStreak === 1;
+    if (!firstOfStreak && now - this.heartbeatLastWarnAt < HEARTBEAT_WARN_INTERVAL_MS) return;
+    this.heartbeatLastWarnAt = now;
+    log.warn(
+      'relay',
+      `heartbeat failed (${reason}, streak=${this.heartbeatFailStreak}) — two misses in a row and the ` +
+        'app shows this session OFFLINE even though it is running',
+    );
+    capture('heartbeat_failed', {
+      pluginId: this.pluginId,
+      agentId: this.agentMeta.id,
+      reason,
+      streak: this.heartbeatFailStreak,
+    });
+  }
+
+  private handleSessionGone(): void {
+    if (this.sessionGone) return;
+    log.warn('relay', 'backend reports this session no longer exists (paired:false) — stopping');
+    capture('session_gone_detected', { pluginId: this.pluginId, agentId: this.agentMeta.id });
+    process.stderr.write(
+      '[codeam] This session was deleted or disconnected from the app — exiting. Run `codeam pair` to start a new one.\n',
+    );
+    // stop() first so the goodbye beat still goes out; the flag then blocks
+    // any further ONLINE beats from a timer that was already in flight.
+    this.stop();
+    this.sessionGone = true;
+    this.onSessionGone?.();
   }
 
   /**
