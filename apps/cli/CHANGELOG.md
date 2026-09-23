@@ -4,6 +4,12 @@ All notable changes to `codeam-cli` are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.75.9] — 2026-09-23
+
+### Added
+
+- **cli:** Agent packs — structured Reviewer findings, in-place resume, rehydration after restart
+
 ## [2.75.8] — 2026-09-23
 
 ### Fixed
