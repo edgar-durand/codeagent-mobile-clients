@@ -61,20 +61,27 @@ export function buildPackRunnerDeps(ctx: AcpCommandContext): PackRunnerDeps {
         ctx.onActiveSessionChanged?.(id);
         return id;
       },
-      runTurn: async (prompt, displayLine) => {
+      runTurn: async (prompt, displayLine, onAwaiting) => {
         await ctx.streaming.beginTurn();
         // The chat records a short stage line, not the full role brief —
         // the brief rides only the agent prompt (the onboarding precedent).
         ctx.history.appendUserPrompt(displayLine);
-        await ctx.client.prompt(prompt);
-        const text = ctx.streaming.getCurrentText();
-        // True when the reply ended on a numbered-options question: the app
-        // renders a select prompt and the user's pick re-prompts THIS
-        // conversation. The runner must park the stage, not nudge over it.
-        const awaitingUser = await ctx.streaming.closeTurnWithInteractiveDetection();
-        ctx.history.appendAgentReply(text);
-        await ctx.history.flush();
-        return { text, awaitingUser };
+        // Mid-turn permission prompts (a guardrail `confirm`, an interactive
+        // tool approval) flip the stage to awaitingUser while they wait.
+        ctx.streaming.setPendingListener(onAwaiting ?? null);
+        try {
+          await ctx.client.prompt(prompt);
+          const text = ctx.streaming.getCurrentText();
+          // True when the reply ended on a numbered-options question: the app
+          // renders a select prompt and the user's pick re-prompts THIS
+          // conversation. The runner must park the stage, not nudge over it.
+          const awaitingUser = await ctx.streaming.closeTurnWithInteractiveDetection();
+          ctx.history.appendAgentReply(text);
+          await ctx.history.flush();
+          return { text, awaitingUser };
+        } finally {
+          ctx.streaming.setPendingListener(null);
+        }
       },
       cancel: () => ctx.client.cancel(),
       mountSkills: (skillIds) => {

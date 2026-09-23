@@ -44,8 +44,12 @@ export type GuardrailDecision =
 // Secret-file shapes (read or reference). Each `.env`/key/credential token must
 // be preceded by a path separator, quote, `=`, or whitespace so `process.env`
 // and `import.meta.env` (no separator before `.env`) never match.
+// `credentials` only counts as a PATH (`~/.aws/credentials`, `.credentials.json`):
+// the bare word is ordinary prose — an Agent Packs Reviewer writing "no
+// credentials in the diff" into its findings file tripped a 5-minute confirm
+// on a managed session (live run 2026-09-23), twice.
 const SECRET_RE =
-  /(^|[\s"'`=(/\\])(\.env(\.[\w.-]+)?|[\w.-]+\.(pem|key|pfx|p12|jks|keystore)|id_rsa|id_ed25519|\.npmrc|\.pgpass|\.netrc|\.git-credentials|kubeconfig|credentials(\.[\w-]+)?)\b/i;
+  /(^|[\s"'`=(/\\])(\.env(\.[\w.-]+)?|[\w.-]+\.(pem|key|pfx|p12|jks|keystore)|id_rsa|id_ed25519|\.npmrc|\.pgpass|\.netrc|\.git-credentials|kubeconfig|\.credentials(\.[\w-]+)?)\b|[/\\]credentials(\.[\w-]+)?\b/i;
 
 const DESTRUCTIVE_RES: RegExp[] = [
   /\brm\s+-[a-z]*f/i, // rm -rf / -fr / -f
@@ -73,6 +77,22 @@ const OUTWARD_RES: RegExp[] = [
   /\beas\s+(submit|build)\b/i,
 ];
 
+// A WRITE (`kind: 'edit'`) is judged by WHERE it writes, never by what the text
+// says: the body of a review report that mentions `.env`, or a script that
+// contains `rm -rf`, is content — not a secret read, not a shell command. Only
+// the title and path-like input fields are scanned. (Live Agent Packs run
+// 2026-09-23: `Write REVIEW-FINDINGS.pack.json` was flagged secretRead by its
+// own JSON body and sat 5 minutes on a confirm nobody was going to answer.)
+function editTargetHaystack(call: GuardrailPermissionRequest['toolCall']): string {
+  const parts = [typeof call.title === 'string' ? call.title : ''];
+  if (call.rawInput && typeof call.rawInput === 'object' && !Array.isArray(call.rawInput)) {
+    for (const [key, value] of Object.entries(call.rawInput as Record<string, unknown>)) {
+      if (typeof value === 'string' && /path|file|dest|target/i.test(key)) parts.push(value);
+    }
+  }
+  return parts.join('\n');
+}
+
 function haystack(call: GuardrailPermissionRequest['toolCall']): string {
   let s = typeof call.title === 'string' ? call.title : '';
   if (call.rawInput != null) {
@@ -94,11 +114,12 @@ function matchedCategories(hay: string): Set<GuardrailCategory> {
   return m;
 }
 
-function rejectOutcome(
-  options: GuardrailPermissionRequest['options'],
-): { outcome: { outcome: 'selected'; optionId: string } | { outcome: 'cancelled' } } {
+function rejectOutcome(options: GuardrailPermissionRequest['options']): {
+  outcome: { outcome: 'selected'; optionId: string } | { outcome: 'cancelled' };
+} {
   const reject =
-    options.find((o) => o.kind === 'reject_always') ?? options.find((o) => o.kind === 'reject_once');
+    options.find((o) => o.kind === 'reject_always') ??
+    options.find((o) => o.kind === 'reject_once');
   return reject
     ? { outcome: { outcome: 'selected', optionId: reject.optionId } }
     : { outcome: { outcome: 'cancelled' } };
@@ -125,7 +146,10 @@ export function guardrailDecision(
   // it silently blocked ExitPlanMode approvals (same class as the 2026-08-19
   // internal-path P0), so these calls always go to the normal prompt flow.
   if (isProseOnlyToolKind(request.toolCall.kind)) return null;
-  const hay = haystack(request.toolCall);
+  const hay =
+    request.toolCall.kind === 'edit'
+      ? editTargetHaystack(request.toolCall)
+      : haystack(request.toolCall);
   if (!hay) return null;
   const matched = matchedCategories(hay);
   if (matched.size === 0) return null;
@@ -153,7 +177,11 @@ export function guardrailDecision(
     };
   }
   if (confirmCat) {
-    return { kind: 'confirm', category: confirmCat, reason: GUARDRAIL_CATEGORY_META[confirmCat].description };
+    return {
+      kind: 'confirm',
+      category: confirmCat,
+      reason: GUARDRAIL_CATEGORY_META[confirmCat].description,
+    };
   }
   return null; // every matched category is 'off'
 }

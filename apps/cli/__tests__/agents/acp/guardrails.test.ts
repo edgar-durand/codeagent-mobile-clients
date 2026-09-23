@@ -40,17 +40,21 @@ describe('guardrailDecision — category detection', () => {
 
   it('flags git reset --hard as destructiveShell', () => {
     expect(
-      guardrailDecision(req('', { command: 'git reset --hard origin/main' }), ALL_CONFIRM)?.category,
+      guardrailDecision(req('', { command: 'git reset --hard origin/main' }), ALL_CONFIRM)
+        ?.category,
     ).toBe('destructiveShell');
   });
 
   it('flags git push origin main as protectedBranch', () => {
-    expect(guardrailDecision(req('git push origin main'), ALL_CONFIRM)?.category).toBe('protectedBranch');
+    expect(guardrailDecision(req('git push origin main'), ALL_CONFIRM)?.category).toBe(
+      'protectedBranch',
+    );
   });
 
   it('flags force-push as outwardIrreversible', () => {
     expect(
-      guardrailDecision(req('', { command: 'git push --force origin feature' }), ALL_CONFIRM)?.category,
+      guardrailDecision(req('', { command: 'git push --force origin feature' }), ALL_CONFIRM)
+        ?.category,
     ).toBe('outwardIrreversible');
   });
 
@@ -61,14 +65,63 @@ describe('guardrailDecision — category detection', () => {
   });
 
   it('flags reading .env as secretRead', () => {
-    expect(guardrailDecision(req('', { command: 'cat .env' }), ALL_CONFIRM)?.category).toBe('secretRead');
-    expect(guardrailDecision(req('Read', { path: 'config/.env.production' }), ALL_CONFIRM)?.category).toBe(
+    expect(guardrailDecision(req('', { command: 'cat .env' }), ALL_CONFIRM)?.category).toBe(
       'secretRead',
     );
+    expect(
+      guardrailDecision(req('Read', { path: 'config/.env.production' }), ALL_CONFIRM)?.category,
+    ).toBe('secretRead');
+  });
+
+  it('a WRITE is judged by its target, not by its text (Agent Packs Reviewer, 2026-09-23)', () => {
+    const write = (title: string, rawInput: unknown): GuardrailPermissionRequest => ({
+      toolCall: { title, kind: 'edit', rawInput },
+      options: OPTS,
+    });
+    // The findings report SAYS ".env" / "credentials" — it is prose, not a read.
+    expect(
+      guardrailDecision(
+        write('Write REVIEW-FINDINGS.pack.json', {
+          path: '/repo/REVIEW-FINDINGS.pack.json',
+          content: '{"findings":[],"checked":["no credentials or .env values in the diff"]}',
+        }),
+        ALL_CONFIRM,
+      ),
+    ).toBeNull();
+    // A script body that CONTAINS rm -rf is content, not a shell command.
+    expect(
+      guardrailDecision(
+        write('Write scripts/clean.sh', { file_path: 'scripts/clean.sh', content: 'rm -rf dist' }),
+        ALL_CONFIRM,
+      ),
+    ).toBeNull();
+    // Writing INTO a secret file is still a secret touch.
+    expect(
+      guardrailDecision(write('Write .env', { path: 'config/.env', content: 'X=1' }), ALL_CONFIRM)
+        ?.category,
+    ).toBe('secretRead');
+  });
+
+  it('`credentials` is a path shape, not a word', () => {
+    expect(
+      guardrailDecision(req('', { command: 'cat ~/.aws/credentials' }), ALL_CONFIRM)?.category,
+    ).toBe('secretRead');
+    expect(
+      guardrailDecision(req('', { command: 'cat ~/.claude/.credentials.json' }), ALL_CONFIRM)
+        ?.category,
+    ).toBe('secretRead');
+    expect(
+      guardrailDecision(
+        req('', { command: "echo 'no credentials in the diff' >> notes.md" }),
+        ALL_CONFIRM,
+      ),
+    ).toBeNull();
   });
 
   it('does NOT flag process.env / a benign build command', () => {
-    expect(guardrailDecision(req('', { command: 'echo $process.env.NODE_ENV' }), ALL_CONFIRM)).toBeNull();
+    expect(
+      guardrailDecision(req('', { command: 'echo $process.env.NODE_ENV' }), ALL_CONFIRM),
+    ).toBeNull();
     expect(guardrailDecision(req('', { command: 'npm run build' }), ALL_CONFIRM)).toBeNull();
     expect(guardrailDecision(req('', { command: 'ls -la src/' }), ALL_CONFIRM)).toBeNull();
   });
@@ -85,7 +138,10 @@ describe('guardrailDecision — disposition', () => {
 
   it('cancels when the agent offers no reject option', () => {
     const d = guardrailDecision(
-      { toolCall: { title: 'rm -rf x', kind: 'execute' }, options: [{ optionId: 'ok', kind: 'allow_once' }] },
+      {
+        toolCall: { title: 'rm -rf x', kind: 'execute' },
+        options: [{ optionId: 'ok', kind: 'allow_once' }],
+      },
       ALL_DENY,
     );
     expect(d?.kind).toBe('deny');
@@ -98,7 +154,11 @@ describe('guardrailDecision — disposition', () => {
 
   it('picks the strongest disposition across multiple matched categories (force-push to main)', () => {
     // Matches BOTH protectedBranch and outwardIrreversible.
-    const policy: GuardrailPolicy = { ...ALL_OFF, protectedBranch: 'deny', outwardIrreversible: 'confirm' };
+    const policy: GuardrailPolicy = {
+      ...ALL_OFF,
+      protectedBranch: 'deny',
+      outwardIrreversible: 'confirm',
+    };
     const d = guardrailDecision(req('', { command: 'git push --force origin main' }), policy);
     expect(d?.kind).toBe('deny');
     expect(d?.category).toBe('protectedBranch');
@@ -128,7 +188,11 @@ describe('guardrailDecision — prose-only kinds are exempt from the free-text s
     expect(
       guardrailDecision(
         {
-          toolCall: { title: 'Thinking', kind: 'think', rawInput: { thought: 'maybe check .env next' } },
+          toolCall: {
+            title: 'Thinking',
+            kind: 'think',
+            rawInput: { thought: 'maybe check .env next' },
+          },
           options: OPTS,
         },
         ALL_DENY,

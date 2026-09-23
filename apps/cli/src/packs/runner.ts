@@ -52,7 +52,13 @@ export interface PackTurnDriver {
   /** Run ONE full turn: `prompt` goes to the agent; `displayLine` is what the
    *  chat history records as the user-side line (the full role brief would
    *  flood the chat). */
-  runTurn(prompt: string, displayLine: string): Promise<PackTurnResult>;
+  runTurn(
+    prompt: string,
+    displayLine: string,
+    /** Fires when a question for the user opens/closes MID-turn (a permission
+     *  prompt), so the stage can say so instead of looking silently busy. */
+    onAwaiting?: (pending: boolean) => void,
+  ): Promise<PackTurnResult>;
   /** Best-effort cancel of the in-flight turn (abort path). */
   cancel(): Promise<void>;
   /** Mount a stage's curated skills (best-effort, Claude skillFile rail). */
@@ -530,7 +536,7 @@ export class PackRunner {
           previousAttemptError,
         });
         const displayLine = `▶ ${this.pack.name} — stage ${index + 1}/${this.pack.stages.length}: ${stageDef.name}`;
-        turn = await this.drive(prompt, displayLine);
+        turn = await this.drive(prompt, displayLine, index);
       }
 
       if (this.aborted()) {
@@ -552,7 +558,7 @@ export class PackRunner {
           return this.recordHandoff(
             index,
             stageDef,
-            await this.noChangeHandoff(startSha, text, startedMs),
+            await this.noChangeHandoff(stageDef, startSha, text, startedMs),
           );
         }
         // ONE bounded nudge — then the run stalls honestly (never loop forever).
@@ -565,7 +571,7 @@ export class PackRunner {
             'stage produced no commit — Retry stage to run it again in a fresh conversation',
           );
         }
-        const nudged = await this.drive(NUDGE_PROMPT, '▶ Waiting for the stage commit…');
+        const nudged = await this.drive(NUDGE_PROMPT, '▶ Waiting for the stage commit…', index);
         if (this.aborted()) {
           await this.settle('aborted');
           return false;
@@ -580,7 +586,7 @@ export class PackRunner {
             return this.recordHandoff(
               index,
               stageDef,
-              await this.noChangeHandoff(startSha, text, startedMs),
+              await this.noChangeHandoff(stageDef, startSha, text, startedMs),
             );
           }
           return this.stall(index, 'stage produced no commit', text);
@@ -616,10 +622,17 @@ export class PackRunner {
     return this.control === 'abort';
   }
 
-  private async drive(prompt: string, displayLine: string): Promise<PackTurnResult> {
+  private async drive(prompt: string, displayLine: string, index: number): Promise<PackTurnResult> {
     this.inTurn = true;
     try {
-      return await this.deps.driver.runTurn(prompt, displayLine);
+      return await this.deps.driver.runTurn(prompt, displayLine, (pending) => {
+        // A permission prompt opened/closed mid-turn: the run keeps RUNNING
+        // (the answer goes through the normal chat prompt and the turn resumes
+        // by itself) but the stage says it is waiting on the user — live run
+        // 2026-09-23: a guardrail confirm sat 5 min behind a "working" stage.
+        this.patchStage(index, { awaitingUser: pending ? true : undefined });
+        void this.publish();
+      });
     } finally {
       this.inTurn = false;
     }
@@ -634,6 +647,7 @@ export class PackRunner {
   }
 
   private async noChangeHandoff(
+    stageDef: PackStageDef,
     startSha: string | null,
     text: string,
     startedMs: number,
@@ -644,6 +658,14 @@ export class PackRunner {
       summary: summarizeReply(text),
       diffStat: 'reviewed — no changes needed',
       durationMs: Date.now() - startedMs,
+      // A findings-producing stage that hands off without a commit never
+      // wrote its findings file (its contract says: commit it even when
+      // empty). Say so — the next stage must not assume a clean bill.
+      ...(stageDef.producesFindings
+        ? {
+            findingsNote: `no ${PACK_FINDINGS_FILE} committed — the stage handed off without structured findings`,
+          }
+        : {}),
     };
   }
 
