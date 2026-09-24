@@ -4,6 +4,13 @@ All notable changes to `codeam-cli` are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.75.12] — 2026-09-24
+
+### Fixed
+
+- **cli:** Keep the preview detect one-shot out of the chat and bound detection
+- **jetbrains-plugin:** Interpolate the repo identifier instead of sending the literal template
+
 ## [2.75.11] — 2026-09-24
 
 ### Fixed
