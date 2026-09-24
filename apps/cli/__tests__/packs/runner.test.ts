@@ -170,6 +170,28 @@ describe('PackRunner — the sequential pipeline', () => {
     expect(w.turns).toHaveLength(2);
   });
 
+  // codeagent-tvqt: a BYO provider 402 mid-stage. The driver returns the
+  // chat's failure bubble as `failure`; the stage must fail with THAT message
+  // right away — not nudge a dead agent and stall on "no commit" (Agent Pack
+  // run pk_mue0mxo3_96c730e6, 2026-09-23).
+  it('a turn that reports a failure bubble fails the stage with that message, without a nudge', async () => {
+    const w = fakeWorld();
+    const BUBBLE =
+      '💳 **Your OpenRouter account has no credits left.** Top up at your provider, or switch this session to another agent.';
+    w.deps.driver.runTurn = async (prompt, displayLine) => {
+      w.turns.push({ prompt, displayLine });
+      return { text: BUBBLE, awaitingUser: false, failure: BUBBLE };
+    };
+    const runner = PackRunner.create(w.deps, 'quick-pack', 't', 'run-byo-402');
+    await runner.run();
+    const s = runner.getState();
+    expect(s.status).toBe('stalled');
+    expect(s.stalledReason).toBe(BUBBLE);
+    expect(s.stages[0].status).toBe('failed');
+    expect(s.stages[0].error).toBe(BUBBLE);
+    expect(w.turns).toHaveLength(1); // no "Waiting for the stage commit…" nudge
+  });
+
   it('a thrown turn stalls the run with the real error', async () => {
     const w = fakeWorld();
     w.setTurnBehavior(() => 'throw');

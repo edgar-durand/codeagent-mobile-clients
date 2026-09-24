@@ -44,6 +44,14 @@ export interface PackTurnResult {
   /** The turn ended on a question for the user (a select prompt the app
    *  renders) — the stage is NOT done; nudging it would clobber the question. */
   awaitingUser: boolean;
+  /**
+   * The turn FAILED and this is the bubble the chat shows for it (a BYO
+   * provider 402, an auth failure, the house ceiling, an adapter throw). The
+   * stage fails immediately with this exact message — nudging a dead agent
+   * for a commit only stalls on "no commit" and hides the cause (Agent Pack
+   * run pk_mue0mxo3_96c730e6, 2026-09-23).
+   */
+  failure?: string;
 }
 
 export interface PackTurnDriver {
@@ -544,6 +552,7 @@ export class PackRunner {
         return false;
       }
       if (turn.awaitingUser) return this.awaitUser(index);
+      if (turn.failure) return this.stall(index, turn.failure); // the bubble IS the reply
 
       // A review-style stage (requiresCommit === false) legitimately approves
       // clean with NO change — treat a substantive no-commit reply as a
@@ -577,6 +586,7 @@ export class PackRunner {
           return false;
         }
         if (nudged.awaitingUser) return this.awaitUser(index);
+        if (nudged.failure) return this.stall(index, nudged.failure);
         text = nudged.text.trim().length > 0 ? nudged.text : text;
         endSha = await this.deps.gates.head();
         if (!endSha || sameCommit(endSha, startSha)) {

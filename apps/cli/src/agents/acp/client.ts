@@ -59,6 +59,7 @@ import { getGuardrailPolicy } from './guardrail-config';
 import { modeIsFullAutoApprove } from './modes';
 import { isLocalSession } from '../../baton/gate';
 import { log } from '../../services/logger';
+import { describeProviderRouting, formatProviderRouting } from '../../lib/provider-routing';
 import { killQuiet } from '../../lib/quiet';
 
 /**
@@ -542,20 +543,29 @@ export class AcpClient {
       'acpClient',
       `spawn cmd=${adapter.command} args=[${adapter.args.join(',')}] cwd=${cwd}`,
     );
+    // extraEnv (e.g. CLAUDE_CODE_DISABLE_1M_CONTEXT=1 on an on-demand
+    // re-spawn) layers over process.env; PATH stays last so the augmented
+    // PATH always wins.
+    //
+    // MCP_TIMEOUT comes FIRST so the caller can still override it, and it is
+    // load-bearing — see MCP_STARTUP_TIMEOUT_MS.
+    const childEnv: NodeJS.ProcessEnv = {
+      ...process.env,
+      MCP_TIMEOUT: String(MCP_STARTUP_TIMEOUT_MS),
+      ...(this.opts.extraEnv ?? {}),
+      PATH: augmentedPath,
+    };
+    // Provider-routing attribution (codeagent-tvqt): the ONE line that says
+    // which endpoint this agent will bill against — redacted to scheme+host,
+    // from the MERGED env (an in-session house↔BYO switch rewrites extraEnv,
+    // so the process env alone would lie). Info level → always in the file log.
+    log.info(
+      'acpClient',
+      `provider routing ${formatProviderRouting(describeProviderRouting(childEnv, { cwd }), adapter.command)}`,
+    );
     const child = spawn(adapter.command, adapter.args, {
       cwd,
-      // extraEnv (e.g. CLAUDE_CODE_DISABLE_1M_CONTEXT=1 on an on-demand
-      // re-spawn) layers over process.env; PATH stays last so the augmented
-      // PATH always wins.
-      //
-      // MCP_TIMEOUT comes FIRST so the caller can still override it, and it is
-      // load-bearing — see MCP_STARTUP_TIMEOUT_MS.
-      env: {
-        ...process.env,
-        MCP_TIMEOUT: String(MCP_STARTUP_TIMEOUT_MS),
-        ...(this.opts.extraEnv ?? {}),
-        PATH: augmentedPath,
-      },
+      env: childEnv,
       stdio: ['pipe', 'pipe', 'pipe'],
       // ⚠️ Own process group, so `stop()` can reap the WHOLE tree. The adapter
       // is only the top of it: it spawns the real `claude`, which spawns one

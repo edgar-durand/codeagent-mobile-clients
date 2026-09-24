@@ -14,6 +14,7 @@ const { spawnMock } = vi.hoisted(() => ({
 vi.mock('node:child_process', () => ({ spawn: spawnMock }));
 
 import { AcpClient, MCP_STARTUP_TIMEOUT_MS } from '../../src/agents/acp/client';
+import { log } from '../../src/services/logger';
 
 function makeClient(extraEnv?: Record<string, string>) {
   return new AcpClient({
@@ -46,6 +47,24 @@ describe('AcpClient — extraEnv reaches the adapter spawn', () => {
     void c.start().catch(() => undefined);
     const opts = spawnMock.mock.calls[0][2];
     expect(opts.env.CLAUDE_CODE_DISABLE_1M_CONTEXT).toBeUndefined();
+  });
+
+  // codeagent-tvqt: the debug log must say which provider host the SPAWNED
+  // agent is routed to — from the merged env, redacted to scheme+host.
+  it('logs the provider routing (redacted, merged env) at spawn', () => {
+    const info = vi.spyOn(log, 'info');
+    const c = makeClient({ ANTHROPIC_BASE_URL: 'https://openrouter.ai/api/v1?key=sk-SECRET-VALUE' });
+    void c.start().catch(() => undefined);
+    const line = info.mock.calls
+      .map((call) => String(call[1]))
+      .find((m) => m.startsWith('provider routing '));
+    expect(line).toBeDefined();
+    expect(line).toContain('agent=node');
+    expect(line).toContain('anthropic=https://openrouter.ai');
+    expect(line).toContain('houseProxy=no');
+    expect(line).not.toContain('SECRET');
+    expect(line).not.toContain('/api/v1');
+    info.mockRestore();
   });
 });
 

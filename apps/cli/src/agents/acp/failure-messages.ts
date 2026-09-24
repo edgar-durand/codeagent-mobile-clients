@@ -22,6 +22,8 @@ import {
   type AgentId,
 } from '@codeam/shared';
 import { looksLike1mContextCreditsError } from './oneMContextRecovery';
+import { isHouseProxyEnv } from '../../commands/host/house-proxy-config';
+import { PROVIDER_BASE_URL_ENV_KEYS, redactUrlToOrigin } from '../../lib/provider-routing';
 import { agentHooks } from './agent-hooks';
 // TYPE-only import: keeps this leaf module free of `backend-reports`' runtime
 // graph (which pulls the pairing service) — erased at compile time.
@@ -170,6 +172,106 @@ export function replyIsHouseAgentLimit(finalText: string): boolean {
  * that so we never tell a Pro user to "upgrade to Pro". Markdown (the chat
  * renderer supports links/bold).
  */
+/**
+ * A BYO (bring-your-own) provider's 402 — the user's OWN account is out of
+ * credit (codeagent-tvqt, 2026-09-23: a house agent deployed as `openrouter`
+ * with the user's own $0 OpenRouter key; Claude Code logged
+ * `API Error: 402 Insufficient credits. Add more using
+ * https://openrouter.ai/settings/credits`).
+ *
+ * Deliberately scoped to the two things that make it unambiguous: the 402
+ * status next to an "insufficient credits/balance" wording, AND not running
+ * on our house proxy — our agent-proxy converts every upstream 402 into a
+ * 503, so a literal "402 Insufficient credits" in a chat is ALWAYS a BYO
+ * provider. On the house rail this never matches (`houseAgentLimitMessage`
+ * owns that path).
+ */
+const BYO_PROVIDER_BILLING_RE =
+  /(?:api error|http|status)[:\s]+402\b[^\n]{0,80}insufficient (?:credits?|balance)|\b402\b[^\n]{0,40}insufficient (?:credits?|balance)|insufficient (?:credits?|balance)[^\n]{0,40}\b402\b/i;
+
+export function looksLikeByoProviderBilling(
+  text: string,
+  env: NodeJS.ProcessEnv = process.env,
+): boolean {
+  return !isHouseProxyEnv(env) && BYO_PROVIDER_BILLING_RE.test(text);
+}
+
+/** The COMPLETED reply IS a BYO provider 402 (Claude streams it as plain text). */
+export function replyIsByoProviderBilling(
+  finalText: string,
+  env: NodeJS.ProcessEnv = process.env,
+): boolean {
+  const t = finalText.trim();
+  return t.length > 0 && t.length <= 600 && looksLikeByoProviderBilling(t, env);
+}
+
+/** Known provider hosts → the name the person knows them by. */
+const PROVIDER_HOST_NAMES: Array<[RegExp, string]> = [
+  [/(^|\.)openrouter\.ai$/i, 'OpenRouter'],
+  [/(^|\.)deepinfra\.com$/i, 'DeepInfra'],
+  [/(^|\.)anthropic\.com$/i, 'Anthropic'],
+  [/(^|\.)openai\.com$/i, 'OpenAI'],
+  [/(^|\.)googleapis\.com$/i, 'Google'],
+  [/(^|\.)minimax(?:i)?\.(?:io|com|chat)$/i, 'MiniMax'],
+  [/(^|\.)moonshot\.(?:ai|cn)$/i, 'Moonshot'],
+  [/(^|\.)x\.ai$/i, 'xAI'],
+  [/(^|\.)mistral\.ai$/i, 'Mistral'],
+  [/(^|\.)groq\.com$/i, 'Groq'],
+  [/(^|\.)together\.(?:ai|xyz)$/i, 'Together'],
+];
+
+/** The vendor an agent bills by default when no base URL redirects it. */
+const AGENT_DEFAULT_PROVIDER: Partial<Record<string, string>> = {
+  claude: 'Anthropic',
+  codex: 'OpenAI',
+  gemini: 'Google',
+};
+
+/**
+ * Name the provider a BYO 402 came from: the base-URL host the agent is
+ * routed to (known hosts by name, an unknown host verbatim — the person set
+ * it), else the agent's default vendor, else the plain word "provider".
+ */
+export function byoProviderName(opts: { env?: NodeJS.ProcessEnv; agent?: string }): string {
+  const env = opts.env ?? process.env;
+  for (const key of PROVIDER_BASE_URL_ENV_KEYS) {
+    const origin = redactUrlToOrigin(env[key]);
+    if (!origin || origin === 'invalid-url') continue;
+    const host = new URL(origin).hostname;
+    for (const [re, name] of PROVIDER_HOST_NAMES) if (re.test(host)) return name;
+    return host;
+  }
+  return (opts.agent && AGENT_DEFAULT_PROVIDER[opts.agent]) || 'provider';
+}
+
+export function byoProviderBillingMessage(provider: string): string {
+  return (
+    `💳 **Your ${provider} account has no credits left.** ` +
+    'Top up at your provider, or switch this session to another agent.'
+  );
+}
+
+/**
+ * The bubble for a turn that COMPLETED but whose reply text is itself a
+ * failure notice (Claude streams API errors as plain reply text). `null` =
+ * a real reply. Shared by `start_task` and the Agent Pack turn driver so a
+ * pack stage fails with the same message the chat shows instead of
+ * nudging a dead agent and stalling on "no commit".
+ */
+export function completedReplyFailureBubble(opts: {
+  finalText: string;
+  agent: string;
+  env?: NodeJS.ProcessEnv;
+}): string | null {
+  const env = opts.env ?? process.env;
+  if (replyIsHouseAgentLimit(opts.finalText)) return houseAgentLimitMessage(opts.finalText);
+  if (replyIsByoProviderBilling(opts.finalText, env)) {
+    return byoProviderBillingMessage(byoProviderName({ env, agent: opts.agent }));
+  }
+  if (replyIsAuthFailure(opts.finalText)) return AUTH_FAILURE_MESSAGE;
+  return null;
+}
+
 export function houseAgentLimitMessage(text: string): string {
   if (/temporarily (?:unavailable|disabled)/i.test(text)) {
     // ⚠️ "There's nothing to buy and nothing owed" is LOAD-BEARING — do not
@@ -444,7 +546,10 @@ export function failureBubble(opts: {
   agent: string;
   /** Wire id of the managed/house rail, when running on it. See {@link agentStatusPage}. */
   railWireId?: string | null;
+  /** Env the agent was spawned with (defaults to process.env) — decides BYO vs house. */
+  env?: NodeJS.ProcessEnv;
 }): string | null {
+  const env = opts.env ?? process.env;
   // House-proxy 403 (CodeAgent Cloud daily ceiling / temporarily unavailable)
   // FIRST — before auth. Claude wraps it as "Failed to authenticate. API Error:
   // 403 …", so without this it would fall into the auth branch, show the
@@ -453,6 +558,16 @@ export function failureBubble(opts: {
   // availability limit, so surface the accurate daily-limit bubble instead.
   if (looksLikeHouseAgentLimit(opts.detail) || looksLikeHouseAgentLimit(opts.recentStderr)) {
     return houseAgentLimitMessage(`${opts.detail}\n${opts.recentStderr}`);
+  }
+  // BYO provider 402 BEFORE auth: Claude wraps it as "Failed to authenticate.
+  // API Error: 402 Insufficient credits…", which the auth branch would turn
+  // into a re-auth loop on a valid key. Never on the house rail (see
+  // looksLikeByoProviderBilling).
+  if (
+    looksLikeByoProviderBilling(opts.detail, env) ||
+    looksLikeByoProviderBilling(opts.recentStderr, env)
+  ) {
+    return byoProviderBillingMessage(byoProviderName({ env, agent: opts.agent }));
   }
   if (looksLikeAuthFailure(opts.detail) || looksLikeAuthFailure(opts.recentStderr)) {
     return AUTH_FAILURE_MESSAGE;

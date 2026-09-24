@@ -43,6 +43,7 @@ import {
   postAgentSwitchEvent,
 } from '../../services/pairing.service';
 import { log } from '../../services/logger';
+import { noteProviderBillingSignal } from './provider-billing-signal';
 import { HistoryService } from '../../services/history.service';
 import { showInfo, showSuccess, showRelayNotice } from '../../ui/banner';
 import {
@@ -1334,6 +1335,10 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
       // classified below and surfaced as a persistent re-auth message.
       recentStderr.push(line);
       if (recentStderr.length > 40) recentStderr.shift();
+      // Provider 402 attribution (codeagent-tvqt): one structured marker per
+      // process saying whether the billing rejection came from OUR proxy or
+      // the user's own provider. Log/telemetry only — never alters the turn.
+      noteProviderBillingSignal({ text: line, source: 'stderr', agent: opts.agent });
     },
     onUnexpectedExit: (code, signal) => {
       log.warn('acpRunner', `adapter died code=${code} signal=${signal}; shutting down session`);
