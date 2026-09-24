@@ -523,5 +523,82 @@ describe('codex/history (rollouts)', () => {
       );
       expect(id).toBeNull();
     });
+
+    /**
+     * Regression (2026-09-23, JetBrains user, local Codex baton, JUCE project):
+     * `codex exec` — our own preview-detect / AI-summary one-shot — writes a
+     * rollout into the SAME store with the SAME cwd (`source: "exec"`,
+     * `originator: "codex_exec"`, verified live on codex-cli 0.143.0). When the
+     * user tapped Preview before their first terminal turn, discovery bound the
+     * baton to that one-shot and the transcript mirror pushed the internal
+     * "OUTPUT JSON ONLY…" prompt + Codex's raw JSON into the chat as a user turn.
+     */
+    function seedRolloutWithMeta(
+      home: string,
+      id: string,
+      cwd: string,
+      meta: Record<string, string>,
+      fileStamp = '2026-07-09T00-00-00',
+    ): string {
+      const bucket = todayBucket(home);
+      mkdirSync(bucket, { recursive: true });
+      const filePath = path.join(bucket, `rollout-${fileStamp}-${id}.jsonl`);
+      writeFileSync(
+        filePath,
+        JSON.stringify({
+          timestamp: '2026-07-09T00:00:00.000Z',
+          type: 'session_meta',
+          payload: { id, cwd, ...meta },
+        }),
+      );
+      return filePath;
+    }
+
+    it('never binds to a `codex exec` one-shot rollout, even when it is the only fresh one', async () => {
+      const home = mkdtempSync(path.join(tmpdir(), 'codex-disc-'));
+      const proj = mkdtempSync(path.join(tmpdir(), 'codex-proj-'));
+      dirsToClean.push(home, proj);
+      const cwd = realpathSync(proj);
+      seedRolloutWithMeta(home, 'oneshot-detect', cwd, {
+        source: 'exec',
+        originator: 'codex_exec',
+      });
+
+      const id = await discoverSessionId(cwd, { sinceMs: Date.now(), timeoutMs: 600 }, home);
+      expect(id).toBeNull();
+    });
+
+    it("prefers the native TUI's rollout over a NEWER one-shot for the same cwd", async () => {
+      const home = mkdtempSync(path.join(tmpdir(), 'codex-disc-'));
+      const proj = mkdtempSync(path.join(tmpdir(), 'codex-proj-'));
+      dirsToClean.push(home, proj);
+      const cwd = realpathSync(proj);
+      const tui = seedRolloutWithMeta(home, 'sess-tui', cwd, {
+        source: 'cli',
+        originator: 'codex-tui',
+      });
+      // The one-shot lands AFTER the TUI's first turn → newer mtime.
+      const past = new Date(Date.now() - 5_000);
+      utimesSync(tui, past, past);
+      seedRolloutWithMeta(home, 'oneshot-detect', cwd, { source: 'exec' }, '2026-07-09T00-00-01');
+
+      const id = await discoverSessionId(
+        cwd,
+        { sinceMs: Date.now() - 6_000, timeoutMs: 1_000 },
+        home,
+      );
+      expect(id).toBe('sess-tui');
+    });
+
+    it('still binds an older rollout that carries no `source` field (cannot tell — do not guess)', async () => {
+      const home = mkdtempSync(path.join(tmpdir(), 'codex-disc-'));
+      const proj = mkdtempSync(path.join(tmpdir(), 'codex-proj-'));
+      dirsToClean.push(home, proj);
+      const cwd = realpathSync(proj);
+      seedRolloutWithMeta(home, 'sess-legacy', cwd, {});
+
+      const id = await discoverSessionId(cwd, { sinceMs: Date.now(), timeoutMs: 1_000 }, home);
+      expect(id).toBe('sess-legacy');
+    });
   });
 });

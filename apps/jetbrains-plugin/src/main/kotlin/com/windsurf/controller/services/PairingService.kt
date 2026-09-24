@@ -115,7 +115,7 @@ class PairingService {
             runCatching {
                 val ops = ProjectOpsService.getInstance()
                 ops.detectRepoSlug()?.let {
-                    addProperty("repoIdentifier", "${'$'}{it.owner}/${'$'}{it.repo}")
+                    addProperty("repoIdentifier", it.identifier)
                 }
                 ops.gitStatus()
                     .get("branch")
@@ -124,7 +124,7 @@ class PairingService {
                     ?.takeIf { it.isNotBlank() && it != "(detached)" }
                     ?.let { addProperty("branch", it) }
             }.onFailure {
-                logger.info("[pairing] no git context for this project: ${'$'}{it.message}")
+                logger.info("[pairing] no git context for this project: ${it.message}")
             }
         }
 
