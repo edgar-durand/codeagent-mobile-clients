@@ -12,6 +12,7 @@ function fakeAgent(id: string) {
     spawn: vi.fn(async () => {}),
     restart: vi.fn(async (_sid: string, _auto: boolean) => {}),
     kill: vi.fn(() => {}),
+    killAndWait: vi.fn(async () => {}),
     sendCommand: vi.fn((_text: string) => {}),
     spawnedSessionId: id as string | null,
   };
@@ -62,7 +63,8 @@ describe('NativeTuiDriver', () => {
     const d = new NativeTuiDriver(makeDeps(agent).deps);
     await d.start();
     await d.stop();
-    expect(agent.kill).toHaveBeenCalledTimes(1);
+    // Awaited: the agent must be GONE before the hand-off completes (2026-09-24).
+    expect(agent.killAndWait).toHaveBeenCalledTimes(1);
   });
 
   it('whenSafeToYield resolves after idleMs of no output', async () => {
