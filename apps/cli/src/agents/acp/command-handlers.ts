@@ -16,6 +16,7 @@
  */
 
 import { log } from '../../services/logger';
+import { noteProviderBillingSignal } from './provider-billing-signal';
 import { _postJsonAuthed, fetchProvisionCredential } from '../../services/pairing.service';
 import {
   HOUSE_AGENT_ID,
@@ -98,6 +99,9 @@ import {
   failureBubble,
   houseAgentLimitMessage,
   replyIsAuthFailure,
+  replyIsByoProviderBilling,
+  byoProviderBillingMessage,
+  byoProviderName,
   replyIsHouseAgentLimit,
 } from './failure-messages';
 import { agentHooks } from './agent-hooks';
@@ -934,6 +938,11 @@ async function startTaskH(ctx: AcpCommandContext): Promise<void> {
       // instead of staying as plain text (Gemini's typical shape
       // for "¿continuar? 1. sí 2. no").
       const finalText = streaming.getCurrentText();
+      // Provider 402 attribution (codeagent-tvqt): Claude Code surfaces a
+      // provider billing rejection as plain reply text ("API Error: 402
+      // Insufficient credits"). Record the structured external/house marker
+      // BEFORE the classification chain below — observation only, no return.
+      noteProviderBillingSignal({ text: finalText, source: 'reply', agent: opts.agent });
       if (agentHooks(opts.agent)?.classifyCompletedReply?.(finalText) === 'upgrade_required') {
         // Cursor's OWN plan paywall ("Upgrade your plan to continue"): the
         // user's Cursor account is on Free, which doesn't include the headless
@@ -968,6 +977,23 @@ async function startTaskH(ctx: AcpCommandContext): Promise<void> {
         await relay.sendResult(cmd.id, 'failed', {
           error: 'house agent usage ceiling / temporarily unavailable',
         });
+        return;
+      } else if (replyIsByoProviderBilling(finalText)) {
+        // BYO provider 402 ("API Error: 402 Insufficient credits…") streamed
+        // as reply text (codeagent-tvqt). Our proxy converts upstream 402s to
+        // 503, so this is ALWAYS the user's own provider account. NOT a
+        // credential problem — no reportCredentialInvalid — surface the
+        // top-up bubble naming the provider host the agent is routed to.
+        const byoBubble = byoProviderBillingMessage(byoProviderName({ agent: opts.agent }));
+        await streaming.closeWithBubble(byoBubble);
+        turnClosed = true;
+        history.appendAgentReply(byoBubble);
+        void history.flush();
+        turnFiles.flushTurn().catch((err) => {
+          log.warn('acpRunner', `turnFiles.flushTurn failed: ${describeError(err)}`);
+        });
+        log.info('acpRunner', `start_task ← byo-provider-billing id=${cmd.id.slice(0, 8)}`);
+        await relay.sendResult(cmd.id, 'failed', { error: 'provider account has no credits (402)' });
         return;
       } else if (replyIsAuthFailure(finalText)) {
         // The agent COMPLETED the turn but its reply IS an auth-failure

@@ -1,5 +1,11 @@
 import { isPackId, type PackActionPayload, type PackStartPayload } from '@codeam/shared';
 import { log } from '../services/logger';
+import {
+  completedReplyFailureBubble,
+  describeError,
+  failureBubble,
+} from '../agents/acp/failure-messages';
+import { currentRailWireId } from '../commands/host/house-proxy-config';
 import { configureSkill } from '../skills/configure';
 import type { AcpCommandContext, AcpCommandHandler } from '../agents/acp/command-handlers';
 import {
@@ -70,8 +76,39 @@ export function buildPackRunnerDeps(ctx: AcpCommandContext): PackRunnerDeps {
         // tool approval) flip the stage to awaitingUser while they wait.
         ctx.streaming.setPendingListener(onAwaiting ?? null);
         try {
-          await ctx.client.prompt(prompt);
-          const text = ctx.streaming.getCurrentText();
+          let text: string;
+          try {
+            await ctx.client.prompt(prompt);
+            text = ctx.streaming.getCurrentText();
+          } catch (err) {
+            // The turn THREW (adapter died, provider rejected the call). Same
+            // classifier as start_task so the stage fails with the actionable
+            // bubble (BYO 402 / auth / outage) instead of a raw error string.
+            const detail = describeError(err);
+            const bubble =
+              failureBubble({
+                detail,
+                recentStderr: '',
+                hadText: false,
+                agent: ctx.opts.agent,
+                railWireId: currentRailWireId(),
+              }) ?? detail;
+            await ctx.streaming.closeWithBubble(bubble);
+            ctx.history.appendAgentReply(bubble);
+            await ctx.history.flush();
+            return { text: bubble, awaitingUser: false, failure: bubble };
+          }
+          // The turn COMPLETED but the reply itself is a failure notice (Claude
+          // streams "API Error: 402 Insufficient credits…" as plain text). Fail
+          // the stage with the chat's bubble — nudging a dead agent for a commit
+          // only stalled on "no commit" and hid the cause (codeagent-tvqt).
+          const failure = completedReplyFailureBubble({ finalText: text, agent: ctx.opts.agent });
+          if (failure) {
+            await ctx.streaming.closeWithBubble(failure);
+            ctx.history.appendAgentReply(failure);
+            await ctx.history.flush();
+            return { text: failure, awaitingUser: false, failure };
+          }
           // True when the reply ended on a numbered-options question: the app
           // renders a select prompt and the user's pick re-prompts THIS
           // conversation. The runner must park the stage, not nudge over it.

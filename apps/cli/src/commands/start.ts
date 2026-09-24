@@ -39,6 +39,7 @@ import { capture, identifyUser, shutdownTelemetry } from '../services/telemetry.
 import { provisionBeadsForStart } from '../beads/wiring';
 import { startClaudeCredentialSync } from '../agents/claude/credential-sync';
 import { ensureBeadsWorkflowHint } from '../beads/workflow-hint';
+import { pickPinnedSession } from './start/pick-session';
 import { sanitizeRetiredProxyConfig } from '../agents/retired-proxy-cleanup';
 import { ensureAgentStandard } from '../agents/agent-standard';
 import { buildMcpServersForStart } from '../integrations/provision';
@@ -85,11 +86,24 @@ export async function start(
   // per-session daemon lock (`acquireDaemonLock`), and all but one `exit(0)` —
   // only ONE session ever survives on the box. Passing the child's own claimed
   // session makes the lock + the whole run per-deploy → N concurrent sessions.
+  // ⚠️ Multi-session RESUME (codeagent-v07a): the host-agent boot resumes
+  // EVERY session that was live at shutdown, one bare `codeam` child each,
+  // pinned to its session with CODEAM_RESUME_SESSION_ID. Without the pin all
+  // N children would read the same `getActiveSession()` (the last-paired
+  // pointer), collide on that session's daemon lock, and only one would
+  // survive — the exact single-session behaviour this fixes.
+  const pinned = pickPinnedSession(process.env.CODEAM_RESUME_SESSION_ID, () => loadCliConfig().sessions);
+  if (pinned.kind === 'missing') {
+    console.log(`  ${pc.dim(`Pinned session ${pinned.id.slice(0, 8)} is no longer paired — nothing to resume.`)}`);
+    process.exit(0);
+  }
   const session = presetSession
     ? presetSession
-    : requestedAgent
-      ? getActiveSessionForAgent(requestedAgent)
-      : getActiveSession();
+    : pinned.kind === 'found'
+      ? pinned.session
+      : requestedAgent
+        ? getActiveSessionForAgent(requestedAgent)
+        : getActiveSession();
   if (!session) {
     if (requestedAgent) {
       const displayName = AGENT_REGISTRY[requestedAgent]?.displayName ?? requestedAgent;

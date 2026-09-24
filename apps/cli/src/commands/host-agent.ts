@@ -27,7 +27,8 @@
  *   4. On `self_hosted_stop { sessionId }`: kills the matching child.
  *
  * Reboot survival is systemd's job (it restarts this process); we re-open
- * the channel from the sealed token. Children are NOT auto-resumed (v1).
+ * the channel from the sealed token and resume EVERY session child that was
+ * live at shutdown (bounded, see `resumePersistedSessions`).
  *
  * ── Phase-3 / backend gap to close the loop ──────────────────────────
  * The deploy command's `sealedAgentAuth` is sealed with the backend's
@@ -62,7 +63,15 @@ function resolveInputPricePerMillion(agentId: string): number {
 import { log } from '../services/logger';
 import { runAgentInstallScript } from './host/agent-install';
 import { killQuiet } from '../lib/quiet';
-import { getActiveSession, type SavedSession } from '../config';
+import { getActiveSession, loadCliConfig, type SavedSession } from '../config';
+import {
+  fileSessionChildStore,
+  pickSavedSessionForWorkspace,
+  planSessionResume,
+  resolveMaxResumeSessions,
+  type PersistedSessionChild,
+  type SessionChildStore,
+} from './host/session-state';
 import { installRelayCrashGuards } from '../lib/process-guards';
 import {
   deleteHostIdentity,
@@ -765,6 +774,8 @@ const CONTROL_AGENT_META: AgentMetadata = {
 interface ChildSession {
   deployId: string;
   proc: ChildProcess;
+  /** Workspace the child runs in — persisted so a boot can resume it (codeagent-v07a). */
+  cwd: string;
   /**
    * The agent kind this child runs (the deploy's `agentId`), surfaced on the
    * heartbeat so the app's My Servers screen can label the active session.
@@ -772,6 +783,28 @@ interface ChildSession {
   agent: string;
   /** epoch ms when the child was spawned — surfaced on the heartbeat. */
   startedAt: number;
+}
+
+/** One session a boot resume brings back: its deploy key, workspace and pairing. */
+interface ResumeTarget {
+  deployId: string;
+  cwd: string;
+  session: SavedSession;
+}
+
+/** Per-session resume retry / exhaustion / re-probe bookkeeping. */
+interface ResumeState {
+  target: ResumeTarget;
+  /** How many resume re-spawns have failed since the last healthy child. */
+  attempts: number;
+  /** Pending bounded-backoff resume retry (cleared on stop()). */
+  timer: NodeJS.Timeout | null;
+  /** True once the bounded retries exhausted (slow re-probe mode). */
+  exhausted: boolean;
+  /** One visible error bubble per failure episode. */
+  failurePosted: boolean;
+  /** Last post-exhaustion re-probe (throttle). */
+  lastReprobeAt: number;
 }
 
 /** How the supervisor spawns a child — injectable so tests don't fork. */
@@ -807,7 +840,9 @@ const defaultResumeSpawner: ChildSpawner = (env, cwd) =>
     cwd,
     // CODEAM_AUTO_APPROVE=1 → ACP path (baton off). CODEAM_RESUME_LATEST=1 →
     // continue the user's most-recent conversation instead of opening an empty
-    // one (runAcpSession loads it via the ACP session/list RPC).
+    // one (runAcpSession loads it via the ACP session/list RPC). `env` carries
+    // CODEAM_RESUME_SESSION_ID so this child is pinned to ITS session
+    // (codeagent-v07a: N resume children, one per live session).
     env: { ...process.env, ...env, CODEAM_AUTO_APPROVE: '1', CODEAM_RESUME_LATEST: '1' },
     stdio: ['ignore', 'pipe', 'pipe'],
     detached: false,
@@ -832,6 +867,7 @@ const defaultResumeSpawner: ChildSpawner = (env, cwd) =>
 export const defaultOnIdentityRejected = (): void => {
   defaultDisableService();
   deleteHostIdentity();
+  fileSessionChildStore().clear();
   log.warn(
     'host-agent',
     'host identity rejected by backend — disabled service + wiped sealed identity, exiting',
@@ -858,6 +894,13 @@ export interface HostAgentDeps {
   spawnChild?: ChildSpawner;
   /** Injectable resume spawner (bare `codeam`) so tests don't fork. */
   resumeSpawner?: ChildSpawner;
+  /**
+   * Persisted live-children set (`~/.codeam/host-agent-sessions.json`) the
+   * boot resume reads. Injectable so tests never touch the real file.
+   */
+  sessionStore?: SessionChildStore;
+  /** Saved sessions a persisted child maps back to (defaults to the CLI config). */
+  listSavedSessions?: () => SavedSession[];
   /**
    * Posts the visible "agent failed to restart" bubble into the session's
    * chat once the resume retries exhaust. Defaults to
@@ -961,16 +1004,15 @@ export class HostAgentSupervisor {
     auth: SessionBubbleAuth,
     message: string,
   ) => Promise<void>;
-  /** How many resume re-spawns have failed since the last healthy child. */
-  private resumeRetryAttempts = 0;
-  /** Pending bounded-backoff resume retry (cleared on stop()). */
-  private resumeRetryTimer: NodeJS.Timeout | null = null;
+  private readonly sessionStore: SessionChildStore;
+  private readonly listSavedSessions: () => SavedSession[];
+  /**
+   * Per-session resume bookkeeping (codeagent-v07a: N sessions resume on
+   * boot, each with its OWN bounded retries / exhaustion / re-probe throttle —
+   * one session's crash-loop must not spend another's retry budget).
+   */
+  private readonly resumeStates = new Map<string, ResumeState>();
   /** Set once the bounded retries exhaust → heartbeat-ridden slow re-probe. */
-  private resumeExhausted = false;
-  /** Guards the one-shot visible error bubble per failure episode. */
-  private resumeFailurePosted = false;
-  /** Last slow re-probe attempt (epoch ms) — throttles the heartbeat rider. */
-  private lastResumeReprobeAt = 0;
   /** True after stop() — no resume retries may be scheduled past teardown. */
   private stopped = false;
 
@@ -980,6 +1022,8 @@ export class HostAgentSupervisor {
   ) {
     this.spawnChild = deps.spawnChild ?? defaultSpawner;
     this.resumeSpawner = deps.resumeSpawner ?? defaultResumeSpawner;
+    this.sessionStore = deps.sessionStore ?? fileSessionChildStore();
+    this.listSavedSessions = deps.listSavedSessions ?? (() => loadCliConfig().sessions);
     this.resolveAgentAuth = deps.resolveAgentAuth ?? unsealAgentAuth;
     this.metrics = deps.metricsCollector ?? new MetricsCollector();
     this.onIdentityRejected = deps.onIdentityRejected ?? defaultOnIdentityRejected;
@@ -1039,8 +1083,7 @@ export class HostAgentSupervisor {
     // session comes back on its own, in its ORIGINAL ACP shape (self-hosted /
     // codespace sessions are ACP-only — CODEAM_AUTO_APPROVE keeps the baton /
     // native-TUI path OFF, exactly like a deploy child's CODEAM_AUTO_TOKEN).
-    this.resumePersistedSession();
-
+    this.resumePersistedSessions();
 
     // Boot reconcile: a fresh supervisor owns NO children yet (a restart /
     // crash / reboot killed any previous ones), so the authoritative live
@@ -1071,9 +1114,11 @@ export class HostAgentSupervisor {
   /** Stop the control channel + heartbeats + kill every child. */
   stop(): void {
     this.stopped = true;
-    if (this.resumeRetryTimer) {
-      clearTimeout(this.resumeRetryTimer);
-      this.resumeRetryTimer = null;
+    for (const st of this.resumeStates.values()) {
+      if (st.timer) {
+        clearTimeout(st.timer);
+        st.timer = null;
+      }
     }
     if (this.heartbeatTimer) {
       clearInterval(this.heartbeatTimer);
@@ -1087,7 +1132,41 @@ export class HostAgentSupervisor {
     for (const child of this.children.values()) {
       killQuiet(child.proc);
     }
+    // NOT persisted: `stopped` is already set, so the on-disk set keeps
+    // exactly the children that were live at shutdown — what the next boot
+    // resumes (codeagent-v07a).
     this.children.clear();
+  }
+
+  /** Register a live session child + mirror the live set to disk. */
+  private trackChild(child: ChildSession): void {
+    this.children.set(child.deployId, child);
+    this.persistChildren();
+  }
+
+  /**
+   * Forget a session child. With `proc`, only when that exact process is
+   * still the tracked one (a re-spawn may have replaced it). Returns whether
+   * anything was removed.
+   */
+  private untrackChild(deployId: string, proc?: ChildProcess): boolean {
+    const current = this.children.get(deployId);
+    if (!current) return false;
+    if (proc && current.proc !== proc) return false;
+    this.children.delete(deployId);
+    this.persistChildren();
+    return true;
+  }
+
+  private persistChildren(): void {
+    if (this.stopped) return;
+    const list: PersistedSessionChild[] = [...this.children.values()].map((c) => ({
+      deployId: c.deployId,
+      cwd: c.cwd,
+      agent: c.agent,
+      startedAt: c.startedAt,
+    }));
+    this.sessionStore.save(list);
   }
 
   private async beat(): Promise<void> {
@@ -1357,6 +1436,7 @@ export class HostAgentSupervisor {
       // restart us into a cleanly-failing redeem.)
       log.warn('host-agent', `self_hosted_wipe received id=${cmd.id} — de-provisioning`);
       this.stop();
+      this.sessionStore.clear();
       this.disableService();
       if (!this.healing) {
         this.healing = true;
@@ -2036,10 +2116,11 @@ export class HostAgentSupervisor {
       const child: ChildSession = {
         deployId: payload.deployId,
         proc,
+        cwd,
         agent: payload.agentId,
         startedAt: Date.now(),
       };
-      this.children.set(payload.deployId, child);
+      this.trackChild(child);
 
       // Capture a rolling tail of the child's stdout/stderr so an EARLY
       // non-zero exit (the agent failed to start) can be reported with
@@ -2054,11 +2135,8 @@ export class HostAgentSupervisor {
       report('agent_starting', 'agent process started');
 
       proc.once('exit', (code) => {
-        const tracked = this.children.get(payload.deployId)?.proc === proc;
         // Self-heal the map when a child dies on its own.
-        if (tracked) {
-          this.children.delete(payload.deployId);
-        }
+        const tracked = this.untrackChild(payload.deployId, proc);
         // END: a supervised child exited — report it one-shot so the backend
         // drops the active-sessions row (covers clean teardown AND crash;
         // a SIGTERM-stop also lands here). Discrete event, never a poll.
@@ -2088,8 +2166,7 @@ export class HostAgentSupervisor {
       // below, but a silent spawn 'error' would mask any future failure the same
       // way, so both are fixed.)
       proc.once('error', (err) => {
-        const tracked = this.children.get(payload.deployId)?.proc === proc;
-        if (tracked) this.children.delete(payload.deployId);
+        const tracked = this.untrackChild(payload.deployId, proc);
         if (tracked) {
           report('failed', `agent failed to start: ${err instanceof Error ? err.message : String(err)}`);
         }
@@ -2108,7 +2185,7 @@ export class HostAgentSupervisor {
         } catch {
           /* already gone */
         }
-        this.children.delete(payload.deployId);
+        this.untrackChild(payload.deployId);
       }
       report('failed', message);
     }
@@ -2128,34 +2205,138 @@ export class HostAgentSupervisor {
   }
 
   /**
-   * Auto-resume the user's last active session on supervisor boot (2026-07-16
-   * churn fix). Before this, a restart / self-update killed the session child
-   * and never re-spawned it — the session lost its heartbeat, went "CLI
-   * disconnected", and the user had to reconnect by hand (churn right after an
-   * update). Spawn bare `codeam` via the resume spawner (reconnects the SAME
-   * pluginId via start(), then heartbeats) so the session comes back on its own
-   * in its ORIGINAL ACP shape (self-hosted/codespace = ACP-only; the resume
-   * spawner sets CODEAM_AUTO_APPROVE=1 to keep the local baton/native-TUI OFF).
+   * Resume EVERY session child that was live at shutdown (codeagent-v07a).
    *
-   * Best-effort + guarded: no-op when there's no persisted session, when the
-   * persisted session lacks the reconnect material (pluginId + pollSecret +
-   * agent), or when a fresh deploy already owns a child this boot.
+   * History: the 2026-07-16 churn fix resumed ONE session — the CLI config's
+   * `getActiveSession()` ("last paired") — so a box with two live sessions
+   * brought back only the newest after `systemctl restart`; the other was
+   * dropped silently (no child, no `ended`, a dead card — live 2026-09-23).
+   * The live set is now mirrored to disk on every child add/remove
+   * (`persistChildren`) and read back here.
+   *
+   * Bounded: each session is one agent process, so at most
+   * `resolveMaxResumeSessions()` (default 3, `CODEAM_HOST_MAX_RESUME_SESSIONS`)
+   * newest sessions resume; the rest get an explicit
+   * `ended { reason: 'host_restart' }` so the app shows that, not a zombie.
+   *
+   * Each child is a bare `codeam` PINNED to its session via
+   * `CODEAM_RESUME_SESSION_ID` (start() honours it) — without the pin all N
+   * children would read the same last-paired pointer and only one survives
+   * the per-session daemon lock. Fallback when nothing is persisted (first
+   * boot after upgrading from a CLI that kept the set in memory): the old
+   * single `getActiveSession()` resume, unchanged.
+   *
+   * Best-effort + guarded: no-op when a fresh deploy already owns a child.
    */
-  private resumePersistedSession(): void {
+  private resumePersistedSessions(): void {
     try {
       if (this.children.size > 0) return; // a fresh deploy already owns a child
-      const session = getActiveSession();
-      if (!session || !session.pluginId || !session.pollSecret || !session.agent) return;
+      const records = this.sessionStore.load();
+      if (records.length === 0) {
+        const target = this.fallbackResumeTarget();
+        if (target) this.resumeOne(target);
+        return;
+      }
+      const max = resolveMaxResumeSessions();
+      const { resume, dropped } = planSessionResume(records, max);
+      for (const rec of dropped) {
+        log.warn(
+          'host-agent',
+          `resume: ending session deploy=${rec.deployId.slice(0, 8)} agent=${rec.agent} — ` +
+            `beyond the resume bound (${max}); the app will show it as ended`,
+        );
+        void reportSessionEvent(
+          { hostId: this.identity.hostId, hostToken: this.identity.hostToken },
+          { event: 'ended', deployId: rec.deployId, reason: 'host_restart' },
+        ).catch((err) => log.trace('host-agent', 'host_restart ended report failed (best-effort)', err));
+      }
+      const saved = this.listSavedSessions();
+      let resumed = 0;
+      for (const rec of resume) {
+        const session = pickSavedSessionForWorkspace(saved, rec.cwd);
+        if (!session) {
+          log.warn(
+            'host-agent',
+            `resume: no paired session for deploy=${rec.deployId.slice(0, 8)} cwd=${rec.cwd} — ` +
+              `deleted from the app; not resumed`,
+          );
+          continue;
+        }
+        this.resumeOne({ deployId: rec.deployId, cwd: rec.cwd, session });
+        resumed += 1;
+      }
+      log.info(
+        'host-agent',
+        `resume: ${resumed} session(s) resumed, ${dropped.length} ended (bound ${max}), ` +
+          `${resume.length - resumed} skipped`,
+      );
+      // Nothing came back → the file must not keep promising sessions.
+      if (this.children.size === 0) this.sessionStore.save([]);
+    } catch (err) {
+      log.warn(
+        'host-agent',
+        `resume persisted sessions failed (best-effort): ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
 
-      // ⚠️ Resume in the SESSION's original deploy workspace, not the
-      // host-agent's own cwd. On a warm codespace the host-agent runs in the
-      // wrapper repo root (`/workspaces/<wrapper>`), while the session's agent +
-      // its conversation live under the deploy workspace (`~/.codeam/self-hosted/
-      // <deployId>`). Resuming in the wrong cwd made CODEAM_RESUME_LATEST find no
-      // prior conversation → a fresh empty session with no project context
-      // (2026-07-29). Fall back to process.cwd() for older sessions with no
-      // persisted cwd (prior behavior).
-      const cwd = session.cwd && fs.existsSync(session.cwd) ? session.cwd : process.cwd();
+  /**
+   * Pre-persistence fallback (the ONE-session behaviour this replaces):
+   * the CLI config's last-paired session. Guarded exactly as before — needs
+   * pluginId + pollSecret + agent to reconnect.
+   */
+  private fallbackResumeTarget(): ResumeTarget | null {
+    const session = getActiveSession();
+    if (!session || !session.pluginId || !session.pollSecret || !session.agent) return null;
+    // ⚠️ Resume in the SESSION's original deploy workspace, not the
+    // host-agent's own cwd. On a warm codespace the host-agent runs in the
+    // wrapper repo root (`/workspaces/<wrapper>`), while the session's agent +
+    // its conversation live under the deploy workspace (`~/.codeam/self-hosted/
+    // <deployId>`). Resuming in the wrong cwd made CODEAM_RESUME_LATEST find no
+    // prior conversation → a fresh empty session with no project context
+    // (2026-07-29). Fall back to process.cwd() for older sessions with no
+    // persisted cwd (prior behavior).
+    const cwd = session.cwd && fs.existsSync(session.cwd) ? session.cwd : process.cwd();
+    // ⚠️ The child MUST be registered under its DEPLOY id, never the
+    // paired-session id. `deployId` is the key every upward signal is matched
+    // against server-side: the boot reconcile reports it, and
+    // `recordSessionEvent` compares it to `SelfHostedSession.deployId`. Using
+    // `session.id` (a PairedSession id) reported an id from the WRONG SPACE,
+    // so no row matched, the backend read the live session as unlisted, and
+    // ENDED its link — moments after this very function resumed it. That row
+    // is the only thing tying the session to its host, so the app then showed
+    // a live CodeAgent Box session as **LOCAL** with a reconnect the user
+    // cannot perform (they have no shell on our VPS). Reported by
+    // rafaelph90.br@gmail.com 2026-09-01 and again 2026-09-02, by which point
+    // 9 of 16 fleet boxes had lost their link this way.
+    //
+    // `SavedSession` doesn't persist the deployId, but it persists the deploy
+    // WORKSPACE (`~/.codeam/self-hosted/<deployId>`), so the id is the
+    // basename. Fall back to `session.id` only when the cwd isn't a deploy
+    // workspace (a local pairing has no deployId at all) — there the backend
+    // has no link row to protect either way.
+    const deployId = deployIdFromWorkspace(session.cwd) ?? session.id;
+    return { deployId, cwd, session };
+  }
+
+  private resumeStateFor(target: ResumeTarget): ResumeState {
+    let st = this.resumeStates.get(target.deployId);
+    if (!st) {
+      st = { target, attempts: 0, timer: null, exhausted: false, failurePosted: false, lastReprobeAt: 0 };
+      this.resumeStates.set(target.deployId, st);
+    } else {
+      st.target = target;
+    }
+    return st;
+  }
+
+  /** Spawn ONE resume child for `target` (boot, retry, or re-probe). */
+  private resumeOne(target: ResumeTarget): void {
+    const { session, deployId } = target;
+    if (this.children.has(deployId)) return; // already live
+    const st = this.resumeStateFor(target);
+    try {
+      const cwd = fs.existsSync(target.cwd) ? target.cwd : process.cwd();
       // Re-inject the house-proxy env
       // (ANTHROPIC_BASE_URL + AUTH_TOKEN + model pins + CLAUDE_CONFIG_DIR). The
       // resume is a bare `codeam` that does NOT re-process the deploy, so
@@ -2164,35 +2345,17 @@ export class HostAgentSupervisor {
       // Returns `{}` when the box has no persisted house config (BYO deploy →
       // its own credential path is used instead).
       const proc = this.resumeSpawner(
-        readHouseProxyChildEnv(),
+        { ...readHouseProxyChildEnv(), CODEAM_RESUME_SESSION_ID: session.id },
         cwd,
       );
-      // ⚠️ The child MUST be registered under its DEPLOY id, never the
-      // paired-session id. `deployId` is the key every upward signal is matched
-      // against server-side: the boot reconcile below reports it, and
-      // `recordSessionEvent` compares it to `SelfHostedSession.deployId`. Using
-      // `session.id` (a PairedSession id) reported an id from the WRONG SPACE,
-      // so no row matched, the backend read the live session as unlisted, and
-      // ENDED its link — moments after this very function resumed it. That row
-      // is the only thing tying the session to its host, so the app then showed
-      // a live CodeAgent Box session as **LOCAL** with a reconnect the user
-      // cannot perform (they have no shell on our VPS). Reported by
-      // rafaelph90.br@gmail.com 2026-09-01 and again 2026-09-02, by which point
-      // 9 of 16 fleet boxes had lost their link this way.
-      //
-      // `SavedSession` doesn't persist the deployId, but it persists the deploy
-      // WORKSPACE (`~/.codeam/self-hosted/<deployId>`), so the id is the
-      // basename. Fall back to `session.id` only when the cwd isn't a deploy
-      // workspace (a local pairing has no deployId at all) — there the backend
-      // has no link row to protect either way.
-      const deployId = deployIdFromWorkspace(session.cwd) ?? session.id;
       const child: ChildSession = {
         deployId,
         proc,
+        cwd,
         agent: session.agent,
         startedAt: Date.now(),
       };
-      this.children.set(deployId, child);
+      this.trackChild(child);
 
       let tail = '';
       const appendTail = (buf: Buffer): void => {
@@ -2201,9 +2364,9 @@ export class HostAgentSupervisor {
       proc.stdout?.on('data', appendTail);
       proc.stderr?.on('data', appendTail);
       proc.once('exit', (code, signal) => {
-        if (this.children.get(deployId)?.proc === proc) this.children.delete(deployId);
+        this.untrackChild(deployId, proc);
         if (typeof code === 'number' && code !== 0) {
-          this.onResumeChildExit(session, code, tail.trim().slice(-300));
+          this.onResumeChildExit(target, code, tail.trim().slice(-300));
           return;
         }
         // A resume child is meant to live for hours; a clean exit means it
@@ -2222,8 +2385,9 @@ export class HostAgentSupervisor {
       });
       log.info(
         'host-agent',
-        `resumed session ${session.id.slice(0, 8)} pluginId=${session.pluginId.slice(0, 12)} (ACP)` +
-          (this.resumeRetryAttempts > 0 ? ` [retry ${this.resumeRetryAttempts}]` : ''),
+        `resumed session ${session.id.slice(0, 8)} deploy=${deployId.slice(0, 8)} ` +
+          `pluginId=${(session.pluginId ?? '').slice(0, 12)} (ACP)` +
+          (st.attempts > 0 ? ` [retry ${st.attempts}]` : ''),
       );
     } catch (err) {
       log.warn(
@@ -2239,42 +2403,45 @@ export class HostAgentSupervisor {
    * restarted the fleet-1 unit, the resumed kimi child died `ENOENT — 'kimi'
    * was not found on PATH`, and the session sat dead for 3+ hours while the
    * HOST heartbeat stayed green (nothing retried, nothing surfaced anywhere).
-   * Now: bounded backoff retries ({@link RESUME_RETRY_BACKOFF_MS}); when they
-   * exhaust, post an HONEST error bubble into the session's chat (the relay/
-   * backend are up — only the agent child is dead) and hand off to the
-   * heartbeat-ridden slow re-probe ({@link resumeRecoveryTick}) so an
-   * externally-fixed cause heals without a manual restart.
+   * Now: bounded backoff retries ({@link RESUME_RETRY_BACKOFF_MS}) PER
+   * SESSION; when they exhaust, post an HONEST error bubble into that
+   * session's chat (the relay/backend are up — only the agent child is dead)
+   * and hand off to the heartbeat-ridden slow re-probe
+   * ({@link resumeRecoveryTick}) so an externally-fixed cause heals without a
+   * manual restart.
    */
-  private onResumeChildExit(session: SavedSession, code: number, detail: string): void {
+  private onResumeChildExit(target: ResumeTarget, code: number, detail: string): void {
     if (this.stopped) return;
+    const { session } = target;
+    const st = this.resumeStateFor(target);
     const reason = detail ? `exit ${code}: ${detail}` : `exit ${code}`;
-    if (this.resumeRetryAttempts < RESUME_RETRY_BACKOFF_MS.length) {
-      const delay = RESUME_RETRY_BACKOFF_MS[this.resumeRetryAttempts];
-      this.resumeRetryAttempts += 1;
+    if (st.attempts < RESUME_RETRY_BACKOFF_MS.length) {
+      const delay = RESUME_RETRY_BACKOFF_MS[st.attempts];
+      st.attempts += 1;
       log.warn(
         'host-agent',
         `resumed session ${session.id.slice(0, 8)} died (${reason}) — ` +
-          `retry ${this.resumeRetryAttempts}/${RESUME_RETRY_BACKOFF_MS.length} in ${Math.round(delay / 1000)}s`,
+          `retry ${st.attempts}/${RESUME_RETRY_BACKOFF_MS.length} in ${Math.round(delay / 1000)}s`,
       );
-      this.resumeRetryTimer = setTimeout(() => {
-        this.resumeRetryTimer = null;
-        this.resumePersistedSession();
+      st.timer = setTimeout(() => {
+        st.timer = null;
+        this.resumeOne(st.target);
       }, delay);
-      this.resumeRetryTimer.unref?.();
+      st.timer.unref?.();
       return;
     }
     // Retries exhausted — fail LOUDLY and visibly, then keep the slow
     // heartbeat re-probe alive (resumeRecoveryTick) instead of giving up.
-    this.resumeExhausted = true;
-    this.lastResumeReprobeAt = Date.now();
+    st.exhausted = true;
+    st.lastReprobeAt = Date.now();
     log.error(
       'host-agent',
       `resumed session ${session.id.slice(0, 8)} FAILED permanently after ` +
         `${RESUME_RETRY_BACKOFF_MS.length + 1} attempts (${reason}) — ` +
         `posting visible error, re-probing every ${Math.round(RESUME_REPROBE_INTERVAL_MS / 60_000)} min`,
     );
-    if (!this.resumeFailurePosted) {
-      this.resumeFailurePosted = true;
+    if (!st.failurePosted) {
+      st.failurePosted = true;
       if (session.pluginId && session.pluginAuthToken) {
         void this.postResumeFailure(
           {
@@ -2300,39 +2467,45 @@ export class HostAgentSupervisor {
 
   /**
    * Heartbeat rider for resume recovery (synchronous scheduling only — the
-   * beat must stay punctual, and this adds NO new timers):
-   *   - a live session child ⇒ the failure episode (if any) is over: reset
-   *     the retry counter + flags so a FUTURE restart gets fresh retries and
-   *     a fresh (single) error bubble.
-   *   - retries exhausted + no child ⇒ re-probe the resume, throttled to
-   *     {@link RESUME_REPROBE_INTERVAL_MS}, so a fixed PATH / reinstalled
-   *     binary heals the session WITHOUT another manual restart. A re-probe
+   * beat must stay punctual, and this adds NO new timers), PER SESSION:
+   *   - its child is live ⇒ once it has PROVEN healthy (age gate) the
+   *     failure episode is over: reset that session's retry counter + flags
+   *     so a FUTURE restart gets fresh retries and a fresh (single) bubble.
+   *   - retries exhausted + no child ⇒ re-probe that session's resume,
+   *     throttled to {@link RESUME_REPROBE_INTERVAL_MS}, so a fixed PATH /
+   *     reinstalled binary heals it WITHOUT another manual restart. A re-probe
    *     that fails again stays in this state (the bubble is not re-posted).
    */
   private resumeRecoveryTick(): void {
-    if (this.children.size > 0) {
-      // Reset only once a child has PROVEN healthy (age gate) — a child that
-      // merely survived one heartbeat tick must not refill the retry budget,
-      // or a slow crash-loop would retry silently forever and never reach
-      // the visible-error path.
-      const now = Date.now();
-      const hasHealthyChild = [...this.children.values()].some(
-        (c) => now - c.startedAt >= RESUME_HEALTHY_AFTER_MS,
-      );
-      if (hasHealthyChild && (this.resumeRetryAttempts > 0 || this.resumeExhausted)) {
-        log.info('host-agent', 'resume recovered — session child healthy, retry state reset');
-        this.resumeRetryAttempts = 0;
-        this.resumeExhausted = false;
-        this.resumeFailurePosted = false;
-      }
-      return;
-    }
-    if (!this.resumeExhausted || this.resumeRetryTimer) return;
     const now = Date.now();
-    if (now - this.lastResumeReprobeAt < RESUME_REPROBE_INTERVAL_MS) return;
-    this.lastResumeReprobeAt = now;
-    log.info('host-agent', 'resume re-probe (post-exhaustion heartbeat rider)');
-    this.resumePersistedSession();
+    for (const st of this.resumeStates.values()) {
+      const child = this.children.get(st.target.deployId);
+      if (child) {
+        // Reset only once the child has PROVEN healthy (age gate) — a child
+        // that merely survived one heartbeat tick must not refill the retry
+        // budget, or a slow crash-loop would retry silently forever and never
+        // reach the visible-error path.
+        const healthy = now - child.startedAt >= RESUME_HEALTHY_AFTER_MS;
+        if (healthy && (st.attempts > 0 || st.exhausted)) {
+          log.info(
+            'host-agent',
+            `resume recovered — session ${st.target.session.id.slice(0, 8)} child healthy, retry state reset`,
+          );
+          st.attempts = 0;
+          st.exhausted = false;
+          st.failurePosted = false;
+        }
+        continue;
+      }
+      if (!st.exhausted || st.timer) continue;
+      if (now - st.lastReprobeAt < RESUME_REPROBE_INTERVAL_MS) continue;
+      st.lastReprobeAt = now;
+      log.info(
+        'host-agent',
+        `resume re-probe for session ${st.target.session.id.slice(0, 8)} (post-exhaustion heartbeat rider)`,
+      );
+      this.resumeOne(st.target);
+    }
   }
 
   /**
@@ -2374,7 +2547,7 @@ export class HostAgentSupervisor {
     } catch {
       /* already gone */
     }
-    this.children.delete(child.deployId);
+    this.untrackChild(child.deployId);
   }
 
   /**
@@ -2400,7 +2573,7 @@ export class HostAgentSupervisor {
       } catch {
         /* already gone */
       }
-      this.children.delete(deployId);
+      this.untrackChild(deployId);
     }
     const dirs = [
       path.join(selfHostedWorkspaceRoot(), deployId),

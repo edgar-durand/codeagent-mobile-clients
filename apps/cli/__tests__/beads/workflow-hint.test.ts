@@ -47,6 +47,34 @@ describe('ensureBeadsWorkflowHint', () => {
     expect(out).toContain('bd (beads)');
   });
 
+  // codeagent-zwp2: the hint now tells the agent to run `bd prime` only when
+  // starting real work and never to paste bd commands/output into a reply.
+  it('tells the agent to run bd via the shell tool and never paste bd output as a reply', () => {
+    ensureBeadsWorkflowHint(home);
+    const out = read();
+    expect(out).toContain('via your shell tool');
+    expect(out).toContain('Not needed to answer a greeting');
+    expect(out).toMatch(/Never\s+paste `bd` commands or their raw output into your reply/);
+  });
+
+  it('upgrades a STALE block from an older CLI in place (same markers, old text)', () => {
+    const dir = path.join(home, '.claude');
+    fs.mkdirSync(dir, { recursive: true });
+    const stale =
+      '# My rules\n\n<!-- codeam:beads-workflow -->\n# Beads (bd)\n- Run `bd prime` for the full workflow context.\n<!-- codeam:beads-workflow -->\n\n# After\n';
+    fs.writeFileSync(path.join(dir, 'CLAUDE.md'), stale);
+    ensureBeadsWorkflowHint(home);
+    const out = read();
+    expect(out).toContain('# My rules');
+    expect(out).toContain('# After');
+    expect(out).toContain('via your shell tool');
+    expect(out).not.toContain('- Run `bd prime` for the full workflow context.\n');
+    expect(out.match(/codeam:beads-workflow/g) ?? []).toHaveLength(2);
+    // And a second run is a no-op.
+    ensureBeadsWorkflowHint(home);
+    expect(read()).toBe(out);
+  });
+
   it('never throws on an unwritable home (best-effort)', () => {
     // A path whose parent is a file, not a dir → mkdir/write fail internally.
     const file = path.join(home, 'not-a-dir');

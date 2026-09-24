@@ -1,3 +1,7 @@
+// codeagent-v07a: the supervisor mirrors its live children to
+// `~/.codeam/host-agent-sessions.json`. Point that at a throwaway file so a
+// dev machine's real state is never read or overwritten by these tests.
+process.env.CODEAM_HOST_SESSION_STATE_FILE = `${process.env.TMPDIR ?? '/tmp'}/codeam-host-sessions-test-${process.pid}.json`;
 /**
  * Fleet control plane — REAL Docker integration test (Phase 2 acceptance gate).
  *

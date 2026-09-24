@@ -417,7 +417,12 @@ export async function sendHostHeartbeat(
 /**
  * Report a discrete supervised-session lifecycle transition (NOT a poll).
  * Fired one-shot by the host-agent on a real process transition:
- *   - `ended`     — a session child exited (pass its `deployId`).
+ *   - `ended`     — a session child exited (pass its `deployId`). `reason`
+ *                   is additive: `host_restart` marks a session the boot
+ *                   resume ENDED on purpose because it was beyond the
+ *                   resume bound (codeagent-v07a), so the app can say so
+ *                   instead of showing a dead card. The backend's DTO
+ *                   whitelist strips unknown fields today (no 400).
  *   - `reconcile` — supervisor boot (pass `activeDeployIds`, the live set);
  *                   the backend ends every row not listed, clearing zombies
  *                   left by a hard crash / reboot where no `ended` fired.
@@ -427,7 +432,7 @@ export async function sendHostHeartbeat(
 export async function reportSessionEvent(
   identity: Pick<SealedHostIdentity, 'hostId' | 'hostToken'>,
   body:
-    | { event: 'ended'; deployId: string }
+    | { event: 'ended'; deployId: string; reason?: 'host_restart' }
     | { event: 'reconcile'; activeDeployIds: string[] },
 ): Promise<void> {
   await postJson<{ ok: boolean }>('/api/self-hosted/session-event', {
@@ -618,7 +623,7 @@ export type SessionBubbleAuth = {
  *
  * Exists for the SUPERVISOR-side failures no session child is alive to
  * report: when the post-restart auto-resume exhausts its retries
- * (`resumePersistedSession`), the relay/backend are reachable but the agent
+ * (`resumePersistedSessions`), the relay/backend are reachable but the agent
  * child is dead — without this the HOST heartbeat stayed green while the
  * SESSION sat silently stale for hours (fleet-1, 2026-08-20).
  *

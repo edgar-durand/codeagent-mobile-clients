@@ -77,10 +77,69 @@ export interface ChunkDelta {
   delta: string;
 }
 
+/**
+ * `bd prime` shell invocations, as the agent's tool call carries them
+ * (`rawInput.command` for Bash-style tools, or the call title).
+ */
+const BD_PRIME_COMMAND_RE = /(?:^|[;&|]\s*)bd\s+prime\b/;
+
+/**
+ * Per-session memory of which tool calls were `bd prime` (codeagent-zwp2).
+ *
+ * WHY: the static beads hint tells every agent to "run `bd prime`", so an
+ * agent without a bd SessionStart hook (opencode has no `bd setup` recipe)
+ * runs it as a Bash tool call on its FIRST turn. Its result is bd's ~3000-line
+ * workflow guide, whose LAST content line is a documentation example:
+ * `bd dep add beads-yyy beads-xxx  # Tests depend on Feature …`. That result
+ * is published as a `tool_result` streaming chunk, and mobile's activity line
+ * renders the latest chunk's last non-empty line — so a newcomer's "Hello"
+ * was answered with a bare `bd dep add …` under the reply (replay
+ * 01a0ce5c…, 2026-09-23). Not the assistant's text (the chat pipe is
+ * `kind:'text'` only), not a narration: our own onboarding scaffolding
+ * leaking through a tool result.
+ *
+ * `bd prime` output is context for the MODEL, never for the person, so its
+ * tool_result is collapsed to a one-line summary. Every other tool result is
+ * untouched. `tool_call` ids are remembered until their terminal
+ * `tool_call_update`, so the map stays bounded.
+ */
+export class ToolCallTracker {
+  private readonly bdPrimeIds = new Set<string>();
+
+  /** Record a `tool_call` so its later `tool_call_update` can be recognised. */
+  note(update: { sessionUpdate: string; toolCallId?: string; title?: string | null; rawInput?: unknown }): void {
+    if (update.sessionUpdate !== 'tool_call' || !update.toolCallId) return;
+    if (isBdPrimeInvocation(update)) this.bdPrimeIds.add(update.toolCallId);
+  }
+
+  /** True when this tool call was `bd prime`; forgets terminal ids. */
+  isBdPrime(toolCallId: string | undefined, terminal: boolean): boolean {
+    if (!toolCallId) return false;
+    const hit = this.bdPrimeIds.has(toolCallId);
+    if (hit && terminal) this.bdPrimeIds.delete(toolCallId);
+    return hit;
+  }
+}
+
+export function isBdPrimeInvocation(call: { title?: string | null; rawInput?: unknown }): boolean {
+  const input = call.rawInput as Record<string, unknown> | null | undefined;
+  const command = input && typeof input === 'object' ? input.command : undefined;
+  if (typeof command === 'string' && BD_PRIME_COMMAND_RE.test(command)) return true;
+  return typeof call.title === 'string' && BD_PRIME_COMMAND_RE.test(call.title);
+}
+
+/** The tool_result body published in place of `bd prime`'s workflow guide. */
+export function bdPrimeResultSummary(body: string): string {
+  const lines = body.split('\n').filter((l) => l.trim().length > 0).length;
+  return `bd prime · workflow context loaded (${lines} lines)`;
+}
+
 export function mapSessionUpdate(
   notification: SessionNotification,
+  tracker?: ToolCallTracker,
 ): ChunkDelta[] {
   const update = notification.update;
+  tracker?.note(update as { sessionUpdate: string; toolCallId?: string; title?: string | null; rawInput?: unknown });
   switch (update.sessionUpdate) {
     case 'agent_message_chunk': {
       const text = extractText(update.content);
@@ -122,8 +181,15 @@ export function mapSessionUpdate(
       if (update.status !== 'completed' && update.status !== 'failed') {
         return [];
       }
-      const body = describeToolCallUpdate(update);
-      if (!body) return [];
+      const rawBody = describeToolCallUpdate(update);
+      if (!rawBody) return [];
+      // `bd prime` output is model context, not user output — collapse it
+      // (see ToolCallTracker). A FAILED prime keeps its real body: that is
+      // an error the person may need to see.
+      const body =
+        update.status === 'completed' && tracker?.isBdPrime(update.toolCallId, true)
+          ? bdPrimeResultSummary(rawBody)
+          : rawBody;
       const prefix = update.status === 'failed' ? '[failed] ' : '';
       return [{ chunkId: update.toolCallId, kind: 'tool_result', delta: prefix + body }];
     }
