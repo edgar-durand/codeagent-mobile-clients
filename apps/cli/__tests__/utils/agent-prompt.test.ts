@@ -6,6 +6,16 @@ describe('parseAgentFlag', () => {
     expect(parseAgentFlag(['--agent=claude'])).toBe('claude');
   });
 
+  it('accepts the documented space form `--agent <id>` (help text advertises it)', () => {
+    expect(parseAgentFlag(['--agent', 'claude'])).toBe('claude');
+    expect(parseAgentFlag(['pair', '--agent', 'codex', '--verbose'])).toBe('codex');
+  });
+
+  it('rejects `--agent` with no value instead of silently falling back to the picker', () => {
+    expect(() => parseAgentFlag(['--agent'])).toThrow(/needs a value/);
+    expect(() => parseAgentFlag(['--agent', '--verbose'])).toThrow(/needs a value/);
+  });
+
   it('returns null when no flag', () => {
     expect(parseAgentFlag(['--other=x'])).toBeNull();
   });
