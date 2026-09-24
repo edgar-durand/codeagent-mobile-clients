@@ -12,7 +12,17 @@ import java.io.File
  * Used by the cloud-fallback panel so the user can pick the right repo
  * when starting a Codespace from the app.
  */
-data class RepoSlug(val owner: String, val repo: String)
+data class RepoSlug(val owner: String, val repo: String) {
+    /**
+     * `owner/repo`, the shape the backend's `repoIdentifier` expects and the
+     * apps title sessions with. Kept here, next to the parse, so the pairing
+     * body can't drift from it again — v2.75.x escaped the template's `$`
+     * (the `${'$'}` idiom meant for JS/JSON literals), so the backend got the
+     * literal text "dollar-brace it.owner / dollar-brace it.repo" and every
+     * JetBrains session was titled with it (2026-09-23 replays).
+     */
+    val identifier: String get() = "$owner/$repo"
+}
 
 /**
  * Project-level helpers for the mini-IDE feature: file-tree listing,
