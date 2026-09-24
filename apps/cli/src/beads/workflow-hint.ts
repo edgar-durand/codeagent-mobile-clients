@@ -31,11 +31,15 @@ const BEADS_HINT = `${BEADS_HINT_MARKER}
 This environment uses **bd (beads)** for issue/task tracking and persistent memory.
 
 - Use \`bd\` for ALL task tracking — do NOT use TodoWrite or markdown TODO lists.
-- Run \`bd prime\` for the full workflow context + project memories. On a fresh
-  session beads may still be provisioning for a few seconds — if \`bd prime\` comes
-  back empty, retry it shortly; it works once the shared server is up.
+- Run \`bd prime\` (via your shell tool, once) when you start working on a task, for
+  the full workflow context + project memories. Not needed to answer a greeting or
+  a quick question. On a fresh session beads may still be provisioning for a few
+  seconds — if \`bd prime\` comes back empty, retry it shortly; it works once the
+  shared server is up.
 - \`bd ready\` (available work) · \`bd show <id>\` · \`bd update <id> --claim\` · \`bd close <id>\`.
 - Use \`bd remember "..."\` for persistent knowledge — do NOT use MEMORY.md files.
+- Run \`bd\` commands through your shell tool and summarize the outcome. Never
+  paste \`bd\` commands or their raw output into your reply.
 ${BEADS_HINT_MARKER}`;
 
 export function ensureBeadsWorkflowHint(homeDir: string = os.homedir()): void {
@@ -47,11 +51,21 @@ export function ensureBeadsWorkflowHint(homeDir: string = os.homedir()): void {
     } catch {
       /* new file — fine */
     }
-    if (existing.includes(BEADS_HINT_MARKER)) return; // already present (idempotent)
+    if (existing.includes(BEADS_HINT)) return; // current block present (idempotent)
     fs.mkdirSync(path.dirname(file), { recursive: true });
-    const next = existing.trim()
-      ? `${existing.trimEnd()}\n\n${BEADS_HINT}\n`
-      : `${BEADS_HINT}\n`;
+    let next: string;
+    const open = existing.indexOf(BEADS_HINT_MARKER);
+    const close = open === -1 ? -1 : existing.indexOf(BEADS_HINT_MARKER, open + BEADS_HINT_MARKER.length);
+    if (open !== -1 && close !== -1) {
+      // A STALE block from an older CLI (the markers match, the text doesn't):
+      // replace it in place so a wording fix reaches boxes that already have
+      // the hint — a marker-only guard would have pinned them to the old text
+      // forever (codeagent-zwp2).
+      next =
+        existing.slice(0, open) + BEADS_HINT + existing.slice(close + BEADS_HINT_MARKER.length);
+    } else {
+      next = existing.trim() ? `${existing.trimEnd()}\n\n${BEADS_HINT}\n` : `${BEADS_HINT}\n`;
+    }
     fs.writeFileSync(file, next);
   } catch {
     /* best-effort — a failure here must never block or fail the agent spawn */

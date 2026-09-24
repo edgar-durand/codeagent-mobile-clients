@@ -83,7 +83,7 @@ import {
 } from './handoff-protocol';
 import { maybeSendOnboardingWelcome, resolveRepoName } from './onboarding';
 import { registerTerminalHandlers, closeAllTerminals } from '../../services/terminal-ops.service';
-import { mapSessionUpdate } from './mappers';
+import { mapSessionUpdate, ToolCallTracker } from './mappers';
 import { createOnRequestPermission } from './permission-gate';
 import type { PermissionOption } from './mappers';
 import { getGuardrailPolicy } from './guardrail-config';
@@ -1253,6 +1253,10 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
     autoApprovePermissions: opts.autoApprovePermissions,
     disable1mContext,
   });
+  // Remembers which tool calls were `bd prime` so their tool_result collapses
+  // to a one-liner instead of leaking bd's workflow guide into the activity
+  // line (codeagent-zwp2, see ToolCallTracker).
+  const toolCallTracker = new ToolCallTracker();
   const clientOptions: AcpClientOptions = {
     adapter: opts.adapter,
     cwd: opts.cwd,
@@ -1262,7 +1266,7 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
       updateCount += 1;
       const variant =
         (notification.update as { sessionUpdate?: string })?.sessionUpdate ?? 'unknown';
-      const deltas = mapSessionUpdate(notification);
+      const deltas = mapSessionUpdate(notification, toolCallTracker);
       // Info-level so it appears with CODEAM_DEBUG=1 (the canonical
       // smoke-test invocation) without needing trace. Includes a
       // post-map delta count so we can tell "SDK delivered the
