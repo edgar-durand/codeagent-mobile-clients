@@ -1799,6 +1799,47 @@ const emitPreviewEvent = (args: Parameters<typeof postPreviewEvent>[0]): void =>
   });
 };
 
+/**
+ * Upper bound on ONE project-detection one-shot, owned by the HANDLER — not
+ * by whichever runtime happens to implement `generateOneShot`. Every runtime
+ * today routes through `spawnAndCapture` (60 s default), but the pending
+ * state on mobile/web is only ever cleared by a terminal `preview_*` event
+ * from here, so the bound that guarantees that event must live here too:
+ * a future runtime (or a one-shot that ignores `timeoutMs`) cannot leave the
+ * user on "Detecting project…" indefinitely. 120 s covers the 30-90 s a cold
+ * repo scan takes on Claude/Codex/Gemini with margin.
+ */
+export const PREVIEW_DETECT_TIMEOUT_MS = 120_000;
+
+/**
+ * Race a detect one-shot against {@link PREVIEW_DETECT_TIMEOUT_MS}. On expiry
+ * the one-shot's later result is deliberately dropped: the user has already
+ * been told it failed, and a `preview_detection_ready` arriving after a
+ * `preview_error` would flip the UI back into a sheet nobody asked for.
+ */
+async function runDetectOneShot(
+  generate: NonNullable<RuntimeStrategy['generateOneShot']>,
+  timeoutMs: number = PREVIEW_DETECT_TIMEOUT_MS,
+): Promise<{ raw: string | null; timedOut: boolean }> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<{ raw: null; timedOut: true }>((resolve) => {
+    timer = setTimeout(() => resolve({ raw: null, timedOut: true }), timeoutMs);
+    timer.unref?.();
+  });
+  const oneShot = generate(PREVIEW_DETECT_PROMPT, { timeoutMs }).then(
+    (raw) => ({ raw, timedOut: false as const }),
+    (err: unknown) => {
+      log.info('preview', `detect: generateOneShot threw: ${String(err)}`);
+      return { raw: null, timedOut: false as const };
+    },
+  );
+  try {
+    return await Promise.race([oneShot, deadline]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 const requestPreviewDetectH: CommandHandler = (ctx) => {
   if (!ctx.pluginAuthToken) {
     log.info('preview', 'no pluginAuthToken — skipping detect');
@@ -1819,6 +1860,7 @@ const requestPreviewDetectH: CommandHandler = (ctx) => {
     return;
   }
   const pluginAuthToken = ctx.pluginAuthToken;
+  const generateOneShot = ctx.runtime.generateOneShot.bind(ctx.runtime);
   void (async () => {
     // `.codeam/preview.json` short-circuits the agent step entirely
     // when a repo has been pinned. Saves the user 30-90 s + the LLM
@@ -1845,11 +1887,24 @@ const requestPreviewDetectH: CommandHandler = (ctx) => {
     });
     log.info('preview', 'detect: invoking generateOneShot');
     const startedAt = Date.now();
-    const raw = await ctx.runtime.generateOneShot!(PREVIEW_DETECT_PROMPT).catch((err) => {
-      log.info('preview', `detect: generateOneShot threw: ${String(err)}`);
-      return null;
-    });
+    const { raw, timedOut } = await runDetectOneShot(generateOneShot);
     const tookMs = Date.now() - startedAt;
+    if (timedOut) {
+      log.info('preview', `detect: timed out after ${tookMs}ms — emitting preview_error`);
+      emitPreviewEvent({
+        sessionId: ctx.sessionId,
+        pluginId: ctx.pluginId,
+        pluginAuthToken,
+        type: USER_EVENTS.PREVIEW_ERROR,
+        payload: {
+          stage: 'detection',
+          message:
+            `Project detection timed out after ${Math.round(PREVIEW_DETECT_TIMEOUT_MS / 1000)} s — ` +
+            'the agent did not answer. Try again, or add a .codeam/preview.json override.',
+        },
+      });
+      return;
+    }
     const detection = safeParseDetection(raw);
     if (!detection) {
       // codeagent-k9q4. Antes esta linea era `detect: invalid agent output
@@ -1983,11 +2038,12 @@ export function prewarmPreviewDetection(runtime: RuntimeStrategy): void {
   if (previewPrewarmStarted) return;
   previewPrewarmStarted = true;
   if (typeof runtime.generateOneShot !== 'function') return;
+  const generateOneShot = runtime.generateOneShot.bind(runtime);
   void (async () => {
     try {
       const cwd = process.cwd();
       if (await readPreviewConfig(cwd)) return; // already pinned/cached — nothing to do
-      const raw = await runtime.generateOneShot!(PREVIEW_DETECT_PROMPT).catch(() => null);
+      const { raw } = await runDetectOneShot(generateOneShot);
       const detection = safeParseDetection(raw);
       if (!detection) {
         // Silencioso para el usuario (es un pre-calentamiento), pero NO para

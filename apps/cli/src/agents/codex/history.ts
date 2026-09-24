@@ -47,6 +47,33 @@ interface SessionMetaPayload {
   id?: string;
   cwd?: string;
   timestamp?: string;
+  /** `cli` (native TUI), `vscode`, or `exec` (`codex exec` — a headless one-shot). */
+  source?: string;
+  /** `codex-tui` / `codex_exec` / … — the binary mode that minted the rollout. */
+  originator?: string;
+}
+
+/**
+ * A rollout written by `codex exec` — the headless one-shot our own
+ * `generateOneShot` runs for preview detection + AI summaries/insights — is
+ * NEVER the conversation the user is driving. Verified live on codex-cli
+ * 0.143.0: `codex exec "<prompt>"` writes `rollout-*.jsonl` into the SAME
+ * `~/.codex/sessions/YYYY/MM/DD` store as the TUI, with the SAME `cwd`, and
+ * `session_meta.source === 'exec'` / `originator === 'codex_exec'` (the TUI
+ * writes `cli` / `codex-tui`).
+ *
+ * ⚠️ 2026-09-23 (JetBrains user, local Codex baton session, C++ JUCE project):
+ * the user tapped Preview BEFORE their first terminal turn. The TUI had no
+ * rollout yet, the `codex exec` detect one-shot wrote one, and
+ * {@link discoverSessionId} — "newest rollout for this cwd since spawn" —
+ * bound the baton to it. The transcript mirror then tailed the ONE-SHOT: the
+ * internal `PREVIEW_DETECT_PROMPT` ("OUTPUT JSON ONLY…") appeared in the chat
+ * as a big USER message followed by Codex's raw JSON, the user's real TUI turns
+ * were never mirrored, and a Take Control would have `session/load`ed the
+ * one-shot. Older rollouts without `source` are kept (can't tell, don't guess).
+ */
+function isHeadlessOneShotMeta(meta: SessionMetaPayload): boolean {
+  return meta.source === 'exec' || meta.originator === 'codex_exec';
 }
 
 interface MessageVariant {
@@ -414,7 +441,8 @@ export function resolveHistoryFile(
  * native TUI is interactive throughout, so the user naturally types; the moment
  * their first turn lands the rollout appears and we bind it. Returns the id of the
  * newest rollout for THIS cwd whose mtime ≥ `sinceMs` (the one this launch just
- * created), or null if none appears within `timeoutMs`.
+ * created), or null if none appears within `timeoutMs`. Rollouts written by
+ * `codex exec` are skipped — see {@link isHeadlessOneShotMeta}.
  *
  * Codex shares ONE rollout store across native TUI and its ACP adapter (verified
  * live: `codex-acp` `session/load` replays a native rollout id), so — unlike
@@ -487,6 +515,7 @@ function newestRolloutIdSince(
       // Read only the session_meta (leads the file) to confirm cwd + get the id.
       let metaCwd: string | undefined;
       let metaId: string | undefined;
+      let headlessOneShot = false;
       try {
         const raw = fs.readFileSync(filePath, 'utf8');
         for (const line of raw.split('\n')) {
@@ -497,13 +526,14 @@ function newestRolloutIdSince(
             const meta = rec.payload as SessionMetaPayload | undefined;
             metaCwd = typeof meta?.cwd === 'string' ? meta.cwd : undefined;
             metaId = typeof meta?.id === 'string' ? meta.id : undefined;
+            headlessOneShot = meta !== undefined && isHeadlessOneShotMeta(meta);
           }
           break; // session_meta leads the rollout; nothing else to read
         }
       } catch {
         continue;
       }
-      if (!metaId || !metaCwd) continue;
+      if (!metaId || !metaCwd || headlessOneShot) continue;
       let resolvedMeta: string;
       try {
         resolvedMeta = fs.realpathSync(metaCwd);
