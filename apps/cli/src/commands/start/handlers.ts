@@ -298,7 +298,7 @@ const resumeSession: CommandHandler = async (ctx, _cmd, parsed) => {
   ctx.historySvc.setCurrentConversationId(id);
   await ctx.historySvc.loadConversation(id);
   await ctx.outputSvc.newTurnResume(id);
-  ctx.agent.restart(id, auto ?? false);
+  void ctx.agent.restart(id, auto ?? false);
 };
 
 // ─── Read-only context queries ───────────────────────────────────

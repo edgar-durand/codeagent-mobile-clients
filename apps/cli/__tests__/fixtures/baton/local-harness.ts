@@ -271,7 +271,33 @@ export async function waitUntil(label: string, predicate: () => boolean, timeout
     if (predicate()) return;
     await new Promise((r) => setTimeout(r, 250));
   }
-  throw new Error(`timed out after ${Math.round(timeoutMs / 1000)}s waiting for: ${label}`);
+  throw new Error(
+    `timed out after ${Math.round(timeoutMs / 1000)}s waiting for: ${label}\n${diagnoseClaudeState()}`,
+  );
+}
+
+/**
+ * What a wedged TUI usually needs to explain itself: which temp cwds
+ * `~/.claude.json` currently trusts and which claude processes are alive.
+ * (CI run 35946818546: the trust entry had been clobbered by an orphaned
+ * predecessor and the TUI sat on the trust dialog for 180 s, silently.)
+ */
+export function diagnoseClaudeState(): string {
+  const lines: string[] = [];
+  try {
+    const cfg = JSON.parse(fs.readFileSync(path.join(os.homedir(), '.claude.json'), 'utf8')) as {
+      projects?: Record<string, { hasTrustDialogAccepted?: boolean }>;
+    };
+    const tmp = Object.entries(cfg.projects ?? {}).filter(([k]) => k.includes('codeam-baton-local-'));
+    lines.push(`~/.claude.json trusted temp cwds: ${tmp.map(([k, v]) => `${path.basename(k)}=${v.hasTrustDialogAccepted === true}`).join(', ') || '(none)'}`);
+  } catch (e) {
+    lines.push(`~/.claude.json unreadable: ${(e as Error).message}`);
+  }
+  try {
+    const out = execFileSync('sh', ['-c', 'pgrep -lx claude || true'], { encoding: 'utf8' }).trim();
+    lines.push(`live claude processes: ${out || '(none)'}`);
+  } catch { /* pgrep missing */ }
+  return lines.join('\n');
 }
 
 /** Every `<conversation>.jsonl` claude has written for `cwd`, if any (ids, no extension). */

@@ -314,6 +314,16 @@ export class StreamingState {
    * no matter how many message ids the adapter spreads it across.
    */
   private turnTextChunkId: string | null = null;
+  /**
+   * Adapter message id of the LAST text delta appended this turn. A text delta
+   * under a NEW message id that appends (not a snapshot re-emit) is a new
+   * paragraph — Codex emits several `agent_message_chunk` messages per turn
+   * around tool calls ('…run every gate.' → tools → 'I'm resuming at…') and,
+   * collapsed onto `turnTextChunkId`, they glued into 'gate.I'm resuming'
+   * (replay 2026-09-23, bead codeagent-wqpi). Both feeds carry the joined
+   * string, so the boundary can only be restored here.
+   */
+  private lastTextMessageId: string | null = null;
 
   /**
    * Stable chunkId that ALL `thinking` segments of the current turn collapse
@@ -506,6 +516,7 @@ export class StreamingState {
     this.text = '';
     this.streamingChunks.clear();
     this.turnTextChunkId = null;
+    this.lastTextMessageId = null;
     this.turnThoughtChunkId = null;
     // New turn → new namespace, so a reused adapter chunkId (e.g. `toolu_01`)
     // never collides with a prior turn's already-finalized chunk on the feed.
@@ -581,7 +592,19 @@ export class StreamingState {
         `streaming-chunk kind flip chunkId=${chunkId.slice(0, 8)} from=${existing.kind} to=${delta.kind}`,
       );
     }
-    const cumulativeContent = reconcileCumulative(existing?.content ?? '', delta.delta);
+    const prior = existing?.content ?? '';
+    let cumulativeContent = reconcileCumulative(prior, delta.delta);
+    if (delta.kind === 'text') {
+      // A new adapter message id whose delta APPENDS (a snapshot re-emit of
+      // the same reply reconciles as REPLACE and is left alone) starts a new
+      // paragraph — never glue it onto the previous message's last byte.
+      const newMessage = this.lastTextMessageId !== null && this.lastTextMessageId !== delta.chunkId;
+      const appended = cumulativeContent === prior + delta.delta;
+      if (newMessage && appended && /\S$/.test(prior) && !/^\s/.test(delta.delta)) {
+        cumulativeContent = `${prior}\n\n${delta.delta}`;
+      }
+      this.lastTextMessageId = delta.chunkId;
+    }
     this.streamingChunks.set(chunkId, { kind: delta.kind, content: cumulativeContent });
 
     // A ```codeam-handoff fence proposed at the tail of a reply is protocol

@@ -634,7 +634,9 @@ export async function runBatonSession(opts: BatonSessionOptions): Promise<void> 
     process.removeListener('SIGTERM', onSignal);
     process.removeListener('SIGHUP', onSignal);
     mirror?.stop();
-    void controller.shutdown();
+    // Bounded by killAndWait: the native TUI must be GONE before we leave,
+    // or its exit-time config rewrite races the next session's setup.
+    await controller.shutdown();
     await stopRelayWithGoodbye(relay);
   }
   const onSignal = (): void => {

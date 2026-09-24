@@ -154,7 +154,10 @@ describe('StreamingState.append — chat-pipe text reconciliation', () => {
     const { state } = makeState();
     state.append({ chunkId: 'a', kind: 'text', delta: 'first.' });
     state.append({ chunkId: 'b', kind: 'text', delta: 'second.' });
-    expect(state.getCurrentText()).toBe('first.second.');
+    // A NEW message id after a finished sentence is a new paragraph — the
+    // old 'first.second.' expectation WAS the glued-chunks bug (replay
+    // 2026-09-23 'gate.I'm resuming', bead codeagent-wqpi).
+    expect(state.getCurrentText()).toBe('first.\n\nsecond.');
   });
 
   it('ignores non-text chunks (thinking/tool) in the chat-bubble text', () => {

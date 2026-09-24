@@ -203,7 +203,7 @@ export class NativeTuiDriver implements SessionDriver {
   async stop(): Promise<void> {
     this.unwatchSwitch?.();
     this.unwatchSwitch = null;
-    this.agent.kill();
+    await this.agent.killAndWait();
     // Hand-off (not process exit): the native TUI was hard-killed, so the
     // terminal modes it turned on (focus reporting, bracketed paste, mouse)
     // are still latched — a cooked-mode tty would echo each focus event as

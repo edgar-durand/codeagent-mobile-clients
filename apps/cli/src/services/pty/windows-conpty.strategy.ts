@@ -214,6 +214,10 @@ export class WindowsConPtyStrategy implements IPtyStrategy {
     this.pty.write(typeof data === 'string' ? data : data.toString('utf8'));
   }
 
+  async killAndWait(): Promise<void> {
+    this.kill();
+  }
+
   kill(): void {
     try {
       this.pty?.kill();
