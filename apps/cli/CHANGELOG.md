@@ -4,6 +4,17 @@ All notable changes to `codeam-cli` are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.75.13] — 2026-09-24
+
+### Added
+
+- **cli:** Attribute provider 402s — routing in the debug log, BYO no-credits bubble, pack fail
+
+### Fixed
+
+- **cli:** Host-agent resumes every session live at shutdown, bounded, not just the last one
+- **cli:** Collapse `bd prime` tool result so its docs tail no longer shows under the reply
+
 ## [2.75.12] — 2026-09-24
 
 ### Fixed
