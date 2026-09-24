@@ -52,9 +52,49 @@ export interface AcpPublisherOptions {
   onPairingInvalid?: () => void;
 }
 
+/**
+ * api-v2's `StreamingChunkDto` caps `content` at 64 KiB and answers 400 above
+ * it. The feed sends the CUMULATIVE per-chunk snapshot on every delta, so a
+ * single long tool result / thinking block used to cross the cap and then get
+ * EVERY following delta rejected — 54,718 × 400 on 2026-09-23 from two
+ * codespace sessions (128 KB bodies at ~11/s for an hour), enough to trip
+ * Cloud Run "no available instance" 500s for everyone else. Stay under the cap
+ * with headroom for JSON escaping; past it, mobile gets the head once plus a
+ * truncation marker and no further re-sends until the terminal frame.
+ */
+export const STREAMING_CHUNK_SNAPSHOT_MAX_CHARS = 56 * 1024;
+
+/**
+ * Above this size a chunk's snapshots are coalesced to at most one POST per
+ * window: a 50 KB tool result re-sent on each of 20 deltas/s is 1 MB/s that
+ * mobile immediately replaces with the next snapshot anyway.
+ */
+export const STREAMING_CHUNK_COALESCE_MIN_CHARS = 8 * 1024;
+export const STREAMING_CHUNK_COALESCE_WINDOW_MS = 300;
+
+export function boundStreamingChunkContent(
+  content: string,
+  max = STREAMING_CHUNK_SNAPSHOT_MAX_CHARS,
+): { content: string; truncated: boolean } {
+  if (content.length <= max) return { content, truncated: false };
+  const dropped = content.length - max;
+  return {
+    content: `${content.slice(0, max)}\n… [output truncated: ${dropped} more characters — the full text is in the conversation transcript]`,
+    truncated: true,
+  };
+}
+
 export class AcpPublisher {
   private readonly apiBase: string;
   private token: string;
+  /** chunkIds whose truncated snapshot already went out — nothing new to show
+   *  until the terminal frame. */
+  private readonly truncatedChunks = new Set<string>();
+  private readonly lastChunkPostAt = new Map<string, number>();
+  private readonly pendingChunkPosts = new Map<
+    string,
+    { timer: ReturnType<typeof setTimeout>; event: StreamingChunkEvent }
+  >();
   /** Latched on an unrecoverable 401/403 — every surface stops posting
    *  (2026-06-28 incident: a dead-token publisher spammed 401 ×34 while
    *  the agent's replies silently never reached the phone). */
@@ -94,7 +134,10 @@ export class AcpPublisher {
       const fresh = await this.opts.refreshAuthToken();
       if (fresh) {
         this.token = fresh;
-        log.info('acpPublisher', `plugin-auth token refreshed after ${first.statusCode}; retrying POST`);
+        log.info(
+          'acpPublisher',
+          `plugin-auth token refreshed after ${first.statusCode}; retrying POST`,
+        );
         const second = await _transport.post(url, this.authHeaders(), payload);
         if (second.statusCode !== 401 && second.statusCode !== 403) return second;
         // A FRESH token still rejected — the pairing itself is gone.
@@ -211,17 +254,54 @@ export class AcpPublisher {
    * richer SessionDetail surface.
    */
   async publishStreamingChunk(event: StreamingChunkEvent): Promise<void> {
+    const { chunkId, isFinal } = event;
+    // A newer snapshot supersedes any coalesced one still waiting.
+    const pending = this.pendingChunkPosts.get(chunkId);
+    if (pending) {
+      clearTimeout(pending.timer);
+      this.pendingChunkPosts.delete(chunkId);
+    }
+    const bounded = boundStreamingChunkContent(event.content);
+    if (bounded.truncated) {
+      if (!isFinal && this.truncatedChunks.has(chunkId)) return; // already told mobile; nothing new to show
+      if (!this.truncatedChunks.has(chunkId)) {
+        log.warn(
+          'acpPublisher',
+          `streaming-chunk ${chunkId.slice(0, 12)} (${event.kind}) exceeds ${STREAMING_CHUNK_SNAPSHOT_MAX_CHARS} chars — sending a truncated snapshot once`,
+        );
+      }
+      this.truncatedChunks.add(chunkId);
+    }
+    if (isFinal) {
+      this.truncatedChunks.delete(chunkId);
+      this.lastChunkPostAt.delete(chunkId);
+    } else if (!bounded.truncated && bounded.content.length >= STREAMING_CHUNK_COALESCE_MIN_CHARS) {
+      const last = this.lastChunkPostAt.get(chunkId) ?? 0;
+      const wait = STREAMING_CHUNK_COALESCE_WINDOW_MS - (Date.now() - last);
+      if (wait > 0) {
+        // Keep the latest snapshot; one trailing post per window.
+        const timer = setTimeout(() => {
+          const latest = this.pendingChunkPosts.get(chunkId);
+          this.pendingChunkPosts.delete(chunkId);
+          if (latest) void this.postStreamingChunk(latest.event);
+        }, wait);
+        this.pendingChunkPosts.set(chunkId, { timer, event });
+        return;
+      }
+    }
+    await this.postStreamingChunk({ ...event, content: bounded.content });
+  }
+
+  private async postStreamingChunk(event: StreamingChunkEvent): Promise<void> {
     const url = `${this.apiBase}/api/sessions/${encodeURIComponent(this.opts.sessionId)}/streaming-chunk`;
+    if (!event.isFinal) this.lastChunkPostAt.set(event.chunkId, Date.now());
     try {
       const { statusCode, body } = await this.postWithReauth(
         url,
         this.envelope(event as unknown as Record<string, unknown>),
       );
       if (statusCode < 200 || statusCode >= 300) {
-        log.warn(
-          'acpPublisher',
-          `streaming-chunk status=${statusCode} body=${body.slice(0, 200)}`,
-        );
+        log.warn('acpPublisher', `streaming-chunk status=${statusCode} body=${body.slice(0, 200)}`);
       }
     } catch (err) {
       log.trace('acpPublisher', 'streaming-chunk post failed', err);
