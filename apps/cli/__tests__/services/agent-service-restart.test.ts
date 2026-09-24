@@ -34,6 +34,10 @@ describe('AgentService — restart / resume', () => {
       spawn: spawnSpy,
       write: vi.fn<(data: string | Buffer) => void>(),
       kill: killSpy,
+      // restart() awaits the OLD agent's exit before spawning (2026-09-24).
+      killAndWait: vi.fn(async () => {
+        killSpy();
+      }),
       dispose: vi.fn<() => void>(),
     };
   });
@@ -78,9 +82,9 @@ describe('AgentService — restart / resume', () => {
     return { agent, initialArgs };
   }
 
-  test('respawn does NOT carry the spawn-time --session-id (the dead-agent bug)', () => {
+  test('respawn does NOT carry the spawn-time --session-id (the dead-agent bug)', async () => {
     const { agent } = makeClaudeLikeAgent();
-    agent.restart('resume-id', false);
+    await agent.restart('resume-id', false);
 
     expect(killSpy).toHaveBeenCalledTimes(1);
     expect(spawnSpy).toHaveBeenCalledTimes(1);
@@ -90,9 +94,9 @@ describe('AgentService — restart / resume', () => {
     expect(args).toContain('resume-id');
   });
 
-  test('auto=true respawn includes the permissions bypass, still no --session-id', () => {
+  test('auto=true respawn includes the permissions bypass, still no --session-id', async () => {
     const { agent } = makeClaudeLikeAgent();
-    agent.restart('resume-id', true);
+    await agent.restart('resume-id', true);
 
     const [, , args] = spawnSpy.mock.calls[0];
     expect(args).not.toContain('--session-id');
@@ -101,7 +105,7 @@ describe('AgentService — restart / resume', () => {
     );
   });
 
-  test('after restart, output from the respawned PTY still streams to onData', () => {
+  test('after restart, output from the respawned PTY still streams to onData', async () => {
     const onData = vi.fn();
     const initialArgs = ['--session-id', 'spawn-uuid'];
     const runtime = {
@@ -121,7 +125,7 @@ describe('AgentService — restart / resume', () => {
       initialLaunch: { cmd: 'claude', args: initialArgs, sessionId: 'spawn-uuid' },
     });
 
-    agent.restart('resume-id', false);
+    await agent.restart('resume-id', false);
     // The strategy's onData callback is bound once at construction and
     // re-used across respawns — a byte from the resumed process must
     // still reach the OutputService.
@@ -129,13 +133,13 @@ describe('AgentService — restart / resume', () => {
     expect(onData).toHaveBeenCalledWith('hello from resumed session');
   });
 
-  test('a new prompt after restart is submitted (agent not wedged busy)', () => {
+  test('a new prompt after restart is submitted (agent not wedged busy)', async () => {
     const { agent } = makeClaudeLikeAgent();
     // Leave the agent in a "busy" state as if a turn had been running
     // when the user switched conversations.
     Object.assign(agent, { agentBusy: true });
 
-    agent.restart('resume-id', false);
+    await agent.restart('resume-id', false);
 
     const writeSpy = strategy.write as ReturnType<typeof vi.fn>;
     writeSpy.mockClear();
@@ -145,7 +149,7 @@ describe('AgentService — restart / resume', () => {
     expect(writeSpy).toHaveBeenCalledWith('new prompt after resume');
   });
 
-  test('falls back to concatenated args when runtime has no prepareResumeLaunch (Codex)', () => {
+  test('falls back to concatenated args when runtime has no prepareResumeLaunch (Codex)', async () => {
     // Codex resumes via a subcommand (`codex resume <id>`) and its
     // initial launch carries NO conflicting flags, so the legacy
     // concat path is correct and must be preserved.
@@ -160,7 +164,7 @@ describe('AgentService — restart / resume', () => {
       initialLaunch: { cmd: 'codex', args: [] },
     });
 
-    agent.restart('resume-id', false);
+    await agent.restart('resume-id', false);
     const [, , args] = spawnSpy.mock.calls[0];
     expect(args).toEqual(['resume', 'resume-id']);
   });

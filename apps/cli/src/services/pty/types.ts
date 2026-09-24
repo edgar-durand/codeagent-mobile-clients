@@ -9,6 +9,9 @@ export interface IPtyStrategy {
   spawn(cmd: string, cwd: string, args?: string[]): void;
   write(data: string | Buffer): void;
   kill(): void;
+  /** Like `kill()`, but resolves once the agent process has actually exited
+   *  (bounded). Await it before spawning a replacement or a new session. */
+  killAndWait(timeoutMs?: number): Promise<void>;
   dispose(): void;
   /**
    * PID of the spawned child (typically a helper that exec's the

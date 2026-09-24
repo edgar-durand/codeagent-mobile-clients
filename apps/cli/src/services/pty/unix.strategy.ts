@@ -50,9 +50,13 @@ def onwinch(n,f):
         sz=os.get_terminal_size(2)
         fcntl.ioctl(m,termios.TIOCSWINSZ,struct.pack('HHHH',sz.lines,sz.columns,0,0))
     except Exception:pass
+def onterm(n,f):
+    done[0]=True
 signal.signal(signal.SIGCHLD,onchld)
 signal.signal(signal.SIGWINCH,onwinch)
 signal.signal(signal.SIGHUP,signal.SIG_IGN)
+signal.signal(signal.SIGTERM,onterm)
+signal.signal(signal.SIGINT,onterm)
 i=sys.stdin.fileno()
 o=sys.stdout.fileno()
 while not done[0]:
@@ -73,10 +77,20 @@ while not done[0]:
         except OSError:done[0]=True
 try:os.kill(pid,signal.SIGTERM)
 except Exception:pass
-try:
-    _,st=os.waitpid(pid,0)
-    sys.exit((st>>8)&0xFF)
-except Exception:sys.exit(0)
+import time
+t0=time.time()
+while True:
+    try:w,st=os.waitpid(pid,os.WNOHANG)
+    except ChildProcessError:sys.exit(0)
+    except Exception:sys.exit(0)
+    if w==pid:sys.exit((st>>8)&0xFF)
+    if time.time()-t0>5:
+        try:os.kill(pid,signal.SIGKILL)
+        except Exception:pass
+        try:os.waitpid(pid,0)
+        except Exception:pass
+        sys.exit(137)
+    time.sleep(0.05)
 `;
 
 /**
@@ -226,11 +240,40 @@ export class UnixPtyStrategy implements IPtyStrategy {
   }
 
   kill(): void {
+    void this.killAndWait();
+  }
+
+  /**
+   * SIGTERM the helper and resolve once it has EXITED (bounded; SIGKILL
+   * fallback). The helper forwards the signal to the agent and waits for it,
+   * so when this resolves the agent process is gone too.
+   *
+   * ⚠️ Why awaited (2026-09-24): the helper used to die under SIGTERM with no
+   * handler, leaving the agent orphaned; on a baton hand-off and in the
+   * baton integration suite the orphaned Claude exited a beat later and
+   * rewrote `~/.claude.json` from memory, clobbering the just-written
+   * workspace-trust entry for the NEXT session — which then wedged on the
+   * trust dialog (CI run 35946818546). Callers that start a new agent or a
+   * new session must `await` this.
+   */
+  async killAndWait(timeoutMs = 6_000): Promise<void> {
     const proc = this.proc;
     this.proc = null;
     if (proc) {
       proc.removeAllListeners('exit'); // prevent old exit handler from deleting the new helper file
-      proc.kill();
+      const exited = new Promise<void>((resolve) => {
+        if (proc.exitCode !== null || proc.signalCode !== null) return resolve();
+        proc.once('exit', () => resolve());
+      });
+      proc.kill('SIGTERM');
+      const timer = new Promise<'timeout'>((resolve) => {
+        const t = setTimeout(() => resolve('timeout'), timeoutMs);
+        void exited.then(() => clearTimeout(t));
+      });
+      if ((await Promise.race([exited, timer])) === 'timeout') {
+        try { proc.kill('SIGKILL'); } catch { /* already gone */ }
+        await Promise.race([exited, new Promise((r) => setTimeout(r, 1_000))]);
+      }
     }
     this.removeTempFile();
     this.dispose();

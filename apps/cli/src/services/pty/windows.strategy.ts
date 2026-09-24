@@ -89,6 +89,10 @@ export class WindowsPtyStrategy implements IPtyStrategy {
     this.dispose();
   }
 
+  async killAndWait(): Promise<void> {
+    this.kill();
+  }
+
   dispose(): void {
     process.stdin.removeListener('data', this.stdinHandler);
     if (process.stdin.isTTY) {

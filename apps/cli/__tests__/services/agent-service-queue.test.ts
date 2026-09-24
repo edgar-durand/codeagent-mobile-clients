@@ -31,6 +31,7 @@ describe('AgentService — serialised submission queue', () => {
       spawn: vi.fn(),
       write: writeSpy,
       kill: vi.fn(),
+      killAndWait: vi.fn(async () => {}),
       dispose: vi.fn(),
     };
     const runtime = {

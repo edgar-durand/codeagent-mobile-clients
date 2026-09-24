@@ -369,6 +369,11 @@ export class AgentService {
     this.strategy?.kill();
   }
 
+  /** Kill and resolve once the agent process is gone (see `IPtyStrategy.killAndWait`). */
+  async killAndWait(): Promise<void> {
+    await this.strategy?.killAndWait();
+  }
+
   /**
    * Kill the current Claude process and relaunch it resuming the given session.
    * Pass auto=true to add --dangerously-skip-permissions (no confirmation prompts).
@@ -378,7 +383,7 @@ export class AgentService {
    * For agents that use a post-spawn PTY instruction (e.g. Codex), `resumeLaunchArgs`
    * returns [] and `postSpawnInstruction` types the resume command into the PTY.
    */
-  restart(sessionId: string, auto = false): void {
+  async restart(sessionId: string, auto = false): Promise<void> {
     if (!this.strategy || !this.initialLaunch) return;
     // Previously this branch hardcoded `buildClaudeLaunch` — for any
     // non-Claude runtime that silently relaunched Claude (or no-op'd
@@ -421,7 +426,10 @@ export class AgentService {
       this.quietTimer = null;
     }
 
-    this.strategy.kill();
+    // Wait for the old agent to be GONE before the new one starts: an
+    // orphaned predecessor rewrites its config on exit and can clobber what
+    // the successor just wrote (workspace trust, session pointers).
+    await this.strategy.killAndWait();
     this.strategy.spawn(launch.cmd, this.opts.cwd, launch.args);
     if (resumeArgs.length === 0 && this.runtime.postSpawnInstruction) {
       const { ptyInput } = this.runtime.postSpawnInstruction(sessionId);
