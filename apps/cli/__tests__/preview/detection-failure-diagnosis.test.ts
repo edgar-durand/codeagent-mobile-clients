@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { describeDetectionFailure } from '../../src/services/preview/parser';
+import { describeDetectionFailure, describeOneShotAgentError } from '../../src/services/preview/parser';
 
 /**
  * codeagent-k9q4 — cuando el parseo de la deteccion falla no se registraba la
@@ -66,5 +66,26 @@ describe('describeDetectionFailure — nombrar el fallo, no solo constatarlo', (
       port: 5173, ready_pattern: 'Local:',
     });
     expect(describeDetectionFailure(raw)).toBeNull();
+  });
+});
+
+// Break-it emulator 2026-09-25: on a CodeAgent Box whose credits ran out, the
+// one-shot printed nothing on stdout and `API Error: 402 You're out of
+// credits…` on stderr. The user read "The agent didn't return anything".
+describe('describeOneShotAgentError — say what the agent said', () => {
+  it("surfaces the agent's API error instead of 'returned nothing'", () => {
+    const stderr =
+      "API Error: 402 You're out of credits — top up to keep this agent running. Automatic top-ups are off.\n\n" +
+      '"MiniMax-M3" isn\'t described by this version\'s model catalog; update Claude Code…';
+    expect(describeOneShotAgentError(stderr)).toBe(
+      "Preview detection couldn't run — the agent answered 402: You're out of credits — top up to keep this agent running. Automatic top-ups are off.",
+    );
+  });
+
+  it('drops a trailing JSON body and returns null when stderr names no API error', () => {
+    expect(describeOneShotAgentError('API Error: 500 Internal error {"type":"error"}')).toBe(
+      "Preview detection couldn't run — the agent answered 500: Internal error",
+    );
+    expect(describeOneShotAgentError('Loading config…\nwarning: something')).toBeNull();
   });
 });

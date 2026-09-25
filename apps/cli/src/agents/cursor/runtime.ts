@@ -209,12 +209,13 @@ export class CursorRuntimeStrategy implements RuntimeStrategy {
    */
   async generateOneShot(
     prompt: string,
-    opts?: { cwd?: string; timeoutMs?: number },
+    opts?: { cwd?: string; timeoutMs?: number; onStderr?: (chunk: string) => void },
   ): Promise<string | null> {
     const binary = this.os.findInPath('cursor-agent');
     if (!binary) return null;
     const launch = this.os.buildLaunch(binary, ['--print', '--force', '--trust', prompt]);
     return spawnAndCapture(launch.cmd, launch.args, {
+      onStderr: opts?.onStderr,
       cwd: opts?.cwd,
       timeoutMs: opts?.timeoutMs,
     });

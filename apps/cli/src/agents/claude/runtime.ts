@@ -210,7 +210,7 @@ export class ClaudeRuntimeStrategy implements RuntimeStrategy {
 
   async generateOneShot(
     prompt: string,
-    opts?: { cwd?: string; timeoutMs?: number },
+    opts?: { cwd?: string; timeoutMs?: number; onStderr?: (chunk: string) => void },
   ): Promise<string | null> {
     // `claude -p "<prompt>"` is Anthropic's officially-supported print
     // mode — runs in non-interactive headless mode, prints the response
@@ -220,6 +220,7 @@ export class ClaudeRuntimeStrategy implements RuntimeStrategy {
     const launch = buildClaudeLaunch(['-p', prompt], this.os);
     if (!launch) return null;
     return spawnAndCapture(launch.cmd, launch.args, {
+      onStderr: opts?.onStderr,
       cwd: opts?.cwd,
       timeoutMs: opts?.timeoutMs,
     });
