@@ -175,6 +175,21 @@ export interface DetectionFailure {
   rawExcerpt: string;
 }
 
+/**
+ * The agent's own error, when a one-shot printed nothing on stdout but said
+ * why on stderr (`API Error: 402 You're out of credits — top up…`). Without it
+ * a Box user whose credits ran out read "The agent didn't return anything"
+ * and had no way to know what to fix (break-it emulator 2026-09-25).
+ * Returns a user-facing sentence, or null when stderr names no API error.
+ */
+export function describeOneShotAgentError(stderr: string): string | null {
+  const m = /API Error:\s*(\d{3})\s+([^\n]+)/i.exec(stderr);
+  if (!m) return null;
+  const detail = m[2].replace(/\{.*$/, '').trim().slice(0, 240);
+  if (!detail) return null;
+  return `Preview detection couldn't run — the agent answered ${m[1]}: ${detail}`;
+}
+
 /** Tope del extracto. Un one-shot puede devolver miles de lineas y el log
  *  vive en la maquina del usuario: no es sitio para volcarlas enteras. */
 const RAW_EXCERPT_LIMIT = 1_000;

@@ -159,9 +159,10 @@ describe('request_preview_detect — headless one-shot only, always terminal', (
     await vi.waitFor(() => expect(postedTypes()).toContain('preview_error'));
 
     expect(generateOneShot).toHaveBeenCalledTimes(1);
-    expect(generateOneShot).toHaveBeenCalledWith(PREVIEW_DETECT_PROMPT, {
-      timeoutMs: PREVIEW_DETECT_TIMEOUT_MS,
-    });
+    expect(generateOneShot).toHaveBeenCalledWith(
+      PREVIEW_DETECT_PROMPT,
+      expect.objectContaining({ timeoutMs: PREVIEW_DETECT_TIMEOUT_MS }),
+    );
     expect(agent.write).not.toHaveBeenCalled();
     expect(agent.sendPrompt).not.toHaveBeenCalled();
   });
@@ -185,9 +186,10 @@ describe('request_preview_detect — headless one-shot only, always terminal', (
     await dispatchCommand(makeAcpCtx({ id: 'codex', generateOneShot }), cmd);
     await vi.waitFor(() => expect(postedTypes()).toContain('preview_error'));
 
-    expect(generateOneShot).toHaveBeenCalledWith(PREVIEW_DETECT_PROMPT, {
-      timeoutMs: PREVIEW_DETECT_TIMEOUT_MS,
-    });
+    expect(generateOneShot).toHaveBeenCalledWith(
+      PREVIEW_DETECT_PROMPT,
+      expect.objectContaining({ timeoutMs: PREVIEW_DETECT_TIMEOUT_MS }),
+    );
     expect(lastPosted('preview_error')).toMatchObject({ stage: 'unsupported' });
   });
 

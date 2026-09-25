@@ -185,7 +185,7 @@ export interface BaseAgentStrategy {
    */
   generateOneShot?(
     prompt: string,
-    opts?: { cwd?: string; timeoutMs?: number },
+    opts?: { cwd?: string; timeoutMs?: number; onStderr?: (chunk: string) => void },
   ): Promise<string | null>;
 }
 

@@ -69,6 +69,7 @@ import {
   isUnsupportedDetection,
   describeDetectionFailure,
   prewarmNodeDeps,
+  describeOneShotAgentError,
   writePreviewConfig,
 } from '../../services/preview';
 import { log } from '../../services/logger';
@@ -1821,17 +1822,23 @@ export const PREVIEW_DETECT_TIMEOUT_MS = 120_000;
 async function runDetectOneShot(
   generate: NonNullable<RuntimeStrategy['generateOneShot']>,
   timeoutMs: number = PREVIEW_DETECT_TIMEOUT_MS,
-): Promise<{ raw: string | null; timedOut: boolean }> {
+): Promise<{ raw: string | null; timedOut: boolean; stderr: string }> {
   let timer: ReturnType<typeof setTimeout> | undefined;
-  const deadline = new Promise<{ raw: null; timedOut: true }>((resolve) => {
-    timer = setTimeout(() => resolve({ raw: null, timedOut: true }), timeoutMs);
+  // Bounded tail of the agent's stderr — the only place it says WHY it
+  // printed nothing (e.g. a 402 out-of-credits).
+  let stderr = '';
+  const onStderr = (chunk: string): void => {
+    stderr = (stderr + chunk).slice(-4_000);
+  };
+  const deadline = new Promise<{ raw: null; timedOut: true; stderr: string }>((resolve) => {
+    timer = setTimeout(() => resolve({ raw: null, timedOut: true, stderr }), timeoutMs);
     timer.unref?.();
   });
-  const oneShot = generate(PREVIEW_DETECT_PROMPT, { timeoutMs }).then(
-    (raw) => ({ raw, timedOut: false as const }),
+  const oneShot = generate(PREVIEW_DETECT_PROMPT, { timeoutMs, onStderr }).then(
+    (raw) => ({ raw, timedOut: false as const, stderr }),
     (err: unknown) => {
       log.info('preview', `detect: generateOneShot threw: ${String(err)}`);
-      return { raw: null, timedOut: false as const };
+      return { raw: null, timedOut: false as const, stderr };
     },
   );
   try {
@@ -1888,7 +1895,7 @@ const requestPreviewDetectH: CommandHandler = (ctx) => {
     });
     log.info('preview', 'detect: invoking generateOneShot');
     const startedAt = Date.now();
-    const { raw, timedOut } = await runDetectOneShot(generateOneShot);
+    const { raw, timedOut, stderr } = await runDetectOneShot(generateOneShot);
     const tookMs = Date.now() - startedAt;
     if (timedOut) {
       log.info('preview', `detect: timed out after ${tookMs}ms — emitting preview_error`);
@@ -1931,6 +1938,7 @@ const requestPreviewDetectH: CommandHandler = (ctx) => {
           // El mensaje sale del diagnostico: decir "JSON invalido" cuando el
           // agente no contesto manda al usuario a mirar un JSON que no existe.
           message:
+            (failure?.reason === 'no_output' ? describeOneShotAgentError(stderr) : null) ??
             failure?.message ??
             'Agent returned invalid JSON. Try again, or add a .codeam/preview.json override.',
         },

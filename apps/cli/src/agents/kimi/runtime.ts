@@ -178,12 +178,13 @@ export class KimiRuntimeStrategy implements RuntimeStrategy {
    */
   async generateOneShot(
     prompt: string,
-    opts?: { cwd?: string; timeoutMs?: number },
+    opts?: { cwd?: string; timeoutMs?: number; onStderr?: (chunk: string) => void },
   ): Promise<string | null> {
     const binary = this.os.findInPath('kimi');
     if (!binary) return null;
     const launch = this.os.buildLaunch(binary, ['-p', prompt, '--output-format', 'text']);
     return spawnAndCapture(launch.cmd, launch.args, {
+      onStderr: opts?.onStderr,
       cwd: opts?.cwd,
       timeoutMs: opts?.timeoutMs,
     });
