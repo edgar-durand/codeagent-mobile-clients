@@ -59,8 +59,55 @@ describe('provisionBeads', () => {
     // Symlink the resolved bd onto PATH — mocked out so unit runs never touch
     // the real filesystem. Idempotency is covered in its own describe block.
     vi.spyOn(_provisionSeam, 'linkBdOntoPath').mockImplementation(() => undefined);
+    // Remote state unknown by default → bd's own bootstrap recovery runs.
+    vi.spyOn(_provisionSeam, 'remoteHasDoltData').mockReturnValue(null);
   });
   afterEach(() => vi.restoreAllMocks());
+
+  it('skips bd bootstrap and mints directly when the remote answered with no Dolt data', async () => {
+    // Fleet box 2026-09-24: bootstrap against a brand-new repo spent ~86 s and
+    // could never produce the DB, while the running agent derailed into
+    // repairing beads. An empty-but-reachable remote means nothing to clone.
+    vi.mocked(_provisionSeam.remoteHasDoltData).mockReturnValue(false);
+    let dbPresent = false;
+    fake.run = async (args: string[]): Promise<BdRunResult> => {
+      fake.calls.push(args);
+      if (args[0] === 'ping') {
+        return dbPresent
+          ? { code: 0, stdout: '', stderr: '' }
+          : { code: 1, stdout: '', stderr: 'database not found' };
+      }
+      if (args[0] === 'init' && args.includes('--reinit-local')) dbPresent = true;
+      return { code: 0, stdout: '', stderr: '' };
+    };
+
+    const res = await provisionBeads({ adapter: fake as never, beadsDir: '/tmp/hb' });
+
+    expect(ran(fake, 'bootstrap')).toBe(0);
+    expect(fake.calls.some((c) => c[0] === 'init' && c.includes('--reinit-local'))).toBe(true);
+    expect(res.serverUp).toBe(true);
+    expect(res.initialized).toBe(true);
+  });
+
+  it('still bootstraps when the remote HAS Dolt data (never mints over real issues first)', async () => {
+    vi.mocked(_provisionSeam.remoteHasDoltData).mockReturnValue(true);
+    let dbPresent = false;
+    fake.run = async (args: string[]): Promise<BdRunResult> => {
+      fake.calls.push(args);
+      if (args[0] === 'ping') {
+        return dbPresent
+          ? { code: 0, stdout: '', stderr: '' }
+          : { code: 1, stdout: '', stderr: 'database not found' };
+      }
+      if (args[0] === 'bootstrap') dbPresent = true;
+      return { code: 0, stdout: '', stderr: '' };
+    };
+
+    await provisionBeads({ adapter: fake as never, beadsDir: '/tmp/hb' });
+
+    expect(ran(fake, 'bootstrap')).toBe(1);
+    expect(fake.calls.some((c) => c[0] === 'init' && c.includes('--reinit-local'))).toBe(false);
+  });
 
   it('symlinks the resolved bd binary onto PATH (GAP 1) using the adapter binary', async () => {
     await provisionBeads({ adapter: fake as never, beadsDir: '/tmp/hb' });
@@ -383,6 +430,8 @@ describe('provisionBeads', () => {
         '--non-interactive',
       ]),
     );
+    // The mint must not touch the user's repo: no agent files, no git hooks.
+    expect(mint).toEqual(expect.arrayContaining(['--skip-agents', '--skip-hooks']));
 
     expect(res.serverUp).toBe(true);
     expect(res.initialized).toBe(true);

@@ -40,6 +40,11 @@ This environment uses **bd (beads)** for issue/task tracking and persistent memo
 - Use \`bd remember "..."\` for persistent knowledge — do NOT use MEMORY.md files.
 - Run \`bd\` commands through your shell tool and summarize the outcome. Never
   paste \`bd\` commands or their raw output into your reply.
+- CodeAgent installs, starts and repairs beads — not you. If a \`bd\` command
+  fails, carry on with the user's task without task tracking and try \`bd\`
+  again later. Never run \`bd init\`, \`bd bootstrap\`, \`bd doctor --fix\` or
+  \`dolt\` commands yourself: they race the provisioning and can wipe the
+  project's issues.
 ${BEADS_HINT_MARKER}`;
 
 export function ensureBeadsWorkflowHint(homeDir: string = os.homedir()): void {

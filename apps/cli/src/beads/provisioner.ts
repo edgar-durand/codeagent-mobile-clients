@@ -137,7 +137,31 @@ export const _provisionSeam = {
   linkBdOntoPath,
   /** Silence bd's `beads.role not configured` warning. */
   setGitBeadsRole,
+  /** Does the project's git remote carry Dolt data (`refs/dolt/data`)? */
+  remoteHasDoltData,
 };
+
+/**
+ * Whether `origin` carries beads' Dolt data. `false` ONLY when the remote
+ * answered and has no `refs/dolt/data` — the one case where `bd bootstrap` can
+ * never produce the DB. `null` when unknown (no origin, auth, network): the
+ * caller keeps bd's own recovery in that case.
+ */
+export function remoteHasDoltData(cwd?: string): boolean | null {
+  try {
+    const out = execFileSync('git', ['ls-remote', 'origin', 'refs/dolt/data'], {
+      cwd,
+      encoding: 'utf8',
+      timeout: 10_000,
+      stdio: ['ignore', 'pipe', 'ignore'],
+      // Never block on a credential prompt in a headless box.
+      env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
+    });
+    return out.trim().length > 0;
+  } catch {
+    return null;
+  }
+}
 
 /**
  * Filesystem / environment primitives for the PATH symlink, isolated behind a
@@ -431,12 +455,20 @@ export async function provisionBeads(opts: ProvisionOptions = {}): Promise<Provi
         'beads',
         `prefix DB '${prefix}' not reachable on shared server — self-healing via bd bootstrap`,
       );
-      const boot = await bd.run(['bootstrap', '--non-interactive']);
-      if (boot.code !== 0) {
-        log.warn(
-          'beads',
-          `bd bootstrap failed (code=${boot.code}): ${boot.stderr.slice(0, 200)} — prefix DB may be absent`,
-        );
+      // A remote that answered with no refs/dolt/data has nothing to clone:
+      // bootstrap can only fail there, and it spent ~86 s doing so on a fleet
+      // box (2026-09-24) while the agent, already running, tried to repair
+      // beads itself. Go straight to the mint. Unknown → keep bd's recovery.
+      if (_provisionSeam.remoteHasDoltData(opts.cwd) === false) {
+        log.info('beads', 'remote has no Dolt data — skipping bd bootstrap');
+      } else {
+        const boot = await bd.run(['bootstrap', '--non-interactive']);
+        if (boot.code !== 0) {
+          log.warn(
+            'beads',
+            `bd bootstrap failed (code=${boot.code}): ${boot.stderr.slice(0, 200)} — prefix DB may be absent`,
+          );
+        }
       }
 
       // If bootstrap (clone/restore) didn't make the DB reachable, this is a
@@ -454,6 +486,12 @@ export async function provisionBeads(opts: ProvisionOptions = {}): Promise<Provi
           '--reinit-local',
           '--discard-remote',
           `--destroy-token=DESTROY-${prefix}`,
+          // Same as Step 3: without these the mint wrote AGENTS.md/CLAUDE.md,
+          // .codex/.cursor setup and set core.hooksPath to .beads/hooks in the
+          // USER's repo — whose LFS-wrapped pre-push then blocked every
+          // `git push` on a box without git-lfs (fleet box 2026-09-24).
+          '--skip-agents',
+          '--skip-hooks',
           '--non-interactive',
         ]);
         if (mint.code !== 0) {
