@@ -57,6 +57,16 @@ describe('ensureBeadsWorkflowHint', () => {
     expect(out).toMatch(/Never\s+paste `bd` commands or their raw output into your reply/);
   });
 
+  // Fleet box 2026-09-24: a fresh session's first `bd ready` failed while the
+  // project DB was still being created, and the agent spent its first turn on
+  // bd doctor / bd bootstrap instead of the user's ticket — racing provisioning.
+  it('tells the agent to keep working when bd fails and never repair beads itself', () => {
+    ensureBeadsWorkflowHint(home);
+    const out = read();
+    expect(out).toMatch(/If a `bd` command\s+fails, carry on with the user's task/);
+    expect(out).toMatch(/Never run `bd init`, `bd bootstrap`, `bd doctor --fix`/);
+  });
+
   it('upgrades a STALE block from an older CLI in place (same markers, old text)', () => {
     const dir = path.join(home, '.claude');
     fs.mkdirSync(dir, { recursive: true });
