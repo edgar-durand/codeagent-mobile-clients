@@ -430,6 +430,8 @@ describe('provisionBeads', () => {
         '--non-interactive',
       ]),
     );
+    // The mint must not touch the user's repo: no agent files, no git hooks.
+    expect(mint).toEqual(expect.arrayContaining(['--skip-agents', '--skip-hooks']));
 
     expect(res.serverUp).toBe(true);
     expect(res.initialized).toBe(true);

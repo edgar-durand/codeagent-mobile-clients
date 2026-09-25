@@ -486,6 +486,12 @@ export async function provisionBeads(opts: ProvisionOptions = {}): Promise<Provi
           '--reinit-local',
           '--discard-remote',
           `--destroy-token=DESTROY-${prefix}`,
+          // Same as Step 3: without these the mint wrote AGENTS.md/CLAUDE.md,
+          // .codex/.cursor setup and set core.hooksPath to .beads/hooks in the
+          // USER's repo — whose LFS-wrapped pre-push then blocked every
+          // `git push` on a box without git-lfs (fleet box 2026-09-24).
+          '--skip-agents',
+          '--skip-hooks',
           '--non-interactive',
         ]);
         if (mint.code !== 0) {
