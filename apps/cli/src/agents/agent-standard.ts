@@ -3,6 +3,7 @@ import * as path from 'node:path';
 import * as os from 'node:os';
 import { AGENT_STANDARD_MARKER, AGENT_STANDARD_BLOCK, AGENT_STANDARD_TEXT } from '@codeam/shared';
 import { isLocalSession } from '../baton/gate';
+import { claudeMemoryFile } from './claude-memory-file';
 import type { PromptBlock } from './acp/buildAcpPromptBlocks';
 
 /**
@@ -25,9 +26,8 @@ import type { PromptBlock } from './acp/buildAcpPromptBlocks';
 
 // ─── Claude rail: append to ~/.claude/CLAUDE.md ───────────────────────────────
 
-export function ensureAgentStandard(homeDir: string = os.homedir()): void {
+export function ensureAgentStandard(homeDir?: string, file: string = claudeMemoryFile(homeDir)): void {
   try {
-    const file = path.join(homeDir, '.claude', 'CLAUDE.md');
     let existing = '';
     try {
       existing = fs.readFileSync(file, 'utf8');

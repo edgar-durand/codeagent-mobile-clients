@@ -1,6 +1,6 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import * as os from 'node:os';
+import { claudeMemoryFile } from '../agents/claude-memory-file';
 
 /**
  * STATIC "use bd" instruction, written to the global `~/.claude/CLAUDE.md` so the
@@ -47,9 +47,8 @@ This environment uses **bd (beads)** for issue/task tracking and persistent memo
   project's issues.
 ${BEADS_HINT_MARKER}`;
 
-export function ensureBeadsWorkflowHint(homeDir: string = os.homedir()): void {
+export function ensureBeadsWorkflowHint(homeDir?: string, file: string = claudeMemoryFile(homeDir)): void {
   try {
-    const file = path.join(homeDir, '.claude', 'CLAUDE.md');
     let existing = '';
     try {
       existing = fs.readFileSync(file, 'utf8');
