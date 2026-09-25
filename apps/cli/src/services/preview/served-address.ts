@@ -23,9 +23,19 @@ export interface ServedAddress {
 
 const LOOPBACK_HOSTS = ['127.0.0.1', '::1'] as const;
 
-// Strip ANSI colour codes — Vite prints `Local:` and the URL in different colours.
+// ANSI escape sequences (colours, cursor moves). Vite prints `Local:` and the
+// URL in different colours, splitting the port from its host.
 // eslint-disable-next-line no-control-regex
-const ANSI_RE = /\x1b\[[0-9;]*m/g;
+const ANSI_RE = /\x1b\[[0-9;?]*[A-Za-z]/g;
+
+/**
+ * Dev-server output without terminal escapes — for parsing, and for the log
+ * tail the apps show in the preview error card, which printed raw
+ * `[32m➜ [1mLocal[22m` sequences (QA Box, 2026-09-25).
+ */
+export function stripAnsi(text: string): string {
+  return text.replace(ANSI_RE, '');
+}
 const LOCAL_URL_RE =
   /https?:\/\/(?:localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1?\]|\[::\]):(\d{2,5})\b/gi;
 
@@ -35,7 +45,7 @@ const LOCAL_URL_RE =
  * same port, and an unrelated remote URL (an API proxy target) must not.
  */
 export function announcedPorts(output: string): number[] {
-  const clean = output.replace(ANSI_RE, '');
+  const clean = stripAnsi(output);
   const ports: number[] = [];
   for (const m of clean.matchAll(LOCAL_URL_RE)) {
     const port = Number(m[1]);

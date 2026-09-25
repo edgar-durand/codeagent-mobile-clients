@@ -32,6 +32,7 @@ import { bringUpInspector } from './inspector-bringup';
 import {
   announcedPortListening,
   resolveServedAddress,
+  stripAnsi,
   type ServedAddress,
 } from './served-address';
 import type { InspectorProxy } from './inspector-proxy';
@@ -818,7 +819,7 @@ async function startDevServer(
     emit(USER_EVENTS.PREVIEW_ERROR, {
       stage: 'spawn',
       message: `The dev server exited (code ${outcome.code}) before it was ready. It may need a database or other services.`,
-      stderrTail: outputTail.slice(-8000),
+      stderrTail: stripAnsi(outputTail).slice(-8000),
     });
     return null;
   }
@@ -828,7 +829,7 @@ async function startDevServer(
       stage: 'ready_timeout',
       message:
         "The dev server didn't become ready in time. It may be stuck waiting on a database or other service.",
-      stderrTail: outputTail.slice(-8000),
+      stderrTail: stripAnsi(outputTail).slice(-8000),
     });
     return null;
   }
