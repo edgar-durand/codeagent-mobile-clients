@@ -192,11 +192,53 @@ export async function ensureGhAuth(
     });
     if (login.code === 0) {
       log.info('host-agent', 'gh authenticated with the linked GitHub token');
+    } else if (/missing required scope/i.test(login.stderr) && writeGhHostsToken(token)) {
+      // `gh auth login --with-token` insists on `read:org`, which the app's
+      // GitHub link does not request (scopes: codespace, repo, user:email).
+      // gh itself uses such a token fine once stored — issue view, pr create,
+      // pr list all work (verified on a fleet box 2026-09-24). Store it the
+      // way gh does on a box without a keyring.
+      log.info('host-agent', 'gh authenticated via hosts.yml (token lacks read:org)');
     } else {
-      log.warn('host-agent', `gh auth login failed (code=${String(login.code)}) — gh unauthenticated`);
+      log.warn(
+        'host-agent',
+        `gh auth login failed (code=${String(login.code)}): ${login.stderr.trim().slice(0, 200)} — gh unauthenticated`,
+      );
     }
   } catch (e) {
     log.warn('host-agent', `gh auth errored: ${e instanceof Error ? e.message : String(e)}`);
+  }
+}
+
+/** gh's config dir, resolved the way gh resolves it. */
+export function ghConfigDir(): string {
+  if (process.env.GH_CONFIG_DIR) return process.env.GH_CONFIG_DIR;
+  if (process.env.XDG_CONFIG_HOME) return path.join(process.env.XDG_CONFIG_HOME, 'gh');
+  if (process.platform === 'win32' && process.env.APPDATA) {
+    return path.join(process.env.APPDATA, 'GitHub CLI');
+  }
+  return path.join(os.homedir(), '.config', 'gh');
+}
+
+/**
+ * Store the token in gh's `hosts.yml` (0600), exactly what `gh auth login`
+ * writes when no keyring exists. Refuses to touch an existing `hosts.yml` —
+ * it may hold another host's login. Returns whether it wrote the file.
+ */
+export function writeGhHostsToken(token: string): boolean {
+  try {
+    const dir = ghConfigDir();
+    const file = path.join(dir, 'hosts.yml');
+    if (fs.existsSync(file)) return false;
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    fs.writeFileSync(
+      file,
+      `github.com:\n    oauth_token: ${token}\n    git_protocol: https\n`,
+      { mode: 0o600, flag: 'wx' },
+    );
+    return true;
+  } catch {
+    return false;
   }
 }
 
