@@ -11,13 +11,55 @@ import type {
   RequestPermissionRequest,
   SessionNotification,
 } from '@agentclientprotocol/sdk';
-import { mapPermissionRequest, mapSessionUpdate } from '../../src/agents/acp/mappers';
+import { mapPermissionRequest, mapSessionUpdate, ToolCallTracker } from '../../src/agents/acp/mappers';
 
 function notification(update: SessionNotification['update']): SessionNotification {
   return { sessionId: 'sess-1', update };
 }
 
 describe('mapSessionUpdate', () => {
+  // Fleet box 2026-09-24 (claude-agent-acp Write): opened as "Preparing file…",
+  // renamed by a NON-terminal update, then completed with no content and an
+  // empty title. The completion mapped to nothing and the phone kept the row
+  // pending as "Preparing file…" for the rest of the session.
+  it('closes a tool call whose completion has no content, using its last title', () => {
+    const tracker = new ToolCallTracker();
+    const run = (update: SessionNotification['update']) =>
+      mapSessionUpdate(notification(update), tracker);
+
+    expect(
+      run({ sessionUpdate: 'tool_call', toolCallId: 'call_ea1', title: 'Preparing file…', kind: 'edit', status: 'pending' }),
+    ).toEqual([{ chunkId: 'call_ea1', kind: 'tool_use', delta: 'Preparing file…' }]);
+    expect(
+      run({ sessionUpdate: 'tool_call_update', toolCallId: 'call_ea1', title: 'Write FEATURE_REQUESTS_FOLLOW_UP.md', kind: 'edit' }),
+    ).toEqual([]);
+    expect(run({ sessionUpdate: 'tool_call_update', toolCallId: 'call_ea1', title: '' })).toEqual([]);
+    expect(
+      run({ sessionUpdate: 'tool_call_update', toolCallId: 'call_ea1', title: '', status: 'completed' }),
+    ).toEqual([
+      { chunkId: 'call_ea1', kind: 'tool_result', delta: 'Write FEATURE_REQUESTS_FOLLOW_UP.md' },
+    ]);
+  });
+
+  it('prefers the completion content over the remembered title', () => {
+    const tracker = new ToolCallTracker();
+    mapSessionUpdate(
+      notification({ sessionUpdate: 'tool_call', toolCallId: 'c2', title: 'Run tests', kind: 'execute', status: 'pending' }),
+      tracker,
+    );
+    expect(
+      mapSessionUpdate(
+        notification({
+          sessionUpdate: 'tool_call_update',
+          toolCallId: 'c2',
+          status: 'completed',
+          content: [{ type: 'content', content: { type: 'text', text: '12 passed' } }],
+        }),
+        tracker,
+      ),
+    ).toEqual([{ chunkId: 'c2', kind: 'tool_result', delta: '12 passed' }]);
+  });
+
   it('maps agent_message_chunk → text chunk keyed by messageId', () => {
     const chunks = mapSessionUpdate(
       notification({
