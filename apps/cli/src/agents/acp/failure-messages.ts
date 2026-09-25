@@ -186,8 +186,13 @@ export function replyIsHouseAgentLimit(finalText: string): boolean {
  * provider. On the house rail this never matches (`houseAgentLimitMessage`
  * owns that path).
  */
+// OpenRouter words the same condition two ways: "Insufficient credits" (empty
+// balance) and "This request requires more credits, or fewer max_tokens. You
+// requested up to 64000 tokens, but can only afford 1416" (a small balance
+// that can't cover Claude Code's max_tokens reservation). The second one
+// reached a user raw (break-it 2026-09-24), so both are matched.
 const BYO_PROVIDER_BILLING_RE =
-  /(?:api error|http|status)[:\s]+402\b[^\n]{0,80}insufficient (?:credits?|balance)|\b402\b[^\n]{0,40}insufficient (?:credits?|balance)|insufficient (?:credits?|balance)[^\n]{0,40}\b402\b/i;
+  /(?:api error|http|status)[:\s]+402\b[^\n]{0,80}(?:insufficient (?:credits?|balance)|requires more credits)|\b402\b[^\n]{0,40}(?:insufficient (?:credits?|balance)|requires more credits)|insufficient (?:credits?|balance)[^\n]{0,40}\b402\b/i;
 
 export function looksLikeByoProviderBilling(
   text: string,

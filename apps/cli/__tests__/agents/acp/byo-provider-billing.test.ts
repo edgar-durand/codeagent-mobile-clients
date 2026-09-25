@@ -34,6 +34,9 @@ describe('looksLikeByoProviderBilling / replyIsByoProviderBilling', () => {
     'API Error: 402 insufficient balance (1008)',
     'status 402: Insufficient credits',
     'Insufficient credits — HTTP 402',
+    // OpenRouter's small-balance wording, verbatim from a real session
+    // (break-it 2026-09-24) — it reached the user raw before this case.
+    'API Error: 402 This request requires more credits, or fewer max_tokens. You requested up to 64000 tokens, but can only afford 1416. To increase, visit https://openrouter.ai/settings/credits and upgrade to a paid account',
   ])('matches %j off the house rail', (line) => {
     expect(looksLikeByoProviderBilling(line, BYO_ENV)).toBe(true);
     expect(looksLikeByoProviderBilling(line, {})).toBe(true);
