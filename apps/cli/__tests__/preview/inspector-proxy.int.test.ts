@@ -285,18 +285,20 @@ describe('inspector proxy — la tubería', () => {
   // ── 3. Cabeceras y estados ───────────────────────────────────────────
 
   /**
-   * ⚠️ `Host` verbatim. Vite y Next comprueban el host de la petición y
-   * `applyPreviewHostAllow` ya prepara el del túnel; si el proxy reescribiera
-   * `Host` a `localhost`, esa preparación dejaría de casar y el dev server
-   * respondería «Blocked request» a través del túnel.
+   * ⚠️ `Host` pasa a ser el del propio dev server (`changeOrigin`), y el
+   * público viaja en `X-Forwarded-Host`. Antes se reenviaba tal cual confiando
+   * en que `applyPreviewHostAllow` hubiera preparado el host del túnel, pero en
+   * un monorepo el `vite.config` vive en su paquete y no lo encuentra: Vite
+   * respondía «Blocked request» (Box de QA, 2026-09-25). `localhost:<puerto>`
+   * lo acepta cualquier dev server, esté donde esté su config.
    */
-  it('reenvía las cabeceras verbatim, Host incluida', async () => {
+  it('reenvía las cabeceras, con Host = el dev server y el público en X-Forwarded-Host', async () => {
     const res = await get(proxy.port, '/echo-headers', {
       host: 'preview-abc.codeagent-mobile.com',
       'x-custom': 'intacta',
     });
     expect(JSON.parse(res.body.toString())).toEqual({
-      host: 'preview-abc.codeagent-mobile.com',
+      host: `localhost:${origin.port}`,
       custom: 'intacta',
     });
   });

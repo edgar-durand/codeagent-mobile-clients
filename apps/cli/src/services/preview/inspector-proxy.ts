@@ -126,6 +126,41 @@ export function injectAt(html: string, script: string): string | null {
   return null;
 }
 
+/**
+ * Headers the dev server sees: the request's own, with `Host` pointed at the
+ * dev server itself (`changeOrigin`).
+ *
+ * ⚠️ WHY (QA Box, 2026-09-25): Vite answers `403 Blocked request. This host
+ * ("x.trycloudflare.com") is not allowed` to any Host outside
+ * `server.allowedHosts`, and Next does the same for dev origins. `host-allow`
+ * patches the config it finds at the repo root, but in a monorepo the app's
+ * `vite.config.ts` lives in its package (`apps/web-empresas/`), so the tunnel
+ * host was never allowed. Every dev server accepts its own `localhost:<port>`,
+ * wherever its config lives. The public host still reaches the app in
+ * `X-Forwarded-Host`; this proxy stays the only public door.
+ */
+export function upstreamRequestHeaders(
+  headers: http.IncomingHttpHeaders,
+  targetPort: number,
+): http.OutgoingHttpHeaders {
+  const out: http.OutgoingHttpHeaders = { ...headers, host: `localhost:${targetPort}` };
+  if (headers.host && !headers['x-forwarded-host']) out['x-forwarded-host'] = headers.host;
+  if (!headers['x-forwarded-proto']) out['x-forwarded-proto'] = 'https';
+  return out;
+}
+
+/**
+ * A redirect the dev server built from the rewritten Host
+ * (`http://localhost:5174/login`) would send the browser to the box's own
+ * loopback. Make it relative so it stays on the public URL.
+ */
+export function publicLocation(location: string | undefined, targetPort: number): string | undefined {
+  if (!location) return location;
+  const m = /^https?:\/\/(?:localhost|127\.0\.0\.1|\[::1\]):(\d+)(\/.*)?$/i.exec(location);
+  if (!m || Number(m[1]) !== targetPort) return location;
+  return m[2] ?? '/';
+}
+
 export async function startInspectorProxy(
   opts: InspectorProxyOptions,
 ): Promise<InspectorProxy> {
@@ -149,7 +184,7 @@ export async function startInspectorProxy(
       secFetchDest: one(req.headers['sec-fetch-dest']),
       secFetchMode: one(req.headers['sec-fetch-mode']),
     });
-    const headers = { ...req.headers };
+    const headers = upstreamRequestHeaders(req.headers, opts.targetPort);
 
     // ⚠️ No se puede inyectar dentro de bytes comprimidos. Se renuncia a la
     // compresión SOLO en las navegaciones; los assets —que son la mayor parte
@@ -160,6 +195,8 @@ export async function startInspectorProxy(
       { host: targetHost, port: opts.targetPort, method: req.method, path: req.url, headers },
       (originRes) => {
         const outHeaders = { ...originRes.headers };
+        const location = publicLocation(originRes.headers.location, opts.targetPort);
+        if (location !== undefined) outHeaders.location = location;
         const willInject = inject && isHtmlResponse(originRes.headers['content-type']);
 
         // Al inyectar cambia el largo, así que se quita y Node pasa a
@@ -228,7 +265,7 @@ export async function startInspectorProxy(
 
     const upstream = net.connect(opts.targetPort, targetHost, () => {
       const lines = [`${req.method} ${req.url} HTTP/1.1`];
-      for (const [k, v] of Object.entries(req.headers)) {
+      for (const [k, v] of Object.entries(upstreamRequestHeaders(req.headers, opts.targetPort))) {
         for (const one of Array.isArray(v) ? v : [v]) {
           if (one !== undefined) lines.push(`${k}: ${one}`);
         }
