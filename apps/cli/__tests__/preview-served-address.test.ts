@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { announcedPortListening, announcedPorts, resolveServedAddress } from '../src/services/preview/served-address';
+import { announcedPortListening, announcedPorts, resolveServedAddress, stripAnsi } from '../src/services/preview/served-address';
 
 // QA CodeAgent Box 2026-09-25: detection said 5173, vite.config pinned 5174 and
 // Vite bound [::1] only; the proxy forwarded to 127.0.0.1:5173 → Cloudflare 502.
@@ -61,5 +61,12 @@ describe('announcedPortListening (readiness)', () => {
 
   it('waits while the announced port is not accepting yet', async () => {
     await expect(announcedPortListening(VITE_OUT, { listening: only() })).resolves.toBe(false);
+  });
+});
+
+describe('stripAnsi', () => {
+  it('leaves the plain text the error card should show', () => {
+    expect(stripAnsi(VITE_OUT)).toContain('Local:   http://localhost:5174/');
+    expect(stripAnsi(VITE_OUT)).not.toMatch(/\x1b|\[3\dm/);
   });
 });
