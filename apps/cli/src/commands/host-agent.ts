@@ -265,6 +265,11 @@ interface StopPayload {
   sessionId: string;
 }
 
+/** `self_hosted_resume`: bring ONE saved session back (the user opened it). */
+interface ResumePayload {
+  sessionId: string;
+}
+
 /**
  * The workspace-cleanup command payload (mirrors the backend
  * `SelfHostedCleanupCommand`). Pushed on session DELETE so a persistent box
@@ -337,6 +342,10 @@ function isDeployPayload(p: Record<string, unknown>): p is DeployPayload & Recor
 
 function isStopPayload(p: Record<string, unknown>): p is StopPayload & Record<string, unknown> {
   return typeof p.sessionId === 'string';
+}
+
+function isResumePayload(p: Record<string, unknown>): p is ResumePayload & Record<string, unknown> {
+  return typeof p.sessionId === 'string' && p.sessionId.length > 0;
 }
 
 function isCleanupPayload(
@@ -787,6 +796,13 @@ interface ChildSession {
   agent: string;
   /** epoch ms when the child was spawned — surfaced on the heartbeat. */
   startedAt: number;
+  /**
+   * The PairedSession id, when known at spawn (every RESUMED child). Reported
+   * on the boot reconcile so the backend can restore a lost host↔session link
+   * (codeagent-bbou). A fresh deploy child learns it only when it pairs, and
+   * the backend already records that link itself.
+   */
+  sessionId?: string;
 }
 
 /** One session a boot resume brings back: its deploy key, workspace and pairing. */
@@ -1095,10 +1111,7 @@ export class HostAgentSupervisor {
     // it ends any rows the backend still has marked active for this host,
     // clearing zombies that a hard crash left without an `ended` event.
     // One-shot, best-effort; the next boot re-converges if this POST fails.
-    void reportSessionEvent(
-      { hostId: this.identity.hostId, hostToken: this.identity.hostToken },
-      { event: 'reconcile', activeDeployIds: this.activeSessions().map((s) => s.id) },
-    ).catch((err) => log.trace('host-agent', 'boot reconcile failed (best-effort)', err));
+    this.reportLiveSet('boot');
 
     // Periodic self-update: check npm for a newer codeam-cli, install it,
     // and restart so systemd relaunches the new code. Best-effort; the
@@ -1411,6 +1424,14 @@ export class HostAgentSupervisor {
         return;
       }
       this.stopChild(cmd.payload.sessionId);
+      return;
+    }
+    if (cmd.type === 'self_hosted_resume') {
+      if (!isResumePayload(cmd.payload)) {
+        log.warn('host-agent', `ignoring malformed self_hosted_resume id=${cmd.id}`);
+        return;
+      }
+      this.resumeSavedSession(cmd.payload.sessionId);
       return;
     }
     if (cmd.type === 'self_hosted_cleanup') {
@@ -2343,6 +2364,58 @@ export class HostAgentSupervisor {
     return st;
   }
 
+  /**
+   * `self_hosted_resume` — the user opened (or reconnected) a session this box
+   * is not running. A boot resumes only the children that were LIVE when the
+   * box went down, so any other saved session was a dead card: the app said
+   * "waking up — your message is queued", the box woke, and the session never
+   * came back (codeagent-o7lm, QA box 2026-09-25: 4 saved sessions, 2 resumed).
+   *
+   * Resumes it through the same `resumeOne` a boot uses (bounded retries,
+   * house-proxy env, persisted into the live set), then re-reports the live
+   * set so the backend restores the session's host link. No-op when the
+   * session is unknown, lacks its pairing, or its workspace is gone — the app
+   * then keeps its offline state instead of a phantom "waking".
+   */
+  private resumeSavedSession(sessionId: string): void {
+    const session = this.listSavedSessions().find((s) => s.id === sessionId);
+    if (!session || !session.pluginId || !session.pollSecret || !session.agent) {
+      log.warn('host-agent', `self_hosted_resume ${sessionId.slice(0, 8)}: no saved pairing on this box`);
+      return;
+    }
+    if (!session.cwd || !fs.existsSync(session.cwd)) {
+      log.warn('host-agent', `self_hosted_resume ${sessionId.slice(0, 8)}: workspace is gone`);
+      return;
+    }
+    const deployId = deployIdFromWorkspace(session.cwd) ?? session.id;
+    if (this.children.has(deployId)) {
+      log.info('host-agent', `self_hosted_resume ${sessionId.slice(0, 8)}: already live`);
+      return;
+    }
+    this.resumeOne({ deployId, cwd: session.cwd, session });
+    this.reportLiveSet('resume');
+  }
+
+  /**
+   * Tell the backend exactly which sessions this host runs. `activeSessions`
+   * (additive) carries the PairedSession id of every child that knows it, so a
+   * link lost to host-identity churn is rebuilt instead of the session
+   * rendering as LOCAL with a reconnect the user cannot perform.
+   */
+  private reportLiveSet(why: 'boot' | 'resume'): void {
+    const children = [...this.children.values()];
+    void reportSessionEvent(
+      { hostId: this.identity.hostId, hostToken: this.identity.hostToken },
+      {
+        event: 'reconcile',
+        activeDeployIds: children.map((c) => c.deployId),
+        activeSessions: children
+          .filter((c): c is ChildSession & { sessionId: string } => typeof c.sessionId === 'string')
+          .map((c) => ({ deployId: c.deployId, sessionId: c.sessionId, agent: c.agent })),
+      },
+    ).catch((err) => log.trace('host-agent', `${why} reconcile failed (best-effort)`, err));
+  }
+
   /** Spawn ONE resume child for `target` (boot, retry, or re-probe). */
   private resumeOne(target: ResumeTarget): void {
     const { session, deployId } = target;
@@ -2367,6 +2440,7 @@ export class HostAgentSupervisor {
         cwd,
         agent: session.agent,
         startedAt: Date.now(),
+        sessionId: session.id,
       };
       this.trackChild(child);
 

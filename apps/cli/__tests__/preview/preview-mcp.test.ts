@@ -7,22 +7,26 @@ import {
   previewMcpServer,
   runPreviewTool,
 } from '../../src/commands/preview-mcp';
+import { loadMcpSecrets } from '../../src/integrations/mcp-secrets';
 
 describe('preview MCP server entry', () => {
   it('is absent when the bridge never bound', () => {
     expect(previewMcpServer(null)).toBeNull();
   });
 
-  it('carries the bridge address + token in env, never argv (ps shows argv)', () => {
+  // codeagent-5bew: the claude ACP adapter copies the MCP env onto the agent's
+  // argv, so the bridge token must not be in the env at all — only the path of
+  // the owner-only secrets file the shim reads at startup.
+  it('keeps the bridge token out of argv AND env; the shim resolves it from the secrets file', () => {
     const entry = previewMcpServer({ url: 'http://127.0.0.1:5555', token: 'secret-token' })!;
     expect(entry.name).toBe(PREVIEW_MCP_SERVER_NAME);
     expect(entry.command).toBe(process.execPath);
     expect(entry.args).toEqual([process.argv[1], 'preview-mcp']);
-    expect(entry.args.join(' ')).not.toContain('secret-token');
-    expect(entry.env).toEqual([
-      { name: PREVIEW_IPC_URL_ENV, value: 'http://127.0.0.1:5555' },
-      { name: PREVIEW_IPC_TOKEN_ENV, value: 'secret-token' },
-    ]);
+    expect(JSON.stringify(entry)).not.toContain('secret-token');
+    const env: NodeJS.ProcessEnv = Object.fromEntries(entry.env.map((e) => [e.name, e.value]));
+    expect(env[PREVIEW_IPC_URL_ENV]).toBe('http://127.0.0.1:5555');
+    loadMcpSecrets(env);
+    expect(env[PREVIEW_IPC_TOKEN_ENV]).toBe('secret-token');
   });
 
   it('exposes exactly the five preview tools', () => {

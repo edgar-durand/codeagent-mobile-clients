@@ -20,6 +20,15 @@ import { buildMcpServersForStart } from '../src/integrations/provision';
 import { integrationsManifestPath, clearIntegrationsManifest } from '../src/integrations/manifest';
 import type { IntegrationsManifest } from '@codeam/shared';
 import type { McpServerStdio } from '@agentclientprotocol/sdk';
+import { readFileSync } from 'node:fs';
+import { MCP_SECRETS_FILE_ENV } from '../src/integrations/mcp-secrets';
+
+/** Env as the shim sees it: the inline values plus the secrets file's. */
+function resolvedEnv(env: Array<{ name: string; value: string }>): Record<string, string> {
+  const map: Record<string, string> = Object.fromEntries(env.map((e) => [e.name, e.value]));
+  const file = map[MCP_SECRETS_FILE_ENV];
+  return file ? { ...(JSON.parse(readFileSync(file, 'utf8')) as Record<string, string>), ...map } : map;
+}
 
 const JIRA_MANIFEST: IntegrationsManifest = {
   integrations: [
@@ -63,7 +72,7 @@ describe('buildMcpServersForStart', () => {
     expect(server.command).toBe(process.execPath);
     expect(server.args).toEqual([process.argv[1], 'mcp-run', 'jira']);
 
-    const envMap = Object.fromEntries(server.env.map((e) => [e.name, e.value]));
+    const envMap = resolvedEnv(server.env);
     expect(envMap.CODEAM_MCP_INTEGRATION_ID).toBe('jira');
     expect(envMap.CODEAM_MCP_SESSION_ID).toBe('sess-1');
     expect(envMap.CODEAM_MCP_PLUGIN_ID).toBe('plugin-1');
@@ -81,7 +90,7 @@ describe('buildMcpServersForStart', () => {
     });
 
     const server = servers[0] as McpServerStdio;
-    expect(server.env.some((e) => e.name === 'CODEAM_MCP_POLL_SECRET')).toBe(false);
+    expect(resolvedEnv(server.env).CODEAM_MCP_POLL_SECRET).toBeUndefined();
   });
 
   it('returns [] when no manifest file exists', () => {
@@ -143,6 +152,24 @@ describe('buildMcpServersForStart', () => {
     expect(servers).toEqual([]);
   });
 
+  // codeagent-5bew: the claude ACP adapter serializes the WHOLE server config
+  // (env included) into the agent's `--mcp-config` ARGUMENT, so the env must
+  // carry no secret either — only the path of the owner-only secrets file.
+  it('the whole serialized spec (what lands on the agent argv) carries no secret', () => {
+    writeManifest(JIRA_MANIFEST);
+    const servers = buildMcpServersForStart({
+      sessionId: 'sess-1',
+      pluginId: 'plugin-1',
+      pluginAuthToken: 'super-secret-plugin-token',
+      pollSecret: 'super-secret-poll-secret',
+    });
+    const blob = JSON.stringify(servers);
+    expect(blob).not.toContain('super-secret-plugin-token');
+    expect(blob).not.toContain('super-secret-poll-secret');
+    const env = resolvedEnv((servers[0] as McpServerStdio).env);
+    expect(env.CODEAM_MCP_PLUGIN_TOKEN).toBe('super-secret-plugin-token');
+  });
+
   it('serialized specs contain no token-looking material in argv — only in env', () => {
     writeManifest(JIRA_MANIFEST);
 
@@ -158,9 +185,9 @@ describe('buildMcpServersForStart', () => {
     expect(argvBlob).not.toContain('super-secret-plugin-token');
     expect(argvBlob).not.toContain('super-secret-poll-secret');
 
-    // The token DOES appear, but only inside the env array's values.
+    // Nor in the env array: it lives in the owner-only secrets file.
     const envBlob = JSON.stringify(server.env);
-    expect(envBlob).toContain('super-secret-plugin-token');
+    expect(envBlob).not.toContain('super-secret-plugin-token');
   });
 
   // ── Tool router opt-in ─────────────────────────────────────────────────────
@@ -197,7 +224,7 @@ describe('buildMcpServersForStart', () => {
     expect(r.name).toBe('codeam');
     expect(r.command).toBe(process.execPath);
     expect(r.args).toEqual([process.argv[1], 'mcp-router']);
-    const env = Object.fromEntries(r.env.map((e) => [e.name, e.value]));
+    const env = resolvedEnv(r.env);
     // Everything a shim needs to broker its credential travels through the router…
     expect(env.CODEAM_MCP_SESSION_ID).toBe('sess-1');
     expect(env.CODEAM_MCP_PLUGIN_ID).toBe('plugin-1');

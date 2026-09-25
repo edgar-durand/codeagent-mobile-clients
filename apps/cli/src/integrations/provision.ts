@@ -13,6 +13,7 @@ import { readIntegrationsManifest } from './manifest';
 import { MCP_ROUTER_SERVER_NAME } from './mcp-router';
 import { log } from '../services/logger';
 import { previewMcpServer } from '../commands/preview-mcp';
+import { mcpSecretEnv } from './mcp-secrets';
 
 export interface ProvisionCtx {
   sessionId: string;
@@ -25,6 +26,14 @@ export interface ProvisionCtx {
   /** The running CLI's agent-preview bridge (`agentPreviewBridge.address()`).
    *  When set, the agent also gets the `codeagent_preview` tools. */
   preview?: { url: string; token: string } | null;
+}
+
+/** The per-session credentials every integration shim needs. */
+function secretVars(ctx: ProvisionCtx): Record<string, string> {
+  return {
+    ...(ctx.pluginAuthToken ? { CODEAM_MCP_PLUGIN_TOKEN: ctx.pluginAuthToken } : {}),
+    ...(ctx.pollSecret ? { CODEAM_MCP_POLL_SECRET: ctx.pollSecret } : {}),
+  };
 }
 
 /**
@@ -61,9 +70,10 @@ function buildIntegrationMcpServers(ctx: ProvisionCtx): McpServer[] {
       { name: 'CODEAM_MCP_INTEGRATION_ID', value: entry.id },
       { name: 'CODEAM_MCP_SESSION_ID', value: ctx.sessionId },
       { name: 'CODEAM_MCP_PLUGIN_ID', value: ctx.pluginId },
-      // Plugin token in ENV, never argv — argv is visible via `ps`.
-      { name: 'CODEAM_MCP_PLUGIN_TOKEN', value: ctx.pluginAuthToken },
-      ...(ctx.pollSecret ? [{ name: 'CODEAM_MCP_POLL_SECRET', value: ctx.pollSecret }] : []),
+      // ⚠️ Secrets via an owner-only FILE, not env values: the claude ACP
+      // adapter copies this env onto the agent's argv (`--mcp-config`), where
+      // `ps` shows it (codeagent-5bew). See `mcp-secrets.ts`.
+      ...mcpSecretEnv('integrations', secretVars(ctx)),
     ];
     servers.push({
       name: entry.id,
@@ -101,8 +111,7 @@ function buildIntegrationMcpServers(ctx: ProvisionCtx): McpServer[] {
         env: [
           { name: 'CODEAM_MCP_SESSION_ID', value: ctx.sessionId },
           { name: 'CODEAM_MCP_PLUGIN_ID', value: ctx.pluginId },
-          { name: 'CODEAM_MCP_PLUGIN_TOKEN', value: ctx.pluginAuthToken },
-          ...(ctx.pollSecret ? [{ name: 'CODEAM_MCP_POLL_SECRET', value: ctx.pollSecret }] : []),
+          ...mcpSecretEnv('integrations', secretVars(ctx)),
         ],
       },
     ];

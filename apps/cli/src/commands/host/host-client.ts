@@ -433,7 +433,13 @@ export async function reportSessionEvent(
   identity: Pick<SealedHostIdentity, 'hostId' | 'hostToken'>,
   body:
     | { event: 'ended'; deployId: string; reason?: 'host_restart' }
-    | { event: 'reconcile'; activeDeployIds: string[] },
+    | {
+        event: 'reconcile';
+        activeDeployIds: string[];
+        /** Additive: the live children whose PairedSession id is known
+         *  (older backends ignore it). */
+        activeSessions?: Array<{ deployId: string; sessionId: string; agent?: string }>;
+      },
 ): Promise<void> {
   await postJson<{ ok: boolean }>('/api/self-hosted/session-event', {
     hostId: identity.hostId,

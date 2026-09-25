@@ -14,6 +14,7 @@ import { doctor } from './commands/doctor';
 import { completion } from './commands/completion';
 import { mcpRun } from './integrations/mcp-run';
 import { previewMcp } from './commands/preview-mcp';
+import { loadMcpSecrets } from './integrations/mcp-secrets';
 import { mcpWarm } from './integrations/mcp-warm';
 import { mcpRouter } from './integrations/mcp-router';
 import { version } from './commands/version';
@@ -159,6 +160,12 @@ async function main(): Promise<void> {
   // `commands` table — specifically so it never appears in `codeam help`
   // or in the "Did you mean …" typo-suggestion candidates (those are both
   // derived from `Object.keys(commands)`, see below).
+  // The MCP shims read their credentials from the owner-only secrets file
+  // named in their env (codeagent-5bew) — load it before any of them runs.
+  if (command === 'mcp-run' || command === 'mcp-router' || command === 'preview-mcp') {
+    loadMcpSecrets();
+  }
+
   if (command === 'mcp-run') {
     return mcpRun(args);
   }
