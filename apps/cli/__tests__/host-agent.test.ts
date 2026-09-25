@@ -915,6 +915,18 @@ describe('HostAgentSupervisor — control channel reuse', () => {
       });
     });
 
+    // break-it emulator session 2026-09-24: a session killed by a signal we did
+    // not send (OOM SIGKILL) was only LOGGED — never retried — so the box stayed
+    // awake with a dead session and "Reconnect" could never bring it back.
+    it('retries a resumed child killed by a signal the supervisor did not send (OOM)', async () => {
+      await withRetryHarness(async ({ procs, resumeSpawner }) => {
+        expect(resumeSpawner).toHaveBeenCalledTimes(1);
+        procs[0].emit('exit', null, 'SIGKILL');
+        await vi.advanceTimersByTimeAsync(RESUME_RETRY_BACKOFF_MS[0]);
+        expect(resumeSpawner).toHaveBeenCalledTimes(2);
+      });
+    });
+
     it('does NOT retry a clean exit (code 0)', async () => {
       await withRetryHarness(async ({ procs, resumeSpawner }) => {
         procs[0].emit('exit', 0);
