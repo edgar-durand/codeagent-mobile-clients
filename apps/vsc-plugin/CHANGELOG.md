@@ -4,6 +4,12 @@ All notable changes to the CodeAgent Mobile VS Code extension are documented her
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.75.28] — 2026-09-25
+
+### Fixed
+
+- **cli:** Preview proxy forwards to the address the dev server really serves (#820)
+
 ## [2.75.27] — 2026-09-25
 
 ### Fixed
