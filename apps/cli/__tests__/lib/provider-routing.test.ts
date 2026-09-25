@@ -1,3 +1,4 @@
+import * as path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   classifyProviderBilling,
@@ -83,10 +84,13 @@ describe('describeProviderRouting / formatProviderRouting', () => {
 
 describe('readOpencodeProviderOrigins', () => {
   it('reads provider.<id>.options.baseURL from project then global config, redacted, project wins', () => {
+    // Keys built with path.join: the code joins with the platform separator,
+    // so literal POSIX keys never matched on Windows (main CI red since
+    // 2026-09-24).
     const files: Record<string, string> = {
-      '/repo/opencode.jsonc':
+      [path.join('/repo', 'opencode.jsonc')]:
         '// project config\n{"provider":{"openrouter":{"options":{"baseURL":"https://openrouter.ai/api/v1?k=sk-x"}}}}',
-      '/home/u/.config/opencode/opencode.json':
+      [path.join('/home/u', '.config', 'opencode', 'opencode.json')]:
         '{"provider":{"openrouter":{"options":{"baseURL":"https://global.example.com/v1"}},"deepinfra":{"options":{"baseUrl":"https://api.deepinfra.com/v1/openai"}}}}',
     };
     const out = readOpencodeProviderOrigins({
