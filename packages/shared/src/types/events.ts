@@ -55,6 +55,9 @@ export const USER_EVENTS = {
   PREVIEW_STOPPED: 'preview_stopped',
   PREVIEW_ERROR: 'preview_error',
   PREVIEW_PROGRESS: 'preview_progress',
+  /** The agent points at an element of the running preview (`highlight_element`
+   *  MCP tool) — the inspector client draws the agent's mark over it. */
+  PREVIEW_AGENT_HIGHLIGHT: 'preview_agent_highlight',
   BEADS_STATE_CHANGED: 'beads_state_changed',
   BEADS_PROVISIONING: 'beads_provisioning',
   BEADS_TEAM_MEMORY_CHANGED: 'beads_team_memory_changed',
