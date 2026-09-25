@@ -29,7 +29,11 @@ import { applyPreviewHostAllow } from './host-allow';
 import { restoreProjectEnvIfMissing } from '../project-env';
 import { resolveNamedTunnel } from './named-tunnel';
 import { bringUpInspector } from './inspector-bringup';
-import { resolveServedAddress, type ServedAddress } from './served-address';
+import {
+  announcedPortListening,
+  resolveServedAddress,
+  type ServedAddress,
+} from './served-address';
 import type { InspectorProxy } from './inspector-proxy';
 import { fetchNamedPreviewTunnel } from '../pairing.service';
 
@@ -784,11 +788,16 @@ async function startDevServer(
   // manifest the way Expo Go does (`GET /` + `expo-platform: ios`) and needs
   // a 2xx — a bound port that still 5xx's mid-boot isn't ready.
   const isNextJs = /next/i.test(detection.framework);
+  // Every other framework: ready once the server's OWN announced local URL
+  // answers. The agent's pattern embeds its port guess, so a wrong guess
+  // (5173 for a Vite pinned to 5174) never matches and an Nx app sat in
+  // WAITING_FOR_READY for the full 6 minutes while serving (QA Box,
+  // 2026-09-25). An announced URL is the server's own word, not a guess.
   const portProbe = isExpo
     ? () => previewSvc.waitForExpoManifest(detection.port, { timeoutMs: 1_000, intervalMs: 250 })
     : isNextJs
       ? () => previewSvc.waitForPortListening(detection.port, { timeoutMs: 1_000, intervalMs: 250 })
-      : undefined;
+      : () => announcedPortListening(outputTail);
   const outcome = await waitForDevServerReady(devServer, readyRe, {
     timeoutMs: devServerReadyTimeoutMs(detection),
     onChunk: (s) => {

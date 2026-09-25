@@ -67,3 +67,21 @@ export async function resolveServedAddress(
   }
   return { host: '127.0.0.1', port: detectedPort };
 }
+
+/**
+ * Readiness signal for frameworks whose `ready_pattern` embeds a port guess:
+ * true once any port the server ANNOUNCED is accepting connections. Output
+ * that announces nothing never counts, so this cannot flip ready early.
+ */
+export async function announcedPortListening(
+  output: string,
+  deps: ResolveServedAddressDeps = {},
+): Promise<boolean> {
+  const listening = deps.listening ?? isPortListening;
+  for (const port of announcedPorts(output)) {
+    for (const host of LOOPBACK_HOSTS) {
+      if (await listening(port, host)) return true;
+    }
+  }
+  return false;
+}
