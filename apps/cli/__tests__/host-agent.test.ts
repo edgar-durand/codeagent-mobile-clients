@@ -3559,6 +3559,10 @@ describe('HostAgentSupervisor — self_hosted_resume (on-demand)', () => {
     await vi.waitFor(() =>
       expect(reconcileBodies(fetchMock)[0]).toMatchObject({
         activeSessions: [{ deployId: '0ffa6c6c-0b6f-42c6-a49b-067514e24288', sessionId: 'cmugayyr' }],
+        // Every resumable saved session, live or not (dormant links).
+        knownSessions: expect.arrayContaining([
+          expect.objectContaining({ deployId: '0ffa6c6c-0b6f-42c6-a49b-067514e24288', sessionId: 'cmugayyr' }),
+        ]),
       }),
     );
     sup.stop();

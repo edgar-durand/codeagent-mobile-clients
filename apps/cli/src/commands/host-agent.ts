@@ -2412,8 +2412,30 @@ export class HostAgentSupervisor {
         activeSessions: children
           .filter((c): c is ChildSession & { sessionId: string } => typeof c.sessionId === 'string')
           .map((c) => ({ deployId: c.deployId, sessionId: c.sessionId, agent: c.agent })),
+        knownSessions: this.knownSavedSessions(),
       },
     ).catch((err) => log.trace('host-agent', `${why} reconcile failed (best-effort)`, err));
+  }
+
+  /**
+   * Every saved session this host could resume — a pairing whose deploy
+   * workspace is still on disk — live or not. The backend links the non-live
+   * ones too, so the app knows they belong to THIS box and wakes + resumes it
+   * when the user opens one, instead of showing a LOCAL session with a
+   * "run codeam in your terminal" the user cannot do (codeagent-bbou).
+   */
+  private knownSavedSessions(): Array<{ deployId: string; sessionId: string; agent?: string }> {
+    try {
+      return this.listSavedSessions()
+        .map((s) => ({ s, deployId: deployIdFromWorkspace(s.cwd) }))
+        .filter(
+          (x): x is { s: SavedSession; deployId: string } =>
+            x.deployId !== null && !!x.s.cwd && fs.existsSync(x.s.cwd),
+        )
+        .map(({ s, deployId }) => ({ deployId, sessionId: s.id, ...(s.agent ? { agent: s.agent } : {}) }));
+    } catch {
+      return [];
+    }
   }
 
   /** Spawn ONE resume child for `target` (boot, retry, or re-probe). */
