@@ -160,6 +160,10 @@ const HEARTBEAT_INTERVAL_MS = 20_000;
  */
 export const RESUME_RETRY_BACKOFF_MS = [15_000, 30_000, 60_000, 120_000] as const;
 
+/** A child must have been up this long before its death counts as a crash to respawn
+ *  (shorter = it never came up → report `failed` instead of looping). */
+export const CRASH_RESPAWN_MIN_UPTIME_MS = 60_000;
+
 /**
  * After the bounded retries exhaust, keep a SLOW periodic re-probe riding the
  * existing heartbeat tick (no new timers) so an externally-fixed cause (e.g.
@@ -2134,9 +2138,18 @@ export class HostAgentSupervisor {
 
       report('agent_starting', 'agent process started');
 
-      proc.once('exit', (code) => {
+      proc.once('exit', (code, signal) => {
         // Self-heal the map when a child dies on its own.
         const tracked = this.untrackChild(payload.deployId, proc);
+        // ⚠️ `tracked` is true ONLY when the child died without the supervisor
+        // stopping it (every intentional stop kills THEN untracks, so the map
+        // entry is already gone here). A session that was up and then crashed
+        // (OOM SIGKILL, an agent panic) used to be reported `ended` and never
+        // respawned: the box stayed awake, "Reconnect → Waking your box…" was a
+        // no-op, and the user's session was dead for good (break-it emulator
+        // session 2026-09-24). Resume it through the same bounded-retry path a
+        // host restart uses.
+        if (tracked && this.respawnCrashedChild(child, code, signal, tail)) return;
         // END: a supervised child exited — report it one-shot so the backend
         // drops the active-sessions row (covers clean teardown AND crash;
         // a SIGTERM-stop also lands here). Discrete event, never a poll.
@@ -2364,9 +2377,14 @@ export class HostAgentSupervisor {
       proc.stdout?.on('data', appendTail);
       proc.stderr?.on('data', appendTail);
       proc.once('exit', (code, signal) => {
-        this.untrackChild(deployId, proc);
+        const tracked = this.untrackChild(deployId, proc);
         if (typeof code === 'number' && code !== 0) {
           this.onResumeChildExit(target, code, tail.trim().slice(-300));
+          return;
+        }
+        // Killed by a signal we did NOT send (OOM SIGKILL…): retry like a crash.
+        if (tracked && signal) {
+          this.onResumeChildExit(target, 128 + (os.constants.signals[signal] ?? 9), `signal ${signal}`);
           return;
         }
         // A resume child is meant to live for hours; a clean exit means it
@@ -2410,6 +2428,32 @@ export class HostAgentSupervisor {
    * ({@link resumeRecoveryTick}) so an externally-fixed cause heals without a
    * manual restart.
    */
+  /**
+   * A deploy child that was UP (≥ {@link CRASH_RESPAWN_MIN_UPTIME_MS}) died on
+   * its own → resume its paired session with the bounded retry path. Returns
+   * false when it must be treated as before (early start failure, supervisor
+   * stopping, or no saved paired session for that workspace).
+   */
+  private respawnCrashedChild(
+    child: ChildSession,
+    code: number | null,
+    signal: NodeJS.Signals | null,
+    tail: string,
+  ): boolean {
+    if (this.stopped) return false;
+    if (Date.now() - child.startedAt < CRASH_RESPAWN_MIN_UPTIME_MS) return false;
+    const session = pickSavedSessionForWorkspace(this.listSavedSessions(), child.cwd);
+    if (!session) return false;
+    const exitCode = typeof code === 'number' ? code : 128 + (signal ? (os.constants.signals[signal] ?? 9) : 9);
+    log.warn(
+      'host-agent',
+      `session deploy=${child.deployId.slice(0, 8)} died (${signal ?? code}) after ` +
+        `${Math.round((Date.now() - child.startedAt) / 1000)}s — respawning it (resume)`,
+    );
+    this.onResumeChildExit({ deployId: child.deployId, cwd: child.cwd, session }, exitCode, tail.trim().slice(-300));
+    return true;
+  }
+
   private onResumeChildExit(target: ResumeTarget, code: number, detail: string): void {
     if (this.stopped) return;
     const { session } = target;
