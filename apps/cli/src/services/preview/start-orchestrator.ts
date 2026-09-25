@@ -140,6 +140,27 @@ export interface ChildProcessWithIO {
  * resolves: `opts.onChunk` keeps feeding the caller's output tail
  * during the post-ready tunnel stage.
  */
+/**
+ * How long a dev server may take to print its ready line. Monorepo build
+ * orchestrators (Nx, Turborepo, Lerna) build the app's dependency projects
+ * FIRST — often a silent `tsc` — so 2 minutes timed out a healthy Nx app on a
+ * CodeAgent Box while `nx run @dgi/shared:build` was still compiling
+ * (break-it emulator 2026-09-25). Still bounded.
+ */
+export const DEV_SERVER_READY_TIMEOUT_MS = 120_000;
+export const MONOREPO_READY_TIMEOUT_MS = 360_000;
+
+export function devServerReadyTimeoutMs(detection: {
+  framework: string;
+  command?: string;
+  args?: readonly string[];
+}): number {
+  const text = [detection.framework, detection.command ?? '', ...(detection.args ?? [])].join(' ');
+  return /\b(nx|turbo|turborepo|lerna)\b/i.test(text)
+    ? MONOREPO_READY_TIMEOUT_MS
+    : DEV_SERVER_READY_TIMEOUT_MS;
+}
+
 export async function waitForDevServerReady(
   devServer: ChildProcessWithIO,
   readyRe: RegExp,
@@ -422,6 +443,9 @@ async function provisionDeps(ctx: StageCtx): Promise<boolean> {
   //    module …". Returns null (no-op) when deps already present;
   //    we trust an existing `node_modules/` rather than running a
   //    slow no-op install on every preview boot.
+  // A background install started at session start (prewarm) may still be
+  // writing node_modules/ — wait for it rather than trusting a half tree.
+  await previewSvc.awaitPrewarmInstall();
   const missingDeps = previewSvc.detectMissingNodeDeps(cwd);
   let preflightRan = false;
   if (missingDeps) {
@@ -757,7 +781,7 @@ async function startDevServer(
       ? () => previewSvc.waitForPortListening(detection.port, { timeoutMs: 1_000, intervalMs: 250 })
       : undefined;
   const outcome = await waitForDevServerReady(devServer, readyRe, {
-    timeoutMs: 120_000,
+    timeoutMs: devServerReadyTimeoutMs(detection),
     onChunk: (s) => {
       // Keep a generous window: when a task runner (Nx, Turbo, npm
       // workspaces) fails a dependency task, the REAL error prints

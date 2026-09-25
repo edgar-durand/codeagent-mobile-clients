@@ -69,6 +69,7 @@ import {
   isUnsupportedDetection,
   describeDetectionFailure,
   listScriptCandidates,
+  prewarmNodeDeps,
   describeOneShotAgentError,
   writePreviewConfig,
 } from '../../services/preview';
@@ -2058,6 +2059,9 @@ export function makePreviewReaffirm(args: {
 export function prewarmPreviewDetection(runtime: RuntimeStrategy): void {
   if (previewPrewarmStarted) return;
   previewPrewarmStarted = true;
+  // Deps first and independent of detection: the install is the slow part of
+  // a first Preview, and it doesn't need the agent (or its credits).
+  void prewarmNodeDeps(process.cwd());
   if (typeof runtime.generateOneShot !== 'function') return;
   const generateOneShot = runtime.generateOneShot.bind(runtime);
   void (async () => {
