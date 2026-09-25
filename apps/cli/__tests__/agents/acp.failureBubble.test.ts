@@ -504,7 +504,8 @@ describe('house-agent 403 (CodeAgent Cloud ceiling) is NOT an auth failure', () 
     });
     expect(bubble).toBe(houseAgentLimitMessage(PRO_CEILING));
     expect(bubble).not.toBe(AUTH_FAILURE_MESSAGE);
-    expect(bubble).toMatch(/daily CodeAgent Cloud limit/i);
+    expect(bubble).toMatch(/today’s agent usage limit/i);
+    expect(bubble).not.toMatch(/CodeAgent Cloud/i);
     // Must NOT tell the user their login is broken.
     expect(bubble).not.toMatch(/re-?authenticate|codeam:\/\/reauth/i);
   });

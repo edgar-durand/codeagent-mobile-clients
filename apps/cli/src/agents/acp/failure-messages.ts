@@ -15,7 +15,6 @@
 
 import {
   AGENT_REGISTRY,
-  HOUSE_AGENT_NAME,
   MANAGED_PROVIDER_DISPLAY_NAMES,
   isKnownAgentId,
   isManagedProviderId,
@@ -292,7 +291,7 @@ export function houseAgentLimitMessage(text: string): string {
     // no internal mechanism), and never route this to an upgrade — nothing the
     // user buys fixes an outage on our side.
     return (
-      '⏳ **CodeAgent Cloud is temporarily unavailable — this one’s on us, not your account.**\n\n' +
+      '⏳ **Our agent service is temporarily unavailable — this one’s on us, not your account.**\n\n' +
       'There’s nothing to buy and nothing owed, and it isn’t a problem with your login, so ' +
       're-authenticating won’t help. Send your message again in a bit, or connect your own ' +
       'agent (Claude Code, Codex, Cursor, Gemini) in **Profile › Agents** to keep going now.'
@@ -300,8 +299,8 @@ export function houseAgentLimitMessage(text: string): string {
   }
   const canUpgrade = /upgrade to pro/i.test(text);
   return (
-    '📊 **You’ve reached your daily CodeAgent Cloud limit.**\n\n' +
-    'The free CodeAgent Cloud agent has a daily usage ceiling that resets at midnight UTC. ' +
+    '📊 **You’ve reached today’s agent usage limit.**\n\n' +
+    'The free agent has a daily usage ceiling that resets at midnight UTC. ' +
     'This is a usage limit, not a problem with your login — re-authenticating won’t change it. ' +
     (canUpgrade
       ? 'To keep going now, upgrade to **Pro** for a higher ceiling, or connect your own agent ' +
@@ -452,12 +451,14 @@ export function providerOutageMessage(agent: string, railWireId?: string | null)
   // names the agent they picked and our service — no third-party vendor, no
   // status link they can't act on. See {@link agentStatusPage}.
   if (railWireId) {
+    // The house agent is retired as a user agent (CI fixture only), so it is
+    // never named: "Your CodeAgent Cloud agent" reached a QA Box on 2026-09-25.
     const who = isManagedProviderId(railWireId)
-      ? MANAGED_PROVIDER_DISPLAY_NAMES[railWireId]
-      : HOUSE_AGENT_NAME;
+      ? `${MANAGED_PROVIDER_DISPLAY_NAMES[railWireId]} `
+      : '';
     return (
       `🌐 **CodeAgent's agent service is having a disruption — this isn't your session.**\n\n` +
-      `Your ${who} agent couldn't finish this turn because our provider returned an ` +
+      `Your ${who}agent couldn't finish this turn because our provider returned an ` +
       'overload error. It usually clears up on its own — just send your message again in a bit.'
     );
   }

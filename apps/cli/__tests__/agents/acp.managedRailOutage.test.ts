@@ -26,7 +26,6 @@ describe('managed rail never blames an upstream vendor for our proxy', () => {
     ['managed-deepseek-flash', 'DeepSeek V4 Flash'],
     ['managed-codex', 'Codex'],
     ['managed-claude', 'Claude'],
-    ['house-codeagent-cloud', 'CodeAgent Cloud'],
   ])('%s: no Anthropic, no vendor status link, names the agent', (railWireId: string, display: string) => {
     // The runtime id is ALWAYS `claude` on this rail — that is the whole trap.
     const msg = providerOutageMessage('claude', railWireId);
@@ -36,6 +35,13 @@ describe('managed rail never blames an upstream vendor for our proxy', () => {
     expect(msg).toContain(display);
     expect(msg).toMatch(/CodeAgent/);
     expect(agentStatusPage('claude', railWireId)).toBeNull();
+  });
+
+  it('house rail: no vendor, and never names the retired CodeAgent Cloud agent', () => {
+    const msg = providerOutageMessage('claude', 'house-codeagent-cloud');
+    expect(msg).not.toMatch(/Anthropic|CodeAgent Cloud/i);
+    expect(msg).toMatch(/Your agent couldn't finish/);
+    expect(agentStatusPage('claude', 'house-codeagent-cloud')).toBeNull();
   });
 
   it('routes the managed message through failureBubble on a real overload', () => {
