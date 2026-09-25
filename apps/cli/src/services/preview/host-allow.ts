@@ -190,6 +190,17 @@ function shimFor(framework: Framework, origBasename: string | null, esm: boolean
   return framework === 'next' ? nextShim(origBasename, esm) : viteShim(origBasename, esm);
 }
 
+const SHIM_HEADER = '// codeam preview host-allow shim';
+
+/** Is this file one of OUR shims (first line is the generated header)? */
+async function isOurShim(abs: string): Promise<boolean> {
+  try {
+    return (await fs.readFile(abs, 'utf8')).startsWith(SHIM_HEADER);
+  } catch {
+    return false;
+  }
+}
+
 async function writeMarker(cwd: string, marker: HostAllowMarker): Promise<void> {
   await fs.mkdir(path.join(cwd, MARKER_DIR), { recursive: true });
   await fs.writeFile(markerPath(cwd), JSON.stringify(marker, null, 2), 'utf8');
@@ -265,6 +276,21 @@ export async function applyPreviewHostAllow(cwd: string): Promise<void> {
     if (existing) {
       const ext = path.extname(existing);
       const origBasename = `${CONFIG_BASENAMES[framework]}${ORIG_INFIX}${ext}`;
+      // A shim with no marker: it was COMMITTED (an agent ran `git add -A`
+      // mid-preview) or the marker was lost, so step 1 could not undo it.
+      // Wrapping it again moved the shim onto the saved original and made it
+      // import itself — "Cannot access '__codeamUser' before initialization"
+      // (break-it 2026-09-24, fleet box). Put the original back first.
+      if (await isOurShim(path.join(cwd, existing))) {
+        const origAbs = path.join(cwd, origBasename);
+        if (!(await fileExists(origAbs)) || (await isOurShim(origAbs))) {
+          log.warn('preview', `host-allow: ${existing} is a leftover shim with no original — skipped`);
+          return;
+        }
+        await fs.rm(path.join(cwd, existing), { force: true });
+        await fs.rename(origAbs, path.join(cwd, existing));
+        log.info('preview', `host-allow: restored ${existing} from a leftover ${origBasename}`);
+      }
       const esm = await isEsmConfig(cwd, existing);
       // Move the user's config aside byte-for-byte, then drop the shim in its
       // place. The original is never mutated — restore renames it straight back.

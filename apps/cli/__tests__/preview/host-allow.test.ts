@@ -91,6 +91,38 @@ describe('preview host-allow', () => {
       await restorePreviewHostAllow(dir);
       expect(read('next.config.mjs')).toBe(ORIG);
     });
+
+    // Break-it 2026-09-24 (fleet box): an agent committed the shim + the
+    // backup mid-preview. A fresh clone has both files but NO marker (.codeam/
+    // is never committed), so the marker-driven self-heal can't see it. The
+    // old apply moved the shim onto the backup → the shim imported itself →
+    // `next dev` died "Cannot access '__codeamUser' before initialization".
+    it('heals a COMMITTED shim with no marker: wraps the real original, not the shim', async () => {
+      await applyPreviewHostAllow(dir);
+      fs.rmSync(path.join(dir, '.codeam'), { recursive: true, force: true }); // fresh clone
+
+      await applyPreviewHostAllow(dir);
+
+      expect(read('next.config.codeam-orig.mjs')).toBe(ORIG);
+      expect(read('next.config.mjs').match(/codeam-orig/g)?.length).toBe(1);
+      await restorePreviewHostAllow(dir);
+      expect(read('next.config.mjs')).toBe(ORIG);
+      expect(exists('next.config.codeam-orig.mjs')).toBe(false);
+    });
+
+    it('leaves a leftover shim alone when its original is gone or is itself a shim', async () => {
+      await applyPreviewHostAllow(dir);
+      const shim = read('next.config.mjs');
+      fs.rmSync(path.join(dir, '.codeam'), { recursive: true, force: true });
+      fs.writeFileSync(path.join(dir, 'next.config.codeam-orig.mjs'), shim); // shim-on-shim state
+
+      await applyPreviewHostAllow(dir);
+
+      // Untouched — never loops, never moves a shim onto the backup again.
+      expect(read('next.config.mjs')).toBe(shim);
+      expect(read('next.config.codeam-orig.mjs')).toBe(shim);
+      expect(exists('.codeam/preview-host-allow.json')).toBe(false);
+    });
   });
 
   describe('Vite (existing config, CJS)', () => {
