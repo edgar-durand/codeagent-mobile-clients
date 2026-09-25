@@ -4,6 +4,13 @@ All notable changes to the CodeAgent-Mobile JetBrains plugin are documented here
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.75.15] — 2026-09-25
+
+### Fixed
+
+- **cli:** Accept the documented `--agent <id>` space form in pair/deploy
+- **cli:** Recognise OpenRouter's "requires more credits" 402 as a BYO billing failure
+
 ## [2.75.14] — 2026-09-24
 
 ### Fixed
