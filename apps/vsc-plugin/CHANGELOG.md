@@ -4,6 +4,13 @@ All notable changes to the CodeAgent Mobile VS Code extension are documented her
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.75.25] — 2026-09-25
+
+### Added
+
+- **cli:** Send every runnable repo script with the preview detection
+- **cli:** Install preview deps in the background at session start; room for monorepo builds
+
 ## [2.75.23] — 2026-09-25
 
 ### Fixed
