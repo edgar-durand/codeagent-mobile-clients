@@ -50,6 +50,8 @@ export function resolveInspectorOrigins(env: NodeJS.ProcessEnv): string[] {
 export interface BringUpInspectorDeps {
   /** Inyectable para poder probar el camino de fallo sin abrir puertos. */
   start?: typeof startInspectorProxy;
+  /** The loopback the dev server bound (`::1` for an IPv6-only Vite). */
+  targetHost?: string;
   log?: (message: string) => void;
   env?: NodeJS.ProcessEnv;
 }
@@ -81,9 +83,10 @@ export async function bringUpInspector(
     const start = deps.start ?? startInspectorProxy;
     const proxy = await start({
       targetPort,
+      ...(deps.targetHost ? { targetHost: deps.targetHost } : {}),
       script: inspectorClientSource({ allowedOrigins: resolveInspectorOrigins(env) }),
     });
-    log(`preview inspector proxy on :${proxy.port} → :${targetPort}`);
+    log(`preview inspector proxy on :${proxy.port} → ${deps.targetHost ?? '127.0.0.1'}:${targetPort}`);
     return { port: proxy.port, proxy };
   } catch (e) {
     // ⚠️ Se traga TODO. Un puerto que no se puede abrir, un límite de

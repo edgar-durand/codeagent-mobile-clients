@@ -29,6 +29,7 @@ import { applyPreviewHostAllow } from './host-allow';
 import { restoreProjectEnvIfMissing } from '../project-env';
 import { resolveNamedTunnel } from './named-tunnel';
 import { bringUpInspector } from './inspector-bringup';
+import { resolveServedAddress, type ServedAddress } from './served-address';
 import type { InspectorProxy } from './inspector-proxy';
 import { fetchNamedPreviewTunnel } from '../pairing.service';
 
@@ -578,6 +579,11 @@ async function provisionDeps(ctx: StageCtx): Promise<boolean> {
 interface DevServerUp {
   /** `null` = adoptado: ya estaba corriendo y no lo arrancamos nosotros. */
   devServer: ReturnType<typeof spawn> | null;
+  /**
+   * Where it really listens (see `served-address.ts`). The detection's port is
+   * a guess; forwarding to it put a 502 in front of a healthy Vite on :5174.
+   */
+  served: ServedAddress;
 }
 
 /**
@@ -701,7 +707,10 @@ async function startDevServer(
         emitProgress('READY_DETECTED', `adopted the server already on port ${detection.port}`);
         // `devServer: null` = adoptado. No es nuestro, así que parar el
         // preview no lo mata.
-        return { devServer: null };
+        return {
+          devServer: null,
+          served: await resolveServedAddress('', detection.port),
+        };
       }
 
       emit(USER_EVENTS.PREVIEW_ERROR, {
@@ -814,8 +823,15 @@ async function startDevServer(
     });
     return null;
   }
-  emitProgress('READY_DETECTED', `port ${detection.port}`);
-  return { devServer };
+  const served = await resolveServedAddress(outputTail, detection.port);
+  if (served.port !== detection.port || served.host !== '127.0.0.1') {
+    log.info(
+      'preview',
+      `dev server serves on ${served.host}:${served.port} (detection said :${detection.port})`,
+    );
+  }
+  emitProgress('READY_DETECTED', `port ${served.port}`);
+  return { devServer, served };
 }
 
 /** What stage 3 hands back for registration. */
@@ -865,7 +881,8 @@ async function establishTunnel(ctx: StageCtx, dev: DevServerUp): Promise<TunnelU
    * dev server (`ready_pattern` + la sonda TCP), nunca contra el proxy: así el
    * inspector no puede hacer que un preview sano parezca roto.
    */
-  const inspection = await bringUpInspector(detection.port, {
+  const inspection = await bringUpInspector(dev.served.port, {
+    targetHost: dev.served.host,
     log: (m) => log.info('preview', m),
   });
 
