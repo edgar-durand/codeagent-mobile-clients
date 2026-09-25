@@ -74,6 +74,8 @@ import {
 } from './switch-agent';
 import { SquadState } from './squad-roster';
 import { provisionAgentCredentials } from '../../commands/host/agent-provisioning';
+import { ensureBeadsWorkflowHint } from '../../beads/workflow-hint';
+import { ensureAgentStandard } from '../agent-standard';
 import { AcpPublisher } from './publisher';
 import type { PromptBlock } from './buildAcpPromptBlocks';
 import { createWakeCredentialProbe, localCredentialExpiryStatus } from './wakeCredentialProbe';
@@ -1971,6 +1973,10 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
       } catch {
         /* best-effort — claude creates it on first run */
       }
+      // The switched-to agent reads ITS config dir's CLAUDE.md, not ~/.claude's.
+      const memoryFile = path.join(claudeConfigDir, 'CLAUDE.md');
+      ensureBeadsWorkflowHint(undefined, memoryFile);
+      ensureAgentStandard(undefined, memoryFile);
       const cfg: HouseProxyConfig = {
         baseUrl,
         token,
