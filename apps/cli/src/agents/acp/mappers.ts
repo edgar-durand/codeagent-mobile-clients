@@ -105,11 +105,31 @@ const BD_PRIME_COMMAND_RE = /(?:^|[;&|]\s*)bd\s+prime\b/;
  */
 export class ToolCallTracker {
   private readonly bdPrimeIds = new Set<string>();
+  /** Latest non-empty title per open call — see {@link lastTitle}. */
+  private readonly titles = new Map<string, string>();
 
   /** Record a `tool_call` so its later `tool_call_update` can be recognised. */
   note(update: { sessionUpdate: string; toolCallId?: string; title?: string | null; rawInput?: unknown }): void {
-    if (update.sessionUpdate !== 'tool_call' || !update.toolCallId) return;
+    if (!update.toolCallId) return;
+    if (update.sessionUpdate !== 'tool_call' && update.sessionUpdate !== 'tool_call_update') return;
+    const title = update.title?.trim();
+    if (title) this.titles.set(update.toolCallId, title);
+    if (update.sessionUpdate !== 'tool_call') return;
     if (isBdPrimeInvocation(update)) this.bdPrimeIds.add(update.toolCallId);
+  }
+
+  /**
+   * The call's most recent title, forgotten once read. claude-agent-acp opens
+   * a Write as "Preparing file…", renames it in a non-terminal update
+   * ("Write FOO.md"), then completes it with NO content and an EMPTY title —
+   * the completion mapped to nothing and the phone showed "Preparing file…"
+   * pending forever (break-it 2026-09-24, fleet box).
+   */
+  lastTitle(toolCallId: string | undefined): string | null {
+    if (!toolCallId) return null;
+    const title = this.titles.get(toolCallId) ?? null;
+    this.titles.delete(toolCallId);
+    return title;
   }
 
   /** True when this tool call was `bd prime`; forgets terminal ids. */
@@ -181,7 +201,10 @@ export function mapSessionUpdate(
       if (update.status !== 'completed' && update.status !== 'failed') {
         return [];
       }
-      const rawBody = describeToolCallUpdate(update);
+      const remembered = tracker?.lastTitle(update.toolCallId) ?? null;
+      // A terminal update with no body still has to close the row on the
+      // phone — fall back to the call's last title.
+      const rawBody = describeToolCallUpdate(update) ?? remembered;
       if (!rawBody) return [];
       // `bd prime` output is model context, not user output — collapse it
       // (see ToolCallTracker). A FAILED prime keeps its real body: that is
