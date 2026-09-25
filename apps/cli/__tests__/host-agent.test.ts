@@ -3426,3 +3426,145 @@ describe('HostAgentSupervisor — multi-session boot resume (codeagent-v07a)', (
     }
   });
 });
+
+/**
+ * codeagent-o7lm / codeagent-bbou (QA box 2026-09-25): a boot resumes only the
+ * children that were live when the box went down, so opening any OTHER saved
+ * session after a wake was a dead card ("waking up… your message is queued",
+ * then offline forever). `self_hosted_resume` brings exactly that session back,
+ * and every live-set report now carries the PairedSession ids so the backend
+ * can rebuild a host link lost to identity churn.
+ */
+describe('HostAgentSupervisor — self_hosted_resume (on-demand)', () => {
+  // A deploy workspace is `~/.codeam/self-hosted/<deployId>`; point HOME at a
+  // throwaway root so the real home is never touched.
+  const fakeHome = path.join(os.tmpdir(), `codeam-resume-home-${process.pid}`);
+  const origHome = process.env.HOME;
+  beforeEach(() => {
+    process.env.HOME = fakeHome;
+  });
+  afterEach(() => {
+    if (origHome !== undefined) process.env.HOME = origHome;
+    else delete process.env.HOME;
+  });
+  const workspace = (id: string): string => {
+    const dir = path.join(fakeHome, '.codeam', 'self-hosted', id);
+    fs.mkdirSync(dir, { recursive: true });
+    return dir;
+  };
+  const saved = (id: string, cwd: string) => ({
+    id,
+    pluginId: `plug-${id}`,
+    pollSecret: 'sec',
+    agent: 'claude',
+    userName: 'u',
+    userEmail: 'e',
+    plan: 'pro',
+    pairedAt: 0,
+    pluginAuthToken: 't',
+    cwd,
+  });
+  const memoryStore = () => {
+    let list: Array<{ deployId: string; cwd: string; agent: string; startedAt: number }> = [];
+    return {
+      load: () => list,
+      save: (l: typeof list) => {
+        list = l;
+      },
+      clear: () => {
+        list = [];
+      },
+    };
+  };
+  const cmd = (payload: Record<string, unknown>): RemoteCommand =>
+    ({ id: 'c1', type: 'self_hosted_resume', payload }) as RemoteCommand;
+  const reconcileBodies = (fetchMock: ReturnType<typeof vi.fn>) =>
+    fetchMock.mock.calls
+      .map((c) => {
+        try {
+          return JSON.parse(String((c[1] as { body?: string })?.body ?? '{}')) as Record<string, unknown>;
+        } catch {
+          return {};
+        }
+      })
+      .filter((b) => b.event === 'reconcile');
+
+  it('resumes the saved session in its own workspace and reports its link', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => ({ success: true, data: {} }) });
+    vi.stubGlobal('fetch', fetchMock);
+    const cwd = workspace('6449c628-1612-4c1e-9d64-c680f5e38572');
+    const fakeProc = { stdout: { on: vi.fn() }, stderr: { on: vi.fn() }, once: vi.fn(), kill: vi.fn() };
+    const resumeSpawner = vi.fn(() => fakeProc as never);
+    const sup = new HostAgentSupervisor(IDENTITY, {
+      makeRelay: () => ({ start: vi.fn(), stop: vi.fn(), sendResult: vi.fn() }),
+      resumeSpawner,
+      sessionStore: memoryStore(),
+      listSavedSessions: () => [saved('cmugz66w', cwd)] as never,
+    });
+    sup.start();
+    expect(resumeSpawner).not.toHaveBeenCalled(); // not in the live set at boot
+
+    await sup.handleCommand(cmd({ sessionId: 'cmugz66w' }));
+
+    expect(resumeSpawner).toHaveBeenCalledWith(
+      expect.objectContaining({ CODEAM_RESUME_SESSION_ID: 'cmugz66w' }),
+      cwd,
+    );
+    await vi.waitFor(() => {
+      const last = reconcileBodies(fetchMock).at(-1);
+      expect(last).toMatchObject({
+        activeDeployIds: ['6449c628-1612-4c1e-9d64-c680f5e38572'],
+        activeSessions: [
+          { deployId: '6449c628-1612-4c1e-9d64-c680f5e38572', sessionId: 'cmugz66w', agent: 'claude' },
+        ],
+      });
+    });
+    // A second request for the same live session does not spawn twice.
+    await sup.handleCommand(cmd({ sessionId: 'cmugz66w' }));
+    expect(resumeSpawner).toHaveBeenCalledTimes(1);
+    sup.stop();
+  });
+
+  it('ignores an unknown session, a missing workspace and a malformed payload', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => ({ success: true, data: {} }) }));
+    const resumeSpawner = vi.fn();
+    const sup = new HostAgentSupervisor(IDENTITY, {
+      makeRelay: () => ({ start: vi.fn(), stop: vi.fn(), sendResult: vi.fn() }),
+      resumeSpawner,
+      sessionStore: memoryStore(),
+      listSavedSessions: () => [saved('gone', path.join(os.tmpdir(), 'codeam-no-such-workspace-xyz'))] as never,
+    });
+    sup.start();
+    await sup.handleCommand(cmd({ sessionId: 'nope' }));
+    await sup.handleCommand(cmd({ sessionId: 'gone' }));
+    await sup.handleCommand(cmd({}));
+    expect(resumeSpawner).not.toHaveBeenCalled();
+    sup.stop();
+  });
+
+  it('the boot reconcile carries the resumed sessions with their ids', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => ({ success: true, data: {} }) });
+    vi.stubGlobal('fetch', fetchMock);
+    const cwd = workspace('0ffa6c6c-0b6f-42c6-a49b-067514e24288');
+    const store = memoryStore();
+    store.save([{ deployId: '0ffa6c6c-0b6f-42c6-a49b-067514e24288', cwd, agent: 'claude', startedAt: 1 }]);
+    const fakeProc = { stdout: { on: vi.fn() }, stderr: { on: vi.fn() }, once: vi.fn(), kill: vi.fn() };
+    const sup = new HostAgentSupervisor(IDENTITY, {
+      makeRelay: () => ({ start: vi.fn(), stop: vi.fn(), sendResult: vi.fn() }),
+      resumeSpawner: vi.fn(() => fakeProc as never),
+      sessionStore: store,
+      listSavedSessions: () => [saved('cmugayyr', cwd)] as never,
+    });
+    sup.start();
+    await vi.waitFor(() =>
+      expect(reconcileBodies(fetchMock)[0]).toMatchObject({
+        activeSessions: [{ deployId: '0ffa6c6c-0b6f-42c6-a49b-067514e24288', sessionId: 'cmugayyr' }],
+        // Every resumable saved session, live or not (dormant links).
+        knownSessions: expect.arrayContaining([
+          expect.objectContaining({ deployId: '0ffa6c6c-0b6f-42c6-a49b-067514e24288', sessionId: 'cmugayyr' }),
+        ]),
+      }),
+    );
+    sup.stop();
+  });
+});

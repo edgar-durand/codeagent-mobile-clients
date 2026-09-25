@@ -292,3 +292,44 @@ describe('house-proxy-config — managed agents', () => {
     }
   });
 });
+
+/**
+ * codeagent-cz34: the config was ONE file — "the LAST active house deploy".
+ * Once a box resumes several sessions, each got the NEWEST deploy's token
+ * (scoped to a managed provider) and identity; a BYO session got house env over
+ * its own credential. Now each deploy resumes with its own config.
+ */
+describe('house-proxy-config — per deploy', () => {
+  beforeEach(() => {
+    tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'house-proxy-deploy-'));
+    homeHolder.dir = tmpHome;
+  });
+  afterEach(() => {
+    fs.rmSync(tmpHome, { recursive: true, force: true });
+  });
+
+  it('each deploy resumes with ITS OWN token, not the latest deploy\'s', () => {
+    persistHouseProxyConfig({ baseUrl: 'https://p', token: 'tok-qwen', model: 'qwen3-coder' }, 'dep-qwen');
+    persistHouseProxyConfig({ baseUrl: 'https://p', token: 'tok-deepseek', model: 'deepseek' }, 'dep-ds');
+    expect(readHouseProxyChildEnv('dep-qwen').ANTHROPIC_AUTH_TOKEN).toBe('tok-qwen');
+    expect(readHouseProxyChildEnv('dep-ds').ANTHROPIC_AUTH_TOKEN).toBe('tok-deepseek');
+  });
+
+  it('a BYO deploy is marked so its resume never inherits another deploy\'s house env', () => {
+    persistHouseProxyConfig({ baseUrl: 'https://p', token: 'tok-house' }, 'dep-house');
+    clearHouseProxyConfig('dep-byo');
+    expect(readHouseProxyChildEnv('dep-byo')).toEqual({});
+    expect(readHouseProxyChildEnv('dep-house').ANTHROPIC_AUTH_TOKEN).toBe('tok-house');
+  });
+
+  it('a deploy from before per-deploy configs still falls back to the global file', () => {
+    persistHouseProxyConfig({ baseUrl: 'https://p', token: 'tok-legacy' });
+    expect(readHouseProxyChildEnv('dep-old').ANTHROPIC_AUTH_TOKEN).toBe('tok-legacy');
+  });
+
+  it('a deploy id cannot escape the config dir', () => {
+    persistHouseProxyConfig({ baseUrl: 'https://p', token: 'tok' }, '../../evil');
+    expect(fs.existsSync(path.join(tmpHome, '.codeam', 'evil.json'))).toBe(false);
+    expect(fs.existsSync(path.join(tmpHome, 'evil.json'))).toBe(false);
+  });
+});

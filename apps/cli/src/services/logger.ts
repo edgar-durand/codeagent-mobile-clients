@@ -99,6 +99,11 @@ function maybeRotate(): void {
     // No file yet → nothing to rotate.
     return;
   }
+  rotateNow();
+}
+
+/** Shift the current file into the bounded archive chain (`.old`, `.1`, …). */
+function rotateNow(): void {
   // Shift `.N` → `.N+1` from the top down so we never overwrite an
   // existing archive. Deletes the oldest beyond MAX_ARCHIVES.
   const archivePath = (n: number): string =>
@@ -124,6 +129,12 @@ function appendToFile(line: string): void {
   try {
     if (!fileInitialized) {
       fs.mkdirSync(path.dirname(debugFilePath), { recursive: true, mode: 0o700 });
+      // ⚠️ A file already here belongs to an EARLIER process that had the same
+      // pid — in a container that is every boot (the Box host-agent is always
+      // pid 1). Writing the header below replaces it, so each wake erased the
+      // previous boot's log: the only record of why a session was not resumed
+      // (codeagent-bcvb). Archive it into the same bounded chain instead.
+      if (fs.existsSync(debugFilePath)) rotateNow();
       const header = jsonMode
         ? `${JSON.stringify({
             ts: new Date().toISOString(),

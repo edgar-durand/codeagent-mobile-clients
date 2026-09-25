@@ -5,12 +5,14 @@
  * HIDDEN: the agent's MCP config launches it (see `previewMcpServer`), nobody
  * types it. It is a thin stdio front: each tool is one HTTP call to the
  * running CLI's {@link AgentPreviewBridge}, which owns the real pipeline. The
- * bridge address + token arrive in env, never argv.
+ * bridge address arrives in env; its token in the owner-only MCP secrets file
+ * (`integrations/mcp-secrets.ts`) — never argv, never plain env.
  *
  * The tool descriptions ARE the skill: they are always in the agent's context,
  * on every agent, local or managed — which a CLAUDE.md block is not.
  */
 import type { McpServerStdio } from '@agentclientprotocol/sdk';
+import { mcpSecretEnv } from '../integrations/mcp-secrets';
 
 /** Name the agent sees (tools surface as `mcp__codeagent_preview__*` on Claude). */
 export const PREVIEW_MCP_SERVER_NAME = 'codeagent_preview';
@@ -93,10 +95,9 @@ export function previewMcpServer(bridge: { url: string; token: string } | null):
     // Same runtime + entrypoint as this CLI — never trust the agent's PATH.
     command: process.execPath,
     args: [process.argv[1], 'preview-mcp'],
-    env: [
-      { name: PREVIEW_IPC_URL_ENV, value: bridge.url },
-      { name: PREVIEW_IPC_TOKEN_ENV, value: bridge.token },
-    ],
+    // The token rides the owner-only secrets file, never this env: the
+    // claude ACP adapter copies MCP env onto argv (codeagent-5bew).
+    env: [{ name: PREVIEW_IPC_URL_ENV, value: bridge.url }, ...mcpSecretEnv('preview', { [PREVIEW_IPC_TOKEN_ENV]: bridge.token })],
   };
 }
 

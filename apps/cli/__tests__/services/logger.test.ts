@@ -72,3 +72,41 @@ describe('logger rotation invariants', () => {
     expect(p.endsWith('.log')).toBe(true);
   });
 });
+
+/**
+ * codeagent-bcvb: in a container every boot reuses the same pids (the Box
+ * host-agent is always pid 1), so the first write of a new process used to
+ * REPLACE the previous boot's `debug-<pid>.log` — erasing the only record of
+ * why a session was not resumed after a wake. The previous file is archived
+ * into the bounded chain instead.
+ */
+describe('logger — a previous process with the same pid', () => {
+  it('archives the earlier log to .old instead of overwriting it', async () => {
+    const fs = await import('node:fs');
+    const os = await import('node:os');
+    const path = await import('node:path');
+    const { vi } = await import('vitest');
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'codeam-log-'));
+    const origPlatform = process.platform;
+    const origXdg = process.env.XDG_STATE_HOME;
+    Object.defineProperty(process, 'platform', { value: 'linux' });
+    process.env.XDG_STATE_HOME = dir;
+    try {
+      vi.resetModules();
+      const mod = await import('../../src/services/logger');
+      const file = mod._logHelpers.getDebugFilePath();
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      fs.writeFileSync(file, 'previous boot: resume: 2 session(s) resumed\n');
+      mod.log.info('test', 'new boot');
+      expect(fs.readFileSync(`${file}.old`, 'utf8')).toContain('previous boot');
+      const current = fs.readFileSync(file, 'utf8');
+      expect(current).toContain('new boot');
+      expect(current).not.toContain('previous boot');
+    } finally {
+      Object.defineProperty(process, 'platform', { value: origPlatform });
+      if (origXdg !== undefined) process.env.XDG_STATE_HOME = origXdg;
+      else delete process.env.XDG_STATE_HOME;
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});

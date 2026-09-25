@@ -17,8 +17,15 @@
 // sources `~/.bashrc`. Any per-deploy agent env must therefore be PERSISTED and
 // re-injected on every child spawn — this file does that for the house proxy.
 //
-// Path: `~/.codeam/house-proxy.json` — the LAST active house deploy, matching
-// the resume spawner's `CODEAM_RESUME_LATEST` ("resume the most-recent session").
+// Path: `~/.codeam/house-proxy/<deployId>.json` — PER DEPLOY. ⚠️ It used to be
+// ONE file, `~/.codeam/house-proxy.json`, "the LAST active house deploy": right
+// when a box resumed a single session, wrong once it resumes several
+// (codeagent-v07a). Every resumed session got the NEWEST deploy's proxy token —
+// which is scoped to a managed provider — so an older Qwen session could run
+// and bill on another deploy's provider, a BYO session got house env over its
+// own credential, and the announced agent flipped (codeagent-cz34). The global
+// file is still written, and read only as the fallback for deploys made before
+// the per-deploy files existed.
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -28,6 +35,22 @@ import { restrictToOwner } from '../../lib/restrict-to-owner';
 
 export function houseProxyConfigPath(): string {
   return path.join(os.homedir(), '.codeam', 'house-proxy.json');
+}
+
+/** A deploy id is a uuid-ish path segment — never let one escape the dir. */
+const DEPLOY_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+
+export function deployHouseProxyConfigPath(deployId: string): string | null {
+  if (!DEPLOY_ID_RE.test(deployId) || deployId.includes('..')) return null;
+  return path.join(os.homedir(), '.codeam', 'house-proxy', `${deployId}.json`);
+}
+
+function writeJson0600(file: string, value: unknown): void {
+  fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+  const tmp = `${file}.tmp-${process.pid}`;
+  fs.writeFileSync(tmp, JSON.stringify(value, null, 2), { encoding: 'utf8', mode: 0o600 });
+  fs.renameSync(tmp, file);
+  restrictToOwner(file);
 }
 
 /** On-disk house-proxy config shape (mirrors {@link readHouseProxyChildEnv}). */
@@ -57,14 +80,11 @@ export interface HouseProxyConfig {
  * concurrent reader never sees a half-written file. Best-effort: a failure is
  * logged and swallowed — it must NEVER break the deploy.
  */
-export function persistHouseProxyConfig(config: HouseProxyConfig): void {
+export function persistHouseProxyConfig(config: HouseProxyConfig, deployId?: string): void {
   try {
-    const file = houseProxyConfigPath();
-    fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
-    const tmp = `${file}.tmp-${process.pid}`;
-    fs.writeFileSync(tmp, JSON.stringify(config, null, 2), { encoding: 'utf8', mode: 0o600 });
-    fs.renameSync(tmp, file);
-    restrictToOwner(file);
+    const perDeploy = deployId ? deployHouseProxyConfigPath(deployId) : null;
+    if (perDeploy) writeJson0600(perDeploy, config);
+    writeJson0600(houseProxyConfigPath(), config);
   } catch (err) {
     log.warn(
       'host-agent',
@@ -78,9 +98,13 @@ export function persistHouseProxyConfig(config: HouseProxyConfig): void {
  * takes over the box so a resume can't wrongly re-inject a stale house proxy on
  * top of the user's own agent credential.
  */
-export function clearHouseProxyConfig(): void {
+export function clearHouseProxyConfig(deployId?: string): void {
   try {
     fs.rmSync(houseProxyConfigPath(), { force: true });
+    // An explicit "this deploy has NO house proxy" marker, so its resume never
+    // falls back to another deploy's config.
+    const perDeploy = deployId ? deployHouseProxyConfigPath(deployId) : null;
+    if (perDeploy) writeJson0600(perDeploy, { none: true });
   } catch {
     /* best-effort */
   }
@@ -93,12 +117,17 @@ export function clearHouseProxyConfig(): void {
  * (BYO deploy, or the file is absent/corrupt) so a resume degrades to the
  * agent's own credential path.
  */
-export function readHouseProxyChildEnv(): Record<string, string> {
+export function readHouseProxyChildEnv(deployId?: string): Record<string, string> {
   try {
-    const raw = fs.readFileSync(houseProxyConfigPath(), 'utf8');
+    // THIS deploy's own config when it has one; the global file only for
+    // deploys that predate per-deploy configs.
+    const perDeploy = deployId ? deployHouseProxyConfigPath(deployId) : null;
+    const file = perDeploy && fs.existsSync(perDeploy) ? perDeploy : houseProxyConfigPath();
+    const raw = fs.readFileSync(file, 'utf8');
     const parsed: unknown = JSON.parse(raw);
     if (typeof parsed !== 'object' || parsed === null) return {};
     const o = parsed as Record<string, unknown>;
+    if (o.none === true) return {};
     if (typeof o.baseUrl !== 'string' || !o.baseUrl) return {};
     if (typeof o.token !== 'string' || !o.token) return {};
     return buildHouseProxyChildEnv({
