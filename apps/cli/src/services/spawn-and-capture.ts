@@ -1,3 +1,4 @@
+import { currentAgentEnv } from '../agents/current-agent-env';
 import { spawn, type ChildProcess } from 'child_process';
 
 import { killQuiet } from '../lib/quiet';
@@ -68,7 +69,9 @@ export async function spawnAndCapture(
     try {
       child = spawn(cmd, [...args], {
         cwd: opts.cwd,
-        env: opts.env ?? process.env,
+        // The CURRENT agent's env, not the deploy-time process env — see
+        // agents/current-agent-env.ts.
+        env: opts.env ?? currentAgentEnv(),
         stdio: ['ignore', 'pipe', 'pipe'],
       });
     } catch {

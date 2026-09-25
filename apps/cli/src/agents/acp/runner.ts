@@ -27,6 +27,7 @@
  * handler registry verbatim for those.
  */
 
+import { setCurrentAgentEnv } from '../current-agent-env';
 import { randomUUID } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
@@ -1277,6 +1278,7 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
     autoApprovePermissions: opts.autoApprovePermissions,
     disable1mContext,
   });
+  setCurrentAgentEnv(extraEnv);
   // Remembers which tool calls were `bd prime` so their tool_result collapses
   // to a one-liner instead of leaking bd's workflow guide into the activity
   // line (codeagent-zwp2, see ToolCallTracker).
@@ -1864,6 +1866,9 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
     };
     const next = new AcpClient(clientOptions);
     const hs = await next.start();
+    // The switched-to agent is live: headless one-shots (Preview detection,
+    // summaries) must run as IT from now on — see agents/current-agent-env.ts.
+    setCurrentAgentEnv(clientOptions.extraEnv);
     // Success — only now swap the shared state over.
     client = next;
     opts.agent = nextAgent;
