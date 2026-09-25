@@ -13,6 +13,7 @@ import { invite } from './commands/invite';
 import { doctor } from './commands/doctor';
 import { completion } from './commands/completion';
 import { mcpRun } from './integrations/mcp-run';
+import { previewMcp } from './commands/preview-mcp';
 import { mcpWarm } from './integrations/mcp-warm';
 import { mcpRouter } from './integrations/mcp-router';
 import { version } from './commands/version';
@@ -160,6 +161,13 @@ async function main(): Promise<void> {
   // derived from `Object.keys(commands)`, see below).
   if (command === 'mcp-run') {
     return mcpRun(args);
+  }
+
+  // `codeam preview-mcp` — the agent's Preview tools (start_preview,
+  // highlight_element, …). Launched by the agent's MCP config, never typed by
+  // a human; hidden for the same reason as `mcp-run`.
+  if (command === 'preview-mcp') {
+    return previewMcp();
   }
 
   // `codeam mcp-warm [id…]` — pre-fetch the integration MCP server packages so

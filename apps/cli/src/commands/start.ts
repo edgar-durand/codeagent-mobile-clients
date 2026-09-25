@@ -56,6 +56,9 @@ import { runBatonSession } from '../baton/wire-baton';
 import { keepDeviceAwake } from '../services/keep-awake';
 import { ensureClaudeOnboarded } from '../agents/claude/onboarding';
 import { log } from '../services/logger';
+import { agentPreviewBridge } from './start/agent-preview-bridge';
+import { createOsStrategy } from '../os';
+import { createInteractiveAgentStrategy } from '../agents/registry';
 
 /**
  * Wires the long-running services (PTY ↔ output relay ↔ command
@@ -302,12 +305,25 @@ export async function start(
       agent: isHouseProxyEnv(process.env) ? houseRailWireId(process.env) : session.agent,
     });
   }
+  // The agent's own door into the in-app Preview (`codeagent_preview` MCP
+  // tools → loopback bridge → the Preview button's pipeline). Bound BEFORE the
+  // MCP list is built so the agent gets the tools at `session/new`; attached
+  // with the same runtime the relayed preview commands use. Never fatal: a
+  // bridge that can't bind just means no preview tools.
+  const previewBridge = await agentPreviewBridge.listen();
+  agentPreviewBridge.attach({
+    sessionId: session.id,
+    pluginId,
+    pluginAuthToken: session.pluginAuthToken ?? undefined,
+    getRuntime: () => createInteractiveAgentStrategy(session.agent, createOsStrategy()),
+  });
   const mcpServers = mergeWithLocalMcpServers(
     buildMcpServersForStart({
       sessionId: session.id,
       pluginId,
       pluginAuthToken: session.pluginAuthToken ?? undefined,
       pollSecret: session.pollSecret,
+      preview: previewBridge,
     }),
   );
 

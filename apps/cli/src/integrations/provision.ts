@@ -12,6 +12,7 @@ import type { McpServer } from '@agentclientprotocol/sdk';
 import { readIntegrationsManifest } from './manifest';
 import { MCP_ROUTER_SERVER_NAME } from './mcp-router';
 import { log } from '../services/logger';
+import { previewMcpServer } from '../commands/preview-mcp';
 
 export interface ProvisionCtx {
   sessionId: string;
@@ -21,6 +22,20 @@ export interface ProvisionCtx {
   pluginAuthToken?: string;
   /** Replayed to the gated `/api/pairing/reconnect` token-refresh path. */
   pollSecret?: string;
+  /** The running CLI's agent-preview bridge (`agentPreviewBridge.address()`).
+   *  When set, the agent also gets the `codeagent_preview` tools. */
+  preview?: { url: string; token: string } | null;
+}
+
+/**
+ * Every MCP server the agent gets at `session/new`: the integration servers
+ * below plus the built-in Preview tools. The Preview server is never routed
+ * through `mcp-router` — five small schemas, and they must stay first-class.
+ */
+export function buildMcpServersForStart(ctx: ProvisionCtx): McpServer[] {
+  const servers = buildIntegrationMcpServers(ctx);
+  const preview = previewMcpServer(ctx.preview ?? null);
+  return preview ? [...servers, preview] : servers;
 }
 
 /**
@@ -31,7 +46,7 @@ export interface ProvisionCtx {
  * spawn time. Returns `[]` on any miss (no manifest, no plugin auth token) —
  * this must never block agent start.
  */
-export function buildMcpServersForStart(ctx: ProvisionCtx): McpServer[] {
+function buildIntegrationMcpServers(ctx: ProvisionCtx): McpServer[] {
   const manifest = readIntegrationsManifest();
   if (!manifest || manifest.integrations.length === 0) return [];
   if (!ctx.pluginAuthToken) {

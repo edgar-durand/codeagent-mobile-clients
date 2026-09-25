@@ -51,7 +51,7 @@ import { CoderabbitRuntimeStrategy } from '../../agents/coderabbit/runtime';
 import { reviewPullRequest, defaultRunGh } from '../../agents/coderabbit/review-pr';
 import { createOsStrategy } from '../../os';
 import { getGuardrailPolicy, setGuardrailPolicy } from '../../agents/acp/guardrail-config';
-import { AGENT_REGISTRY, isKnownAgentId, normalizeAgentId, PREVIEW_DETECT_PROMPT, USER_EVENTS, type PreviewDetection } from '@codeam/shared';
+import { AGENT_REGISTRY, isKnownAgentId, normalizeAgentId, PREVIEW_DETECT_PROMPT, USER_EVENTS, type PreviewDetection, type PreviewOrigin } from '@codeam/shared';
 import * as previewSvc from '../../services/preview';
 import { runPreviewStart, type EmitPreviewEvent } from '../../services/preview/start-orchestrator';
 import {
@@ -1849,125 +1849,134 @@ async function runDetectOneShot(
   }
 }
 
+/** Who/what a preview event is tagged with. Only `agent` is ever written to
+ *  the wire, so every button-driven event stays byte-identical. */
+function originPayload(
+  payload: Record<string, unknown> | undefined,
+  origin: PreviewOrigin | undefined,
+): Record<string, unknown> | undefined {
+  if (origin !== 'agent') return payload;
+  return { ...(payload ?? {}), origin };
+}
+
+/** The identity a preview pipeline needs — agent-agnostic, no relay. */
+export type PreviewCtx = Pick<BaseHandlerContext, 'sessionId' | 'pluginId'>;
+
+/**
+ * Resolve HOW to start this project: `.codeam/preview.json` first, else the
+ * agent's headless one-shot. Emits `preview_detection_pending` and every
+ * `preview_error` itself; returns the detection (never `unsupported`) or null
+ * once the error has been reported. The caller decides what a success means —
+ * the Preview button emits `preview_detection_ready` (confirm sheet), the
+ * agent's `start_preview` goes straight to the bring-up.
+ */
+export async function resolvePreviewDetection(args: {
+  ctx: PreviewCtx;
+  runtime: RuntimeStrategy;
+  pluginAuthToken: string;
+  origin?: PreviewOrigin;
+}): Promise<PreviewDetection | null> {
+  const { ctx, runtime, pluginAuthToken, origin } = args;
+  const emit = (
+    type: Parameters<typeof postPreviewEvent>[0]['type'],
+    payload?: Record<string, unknown>,
+  ): void => {
+    emitPreviewEvent({
+      sessionId: ctx.sessionId,
+      pluginId: ctx.pluginId,
+      pluginAuthToken,
+      type,
+      payload: originPayload(payload, origin),
+    });
+  };
+  if (typeof runtime.generateOneShot !== 'function') {
+    log.info('preview', `runtime ${runtime.id} has no generateOneShot — emitting unsupported`);
+    emit(USER_EVENTS.PREVIEW_ERROR, {
+      stage: 'detection',
+      message: `Preview detection isn't available on ${runtime.id} sessions yet — link a Claude or Codex agent.`,
+    });
+    return null;
+  }
+  const generateOneShot = runtime.generateOneShot.bind(runtime);
+  // `.codeam/preview.json` short-circuits the agent step entirely
+  // when a repo has been pinned. Saves the user 30-90 s + the LLM
+  // tokens, and lets a team commit the override so every dev gets
+  // an instant preview on first try.
+  const fromFile = await readPreviewConfig(process.cwd());
+  if (fromFile) {
+    log.info('preview', `detect: using .codeam/preview.json (${fromFile.framework})`);
+    return fromFile;
+  }
+
+  emit(USER_EVENTS.PREVIEW_DETECTION_PENDING);
+  log.info('preview', 'detect: invoking generateOneShot');
+  const startedAt = Date.now();
+  const { raw, timedOut, stderr } = await runDetectOneShot(generateOneShot);
+  const tookMs = Date.now() - startedAt;
+  if (timedOut) {
+    log.info('preview', `detect: timed out after ${tookMs}ms — emitting preview_error`);
+    emit(USER_EVENTS.PREVIEW_ERROR, {
+      stage: 'detection',
+      message:
+        `Project detection timed out after ${Math.round(PREVIEW_DETECT_TIMEOUT_MS / 1000)} s — ` +
+        'the agent did not answer. Try again, or add a .codeam/preview.json override.',
+    });
+    return null;
+  }
+  const detection = safeParseDetection(raw);
+  if (!detection) {
+    // codeagent-k9q4. Antes esta linea era `detect: invalid agent output
+    // after Xms` y nada mas: sin la salida cruda no se podia distinguir
+    // "el agente devolvio prosa" de "devolvio JSON al que le faltan campos"
+    // de "no devolvio NADA" — tres fallos con tres arreglos distintos. Un
+    // usuario encadeno CINCO de estos en 19 minutos (2026-08-30) y no habia
+    // forma de saber cual de los tres era.
+    const failure = describeDetectionFailure(raw);
+    log.info(
+      'preview',
+      `detect: failed after ${tookMs}ms reason=${failure?.reason ?? 'unknown'}` +
+        (failure?.missing ? ` missing=${failure.missing.join(',')}` : '') +
+        `\n--- salida cruda del agente (acotada) ---\n${failure?.rawExcerpt ?? ''}`,
+    );
+    emit(USER_EVENTS.PREVIEW_ERROR, {
+      stage: 'detection',
+      // El mensaje sale del diagnostico: decir "JSON invalido" cuando el
+      // agente no contesto manda al usuario a mirar un JSON que no existe.
+      message:
+        (failure?.reason === 'no_output' ? describeOneShotAgentError(stderr) : null) ??
+        failure?.message ??
+        'Agent returned invalid JSON. Try again, or add a .codeam/preview.json override.',
+    });
+    return null;
+  }
+  if (isUnsupportedDetection(detection)) {
+    log.info('preview', 'detect: framework=unsupported');
+    emit(USER_EVENTS.PREVIEW_ERROR, {
+      stage: 'unsupported',
+      message: detection.notes ?? 'No dev server applies to this project.',
+    });
+    return null;
+  }
+  log.info('preview', `detect: ${detection.framework} on :${detection.port} (took ${tookMs}ms)`);
+  // Persist the result so the next detect (this session, a reconnect, or a
+  // teammate) is instant. Only the prewarm cached `.codeam/preview.json`
+  // before — so when the prewarm didn't run (e.g. it raced agent startup),
+  // every detect paid the full 30-90 s LLM round-trip again. Best-effort.
+  void writePreviewConfig(process.cwd(), detection).catch((err) => {
+    log.info('preview', `detect: writePreviewConfig failed (non-fatal): ${String(err)}`);
+  });
+  return detection;
+}
+
 const requestPreviewDetectH: CommandHandler = (ctx) => {
   if (!ctx.pluginAuthToken) {
     log.info('preview', 'no pluginAuthToken — skipping detect');
     return;
   }
-  if (typeof ctx.runtime.generateOneShot !== 'function') {
-    log.info('preview', `runtime ${ctx.runtime.id} has no generateOneShot — emitting unsupported`);
-    emitPreviewEvent({
-      sessionId: ctx.sessionId,
-      pluginId: ctx.pluginId,
-      pluginAuthToken: ctx.pluginAuthToken,
-      type: USER_EVENTS.PREVIEW_ERROR,
-      payload: {
-        stage: 'detection',
-        message: `Preview detection isn't available on ${ctx.runtime.id} sessions yet — link a Claude or Codex agent.`,
-      },
-    });
-    return;
-  }
   const pluginAuthToken = ctx.pluginAuthToken;
-  const generateOneShot = ctx.runtime.generateOneShot.bind(ctx.runtime);
   void (async () => {
-    // `.codeam/preview.json` short-circuits the agent step entirely
-    // when a repo has been pinned. Saves the user 30-90 s + the LLM
-    // tokens, and lets a team commit the override so every dev gets
-    // an instant preview on first try.
-    const fromFile = await readPreviewConfig(process.cwd());
-    if (fromFile) {
-      log.info('preview', `detect: using .codeam/preview.json (${fromFile.framework})`);
-      emitPreviewEvent({
-        sessionId: ctx.sessionId,
-        pluginId: ctx.pluginId,
-        pluginAuthToken,
-        type: USER_EVENTS.PREVIEW_DETECTION_READY,
-        payload: { detection: withScriptCandidates(fromFile) },
-      });
-      return;
-    }
-
-    emitPreviewEvent({
-      sessionId: ctx.sessionId,
-      pluginId: ctx.pluginId,
-      pluginAuthToken,
-      type: USER_EVENTS.PREVIEW_DETECTION_PENDING,
-    });
-    log.info('preview', 'detect: invoking generateOneShot');
-    const startedAt = Date.now();
-    const { raw, timedOut, stderr } = await runDetectOneShot(generateOneShot);
-    const tookMs = Date.now() - startedAt;
-    if (timedOut) {
-      log.info('preview', `detect: timed out after ${tookMs}ms — emitting preview_error`);
-      emitPreviewEvent({
-        sessionId: ctx.sessionId,
-        pluginId: ctx.pluginId,
-        pluginAuthToken,
-        type: USER_EVENTS.PREVIEW_ERROR,
-        payload: {
-          stage: 'detection',
-          message:
-            `Project detection timed out after ${Math.round(PREVIEW_DETECT_TIMEOUT_MS / 1000)} s — ` +
-            'the agent did not answer. Try again, or add a .codeam/preview.json override.',
-        },
-      });
-      return;
-    }
-    const detection = safeParseDetection(raw);
-    if (!detection) {
-      // codeagent-k9q4. Antes esta linea era `detect: invalid agent output
-      // after Xms` y nada mas: sin la salida cruda no se podia distinguir
-      // "el agente devolvio prosa" de "devolvio JSON al que le faltan campos"
-      // de "no devolvio NADA" — tres fallos con tres arreglos distintos. Un
-      // usuario encadeno CINCO de estos en 19 minutos (2026-08-30) y no habia
-      // forma de saber cual de los tres era.
-      const failure = describeDetectionFailure(raw);
-      log.info(
-        'preview',
-        `detect: failed after ${tookMs}ms reason=${failure?.reason ?? 'unknown'}` +
-          (failure?.missing ? ` missing=${failure.missing.join(',')}` : '') +
-          `\n--- salida cruda del agente (acotada) ---\n${failure?.rawExcerpt ?? ''}`,
-      );
-      emitPreviewEvent({
-        sessionId: ctx.sessionId,
-        pluginId: ctx.pluginId,
-        pluginAuthToken,
-        type: USER_EVENTS.PREVIEW_ERROR,
-        payload: {
-          stage: 'detection',
-          // El mensaje sale del diagnostico: decir "JSON invalido" cuando el
-          // agente no contesto manda al usuario a mirar un JSON que no existe.
-          message:
-            (failure?.reason === 'no_output' ? describeOneShotAgentError(stderr) : null) ??
-            failure?.message ??
-            'Agent returned invalid JSON. Try again, or add a .codeam/preview.json override.',
-        },
-      });
-      return;
-    }
-    if (isUnsupportedDetection(detection)) {
-      log.info('preview', 'detect: framework=unsupported');
-      emitPreviewEvent({
-        sessionId: ctx.sessionId,
-        pluginId: ctx.pluginId,
-        pluginAuthToken,
-        type: USER_EVENTS.PREVIEW_ERROR,
-        payload: {
-          stage: 'unsupported',
-          message: detection.notes ?? 'No dev server applies to this project.',
-        },
-      });
-      return;
-    }
-    log.info('preview', `detect: ${detection.framework} on :${detection.port} (took ${tookMs}ms)`);
-    // Persist the result so the next detect (this session, a reconnect, or a
-    // teammate) is instant. Only the prewarm cached `.codeam/preview.json`
-    // before — so when the prewarm didn't run (e.g. it raced agent startup),
-    // every detect paid the full 30-90 s LLM round-trip again. Best-effort.
-    void writePreviewConfig(process.cwd(), detection).catch((err) => {
-      log.info('preview', `detect: writePreviewConfig failed (non-fatal): ${String(err)}`);
-    });
+    const detection = await resolvePreviewDetection({ ctx, runtime: ctx.runtime, pluginAuthToken });
+    if (!detection) return;
     emitPreviewEvent({
       sessionId: ctx.sessionId,
       pluginId: ctx.pluginId,
@@ -2116,7 +2125,7 @@ const previewStartH: CommandHandler = (ctx, _cmd, parsed) => {
   // actually exists when we test for it. Running it here at the top
   // — when node_modules may not exist yet on a fresh codespace —
   // silently no-ops and we'd spawn through the unreliable npx wrapper.
-  startPreviewFromDetection(ctx, rawDetection, ctx.pluginAuthToken);
+  void startPreviewFromDetection(ctx, rawDetection, ctx.pluginAuthToken);
 };
 
 /**
@@ -2132,20 +2141,29 @@ const previewStartH: CommandHandler = (ctx, _cmd, parsed) => {
  * safety net for unexpected throws.
  */
 export function startPreviewFromDetection(
-  ctx: HandlerContext,
+  ctx: PreviewCtx,
   detection: PreviewDetection,
   pluginAuthToken: string,
-): void {
+  opts: {
+    /** `agent` when the agent's `start_preview` tool started it. */
+    origin?: PreviewOrigin;
+    /** Sees every lifecycle event this bring-up emits (the agent bridge
+     *  reads the terminal ready/error off it). */
+    onEvent?: EmitPreviewEvent;
+  } = {},
+): Promise<void> {
   const emit: EmitPreviewEvent = (type, payload) => {
+    const tagged = originPayload(payload, opts.origin) ?? {};
+    opts.onEvent?.(type, tagged);
     emitPreviewEvent({
       sessionId: ctx.sessionId,
       pluginId: ctx.pluginId,
       pluginAuthToken,
       type,
-      payload,
+      payload: tagged,
     });
   };
-  runPreviewStart({
+  return runPreviewStart({
     sessionId: ctx.sessionId,
     detection,
     cwd: process.cwd(),
@@ -2186,7 +2204,7 @@ export function startPreviewFromDetection(
  * (the `runPreviewStart` reuse-guard resolved without touching the existing
  * `ActivePreview`, whose watcher is already live).
  */
-export function maybeAttachBuildHeal(ctx: HandlerContext, pluginAuthToken: string): void {
+export function maybeAttachBuildHeal(ctx: PreviewCtx, pluginAuthToken: string): void {
   const preview = previewSvc.activePreviews.get(ctx.sessionId);
   if (!preview || preview.buildHealStop) return;
   if (!previewSvc.isBuildHealSupported(preview.framework)) return;
@@ -2215,7 +2233,7 @@ export function maybeAttachBuildHeal(ctx: HandlerContext, pluginAuthToken: strin
         // 150 ms so the port is fully released before the fresh spawn binds
         // it — same grace period `previewRestartH` waits below.
         await new Promise((r) => setTimeout(r, 150));
-        self.startPreviewFromDetection(ctx, preview.detection, pluginAuthToken);
+        void self.startPreviewFromDetection(ctx, preview.detection, pluginAuthToken);
       })();
     },
     notify: (message) => {
@@ -2276,7 +2294,7 @@ const previewRestartH: CommandHandler = async (ctx, cmd) => {
   await previewSvc.killPreview(ctx.sessionId);
   // 150 ms so the port is fully released before the fresh spawn binds it.
   await new Promise((r) => setTimeout(r, 150));
-  self.startPreviewFromDetection(ctx, preview.detection, ctx.pluginAuthToken);
+  void self.startPreviewFromDetection(ctx, preview.detection, ctx.pluginAuthToken);
   await ctx.relay.sendResult(cmd.id, 'completed', { restarted: true });
 };
 

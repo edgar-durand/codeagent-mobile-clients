@@ -142,7 +142,7 @@ describe('preview_restart', () => {
     // Spy on the bring-up so the REAL dev-server spawn never runs in the test.
     const restart = vi
       .spyOn(handlersMod, 'startPreviewFromDetection')
-      .mockReturnValue(undefined);
+      .mockResolvedValue(undefined);
 
     const sendResult = vi.fn();
     const p = handlers.preview_restart(makeCtx(sendResult), { id: 'r2' } as any, {} as any);

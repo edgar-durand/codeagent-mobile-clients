@@ -42,6 +42,7 @@ vi.mock('../../src/services/pairing.service', () => ({
 
 import {
   dispatchCommand,
+  resolvePreviewDetection,
   PREVIEW_DETECT_TIMEOUT_MS,
   type BaseHandlerContext,
   type HandlerContext,
@@ -244,5 +245,30 @@ describe('request_preview_detect — headless one-shot only, always terminal', (
     );
     for (let i = 0; i < 20; i += 1) await new Promise<void>((resolve) => setImmediate(resolve));
     expect(postedTypes()).not.toContain('preview_detection_ready');
+  });
+});
+
+describe('origin tagging — the agent path is tagged, the button path is untouched', () => {
+  it('the Preview button emits NO origin field (byte-identical to before)', async () => {
+    const generateOneShot = vi.fn().mockResolvedValue(UNSUPPORTED_ANSWER);
+    await dispatchCommand(makeAcpCtx({ id: 'codex', generateOneShot }), cmd);
+    await vi.waitFor(() => expect(postedTypes()).toContain('preview_error'));
+    for (const call of mockPostPreviewEvent.mock.calls) {
+      expect((call[0] as { payload?: Record<string, unknown> }).payload ?? {}).not.toHaveProperty('origin');
+    }
+  });
+
+  it('resolvePreviewDetection(origin:agent) tags pending + error with origin:agent', async () => {
+    const generateOneShot = vi.fn().mockResolvedValue(UNSUPPORTED_ANSWER);
+    const detection = await resolvePreviewDetection({
+      ctx: { sessionId: 'sess-1', pluginId: 'plug-1' },
+      runtime: { id: 'codex', generateOneShot } as unknown as Parameters<typeof resolvePreviewDetection>[0]['runtime'],
+      pluginAuthToken: 'tok-1',
+      origin: 'agent',
+    });
+    expect(detection).toBeNull();
+    await vi.waitFor(() => expect(postedTypes()).toEqual(['preview_detection_pending', 'preview_error']));
+    expect(lastPosted('preview_detection_pending')).toEqual({ origin: 'agent' });
+    expect(lastPosted('preview_error')).toMatchObject({ stage: 'unsupported', origin: 'agent' });
   });
 });

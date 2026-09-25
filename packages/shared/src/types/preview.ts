@@ -78,8 +78,29 @@ export interface MissingService {
   envVar: string;
 }
 
+/**
+ * Who started a preview. `agent` = the session's agent called the
+ * `start_preview` MCP tool: the app skips the confirm sheet (the agent already
+ * chose), shows the "Initializing Preview…" card in the chat and switches to
+ * the preview plane once it is ready. Absent = `user` (the Preview button).
+ */
+export type PreviewOrigin = 'user' | 'agent';
+
+/**
+ * `preview_agent_highlight` — the agent pointing at an element of the running
+ * preview. `clear: true` removes every agent mark; otherwise `selector` is a
+ * CSS selector the inspector client resolves inside the page.
+ */
+export interface PreviewAgentHighlight {
+  selector?: string;
+  label?: string;
+  clear?: boolean;
+}
+
 export interface PreviewStatus {
   state: PreviewState;
+  /** Who started it — lets a reconnecting client keep the agent-launch UI. */
+  origin?: PreviewOrigin;
   url?: string;
   framework?: string;
   detection?: PreviewDetection;
