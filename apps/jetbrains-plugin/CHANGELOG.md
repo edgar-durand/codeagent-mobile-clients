@@ -4,6 +4,12 @@ All notable changes to the CodeAgent-Mobile JetBrains plugin are documented here
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.75.27] — 2026-09-25
+
+### Fixed
+
+- **cli:** On-demand Box session resume, link reporting, per-boot logs, MCP secrets off argv (#818)
+
 ## [2.75.26] — 2026-09-25
 
 ### Added
