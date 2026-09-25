@@ -14,6 +14,7 @@ import * as path from 'node:path';
 import {
   ensureGhCli,
   ensureGhAuth,
+  ghConfigDir,
   type GitToolingRunner,
 } from '../src/commands/host/git-tooling';
 
@@ -107,5 +108,54 @@ describe('ensureGhAuth', () => {
     expect(login).toBeTruthy();
     expect(login?.args).toEqual(['auth', 'login', '--with-token']);
     expect(login?.input).toContain('my-secret-token');
+  });
+
+  // Fleet box 2026-09-24: the app's GitHub token has scopes codespace, repo,
+  // user:email. `gh auth login --with-token` rejects it for lacking read:org,
+  // so every Box session had an unauthenticated gh and the ticket flow could
+  // never open its PR. gh works with that token once it is stored.
+  describe('token without read:org', () => {
+    let cfg: string;
+    beforeEach(() => {
+      cfg = fs.mkdtempSync(path.join(os.tmpdir(), 'codeam-gh-'));
+      process.env.GH_CONFIG_DIR = cfg;
+    });
+    afterEach(() => {
+      delete process.env.GH_CONFIG_DIR;
+      fs.rmSync(cfg, { recursive: true, force: true });
+    });
+    const scopeRejectingGh = makeRunner({
+      run: async (_cmd, args) =>
+        args[1] === 'status'
+          ? { code: 1, stderr: 'You are not logged into any GitHub hosts.' }
+          : { code: 1, stderr: "error validating token: missing required scope 'read:org'" },
+    });
+
+    it('stores the token in hosts.yml (0600) so gh is logged in', async () => {
+      await ensureGhAuth(scopeRejectingGh, 'gh', 'gho_secret');
+      const file = path.join(ghConfigDir(), 'hosts.yml');
+      expect(fs.readFileSync(file, 'utf8')).toBe(
+        'github.com:\n    oauth_token: gho_secret\n    git_protocol: https\n',
+      );
+      if (process.platform !== 'win32') {
+        expect(fs.statSync(file).mode & 0o777).toBe(0o600);
+      }
+    });
+
+    it('never overwrites an existing hosts.yml', async () => {
+      const file = path.join(cfg, 'hosts.yml');
+      fs.writeFileSync(file, 'ghe.example.com:\n    oauth_token: other\n');
+      await ensureGhAuth(scopeRejectingGh, 'gh', 'gho_secret');
+      expect(fs.readFileSync(file, 'utf8')).toBe('ghe.example.com:\n    oauth_token: other\n');
+    });
+
+    it('does not write hosts.yml when login fails for another reason', async () => {
+      const runner = makeRunner({
+        run: async (_cmd, args) =>
+          args[1] === 'status' ? { code: 1, stderr: '' } : { code: 1, stderr: 'HTTP 401: Bad credentials' },
+      });
+      await ensureGhAuth(runner, 'gh', 'gho_bad');
+      expect(fs.existsSync(path.join(cfg, 'hosts.yml'))).toBe(false);
+    });
   });
 });
