@@ -17,6 +17,35 @@ export interface PreviewDetection {
   env?: Record<string, string>;
   setup_commands?: Array<{ cmd: string; args: string[] }>;
   notes?: string;
+  /**
+   * Every runnable dev-style script the CLI found in the repo (root + each
+   * workspace app), so the confirm sheet can offer them in an autocomplete
+   * next to the agent's pick. Additive: older clients ignore it, and the
+   * CLI never writes it to `.codeam/preview.json`.
+   */
+  candidates?: PreviewScriptCandidate[];
+}
+
+/**
+ * One runnable script, already shaped as a detection the Preview start can
+ * use as-is (owner request 2026-09-25: pick any script, e.g. the Expo app of
+ * a monorepo, not only the one the agent chose).
+ */
+export interface PreviewScriptCandidate {
+  /** `@dgi/mobile-empresas`, or the root package name. */
+  app: string;
+  /** Repo-relative dir of the owning package.json ('.' for the root). */
+  appDir: string;
+  /** The package.json script name (`start`, `dev:empresas`). */
+  script: string;
+  /** The script body, for display (`expo start`). */
+  body: string;
+  /** Framework inferred from the owning package's dependencies. */
+  framework: string;
+  command: string;
+  args: string[];
+  port: number;
+  ready_pattern: string;
 }
 
 export type PreviewState =

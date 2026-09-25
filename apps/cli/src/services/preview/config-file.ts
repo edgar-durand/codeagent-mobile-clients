@@ -72,5 +72,8 @@ export async function writePreviewConfig(
 ): Promise<void> {
   const filePath = configPath(cwd);
   await fs.mkdir(path.dirname(filePath), { recursive: true });
-  await fs.writeFile(filePath, JSON.stringify(detection, null, 2) + '\n', 'utf-8');
+  // `candidates` is a per-session listing for the confirm sheet, never config:
+  // persisting it would freeze a stale script list into a committable file.
+  const { candidates: _candidates, ...config } = detection;
+  await fs.writeFile(filePath, JSON.stringify(config, null, 2) + '\n', 'utf-8');
 }

@@ -14,6 +14,7 @@ export * from './port-ready';
 export * from './provision-deps';
 export * from './run-setup';
 export * from './setup-deps';
+export * from './script-candidates';
 export * from './prewarm-deps';
 export * from './tunnel-bringup';
 export * from './port-registry';

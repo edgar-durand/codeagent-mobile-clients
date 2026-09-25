@@ -68,6 +68,7 @@ import {
   safeParseDetection,
   isUnsupportedDetection,
   describeDetectionFailure,
+  listScriptCandidates,
   prewarmNodeDeps,
   describeOneShotAgentError,
   writePreviewConfig,
@@ -1882,7 +1883,7 @@ const requestPreviewDetectH: CommandHandler = (ctx) => {
         pluginId: ctx.pluginId,
         pluginAuthToken,
         type: USER_EVENTS.PREVIEW_DETECTION_READY,
-        payload: { detection: fromFile },
+        payload: { detection: withScriptCandidates(fromFile) },
       });
       return;
     }
@@ -1972,10 +1973,22 @@ const requestPreviewDetectH: CommandHandler = (ctx) => {
       pluginId: ctx.pluginId,
       pluginAuthToken,
       type: USER_EVENTS.PREVIEW_DETECTION_READY,
-      payload: { detection },
+      payload: { detection: withScriptCandidates(detection) },
     });
   })();
 };
+
+/** Attach the repo's runnable scripts for the confirm sheet's autocomplete.
+ *  Never persisted: `.codeam/preview.json` gets the plain detection. */
+function withScriptCandidates(detection: PreviewDetection): PreviewDetection {
+  try {
+    const candidates = listScriptCandidates(process.cwd());
+    return candidates.length > 0 ? { ...detection, candidates } : detection;
+  } catch (err) {
+    log.info('preview', `detect: listing script candidates failed (non-fatal): ${String(err)}`);
+    return detection;
+  }
+}
 
 let previewPrewarmStarted = false;
 
