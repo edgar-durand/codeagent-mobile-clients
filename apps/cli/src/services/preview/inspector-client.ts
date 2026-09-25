@@ -305,6 +305,145 @@ export function inspectorClientSource(opts: InspectorClientOptions): string {
       redrawMarks();
     }
 
+    /**
+     * Las marcas del AGENTE — la herramienta highlight_element.
+     *
+     * Van aparte de las del usuario a proposito: no se numeran, no se pueden
+     * borrar desde el composer y no dependen de que el modo inspector este
+     * encendido. Son el agente SEÑALANDO algo, y el usuario las ve aunque no
+     * haya tocado nada: un cursor que viaja hasta el elemento, lo centra en
+     * pantalla y deja una caja con su etiqueta.
+     *
+     * Mismo anclaje que las marcas fijadas (coordenadas de documento), asi que
+     * acompañan al scroll. Un selector que no encuentra nada no pinta nada: el
+     * agente ya sabe por la herramienta que puede fallar.
+     */
+    var AGENT = '#22d3ee';
+    var agentMarks = [];
+    var agentHost = null;
+    var agentCursor = null;
+    var agentStyle = null;
+    var agentListening = false;
+
+    function ensureAgentStyle() {
+      if (agentStyle && agentStyle.parentNode) return;
+      agentStyle = document.createElement('style');
+      agentStyle.setAttribute('data-codeam', 'agent-style');
+      agentStyle.textContent =
+        '@keyframes codeam-agent-pulse{0%{box-shadow:0 0 0 0 rgba(34,211,238,.55)}' +
+        '70%{box-shadow:0 0 0 10px rgba(34,211,238,0)}100%{box-shadow:0 0 0 0 rgba(34,211,238,0)}}' +
+        '@keyframes codeam-agent-in{from{opacity:0;transform:scale(1.06)}to{opacity:1;transform:scale(1)}}';
+      (document.head || document.documentElement).appendChild(agentStyle);
+    }
+
+    function ensureAgentCursor() {
+      if (agentCursor && agentCursor.parentNode) return agentCursor;
+      agentCursor = document.createElement('div');
+      agentCursor.setAttribute('data-codeam', 'agent-cursor');
+      agentCursor.style.cssText = [
+        'position:fixed', 'pointer-events:none', 'z-index:2147483647',
+        'left:' + Math.round(window.innerWidth / 2) + 'px', 'top:' + Math.round(window.innerHeight - 40) + 'px',
+        'transition:left .6s cubic-bezier(.22,1,.36,1),top .6s cubic-bezier(.22,1,.36,1),opacity .3s',
+        'opacity:0'
+      ].join(';');
+      agentCursor.innerHTML =
+        '<svg width="22" height="22" viewBox="0 0 24 24" style="display:block;filter:drop-shadow(0 1px 2px rgba(0,0,0,.5))">' +
+        '<path d="M4 2l15 8.5-6.6 1.6L9 18.5z" fill="' + AGENT + '" stroke="#000" stroke-width="1.2"/></svg>' +
+        '<div style="margin:2px 0 0 14px;background:' + AGENT + ';color:#000;font:700 10px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;' +
+        'padding:1px 6px;border-radius:8px;white-space:nowrap">Agent</div>';
+      document.body.appendChild(agentCursor);
+      return agentCursor;
+    }
+
+    function redrawAgentMarks() {
+      if (agentMarks.length === 0) {
+        if (agentHost && agentHost.parentNode) agentHost.parentNode.removeChild(agentHost);
+        agentHost = null;
+        return;
+      }
+      if (!agentHost || !agentHost.parentNode) {
+        agentHost = document.createElement('div');
+        agentHost.setAttribute('data-codeam', 'agent-marks');
+        agentHost.style.cssText = 'position:absolute;left:0;top:0;width:0;height:0;z-index:2147483646';
+        document.body.appendChild(agentHost);
+      }
+      agentHost.innerHTML = '';
+      var sx = window.scrollX || window.pageXOffset || 0;
+      var sy = window.scrollY || window.pageYOffset || 0;
+      for (var i = 0; i < agentMarks.length; i++) {
+        var m = agentMarks[i];
+        if (!m.el.isConnected) continue;
+        var r = m.el.getBoundingClientRect();
+        var box = document.createElement('div');
+        box.setAttribute('data-codeam', 'agent-mark');
+        box.style.cssText = [
+          'position:absolute', 'pointer-events:none', 'box-sizing:border-box',
+          'border:2px solid ' + AGENT, 'background:rgba(34,211,238,0.10)', 'border-radius:4px',
+          'left:' + (r.left + sx - 3) + 'px', 'top:' + (r.top + sy - 3) + 'px',
+          'width:' + (r.width + 6) + 'px', 'height:' + (r.height + 6) + 'px',
+          'animation:codeam-agent-in .25s ease-out,codeam-agent-pulse 1.6s ease-out 3'
+        ].join(';');
+        if (m.label) {
+          var tag = document.createElement('div');
+          tag.setAttribute('data-codeam', 'agent-mark-label');
+          tag.style.cssText = [
+            'position:absolute', 'left:-2px', (r.top >= 22 ? 'top:-22px' : 'bottom:-22px'),
+            'background:' + AGENT, 'color:#000', 'font:700 11px/1.6 ui-monospace,SFMono-Regular,Menlo,monospace',
+            'padding:0 6px', 'border-radius:3px', 'white-space:nowrap', 'max-width:260px',
+            'overflow:hidden', 'text-overflow:ellipsis'
+          ].join(';');
+          tag.textContent = m.label;
+          box.appendChild(tag);
+        }
+        agentHost.appendChild(box);
+      }
+    }
+
+    function listenAgentLayout() {
+      if (agentListening) return;
+      agentListening = true;
+      window.addEventListener('scroll', redrawAgentMarks, true);
+      window.addEventListener('resize', redrawAgentMarks);
+    }
+
+    function agentHighlight(selector, labelText) {
+      var el = null;
+      try { el = document.querySelector(String(selector)); } catch (e) { el = null; }
+      if (!el || !el.getBoundingClientRect) return false;
+      ensureAgentStyle();
+      listenAgentLayout();
+      try { el.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'smooth' }); } catch (e) { /* viejo */ }
+      var cursor = ensureAgentCursor();
+      // Tras el scroll suave: el cursor viaja al centro del elemento y, al
+      // llegar, aparece la caja. El orden es lo que se lee como «el agente
+      // lo esta señalando» y no como un recuadro que salta.
+      setTimeout(function () {
+        var r = el.getBoundingClientRect();
+        cursor.style.opacity = '1';
+        cursor.style.left = Math.round(r.left + Math.min(r.width / 2, 40)) + 'px';
+        cursor.style.top = Math.round(r.top + Math.min(r.height / 2, 24)) + 'px';
+        setTimeout(function () {
+          agentMarks.push({ el: el, label: labelText ? String(labelText).slice(0, 80) : '' });
+          redrawAgentMarks();
+        }, 620);
+      }, 380);
+      return true;
+    }
+
+    function agentClear() {
+      agentMarks = [];
+      redrawAgentMarks();
+      if (agentCursor && agentCursor.parentNode) agentCursor.parentNode.removeChild(agentCursor);
+      agentCursor = null;
+      if (agentStyle && agentStyle.parentNode) agentStyle.parentNode.removeChild(agentStyle);
+      agentStyle = null;
+      if (agentListening) {
+        window.removeEventListener('scroll', redrawAgentMarks, true);
+        window.removeEventListener('resize', redrawAgentMarks);
+        agentListening = false;
+      }
+    }
+
     function enable(origin) {
       if (enabled) return;
       enabled = true;
@@ -338,6 +477,8 @@ export function inspectorClientSource(opts: InspectorClientOptions): string {
       if (data.type === 'enable') enable(e.origin);
       else if (data.type === 'disable') disable();
       else if (data.type === 'marks' && data.ids) syncMarks(data.ids);
+      else if (data.type === 'agent-highlight' && data.selector) agentHighlight(data.selector, data.label);
+      else if (data.type === 'agent-clear') agentClear();
     });
 
     /**
@@ -356,6 +497,11 @@ export function inspectorClientSource(opts: InspectorClientOptions): string {
       window.__codeamInspector = {
         enable: function () { enable('react-native'); },
         disable: disable,
+        // La app movil ya llamaba \`marks\` al borrar un chip y no existia:
+        // la marca se quedaba pintada en la pagina.
+        marks: function (ids) { if (ids && ids.length !== undefined) syncMarks(ids); },
+        highlight: function (selector, text) { return agentHighlight(selector, text); },
+        clear: agentClear,
       };
     }
   } catch (e) {

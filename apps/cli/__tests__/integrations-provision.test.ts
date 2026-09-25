@@ -93,6 +93,28 @@ describe('buildMcpServersForStart', () => {
     expect(servers).toEqual([]);
   });
 
+  it('adds the built-in Preview tools when the bridge is up — even with no integrations', () => {
+    const servers = buildMcpServersForStart({
+      sessionId: 'sess-1',
+      pluginId: 'plugin-1',
+      pluginAuthToken: 'plugin-token-abc',
+      preview: { url: 'http://127.0.0.1:4000', token: 'bridge-token' },
+    }) as McpServerStdio[];
+    expect(servers.map((s) => s.name)).toEqual(['codeagent_preview']);
+    expect(servers[0].args).toEqual([process.argv[1], 'preview-mcp']);
+  });
+
+  it('the Preview server sits NEXT to the router, never behind it', () => {
+    writeManifest({ ...JIRA_MANIFEST, toolRouter: true });
+    const servers = buildMcpServersForStart({
+      sessionId: 'sess-1',
+      pluginId: 'plugin-1',
+      pluginAuthToken: 'plugin-token-abc',
+      preview: { url: 'http://127.0.0.1:4000', token: 'bridge-token' },
+    });
+    expect(servers.map((s) => s.name)).toEqual(['codeam', 'codeagent_preview']);
+  });
+
   it('returns [] when the manifest is present but pluginAuthToken is missing', () => {
     writeManifest(JIRA_MANIFEST);
 

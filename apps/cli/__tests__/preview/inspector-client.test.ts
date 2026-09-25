@@ -493,3 +493,92 @@ describe('inspector client — la fuente', () => {
     expect(src.split('</script>').length - 1).toBe(1);
   });
 });
+
+/**
+ * Las marcas del AGENTE (`highlight_element`): el agente señala algo y el
+ * usuario lo ve sin haber encendido el inspector. Tras el scroll suave y el
+ * viaje del cursor (~1 s) queda una caja anclada al documento con su etiqueta.
+ */
+describe('inspector client — el agente señala', () => {
+  const settle = () => new Promise((r) => setTimeout(r, 1_150));
+  const agentBoxes = (win: Window) =>
+    Array.from(win.document.querySelectorAll('[data-codeam="agent-mark"]')) as HTMLElement[];
+
+  function send(h: Harness, data: Record<string, unknown>, origin = DASHBOARD): void {
+    const ev = new h.win.MessageEvent('message', { data: { source: INSPECTOR_CHANNEL, ...data } });
+    Object.defineProperty(ev, 'origin', { value: origin });
+    h.win.dispatchEvent(ev);
+  }
+
+  it('dibuja la marca con su etiqueta sin encender el modo inspector', async () => {
+    const h = mount('<button id="cta" data-box="40">Comprar</button>');
+    send(h, { type: 'agent-highlight', selector: '#cta', label: 'Nuevo CTA' });
+    await settle();
+    const [box] = agentBoxes(h.win);
+    expect(box).toBeDefined();
+    expect(box.textContent).toBe('Nuevo CTA');
+    expect(box.style.pointerEvents).toBe('none');
+    // El agente no activa el modo: el ratón del usuario sigue sin reportarse.
+    h.hoverOver('#cta');
+    expect(h.sent.filter((m) => m.type === 'hover')).toHaveLength(0);
+  });
+
+  it('muestra el cursor del agente', async () => {
+    const h = mount('<button id="cta" data-box="40">x</button>');
+    send(h, { type: 'agent-highlight', selector: '#cta' });
+    await settle();
+    const cursor = h.win.document.querySelector('[data-codeam="agent-cursor"]') as HTMLElement;
+    expect(cursor).not.toBeNull();
+    expect(cursor.style.opacity).toBe('1');
+  });
+
+  it('un selector que no existe (o inválido) no pinta nada ni rompe la página', async () => {
+    const h = mount('<button id="cta">x</button>');
+    send(h, { type: 'agent-highlight', selector: '#nope' });
+    send(h, { type: 'agent-highlight', selector: '[[[' });
+    await settle();
+    expect(agentBoxes(h.win)).toHaveLength(0);
+  });
+
+  it('un origen ajeno no puede señalar', async () => {
+    const h = mount('<button id="cta">x</button>');
+    send(h, { type: 'agent-highlight', selector: '#cta' }, ATTACKER);
+    await settle();
+    expect(agentBoxes(h.win)).toHaveLength(0);
+  });
+
+  it('agent-clear quita marcas y cursor sin dejar nodos', async () => {
+    const h = mount('<button id="cta">x</button><a id="b">y</a>');
+    send(h, { type: 'agent-highlight', selector: '#cta' });
+    send(h, { type: 'agent-highlight', selector: '#b' });
+    await settle();
+    expect(agentBoxes(h.win)).toHaveLength(2);
+    send(h, { type: 'agent-clear' });
+    expect(h.win.document.querySelectorAll('[data-codeam]').length).toBe(0);
+  });
+
+  it('en el WebView expone highlight/clear/marks a la app', async () => {
+    const dom = new JSDOM('<!doctype html><html><head></head><body><button id="cta">x</button></body></html>', {
+      runScripts: 'dangerously',
+      url: 'https://preview-abc.codeagent-mobile.com/',
+    });
+    const win = dom.window as unknown as Window & typeof globalThis;
+    (win as unknown as { ReactNativeWebView: unknown }).ReactNativeWebView = { postMessage: () => undefined };
+    const source = inspectorClientSource({ allowedOrigins: [DASHBOARD] });
+    win.eval(source.replace(/^<script[^>]*>/, '').replace(/<\/script>$/, ''));
+    const api = (win as unknown as {
+      __codeamInspector: {
+        highlight: (s: string, l?: string) => boolean;
+        clear: () => void;
+        marks: (ids: string[]) => void;
+      };
+    }).__codeamInspector;
+    expect(api.highlight('#cta', 'aquí')).toBe(true);
+    expect(api.highlight('#missing')).toBe(false);
+    expect(() => api.marks([])).not.toThrow();
+    await settle();
+    expect(agentBoxes(win)).toHaveLength(1);
+    api.clear();
+    expect(agentBoxes(win)).toHaveLength(0);
+  });
+});

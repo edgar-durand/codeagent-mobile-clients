@@ -92,7 +92,7 @@ describe('maybeAttachBuildHeal wiring', () => {
     const kill = vi.spyOn(previewSvc, 'killPreview').mockResolvedValue(undefined);
     const respawn = vi
       .spyOn(handlersMod, 'startPreviewFromDetection')
-      .mockReturnValue(undefined);
+      .mockResolvedValue(undefined);
 
     const ctx = makeCtx();
     handlersMod.maybeAttachBuildHeal(ctx, 'tok');
@@ -142,7 +142,7 @@ describe('maybeAttachBuildHeal wiring', () => {
     });
     const respawn = vi
       .spyOn(handlersMod, 'startPreviewFromDetection')
-      .mockReturnValue(undefined);
+      .mockResolvedValue(undefined);
 
     const ctx = makeCtx();
     handlersMod.maybeAttachBuildHeal(ctx, 'tok');
