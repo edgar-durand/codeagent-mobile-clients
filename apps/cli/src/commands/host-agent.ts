@@ -810,6 +810,14 @@ interface ResumeTarget {
   deployId: string;
   cwd: string;
   session: SavedSession;
+  /**
+   * The PUBLIC agent id the deploy ran (`managed-qwen-coder`, `claude_code`…),
+   * from the persisted live set. The saved pairing only knows the RUNTIME
+   * (`claude` for the whole managed rail), and resuming with that rewrote the
+   * record so every later report said `claude` — the session's agent chip
+   * flipped to CLAUDE after a wake (codeagent-cz34).
+   */
+  agent?: string;
 }
 
 /** Per-session resume retry / exhaustion / re-probe bookkeeping. */
@@ -1971,7 +1979,7 @@ export class HostAgentSupervisor {
           token,
           openRouter: !!openRouter,
           claudeConfigDir: houseConfigDir,
-        });
+        }, payload.deployId);
       } else {
         // Non-house path: `sealedAgentAuth` is guaranteed present by
         // isDeployPayload (exactly one of houseProxy / sealedAgentAuth).
@@ -1984,7 +1992,7 @@ export class HostAgentSupervisor {
         // A BYO-credential deploy takes over the box — drop any persisted
         // house-proxy env so a later RESUME can't re-inject a stale house proxy
         // on top of this agent's own credential.
-        clearHouseProxyConfig();
+        clearHouseProxyConfig(payload.deployId);
       }
 
       // A self-hosted deploy is an AUTONOMOUS, headless session — the user
@@ -2296,7 +2304,7 @@ export class HostAgentSupervisor {
           );
           continue;
         }
-        this.resumeOne({ deployId: rec.deployId, cwd: rec.cwd, session });
+        this.resumeOne({ deployId: rec.deployId, cwd: rec.cwd, session, agent: rec.agent });
         resumed += 1;
       }
       log.info(
@@ -2426,13 +2434,20 @@ export class HostAgentSupervisor {
    */
   private knownSavedSessions(): Array<{ deployId: string; sessionId: string; agent?: string }> {
     try {
+      const persisted = new Map(this.sessionStore.load().map((r) => [r.deployId, r.agent]));
+      for (const c of this.children.values()) persisted.set(c.deployId, c.agent);
       return this.listSavedSessions()
         .map((s) => ({ s, deployId: deployIdFromWorkspace(s.cwd) }))
         .filter(
           (x): x is { s: SavedSession; deployId: string } =>
             x.deployId !== null && !!x.s.cwd && fs.existsSync(x.s.cwd),
         )
-        .map(({ s, deployId }) => ({ deployId, sessionId: s.id, ...(s.agent ? { agent: s.agent } : {}) }));
+        .map(({ s, deployId }) => {
+          // Only a PUBLIC agent id is worth reporting — the saved pairing's
+          // `agent` is the runtime and would overwrite the real identity.
+          const agent = persisted.get(deployId);
+          return { deployId, sessionId: s.id, ...(agent ? { agent } : {}) };
+        });
     } catch {
       return [];
     }
@@ -2453,14 +2468,14 @@ export class HostAgentSupervisor {
       // Returns `{}` when the box has no persisted house config (BYO deploy →
       // its own credential path is used instead).
       const proc = this.resumeSpawner(
-        { ...readHouseProxyChildEnv(), CODEAM_RESUME_SESSION_ID: session.id },
+        { ...readHouseProxyChildEnv(deployId), CODEAM_RESUME_SESSION_ID: session.id },
         cwd,
       );
       const child: ChildSession = {
         deployId,
         proc,
         cwd,
-        agent: session.agent,
+        agent: target.agent ?? session.agent,
         startedAt: Date.now(),
         sessionId: session.id,
       };

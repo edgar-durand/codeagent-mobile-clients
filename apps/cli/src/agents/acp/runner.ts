@@ -27,6 +27,7 @@
  * handler registry verbatim for those.
  */
 
+import { deployIdFromWorkspace } from '../../commands/host/workspace';
 import { setCurrentAgentEnv } from '../current-agent-env';
 import { randomUUID } from 'node:crypto';
 import * as fs from 'node:fs';
@@ -1897,7 +1898,9 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
       // this env into the resumed child (the Rafael 2026-08-05 class of
       // "woken house agent has no proxy env" bugs).
       if (pendingHouseConfig) {
-        persistHouseProxyConfig(pendingHouseConfig);
+        // Scoped to THIS session's deploy (its workspace names it) so a resume
+        // of another session on the box never picks this config up.
+        persistHouseProxyConfig(pendingHouseConfig, deployIdFromWorkspace(process.cwd()) ?? undefined);
         pendingHouseConfig = null;
       }
     } else if (wasHouse) {
@@ -1906,7 +1909,7 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
       // (mirrors the BYO-deploy takeover in host-agent.ts). Scoped to
       // sessions that WERE house so a co-located house session's config
       // isn't clobbered by an unrelated swap.
-      clearHouseProxyConfig();
+      clearHouseProxyConfig(deployIdFromWorkspace(process.cwd()) ?? undefined);
     }
     // Fresh welcome card so the mobile chat flips to the new agent's brand.
     // House target: white-label identity — never the runtime's name/model
