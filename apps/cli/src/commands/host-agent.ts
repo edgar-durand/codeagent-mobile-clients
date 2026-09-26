@@ -2296,7 +2296,7 @@ export class HostAgentSupervisor {
       const saved = this.listSavedSessions();
       let resumed = 0;
       for (const rec of resume) {
-        const session = pickSavedSessionForWorkspace(saved, rec.cwd);
+        const session = pickSavedSessionForWorkspace(saved, rec.cwd, rec.deployId);
         if (!session) {
           log.warn(
             'host-agent',

@@ -86,6 +86,22 @@ describe('pickSavedSessionForWorkspace', () => {
     expect(pickSavedSessionForWorkspace([], '/ws/a')).toBeNull();
     expect(pickSavedSessionForWorkspace([{ ...base, cwd: '/ws/z', pluginId: 'p', pollSecret: 's' }], '/ws/a')).toBeNull();
   });
+
+  // Owner 2026-09-26: a session paired in July by an older CLI was saved with
+  // NO cwd; the restart dropped it as "deleted from the app" although it was
+  // ACTIVE. A resumed child's deployId is its session id.
+  it('a legacy cwd-less saved session is found by the child\'s deployId (= its session id)', () => {
+    const legacy: SavedSession = { ...base, id: 'cmrmvwbyr', pluginId: 'p', pollSecret: 's' };
+    expect(pickSavedSessionForWorkspace([legacy], '/home/box', 'cmrmvwbyr')?.id).toBe('cmrmvwbyr');
+    // Without the deployId, or for another id, it still is not guessed.
+    expect(pickSavedSessionForWorkspace([legacy], '/home/box')).toBeNull();
+    expect(pickSavedSessionForWorkspace([legacy], '/home/box', 'other')).toBeNull();
+  });
+
+  it('a saved cwd that disagrees is never overridden by the id fallback', () => {
+    const elsewhere: SavedSession = { ...base, id: 'sid', cwd: '/ws/z', pluginId: 'p', pollSecret: 's' };
+    expect(pickSavedSessionForWorkspace([elsewhere], '/ws/a', 'sid')).toBeNull();
+  });
 });
 
 describe('fileSessionChildStore', () => {

@@ -133,17 +133,23 @@ export function planSessionResume(
 export function pickSavedSessionForWorkspace(
   sessions: SavedSession[],
   cwd: string,
+  deployId?: string,
 ): SavedSession | null {
   const target = path.resolve(cwd);
+  const reconnectable = (s: SavedSession) => !!s.pluginId && !!s.pollSecret && !!s.agent;
   const matches = sessions.filter(
-    (s) =>
-      !!s.cwd &&
-      path.resolve(s.cwd) === target &&
-      !!s.pluginId &&
-      !!s.pollSecret &&
-      !!s.agent,
+    (s) => !!s.cwd && path.resolve(s.cwd) === target && reconnectable(s),
   );
-  if (matches.length === 0) return null;
-  matches.sort((a, b) => b.pairedAt - a.pairedAt);
-  return matches[0];
+  if (matches.length > 0) {
+    matches.sort((a, b) => b.pairedAt - a.pairedAt);
+    return matches[0];
+  }
+  // ⚠️ A session paired by an older CLI was saved WITHOUT `cwd`, so the
+  // workspace match above can never find it — and the host dropped it as
+  // "deleted from the app" on restart although it was ACTIVE (owner's 24/7
+  // session, paired 2026-07-16, lost on the 2026-09-26 restart). A resumed
+  // child's deployId IS its session id, so that is the exact key; only a
+  // cwd-less record may use it, a saved cwd that disagrees still wins.
+  if (!deployId) return null;
+  return sessions.find((s) => !s.cwd && s.id === deployId && reconnectable(s)) ?? null;
 }
