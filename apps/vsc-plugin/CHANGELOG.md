@@ -4,6 +4,12 @@ All notable changes to the CodeAgent Mobile VS Code extension are documented her
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.75.32] — 2026-09-26
+
+### Fixed
+
+- **cli:** Clear a preview that died with its machine on the first heartbeat (#828)
+
 ## [2.75.31] — 2026-09-26
 
 ### Fixed
