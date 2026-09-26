@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 // codeagent-v07a: the supervisor mirrors its live children to
 // `~/.codeam/host-agent-sessions.json`. Point that at a throwaway file so a
 // dev machine's real state is never read or overwritten by these tests.
@@ -507,6 +508,40 @@ describe('resolveHostIdentity — redeem-first', () => {
  * ENROLL_TOKEN_INVALID) instead of looping forever against a permanently
  * invalid token.
  */
+// Edgar 2026-09-26: a host sealed before redeem-time secret enrolment had no
+// control poll secret, so it heartbeated "online" while every command poll was
+// refused PLUGIN_SECRET_REQUIRED — and nothing but a redeem ever wrote one.
+describe('legacy identity (no controlPollSecret) self-heals', () => {
+  const LEGACY = { hostId: 'host-old', hostToken: 'tok-old', controlPluginId: 'sh-old' };
+
+  it('resolveHostIdentity gives it a secret and re-seals it', async () => {
+    vi.stubGlobal('fetch', vi.fn());
+    fs.mkdirSync(path.dirname(hostIdentityPath()), { recursive: true });
+    fs.writeFileSync(hostIdentityPath(), JSON.stringify(LEGACY));
+
+    const resolved = await resolveHostIdentity(undefined);
+    expect(resolved).toMatchObject(LEGACY);
+    expect(typeof resolved?.controlPollSecret).toBe('string');
+    expect(resolved!.controlPollSecret!.length).toBeGreaterThan(20);
+    const sealed = JSON.parse(fs.readFileSync(hostIdentityPath(), 'utf8'));
+    expect(sealed.controlPollSecret).toBe(resolved!.controlPollSecret);
+    // Stable across restarts: the second resolve keeps the same secret.
+    expect((await resolveHostIdentity(undefined))?.controlPollSecret).toBe(resolved!.controlPollSecret);
+  });
+
+  it('the heartbeat carries the SHA-256 of the control poll secret', async () => {
+    const fetchMock = vi.fn(async () =>
+      new Response(JSON.stringify({ success: true, data: { ok: true } }), { status: 200 }),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+    await sendHostHeartbeat(IDENTITY);
+    const body = JSON.parse((fetchMock.mock.calls[0] as unknown as [string, RequestInit])[1].body as string);
+    expect(body.pluginSecretHash).toBe(
+      createHash('sha256').update(IDENTITY.controlPollSecret!).digest('hex'),
+    );
+  });
+});
+
 describe('resolveHostIdentity — terminal enroll errors stop retrying', () => {
   it('throws a clear user-facing message on ENROLL_TOKEN_EXPIRED (410) — no fallback', async () => {
     const fetchMock = vi.fn().mockImplementation(async (url: string) => {

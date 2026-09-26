@@ -168,11 +168,50 @@ const codexProvisioner: AgentProvisioner = {
       writeFile0600(authJson, JSON.stringify({ auth_mode: 'apikey', OPENAI_API_KEY: auth.value }));
       return { OPENAI_API_KEY: auth.value };
     }
-    // oauth_token → ~/.codex/auth.json verbatim (the ChatGPT subscription blob).
-    writeFile0600(authJson, auth.value);
+    // oauth_token → ~/.codex/auth.json verbatim (the ChatGPT subscription blob)
+    // — unless the box already holds a FRESHER login for the same account.
+    if (!keepsFresherCodexLogin(authJson, auth.value)) writeFile0600(authJson, auth.value);
     return {};
   },
 };
+
+/** `last_refresh` (ms) + `tokens.account_id` of a Codex ChatGPT login blob. */
+function codexLoginStamp(raw: string): { refreshedAt: number; accountId: string } | null {
+  try {
+    const blob = JSON.parse(raw) as { last_refresh?: unknown; tokens?: { account_id?: unknown } };
+    const refreshedAt = typeof blob.last_refresh === 'string' ? Date.parse(blob.last_refresh) : NaN;
+    const accountId = blob.tokens?.account_id;
+    if (!Number.isFinite(refreshedAt) || typeof accountId !== 'string' || !accountId) return null;
+    return { refreshedAt, accountId };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Should the box's existing Codex login survive this provision?
+ *
+ * ⚠️ Codex rotates its refresh_token on every refresh and the box's codex
+ * refreshes in-session, never writing back to the vault. So after the first
+ * refresh on a box, the VAULT copy is the stale one: its refresh_token is
+ * spent. Writing it over the box's file replaced a working login with a dead
+ * one — an in-session switch to Codex then died `Authentication required`
+ * (Edgar's 24/7 box, 2026-09-26: vault `last_refresh` 08-28, the box had been
+ * answering on 09-18). Same account + a newer `last_refresh` on disk = keep
+ * the disk. A different account (a re-link to another login) always wins.
+ */
+export function keepsFresherCodexLogin(authJsonPath: string, incoming: string): boolean {
+  let onDisk: string;
+  try {
+    onDisk = fs.readFileSync(authJsonPath, 'utf8');
+  } catch {
+    return false;
+  }
+  const current = codexLoginStamp(onDisk);
+  const next = codexLoginStamp(incoming);
+  if (!current || !next) return false;
+  return current.accountId === next.accountId && current.refreshedAt > next.refreshedAt;
+}
 
 const geminiProvisioner: AgentProvisioner = {
   write(auth, home): Record<string, string> {
