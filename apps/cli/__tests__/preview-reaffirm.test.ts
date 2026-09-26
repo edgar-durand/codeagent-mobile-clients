@@ -94,3 +94,26 @@ describe('makePreviewHeartbeatReaffirm', () => {
     expect(PREVIEW_REAFFIRM_INTERVAL_MS).toBeLessThan(3_600_000 / 4);
   });
 });
+
+// QA 2026-09-26: a codespace stop killed the Expo preview, and the app kept
+// showing it "RUNNING FOR 35 MIN" with a QR to a dead tunnel, because the
+// backend's snapshot lives an hour and nobody said it was gone.
+describe('clearStale — a preview that died with its machine', () => {
+  it('clears once, on the first beat of the process, when nothing is serving', () => {
+    const clearStale = vi.fn();
+    const rider = makePreviewHeartbeatReaffirm({ serving: () => null, emitReady: vi.fn(), clearStale });
+    rider({ firstAfterConnect: true });
+    rider({ firstAfterConnect: false });
+    rider({ firstAfterConnect: true }); // a later reconnect never clears again
+    expect(clearStale).toHaveBeenCalledTimes(1);
+  });
+
+  it('never clears when a preview is serving on the first beat', () => {
+    const clearStale = vi.fn();
+    const emitReady = vi.fn();
+    const rider = makePreviewHeartbeatReaffirm({ serving: () => serving, emitReady, clearStale });
+    rider({ firstAfterConnect: true });
+    expect(clearStale).not.toHaveBeenCalled();
+    expect(emitReady).toHaveBeenCalledWith(serving);
+  });
+});
