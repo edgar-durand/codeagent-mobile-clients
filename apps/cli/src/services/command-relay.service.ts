@@ -866,10 +866,12 @@ export class CommandRelayService {
             installed: true,
           },
         ];
+    const linkedAgentId = this.linkedAgentIdProvider?.() ?? null;
     _postJson(`${API_BASE}/api/plugin/agents`, {
       pluginId: this.pluginId,
       agents,
       capabilities: { squad: true },
+      ...(linkedAgentId ? { linkedAgentId } : {}),
     })
       .then(() => { this.agentsRegistered = true; })
       .catch(() => { /* retry via agentsTimer */ });
@@ -880,6 +882,18 @@ export class CommandRelayService {
    * switch). Heartbeats pick the new id up on their next tick; call
    * {@link reannounceAgents} to push the new `/api/plugin/agents` entry.
    */
+  /**
+   * The PUBLIC id of the agent really running (`managed-codex`, `claude_code`),
+   * sent alongside the runtime-keyed `agents` list. The runtime id is `claude`
+   * for every managed agent, so without this a session the host RESUMED on a
+   * managed agent read as the user's own Claude in the app (owner, 2026-09-26).
+   */
+  private linkedAgentIdProvider: (() => string | null) | null = null;
+
+  setLinkedAgentIdProvider(provider: () => string | null): void {
+    this.linkedAgentIdProvider = provider;
+  }
+
   setAgentMeta(meta: AgentMetadata): void {
     this.agentMeta = meta;
   }

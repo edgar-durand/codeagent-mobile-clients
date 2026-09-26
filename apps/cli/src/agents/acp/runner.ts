@@ -55,6 +55,7 @@ import {
   HOUSE_AGENT_SUBTITLE,
   MANAGED_AGENT_SUBTITLE,
   MANAGED_PROVIDER_DISPLAY_NAMES,
+  internalToPublic,
   isManagedProviderId,
   type AgentId,
   type HandoffProposal,
@@ -2003,6 +2004,15 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
       relay.reannounceAgents();
     },
   };
+  // Tell the backend which LINKED agent really runs (see
+  // CommandRelayService.setLinkedAgentIdProvider): the managed id on the house
+  // rail, else the public id of the runtime. Re-announced after the first
+  // report so a resumed session corrects its row without waiting for a switch.
+  relay.setLinkedAgentIdProvider(() => {
+    if (houseActive) return isManagedProviderId(houseWireId) ? houseWireId : null;
+    return internalToPublic(opts.agent as AgentId);
+  });
+  relay.reannounceAgents();
   const switchAgentForSession = async (rawAgentId: unknown): Promise<SwitchAgentResult> => {
     const result = await performAgentSwitch(switchDeps, rawAgentId);
     // Same reason routeToAgent re-fetches: the squad's membership/plan can

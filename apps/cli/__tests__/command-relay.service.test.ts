@@ -97,6 +97,27 @@ describe('CommandRelayService', () => {
     relay.stop();
   });
 
+  // Owner 2026-09-26: a host-resumed session on a MANAGED agent reported only
+  // the runtime `claude`, so the app called it his own Claude. The report now
+  // carries the linked agent really running.
+  it('reportAgents carries the linkedAgentId the provider returns, and omits it when none', async () => {
+    const relay = new CommandRelayService('plugin-linked', vi.fn(), META);
+    relay.start();
+    await vi.advanceTimersByTimeAsync(10);
+    const first = vi.mocked(pairing._postJson).mock.calls.find(([u]) => String(u).includes('/api/plugin/agents'));
+    expect(first?.[1]).not.toHaveProperty('linkedAgentId');
+    vi.mocked(pairing._postJson).mockClear();
+
+    relay.setLinkedAgentIdProvider(() => 'managed-codex');
+    relay.reannounceAgents();
+    await vi.advanceTimersByTimeAsync(10);
+    expect(pairing._postJson).toHaveBeenCalledWith(
+      expect.stringContaining('/api/plugin/agents'),
+      expect.objectContaining({ pluginId: 'plugin-linked', linkedAgentId: 'managed-codex' }),
+    );
+    relay.stop();
+  });
+
   it('setAgentMeta + reannounceAgents re-registers the switched agent and heartbeats it', async () => {
     // In-session agent switch: the SAME relay instance must re-report the
     // NEW agent (POST /api/plugin/agents) and heartbeat with the new id —
