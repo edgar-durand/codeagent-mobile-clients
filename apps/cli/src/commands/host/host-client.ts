@@ -208,6 +208,32 @@ export function loadHostIdentity(): SealedHostIdentity | null {
   }
 }
 
+/** SHA-256 hex of a control poll secret — the form the backend stores. */
+export function pollSecretHash(secret: string): string {
+  return createHash('sha256').update(secret).digest('hex');
+}
+
+/**
+ * Give a legacy identity (sealed before redeem-time secret enrolment, so it has
+ * no `controlPollSecret`) a poll secret of its own and re-seal it. The heartbeat
+ * then enrols the hash server-side.
+ *
+ * ⚠️ Without this such a host is heard but never commanded, forever: it
+ * heartbeats "online" while every `/api/commands/pending` is refused
+ * `PLUGIN_SECRET_REQUIRED`, and only a redeem ever wrote the secret. Edgar's
+ * 24/7 host (enrolled 2026-07-15) sat exactly there until 2026-09-26, and every
+ * deploy to it answered "the host wasn't ready".
+ */
+export function ensureControlPollSecret(
+  identity: SealedHostIdentity | null,
+  save: (identity: SealedHostIdentity) => void = saveHostIdentity,
+): SealedHostIdentity | null {
+  if (!identity || identity.controlPollSecret) return identity;
+  const upgraded = { ...identity, controlPollSecret: randomBytes(32).toString('base64url') };
+  save(upgraded);
+  return upgraded;
+}
+
 /** Seal the host identity to `~/.codeam/host-agent.json` owner-only
  *  (0600 on POSIX, icacls ACL on Windows — a bare chmod is an ACL no-op
  *  there). */
@@ -409,6 +435,12 @@ export async function sendHostHeartbeat(
     hostId: identity.hostId,
     hostToken: identity.hostToken,
     ...(metrics ? { metrics } : {}),
+    // The backend enrols this ONLY if the control plugin has no secret yet
+    // (first writer wins), so re-sending it every beat is idempotent — and it
+    // is the one way a host that never had one (or lost it) gets it back.
+    ...(identity.controlPollSecret
+      ? { pluginSecretHash: pollSecretHash(identity.controlPollSecret) }
+      : {}),
   });
   const elapsedNs = process.hrtime.bigint() - start;
   return Math.round(Number(elapsedNs) / 1_000_000);
