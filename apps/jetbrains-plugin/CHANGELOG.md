@@ -4,6 +4,13 @@ All notable changes to the CodeAgent-Mobile JetBrains plugin are documented here
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.75.35] — 2026-09-26
+
+### Fixed
+
+- **cli:** Cap the heartbeat's reported latency at the backend's 60 s bound (#834)
+- **cli:** Report the linked agent a session really runs, not just the runtime (#835)
+
 ## [2.75.34] — 2026-09-26
 
 ### Fixed
