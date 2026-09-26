@@ -2337,6 +2337,8 @@ describe('HostAgentSupervisor — periodic self-update', () => {
       resolveAgentAuth: vi.fn().mockResolvedValue({ kind: 'oauth_token', value: '{}' }),
       selfUpdate,
       onUpdated,
+      // A turn is running in the child (the marker the child writes).
+      isChildMidTurn: () => true,
     });
 
     await sup.handleCommand(deployCmd({ repoOrPath: cwdTarget }));
@@ -2397,6 +2399,8 @@ describe('HostAgentSupervisor — periodic self-update', () => {
       resolveAgentAuth: vi.fn().mockResolvedValue({ kind: 'oauth_token', value: '{}' }),
       selfUpdate,
       onUpdated,
+      // A turn is running in the child (the marker the child writes).
+      isChildMidTurn: () => true,
       now,
     });
 
@@ -2435,6 +2439,8 @@ describe('HostAgentSupervisor — periodic self-update', () => {
       resolveAgentAuth: vi.fn().mockResolvedValue({ kind: 'oauth_token', value: '{}' }),
       selfUpdate,
       onUpdated,
+      // A turn is running in the child (the marker the child writes).
+      isChildMidTurn: () => true,
       now,
     });
 
@@ -2450,6 +2456,31 @@ describe('HostAgentSupervisor — periodic self-update', () => {
     expect(onUpdated).toHaveBeenCalledWith('2.66.1');
 
     fs.rmSync(cwdTarget, { recursive: true, force: true });
+  });
+
+  // Owner rule 2026-09-26: a fix must reach EXISTING sessions. A paired box
+// always has a session child, so "defer while a child exists" meant every
+// update waited out the 24 h ceiling (the 24/7 host ran 2.75.21 all day with
+// 2.75.32 on disk). An open-but-idle session no longer blocks the restart.
+  it('restarts right away when the session child is open but NOT mid-turn', async () => {
+    const cwdTarget = fs.mkdtempSync(path.join(os.tmpdir(), 'codeam-su-idle-'));
+    const child = fakeChildWithStreams();
+    const selfUpdate = vi
+      .fn<() => Promise<SelfUpdateResult>>()
+      .mockResolvedValue({ status: 'updated', version: '9.9.9' });
+    const onUpdated = vi.fn();
+    const sup = new HostAgentSupervisor(IDENTITY, {
+      makeRelay: () => ({ start: vi.fn(), stop: vi.fn(), sendResult: vi.fn() }),
+      spawnChild: () => child,
+      resolveAgentAuth: vi.fn().mockResolvedValue({ kind: 'oauth_token', value: '{}' }),
+      selfUpdate,
+      onUpdated,
+      isChildMidTurn: () => false,
+    });
+    await sup.handleCommand(deployCmd({ repoOrPath: cwdTarget }));
+    expect(sup.childCount()).toBe(1);
+    await sup.selfUpdateTick();
+    expect(onUpdated).toHaveBeenCalledWith('9.9.9');
   });
 
   it('disables the self-update timer when CODEAM_HOST_SELF_UPDATE_MS<=0', () => {

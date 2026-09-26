@@ -15,6 +15,7 @@
  * mobile chat sitting empty while the CLI looks like it's hung.
  */
 
+import { withTurnMarker } from '../../services/turn-marker';
 import { log } from '../../services/logger';
 import { noteProviderBillingSignal } from './provider-billing-signal';
 import { _postJsonAuthed, fetchProvisionCredential } from '../../services/pairing.service';
@@ -2032,8 +2033,8 @@ export const ACP_COMMAND_HANDLERS: Record<string, AcpCommandHandler> = {
   integrations_sync: integrationsSyncH,
   integrations_detect: integrationsDetectH,
   beads_action: beadsActionH,
-  start_task: startTaskH,
-  group_mention_task: groupMentionTaskH,
+  start_task: (ctx) => withTurnMarker(() => startTaskH(ctx)),
+  group_mention_task: (ctx) => withTurnMarker(() => groupMentionTaskH(ctx)),
   stop_task: stopTaskH,
   escape_key: stopTaskH,
   get_conversation: getConversationH,
@@ -2045,7 +2046,7 @@ export const ACP_COMMAND_HANDLERS: Record<string, AcpCommandHandler> = {
   select_option: selectOptionH,
   provide_input: provideInputH,
   resume_session: resumeSessionH,
-  switch_agent: switchAgentH,
+  switch_agent: (ctx) => withTurnMarker(() => switchAgentH(ctx)),
   change_model: changeModelH,
   summarize: summarizeH,
   session_terminated: sessionShutdownH,

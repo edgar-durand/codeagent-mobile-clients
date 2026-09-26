@@ -41,6 +41,7 @@
  * Everything else here is complete + tested via an injected resolver.
  */
 
+import { isProcessMidTurn } from '../services/turn-marker';
 import { spawn, type ChildProcess } from 'node:child_process';
 import * as os from 'node:os';
 import * as fs from 'node:fs';
@@ -976,6 +977,9 @@ export interface HostAgentDeps {
    * Injectable so tests assert the restart WITHOUT killing the test runner.
    */
   onUpdated?: (version: string) => void;
+  /** Is the child process `pid` running a turn right now? Defaults to the
+   *  per-process marker (services/turn-marker.ts); injectable for tests. */
+  isChildMidTurn?: (pid: number | undefined) => boolean;
   /**
    * Docker control-plane runner for the fleet `fleet_*` handlers (CodeAgent
    * Box rescue fleet). Additive — a normal self-hosted box never receives a
@@ -1003,6 +1007,7 @@ export class HostAgentSupervisor {
   /** Self-update check + install (injectable; defaults to runSelfUpdate). */
   private readonly selfUpdate: SelfUpdater;
   private readonly now: () => number;
+  private readonly isChildMidTurn: (pid: number | undefined) => boolean;
   /** Restart action after a successful self-update (defaults to process.exit). */
   private readonly onUpdated: (version: string) => void;
   /** Guards against overlapping self-update ticks (a slow npm install). */
@@ -1060,6 +1065,7 @@ export class HostAgentSupervisor {
     this.selfUpdate = deps.selfUpdate ?? runSelfUpdate;
     this.now = deps.now ?? (() => Date.now());
     this.onUpdated = deps.onUpdated ?? defaultOnUpdated;
+    this.isChildMidTurn = deps.isChildMidTurn ?? ((pid) => isProcessMidTurn(pid));
     this.docker = deps.docker ?? defaultDockerRunner;
     this.postResumeFailure = deps.postResumeFailure ?? postSessionErrorBubble;
   }
@@ -1314,7 +1320,10 @@ export class HostAgentSupervisor {
    * idle tick) rather than yank an active turn.
    */
   private maybeRestartForUpdate(version: string): boolean {
-    if (this.children.size > 0) {
+    // An open session is NOT a reason to wait — the boot resume brings it back
+    // in seconds. Only a turn actually running is (see services/turn-marker.ts).
+    const midTurn = [...this.children.values()].some((c) => this.isChildMidTurn(c.proc.pid));
+    if (midTurn) {
       // ⚠️ `children` holds long-lived SESSION processes, not turns in flight
       // (a `ChildSession` carries no activity state at all), so on a paired
       // box this branch is the permanent state, not a transient one. Without a
@@ -1325,14 +1334,14 @@ export class HostAgentSupervisor {
       if (waited < SELF_UPDATE_DEFER_MAX_MS) {
         log.info(
           'host-agent',
-          `self-update: ${version} installed but ${this.children.size} child(ren) busy — deferring restart`,
+          `self-update: ${version} installed but a session is mid-turn — deferring restart`,
         );
         return false;
       }
       log.warn(
         'host-agent',
         `self-update: ${version} has been owed for ${Math.round(waited / 3_600_000)}h with ` +
-          `${this.children.size} child(ren) still running — restarting anyway rather than ` +
+          `a session still mid-turn — restarting anyway rather than ` +
           'staying on old code',
       );
     }
