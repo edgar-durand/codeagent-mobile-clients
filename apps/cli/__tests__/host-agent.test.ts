@@ -3603,3 +3603,16 @@ describe('HostAgentSupervisor — self_hosted_resume (on-demand)', () => {
     sup.stop();
   });
 });
+
+// Prod 2026-09-26: one heartbeat that took >60 s left latencyMs above the
+// backend's bound; every later beat was refused (400) and, since latency is
+// only re-measured on success, the host stayed offline forever.
+describe('MetricsCollector — reported latency is capped at the backend bound', () => {
+  it('never reports more than 60 000 ms', () => {
+    const m = new MetricsCollector();
+    m.recordLatency(93_512);
+    expect(m.collect().latencyMs).toBe(60_000);
+    m.recordLatency(24.4);
+    expect(m.collect().latencyMs).toBe(24);
+  });
+});

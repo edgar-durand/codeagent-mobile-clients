@@ -88,13 +88,19 @@ function sampleCpuTimes(): CpuTimesSnapshot {
  * Stateful across beats by design (CPU delta + latency carry-over). All
  * methods are pure-ish and never throw on their own.
  */
+/** Upper bound the backend's `HostMetricsDto.latencyMs` accepts. */
+export const MAX_REPORTED_LATENCY_MS = 60_000;
+
 export class MetricsCollector {
   private prevCpu: CpuTimesSnapshot | null = null;
   private lastLatencyMs = 0;
 
   /** Record the measured round-trip of the heartbeat just sent. */
   recordLatency(latencyMs: number): void {
-    this.lastLatencyMs = Math.max(0, Math.round(latencyMs));
+    // Capped at the backend's 60 s bound: an older backend REJECTS the whole
+    // heartbeat above it, and since a latency is only re-measured on a beat
+    // that succeeds, one slow beat used to wedge the host offline forever.
+    this.lastLatencyMs = Math.min(MAX_REPORTED_LATENCY_MS, Math.max(0, Math.round(latencyMs)));
   }
 
   private cpuPct(): number {
