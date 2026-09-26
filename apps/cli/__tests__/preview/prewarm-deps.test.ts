@@ -7,6 +7,8 @@ const runSetupCommand = vi.fn();
 vi.mock('../../src/services/preview/run-setup', () => ({
   runSetupCommand: (...a: unknown[]) => runSetupCommand(...a),
 }));
+const whichMock = vi.fn();
+vi.mock('which', () => ({ default: (...a: unknown[]) => whichMock(...a) }));
 
 import {
   _resetPrewarmDepsForTests,
@@ -54,6 +56,40 @@ describe('prewarmNodeDeps', () => {
     fs.mkdirSync(path.join(dir, 'node_modules'));
     await prewarmNodeDeps(dir);
     expect(runSetupCommand).toHaveBeenCalledTimes(1);
+  });
+
+  // QA 2026-09-26: a yarn project (PrivacyHawkApp) was skipped entirely, so its
+  // 1 min 46 s `yarn install` landed on the first Preview tap.
+  it('installs a yarn project with yarn when yarn is already on PATH', async () => {
+    fs.writeFileSync(path.join(dir, 'package.json'), '{"name":"app"}');
+    fs.writeFileSync(path.join(dir, 'yarn.lock'), '');
+    whichMock.mockResolvedValue('/usr/local/bin/yarn');
+    runSetupCommand.mockResolvedValue({ status: 'ok', code: 0 });
+    await prewarmNodeDeps(dir);
+    expect(runSetupCommand).toHaveBeenCalledTimes(1);
+    expect(runSetupCommand).toHaveBeenCalledWith('yarn', ['install'], dir, undefined, expect.any(Object));
+  });
+
+  it('installs yarn first when a yarn project runs where yarn is missing', async () => {
+    fs.writeFileSync(path.join(dir, 'package.json'), '{"name":"app"}');
+    fs.writeFileSync(path.join(dir, 'yarn.lock'), '');
+    whichMock.mockResolvedValueOnce(null).mockResolvedValue('/usr/local/bin/yarn');
+    runSetupCommand.mockResolvedValue({ status: 'ok', code: 0 });
+    await prewarmNodeDeps(dir);
+    expect(runSetupCommand.mock.calls.map((c) => [c[0], c[1]])).toEqual([
+      ['npm', ['install', '-g', 'yarn']],
+      ['yarn', ['install']],
+    ]);
+  });
+
+  it('leaves a yarn project to the Preview pipeline when yarn cannot be installed', async () => {
+    fs.writeFileSync(path.join(dir, 'package.json'), '{"name":"app"}');
+    fs.writeFileSync(path.join(dir, 'yarn.lock'), '');
+    whichMock.mockResolvedValue(null);
+    runSetupCommand.mockResolvedValue({ status: 'failed', code: 1 });
+    await prewarmNodeDeps(dir);
+    expect(runSetupCommand).toHaveBeenCalledTimes(1);
+    expect(runSetupCommand.mock.calls[0][1]).toEqual(['install', '-g', 'yarn']);
   });
 
   it('does nothing for a non-Node project', async () => {

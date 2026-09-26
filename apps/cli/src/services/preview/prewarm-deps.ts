@@ -1,6 +1,7 @@
+import which from 'which';
 import { log } from '../logger';
 import { runSetupCommand } from './run-setup';
-import { detectMissingNodeDeps } from './setup-deps';
+import { detectMissingNodeDeps, ensureYarnInstalled } from './setup-deps';
 
 /**
  * Install the project's Node dependencies in the BACKGROUND as soon as the
@@ -24,16 +25,35 @@ const PREWARM_INSTALL_TIMEOUT_MS = 5 * 60_000;
 export function prewarmNodeDeps(cwd: string): Promise<void> {
   if (inFlight) return inFlight;
   const missing = detectMissingNodeDeps(cwd);
-  // yarn may not be installed yet; the start pipeline owns that recovery.
-  if (!missing || missing.cmd !== 'npm') return Promise.resolve();
+  if (!missing) return Promise.resolve();
+  // ⚠️ yarn projects used to be skipped here ("the start pipeline owns that
+  // recovery"), so the whole install landed on the user's first Preview tap:
+  // 1 min 46 s of `yarn install` on PrivacyHawkApp in a warm codespace whose
+  // image already had yarn (QA, 2026-09-26). The prewarm now does the same
+  // yarn-on-demand step the start pipeline does, then installs.
   log.info('preview', `prewarm: installing deps (${missing.cmd} ${missing.args.join(' ')})`);
   const started = Date.now();
-  inFlight = runSetupCommand(missing.cmd, missing.args, cwd, undefined, {
-    timeoutMs: PREWARM_INSTALL_TIMEOUT_MS,
-  })
-    .then((r) => {
-      log.info('preview', `prewarm: deps ${r.status} after ${Date.now() - started}ms`);
-    })
+  inFlight = (async () => {
+    if (missing.cmd === 'yarn') {
+      const ensured = await ensureYarnInstalled({
+        hasYarn: async () => Boolean(await which('yarn', { nothrow: true })),
+        installYarn: async () => {
+          const r = await runSetupCommand('npm', ['install', '-g', 'yarn'], cwd, undefined, {
+            timeoutMs: PREWARM_INSTALL_TIMEOUT_MS,
+          });
+          return { ok: r.status === 'ok', code: r.code };
+        },
+      });
+      if (!ensured.ok) {
+        log.info('preview', `prewarm: yarn unavailable (exit ${ensured.code}) — Preview will retry`);
+        return;
+      }
+    }
+    const r = await runSetupCommand(missing.cmd, missing.args, cwd, undefined, {
+      timeoutMs: PREWARM_INSTALL_TIMEOUT_MS,
+    });
+    log.info('preview', `prewarm: deps ${r.status} after ${Date.now() - started}ms`);
+  })()
     .catch((err: unknown) => {
       log.info('preview', `prewarm: deps install threw (${String(err)})`);
     })
