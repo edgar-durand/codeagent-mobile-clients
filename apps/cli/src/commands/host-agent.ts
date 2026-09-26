@@ -78,6 +78,7 @@ import {
   isHostAuthRejection,
   isTerminalEnrollError,
   loadHostIdentity,
+  ensureControlPollSecret,
   MetricsCollector,
   postSessionErrorBubble,
   redeemEnrollToken,
@@ -2810,7 +2811,7 @@ export class HostAgentSupervisor {
 export async function resolveHostIdentity(
   enrollToken: string | undefined,
 ): Promise<SealedHostIdentity | null> {
-  const existing = loadHostIdentity();
+  const existing = ensureControlPollSecret(loadHostIdentity());
 
   if (enrollToken) {
     // Box-side telemetry: report the redeem milestone before it lands

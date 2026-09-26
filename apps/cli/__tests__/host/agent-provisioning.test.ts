@@ -133,6 +133,49 @@ describe('provisionAgentCredentials — gemini', () => {
 });
 
 describe('provisionAgentCredentials — codex', () => {
+  // Edgar 2026-09-26: the box's codex had refreshed (rotating the refresh
+  // token) and kept working; an in-session switch then overwrote its login with
+  // the vault's older blob, whose refresh_token was already spent →
+  // `Authentication required`. A fresher login for the SAME account is kept.
+  const chatgptBlob = (lastRefresh: string, accountId = 'acct-1', marker = 'x') =>
+    JSON.stringify({
+      auth_mode: 'chatgpt',
+      OPENAI_API_KEY: null,
+      tokens: { id_token: marker, access_token: marker, refresh_token: marker, account_id: accountId },
+      last_refresh: lastRefresh,
+    });
+
+  it('oauth_token: keeps a FRESHER on-disk login for the same account', () => {
+    const authJson = path.join(tmpHome, '.codex', 'auth.json');
+    fs.mkdirSync(path.dirname(authJson), { recursive: true });
+    const live = chatgptBlob('2026-09-18T06:30:00Z', 'acct-1', 'box-live');
+    fs.writeFileSync(authJson, live);
+    provisionAgentCredentials(
+      'codex',
+      { kind: 'oauth_token', value: chatgptBlob('2026-08-28T20:17:57Z', 'acct-1', 'vault-stale') },
+      tmpHome,
+    );
+    expect(fs.readFileSync(authJson, 'utf8')).toBe(live);
+  });
+
+  it('oauth_token: a NEWER vault login (a fresh re-link) replaces the disk', () => {
+    const authJson = path.join(tmpHome, '.codex', 'auth.json');
+    fs.mkdirSync(path.dirname(authJson), { recursive: true });
+    fs.writeFileSync(authJson, chatgptBlob('2026-09-18T06:30:00Z', 'acct-1', 'box-old'));
+    const relinked = chatgptBlob('2026-09-26T16:40:00Z', 'acct-1', 'vault-new');
+    provisionAgentCredentials('codex', { kind: 'oauth_token', value: relinked }, tmpHome);
+    expect(fs.readFileSync(authJson, 'utf8')).toBe(relinked);
+  });
+
+  it('oauth_token: a DIFFERENT account always replaces the disk', () => {
+    const authJson = path.join(tmpHome, '.codex', 'auth.json');
+    fs.mkdirSync(path.dirname(authJson), { recursive: true });
+    fs.writeFileSync(authJson, chatgptBlob('2026-09-18T06:30:00Z', 'acct-old', 'box'));
+    const other = chatgptBlob('2026-08-01T00:00:00Z', 'acct-new', 'vault');
+    provisionAgentCredentials('codex', { kind: 'oauth_token', value: other }, tmpHome);
+    expect(fs.readFileSync(authJson, 'utf8')).toBe(other);
+  });
+
   it('oauth_token: writes ~/.codex/auth.json verbatim, no env', () => {
     const blob = '{"OPENAI_API_KEY":null,"auth_mode":"chatgpt","tokens":{"access_token":"a","refresh_token":"r","id_token":"i","account_id":"acct"}}';
     const env = provisionAgentCredentials('codex', { kind: 'oauth_token', value: blob }, tmpHome);
