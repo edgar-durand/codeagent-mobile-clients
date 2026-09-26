@@ -7,7 +7,7 @@ import { BdAdapter, defaultBeadsHomeDir } from './bd-adapter';
 import { installBd } from './install-bd';
 import { installDolt, installDoltToDir, ensureDoltResolvable } from './install-dolt';
 import { ensureSharedServer } from './dolt-daemon';
-import { deriveProjectIdentity } from './project-key';
+import { deriveProjectIdentity, findRepoRoot } from './project-key';
 import { prefixForProjectKey } from './project-prefix';
 import { log } from '../services/logger';
 
@@ -394,6 +394,13 @@ export async function provisionBeads(opts: ProvisionOptions = {}): Promise<Provi
     '--skip-agents',
     '--skip-hooks',
     '--non-interactive',
+    // ⚠️ Without it `bd init` COMMITS ("bd init: initialize beads issue
+    // tracking") on whatever branch the user's repo is on — verified with bd
+    // 1.0.5 on a scratch repo, and seen on a fleet box's feature branch
+    // (break-it 2026-09-24/26). Stealth keeps beads out of git: it only writes
+    // `.git/info/exclude` (local, never committed); the global git config was
+    // verified untouched.
+    '--stealth',
   ]);
   const alreadyInit = /already initialized|already exists/i.test(init.stderr + init.stdout);
   if (init.code !== 0 && !alreadyInit) {
@@ -401,6 +408,12 @@ export async function provisionBeads(opts: ProvisionOptions = {}): Promise<Provi
     return result;
   }
   result.initialized = true;
+  // Repos initialised before `--stealth` (bd answers "already initialized" and
+  // applies nothing) still had beads files showing up as changes. Excluding
+  // them locally heals those on the next session start — no commit, no
+  // tracked-file edit.
+  const workdir = opts.cwd ?? process.cwd();
+  ensureLocalGitExclude(findRepoRoot(workdir) ?? workdir, ['.beads/', '.dolt/']);
 
   // Step 4 — ensure the shared dolt sql-server is up (D8), now that a workspace
   // exists for it. Reuse-if-running, else start detached. Without it, every
@@ -493,6 +506,7 @@ export async function provisionBeads(opts: ProvisionOptions = {}): Promise<Provi
           '--skip-agents',
           '--skip-hooks',
           '--non-interactive',
+          '--stealth',
         ]);
         if (mint.code !== 0) {
           log.warn(
@@ -599,4 +613,26 @@ function dedupeRecipes(agents: AgentId[]): string[] {
     if (recipe) seen.add(recipe);
   }
   return [...seen];
+}
+
+/**
+ * Append patterns to `<repo>/.git/info/exclude` (git's LOCAL, never-committed
+ * ignore file) when missing. Best-effort: not a git repo, a worktree/submodule
+ * `.git` file, or a read-only disk → silently skipped.
+ */
+export function ensureLocalGitExclude(cwd: string, patterns: readonly string[]): void {
+  try {
+    const gitDir = path.join(cwd, '.git');
+    if (!fs.statSync(gitDir).isDirectory()) return;
+    const file = path.join(gitDir, 'info', 'exclude');
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    const current = fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : '';
+    const have = new Set(current.split(/\r?\n/).map((l) => l.trim()));
+    const missing = patterns.filter((p) => !have.has(p));
+    if (missing.length === 0) return;
+    const prefix = current.length > 0 && !current.endsWith('\n') ? '\n' : '';
+    fs.appendFileSync(file, `${prefix}# CodeAgent: beads state stays local\n${missing.join('\n')}\n`);
+  } catch {
+    /* best-effort */
+  }
 }
