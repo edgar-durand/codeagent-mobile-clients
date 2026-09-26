@@ -1968,7 +1968,15 @@ export async function resolvePreviewDetection(args: {
   return detection;
 }
 
+/**
+ * Has THIS process been asked for a preview yet (detect or start)? The
+ * post-restart stale-snapshot clear in {@link makePreviewReaffirm} only runs
+ * while this is false, so it can never cut short a bring-up in progress.
+ */
+let previewRequestedInProcess = false;
+
 const requestPreviewDetectH: CommandHandler = (ctx) => {
+  previewRequestedInProcess = true;
   if (!ctx.pluginAuthToken) {
     log.info('preview', 'no pluginAuthToken — skipping detect');
     return;
@@ -2062,6 +2070,16 @@ export function makePreviewReaffirm(args: {
         payload,
       });
     },
+    clearStale: () => {
+      if (previewRequestedInProcess) return;
+      emitPreviewEvent({
+        sessionId,
+        pluginId: args.pluginId,
+        pluginAuthToken: token,
+        type: USER_EVENTS.PREVIEW_STOPPED,
+        payload: { reason: 'restart' },
+      });
+    },
   });
 }
 
@@ -2152,6 +2170,7 @@ export function startPreviewFromDetection(
     onEvent?: EmitPreviewEvent;
   } = {},
 ): Promise<void> {
+  previewRequestedInProcess = true;
   const emit: EmitPreviewEvent = (type, payload) => {
     const tagged = originPayload(payload, opts.origin) ?? {};
     opts.onEvent?.(type, tagged);

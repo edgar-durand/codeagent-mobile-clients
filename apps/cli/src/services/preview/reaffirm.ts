@@ -44,6 +44,15 @@ export interface PreviewReaffirmDeps {
   /** Re-emite `preview_ready`. Debe ir por el MISMO emisor serializado que las
    *  transiciones, para que una re-afirmación no adelante a un evento real. */
   emitReady: (payload: { url: string; framework: string; port: number }) => void;
+  /**
+   * Publishes `preview_stopped` once, on the FIRST beat of this process, when
+   * nothing is serving. The backend keeps `preview:<sessionId>` for an hour, so
+   * a preview that died WITH its machine (a codespace stop, a Box restart)
+   * read "RUNNING FOR 35 MIN" with a QR to a dead tunnel (QA, 2026-09-26)
+   * until the key expired. The implementation must no-op once a preview was
+   * requested in this process, so a start in flight is never cut short.
+   */
+  clearStale?: () => void;
   intervalMs?: number;
   now?: () => number;
 }
@@ -54,9 +63,13 @@ export function makePreviewHeartbeatReaffirm(
   const now = deps.now ?? Date.now;
   const intervalMs = deps.intervalMs ?? PREVIEW_REAFFIRM_INTERVAL_MS;
   let lastAffirmedAt: number | null = null;
+  let firstBeat = true;
 
   return ({ firstAfterConnect }): void => {
     const current = deps.serving();
+    const isFirstBeat = firstBeat;
+    firstBeat = false;
+    if (!current && isFirstBeat) deps.clearStale?.();
     if (!current) {
       // Sin preview vivo no hay nada que afirmar — y el reloj se reinicia para
       // que el PRÓXIMO preview se afirme de inmediato en vez de heredar la
