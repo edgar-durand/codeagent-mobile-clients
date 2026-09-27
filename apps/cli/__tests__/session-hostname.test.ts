@@ -149,3 +149,25 @@ describe('resolveSessionHostname — inside a codespace', () => {
     expect(label).not.toContain('ghs_LEAKME');
   });
 });
+
+describe('resolveSessionHostname — host label', () => {
+  // break-it 2026-09-26: a CodeAgent Box reported its container id
+  // ("6c98896f0d89") as the machine name.
+  afterEach(() => {
+    delete process.env.CODEAM_HOST_LABEL;
+    vi.restoreAllMocks();
+  });
+
+  it('prefers CODEAM_HOST_LABEL outside a codespace', () => {
+    delete process.env.CODESPACES;
+    process.env.CODEAM_HOST_LABEL = 'CodeAgent Box';
+    vi.spyOn(_osSeam, 'hostname').mockReturnValue('6c98896f0d89');
+    expect(resolveSessionHostname('/tmp')).toBe('CodeAgent Box');
+  });
+
+  it('falls back to the machine name without a label', () => {
+    delete process.env.CODESPACES;
+    vi.spyOn(_osSeam, 'hostname').mockReturnValue('edgar-mbp');
+    expect(resolveSessionHostname('/tmp')).toBe('edgar-mbp');
+  });
+});
