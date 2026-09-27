@@ -47,6 +47,7 @@ import * as os from 'node:os';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { CommandRelayService, type RemoteCommand } from '../services/command-relay.service';
+import { isFilesystemRoot } from '../services/file-watcher.service';
 import type { AgentMetadata, IntegrationsManifestEntry, SkillsManifestEntry } from '@codeam/shared';
 import { resolveApiBaseUrl, getPricing } from '@codeam/shared';
 import { persistIntegrationsManifest, clearIntegrationsManifest } from '../integrations/manifest';
@@ -2284,11 +2285,12 @@ export class HostAgentSupervisor {
     try {
       if (this.children.size > 0) return; // a fresh deploy already owns a child
       const records = this.sessionStore.load();
-      if (records.length === 0) {
+      if (records === null) {
         const target = this.fallbackResumeTarget();
         if (target) this.resumeOne(target);
         return;
       }
+      if (records.length === 0) return; // nothing was live at the last write
       const max = resolveMaxResumeSessions();
       const { resume, dropped } = planSessionResume(records, max);
       for (const rec of dropped) {
@@ -2349,6 +2351,16 @@ export class HostAgentSupervisor {
     // (2026-07-29). Fall back to process.cwd() for older sessions with no
     // persisted cwd (prior behavior).
     const cwd = session.cwd && fs.existsSync(session.cwd) ? session.cwd : process.cwd();
+    // ⚠️ Under systemd the host-agent's own cwd is `/`. A child there watches
+    // the whole filesystem — ENOSPC for every process of the user, then an
+    // abort, retried every few minutes (fleet VPS, 2026-07-16 → 09-27).
+    if (isFilesystemRoot(cwd)) {
+      log.warn(
+        'host-agent',
+        `resume: skipping session ${session.id.slice(0, 8)} — it has no saved workspace and the fallback is the filesystem root`,
+      );
+      return null;
+    }
     // ⚠️ The child MUST be registered under its DEPLOY id, never the
     // paired-session id. `deployId` is the key every upward signal is matched
     // against server-side: the boot reconcile reports it, and
@@ -2444,7 +2456,7 @@ export class HostAgentSupervisor {
    */
   private knownSavedSessions(): Array<{ deployId: string; sessionId: string; agent?: string }> {
     try {
-      const persisted = new Map(this.sessionStore.load().map((r) => [r.deployId, r.agent]));
+      const persisted = new Map((this.sessionStore.load() ?? []).map((r) => [r.deployId, r.agent]));
       for (const c of this.children.values()) persisted.set(c.deployId, c.agent);
       return this.listSavedSessions()
         .map((s) => ({ s, deployId: deployIdFromWorkspace(s.cwd) }))
