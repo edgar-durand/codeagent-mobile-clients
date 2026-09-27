@@ -7,6 +7,7 @@ import {
   _chokidarSeam,
   _findGitRootSeam,
   isUnsafeWindowsWatchRoot,
+  isFilesystemRoot,
 } from '../src/services/file-watcher.service';
 import { _transport } from '../src/services/file-watcher/transport';
 import { parseUnifiedDiff } from '../src/services/file-watcher/diff-parser';
@@ -134,6 +135,32 @@ describe('parseUnifiedDiff', () => {
     expect(r.hunks.length).toBe(2);
     expect(r.totalLinesAdded).toBe(2);
     expect(r.totalLinesRemoved).toBe(2);
+  });
+});
+
+describe('filesystem root is never watched', () => {
+  // 2026-09-27: a host-agent child started in `/` walked /proc and /sys until
+  // the kernel ran out of inotify watches (ENOSPC), then aborted — every few
+  // minutes on the fleet VPS since July.
+  it('recognises the root and nothing else', () => {
+    const root = path.parse(process.cwd()).root;
+    expect(isFilesystemRoot(root)).toBe(true);
+    expect(isFilesystemRoot(path.join(root, 'tmp'))).toBe(false);
+    expect(isFilesystemRoot(WORKING_DIR)).toBe(false);
+  });
+
+  it('start() in the root never loads chokidar', async () => {
+    const load = vi.spyOn(_chokidarSeam, 'load');
+    const svc = new FileWatcherService({
+      workingDir: path.parse(process.cwd()).root,
+      sessionId: 's',
+      pluginId: 'p',
+      pluginAuthToken: 't',
+      apiBaseUrl: 'https://api.example.test',
+    });
+    await svc.start();
+    expect(load).not.toHaveBeenCalled();
+    load.mockRestore();
   });
 });
 

@@ -116,7 +116,9 @@ describe('fileSessionChildStore', () => {
   it('round-trips the list atomically with owner-only mode, and clear() removes it', () => {
     const file = path.join(dir, 'nested', 'host-agent-sessions.json');
     const store = fileSessionChildStore(file);
-    expect(store.load()).toEqual([]);
+    expect(store.load()).toBeNull(); // never written
+    store.save([]);
+    expect(store.load()).toEqual([]); // written empty: nothing was live
     store.save([rec('a', 1), rec('b', 2)]);
     expect(store.load()).toEqual([rec('a', 1), rec('b', 2)]);
     expect(fs.readdirSync(path.dirname(file))).toEqual(['host-agent-sessions.json']); // no tmp left
@@ -125,13 +127,13 @@ describe('fileSessionChildStore', () => {
     }
     store.clear();
     expect(fs.existsSync(file)).toBe(false);
-    expect(store.load()).toEqual([]);
+    expect(store.load()).toBeNull();
   });
 
   it('ignores malformed files and malformed entries instead of throwing', () => {
     const file = path.join(dir, 's.json');
     fs.writeFileSync(file, '{not json');
-    expect(fileSessionChildStore(file).load()).toEqual([]);
+    expect(fileSessionChildStore(file).load()).toBeNull();
     fs.writeFileSync(
       file,
       JSON.stringify({ version: 1, sessions: [rec('ok', 1), { deployId: 'x' }, 'junk', null] }),

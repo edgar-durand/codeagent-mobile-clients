@@ -154,6 +154,8 @@ describe('provisionBeads', () => {
     expect(init).toContain('--skip-agents');
     expect(init).toContain('--skip-hooks');
     expect(init).toContain('--non-interactive');
+    // bd init otherwise COMMITS to the user's current branch (break-it 2026-09-26).
+    expect(init).toContain('--stealth');
     expect(init).not.toContain('--global');
 
     expect(ran(fake, 'config set export.auto true')).toBe(1);
@@ -431,7 +433,7 @@ describe('provisionBeads', () => {
       ]),
     );
     // The mint must not touch the user's repo: no agent files, no git hooks.
-    expect(mint).toEqual(expect.arrayContaining(['--skip-agents', '--skip-hooks']));
+    expect(mint).toEqual(expect.arrayContaining(['--skip-agents', '--skip-hooks', '--stealth']));
 
     expect(res.serverUp).toBe(true);
     expect(res.initialized).toBe(true);

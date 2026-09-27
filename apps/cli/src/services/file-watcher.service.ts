@@ -206,6 +206,18 @@ export function isUnsafeWindowsWatchRoot(dir: string, homedir: string): boolean 
 }
 
 /**
+ * True for the filesystem root (`/`, `C:\\`). Watching it walks every mount —
+ * `/proc`, `/sys`, `/var/run` — until the kernel runs out of inotify watches
+ * (ENOSPC) for every process of that user, and the CLI aborts. A host-agent
+ * resuming a cwd-less session into its own systemd cwd did exactly that on the
+ * fleet VPS every few minutes from 2026-07-16 to 2026-09-27.
+ */
+export function isFilesystemRoot(dir: string): boolean {
+  const resolved = path.resolve(dir);
+  return resolved === path.parse(resolved).root;
+}
+
+/**
  * Test seam — lets vitest stub the chokidar load without going through
  * Node's module cache. The default loads the real package; tests can
  * `vi.spyOn(_chokidarSeam, 'load')`.
@@ -327,6 +339,14 @@ export class FileWatcherService {
     if (this.stopped) {
       // A stopped watcher is single-use; create a new instance.
       throw new Error('FileWatcherService has already been stopped — re-instantiate to restart.');
+    }
+
+    if (isFilesystemRoot(this.opts.workingDir)) {
+      log.warn(
+        'fileWatcher',
+        `refusing to watch ${this.opts.workingDir} — the filesystem root. Run codeam from your project folder to enable file change emission.`,
+      );
+      return;
     }
 
     const isWin = process.platform === 'win32';
