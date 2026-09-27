@@ -84,6 +84,63 @@ const debugFilePath = path.join(LOG_DIR, `debug-${process.pid}.log`);
 
 let fileInitialized = false;
 
+const LOG_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
+const LOG_DIR_BUDGET_BYTES = 200 * 1024 * 1024;
+
+function pidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    // EPERM: it exists but belongs to another user — alive.
+    return (err as NodeJS.ErrnoException).code === 'EPERM';
+  }
+}
+
+/**
+ * Delete the logs of processes that are gone: older than 7 days, or beyond a
+ * 200 MB budget for the directory (newest kept first). Rotation is per-pid, so
+ * without this every new pid adds files forever — a host-agent restarting a
+ * child every few minutes left 2,839 logs / 12 GB on the fleet VPS
+ * (2026-09-27). Never touches this process or any live one. Best-effort.
+ */
+export function pruneStaleLogs(
+  dir: string,
+  now: number = Date.now(),
+  isAlive: (pid: number) => boolean = pidAlive,
+): number {
+  let removed = 0;
+  try {
+    const entries = fs
+      .readdirSync(dir)
+      .map((name) => ({ name, m: /^debug-(\d+)\.log/.exec(name) }))
+      .filter((e): e is { name: string; m: RegExpExecArray } => e.m !== null)
+      .map(({ name, m }) => {
+        const full = path.join(dir, name);
+        const st = fs.statSync(full);
+        return { full, pid: Number(m[1]), mtime: st.mtimeMs, size: st.size };
+      })
+      .sort((a, b) => b.mtime - a.mtime);
+    let used = 0;
+    for (const e of entries) {
+      used += e.size;
+      if (e.pid === process.pid || isAlive(e.pid)) continue;
+      if (now - e.mtime > LOG_RETENTION_MS || used > LOG_DIR_BUDGET_BYTES) {
+        try {
+          fs.unlinkSync(e.full);
+          removed++;
+          used -= e.size;
+        } catch {
+          /* raced another pruner — fine */
+        }
+      }
+    }
+  } catch {
+    /* unreadable dir — nothing to prune */
+  }
+  return removed;
+}
+
 /**
  * Rotate `debugFilePath` out of the way before writing if it has
  * crossed MAX_LOG_BYTES. Cheap stat once per `appendToFile` call —
@@ -129,6 +186,7 @@ function appendToFile(line: string): void {
   try {
     if (!fileInitialized) {
       fs.mkdirSync(path.dirname(debugFilePath), { recursive: true, mode: 0o700 });
+      pruneStaleLogs(path.dirname(debugFilePath));
       // ⚠️ A file already here belongs to an EARLIER process that had the same
       // pid — in a container that is every boot (the Box host-agent is always
       // pid 1). Writing the header below replaces it, so each wake erased the
