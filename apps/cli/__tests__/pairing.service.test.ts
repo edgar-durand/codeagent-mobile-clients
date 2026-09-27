@@ -97,6 +97,23 @@ describe('fetchCurrentPluginAuthToken', () => {
     });
   });
 
+  // break-it 2026-09-26: the box label must reach sessions paired earlier.
+  it('sends the host label as hostname on reconnect', async () => {
+    const postSpy = vi.spyOn(pairing._transport, 'postJson').mockResolvedValue({
+      data: { paired: true, pluginAuthToken: 'v1.fake-token' },
+    } as never);
+    const prevCs = process.env.CODESPACES;
+    delete process.env.CODESPACES;
+    process.env.CODEAM_HOST_LABEL = 'CodeAgent Box';
+    try {
+      await pairing.fetchCurrentPluginAuthToken('sess-1', 'plugin-1');
+      expect(postSpy.mock.calls[0][1]).toMatchObject({ hostname: 'CodeAgent Box' });
+    } finally {
+      delete process.env.CODEAM_HOST_LABEL;
+      if (prevCs !== undefined) process.env.CODESPACES = prevCs;
+    }
+  });
+
   it('returns the pluginAuthToken from a successful reconnect response', async () => {
     vi.spyOn(pairing._transport, 'postJson').mockResolvedValue({
       data: { paired: true, pluginAuthToken: 'v1.the-real-token' },

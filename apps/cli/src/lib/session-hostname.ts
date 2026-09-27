@@ -32,7 +32,14 @@ const WRAPPER_REPO_NAME = 'codeam-codespace';
  * below) and only on the pairing path — never on the 20 s heartbeat tick.
  */
 export function resolveSessionHostname(cwd: string = process.cwd()): string {
-  if (process.env.CODESPACES !== 'true') return _osSeam.hostname();
+  if (process.env.CODESPACES !== 'true') {
+    // A CodeAgent Box's hostname is its container id ("6c98896f0d89"), which
+    // the app showed as the machine's name (break-it 2026-09-26). Boxes and
+    // co-located host units set CODEAM_HOST_LABEL — the same label the
+    // host-agent already reports (`resolveHostLabel`) — so use it when present.
+    const label = process.env.CODEAM_HOST_LABEL?.trim();
+    return label ? label.slice(0, 80) : _osSeam.hostname();
+  }
   return codespaceSessionLabel(cwd) ?? _osSeam.hostname();
 }
 
