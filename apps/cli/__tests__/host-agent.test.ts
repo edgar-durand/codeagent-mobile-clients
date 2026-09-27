@@ -3757,6 +3757,53 @@ describe('HostAgentSupervisor — self_hosted_resume (on-demand)', () => {
     sup.stop();
   });
 
+  // 2026-09-27 QA codespace: v2.75.44's boot store was empty (the old host-agent's
+  // own resume had deferred), so the session came back through THIS command —
+  // which skipped the orphan check and deferred to pid 639 again.
+  it('retires a daemon a previous host-agent left holding the session, then resumes', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => ({ success: true, data: {} }) });
+    vi.stubGlobal('fetch', fetchMock);
+    const prevSelfUpdate = process.env.CODEAM_HOST_SELF_UPDATE_MS;
+    process.env.CODEAM_HOST_SELF_UPDATE_MS = '0';
+    vi.useFakeTimers();
+    const cwd = workspace('559d069e-1612-4c1e-9d64-c680f5e38572');
+    const fakeProc = { stdout: { on: vi.fn() }, stderr: { on: vi.fn() }, once: vi.fn(), kill: vi.fn() };
+    const resumeSpawner = vi.fn(() => fakeProc as never);
+    const tree = [{ pid: 639, start: 'a' }, { pid: 703, start: 'b' }];
+    const signalProcessTree = vi.fn();
+    const sup = new HostAgentSupervisor(IDENTITY, {
+      makeRelay: () => ({ start: vi.fn(), stop: vi.fn(), sendResult: vi.fn() }),
+      resumeSpawner,
+      sessionStore: memoryStore(),
+      listSavedSessions: () => [saved('cmuhncwr', cwd)] as never,
+      orphanedDaemonFor: (id) => (id === 'cmuhncwr' ? 639 : undefined),
+      snapshotProcessTree: () => tree,
+      signalProcessTree,
+    });
+    try {
+      sup.start();
+      await sup.handleCommand(cmd({ sessionId: 'cmuhncwr' }));
+      expect(signalProcessTree).toHaveBeenCalledWith([tree[0]], 'SIGTERM');
+      expect(resumeSpawner).not.toHaveBeenCalled();
+
+      // A repeated request while the replacement runs does not signal twice.
+      await sup.handleCommand(cmd({ sessionId: 'cmuhncwr' }));
+      expect(signalProcessTree).toHaveBeenCalledTimes(1);
+
+      await vi.advanceTimersByTimeAsync(3_500);
+      expect(signalProcessTree).toHaveBeenLastCalledWith(tree, 'SIGKILL');
+      expect(resumeSpawner).toHaveBeenCalledTimes(1);
+      expect(resumeSpawner).toHaveBeenCalledWith(
+        expect.objectContaining({ CODEAM_RESUME_SESSION_ID: 'cmuhncwr' }),
+        cwd,
+      );
+    } finally {
+      sup.stop();
+      vi.useRealTimers();
+      process.env.CODEAM_HOST_SELF_UPDATE_MS = prevSelfUpdate;
+    }
+  });
+
   it('ignores an unknown session, a missing workspace and a malformed payload', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => ({ success: true, data: {} }) }));
     const resumeSpawner = vi.fn();

@@ -1115,6 +1115,7 @@ export class HostAgentSupervisor {
   private readonly signalTree: (refs: ProcRef[], signal: NodeJS.Signals) => void;
   /** Resumes waiting for a left-behind daemon to die (see replaceOrphanedDaemon). */
   private pendingOrphanReplacements = 0;
+  private readonly replacingOrphanFor = new Set<string>();
   /**
    * Per-session resume bookkeeping (codeagent-v07a: N sessions resume on
    * boot, each with its OWN bounded retries / exhaustion / re-probe throttle —
@@ -2367,7 +2368,7 @@ export class HostAgentSupervisor {
       const records = this.sessionStore.load();
       if (records === null) {
         const target = this.fallbackResumeTarget();
-        if (target) this.resumeOrReplace(target);
+        if (target) this.resumeOne(target);
         return;
       }
       if (records.length === 0) return; // nothing was live at the last write
@@ -2396,7 +2397,7 @@ export class HostAgentSupervisor {
           );
           continue;
         }
-        this.resumeOrReplace({ deployId: rec.deployId, cwd: rec.cwd, session, agent: rec.agent });
+        this.resumeOne({ deployId: rec.deployId, cwd: rec.cwd, session, agent: rec.agent });
         resumed += 1;
       }
       log.info(
@@ -2558,18 +2559,23 @@ export class HostAgentSupervisor {
   }
 
   /**
-   * Resume `target` — first retiring a daemon the PREVIOUS host-agent left
-   * holding the session, if there is one. Without this the resume child
+   * Resume `target` (boot, `self_hosted_resume`, retry or re-probe) — first
+   * retiring a daemon the PREVIOUS host-agent left holding the session, if
+   * there is one. ⚠️ Every entry point must come through here: the v2.75.43
+   * check sat on the boot path only, and the QA codespace's session came back
+   * through `self_hosted_resume` instead, which deferred to the orphan again. Without this the resume child
    * defers to that orphan (it holds the daemon lock and is alive), so the
    * session keeps running the old code with dead stdio pipes — on 2.75.41 and
    * older that wedged it offline for good (see `orphanedSupervisorDaemon`).
    * Replacing it matches what systemd already does on a self-hosted box,
    * where a unit restart kills the whole control group.
    */
-  private resumeOrReplace(target: ResumeTarget): void {
+  private resumeOne(target: ResumeTarget): void {
+    if (this.children.has(target.deployId)) return; // already live
+    if (this.replacingOrphanFor.has(target.deployId)) return; // replacement in flight
     const orphan = this.orphanedDaemonFor(target.session.id);
     if (orphan === undefined) {
-      this.resumeOne(target);
+      this.spawnResume(target);
       return;
     }
     log.warn(
@@ -2578,6 +2584,7 @@ export class HostAgentSupervisor {
         'by the previous host-agent — replacing it',
     );
     this.pendingOrphanReplacements += 1;
+    this.replacingOrphanFor.add(target.deployId);
     // Snapshot first: the daemon's ACP adapter, agent and MCP servers are
     // re-parented to init the moment it dies and could no longer be found.
     const tree = this.snapshotTree(orphan);
@@ -2588,13 +2595,14 @@ export class HostAgentSupervisor {
       this.signalTree(tree, 'SIGKILL');
       setTimeout(() => {
         this.pendingOrphanReplacements -= 1;
-        if (!this.stopped) this.resumeOne(target);
+        this.replacingOrphanFor.delete(target.deployId);
+        if (!this.stopped) this.spawnResume(target);
       }, ORPHAN_KILL_SETTLE_MS);
     }, ORPHAN_TERM_GRACE_MS);
   }
 
-  /** Spawn ONE resume child for `target` (boot, retry, or re-probe). */
-  private resumeOne(target: ResumeTarget): void {
+  /** Spawn ONE resume child for `target`. Callers go through {@link resumeOne}. */
+  private spawnResume(target: ResumeTarget): void {
     const { session, deployId } = target;
     if (this.children.has(deployId)) return; // already live
     const st = this.resumeStateFor(target);
