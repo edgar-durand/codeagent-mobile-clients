@@ -56,6 +56,11 @@ const CURATED_REVIEW_IGNORE: readonly string[] = [
   // CodeAgent's own runtime prefixes (never a user change).
   '.codeam/',
   'codeam-node20/',
+  // Beads (issue tracker + agent memory) and its Dolt store — our tooling's
+  // state, written on every bd op; it showed up as `.beads/issues.jsonl` in
+  // the user's review (break-it 2026-09-26).
+  '.beads/',
+  '.dolt/',
 ];
 
 /**

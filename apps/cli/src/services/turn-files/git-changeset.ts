@@ -1,5 +1,6 @@
 import { spawn } from 'child_process';
 import * as fs from 'fs/promises';
+import { lstatSync } from 'fs';
 import * as path from 'path';
 import { log } from '../logger';
 import { isIgnoredFilePath } from '../file-watcher/ignored-paths';
@@ -54,7 +55,16 @@ export interface CollectOptions {
 export async function collectRepoChangeset(
   opts: CollectOptions,
 ): Promise<ChangesetEntry[] | null> {
-  const status = await runGit(opts.repoRoot, ['status', '--porcelain=v1', '-z']);
+  // `--untracked-files=all`: by default git folds a new directory into ONE
+  // `dir/` row, which the review showed as a "file" with +0 −0 that nobody can
+  // open (`.codex/`, `.cursor/`, `.agents/` — break-it 2026-09-26). Listing
+  // its files keeps every row reviewable; the cap below still bounds a leak.
+  const status = await runGit(opts.repoRoot, [
+    'status',
+    '--porcelain=v1',
+    '-z',
+    '--untracked-files=all',
+  ]);
   if (status === null) return null;
 
   // numstat is best-effort: if it fails we still surface the status
@@ -76,7 +86,12 @@ export async function collectRepoChangeset(
   // those so they never reach the review as false "changes".
   const reviewIgnore = makeReviewIgnore(opts.repoRoot);
   const rows = parseStatus(status).filter(
-    (row) => !isIgnoredFilePath(row.filePath) && !reviewIgnore(row.filePath),
+    (row) =>
+      !isIgnoredFilePath(row.filePath) &&
+      !reviewIgnore(row.filePath) &&
+      // A socket, FIFO or device node is never a change to review (a
+      // `cc-socks/1522.sock` reached the Files tab).
+      isReviewablePath(path.join(opts.repoRoot, row.filePath)),
   );
 
   // Hard cap on the changeset size. A "review" of hundreds of files with
@@ -367,5 +382,15 @@ export async function discoverRepos(
       if (entry.name === 'dist' || entry.name === 'build') continue;
       await walk(path.join(dir, entry.name), depth + 1);
     }
+  }
+}
+
+/** A regular file, a symlink, or a path that no longer exists (a deletion). */
+function isReviewablePath(absPath: string): boolean {
+  try {
+    const st = lstatSync(absPath);
+    return st.isFile() || st.isSymbolicLink();
+  } catch {
+    return true;
   }
 }
