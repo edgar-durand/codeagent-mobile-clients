@@ -3807,3 +3807,29 @@ describe('MetricsCollector — reported latency is capped at the backend bound',
     expect(m.collect().latencyMs).toBe(24);
   });
 });
+
+// 2026-09-27 QA codespace: `self-update: installed 2.75.42, restarting` and then
+// nothing — a codespace has no systemd to relaunch the exited host-agent.
+describe('self-update restart without a supervisor', () => {
+  it('relaunches itself only when neither systemd nor a container runtime will', async () => {
+    const { needsSelfRelaunch } = await import('../src/commands/host-agent');
+    expect(needsSelfRelaunch({}, 4242)).toBe(true); // codespace: setsid nohup
+    expect(needsSelfRelaunch({ INVOCATION_ID: 'abc' }, 4242)).toBe(false); // systemd unit
+    expect(needsSelfRelaunch({}, 1)).toBe(false); // container pid 1
+  });
+
+  it('re-execs the same command after a pause so this process exits first', async () => {
+    const { relaunchArgv } = await import('../src/commands/host-agent');
+    const argv = relaunchArgv('/usr/local/bin/node', ['/usr/local/bin/node', '/usr/local/bin/codeam', 'host-agent']);
+    expect(argv).toEqual(['-c', 'sleep 2; exec "$0" "$@"', '/usr/local/bin/node', '/usr/local/bin/codeam', 'host-agent']);
+  });
+
+  it('the relaunch command really runs the same argv after the pause', async () => {
+    const { relaunchArgv } = await import('../src/commands/host-agent');
+    const { execFileSync } = await import('node:child_process');
+    const script = relaunchArgv('/bin/echo', ['/bin/echo', 'codeam', 'host-agent']).map((a) =>
+      a.replace('sleep 2', 'sleep 0'),
+    );
+    expect(execFileSync('/bin/sh', script).toString().trim()).toBe('codeam host-agent');
+  });
+});
