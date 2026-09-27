@@ -651,6 +651,11 @@ function buildFleetBoxRunArgs(p: {
     ...(process.env.CODEAM_FLEET_BOX_IMAGE ? [] : ['--pull=always']),
     '--name',
     p.containerName,
+    // The box's host-agent is the container's pid 1 and its self-update restart
+    // is an exit(0): without a restart policy that stopped the whole box until
+    // the next wake. `docker stop` (the sleep sweep) still keeps it stopped.
+    '--restart',
+    'unless-stopped',
     '--cap-drop',
     'ALL',
     '--security-opt',
@@ -1827,6 +1832,9 @@ export class HostAgentSupervisor {
     // just wake the existing container. Idempotent: a container the host already
     // removed is treated as success.
     log.info('host-agent', `fleet_start_box id=${payload.boxId} name=${containerName}`);
+    // Boxes created before the restart policy existed get it on their next wake
+    // (best-effort — a missing container is handled by `start` below).
+    await this.docker.run(['update', '--restart', 'unless-stopped', containerName]);
     const res = await this.docker.run(['start', containerName]);
     if (res.code !== 0 && !isMissingContainerError(res.stderr)) {
       log.warn(

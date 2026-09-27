@@ -2794,6 +2794,8 @@ describe('HostAgentSupervisor — fleet control plane', () => {
     // Hard isolation invariants.
     expect(args[args.indexOf('--cap-drop') + 1]).toBe('ALL');
     expect(args[args.indexOf('--security-opt') + 1]).toBe('no-new-privileges');
+    // pid 1 is the host-agent: its self-update exit must not stop the box for good.
+    expect(args[args.indexOf('--restart') + 1]).toBe('unless-stopped');
     expect(args[args.indexOf('--memory') + 1]).toBe('1536m');
     expect(args[args.indexOf('--cpus') + 1]).toBe('1');
     expect(args[args.indexOf('--pids-limit') + 1]).toBe('512');
@@ -3139,7 +3141,11 @@ describe('HostAgentSupervisor — fleet control plane', () => {
 
     await sup.handleCommand(fleetRefCmd('fleet_start_box'));
 
-    expect(calls).toEqual([['start', 'codeam-box-clu1a2b3c']]);
+    // A box created before the restart policy gets it on this wake, then starts.
+    expect(calls).toEqual([
+      ['update', '--restart', 'unless-stopped', 'codeam-box-clu1a2b3c'],
+      ['start', 'codeam-box-clu1a2b3c'],
+    ]);
   });
 
   // A per-argv docker mock so the wake-recreate image-staleness probe can return
