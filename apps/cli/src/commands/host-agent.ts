@@ -75,7 +75,12 @@ import {
   type SessionChildStore,
 } from './host/session-state';
 import { installRelayCrashGuards } from '../lib/process-guards';
-import { orphanedSupervisorDaemon } from './pair-auto';
+import {
+  orphanedSupervisorDaemon,
+  signalProcessTree,
+  snapshotProcessTree,
+  type ProcRef,
+} from './pair-auto';
 import {
   deleteHostIdentity,
   isHostAuthRejection,
@@ -944,8 +949,10 @@ export interface HostAgentDeps {
    * need procfs.
    */
   orphanedDaemonFor?: (sessionId: string) => number | undefined;
-  /** Signal a pid, never throwing. Injectable so tests never kill anything. */
-  killPid?: (pid: number, signal: NodeJS.Signals) => void;
+  /** Snapshot a process and its descendants. Injectable so tests need no procfs. */
+  snapshotProcessTree?: (pid: number) => ProcRef[];
+  /** Signal a snapshot, never throwing. Injectable so tests never kill anything. */
+  signalProcessTree?: (refs: ProcRef[], signal: NodeJS.Signals) => void;
   /**
    * Posts the visible "agent failed to restart" bubble into the session's
    * chat once the resume retries exhaust. Defaults to
@@ -1056,7 +1063,8 @@ export class HostAgentSupervisor {
   private readonly sessionStore: SessionChildStore;
   private readonly listSavedSessions: () => SavedSession[];
   private readonly orphanedDaemonFor: (sessionId: string) => number | undefined;
-  private readonly killPid: (pid: number, signal: NodeJS.Signals) => void;
+  private readonly snapshotTree: (pid: number) => ProcRef[];
+  private readonly signalTree: (refs: ProcRef[], signal: NodeJS.Signals) => void;
   /** Resumes waiting for a left-behind daemon to die (see replaceOrphanedDaemon). */
   private pendingOrphanReplacements = 0;
   /**
@@ -1078,7 +1086,8 @@ export class HostAgentSupervisor {
     this.sessionStore = deps.sessionStore ?? fileSessionChildStore();
     this.listSavedSessions = deps.listSavedSessions ?? (() => loadCliConfig().sessions);
     this.orphanedDaemonFor = deps.orphanedDaemonFor ?? orphanedSupervisorDaemon;
-    this.killPid = deps.killPid ?? killQuiet;
+    this.snapshotTree = deps.snapshotProcessTree ?? snapshotProcessTree;
+    this.signalTree = deps.signalProcessTree ?? signalProcessTree;
     this.resolveAgentAuth = deps.resolveAgentAuth ?? unsealAgentAuth;
     this.metrics = deps.metricsCollector ?? new MetricsCollector();
     this.onIdentityRejected = deps.onIdentityRejected ?? defaultOnIdentityRejected;
@@ -2518,11 +2527,14 @@ export class HostAgentSupervisor {
         'by the previous host-agent — replacing it',
     );
     this.pendingOrphanReplacements += 1;
-    this.killPid(orphan, 'SIGTERM');
+    // Snapshot first: the daemon's ACP adapter, agent and MCP servers are
+    // re-parented to init the moment it dies and could no longer be found.
+    const tree = this.snapshotTree(orphan);
+    this.signalTree(tree.slice(0, 1), 'SIGTERM');
     setTimeout(() => {
-      // Still the same orphan → it could not act on SIGTERM (a wedged event
-      // loop never runs signal handlers).
-      if (this.orphanedDaemonFor(target.session.id) === orphan) this.killPid(orphan, 'SIGKILL');
+      // Whatever is still alive could not act on SIGTERM (a wedged event loop
+      // never runs signal handlers) or was left behind by the daemon's exit.
+      this.signalTree(tree, 'SIGKILL');
       setTimeout(() => {
         this.pendingOrphanReplacements -= 1;
         if (!this.stopped) this.resumeOne(target);

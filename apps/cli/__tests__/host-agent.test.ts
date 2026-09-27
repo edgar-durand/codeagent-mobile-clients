@@ -762,7 +762,7 @@ describe('HostAgentSupervisor — control channel reuse', () => {
   // 2026-09-27 (QA codespace): the self-update exit left the resume child
   // re-parented to init; the new host-agent's resume deferred to it and the
   // session stayed offline. The orphan is retired first, then resumed fresh.
-  it('replaces a daemon the previous host-agent left behind before resuming the session', async () => {
+  it('retires the whole process tree a previous host-agent left behind, then resumes', async () => {
     const config = await import('../src/config');
     vi.mocked(config.getActiveSession).mockReturnValueOnce({
       id: 'sess-orphan',
@@ -784,25 +784,26 @@ describe('HostAgentSupervisor — control channel reuse', () => {
     vi.useFakeTimers();
     const fakeProc = { stdout: { on: vi.fn() }, stderr: { on: vi.fn() }, once: vi.fn(), kill: vi.fn() };
     const resumeSpawner = vi.fn(() => fakeProc as never);
-    const killPid = vi.fn();
-    // Ignores SIGTERM (a wedged event loop never runs the handler) until SIGKILL.
-    let orphanAlive = true;
-    killPid.mockImplementation((_pid: number, sig: string) => {
-      if (sig === 'SIGKILL') orphanAlive = false;
-    });
+    // The daemon (639), its ACP adapter (703) and the agent under it (799).
+    const tree = [{ pid: 639, start: 'a' }, { pid: 703, start: 'b' }, { pid: 799, start: 'c' }];
+    const signalProcessTree = vi.fn();
     const sup = new HostAgentSupervisor(IDENTITY, {
       makeRelay: () => ({ start: vi.fn(), stop: vi.fn(), sendResult: vi.fn() }),
       resumeSpawner,
-      killPid,
-      orphanedDaemonFor: (id) => (id === 'sess-orphan' && orphanAlive ? 639 : undefined),
+      orphanedDaemonFor: (id) => (id === 'sess-orphan' ? 639 : undefined),
+      snapshotProcessTree: (pid) => (pid === 639 ? tree : []),
+      signalProcessTree,
     });
     try {
       sup.start();
-      expect(killPid).toHaveBeenCalledWith(639, 'SIGTERM');
+      // Graceful first, to the daemon only — it shuts its own children down.
+      expect(signalProcessTree).toHaveBeenCalledTimes(1);
+      expect(signalProcessTree).toHaveBeenLastCalledWith([tree[0]], 'SIGTERM');
       expect(resumeSpawner).not.toHaveBeenCalled();
 
+      // Then whatever of the snapshot survived — including the re-parented children.
       await vi.advanceTimersByTimeAsync(3_000);
-      expect(killPid).toHaveBeenCalledWith(639, 'SIGKILL');
+      expect(signalProcessTree).toHaveBeenLastCalledWith(tree, 'SIGKILL');
       expect(resumeSpawner).not.toHaveBeenCalled();
 
       await vi.advanceTimersByTimeAsync(500);
@@ -814,10 +815,10 @@ describe('HostAgentSupervisor — control channel reuse', () => {
     }
   });
 
-  it('does not SIGKILL an orphan that exited on SIGTERM', async () => {
+  it('resumes straight away when no previous daemon holds the session', async () => {
     const config = await import('../src/config');
     vi.mocked(config.getActiveSession).mockReturnValueOnce({
-      id: 'sess-orphan',
+      id: 'sess-clean',
       pluginId: 'plug-1',
       pollSecret: 'sec',
       agent: 'claude',
@@ -831,32 +832,19 @@ describe('HostAgentSupervisor — control channel reuse', () => {
       'fetch',
       vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => ({ success: true, data: {} }) }),
     );
-    const prevSelfUpdate = process.env.CODEAM_HOST_SELF_UPDATE_MS;
-    process.env.CODEAM_HOST_SELF_UPDATE_MS = '0';
-    vi.useFakeTimers();
     const fakeProc = { stdout: { on: vi.fn() }, stderr: { on: vi.fn() }, once: vi.fn(), kill: vi.fn() };
     const resumeSpawner = vi.fn(() => fakeProc as never);
-    let orphanAlive = true;
-    const killPid = vi.fn(() => {
-      orphanAlive = false;
-    });
+    const signalProcessTree = vi.fn();
     const sup = new HostAgentSupervisor(IDENTITY, {
       makeRelay: () => ({ start: vi.fn(), stop: vi.fn(), sendResult: vi.fn() }),
       resumeSpawner,
-      killPid,
-      orphanedDaemonFor: () => (orphanAlive ? 639 : undefined),
+      orphanedDaemonFor: () => undefined,
+      signalProcessTree,
     });
-    try {
-      sup.start();
-      await vi.advanceTimersByTimeAsync(3_500);
-      expect(killPid).toHaveBeenCalledTimes(1);
-      expect(killPid).toHaveBeenCalledWith(639, 'SIGTERM');
-      expect(resumeSpawner).toHaveBeenCalledTimes(1);
-    } finally {
-      sup.stop();
-      vi.useRealTimers();
-      process.env.CODEAM_HOST_SELF_UPDATE_MS = prevSelfUpdate;
-    }
+    sup.start();
+    expect(resumeSpawner).toHaveBeenCalledTimes(1);
+    expect(signalProcessTree).not.toHaveBeenCalled();
+    sup.stop();
   });
 
   // 2026-09-27 (fleet VPS): the host resumed a session deleted in July every few

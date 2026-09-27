@@ -11,6 +11,8 @@ import {
   isLiveCodeam,
   orphanedSupervisorDaemon,
   readLockRecord,
+  signalProcessTree,
+  snapshotProcessTree,
 } from '../src/commands/pair-auto';
 
 /**
@@ -237,5 +239,48 @@ describe('orphanedSupervisorDaemon — a session daemon a previous host-agent le
 
   it('returns undefined when nothing holds the lock', () => {
     expect(orphanedSupervisorDaemon(SESSION_ID)).toBeUndefined();
+  });
+});
+
+describe('snapshotProcessTree / signalProcessTree — retiring an orphan and its children', () => {
+  function setPpid(pid: number, ppid: number): void {
+    const stat = path.join(fakeProc, String(pid), 'stat');
+    fs.writeFileSync(stat, fs.readFileSync(stat, 'utf8').replace('(node) S 1 ', `(node) S ${ppid} `));
+  }
+
+  it('collects the root and every descendant, not unrelated processes', () => {
+    writeProcEntry(639, { cmdline: 'codeam', startTicks: '10' });
+    writeProcEntry(703, { cmdline: 'acp', startTicks: '11' });
+    setPpid(703, 639);
+    writeProcEntry(799, { cmdline: 'claude', startTicks: '12' });
+    setPpid(799, 703);
+    writeProcEntry(71437, { cmdline: 'codeam host-agent', startTicks: '13' });
+    expect(snapshotProcessTree(639)).toEqual([
+      { pid: 639, start: '10' },
+      { pid: 703, start: '11' },
+      { pid: 799, start: '12' },
+    ]);
+  });
+
+  it('kills a still-matching process and skips one whose pid was reused', async () => {
+    const same = spawnLivePid();
+    writeProcEntry(same, { cmdline: 'codeam', startTicks: '10' });
+    const reused = spawn('sleep', ['30'], { detached: true, stdio: 'ignore' });
+    reused.unref();
+    writeProcEntry(reused.pid!, { cmdline: 'other', startTicks: '99' });
+    try {
+      signalProcessTree(
+        [
+          { pid: same, start: '10' },
+          { pid: reused.pid!, start: '10' },
+        ],
+        'SIGKILL',
+      );
+      await new Promise((r) => setTimeout(r, 100));
+      expect(() => process.kill(same, 0)).toThrow();
+      expect(() => process.kill(reused.pid!, 0)).not.toThrow();
+    } finally {
+      try { process.kill(reused.pid!, 'SIGKILL'); } catch { /* gone */ }
+    }
   });
 });

@@ -404,6 +404,61 @@ export function orphanedSupervisorDaemon(sessionId: string): number | undefined 
   return spawnedBySupervisor ? rec.pid : undefined;
 }
 
+/** One process, pinned to its incarnation so a reused pid is never signalled. */
+export interface ProcRef {
+  pid: number;
+  start?: string;
+}
+
+/**
+ * `root` and every descendant, read from procfs NOW — once `root` dies its
+ * children are re-parented to init and the tree can no longer be walked. A
+ * session daemon owns the ACP adapter, the agent and its MCP servers; retiring
+ * only the daemon would leave those running with nobody reading them. Without
+ * procfs this is just `root`.
+ */
+export function snapshotProcessTree(root: number): ProcRef[] {
+  const children = new Map<number, number[]>();
+  let entries: string[] = [];
+  try {
+    entries = fs.readdirSync(procRoot).filter((e) => /^\d+$/.test(e));
+  } catch {
+    /* no procfs */
+  }
+  for (const e of entries) {
+    const pid = Number(e);
+    const ppid = procPpid(pid);
+    if (ppid === undefined) continue;
+    const list = children.get(ppid) ?? [];
+    list.push(pid);
+    children.set(ppid, list);
+  }
+  const tree: ProcRef[] = [];
+  const queue = [root];
+  const seen = new Set<number>();
+  while (queue.length > 0) {
+    const pid = queue.shift() as number;
+    if (seen.has(pid)) continue;
+    seen.add(pid);
+    const start = procStartTicks(pid);
+    tree.push(start ? { pid, start } : { pid });
+    queue.push(...(children.get(pid) ?? []));
+  }
+  return tree;
+}
+
+/** Signal each process of a snapshot that is still the SAME incarnation. */
+export function signalProcessTree(refs: ProcRef[], signal: NodeJS.Signals): void {
+  for (const ref of refs) {
+    if (ref.start !== undefined && procStartTicks(ref.pid) !== ref.start) continue;
+    try {
+      process.kill(ref.pid, signal);
+    } catch {
+      /* already gone */
+    }
+  }
+}
+
 /** Lock-file path for the per-session daemon singleton. Resolved per-call so
  *  tests can redirect via HOME/USERPROFILE. sessionId is sanitised so it is
  *  safe to embed in a filename on every OS. */
