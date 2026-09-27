@@ -175,6 +175,10 @@ export async function fetchCurrentPluginAuthToken(
         // path (which previously never updated ideVersion). Backends older
         // than the matching fix ignore the unknown field (backward-compat).
         ideVersion: pkg.version,
+        // Same for the machine label: a session paired while a CodeAgent Box
+        // reported its container id picks up the box label on reconnect.
+        // Older backends strip the unknown field (whitelist, not forbid).
+        hostname: resolveSessionHostname(),
       },
       // SEC: prove possession so the gated /reconnect returns the token.
       // Omitted for legacy sessions (no secret) → backend legacy path.
