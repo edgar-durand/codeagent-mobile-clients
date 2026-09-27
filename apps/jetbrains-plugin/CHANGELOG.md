@@ -4,6 +4,12 @@ All notable changes to the CodeAgent-Mobile JetBrains plugin are documented here
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.75.43] — 2026-09-27
+
+### Fixed
+
+- **cli:** Stop the EPIPE log loop and retire daemons a restarted host-agent left behind (#851)
+
 ## [2.75.42] — 2026-09-27
 
 ### Fixed
