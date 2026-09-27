@@ -367,6 +367,43 @@ export function isLiveCodeam(pid: number): boolean {
   return isLivePairAuto(pid);
 }
 
+/** Parent pid (field 4 of `/proc/<pid>/stat`). Undefined without procfs. */
+function procPpid(pid: number): number | undefined {
+  const stat = readProcFile(`${pid}/stat`);
+  if (!stat) return undefined;
+  const ppid = Number(stat.slice(stat.lastIndexOf(')') + 2).trim().split(/\s+/)[1]);
+  return Number.isInteger(ppid) ? ppid : undefined;
+}
+
+/**
+ * The pid of the live daemon holding `sessionId`'s lock IF a previous
+ * host-agent spawned it and then died without it — undefined otherwise.
+ *
+ * On a box without systemd (a codespace) the host-agent's self-update restart
+ * is a plain `exit(0)`: its session children are re-parented to init with
+ * their stdout/stderr pipes dead, and the next host-agent's resume child sees
+ * a "live daemon" and defers to it. That orphan runs the OLD code and, until
+ * the EPIPE guard in the logger, wedged on its first console write — so the
+ * session stayed offline until a redeploy.
+ *
+ * "Left behind by a supervisor" = re-parented to init (and we are not init
+ * ourselves — a fleet box's host-agent IS pid 1, so its own children look the
+ * same) AND its environment carries what only the supervisor sets: the resume
+ * pin for THIS session, or the deploy child's `CODEAM_AUTO_TOKEN` (the codespace
+ * bootstrap passes its token by file, so its own daemon never matches). Linux
+ * only; anything unreadable answers "not an orphan".
+ */
+export function orphanedSupervisorDaemon(sessionId: string): number | undefined {
+  const rec = readLockRecord(daemonLockPath(sessionId));
+  if (!rec || !isLiveLockHolder(rec)) return undefined;
+  if (process.pid === 1 || procPpid(rec.pid) !== 1) return undefined;
+  const env = readProcFile(`${rec.pid}/environ`)?.split('\0') ?? [];
+  const spawnedBySupervisor = env.some(
+    (v) => v === `CODEAM_RESUME_SESSION_ID=${sessionId}` || v.startsWith('CODEAM_AUTO_TOKEN='),
+  );
+  return spawnedBySupervisor ? rec.pid : undefined;
+}
+
 /** Lock-file path for the per-session daemon singleton. Resolved per-call so
  *  tests can redirect via HOME/USERPROFILE. sessionId is sanitised so it is
  *  safe to embed in a filename on every OS. */

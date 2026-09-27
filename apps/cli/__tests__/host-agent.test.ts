@@ -759,6 +759,106 @@ describe('HostAgentSupervisor — control channel reuse', () => {
     sup.stop();
   });
 
+  // 2026-09-27 (QA codespace): the self-update exit left the resume child
+  // re-parented to init; the new host-agent's resume deferred to it and the
+  // session stayed offline. The orphan is retired first, then resumed fresh.
+  it('replaces a daemon the previous host-agent left behind before resuming the session', async () => {
+    const config = await import('../src/config');
+    vi.mocked(config.getActiveSession).mockReturnValueOnce({
+      id: 'sess-orphan',
+      pluginId: 'plug-1',
+      pollSecret: 'sec',
+      agent: 'claude',
+      userName: 'u',
+      userEmail: 'e',
+      plan: 'pro',
+      pairedAt: 0,
+      pluginAuthToken: 't',
+    } as never);
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => ({ success: true, data: {} }) }),
+    );
+    const prevSelfUpdate = process.env.CODEAM_HOST_SELF_UPDATE_MS;
+    process.env.CODEAM_HOST_SELF_UPDATE_MS = '0';
+    vi.useFakeTimers();
+    const fakeProc = { stdout: { on: vi.fn() }, stderr: { on: vi.fn() }, once: vi.fn(), kill: vi.fn() };
+    const resumeSpawner = vi.fn(() => fakeProc as never);
+    const killPid = vi.fn();
+    // Ignores SIGTERM (a wedged event loop never runs the handler) until SIGKILL.
+    let orphanAlive = true;
+    killPid.mockImplementation((_pid: number, sig: string) => {
+      if (sig === 'SIGKILL') orphanAlive = false;
+    });
+    const sup = new HostAgentSupervisor(IDENTITY, {
+      makeRelay: () => ({ start: vi.fn(), stop: vi.fn(), sendResult: vi.fn() }),
+      resumeSpawner,
+      killPid,
+      orphanedDaemonFor: (id) => (id === 'sess-orphan' && orphanAlive ? 639 : undefined),
+    });
+    try {
+      sup.start();
+      expect(killPid).toHaveBeenCalledWith(639, 'SIGTERM');
+      expect(resumeSpawner).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(3_000);
+      expect(killPid).toHaveBeenCalledWith(639, 'SIGKILL');
+      expect(resumeSpawner).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(500);
+      expect(resumeSpawner).toHaveBeenCalledTimes(1);
+    } finally {
+      sup.stop();
+      vi.useRealTimers();
+      process.env.CODEAM_HOST_SELF_UPDATE_MS = prevSelfUpdate;
+    }
+  });
+
+  it('does not SIGKILL an orphan that exited on SIGTERM', async () => {
+    const config = await import('../src/config');
+    vi.mocked(config.getActiveSession).mockReturnValueOnce({
+      id: 'sess-orphan',
+      pluginId: 'plug-1',
+      pollSecret: 'sec',
+      agent: 'claude',
+      userName: 'u',
+      userEmail: 'e',
+      plan: 'pro',
+      pairedAt: 0,
+      pluginAuthToken: 't',
+    } as never);
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => ({ success: true, data: {} }) }),
+    );
+    const prevSelfUpdate = process.env.CODEAM_HOST_SELF_UPDATE_MS;
+    process.env.CODEAM_HOST_SELF_UPDATE_MS = '0';
+    vi.useFakeTimers();
+    const fakeProc = { stdout: { on: vi.fn() }, stderr: { on: vi.fn() }, once: vi.fn(), kill: vi.fn() };
+    const resumeSpawner = vi.fn(() => fakeProc as never);
+    let orphanAlive = true;
+    const killPid = vi.fn(() => {
+      orphanAlive = false;
+    });
+    const sup = new HostAgentSupervisor(IDENTITY, {
+      makeRelay: () => ({ start: vi.fn(), stop: vi.fn(), sendResult: vi.fn() }),
+      resumeSpawner,
+      killPid,
+      orphanedDaemonFor: () => (orphanAlive ? 639 : undefined),
+    });
+    try {
+      sup.start();
+      await vi.advanceTimersByTimeAsync(3_500);
+      expect(killPid).toHaveBeenCalledTimes(1);
+      expect(killPid).toHaveBeenCalledWith(639, 'SIGTERM');
+      expect(resumeSpawner).toHaveBeenCalledTimes(1);
+    } finally {
+      sup.stop();
+      vi.useRealTimers();
+      process.env.CODEAM_HOST_SELF_UPDATE_MS = prevSelfUpdate;
+    }
+  });
+
   // 2026-09-27 (fleet VPS): the host resumed a session deleted in July every few
   // minutes for ten weeks. The child died, its removal persisted `[]`, and the
   // next boot/re-probe read `[]` as "nothing persisted" → the single-session

@@ -3,10 +3,11 @@ import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vite
 // Capture the logger so we can assert the crash guards leave a diagnostic
 // breadcrumb (they must — a silent death is the exact bug they fix).
 const logError = vi.fn();
+const logWarn = vi.fn();
 vi.mock('../src/services/logger', () => ({
   log: {
     error: (...a: unknown[]) => logError(...a),
-    warn: vi.fn(),
+    warn: (...a: unknown[]) => logWarn(...a),
     info: vi.fn(),
     debug: vi.fn(),
     trace: vi.fn(),
@@ -79,5 +80,22 @@ describe('installRelayCrashGuards', () => {
     onRejection?.({ code: 'ERR', detail: 'HTTP 404 NOT_FOUND' });
     expect(logError).toHaveBeenCalledTimes(1);
     expect(logError.mock.calls[0][1]).toContain('404');
+  });
+
+  // 2026-09-27: a daemon outliving the supervisor that piped its stdout got one
+  // uncaughtException per console write (write EPIPE), forever.
+  it('swallows EPIPE on stdout instead of letting it become an uncaughtException', () => {
+    expect(process.stdout.listenerCount('error')).toBeGreaterThan(0);
+    logWarn.mockClear();
+    const epipe = Object.assign(new Error('write EPIPE'), { code: 'EPIPE' });
+    expect(() => process.stdout.emit('error', epipe)).not.toThrow();
+    expect(logError).not.toHaveBeenCalled();
+    expect(logWarn).not.toHaveBeenCalled();
+  });
+
+  it('still records a stdout error that is not EPIPE', () => {
+    logWarn.mockClear();
+    process.stdout.emit('error', Object.assign(new Error('EIO'), { code: 'EIO' }));
+    expect(logWarn).toHaveBeenCalledTimes(1);
   });
 });

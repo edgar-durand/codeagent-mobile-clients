@@ -48,6 +48,14 @@ export function installRelayCrashGuards(): void {
   process.on('uncaughtException', (err) => {
     log.error('process', `uncaughtException — relay kept alive — ${describeReason(err)}`);
   });
+
+  // A daemon outlives the supervisor that piped its stdout (host-agent restart
+  // on a box without systemd), so a console write can fail EPIPE at any time.
+  // Unhandled, that stream error becomes an `uncaughtException` per write.
+  // The console is simply gone — the file log still records everything.
+  process.stdout.on('error', (err: NodeJS.ErrnoException) => {
+    if (err.code !== 'EPIPE') log.warn('process', `stdout error — ${describeReason(err)}`);
+  });
 }
 
 /**

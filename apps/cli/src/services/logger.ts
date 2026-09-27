@@ -84,6 +84,32 @@ const debugFilePath = path.join(LOG_DIR, `debug-${process.pid}.log`);
 
 let fileInitialized = false;
 
+/**
+ * Set once stderr can no longer be written — its reader is gone (EPIPE). The
+ * file mirror keeps working; only the console copy stops.
+ *
+ * ⚠️ Without this a session daemon orphaned by a host-agent restart (its
+ * stderr pipe's read end died with the old supervisor) wedged for good: the
+ * write failed asynchronously → `uncaughtException` → the relay guard's
+ * `log.error` → another stderr write → another EPIPE, forever, on
+ * `process.nextTick`, starving the event loop. No heartbeat ever left, so the
+ * session showed offline and the NEW host-agent deferred to that live-but-dead
+ * daemon (QA codespace, 2026-09-27: 1.6 GB of EPIPE lines in ~7 h).
+ */
+let consoleBroken = false;
+process.stderr.on('error', () => {
+  consoleBroken = true;
+});
+
+function writeConsole(line: string): void {
+  if (consoleBroken) return;
+  try {
+    process.stderr.write(line);
+  } catch {
+    consoleBroken = true;
+  }
+}
+
 const LOG_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 const LOG_DIR_BUDGET_BYTES = 200 * 1024 * 1024;
 
@@ -265,7 +291,7 @@ function emit(level: Level, tag: string, msg: string, err?: unknown): void {
   // Stderr is gated by the user's level pref (default `error`) so
   // the terminal stays quiet while the file still gets everything.
   if (LEVELS[level] <= currentLevel()) {
-    process.stderr.write(jsonMode ? json : text);
+    writeConsole(jsonMode ? json : text);
   }
 }
 
@@ -287,6 +313,7 @@ export const _logHelpers = {
   /** Force re-resolution of `LOG_DIR` next time the logger boots. */
   resetForTests(): void {
     fileInitialized = false;
+    consoleBroken = false;
   },
   getDebugFilePath(): string {
     return debugFilePath;
