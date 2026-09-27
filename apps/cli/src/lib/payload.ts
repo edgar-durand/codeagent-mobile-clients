@@ -101,6 +101,12 @@ export const startCommandSchema = z.object({
       'add',
       'remove',
       'list',
+      // `guardrail_configure` — read / update the session's guardrail policy.
+      // ⚠️ Missing until 2026-09-26: the generic parse rejected `{action:'read'}`
+      // as malformed BEFORE the handler ran, so Guardrails never loaded ("isn't
+      // responding") and every save was silently dropped.
+      'read',
+      'write',
     ])
     .optional(),
   // `coderabbit_configure` (action='link_apikey') — the CodeRabbit API key.
