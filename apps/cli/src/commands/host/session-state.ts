@@ -33,7 +33,17 @@ export interface PersistedSessionChild {
 }
 
 export interface SessionChildStore {
-  load(): PersistedSessionChild[];
+  /**
+   * The persisted live set, or `null` when there is none on disk (never
+   * written, or unreadable). ⚠️ `[]` and `null` mean different things: `[]` is
+   * "this host ran NO children at its last write", so the boot must resume
+   * nothing. Only `null` (a host upgrading from a CLI that kept the set in
+   * memory) may fall back to the config's single last-paired session. Treating
+   * `[]` as `null` made the fleet host resume a session deleted in July, every
+   * few minutes, for ten weeks — the resumed child died, its removal wrote `[]`,
+   * and the next attempt read that as "nothing persisted" again.
+   */
+  load(): PersistedSessionChild[] | null;
   save(list: PersistedSessionChild[]): void;
   clear(): void;
 }
@@ -62,12 +72,12 @@ function isRecord(v: unknown): v is PersistedSessionChild {
 /** File-backed store: atomic write (tmp + rename), owner-only mode, never throws. */
 export function fileSessionChildStore(file: string = hostSessionStatePath()): SessionChildStore {
   return {
-    load(): PersistedSessionChild[] {
+    load(): PersistedSessionChild[] | null {
       try {
         const raw = JSON.parse(fs.readFileSync(file, 'utf8')) as { sessions?: unknown };
-        return Array.isArray(raw?.sessions) ? raw.sessions.filter(isRecord) : [];
+        return Array.isArray(raw?.sessions) ? raw.sessions.filter(isRecord) : null;
       } catch {
-        return [];
+        return null;
       }
     },
     save(list: PersistedSessionChild[]): void {
