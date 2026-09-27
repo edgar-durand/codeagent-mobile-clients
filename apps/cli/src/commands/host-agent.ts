@@ -651,6 +651,11 @@ function buildFleetBoxRunArgs(p: {
     ...(process.env.CODEAM_FLEET_BOX_IMAGE ? [] : ['--pull=always']),
     '--name',
     p.containerName,
+    // The box's host-agent is the container's pid 1 and its self-update restart
+    // is an exit(0): without a restart policy that stopped the whole box until
+    // the next wake. `docker stop` (the sleep sweep) still keeps it stopped.
+    '--restart',
+    'unless-stopped',
     '--cap-drop',
     'ALL',
     '--security-opt',
@@ -912,19 +917,62 @@ export const defaultOnIdentityRejected = (): void => {
   process.exit(1);
 };
 
-/**
- * Default restart action after a successful self-update: log + exit 0 so
- * the systemd unit (`Restart=always`, `RestartSec=5`) relaunches the
- * process on the freshly-installed binary. Injectable so tests assert the
- * restart intent without killing the test runner.
- */
 /** How long a left-behind session daemon gets to exit on SIGTERM. */
 const ORPHAN_TERM_GRACE_MS = 3_000;
 /** Pause after SIGKILL so init reaps it before the resume takes its lock. */
 const ORPHAN_KILL_SETTLE_MS = 500;
 
+/**
+ * True when nothing will start this process again once it exits: not a systemd
+ * unit (systemd sets `INVOCATION_ID` for every unit it runs) and not a
+ * container's pid 1 (whose exit is the container's restart policy's call).
+ * That is a codespace, where the host-agent is launched with `setsid nohup`.
+ */
+export function needsSelfRelaunch(
+  env: NodeJS.ProcessEnv = process.env,
+  pid: number = process.pid,
+): boolean {
+  return !env.INVOCATION_ID && pid !== 1;
+}
+
+/**
+ * Start a fresh host-agent on the freshly-installed binary, detached, after a
+ * 2 s pause. The pause lets THIS process exit first, so the new boot resume
+ * sees this supervisor's session children re-parented to init and retires them
+ * (see `orphanedSupervisorDaemon`) instead of deferring to them.
+ */
+export function relaunchArgv(execPath: string, argv: string[]): string[] {
+  return ['-c', 'sleep 2; exec "$0" "$@"', execPath, ...argv.slice(1)];
+}
+
+/**
+ * Default restart action after a successful self-update: exit so the new
+ * binary takes over. Under systemd (`Restart=always`, `RestartSec=5`) the unit
+ * relaunches us. ⚠️ A codespace has no supervisor at all: the plain `exit(0)`
+ * left the host DEAD after every release until the user woke the codespace
+ * again (QA codespace, 2026-09-27: `installed 2.75.42, restarting` at 06:28,
+ * then nothing) — so there we relaunch ourselves first. Injectable so tests
+ * assert the restart intent without killing the test runner.
+ */
 const defaultOnUpdated = (version: string): void => {
-  log.info('host-agent', `self-update: installed ${version}, restarting`);
+  const relaunch = needsSelfRelaunch();
+  log.info(
+    'host-agent',
+    `self-update: installed ${version}, restarting${relaunch ? ' (self-relaunch, no supervisor)' : ''}`,
+  );
+  if (relaunch) {
+    try {
+      spawn('/bin/sh', relaunchArgv(process.execPath, process.argv), {
+        cwd: process.cwd(),
+        env: process.env,
+        detached: true,
+        stdio: 'ignore',
+      }).unref();
+    } catch (err) {
+      log.error('host-agent', 'self-update: relaunch failed — staying on the old binary', err);
+      return;
+    }
+  }
   process.exit(0);
 };
 
@@ -1784,6 +1832,9 @@ export class HostAgentSupervisor {
     // just wake the existing container. Idempotent: a container the host already
     // removed is treated as success.
     log.info('host-agent', `fleet_start_box id=${payload.boxId} name=${containerName}`);
+    // Boxes created before the restart policy existed get it on their next wake
+    // (best-effort — a missing container is handled by `start` below).
+    await this.docker.run(['update', '--restart', 'unless-stopped', containerName]);
     const res = await this.docker.run(['start', containerName]);
     if (res.code !== 0 && !isMissingContainerError(res.stderr)) {
       log.warn(

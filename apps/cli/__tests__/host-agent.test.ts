@@ -2794,6 +2794,8 @@ describe('HostAgentSupervisor — fleet control plane', () => {
     // Hard isolation invariants.
     expect(args[args.indexOf('--cap-drop') + 1]).toBe('ALL');
     expect(args[args.indexOf('--security-opt') + 1]).toBe('no-new-privileges');
+    // pid 1 is the host-agent: its self-update exit must not stop the box for good.
+    expect(args[args.indexOf('--restart') + 1]).toBe('unless-stopped');
     expect(args[args.indexOf('--memory') + 1]).toBe('1536m');
     expect(args[args.indexOf('--cpus') + 1]).toBe('1');
     expect(args[args.indexOf('--pids-limit') + 1]).toBe('512');
@@ -3139,7 +3141,11 @@ describe('HostAgentSupervisor — fleet control plane', () => {
 
     await sup.handleCommand(fleetRefCmd('fleet_start_box'));
 
-    expect(calls).toEqual([['start', 'codeam-box-clu1a2b3c']]);
+    // A box created before the restart policy gets it on this wake, then starts.
+    expect(calls).toEqual([
+      ['update', '--restart', 'unless-stopped', 'codeam-box-clu1a2b3c'],
+      ['start', 'codeam-box-clu1a2b3c'],
+    ]);
   });
 
   // A per-argv docker mock so the wake-recreate image-staleness probe can return
@@ -3805,5 +3811,31 @@ describe('MetricsCollector — reported latency is capped at the backend bound',
     expect(m.collect().latencyMs).toBe(60_000);
     m.recordLatency(24.4);
     expect(m.collect().latencyMs).toBe(24);
+  });
+});
+
+// 2026-09-27 QA codespace: `self-update: installed 2.75.42, restarting` and then
+// nothing — a codespace has no systemd to relaunch the exited host-agent.
+describe('self-update restart without a supervisor', () => {
+  it('relaunches itself only when neither systemd nor a container runtime will', async () => {
+    const { needsSelfRelaunch } = await import('../src/commands/host-agent');
+    expect(needsSelfRelaunch({}, 4242)).toBe(true); // codespace: setsid nohup
+    expect(needsSelfRelaunch({ INVOCATION_ID: 'abc' }, 4242)).toBe(false); // systemd unit
+    expect(needsSelfRelaunch({}, 1)).toBe(false); // container pid 1
+  });
+
+  it('re-execs the same command after a pause so this process exits first', async () => {
+    const { relaunchArgv } = await import('../src/commands/host-agent');
+    const argv = relaunchArgv('/usr/local/bin/node', ['/usr/local/bin/node', '/usr/local/bin/codeam', 'host-agent']);
+    expect(argv).toEqual(['-c', 'sleep 2; exec "$0" "$@"', '/usr/local/bin/node', '/usr/local/bin/codeam', 'host-agent']);
+  });
+
+  it('the relaunch command really runs the same argv after the pause', async () => {
+    const { relaunchArgv } = await import('../src/commands/host-agent');
+    const { execFileSync } = await import('node:child_process');
+    const script = relaunchArgv('/bin/echo', ['/bin/echo', 'codeam', 'host-agent']).map((a) =>
+      a.replace('sleep 2', 'sleep 0'),
+    );
+    expect(execFileSync('/bin/sh', script).toString().trim()).toBe('codeam host-agent');
   });
 });

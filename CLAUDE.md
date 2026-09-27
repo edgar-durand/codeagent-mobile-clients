@@ -309,6 +309,7 @@ the already-validated `containerName` and the numeric resource limits):
 
 ```
 docker run -d --name codeam-box-<userId> \
+  --restart unless-stopped \
   --cap-drop ALL --security-opt no-new-privileges \
   --memory <memoryMb>m --cpus <cpus> --pids-limit <pidsLimit> \
   --network fleet-net \
@@ -321,6 +322,12 @@ docker run -d --name codeam-box-<userId> \
   -e CODEAM_HOST_LABEL=CodeAgent Box \
   <fleet box image>
 ```
+
+`--restart unless-stopped` exists because the box's host-agent is the container's pid 1 and its
+self-update restart is an `exit(0)` — without a policy the whole box stayed stopped until the next wake.
+`docker stop` (the sleep sweep) still keeps a box stopped; boxes created before the policy get it via
+`docker update` on their next `fleet_start_box`. On a codespace (no systemd, not pid 1) the host-agent
+instead relaunches itself before exiting (`needsSelfRelaunch`).
 
 NEVER `--privileged`, NEVER a `docker.sock` mount, NEVER a host bind mount — the box's only writable
 surface is the single named volume (identically named to the container). The box image is resolved
