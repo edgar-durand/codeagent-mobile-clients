@@ -9,7 +9,10 @@ import {
   acquireSingletonLock,
   daemonLockPath,
   isLiveCodeam,
+  orphanedSupervisorDaemon,
   readLockRecord,
+  signalProcessTree,
+  snapshotProcessTree,
 } from '../src/commands/pair-auto';
 
 /**
@@ -171,5 +174,113 @@ describe('acquireSingletonLock — same reused-pid guard for the box-wide pair-a
 
     expect(acquireSingletonLock()).toBe(true);
     expect(readLockRecord(lockPath)?.pid).toBe(process.pid);
+  });
+});
+
+/**
+ * 2026-09-27 QA codespace: the host-agent's self-update exit left its resume
+ * child (pid 639) re-parented to init with dead stdio pipes; the NEW host-agent's
+ * resume child deferred to it and the session never came back online.
+ */
+describe('orphanedSupervisorDaemon — a session daemon a previous host-agent left behind', () => {
+  const RESUME_CMDLINE = '/usr/local/bin/node\0/usr/local/bin/codeam\0';
+
+  function holdLock(pid: number): void {
+    const lockPath = daemonLockPath(SESSION_ID);
+    fs.mkdirSync(path.dirname(lockPath), { recursive: true });
+    fs.writeFileSync(lockPath, `${pid}\nstart=4321 boot=boot-A\n`);
+  }
+
+  function writeEnviron(pid: number, vars: string[]): void {
+    fs.writeFileSync(path.join(fakeProc, String(pid), 'environ'), `${vars.join('\0')}\0`);
+  }
+
+  it('returns the pid of an init-parented resume child pinned to this session', () => {
+    const pid = spawnLivePid();
+    writeProcEntry(pid, { cmdline: RESUME_CMDLINE }); // stat ppid = 1
+    writeEnviron(pid, ['HOME=/home/box', `CODEAM_RESUME_SESSION_ID=${SESSION_ID}`]);
+    holdLock(pid);
+    expect(orphanedSupervisorDaemon(SESSION_ID)).toBe(pid);
+  });
+
+  it('returns the pid of an init-parented deploy child (token passed in env by the supervisor)', () => {
+    const pid = spawnLivePid();
+    writeProcEntry(pid, { cmdline: RESUME_CMDLINE });
+    writeEnviron(pid, ['CODEAM_AUTO_TOKEN=tok']);
+    holdLock(pid);
+    expect(orphanedSupervisorDaemon(SESSION_ID)).toBe(pid);
+  });
+
+  it('leaves alone a daemon the codespace bootstrap launched (token by file, nothing in env)', () => {
+    const pid = spawnLivePid();
+    writeProcEntry(pid, { cmdline: RESUME_CMDLINE });
+    writeEnviron(pid, ['HOME=/home/box', 'CODESPACES=true']);
+    holdLock(pid);
+    expect(orphanedSupervisorDaemon(SESSION_ID)).toBeUndefined();
+  });
+
+  it('leaves alone a resume child pinned to a DIFFERENT session', () => {
+    const pid = spawnLivePid();
+    writeProcEntry(pid, { cmdline: RESUME_CMDLINE });
+    writeEnviron(pid, ['CODEAM_RESUME_SESSION_ID=another-session']);
+    holdLock(pid);
+    expect(orphanedSupervisorDaemon(SESSION_ID)).toBeUndefined();
+  });
+
+  it('leaves alone a daemon whose supervisor is still alive (parent is not init)', () => {
+    const pid = spawnLivePid();
+    writeProcEntry(pid, { cmdline: RESUME_CMDLINE });
+    const stat = path.join(fakeProc, String(pid), 'stat');
+    fs.writeFileSync(stat, fs.readFileSync(stat, 'utf8').replace('(node) S 1 ', '(node) S 71437 '));
+    writeEnviron(pid, [`CODEAM_RESUME_SESSION_ID=${SESSION_ID}`]);
+    holdLock(pid);
+    expect(orphanedSupervisorDaemon(SESSION_ID)).toBeUndefined();
+  });
+
+  it('returns undefined when nothing holds the lock', () => {
+    expect(orphanedSupervisorDaemon(SESSION_ID)).toBeUndefined();
+  });
+});
+
+describe('snapshotProcessTree / signalProcessTree — retiring an orphan and its children', () => {
+  function setPpid(pid: number, ppid: number): void {
+    const stat = path.join(fakeProc, String(pid), 'stat');
+    fs.writeFileSync(stat, fs.readFileSync(stat, 'utf8').replace('(node) S 1 ', `(node) S ${ppid} `));
+  }
+
+  it('collects the root and every descendant, not unrelated processes', () => {
+    writeProcEntry(639, { cmdline: 'codeam', startTicks: '10' });
+    writeProcEntry(703, { cmdline: 'acp', startTicks: '11' });
+    setPpid(703, 639);
+    writeProcEntry(799, { cmdline: 'claude', startTicks: '12' });
+    setPpid(799, 703);
+    writeProcEntry(71437, { cmdline: 'codeam host-agent', startTicks: '13' });
+    expect(snapshotProcessTree(639)).toEqual([
+      { pid: 639, start: '10' },
+      { pid: 703, start: '11' },
+      { pid: 799, start: '12' },
+    ]);
+  });
+
+  it('kills a still-matching process and skips one whose pid was reused', async () => {
+    const same = spawnLivePid();
+    writeProcEntry(same, { cmdline: 'codeam', startTicks: '10' });
+    const reused = spawn('sleep', ['30'], { detached: true, stdio: 'ignore' });
+    reused.unref();
+    writeProcEntry(reused.pid!, { cmdline: 'other', startTicks: '99' });
+    try {
+      signalProcessTree(
+        [
+          { pid: same, start: '10' },
+          { pid: reused.pid!, start: '10' },
+        ],
+        'SIGKILL',
+      );
+      await new Promise((r) => setTimeout(r, 100));
+      expect(() => process.kill(same, 0)).toThrow();
+      expect(() => process.kill(reused.pid!, 0)).not.toThrow();
+    } finally {
+      try { process.kill(reused.pid!, 'SIGKILL'); } catch { /* gone */ }
+    }
   });
 });

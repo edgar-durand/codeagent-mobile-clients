@@ -76,6 +76,12 @@ import {
 } from './host/session-state';
 import { installRelayCrashGuards } from '../lib/process-guards';
 import {
+  orphanedSupervisorDaemon,
+  signalProcessTree,
+  snapshotProcessTree,
+  type ProcRef,
+} from './pair-auto';
+import {
   deleteHostIdentity,
   isHostAuthRejection,
   isTerminalEnrollError,
@@ -912,6 +918,11 @@ export const defaultOnIdentityRejected = (): void => {
  * process on the freshly-installed binary. Injectable so tests assert the
  * restart intent without killing the test runner.
  */
+/** How long a left-behind session daemon gets to exit on SIGTERM. */
+const ORPHAN_TERM_GRACE_MS = 3_000;
+/** Pause after SIGKILL so init reaps it before the resume takes its lock. */
+const ORPHAN_KILL_SETTLE_MS = 500;
+
 const defaultOnUpdated = (version: string): void => {
   log.info('host-agent', `self-update: installed ${version}, restarting`);
   process.exit(0);
@@ -932,6 +943,16 @@ export interface HostAgentDeps {
   sessionStore?: SessionChildStore;
   /** Saved sessions a persisted child maps back to (defaults to the CLI config). */
   listSavedSessions?: () => SavedSession[];
+  /**
+   * The pid of a daemon a PREVIOUS host-agent left holding this session, if
+   * any (see {@link orphanedSupervisorDaemon}). Injectable so tests don't
+   * need procfs.
+   */
+  orphanedDaemonFor?: (sessionId: string) => number | undefined;
+  /** Snapshot a process and its descendants. Injectable so tests need no procfs. */
+  snapshotProcessTree?: (pid: number) => ProcRef[];
+  /** Signal a snapshot, never throwing. Injectable so tests never kill anything. */
+  signalProcessTree?: (refs: ProcRef[], signal: NodeJS.Signals) => void;
   /**
    * Posts the visible "agent failed to restart" bubble into the session's
    * chat once the resume retries exhaust. Defaults to
@@ -1041,6 +1062,11 @@ export class HostAgentSupervisor {
   ) => Promise<void>;
   private readonly sessionStore: SessionChildStore;
   private readonly listSavedSessions: () => SavedSession[];
+  private readonly orphanedDaemonFor: (sessionId: string) => number | undefined;
+  private readonly snapshotTree: (pid: number) => ProcRef[];
+  private readonly signalTree: (refs: ProcRef[], signal: NodeJS.Signals) => void;
+  /** Resumes waiting for a left-behind daemon to die (see replaceOrphanedDaemon). */
+  private pendingOrphanReplacements = 0;
   /**
    * Per-session resume bookkeeping (codeagent-v07a: N sessions resume on
    * boot, each with its OWN bounded retries / exhaustion / re-probe throttle —
@@ -1059,6 +1085,9 @@ export class HostAgentSupervisor {
     this.resumeSpawner = deps.resumeSpawner ?? defaultResumeSpawner;
     this.sessionStore = deps.sessionStore ?? fileSessionChildStore();
     this.listSavedSessions = deps.listSavedSessions ?? (() => loadCliConfig().sessions);
+    this.orphanedDaemonFor = deps.orphanedDaemonFor ?? orphanedSupervisorDaemon;
+    this.snapshotTree = deps.snapshotProcessTree ?? snapshotProcessTree;
+    this.signalTree = deps.signalProcessTree ?? signalProcessTree;
     this.resolveAgentAuth = deps.resolveAgentAuth ?? unsealAgentAuth;
     this.metrics = deps.metricsCollector ?? new MetricsCollector();
     this.onIdentityRejected = deps.onIdentityRejected ?? defaultOnIdentityRejected;
@@ -2287,7 +2316,7 @@ export class HostAgentSupervisor {
       const records = this.sessionStore.load();
       if (records === null) {
         const target = this.fallbackResumeTarget();
-        if (target) this.resumeOne(target);
+        if (target) this.resumeOrReplace(target);
         return;
       }
       if (records.length === 0) return; // nothing was live at the last write
@@ -2316,7 +2345,7 @@ export class HostAgentSupervisor {
           );
           continue;
         }
-        this.resumeOne({ deployId: rec.deployId, cwd: rec.cwd, session, agent: rec.agent });
+        this.resumeOrReplace({ deployId: rec.deployId, cwd: rec.cwd, session, agent: rec.agent });
         resumed += 1;
       }
       log.info(
@@ -2325,7 +2354,9 @@ export class HostAgentSupervisor {
           `${resume.length - resumed} skipped`,
       );
       // Nothing came back → the file must not keep promising sessions.
-      if (this.children.size === 0) this.sessionStore.save([]);
+      if (this.children.size === 0 && this.pendingOrphanReplacements === 0) {
+        this.sessionStore.save([]);
+      }
     } catch (err) {
       log.warn(
         'host-agent',
@@ -2473,6 +2504,42 @@ export class HostAgentSupervisor {
     } catch {
       return [];
     }
+  }
+
+  /**
+   * Resume `target` — first retiring a daemon the PREVIOUS host-agent left
+   * holding the session, if there is one. Without this the resume child
+   * defers to that orphan (it holds the daemon lock and is alive), so the
+   * session keeps running the old code with dead stdio pipes — on 2.75.41 and
+   * older that wedged it offline for good (see `orphanedSupervisorDaemon`).
+   * Replacing it matches what systemd already does on a self-hosted box,
+   * where a unit restart kills the whole control group.
+   */
+  private resumeOrReplace(target: ResumeTarget): void {
+    const orphan = this.orphanedDaemonFor(target.session.id);
+    if (orphan === undefined) {
+      this.resumeOne(target);
+      return;
+    }
+    log.warn(
+      'host-agent',
+      `resume: session ${target.session.id.slice(0, 8)} is held by pid ${orphan}, left behind ` +
+        'by the previous host-agent — replacing it',
+    );
+    this.pendingOrphanReplacements += 1;
+    // Snapshot first: the daemon's ACP adapter, agent and MCP servers are
+    // re-parented to init the moment it dies and could no longer be found.
+    const tree = this.snapshotTree(orphan);
+    this.signalTree(tree.slice(0, 1), 'SIGTERM');
+    setTimeout(() => {
+      // Whatever is still alive could not act on SIGTERM (a wedged event loop
+      // never runs signal handlers) or was left behind by the daemon's exit.
+      this.signalTree(tree, 'SIGKILL');
+      setTimeout(() => {
+        this.pendingOrphanReplacements -= 1;
+        if (!this.stopped) this.resumeOne(target);
+      }, ORPHAN_KILL_SETTLE_MS);
+    }, ORPHAN_TERM_GRACE_MS);
   }
 
   /** Spawn ONE resume child for `target` (boot, retry, or re-probe). */
