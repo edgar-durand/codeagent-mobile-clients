@@ -4,6 +4,12 @@ All notable changes to the CodeAgent Mobile VS Code extension are documented her
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.75.42] — 2026-09-27
+
+### Fixed
+
+- **cli:** A CodeAgent Box reports its label, not its container id (#849)
+
 ## [2.75.41] — 2026-09-27
 
 ### Fixed
