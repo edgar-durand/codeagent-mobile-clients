@@ -68,7 +68,7 @@ export function normalizeOrigin(raw: string): string | null {
  * `cwd` isn't inside a git repo. Pure-ish: uses fs.statSync walk so it doesn't
  * shell out for the common case.
  */
-function findRepoRoot(cwd: string): string | null {
+export function findRepoRoot(cwd: string): string | null {
   let dir = path.resolve(cwd);
   const seen = new Set<string>();
   for (let i = 0; i < 256; i++) {
