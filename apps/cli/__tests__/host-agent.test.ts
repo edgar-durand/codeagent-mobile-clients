@@ -759,6 +759,77 @@ describe('HostAgentSupervisor — control channel reuse', () => {
     sup.stop();
   });
 
+  // 2026-09-27 (fleet VPS): the host resumed a session deleted in July every few
+  // minutes for ten weeks. The child died, its removal persisted `[]`, and the
+  // next boot/re-probe read `[]` as "nothing persisted" → the single-session
+  // fallback resumed the same dead session again. `[]` means nothing was live.
+  it('does NOT fall back to the last-paired session when the persisted live set is empty', async () => {
+    const config = await import('../src/config');
+    fs.writeFileSync(
+      process.env.CODEAM_HOST_SESSION_STATE_FILE as string,
+      JSON.stringify({ version: 1, sessions: [] }),
+    );
+    vi.mocked(config.getActiveSession).mockReturnValue({
+      id: 'sess-dead',
+      pluginId: 'plug-1',
+      pollSecret: 'sec',
+      agent: 'claude',
+      userName: 'u',
+      userEmail: 'e',
+      plan: 'pro',
+      pairedAt: 0,
+      pluginAuthToken: 't',
+    } as never);
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => ({ success: true, data: {} }) }),
+    );
+    const resumeSpawner = vi.fn();
+    const sup = new HostAgentSupervisor(IDENTITY, {
+      makeRelay: () => ({ start: vi.fn(), stop: vi.fn(), sendResult: vi.fn() }),
+      resumeSpawner,
+    });
+    sup.start();
+    expect(resumeSpawner).not.toHaveBeenCalled();
+    sup.stop();
+    vi.mocked(config.getActiveSession).mockReset();
+    vi.mocked(config.getActiveSession).mockReturnValue(null);
+  });
+
+  // Same incident: the cwd-less session resumed into the host-agent's systemd
+  // cwd `/`, whose file watcher walked the whole filesystem → ENOSPC → SIGABRT.
+  it('never resumes a cwd-less session into the filesystem root', async () => {
+    const config = await import('../src/config');
+    vi.mocked(config.getActiveSession).mockReturnValueOnce({
+      id: 'sess-1',
+      pluginId: 'plug-1',
+      pollSecret: 'sec',
+      agent: 'claude',
+      userName: 'u',
+      userEmail: 'e',
+      plan: 'pro',
+      pairedAt: 0,
+      pluginAuthToken: 't',
+    } as never);
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => ({ success: true, data: {} }) }),
+    );
+    const cwdSpy = vi.spyOn(process, 'cwd').mockReturnValue(path.parse(process.cwd()).root);
+    const resumeSpawner = vi.fn();
+    const sup = new HostAgentSupervisor(IDENTITY, {
+      makeRelay: () => ({ start: vi.fn(), stop: vi.fn(), sendResult: vi.fn() }),
+      resumeSpawner,
+    });
+    try {
+      sup.start();
+      expect(resumeSpawner).not.toHaveBeenCalled();
+    } finally {
+      sup.stop();
+      cwdSpy.mockRestore();
+    }
+  });
+
   // 2026-07-29: a warm-codespace wake resumed in the host-agent's own cwd (the
   // wrapper repo root) → CODEAM_RESUME_LATEST found no prior conversation → a
   // fresh empty session. The persisted session cwd (the deploy workspace) must
@@ -3218,18 +3289,19 @@ describe('HostAgentSupervisor — fleet control plane', () => {
 describe('HostAgentSupervisor — multi-session boot resume (codeagent-v07a)', () => {
   type Rec = import('../src/commands/host/session-state').PersistedSessionChild;
 
-  function memoryStore(initial: Rec[] = []) {
-    let list: Rec[] = [...initial];
+  // `null` = nothing on disk (pre-upgrade host); `[]` = written empty.
+  function memoryStore(initial: Rec[] | null = []) {
+    let list: Rec[] | null = initial === null ? null : [...initial];
     const saves: Rec[][] = [];
     return {
       store: {
-        load: () => [...list],
+        load: () => (list === null ? null : [...list]),
         save: (next: Rec[]) => {
           list = [...next];
           saves.push([...next]);
         },
         clear: () => {
-          list = [];
+          list = null;
           saves.push([]);
         },
       },
@@ -3322,7 +3394,7 @@ describe('HostAgentSupervisor — multi-session boot resume (codeagent-v07a)', (
       // Both children are live for the boot reconcile.
       const reconcile = sessionEventBodies().find((e) => e.event === 'reconcile');
       expect(reconcile?.activeDeployIds).toEqual(expect.arrayContaining(['dep-a', 'dep-b']));
-      expect(store.load().map((r) => r.deployId).sort()).toEqual(['dep-a', 'dep-b']);
+      expect((store.load() ?? []).map((r) => r.deployId).sort()).toEqual(['dep-a', 'dep-b']);
     } finally {
       sup.stop();
     }
@@ -3352,7 +3424,7 @@ describe('HostAgentSupervisor — multi-session boot resume (codeagent-v07a)', (
       expect(ended.map((e) => e.deployId).sort()).toEqual(['d1', 'd2']);
       for (const e of ended) expect(e.reason).toBe('host_restart');
       // The persisted set now holds only the live two.
-      expect(store.load().map((r) => r.deployId).sort()).toEqual(['d3', 'd4']);
+      expect((store.load() ?? []).map((r) => r.deployId).sort()).toEqual(['d3', 'd4']);
     } finally {
       sup.stop();
     }
@@ -3376,7 +3448,7 @@ describe('HostAgentSupervisor — multi-session boot resume (codeagent-v07a)', (
     try {
       expect(resumeSpawner).toHaveBeenCalledTimes(1);
       expect((resumeSpawner.mock.calls[0] as unknown as [Record<string, string>])[0].CODEAM_RESUME_SESSION_ID).toBe('sess-b');
-      expect(store.load().map((r) => r.deployId)).toEqual(['dep-b']);
+      expect(store.load()?.map((r) => r.deployId)).toEqual(['dep-b']);
     } finally {
       sup.stop();
     }
@@ -3386,7 +3458,7 @@ describe('HostAgentSupervisor — multi-session boot resume (codeagent-v07a)', (
     const config = await import('../src/config');
     const a = ws('dep-a');
     vi.mocked(config.getActiveSession).mockReturnValueOnce(saved('sess-a', a) as never);
-    const { store } = memoryStore([]);
+    const { store } = memoryStore(null);
     const resumeSpawner = vi.fn(() => fakeProc() as never);
     const sup = new HostAgentSupervisor(IDENTITY, {
       makeRelay: () => ({ start: vi.fn(), stop: vi.fn(), sendResult: vi.fn() }),
@@ -3430,12 +3502,12 @@ describe('HostAgentSupervisor — multi-session boot resume (codeagent-v07a)', (
     expect(store.load()).toHaveLength(2);
     // The app stopped session A → its child exits cleanly → dropped from the set.
     procs[1].emit('exit', 0, null); // procs[1] is dep-a (spawned second: newest first)
-    expect(store.load().map((r) => r.deployId)).toEqual(['dep-b']);
+    expect(store.load()?.map((r) => r.deployId)).toEqual(['dep-b']);
     const savesBeforeStop = saves.length;
     // systemctl restart → stop() kills B but must NOT rewrite the set.
     sup.stop();
     expect(saves.length).toBe(savesBeforeStop);
-    expect(store.load().map((r) => r.deployId)).toEqual(['dep-b']);
+    expect(store.load()?.map((r) => r.deployId)).toEqual(['dep-b']);
   });
 
   it('keeps per-session retry budgets: one session crash-looping does not spend the other\'s', () => {
@@ -3481,7 +3553,7 @@ describe('HostAgentSupervisor — multi-session boot resume (codeagent-v07a)', (
         expect(postResumeFailure).toHaveBeenCalledTimes(1);
         expect((postResumeFailure.mock.calls[0] as unknown as [{ sessionId: string }])[0].sessionId).toBe('sess-a');
         // B is still tracked; A is gone from the live set.
-        expect(store.load().map((r) => r.deployId)).toEqual(['dep-b']);
+        expect(store.load()?.map((r) => r.deployId)).toEqual(['dep-b']);
       } finally {
         sup.stop();
         if (prev === undefined) delete process.env.CODEAM_HOST_SELF_UPDATE_MS;
