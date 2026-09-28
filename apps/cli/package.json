@@ -84,6 +84,7 @@
     "qrcode-terminal": "^0.12.0",
     "which": "^6.0.0",
     "ws": "^8.21.3",
+    "yazl": "3.3.1",
     "zod": "^4.3.6"
   },
   "optionalDependencies": {
@@ -97,6 +98,7 @@
     "@types/qrcode-terminal": "^0.12.0",
     "@types/which": "^3.0.4",
     "@types/ws": "^8.5.0",
+    "@types/yazl": "3.3.1",
     "@vitest/coverage-v8": "^4.1.7",
     "jsdom": "^29.1.1",
     "node-pty": "^1.1.0",

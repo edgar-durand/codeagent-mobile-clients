@@ -75,7 +75,7 @@ export function deployIdFromWorkspace(cwd?: string | null): string | null {
  * Manager dialog. A missing/invalid credential therefore fails fast with a
  * non-zero exit instead of hanging the deploy waiting on stdin.
  */
-function nonInteractiveGitEnv(): NodeJS.ProcessEnv {
+export function nonInteractiveGitEnv(): NodeJS.ProcessEnv {
   return {
     ...process.env,
     GIT_TERMINAL_PROMPT: '0',

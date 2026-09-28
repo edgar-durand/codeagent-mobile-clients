@@ -28,6 +28,7 @@ import { USER_EVENTS, type PreviewDetection } from '@codeam/shared';
 import type { RuntimeStrategy } from '../../agents/strategy';
 import { postPreviewEvent } from '../../services/pairing.service';
 import { activePreviews, killPreview, resetBuildHealState } from '../../services/preview';
+import { postScratchOffer } from '../../scratch/api';
 import { log } from '../../services/logger';
 import {
   resolvePreviewDetection,
@@ -236,6 +237,14 @@ export class AgentPreviewBridge {
     return { ok: true, message: 'Preview stopped.' };
   }
 
+  /** Ask the backend to show the "Save your project" card. `false` (never
+   *  throws) when no session is attached yet or the app couldn't be reached. */
+  async offerSave(): Promise<boolean> {
+    const ctx = this.ctx;
+    if (!ctx) return false;
+    return postScratchOffer({ sessionId: ctx.sessionId, pluginId: ctx.pluginId, pluginAuthToken: ctx.pluginAuthToken });
+  }
+
   // ─── Internals ─────────────────────────────────────────────────────────
 
   private async launch(
@@ -319,6 +328,8 @@ export class AgentPreviewBridge {
           return reply(200, await this.highlight(body));
         case 'POST /preview/stop':
           return reply(200, await this.stop());
+        case 'POST /scratch/save-offer':
+          return reply(200, { offered: await this.offerSave() });
         default:
           return reply(404, { error: 'not found' });
       }

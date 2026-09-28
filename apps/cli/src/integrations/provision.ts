@@ -13,6 +13,7 @@ import { readIntegrationsManifest } from './manifest';
 import { MCP_ROUTER_SERVER_NAME } from './mcp-router';
 import { log } from '../services/logger';
 import { previewMcpServer } from '../commands/preview-mcp';
+import { scratchMcpServer } from '../commands/scratch-mcp';
 import { mcpSecretEnv } from './mcp-secrets';
 
 export interface ProvisionCtx {
@@ -26,6 +27,9 @@ export interface ProvisionCtx {
   /** The running CLI's agent-preview bridge (`agentPreviewBridge.address()`).
    *  When set, the agent also gets the `codeagent_preview` tools. */
   preview?: { url: string; token: string } | null;
+  /** True on a from-scratch session (`isScratchWorkspace(cwd)`) — the agent
+   *  also gets the `codeagent_scratch` tools (reuses the preview bridge). */
+  scratch?: boolean;
 }
 
 /** The per-session credentials every integration shim needs. */
@@ -38,13 +42,16 @@ function secretVars(ctx: ProvisionCtx): Record<string, string> {
 
 /**
  * Every MCP server the agent gets at `session/new`: the integration servers
- * below plus the built-in Preview tools. The Preview server is never routed
- * through `mcp-router` — five small schemas, and they must stay first-class.
+ * below plus the built-in Preview tools, plus — on a from-scratch session —
+ * the Scratch save-prompt tool. Neither Preview nor Scratch is ever routed
+ * through `mcp-router` — a handful of small schemas, and they must stay
+ * first-class.
  */
 export function buildMcpServersForStart(ctx: ProvisionCtx): McpServer[] {
   const servers = buildIntegrationMcpServers(ctx);
   const preview = previewMcpServer(ctx.preview ?? null);
-  return preview ? [...servers, preview] : servers;
+  const scratch = ctx.scratch ? scratchMcpServer(ctx.preview ?? null) : null;
+  return [...servers, ...(preview ? [preview] : []), ...(scratch ? [scratch] : [])];
 }
 
 /**

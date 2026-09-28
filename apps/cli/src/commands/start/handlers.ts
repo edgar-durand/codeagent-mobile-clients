@@ -50,6 +50,7 @@ import { deliverPendingCoderabbitCallback, type CoderabbitAuthEvent } from '../.
 import { CoderabbitRuntimeStrategy } from '../../agents/coderabbit/runtime';
 import { reviewPullRequest, defaultRunGh } from '../../agents/coderabbit/review-pr';
 import { createOsStrategy } from '../../os';
+import { scratchExportZipH, scratchSaveGithubH } from '../../scratch/handlers';
 import { getGuardrailPolicy, setGuardrailPolicy } from '../../agents/acp/guardrail-config';
 import { byoProviderName, looksLikeByoProviderBilling } from '../../agents/acp/failure-messages';
 import { AGENT_REGISTRY, isKnownAgentId, normalizeAgentId, PREVIEW_DETECT_PROMPT, USER_EVENTS, type PreviewDetection, type PreviewOrigin } from '@codeam/shared';
@@ -2372,6 +2373,27 @@ const guardrailConfigureH: CommandHandler = async (ctx, cmd) => {
   await ctx.relay.sendResult(cmd.id, 'completed', { policy: getGuardrailPolicy() });
 };
 
+/**
+ * Thin adapters onto the agent-agnostic scratch handlers (`src/scratch/
+ * handlers.ts`), shared verbatim with the ACP dispatch table
+ * (`agents/acp/command-handlers.ts`). Both `scratch_export_zip` and
+ * `scratch_save_github` only need `{cmd, relay, opts}` — never the PTY
+ * fields (`outputSvc`/`agent`/…) — so this is a plain literal, not a cast.
+ */
+const scratchExportZip: CommandHandler = (ctx, cmd) =>
+  scratchExportZipH({
+    cmd,
+    relay: ctx.relay,
+    opts: { sessionId: ctx.sessionId, pluginId: ctx.pluginId, pluginAuthToken: ctx.pluginAuthToken },
+  });
+
+const scratchSaveGithub: CommandHandler = (ctx, cmd) =>
+  scratchSaveGithubH({
+    cmd,
+    relay: ctx.relay,
+    opts: { sessionId: ctx.sessionId, pluginId: ctx.pluginId, pluginAuthToken: ctx.pluginAuthToken },
+  });
+
 export const handlers: Record<string, CommandHandler> = {
   start_task: startTask,
   provide_input: provideInput,
@@ -2424,6 +2446,8 @@ export const handlers: Record<string, CommandHandler> = {
   beads_configure: beadsConfigureH,
   guardrail_configure: guardrailConfigureH,
   cli_self_update: cliSelfUpdateH(),
+  scratch_export_zip: scratchExportZip,
+  scratch_save_github: scratchSaveGithub,
 };
 
 /**

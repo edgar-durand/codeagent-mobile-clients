@@ -1,6 +1,7 @@
 import * as http from 'http';
 import * as net from 'net';
 import type { AddressInfo } from 'net';
+import { handleExportRequest } from '../../scratch/export-registry';
 
 /**
  * El proxy del inspector: se pone entre `cloudflared` y el dev server del
@@ -178,6 +179,7 @@ export async function startInspectorProxy(
   const upgraded = new Set<import('stream').Duplex>();
 
   const server = http.createServer((req, res) => {
+    if (handleExportRequest(req, res)) return;
     const one = (v: string | string[] | undefined) => (Array.isArray(v) ? v[0] : v);
     const inject = isNavigation({
       accept: one(req.headers.accept),

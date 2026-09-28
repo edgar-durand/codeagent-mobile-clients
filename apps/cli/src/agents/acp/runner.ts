@@ -112,6 +112,7 @@ import { FileWatcherService } from '../../services/file-watcher.service';
 import { TurnFileAggregator } from '../../services/turn-files/turn-file-aggregator';
 import type { StartedBeads } from '../../beads';
 import { withTimeout } from './withTimeout';
+import { reapPreviewsAndExportTunnel } from '../../commands/start/shutdown-tunnels';
 import {
   AUTH_FAILURE_MESSAGE,
   adapterExitMessage,
@@ -1420,6 +1421,9 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
           })(),
           5_000,
         );
+        // Bounded reap of previews + the scratch-export tunnel: an orphaned
+        // cloudflared would keep a connector on the box's named tunnel.
+        await reapPreviewsAndExportTunnel();
         // Clean exit for a user-initiated shutdown; failure code otherwise.
         process.exit(benign ? 0 : 1);
       })();
@@ -2142,6 +2146,8 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
     turnFiles.stop();
     closeAllTerminals();
     await client.stop();
+    // Bounded reap of previews + the scratch-export tunnel (see above).
+    await reapPreviewsAndExportTunnel();
     process.exit(0);
   };
   process.once('SIGINT', () => void shutdown('SIGINT'));

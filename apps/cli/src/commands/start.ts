@@ -27,7 +27,6 @@ import { registerTerminalHandlers, closeAllTerminals } from '../services/termina
 import { killActiveSpawnAndCaptureChildren } from '../services/spawn-and-capture';
 import {
   activePreviewSessionIds,
-  killAllPreviews,
   provisionProjectDependencies,
   noteProvisionOutcome,
 } from '../services/preview';
@@ -48,6 +47,11 @@ import {
   isHouseProxyEnv,
   houseRailWireId,
 } from './host/house-proxy-config';
+import { isScratchWorkspace } from '../scratch/workspace';
+import { deployIdFromWorkspace } from './host/workspace';
+import { registerScratchProject } from '../scratch/api';
+import { purgeExports } from '../scratch/export-registry';
+import { reapPreviewsAndExportTunnel } from './start/shutdown-tunnels';
 import { mergeWithLocalMcpServers } from '../services/local-mcp-servers';
 import { provisionSkillsForStart } from '../skills/provision';
 import type { StartedBeads } from '../beads';
@@ -264,6 +268,9 @@ export async function start(
       log.info('claude', `removed retired Headroom config: ${cleaned.removed.join(', ')}`);
     }
   }
+  // Scratch ZIP exports from a previous run are unreachable: their one-shot
+  // tokens lived in that process's memory.
+  purgeExports();
   const beadsReady = provisionBeadsForStart({
     sessionId: session.id,
     pluginId,
@@ -324,8 +331,14 @@ export async function start(
       pluginAuthToken: session.pluginAuthToken ?? undefined,
       pollSecret: session.pollSecret,
       preview: previewBridge,
+      scratch: isScratchWorkspace(process.cwd()),
     }),
   );
+
+  if (isScratchWorkspace(process.cwd())) {
+    const deployId = deployIdFromWorkspace(process.cwd());
+    if (deployId) void registerScratchProject({ sessionId: session.id, pluginId, pluginAuthToken: session.pluginAuthToken }, deployId);
+  }
 
   // Agent Skills — materialize any curated SKILL.md the deploy attached
   // (~/.codeam/skills.json) under $HOME before the agent spawns. Claude
@@ -763,6 +776,10 @@ export async function start(
         // `claude -p` / `codex exec` headless children so they
         // don't survive the parent's hard `process.exit`.
         killActiveSpawnAndCaptureChildren();
+        // Same awaited reap as sigintHandler: an orphaned export cloudflared
+        // would keep a connector on the box's named tunnel and break the
+        // next preview.
+        await reapPreviewsAndExportTunnel();
         process.exit(code);
       },
     },
@@ -884,12 +901,7 @@ export async function start(
     // PreviewTab returns to idle without waiting for the 1 h Redis
     // TTL to expire. Both awaited — process.exit waits for them.
     const previewSessionIds = activePreviewSessionIds();
-    try {
-      await killAllPreviews();
-    } catch {
-      // best-effort — the SIGKILL safety timer inside killPreview
-      // still fires regardless of any await rejection here.
-    }
+    await reapPreviewsAndExportTunnel();
     const previewAuthToken = session?.pluginAuthToken;
     if (previewAuthToken && previewSessionIds.length > 0) {
       await Promise.allSettled(

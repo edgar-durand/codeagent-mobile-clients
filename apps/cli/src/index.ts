@@ -14,6 +14,7 @@ import { doctor } from './commands/doctor';
 import { completion } from './commands/completion';
 import { mcpRun } from './integrations/mcp-run';
 import { previewMcp } from './commands/preview-mcp';
+import { scratchMcp } from './commands/scratch-mcp';
 import { loadMcpSecrets } from './integrations/mcp-secrets';
 import { mcpWarm } from './integrations/mcp-warm';
 import { mcpRouter } from './integrations/mcp-router';
@@ -162,7 +163,12 @@ async function main(): Promise<void> {
   // derived from `Object.keys(commands)`, see below).
   // The MCP shims read their credentials from the owner-only secrets file
   // named in their env (codeagent-5bew) — load it before any of them runs.
-  if (command === 'mcp-run' || command === 'mcp-router' || command === 'preview-mcp') {
+  if (
+    command === 'mcp-run' ||
+    command === 'mcp-router' ||
+    command === 'preview-mcp' ||
+    command === 'scratch-mcp'
+  ) {
     loadMcpSecrets();
   }
 
@@ -175,6 +181,13 @@ async function main(): Promise<void> {
   // a human; hidden for the same reason as `mcp-run`.
   if (command === 'preview-mcp') {
     return previewMcp();
+  }
+
+  // `codeam scratch-mcp` — the from-scratch session's save-prompt tool
+  // (suggest_save_project). Launched by the agent's MCP config, never typed
+  // by a human; hidden for the same reason as `mcp-run`.
+  if (command === 'scratch-mcp') {
+    return scratchMcp();
   }
 
   // `codeam mcp-warm [id…]` — pre-fetch the integration MCP server packages so

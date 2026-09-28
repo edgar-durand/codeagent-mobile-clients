@@ -51,6 +51,9 @@ import { persistIntegrationsManifest, readIntegrationsManifest } from '../../int
 import { buildMcpServersForStart } from '../../integrations/provision';
 import { mergeWithLocalMcpServers } from '../../services/local-mcp-servers';
 import { agentPreviewBridge } from '../../commands/start/agent-preview-bridge';
+import { reapPreviewsAndExportTunnel } from '../../commands/start/shutdown-tunnels';
+import { isScratchWorkspace } from '../../scratch/workspace';
+import { scratchExportZipH, scratchSaveGithubH } from '../../scratch/handlers';
 import { detectRepoStack } from '../../integrations/detect-stack';
 import {
   SQUAD_CONFIGURE_COMMAND,
@@ -1795,6 +1798,9 @@ async function sessionShutdownH(ctx: AcpCommandContext): Promise<void> {
   await stopRelayWithGoodbye(relay);
   closeAllTerminals();
   await client.stop();
+  // Bounded reap of previews + the scratch-export tunnel: an orphaned
+  // cloudflared would keep a connector on the box's named tunnel.
+  await reapPreviewsAndExportTunnel();
   process.exit(0);
   // NOTE: the original switch case had a trailing `return;` here — dead code
   // (process.exit never returns), flagged by TS as "Unreachable code
@@ -1952,6 +1958,7 @@ async function integrationsSyncH(ctx: AcpCommandContext): Promise<void> {
         pluginAuthToken: opts.pluginAuthToken,
         pollSecret: opts.pollSecret,
         preview: agentPreviewBridge.address(),
+        scratch: isScratchWorkspace(process.cwd()),
       }),
     );
     const applied = await client.reprovisionMcp(servers);
@@ -2061,6 +2068,8 @@ export const ACP_COMMAND_HANDLERS: Record<string, AcpCommandHandler> = {
   pack_status: packStatusH,
   [SQUAD_CONFIGURE_COMMAND]: squadConfigureH,
   [SQUAD_STATS_COMMAND]: squadStatsH,
+  scratch_export_zip: scratchExportZipH,
+  scratch_save_github: scratchSaveGithubH,
 };
 
 /**

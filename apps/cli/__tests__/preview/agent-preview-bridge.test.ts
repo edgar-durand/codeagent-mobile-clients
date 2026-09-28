@@ -12,10 +12,11 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-const { mockPost, mockResolve, mockStart } = vi.hoisted(() => ({
+const { mockPost, mockResolve, mockStart, mockScratchOffer } = vi.hoisted(() => ({
   mockPost: vi.fn().mockResolvedValue({ ok: true }),
   mockResolve: vi.fn(),
   mockStart: vi.fn(),
+  mockScratchOffer: vi.fn().mockResolvedValue(true),
 }));
 
 vi.mock('../../src/services/pairing.service', () => ({ postPreviewEvent: mockPost }));
@@ -23,6 +24,7 @@ vi.mock('../../src/commands/start/handlers', () => ({
   resolvePreviewDetection: mockResolve,
   startPreviewFromDetection: mockStart,
 }));
+vi.mock('../../src/scratch/api', () => ({ postScratchOffer: mockScratchOffer }));
 
 import { activePreviews, type ActivePreview } from '../../src/services/preview';
 import { AgentPreviewBridge } from '../../src/commands/start/agent-preview-bridge';
@@ -72,6 +74,7 @@ beforeEach(() => {
   mockPost.mockClear();
   mockResolve.mockReset();
   mockStart.mockReset();
+  mockScratchOffer.mockReset().mockResolvedValue(true);
   activePreviews.clear();
   bridge = new AgentPreviewBridge();
 });
@@ -244,5 +247,35 @@ describe('loopback transport', () => {
     expect(ok.status).toBe(200);
     expect(await ok.json()).toEqual({ status: 'idle' });
     expect(bridge.address()).toEqual(addr);
+  });
+});
+
+describe('scratch save-offer route', () => {
+  it('with the right bearer, calls the injected offer poster once and answers offered:true', async () => {
+    attach(bridge);
+    const addr = await bridge.listen();
+    const res = await fetch(`${addr!.url}/scratch/save-offer`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${addr!.token}` },
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ offered: true });
+    expect(mockScratchOffer).toHaveBeenCalledTimes(1);
+    expect(mockScratchOffer).toHaveBeenCalledWith({
+      sessionId: SESSION,
+      pluginId: 'plug-1',
+      pluginAuthToken: 'tok',
+    });
+  });
+
+  it('rejects a wrong bearer with 401 and never calls the poster', async () => {
+    attach(bridge);
+    const addr = await bridge.listen();
+    const res = await fetch(`${addr!.url}/scratch/save-offer`, {
+      method: 'POST',
+      headers: { authorization: 'Bearer nope' },
+    });
+    expect(res.status).toBe(401);
+    expect(mockScratchOffer).not.toHaveBeenCalled();
   });
 });
