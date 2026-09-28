@@ -83,15 +83,27 @@ describe('ensureExportBaseUrl', () => {
     expect(status).toBe(404);
   });
 
-  it('a preview WITHOUT the inspector proxy is not reused', async () => {
+  it('a preview holding a tunnel WITHOUT the inspector proxy blocks a second connector', async () => {
     activePreviews.set(ctx.sessionId, {
       tunnel: fakeChild(),
       inspector: null,
       url: 'https://preview-x.codeagent-mobile.com',
     } as unknown as ActivePreview);
-    vi.mocked(resolveNamedTunnel).mockResolvedValue(null);
+    vi.mocked(resolveNamedTunnel).mockResolvedValue({ token: 'T', hostname: 'h.example' });
     await expect(ensureExportBaseUrl(ctx)).rejects.toThrow('EXPORT_TUNNEL_UNAVAILABLE');
-    expect(resolveNamedTunnel).toHaveBeenCalledTimes(1);
+    expect(spawnNamedTunnel).not.toHaveBeenCalled();
+    expect(resolveNamedTunnel).not.toHaveBeenCalled();
+  });
+
+  it("another session's inspector-less preview tunnel also blocks a second connector", async () => {
+    activePreviews.set('other-session', {
+      tunnel: fakeChild(),
+      inspector: null,
+      url: 'https://preview-y.codeagent-mobile.com',
+    } as unknown as ActivePreview);
+    vi.mocked(resolveNamedTunnel).mockResolvedValue({ token: 'T', hostname: 'h.example' });
+    await expect(ensureExportBaseUrl(ctx)).rejects.toThrow('EXPORT_TUNNEL_UNAVAILABLE');
+    expect(spawnNamedTunnel).not.toHaveBeenCalled();
   });
 
   it('rejects EXPORT_TUNNEL_UNAVAILABLE when no named tunnel can be resolved', async () => {
@@ -138,5 +150,85 @@ describe('ensureExportBaseUrl', () => {
     await stopExportTunnel();
     expect(child.kill).toHaveBeenCalledWith('SIGTERM');
     await expect(stopExportTunnel()).resolves.toBeUndefined();
+  });
+
+  it('two concurrent calls share one setup: one spawn, same base URL', async () => {
+    const child = fakeChild();
+    let register!: () => void;
+    vi.mocked(resolveNamedTunnel).mockResolvedValue({ token: 'T', hostname: 'h.example' });
+    vi.mocked(spawnNamedTunnel).mockResolvedValue(child as never);
+    vi.mocked(awaitTunnelRegistered).mockImplementation(
+      () => new Promise((r) => (register = () => r({ kind: 'registered', url: 'https://h.example' }))),
+    );
+    const a = ensureExportBaseUrl(ctx);
+    const b = ensureExportBaseUrl(ctx);
+    await vi.waitFor(() => expect(awaitTunnelRegistered).toHaveBeenCalled());
+    register();
+    const [ra, rb] = await Promise.all([a, b]);
+    expect(spawnNamedTunnel).toHaveBeenCalledTimes(1);
+    expect(ra.baseUrl).toBe('https://h.example');
+    expect(rb.baseUrl).toBe('https://h.example');
+    // Shared: the connector survives until the LAST handle is released.
+    ra.release();
+    expect(child.kill).not.toHaveBeenCalled();
+    rb.release();
+    await vi.waitFor(() => expect(child.kill).toHaveBeenCalledWith('SIGTERM'));
+  });
+
+  it('stop during a pending setup kills the late connector; later calls start fresh', async () => {
+    const child1 = fakeChild();
+    const child2 = fakeChild();
+    let register!: () => void;
+    vi.mocked(resolveNamedTunnel).mockResolvedValue({ token: 'T', hostname: 'h.example' });
+    vi.mocked(spawnNamedTunnel).mockResolvedValueOnce(child1 as never).mockResolvedValueOnce(child2 as never);
+    vi.mocked(awaitTunnelRegistered)
+      .mockImplementationOnce(
+        () => new Promise((r) => (register = () => r({ kind: 'registered', url: 'https://h.example' }))),
+      )
+      .mockResolvedValueOnce({ kind: 'registered', url: 'https://h.example' });
+
+    const first = ensureExportBaseUrl(ctx);
+    await vi.waitFor(() => expect(awaitTunnelRegistered).toHaveBeenCalledTimes(1));
+    let stopped = false;
+    const stop = stopExportTunnel().then(() => (stopped = true));
+    await new Promise((r) => setTimeout(r, 20));
+    expect(stopped).toBe(false); // stop waits for the in-flight setup
+    register();
+    await stop;
+    expect(child1.kill).toHaveBeenCalledWith('SIGTERM');
+    await expect(first).rejects.toThrow('EXPORT_TUNNEL_UNAVAILABLE');
+
+    const second = await ensureExportBaseUrl(ctx);
+    expect(spawnNamedTunnel).toHaveBeenCalledTimes(2);
+    expect(second.baseUrl).toBe('https://h.example');
+    expect(child2.kill).not.toHaveBeenCalled();
+  });
+
+  it('a stale release from a stopped S1 does not tear down a new S2, and release is idempotent', async () => {
+    const child1 = fakeChild();
+    const child2 = fakeChild();
+    vi.mocked(resolveNamedTunnel).mockResolvedValue({ token: 'T', hostname: 'h.example' });
+    vi.mocked(spawnNamedTunnel).mockResolvedValueOnce(child1 as never).mockResolvedValueOnce(child2 as never);
+    vi.mocked(awaitTunnelRegistered).mockResolvedValue({ kind: 'registered', url: 'https://h.example' });
+
+    const s1 = await ensureExportBaseUrl(ctx);
+    await stopExportTunnel();
+    expect(child1.kill).toHaveBeenCalledTimes(1);
+
+    const s2a = await ensureExportBaseUrl(ctx);
+    const s2b = await ensureExportBaseUrl(ctx);
+    expect(spawnNamedTunnel).toHaveBeenCalledTimes(2);
+
+    s1.release();
+    s1.release();
+    // Double release of ONE handle must not drop the other handle's hold.
+    s2a.release();
+    s2a.release();
+    await new Promise((r) => setTimeout(r, 20));
+    expect(child2.kill).not.toHaveBeenCalled();
+    expect(child1.kill).toHaveBeenCalledTimes(1);
+
+    s2b.release();
+    await vi.waitFor(() => expect(child2.kill).toHaveBeenCalledWith('SIGTERM'));
   });
 });
