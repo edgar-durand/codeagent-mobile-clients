@@ -4,6 +4,31 @@ All notable changes to the CodeAgent Mobile VS Code extension are documented her
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.76.1] — 2026-09-28
+
+### Added
+
+- **cli:** Host-agent scratch deploy creates a git-initialised project
+- **cli:** Register scratch projects with the backend
+- **cli:** Suggest_save_project tool for scratch sessions
+- **cli:** Gitignore-aware scratch export list and zip
+- **cli:** One-shot scratch export served over the box tunnel
+- **cli:** Scratch save-to-github and export-zip command handlers
+
+### Fixed
+
+- **cli:** One export connector per named tunnel, race-free setup and bound release
+- **cli:** Validate GitHub token, scope its env, single-ack, TTL races
+- **cli:** Never export credentials or symlinks; hookless push; scratch-only save; per-pid exports
+- **cli:** Stop preview and export tunnels when the agent exits on its own
+- **cli:** Stop preview and export tunnels on every ACP session exit
+- **cli:** Push via env-scoped auth header, never a credential helper
+- **cli:** Push saves from a clean bare copy the agent never touched
+- **cli:** Isolate the save clone from global and template git config
+- **cli:** Host-agent keeps the machine awake while it serves (self-hosted on a laptop)
+- **cli:** Release keep-awake before host-agent self-heal exit
+- **cli:** Make windows-only failing tests portable (homedir, gitconfig, socket) (#868)
+
 ## [2.76.0] — 2026-09-28
 
 ### Added
