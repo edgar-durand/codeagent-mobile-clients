@@ -28,6 +28,7 @@ import {
   SELF_UPDATE_DEFER_MAX_MS,
   resolveHostIdentity,
   defaultOnIdentityRejected,
+  isContainerEnvironment,
   type ChildSpawner,
   detectPackageManager,
   RESUME_RETRY_BACKOFF_MS,
@@ -2191,6 +2192,44 @@ describe('HostAgentSupervisor — self-heal on rejected host-token', () => {
     expect(onIdentityRejected).toHaveBeenCalledTimes(1);
   });
 
+  // Fix round 1: on a heartbeat-rejected self-heal, `stop()` (which releases
+  // keep-awake) must run BEFORE `onIdentityRejected()` (which by default
+  // process.exit()s) — mirroring the self_hosted_wipe handler's ordering —
+  // so the release is deterministic instead of depending on process-exit
+  // timing.
+  it('releases keep-awake BEFORE the identity-rejected hook fires (401 heartbeat)', async () => {
+    sealIdentity();
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 401,
+      statusText: 'Unauthorized',
+      json: async () => ({ success: false, error: { code: 'BAD_TOKEN' } }),
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const callOrder: string[] = [];
+    const releaseFn = vi.fn(() => callOrder.push('released'));
+    const keepAwake = vi.fn(() => releaseFn);
+    const onIdentityRejected = vi.fn(() => callOrder.push('identity-rejected'));
+    const isContainerEnv = vi.fn(() => false);
+
+    const sup = new HostAgentSupervisor(IDENTITY, {
+      makeRelay: () => ({ start: vi.fn(), stop: vi.fn(), sendResult: vi.fn() }),
+      onIdentityRejected,
+      keepAwake,
+      isContainerEnv,
+    });
+    sup.start();
+    await flushBeat();
+
+    expect(callOrder).toEqual(['released', 'identity-rejected']);
+    expect(releaseFn).toHaveBeenCalledTimes(1);
+
+    // Idempotent: a follow-up stop() (e.g. test teardown) must not release twice.
+    sup.stop();
+    expect(releaseFn).toHaveBeenCalledTimes(1);
+  });
+
   it('does NOT self-heal on a transient network error (keeps retrying)', async () => {
     sealIdentity();
     // A raw network failure (fetch rejects) — NOT an auth rejection.
@@ -3968,11 +4007,9 @@ describe('HostAgentSupervisor — keep-awake (self-hosted can be the user\'s own
     sup.stop();
   });
 
-  it('still calls the underlying keep-awake gate, which itself honors CODEAM_NO_KEEP_AWAKE=1', () => {
-    // host-agent doesn't special-case the opt-out itself — it delegates to
-    // keepDeviceAwake(), which already no-ops on this env var. Prove the real
-    // (non-injected) keepAwake is wired through by NOT injecting it and
-    // asserting no assertion-holder process gets spawned.
+  it('honors CODEAM_NO_KEEP_AWAKE=1 (real, non-injected keepDeviceAwake — no assertion-holder spawned)', () => {
+    // keepDeviceAwake() itself already no-ops on this env var; prove the real
+    // (non-injected) keepAwake is wired through and nothing throws.
     delete process.env.CODESPACES;
     process.env.CODEAM_NO_KEEP_AWAKE = '1';
     stubFetch();
@@ -3983,5 +4020,72 @@ describe('HostAgentSupervisor — keep-awake (self-hosted can be the user\'s own
     });
     expect(() => sup.start()).not.toThrow();
     expect(() => sup.stop()).not.toThrow();
+  });
+
+  // Fix round 1 (minor #3): host-agent also checks CODEAM_NO_KEEP_AWAKE=1 at
+  // its OWN call site (belt-and-suspenders with keepDeviceAwake's internal
+  // check) so the opt-out gets the same one-line skip log as the codespace /
+  // container cases, instead of silently no-op-ing three layers down.
+  it('short-circuits BEFORE calling keepAwake when CODEAM_NO_KEEP_AWAKE=1 (logged skip)', () => {
+    delete process.env.CODESPACES;
+    process.env.CODEAM_NO_KEEP_AWAKE = '1';
+    stubFetch();
+    const keepAwake = vi.fn(() => vi.fn());
+    const isContainerEnv = vi.fn(() => false);
+    const logSpy = vi.spyOn(log, 'info');
+    const sup = new HostAgentSupervisor(IDENTITY, {
+      makeRelay: () => ({ start: vi.fn(), stop: vi.fn(), sendResult: vi.fn() }),
+      keepAwake,
+      isContainerEnv,
+    });
+    sup.start();
+    expect(keepAwake).not.toHaveBeenCalled();
+    expect(logSpy).toHaveBeenCalledWith('keep-awake', expect.stringContaining('CODEAM_NO_KEEP_AWAKE=1'));
+    sup.stop();
+  });
+});
+
+// Fix round 1 (minor #2): isContainerEnvironment() pure-function coverage —
+// injected fs fns so no test touches the real filesystem.
+describe('isContainerEnvironment — /.dockerenv + cgroup probes (fleet Box detection)', () => {
+  it('true when /.dockerenv exists', () => {
+    const existsSyncFn = vi.fn((p: string) => p === '/.dockerenv');
+    const readFileSyncFn = vi.fn((): string => {
+      throw new Error('cgroup should not be read once /.dockerenv already matched');
+    });
+    expect(isContainerEnvironment(existsSyncFn, readFileSyncFn)).toBe(true);
+  });
+
+  it.each(['docker', 'containerd', 'kubepods'])(
+    'true when /proc/1/cgroup mentions %s',
+    (marker) => {
+      const existsSyncFn = vi.fn(() => false);
+      const readFileSyncFn = vi.fn(() => `0::/${marker}/0123456789abcdef`);
+      expect(isContainerEnvironment(existsSyncFn, readFileSyncFn)).toBe(true);
+    },
+  );
+
+  it('false when neither /.dockerenv nor a container cgroup is present', () => {
+    const existsSyncFn = vi.fn(() => false);
+    const readFileSyncFn = vi.fn(() => '0::/user.slice/user-1000.slice/session-1.scope');
+    expect(isContainerEnvironment(existsSyncFn, readFileSyncFn)).toBe(false);
+  });
+
+  it('false on a read error (e.g. macOS/Windows — no /proc at all)', () => {
+    const existsSyncFn = vi.fn(() => false);
+    const readFileSyncFn = vi.fn((): string => {
+      throw new Error('ENOENT: no such file or directory, open \'/proc/1/cgroup\'');
+    });
+    expect(isContainerEnvironment(existsSyncFn, readFileSyncFn)).toBe(false);
+  });
+
+  it('false when even the /.dockerenv existsSync probe itself throws', () => {
+    const existsSyncFn = vi.fn((): boolean => {
+      throw new Error('EACCES');
+    });
+    const readFileSyncFn = vi.fn((): string => {
+      throw new Error('ENOENT');
+    });
+    expect(isContainerEnvironment(existsSyncFn, readFileSyncFn)).toBe(false);
   });
 });

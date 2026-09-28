@@ -1226,14 +1226,17 @@ export class HostAgentSupervisor {
     // pair-auto children (isLocalSession() is false under
     // CODEAM_AUTO_TOKEN/CODEAM_ENROLL_TOKEN), so without this an idle laptop
     // sleeps and the self-hosted server stops answering. Skip on a codespace
-    // (ephemeral cloud VM — no physical sleep to prevent) and inside a
-    // container (the CodeAgent Box fleet — the container's own stop/start
-    // lifecycle governs uptime); `CODEAM_NO_KEEP_AWAKE=1` still opts out
-    // (honored inside keepDeviceAwake itself).
+    // (ephemeral cloud VM — no physical sleep to prevent), inside a container
+    // (the CodeAgent Box fleet — the container's own stop/start lifecycle
+    // governs uptime), or when opted out via `CODEAM_NO_KEEP_AWAKE=1`
+    // (keepDeviceAwake() honors that env var itself too — checking it here as
+    // well just gets it the same one-line skip log as the other two cases).
     if (process.env.CODESPACES === 'true') {
       log.info('keep-awake', 'skipped (codespace — no physical sleep to prevent)');
     } else if (this.isContainerEnv()) {
       log.info('keep-awake', 'skipped (containerized host-agent — container lifecycle governs uptime)');
+    } else if (process.env.CODEAM_NO_KEEP_AWAKE === '1') {
+      log.info('keep-awake', 'skipped (CODEAM_NO_KEEP_AWAKE=1)');
     } else {
       this.releaseKeepAwake = this.keepAwakeFn({ isLocal: true, pid: process.pid });
     }
@@ -1401,6 +1404,14 @@ export class HostAgentSupervisor {
         if (!this.healing) {
           this.healing = true;
           log.warn('host-agent', 'heartbeat rejected — host deleted/revoked, self-healing', err);
+          // Explicit release before the identity-rejected hook (which by
+          // default process.exit()s) — mirrors the self_hosted_wipe handler
+          // below. Every keepAwakeCommand form (caffeinate -w / systemd-inhibit
+          // tail --pid= / the PowerShell WaitForExit script) already watches
+          // THIS pid and self-releases when it dies, so this is belt-and-
+          // suspenders, not a leak fix — but it makes the release deterministic
+          // instead of depending on process teardown timing.
+          this.stop();
           this.onIdentityRejected();
         }
         return;
