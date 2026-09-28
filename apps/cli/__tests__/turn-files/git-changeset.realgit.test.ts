@@ -45,10 +45,14 @@ describe('collectRepoChangeset on a real repo', () => {
   it('never reports beads state or a unix socket', async () => {
     fs.mkdirSync(path.join(repo, '.beads'));
     fs.writeFileSync(path.join(repo, '.beads', 'issues.jsonl'), '{}\n');
-    fs.mkdirSync(path.join(repo, 'cc-socks'));
-    const sock = path.join(repo, 'cc-socks', '1522.sock');
-    server = net.createServer();
-    await new Promise<void>((r) => server!.listen(sock, () => r()));
+    // Node listens on a named pipe on Windows, never a socket file in the
+    // tree, so the socket half only exists (and only matters) on POSIX.
+    if (process.platform !== 'win32') {
+      fs.mkdirSync(path.join(repo, 'cc-socks'));
+      const sock = path.join(repo, 'cc-socks', '1522.sock');
+      server = net.createServer();
+      await new Promise<void>((r) => server!.listen(sock, () => r()));
+    }
     fs.writeFileSync(path.join(repo, 'real.ts'), 'x\n');
     const paths = ((await collectRepoChangeset({ repoRoot: repo, repoPath: '.', repoName: 'r' })) ?? []).map(
       (r) => r.filePath,

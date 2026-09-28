@@ -272,12 +272,17 @@ describe('export registry', () => {
   function withHome(fn: (home: string) => void): void {
     const home = fs.mkdtempSync(path.join(os.tmpdir(), 'codeam-home-'));
     tmpDirs.push(home);
-    const prevHome = process.env.HOME;
+    // os.homedir() reads USERPROFILE on Windows, HOME elsewhere.
+    const prev = { HOME: process.env.HOME, USERPROFILE: process.env.USERPROFILE };
     process.env.HOME = home;
+    process.env.USERPROFILE = home;
     try {
       fn(home);
     } finally {
-      process.env.HOME = prevHome;
+      for (const [k, v] of Object.entries(prev)) {
+        if (v === undefined) delete process.env[k];
+        else process.env[k] = v;
+      }
     }
   }
 

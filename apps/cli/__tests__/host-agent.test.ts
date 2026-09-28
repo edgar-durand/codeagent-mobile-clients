@@ -3709,14 +3709,18 @@ describe('HostAgentSupervisor — multi-session boot resume (codeagent-v07a)', (
 describe('HostAgentSupervisor — self_hosted_resume (on-demand)', () => {
   // A deploy workspace is `~/.codeam/self-hosted/<deployId>`; point HOME at a
   // throwaway root so the real home is never touched.
+  // os.homedir() reads USERPROFILE on Windows, HOME elsewhere.
   const fakeHome = path.join(os.tmpdir(), `codeam-resume-home-${process.pid}`);
-  const origHome = process.env.HOME;
+  const origEnv = { HOME: process.env.HOME, USERPROFILE: process.env.USERPROFILE };
   beforeEach(() => {
     process.env.HOME = fakeHome;
+    process.env.USERPROFILE = fakeHome;
   });
   afterEach(() => {
-    if (origHome !== undefined) process.env.HOME = origHome;
-    else delete process.env.HOME;
+    for (const [k, v] of Object.entries(origEnv)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
   });
   const workspace = (id: string): string => {
     const dir = path.join(fakeHome, '.codeam', 'self-hosted', id);
