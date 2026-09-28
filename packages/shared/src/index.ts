@@ -16,4 +16,5 @@ export * from './types/beads';
 export * from './types/agent-switch';
 export * from './types/agent-squad';
 export * from './types/events';
+export * from './types/scratch';
 export * from './preview-prompts';

@@ -147,6 +147,8 @@ export const USER_EVENTS = {
    *  publican: no dicen nada a quien los lee. El CLI no lo consume; vive aqui
    *  porque este fichero es la fuente del espejo que valida `shared-type-drift`. */
   AUTO_RECHARGE_BLOCKED: 'auto_recharge_blocked',
+  SCRATCH_SAVE_OFFER: 'scratch_save_offer',
+  SCRATCH_PROJECT_STATE: 'scratch_project_state',
 } as const;
 
 export type UserEventName = (typeof USER_EVENTS)[keyof typeof USER_EVENTS];
