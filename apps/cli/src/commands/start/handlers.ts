@@ -51,6 +51,7 @@ import { CoderabbitRuntimeStrategy } from '../../agents/coderabbit/runtime';
 import { reviewPullRequest, defaultRunGh } from '../../agents/coderabbit/review-pr';
 import { createOsStrategy } from '../../os';
 import { getGuardrailPolicy, setGuardrailPolicy } from '../../agents/acp/guardrail-config';
+import { byoProviderName, looksLikeByoProviderBilling } from '../../agents/acp/failure-messages';
 import { AGENT_REGISTRY, isKnownAgentId, normalizeAgentId, PREVIEW_DETECT_PROMPT, USER_EVENTS, type PreviewDetection, type PreviewOrigin } from '@codeam/shared';
 import * as previewSvc from '../../services/preview';
 import { runPreviewStart, type EmitPreviewEvent } from '../../services/preview/start-orchestrator';
@@ -71,6 +72,7 @@ import {
   listScriptCandidates,
   prewarmNodeDeps,
   describeOneShotAgentError,
+  previewProviderCreditsMessage,
   writePreviewConfig,
 } from '../../services/preview';
 import { log } from '../../services/logger';
@@ -1825,17 +1827,19 @@ async function runDetectOneShot(
   timeoutMs: number = PREVIEW_DETECT_TIMEOUT_MS,
 ): Promise<{ raw: string | null; timedOut: boolean; stderr: string }> {
   let timer: ReturnType<typeof setTimeout> | undefined;
-  // Bounded tail of the agent's stderr — the only place it says WHY it
-  // printed nothing (e.g. a 402 out-of-credits).
+  // Bounded tail of what the agent said when it FAILED — its stderr plus the
+  // stdout of a non-zero exit (`claude -p` prints `API Error: 402 …` on
+  // stdout). The only place it says WHY there is no answer.
   let stderr = '';
   const onStderr = (chunk: string): void => {
     stderr = (stderr + chunk).slice(-4_000);
   };
+  const onFailedOutput = (stdout: string): void => onStderr(`\n${stdout}`);
   const deadline = new Promise<{ raw: null; timedOut: true; stderr: string }>((resolve) => {
     timer = setTimeout(() => resolve({ raw: null, timedOut: true, stderr }), timeoutMs);
     timer.unref?.();
   });
-  const oneShot = generate(PREVIEW_DETECT_PROMPT, { timeoutMs, onStderr }).then(
+  const oneShot = generate(PREVIEW_DETECT_PROMPT, { timeoutMs, onStderr, onFailedOutput }).then(
     (raw) => ({ raw, timedOut: false as const, stderr }),
     (err: unknown) => {
       log.info('preview', `detect: generateOneShot threw: ${String(err)}`);
@@ -1938,6 +1942,17 @@ export async function resolvePreviewDetection(args: {
         (failure?.missing ? ` missing=${failure.missing.join(',')}` : '') +
         `\n--- salida cruda del agente (acotada) ---\n${failure?.rawExcerpt ?? ''}`,
     );
+    // The user's own provider is out of credits (OpenRouter 402 "requires
+    // more credits", web replay 2026-09-27). Say so, instead of blaming the
+    // project with a detection error. Same classifier as the chat bubble.
+    if (looksLikeByoProviderBilling(`${raw ?? ''}\n${stderr}`)) {
+      log.info('preview', 'detect: provider out of credits — emitting preview_error');
+      emit(USER_EVENTS.PREVIEW_ERROR, {
+        stage: 'detection',
+        message: previewProviderCreditsMessage(byoProviderName({ agent: runtime.id })),
+      });
+      return null;
+    }
     emit(USER_EVENTS.PREVIEW_ERROR, {
       stage: 'detection',
       // El mensaje sale del diagnostico: decir "JSON invalido" cuando el

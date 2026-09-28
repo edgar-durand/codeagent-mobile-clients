@@ -24,6 +24,7 @@ import { looksLike1mContextCreditsError } from './oneMContextRecovery';
 import { isHouseProxyEnv } from '../../commands/host/house-proxy-config';
 import { PROVIDER_BASE_URL_ENV_KEYS, redactUrlToOrigin } from '../../lib/provider-routing';
 import { agentHooks } from './agent-hooks';
+import { currentAgentEnv } from '../current-agent-env';
 // TYPE-only import: keeps this leaf module free of `backend-reports`' runtime
 // graph (which pulls the pairing service) — erased at compile time.
 import type { CredentialInvalidReason } from './backend-reports';
@@ -193,17 +194,37 @@ export function replyIsHouseAgentLimit(finalText: string): boolean {
 const BYO_PROVIDER_BILLING_RE =
   /(?:api error|http|status)[:\s]+402\b[^\n]{0,80}(?:insufficient (?:credits?|balance)|requires more credits)|\b402\b[^\n]{0,40}(?:insufficient (?:credits?|balance)|requires more credits)|insufficient (?:credits?|balance)[^\n]{0,40}\b402\b/i;
 
+// Wordings that name a provider's credit/quota exhaustion on their own, with
+// no status code needed (web replay 2026-09-27: OpenRouter's body reached the
+// chat without the `402` the matcher above requires). Each is a provider's
+// verbatim phrasing, never a generic word like "balance" or "quota" alone:
+//   - OpenRouter: "This request requires more credits, or fewer max_tokens…"
+//     and "Insufficient credits. Add more using https://openrouter.ai/…"
+//   - Anthropic API: "Your credit balance is too low to access the Anthropic
+//     API" (Claude Code prints "Credit balance is too low")
+//   - OpenAI: `insufficient_quota` / "You exceeded your current quota, please
+//     check your plan and billing details"
+const PROVIDER_CREDITS_PHRASE_RE =
+  /\brequires more credits\b|\binsufficient credits\.?\s+add more\b|\bcredit balance is too low\b|\binsufficient_quota\b|\bexceeded your current quota\b/i;
+
+// `env` defaults to the CURRENT agent's env, not the deploy-time process env:
+// after a house → BYO switch `process.env` still carries the house-proxy keys
+// (which would suppress this bubble) and lacks the switched-to base URL (which
+// would name the wrong provider). See agents/current-agent-env.ts.
 export function looksLikeByoProviderBilling(
   text: string,
-  env: NodeJS.ProcessEnv = process.env,
+  env: NodeJS.ProcessEnv = currentAgentEnv(),
 ): boolean {
-  return !isHouseProxyEnv(env) && BYO_PROVIDER_BILLING_RE.test(text);
+  return (
+    !isHouseProxyEnv(env) &&
+    (BYO_PROVIDER_BILLING_RE.test(text) || PROVIDER_CREDITS_PHRASE_RE.test(text))
+  );
 }
 
 /** The COMPLETED reply IS a BYO provider 402 (Claude streams it as plain text). */
 export function replyIsByoProviderBilling(
   finalText: string,
-  env: NodeJS.ProcessEnv = process.env,
+  env: NodeJS.ProcessEnv = currentAgentEnv(),
 ): boolean {
   const t = finalText.trim();
   return t.length > 0 && t.length <= 600 && looksLikeByoProviderBilling(t, env);
@@ -237,7 +258,7 @@ const AGENT_DEFAULT_PROVIDER: Partial<Record<string, string>> = {
  * it), else the agent's default vendor, else the plain word "provider".
  */
 export function byoProviderName(opts: { env?: NodeJS.ProcessEnv; agent?: string }): string {
-  const env = opts.env ?? process.env;
+  const env = opts.env ?? currentAgentEnv();
   for (const key of PROVIDER_BASE_URL_ENV_KEYS) {
     const origin = redactUrlToOrigin(env[key]);
     if (!origin || origin === 'invalid-url') continue;
@@ -267,7 +288,7 @@ export function completedReplyFailureBubble(opts: {
   agent: string;
   env?: NodeJS.ProcessEnv;
 }): string | null {
-  const env = opts.env ?? process.env;
+  const env = opts.env ?? currentAgentEnv();
   if (replyIsHouseAgentLimit(opts.finalText)) return houseAgentLimitMessage(opts.finalText);
   if (replyIsByoProviderBilling(opts.finalText, env)) {
     return byoProviderBillingMessage(byoProviderName({ env, agent: opts.agent }));
@@ -552,10 +573,10 @@ export function failureBubble(opts: {
   agent: string;
   /** Wire id of the managed/house rail, when running on it. See {@link agentStatusPage}. */
   railWireId?: string | null;
-  /** Env the agent was spawned with (defaults to process.env) — decides BYO vs house. */
+  /** Env the agent was spawned with (defaults to the current agent's env) — decides BYO vs house. */
   env?: NodeJS.ProcessEnv;
 }): string | null {
-  const env = opts.env ?? process.env;
+  const env = opts.env ?? currentAgentEnv();
   // House-proxy 403 (CodeAgent Cloud daily ceiling / temporarily unavailable)
   // FIRST — before auth. Claude wraps it as "Failed to authenticate. API Error:
   // 403 …", so without this it would fall into the auth branch, show the
