@@ -43,10 +43,22 @@ export async function saveToGithub(
     Accept: 'application/vnd.github+json',
     'User-Agent': 'codeam-cli',
   };
-  const env = { ...process.env, ...nonInteractiveGitEnv(), CODEAM_GH_TOKEN: input.token };
+  // The token is delivered ONLY to the push call's env — repo hooks run on
+  // `commit`/`add`, under the user's OWN process tree, and have no business
+  // seeing it.
+  const env = { ...process.env, ...nonInteractiveGitEnv() };
+  const pushEnv = { ...env, CODEAM_GH_TOKEN: input.token };
   const git = (...args: string[]) => exec('git', ['-C', cwd, ...args], { env });
 
-  const me = (await (await f(`${GH}/user`, { headers })).json()) as { login: string; id: number };
+  const meRes = await f(`${GH}/user`, { headers });
+  const meBody = (await meRes.json()) as { login?: unknown; id?: unknown };
+  if (!meRes.ok || typeof meBody.login !== 'string' || typeof meBody.id !== 'number') {
+    throw Object.assign(
+      new Error('GitHub rejected the token — reconnect GitHub and try again.'),
+      { code: 'SAVE_FAILED' },
+    );
+  }
+  const me = { login: meBody.login, id: meBody.id };
   await git('config', 'user.name', me.login);
   await git('config', 'user.email', `${me.id}+${me.login}@users.noreply.github.com`);
   const { stdout } = await git('status', '--porcelain');
@@ -91,7 +103,7 @@ export async function saveToGithub(
       'origin',
       'HEAD:main',
     ],
-    { env },
+    { env: pushEnv },
   ).catch((err) => {
     throw Object.assign(new Error(`Push failed: ${(err as Error).message.split('\n')[0]}`), {
       code: 'SAVE_FAILED',

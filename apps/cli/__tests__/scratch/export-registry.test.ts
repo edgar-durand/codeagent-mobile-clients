@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import http from 'node:http';
+import { Writable } from 'node:stream';
 import type { AddressInfo } from 'node:net';
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import {
@@ -58,6 +59,25 @@ function getAndAbort(p: string): Promise<void> {
       if (e.code !== 'ECONNRESET') reject(e);
     });
   });
+}
+
+/**
+ * A synthetic `http.ServerResponse` stand-in whose writes never complete
+ * until the test releases them — holds `handleExportRequest`'s pipe mid-flight
+ * deterministically (no real socket/timing race), so a fake-timer TTL
+ * advance can be tested against a genuinely in-flight transfer. `.destroy()`
+ * emits `close` without ever emitting `finish`, simulating an abort.
+ */
+class BlockableRes extends Writable {
+  statusCode = 200;
+  private pending: Array<(err?: Error) => void> = [];
+  writeHead(): void {}
+  override _write(_chunk: unknown, _enc: BufferEncoding, cb: (err?: Error) => void): void {
+    this.pending.push(cb);
+  }
+  releaseAll(): void {
+    while (this.pending.length) this.pending.shift()!();
+  }
 }
 
 async function waitFor(assertion: () => void, timeoutMs = 2000): Promise<void> {
@@ -129,6 +149,91 @@ describe('export registry', () => {
     expect(fs.existsSync(f)).toBe(false);
     expect((await get(`${EXPORT_PATH_PREFIX}${token}`)).status).toBe(404);
     expect(done).not.toHaveBeenCalled();
+  });
+
+  it('onExpire fires once at TTL for an unused export, and a caller-supplied release runs off it', async () => {
+    const f = writeTmp('zipbytes');
+    const done = vi.fn();
+    const release = vi.fn();
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    const { token } = registerExport(f, 8, done, release);
+    vi.advanceTimersByTime(EXPORT_TTL_MS + 1);
+    vi.useRealTimers();
+    expect(release).toHaveBeenCalledTimes(1);
+    expect(done).not.toHaveBeenCalled();
+    expect(fs.existsSync(f)).toBe(false);
+    expect((await get(`${EXPORT_PATH_PREFIX}${token}`)).status).toBe(404);
+
+    // Never fires twice — advancing further must not re-invoke it.
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    vi.advanceTimersByTime(EXPORT_TTL_MS * 2);
+    vi.useRealTimers();
+    expect(release).toHaveBeenCalledTimes(1);
+  });
+
+  it('a download in flight at TTL is not cut — the timer is a no-op while inFlight', async () => {
+    const f = writeTmp('zipbytes');
+    const done = vi.fn();
+    const onExpire = vi.fn();
+
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    const { token } = registerExport(f, 8, done, onExpire);
+
+    // Drive `handleExportRequest` directly against a response that never
+    // completes its write — deterministically holds the transfer `inFlight`
+    // with no real socket/timing race, so the fake-timer TTL advance below
+    // lands on a genuinely in-flight entry.
+    const res = new BlockableRes();
+    const handled = handleExportRequest(
+      { method: 'GET', url: `${EXPORT_PATH_PREFIX}${token}` } as http.IncomingMessage,
+      res as unknown as http.ServerResponse,
+    );
+    expect(handled).toBe(true);
+    expect(res.statusCode).toBe(200);
+
+    vi.advanceTimersByTime(EXPORT_TTL_MS + 1);
+    vi.useRealTimers();
+
+    // The TTL fired, but the entry was in flight — untouched. `finish`/
+    // `close` (exercised by the other tests in this file) own its lifecycle
+    // instead, not this timer.
+    expect(onExpire).not.toHaveBeenCalled();
+    expect(done).not.toHaveBeenCalled();
+    expect(fs.existsSync(f)).toBe(true);
+
+    res.releaseAll();
+  });
+
+  it('an interrupted (close-without-finish) transfer re-arms a short expiry instead of living forever', async () => {
+    const f = writeTmp('zipbytes');
+    const done = vi.fn();
+    const onExpire = vi.fn();
+
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    const { token } = registerExport(f, 8, done, onExpire);
+
+    const res = new BlockableRes();
+    handleExportRequest(
+      { method: 'GET', url: `${EXPORT_PATH_PREFIX}${token}` } as http.IncomingMessage,
+      res as unknown as http.ServerResponse,
+    );
+
+    // Abort mid-transfer: `close` fires WITHOUT `finish` ever having fired.
+    res.destroy();
+    await new Promise<void>((r) => res.on('close', r));
+    expect(fs.existsSync(f)).toBe(true);
+    expect(done).not.toHaveBeenCalled();
+    expect(onExpire).not.toHaveBeenCalled();
+
+    // The ORIGINAL 10-minute timer no longer governs this entry — it was
+    // replaced by a short (<=60s) re-arm. Advancing just past that re-arm
+    // (well short of the original TTL) is what proves the re-arm exists.
+    vi.advanceTimersByTime(60_000 + 1);
+    vi.useRealTimers();
+
+    expect(onExpire).toHaveBeenCalledTimes(1);
+    expect(done).not.toHaveBeenCalled();
+    expect(fs.existsSync(f)).toBe(false);
   });
 
   it('an interrupted transfer keeps the file so the user can retry', async () => {

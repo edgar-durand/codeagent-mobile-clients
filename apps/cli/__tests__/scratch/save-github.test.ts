@@ -119,6 +119,51 @@ describe('saveToGithub', () => {
     for (const call of gitCalls) {
       expect(call.args.join(' ')).not.toContain('gho_secret');
     }
+
+    // ONLY the push call's env carries the token — config/status/add/commit/
+    // remote run under the plain env, since a repo hook running on `commit`
+    // (or any other non-push call) has no business seeing it.
+    for (const call of gitCalls) {
+      if (call.args.includes('push')) continue;
+      expect(call.env.CODEAM_GH_TOKEN).toBeUndefined();
+    }
+    expect(gitCalls.filter((c) => c.env.CODEAM_GH_TOKEN === 'gho_secret')).toHaveLength(1);
+  });
+
+  it('a revoked/expired token (401 on GET /user) rejects SAVE_FAILED and makes NO git calls', async () => {
+    const gitCalls: GitCall[] = [];
+    const exec = makeExec(gitCalls);
+    const fetchImpl = vi.fn().mockResolvedValueOnce(ok({ message: 'Bad credentials' }, 401));
+
+    await expect(
+      saveToGithub(
+        '/tmp/fake-scratch-repo',
+        { repoName: 'landing', private: true, token: 'gho_revoked' },
+        { fetchImpl: fetchImpl as unknown as typeof fetch, exec },
+      ),
+    ).rejects.toMatchObject({
+      code: 'SAVE_FAILED',
+      message: 'GitHub rejected the token — reconnect GitHub and try again.',
+    });
+
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(gitCalls).toHaveLength(0);
+  });
+
+  it('a malformed 200 /user response (missing login/id) rejects SAVE_FAILED and makes NO git calls', async () => {
+    const gitCalls: GitCall[] = [];
+    const exec = makeExec(gitCalls);
+    const fetchImpl = vi.fn().mockResolvedValueOnce(ok({ login: 'me' })); // id missing
+
+    await expect(
+      saveToGithub(
+        '/tmp/fake-scratch-repo',
+        { repoName: 'landing', private: true, token: 'gho_secret' },
+        { fetchImpl: fetchImpl as unknown as typeof fetch, exec },
+      ),
+    ).rejects.toMatchObject({ code: 'SAVE_FAILED' });
+
+    expect(gitCalls).toHaveLength(0);
   });
 
   it('skips add/commit when there are no pending changes', async () => {

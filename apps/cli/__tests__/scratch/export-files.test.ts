@@ -103,6 +103,11 @@ describe('listExportFiles', () => {
     const rels = list.files.map((f) => f.rel);
     expect(rels).toContain('README.md');
   });
+
+  it('a non-git-repo cwd rejects with the exact English "not a git repository" text the scratch_export_zip handler pattern-matches', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'codeam-export-nogit-'));
+    await expect(listExportFiles(dir)).rejects.toThrow(/not a git repository/i);
+  });
 });
 
 describe('topPaths', () => {

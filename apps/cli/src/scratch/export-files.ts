@@ -31,7 +31,11 @@ export interface ExportList {
  * exists.
  */
 export async function listExportFiles(cwd: string): Promise<ExportList> {
-  const gitOpts = { env: nonInteractiveGitEnv(), maxBuffer: 256 * 1024 * 1024 };
+  // `LC_ALL=C` pins git's own messages (notably "fatal: not a git
+  // repository…") to English regardless of the host locale — the
+  // `scratch_export_zip` handler pattern-matches that exact string to
+  // answer a user-safe error instead of a generic build failure.
+  const gitOpts = { env: { ...nonInteractiveGitEnv(), LC_ALL: 'C' }, maxBuffer: 256 * 1024 * 1024 };
   // `-co --exclude-standard` lists tracked files (`-c`) UNION untracked
   // files not matched by .gitignore (`-o` + exclude-standard) — but `-c`
   // never applies exclude patterns, so a file that was force-added despite

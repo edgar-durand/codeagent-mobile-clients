@@ -40,6 +40,13 @@ export async function scratchExportZipH(ctx: ScratchHandlerCtx): Promise<void> {
   const { cmd, relay, opts } = ctx;
   const limit = (cmd.payload as { limitBytes?: number | null }).limitBytes ?? null;
   const cwd = process.cwd();
+
+  // Filled once the download is actually ready. Kept OUTSIDE every
+  // try/catch below so the final ack (after the block) can never be
+  // re-caught and mistaken for a build/tunnel failure — a rejected ack
+  // only means telling the caller failed, not that the download wasn't
+  // prepared, so it must never trigger a second, misleading `failed` ack.
+  let ready: { url: string; sizeBytes: number; expiresAt: string } | null = null;
   try {
     const list = await listExportFiles(cwd);
     if (limit !== null && list.totalBytes > limit) {
@@ -69,20 +76,25 @@ export async function scratchExportZipH(ctx: ScratchHandlerCtx): Promise<void> {
       },
       () => release(),
     );
+    // This inner try covers ONLY `ensureExportBaseUrl` — the one call that
+    // actually means "the tunnel isn't available". Nothing else is nested
+    // in here, so its `catch` can't misfire on an unrelated failure.
+    let base: { baseUrl: string; release: () => void };
     try {
-      const base = await ensureExportBaseUrl(scratchCtx);
-      release = base.release;
-      await relay.sendResult(cmd.id, 'completed', {
-        url: `${base.baseUrl}${EXPORT_PATH_PREFIX}${token}`,
-        sizeBytes: size,
-        expiresAt: expiresAt.toISOString(),
-      });
+      base = await ensureExportBaseUrl(scratchCtx);
     } catch {
       fs.rmSync(file, { force: true });
       await relay.sendResult(cmd.id, 'failed', {
         error: "Couldn't prepare the download — try again.",
       });
+      return;
     }
+    release = base.release;
+    ready = {
+      url: `${base.baseUrl}${EXPORT_PATH_PREFIX}${token}`,
+      sizeBytes: size,
+      expiresAt: expiresAt.toISOString(),
+    };
   } catch (err) {
     const message = (err as Error).message ?? '';
     if (/not a git repository/i.test(message)) {
@@ -92,7 +104,10 @@ export async function scratchExportZipH(ctx: ScratchHandlerCtx): Promise<void> {
       return;
     }
     await relay.sendResult(cmd.id, 'failed', { error: `Couldn't build the ZIP: ${message}` });
+    return;
   }
+
+  await relay.sendResult(cmd.id, 'completed', ready);
 }
 
 /**

@@ -17,11 +17,15 @@ interface Entry {
   timer: NodeJS.Timeout;
   inFlight: boolean;
   onComplete: () => void;
+  onExpire: () => void;
 }
 
 const entries = new Map<string, Entry>();
 
 export const EXPORT_TTL_MS = 600_000;
+/** Cap on the re-armed expiry after an interrupted (close-without-finish)
+ *  transfer — see {@link armExpiry}. */
+const RETRY_WINDOW_MS = 60_000;
 export const EXPORT_PATH_PREFIX = '/.codeam/export/';
 export const exportDir = (): string => path.join(os.homedir(), '.codeam', 'exports');
 
@@ -31,6 +35,24 @@ function drop(token: string): void {
   clearTimeout(e.timer);
   entries.delete(token);
   fs.rmSync(e.file, { force: true });
+}
+
+/**
+ * Arms (or re-arms) the timer that expires `token` after `ms`. A transfer
+ * that's actively streaming when this fires is NEVER cut — `finish`/`close`
+ * own that entry's lifecycle instead (drop-on-finish, or `close`'s own
+ * re-arm on an interrupted one). Returns the new timer so the caller can
+ * store it on the entry.
+ */
+function armExpiry(token: string, ms: number): NodeJS.Timeout {
+  const timer = setTimeout(() => {
+    const e = entries.get(token);
+    if (!e || e.inFlight) return;
+    drop(token);
+    e.onExpire();
+  }, ms);
+  timer.unref();
+  return timer;
 }
 
 export function registerExport(
@@ -48,12 +70,16 @@ export function registerExport(
 ): { token: string; expiresAt: Date } {
   const token = randomBytes(24).toString('hex');
   const expiresAt = Date.now() + EXPORT_TTL_MS;
-  const timer = setTimeout(() => {
-    drop(token);
-    onExpire();
-  }, EXPORT_TTL_MS);
-  timer.unref();
-  entries.set(token, { file, size: sizeBytes, expiresAt, timer, inFlight: false, onComplete });
+  const timer = armExpiry(token, EXPORT_TTL_MS);
+  entries.set(token, {
+    file,
+    size: sizeBytes,
+    expiresAt,
+    timer,
+    inFlight: false,
+    onComplete,
+    onExpire,
+  });
   return { token, expiresAt: new Date(expiresAt) };
 }
 
@@ -90,6 +116,14 @@ export function handleExportRequest(req: http.IncomingMessage, res: http.ServerR
     if (!res.writableFinished) {
       e.inFlight = false;
       stream.destroy();
+      // The TTL timer armed at register time may have already fired while
+      // this transfer was in flight (skipped a no-op, per `armExpiry`) — an
+      // interrupted transfer needs its OWN, short re-arm so the entry still
+      // gets cleaned up (or a retry can still land) instead of living
+      // forever.
+      clearTimeout(e.timer);
+      const remaining = Math.max(0, e.expiresAt - Date.now());
+      e.timer = armExpiry(token, Math.min(remaining, RETRY_WINDOW_MS));
     }
   });
   return true;
