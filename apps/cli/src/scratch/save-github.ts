@@ -1,4 +1,7 @@
 import { execFile } from 'node:child_process';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { promisify } from 'node:util';
 import { nonInteractiveGitEnv } from '../commands/host/workspace';
 
@@ -23,9 +26,10 @@ export interface SaveToGithubDeps {
 /**
  * `scratch_save_github` — creates the GitHub repo for a "Start from scratch"
  * project, commits any pending changes with the user's own identity, and
- * pushes with the token delivered ONLY as an env-configured HTTP header on
- * the push child (never argv, never a URL, never a credential helper) so it
- * can't leak into `.git/config`, `ps` or a helper. Throws an
+ * pushes FROM A CLEAN BARE COPY with the token delivered ONLY as an
+ * env-configured HTTP header on the push child (never argv, never a URL,
+ * never a credential helper), so nothing the agent wrote into the working
+ * repo's config (proxy, TLS, helpers, hooks) can capture it. Throws an
  * `Error` with `.code === 'REPO_NAME_TAKEN' | 'SAVE_FAILED'` on failure.
  */
 export async function saveToGithub(
@@ -40,12 +44,14 @@ export async function saveToGithub(
     Accept: 'application/vnd.github+json',
     'User-Agent': 'codeam-cli',
   };
-  // The token reaches git ONLY as an HTTP Authorization header, set through
-  // git's env-config (GIT_CONFIG_*) in the push child's env alone: never
-  // argv, never a URL, and never the credential subsystem — so no credential
-  // helper (whatever the agent wrote into `.git/config`) can be handed it on
-  // fill/store/erase. config/status/add/commit (which may run repo hooks) get
-  // the plain env; the push itself runs no hooks at all.
+  // The working repo's `.git/config` is agent-writable (proxy, sslVerify,
+  // credential helpers, hooks, …), so the token-carrying push never runs
+  // there: it runs from a fresh bare clone whose config the agent never
+  // touched, with no system/global config and a throwaway HOME. The token
+  // reaches git ONLY as an HTTP Authorization header, set through git's
+  // env-config (GIT_CONFIG_*) in the push child's env alone — never argv,
+  // never a URL, never the credential subsystem. config/status/add/commit
+  // (which may run repo hooks) get the plain env.
   const env = { ...process.env, ...nonInteractiveGitEnv() };
   const git = (...args: string[]) => exec('git', ['-C', cwd, ...args], { env });
 
@@ -86,40 +92,60 @@ export async function saveToGithub(
     throw Object.assign(new Error(`GitHub answered ${res.status}`), { code: 'SAVE_FAILED' });
   }
 
+  // The working repo tracks the new repo (set before the push, as the repo
+  // already exists on GitHub either way) so later, normal pushes just work.
+  // Plain config: no token is involved here.
   await git('remote', 'remove', 'origin').catch(() => undefined);
   await git('remote', 'add', 'origin', body.clone_url);
-  const pushEnv = {
-    ...env,
-    GIT_TERMINAL_PROMPT: '0',
-    GCM_INTERACTIVE: 'never',
-    GIT_CONFIG_COUNT: '1',
-    // Scoped to this exact repo URL: the header goes nowhere else.
-    GIT_CONFIG_KEY_0: `http.${body.clone_url}.extraheader`,
-    GIT_CONFIG_VALUE_0: `AUTHORIZATION: basic ${Buffer.from(`x-access-token:${input.token}`).toString('base64')}`,
-  };
-  await exec(
-    'git',
-    [
-      '-C',
-      cwd,
-      // Empties the helper list (URL-scoped entries included) and never
-      // prompts: the header is the only way this push authenticates.
-      '-c',
-      'credential.helper=',
-      '-c',
-      'credential.interactive=never',
-      '-c',
-      'core.hooksPath=/dev/null',
-      'push',
-      '-u',
-      'origin',
-      'HEAD:main',
-    ],
-    { env: pushEnv },
-  ).catch((err) => {
+  await git('config', 'branch.main.remote', 'origin');
+  await git('config', 'branch.main.merge', 'refs/heads/main');
+
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'codeam-push-'));
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'codeam-push-home-'));
+  try {
+    const bare = path.join(tmp, 'repo.git');
+    await exec('git', ['clone', '--bare', '--no-hardlinks', '-q', cwd, bare], { env });
+    const pushEnv = {
+      ...env,
+      HOME: home,
+      GIT_CONFIG_NOSYSTEM: '1',
+      GIT_CONFIG_GLOBAL: '/dev/null',
+      GIT_TERMINAL_PROMPT: '0',
+      GCM_INTERACTIVE: 'never',
+      GIT_CONFIG_COUNT: '1',
+      // Scoped to this exact repo URL: the header goes nowhere else.
+      GIT_CONFIG_KEY_0: `http.${body.clone_url}.extraheader`,
+      GIT_CONFIG_VALUE_0: `AUTHORIZATION: basic ${Buffer.from(`x-access-token:${input.token}`).toString('base64')}`,
+    };
+    await exec(
+      'git',
+      [
+        '-C',
+        bare,
+        '-c',
+        'credential.helper=',
+        '-c',
+        'credential.interactive=never',
+        '-c',
+        'core.hooksPath=/dev/null',
+        '-c',
+        'http.sslVerify=true',
+        '-c',
+        'http.proxy=',
+        'push',
+        body.clone_url,
+        'HEAD:main',
+      ],
+      { env: pushEnv },
+    );
+  } catch (err) {
     throw Object.assign(new Error(`Push failed: ${(err as Error).message.split('\n')[0]}`), {
       code: 'SAVE_FAILED',
     });
-  });
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+
   return { repoFullName: body.full_name, htmlUrl: body.html_url ?? `https://github.com/${body.full_name}` };
 }

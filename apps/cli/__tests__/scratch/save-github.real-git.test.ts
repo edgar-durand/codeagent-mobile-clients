@@ -23,6 +23,9 @@ const B64 = Buffer.from(`x-access-token:${TOKEN}`).toString('base64');
 let server: http.Server;
 let port: number;
 const authHeaders: string[] = [];
+let proxy: http.Server;
+let proxyPort: number;
+const proxyHits: string[] = [];
 
 beforeAll(async () => {
   server = http.createServer((req, res) => {
@@ -32,11 +35,37 @@ beforeAll(async () => {
   });
   await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
   port = (server.address() as AddressInfo).port;
+  // A capturing "MITM" proxy: records anything sent through it.
+  proxy = http.createServer((req, res) => {
+    proxyHits.push(`${req.method} ${req.url} ${String(req.headers.authorization ?? '')}`);
+    res.writeHead(502);
+    res.end();
+  });
+  proxy.on('connect', (req, sock) => {
+    proxyHits.push(`CONNECT ${req.url}`);
+    sock.destroy();
+  });
+  await new Promise<void>((r) => proxy.listen(0, '127.0.0.1', r));
+  proxyPort = (proxy.address() as AddressInfo).port;
 });
 
 afterAll(async () => {
   await new Promise<void>((r) => server.close(() => r()));
+  await new Promise<void>((r) => proxy.close(() => r()));
 });
+
+function makeWorkingRepo(): string {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'codeam-save-real-'));
+  execFileSync('git', ['init', '-q', '-b', 'main', dir]);
+  fs.writeFileSync(path.join(dir, 'a.txt'), 'x');
+  execFileSync('git', ['-C', dir, '-c', 'user.name=t', '-c', 'user.email=t@t', 'add', '-A']);
+  execFileSync('git', ['-C', dir, '-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q', '-m', 'i']);
+  return dir;
+}
+
+function codeamTmpDirs(): string[] {
+  return fs.readdirSync(os.tmpdir()).filter((n) => n.startsWith('codeam-push-'));
+}
 
 function ok(body: unknown, status = 200) {
   return { ok: status < 300, status, json: () => Promise.resolve(body) };
@@ -78,5 +107,34 @@ describe('saveToGithub push — real git, hostile repo config', () => {
     expect(helperLog).not.toMatch(/ACTION=(store|erase)/);
     // The token reached the remote — as the header, the only channel.
     expect(authHeaders.map((h) => h.toLowerCase())).toContain(`basic ${B64.toLowerCase()}`);
+  }, 30_000);
+
+  it('an agent-written http.proxy + sslVerify=false in .git/config never sees the push; temp dirs removed; origin/upstream set', async () => {
+    const dir = makeWorkingRepo();
+    const cloneUrl = `http://127.0.0.1:${port}/me/proxied.git`;
+    execFileSync('git', ['-C', dir, 'config', 'http.proxy', `http://127.0.0.1:${proxyPort}`]);
+    execFileSync('git', ['-C', dir, 'config', `http.${cloneUrl}.proxy`, `http://127.0.0.1:${proxyPort}`]);
+    execFileSync('git', ['-C', dir, 'config', 'http.sslVerify', 'false']);
+    const before = new Set(codeamTmpDirs());
+    authHeaders.length = 0;
+
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValueOnce(ok({ login: 'me', id: 7 }))
+      .mockResolvedValueOnce(ok({ full_name: 'me/proxied', clone_url: cloneUrl, html_url: 'https://github.com/me/proxied' }, 201));
+
+    await expect(
+      saveToGithub(dir, { repoName: 'proxied', private: true, token: TOKEN }, {
+        fetchImpl: fetchImpl as unknown as typeof fetch,
+      }),
+    ).rejects.toMatchObject({ code: 'SAVE_FAILED' });
+
+    expect(proxyHits).toEqual([]);
+    expect(authHeaders.map((h) => h.toLowerCase())).toContain(`basic ${B64.toLowerCase()}`);
+    expect(codeamTmpDirs().filter((n) => !before.has(n))).toEqual([]);
+    const cfg = (k: string) => execFileSync('git', ['-C', dir, 'config', '--get', k]).toString().trim();
+    expect(cfg('remote.origin.url')).toBe(cloneUrl);
+    expect(cfg('branch.main.remote')).toBe('origin');
+    expect(cfg('branch.main.merge')).toBe('refs/heads/main');
   }, 30_000);
 });

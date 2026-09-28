@@ -1,3 +1,5 @@
+import fs from 'node:fs';
+import os from 'node:os';
 import { describe, expect, it, vi } from 'vitest';
 import { promisify } from 'node:util';
 import type { execFile as ExecFileType } from 'node:child_process';
@@ -102,9 +104,16 @@ describe('saveToGithub', () => {
     // env-config (GIT_CONFIG_*), never argv/URL and never the credential
     // subsystem: the generic helper list is emptied and no helper is added.
     const push = gitCalls.find((c) => c.args.includes('push'))!;
+    // The push runs from a CLEAN bare copy (never the agent-writable working
+    // repo), cloned right before it, to the new repo's URL given explicitly.
+    const clone = gitCalls.find((c) => c.args.includes('clone'))!;
+    const bare = push.args[1];
+    expect(clone.args).toEqual(['clone', '--bare', '--no-hardlinks', '-q', dir, bare]);
+    expect(bare.startsWith(os.tmpdir())).toBe(true);
+    expect(bare).not.toContain(dir);
     expect(push.args).toEqual([
       '-C',
-      dir,
+      bare,
       '-c',
       'credential.helper=',
       '-c',
@@ -112,11 +121,28 @@ describe('saveToGithub', () => {
       // No repo hook (pre-push, …) ever runs while the header is in env.
       '-c',
       'core.hooksPath=/dev/null',
+      '-c',
+      'http.sslVerify=true',
+      '-c',
+      'http.proxy=',
       'push',
-      '-u',
-      'origin',
+      'https://github.com/me/landing.git',
       'HEAD:main',
     ]);
+    // No system/global config, and a throwaway HOME, for the push.
+    expect(push.env.GIT_CONFIG_NOSYSTEM).toBe('1');
+    expect(push.env.GIT_CONFIG_GLOBAL).toBe('/dev/null');
+    expect(push.env.HOME).not.toBe(process.env.HOME);
+    expect(push.env.HOME!.startsWith(os.tmpdir())).toBe(true);
+    // Both temp dirs are gone afterwards.
+    expect(fs.existsSync(bare)).toBe(false);
+    expect(fs.existsSync(push.env.HOME!)).toBe(false);
+    // The working repo gets origin + upstream so later pushes just work.
+    const argsOf = (c: GitCall) => c.args.slice(2).join(' ');
+    const rest = gitCalls.filter((c) => c.args[0] === '-C' && c.args[1] === dir).map(argsOf);
+    expect(rest).toContain('remote add origin https://github.com/me/landing.git');
+    expect(rest).toContain('config branch.main.remote origin');
+    expect(rest).toContain('config branch.main.merge refs/heads/main');
     expect(push.args.filter((a) => /^credential\.helper=./.test(a))).toEqual([]);
     const b64 = Buffer.from('x-access-token:gho_secret').toString('base64');
     expect(push.env.GIT_CONFIG_COUNT).toBe('1');
