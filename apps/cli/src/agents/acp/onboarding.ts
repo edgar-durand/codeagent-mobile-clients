@@ -130,7 +130,7 @@ export function resolveRepoName(cwd: string): string {
 export function buildOnboardingWelcome(cwd: string): string {
   const repo = resolveRepoName(cwd);
   return [
-    `Welcome to CodeAgent Mobile! 👋 You're now driving this agent from your phone — and it comes fully wired, zero setup:`,
+    `Welcome to CodeAgent Mobile! 👋 You're now driving this agent from your phone or the web — and it comes fully wired, zero setup:`,
     '',
     '- **Native repo context, persistent memory, and an issue tracker** — powered by Beads, out of the box.',
     '- **A full IDE** (Monaco) — edit code, live preview, and rich visual output, not just a file viewer.',
