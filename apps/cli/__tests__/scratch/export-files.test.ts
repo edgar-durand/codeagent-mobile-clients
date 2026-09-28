@@ -4,6 +4,7 @@ import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { describe, it, expect } from 'vitest';
 import { listExportFiles, topPaths } from '../../src/scratch/export-files';
+import { configureGitCredentials } from '../../src/commands/host/workspace';
 
 /**
  * mkdtemp, write `files` (relative path -> content, directories created as
@@ -49,7 +50,7 @@ function makeRepo(files: Record<string, string>, opts: { commitAll?: boolean } =
 }
 
 describe('listExportFiles', () => {
-  it('honours .gitignore, keeps .git, drops node_modules and .env* even if tracked, generates .env.example', async () => {
+  it('honours .gitignore, drops node_modules and .env* even if tracked, generates .env.example', async () => {
     const dir = makeRepo(
       {
         '.gitignore': 'dist/\n',
@@ -64,7 +65,6 @@ describe('listExportFiles', () => {
     const list = await listExportFiles(dir);
     const rels = list.files.map((f) => f.rel);
     expect(rels).toContain('src/index.html');
-    expect(rels.some((r) => r.startsWith('.git/'))).toBe(true);
     expect(rels).not.toContain('dist/bundle.js');
     expect(rels.some((r) => r.startsWith('node_modules/'))).toBe(false);
     expect(rels).not.toContain('.env');
@@ -95,6 +95,56 @@ describe('listExportFiles', () => {
     const rels = list.files.map((f) => f.rel);
     expect(rels).not.toContain('.git/codeam-scratch');
     expect(rels.some((r) => r.startsWith('.git/'))).toBe(true);
+  });
+
+  it('a NON-scratch repo (clone prepared with configureGitCredentials) exports source only: no .git/ at all, never the credentials file', async () => {
+    const dir = makeRepo({ 'src/index.html': '<h1>x</h1>' }, { commitAll: true });
+    await configureGitCredentials(dir, 'me/repo', 'ghs_supersecret');
+    // Precondition: the credentials file really is on disk.
+    expect(fs.readFileSync(path.join(dir, '.git', 'codeam-credentials'), 'utf8')).toContain('ghs_supersecret');
+    const list = await listExportFiles(dir);
+    const rels = list.files.map((f) => f.rel);
+    expect(rels).toContain('src/index.html');
+    expect(rels.some((r) => r.startsWith('.git/'))).toBe(false);
+    expect(rels).not.toContain('.git/codeam-credentials');
+  });
+
+  it('a scratch repo keeps .git/ but never the marker or any .git/*credentials* file', async () => {
+    const dir = makeRepo({ 'src/index.html': '<h1>x</h1>' }, { commitAll: true });
+    fs.writeFileSync(path.join(dir, '.git', 'codeam-scratch'), '');
+    fs.writeFileSync(path.join(dir, '.git', 'codeam-credentials'), 'https://x-access-token:tok@github.com\n');
+    fs.writeFileSync(path.join(dir, '.git', 'git-credentials'), 'https://u:p@example.com\n');
+    const list = await listExportFiles(dir);
+    const rels = list.files.map((f) => f.rel);
+    expect(rels).toContain('.git/HEAD');
+    expect(rels).not.toContain('.git/codeam-scratch');
+    expect(rels).not.toContain('.git/codeam-credentials');
+    expect(rels).not.toContain('.git/git-credentials');
+  });
+
+  it('never lists a symbolic link (tracked or untracked), even one pointing at a real file outside the project', async () => {
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'codeam-outside-'));
+    fs.writeFileSync(path.join(outside, 'id_rsa'), 'PRIVATE KEY');
+    const dir = makeRepo({ 'src/index.html': '<h1>x</h1>' });
+    fs.symlinkSync(path.join(outside, 'id_rsa'), path.join(dir, 'tracked-link'));
+    execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@t.com', '-C', dir, 'add', '-A']);
+    execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@t.com', '-C', dir, 'commit', '-q', '-m', 'l']);
+    fs.symlinkSync(path.join(outside, 'id_rsa'), path.join(dir, 'untracked-link'));
+    fs.symlinkSync(path.join(outside, 'id_rsa'), path.join(dir, '.env'));
+    const list = await listExportFiles(dir);
+    const rels = list.files.map((f) => f.rel);
+    expect(rels).toContain('src/index.html');
+    expect(rels).not.toContain('tracked-link');
+    expect(rels).not.toContain('untracked-link');
+    expect(list.envExample).toBeNull();
+  });
+
+  it('a tracked .env* missing from the working tree is skipped, not a crash', async () => {
+    const dir = makeRepo({ 'src/index.html': '<h1>x</h1>', '.env.local': 'A=1\n' }, { commitAll: true });
+    fs.rmSync(path.join(dir, '.env.local'));
+    const list = await listExportFiles(dir);
+    expect(list.files.map((f) => f.rel)).toContain('src/index.html');
+    expect(list.envExample).toBeNull();
   });
 
   it('includes untracked files that are not gitignored', async () => {

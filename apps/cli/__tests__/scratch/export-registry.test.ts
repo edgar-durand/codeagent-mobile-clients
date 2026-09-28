@@ -269,23 +269,59 @@ describe('export registry', () => {
     await new Promise<void>((r) => first.on('end', () => r()));
   });
 
-  it('purgeExports empties the export dir', () => {
+  function withHome(fn: (home: string) => void): void {
     const home = fs.mkdtempSync(path.join(os.tmpdir(), 'codeam-home-'));
     tmpDirs.push(home);
     const prevHome = process.env.HOME;
     process.env.HOME = home;
     try {
-      const dir = exportDir();
-      expect(dir).toBe(path.join(home, '.codeam', 'exports'));
-      fs.mkdirSync(dir, { recursive: true });
-      fs.writeFileSync(path.join(dir, 'a.zip'), 'x');
-      fs.writeFileSync(path.join(dir, 'b.zip'), 'y');
-      purgeExports();
-      expect(fs.existsSync(dir) ? fs.readdirSync(dir) : []).toEqual([]);
-      // Idempotent when the dir does not exist.
-      expect(() => purgeExports()).not.toThrow();
+      fn(home);
     } finally {
       process.env.HOME = prevHome;
     }
+  }
+
+  it('exportDir is per process: ~/.codeam/exports/<pid>', () => {
+    withHome((home) => {
+      expect(exportDir()).toBe(path.join(home, '.codeam', 'exports', String(process.pid)));
+    });
+  });
+
+  it("purgeExports keeps a LIVE process's dir and removes a dead one's (and a stale one under our own pid)", () => {
+    withHome((home) => {
+      const base = path.join(home, '.codeam', 'exports');
+      // Another running CLI: our parent process is certainly alive.
+      const live = path.join(base, String(process.ppid));
+      const own = path.join(base, String(process.pid));
+      // A pid far above any real pid_max: process.kill(pid, 0) → ESRCH.
+      const dead = path.join(base, '999999999');
+      for (const d of [live, own, dead]) {
+        fs.mkdirSync(d, { recursive: true });
+        fs.writeFileSync(path.join(d, 'a.zip'), 'x');
+      }
+      purgeExports();
+      expect(fs.existsSync(path.join(live, 'a.zip'))).toBe(true);
+      expect(fs.existsSync(dead)).toBe(false);
+      expect(fs.existsSync(own)).toBe(false);
+    });
+  });
+
+  it('purgeExports removes legacy loose files only once older than the TTL', () => {
+    withHome((home) => {
+      const base = path.join(home, '.codeam', 'exports');
+      fs.mkdirSync(base, { recursive: true });
+      const old = path.join(base, 'old.zip');
+      const fresh = path.join(base, 'fresh.zip');
+      fs.writeFileSync(old, 'x');
+      fs.writeFileSync(fresh, 'y');
+      const past = (Date.now() - EXPORT_TTL_MS - 60_000) / 1000;
+      fs.utimesSync(old, past, past);
+      purgeExports();
+      expect(fs.existsSync(old)).toBe(false);
+      expect(fs.existsSync(fresh)).toBe(true);
+      // Idempotent when the dir does not exist.
+      fs.rmSync(base, { recursive: true, force: true });
+      expect(() => purgeExports()).not.toThrow();
+    });
   });
 });

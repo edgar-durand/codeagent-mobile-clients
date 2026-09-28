@@ -27,7 +27,12 @@ export const EXPORT_TTL_MS = 600_000;
  *  transfer — see {@link armExpiry}. */
 const RETRY_WINDOW_MS = 60_000;
 export const EXPORT_PATH_PREFIX = '/.codeam/export/';
-export const exportDir = (): string => path.join(os.homedir(), '.codeam', 'exports');
+const exportsBaseDir = (): string => path.join(os.homedir(), '.codeam', 'exports');
+/**
+ * Per-process: several CLIs (sessions) on one box share `~/.codeam/exports`,
+ * and one starting up must never delete another's live downloads.
+ */
+export const exportDir = (): string => path.join(exportsBaseDir(), String(process.pid));
 
 function drop(token: string): void {
   const e = entries.get(token);
@@ -129,11 +134,41 @@ export function handleExportRequest(req: http.IncomingMessage, res: http.ServerR
   return true;
 }
 
-/** Leftovers from a previous CLI run are unreachable (their tokens died with it). */
-export function purgeExports(): void {
+function isPidAlive(pid: number): boolean {
   try {
-    fs.rmSync(exportDir(), { recursive: true, force: true });
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    // EPERM = alive but not ours to signal; only ESRCH means gone.
+    return (err as NodeJS.ErrnoException).code !== 'ESRCH';
+  }
+}
+
+/**
+ * Leftovers from CLI runs that are gone are unreachable (their tokens died
+ * with them): removes every `<pid>/` dir whose process is dead — and our OWN
+ * pid's, which at start can only be a previous process's that reused it —
+ * plus legacy loose files (pre-per-process layout) once past the TTL. Another
+ * running CLI's dir is left alone.
+ */
+export function purgeExports(): void {
+  const base = exportsBaseDir();
+  let names: string[];
+  try {
+    names = fs.readdirSync(base);
   } catch {
-    // Best-effort housekeeping at CLI start: never worth failing the start over.
+    return;
+  }
+  for (const name of names) {
+    const abs = path.join(base, name);
+    try {
+      const st = fs.lstatSync(abs);
+      const stale = st.isDirectory() && /^\d+$/.test(name)
+        ? Number(name) === process.pid || !isPidAlive(Number(name))
+        : Date.now() - st.mtimeMs > EXPORT_TTL_MS;
+      if (stale) fs.rmSync(abs, { recursive: true, force: true });
+    } catch {
+      // Best-effort housekeeping at CLI start: never worth failing the start over.
+    }
   }
 }

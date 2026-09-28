@@ -38,8 +38,17 @@ export async function prepareScratchWorkspace(deployId: string): Promise<string>
   // save-to-GitHub replaces it with the user's.
   await run('git', ['-C', dir, 'config', 'user.name', 'CodeAgent'], { env });
   await run('git', ['-C', dir, 'config', 'user.email', 'noreply@codeagent-mobile.com'], { env });
-  await run('git', ['-C', dir, 'add', '.gitignore'], { env });
-  await run('git', ['-C', dir, 'commit', '-m', 'Start project'], { env });
+  // A crash between the commit and the marker leaves a repo WITH the initial
+  // commit but no marker; a retry must not try (and fail) to commit again.
+  const hasHead = await run('git', ['-C', dir, 'rev-parse', '--verify', '-q', 'HEAD'], { env }).then(
+    () => true,
+    () => false,
+  );
+  if (!hasHead) {
+    await run('git', ['-C', dir, 'add', '.gitignore'], { env });
+    await run('git', ['-C', dir, 'commit', '-m', 'Start project'], { env });
+  }
+  // Written LAST: its presence means the workspace is fully prepared.
   fs.writeFileSync(path.join(dir, '.git', SCRATCH_MARKER), '');
   return dir;
 }

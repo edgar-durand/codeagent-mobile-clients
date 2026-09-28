@@ -7,7 +7,13 @@ import type { ExportList } from './export-files';
 export function buildZip(cwd: string, list: ExportList, outFile: string): Promise<number> {
   return new Promise((resolve, reject) => {
     const zip = new ZipFile();
-    for (const f of list.files) zip.addFile(path.join(cwd, f.rel), f.rel);
+    for (const f of list.files) {
+      const abs = path.join(cwd, f.rel);
+      // Re-checked here (lstat, not stat): a path that became a symlink after
+      // the list was built is skipped, never followed out of the project.
+      if (!fs.lstatSync(abs, { throwIfNoEntry: false })?.isFile()) continue;
+      zip.addFile(abs, f.rel);
+    }
     if (list.envExample) zip.addBuffer(Buffer.from(list.envExample), '.env.example');
     const out = fs.createWriteStream(outFile, { mode: 0o600 });
     zip.outputStream.pipe(out);

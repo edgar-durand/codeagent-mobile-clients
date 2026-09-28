@@ -8,6 +8,8 @@ import { registerExport, exportDir, EXPORT_PATH_PREFIX } from './export-registry
 import { ensureExportBaseUrl } from './export-tunnel';
 import { postZipDownloaded, type ScratchCtx } from './api';
 import { saveToGithub } from './save-github';
+import { isScratchWorkspace } from './workspace';
+import { log } from '../services/logger';
 
 /**
  * The subset of a command context these two agent-agnostic scratch handlers
@@ -66,16 +68,6 @@ export async function scratchExportZipH(ctx: ScratchHandlerCtx): Promise<void> {
       pluginId: opts.pluginId,
       pluginAuthToken: opts.pluginAuthToken,
     };
-    let release: () => void = () => {};
-    const { token, expiresAt } = registerExport(
-      file,
-      size,
-      () => {
-        void postZipDownloaded(scratchCtx);
-        release();
-      },
-      () => release(),
-    );
     // This inner try covers ONLY `ensureExportBaseUrl` — the one call that
     // actually means "the tunnel isn't available". Nothing else is nested
     // in here, so its `catch` can't misfire on an unrelated failure.
@@ -89,7 +81,17 @@ export async function scratchExportZipH(ctx: ScratchHandlerCtx): Promise<void> {
       });
       return;
     }
-    release = base.release;
+    // Registered only once the tunnel is up, so a tunnel failure never
+    // leaves a dangling token behind.
+    const { token, expiresAt } = registerExport(
+      file,
+      size,
+      () => {
+        void postZipDownloaded(scratchCtx);
+        base.release();
+      },
+      () => base.release(),
+    );
     ready = {
       url: `${base.baseUrl}${EXPORT_PATH_PREFIX}${token}`,
       sizeBytes: size,
@@ -103,7 +105,9 @@ export async function scratchExportZipH(ctx: ScratchHandlerCtx): Promise<void> {
       });
       return;
     }
-    await relay.sendResult(cmd.id, 'failed', { error: `Couldn't build the ZIP: ${message}` });
+    // The raw message can carry git argv and box paths: log it, never ack it.
+    log.warn('scratch', `export ZIP build failed: ${message}`);
+    await relay.sendResult(cmd.id, 'failed', { error: "Couldn't build the ZIP — try again." });
     return;
   }
 
@@ -112,10 +116,18 @@ export async function scratchExportZipH(ctx: ScratchHandlerCtx): Promise<void> {
 
 /**
  * `scratch_save_github` — creates the repo, commits pending changes, and
- * pushes (`saveToGithub`). Only reachable from scratch sessions via the app.
+ * pushes (`saveToGithub`). Refused outright outside a scratch project: a
+ * cloned repo already has its own remote and must never be re-pointed.
  */
 export async function scratchSaveGithubH(ctx: ScratchHandlerCtx): Promise<void> {
   const { cmd, relay } = ctx;
+  if (!isScratchWorkspace(process.cwd())) {
+    await relay.sendResult(cmd.id, 'failed', {
+      code: 'SAVE_FAILED',
+      error: 'Save to GitHub is only available for projects started from scratch.',
+    });
+    return;
+  }
   const p = cmd.payload as { repoName?: string; private?: boolean; token?: string };
   if (!p.repoName || !p.token) {
     await relay.sendResult(cmd.id, 'failed', {

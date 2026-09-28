@@ -39,6 +39,18 @@ describe('prepareScratchWorkspace', () => {
     await expect(prepareScratchWorkspace('dep123')).resolves.toBeTruthy();
   });
 
+  it('recovers from a crash between the initial commit and the marker (no second commit, marker written)', async () => {
+    const dir = await prepareScratchWorkspace('dep123');
+    // Simulate the crash window: the commit landed, the marker did not.
+    fs.rmSync(path.join(dir, '.git', 'codeam-scratch'));
+    expect(isScratchWorkspace(dir)).toBe(false);
+    await expect(prepareScratchWorkspace('dep123')).resolves.toBe(dir);
+    expect(isScratchWorkspace(dir)).toBe(true);
+    expect(execFileSync('git', ['-C', dir, 'rev-list', '--count', 'HEAD']).toString().trim()).toBe(
+      '1',
+    );
+  });
+
   it('a normal clone dir is not scratch', () => {
     expect(isScratchWorkspace(home)).toBe(false);
   });

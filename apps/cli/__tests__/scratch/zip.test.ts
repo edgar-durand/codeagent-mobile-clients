@@ -82,4 +82,28 @@ describe('buildZip', () => {
       fs.rmSync(out);
     },
   );
+
+  it.skipIf(!hasUnzip)('never follows a symbolic link, even if one is in the list', async () => {
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'codeam-outside-'));
+    fs.writeFileSync(path.join(outside, 'secret.txt'), 'TOP SECRET');
+    const dir = makeRepo({ 'src/index.html': '<h1>x</h1>' });
+    fs.symlinkSync(path.join(outside, 'secret.txt'), path.join(dir, 'link.txt'));
+    const out = path.join(dir, '..', 'export-link.zip');
+    await buildZip(
+      dir,
+      {
+        files: [
+          { rel: 'src/index.html', bytes: 10 },
+          { rel: 'link.txt', bytes: 10 },
+        ],
+        totalBytes: 20,
+        envExample: null,
+      },
+      out,
+    );
+    const listing = execFileSync('unzip', ['-l', out]).toString();
+    expect(listing).toContain('src/index.html');
+    expect(listing).not.toContain('link.txt');
+    fs.rmSync(out);
+  });
 });

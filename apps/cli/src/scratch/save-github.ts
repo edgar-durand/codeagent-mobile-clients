@@ -43,9 +43,10 @@ export async function saveToGithub(
     Accept: 'application/vnd.github+json',
     'User-Agent': 'codeam-cli',
   };
-  // The token is delivered ONLY to the push call's env — repo hooks run on
-  // `commit`/`add`, under the user's OWN process tree, and have no business
-  // seeing it.
+  // The token is delivered ONLY to the push call's env, never to
+  // config/status/add/commit (which may run repo hooks). The push itself runs
+  // with `core.hooksPath=/dev/null` so no repo hook (pre-push, …) can execute
+  // while the token is in its env.
   const env = { ...process.env, ...nonInteractiveGitEnv() };
   const pushEnv = { ...env, CODEAM_GH_TOKEN: input.token };
   const git = (...args: string[]) => exec('git', ['-C', cwd, ...args], { env });
@@ -98,6 +99,8 @@ export async function saveToGithub(
       'credential.helper=',
       '-c',
       `credential.helper=${HELPER}`,
+      '-c',
+      'core.hooksPath=/dev/null',
       'push',
       '-u',
       'origin',

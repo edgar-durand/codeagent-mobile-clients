@@ -25,6 +25,12 @@ vi.mock('../../src/scratch/api', () => ({
 vi.mock('../../src/scratch/save-github', () => ({
   saveToGithub: vi.fn(),
 }));
+vi.mock('../../src/scratch/workspace', () => ({
+  isScratchWorkspace: vi.fn(),
+}));
+vi.mock('../../src/services/logger', () => ({
+  log: { error: vi.fn(), warn: vi.fn(), info: vi.fn(), debug: vi.fn(), trace: vi.fn() },
+}));
 
 import { scratchExportZipH, scratchSaveGithubH, type ScratchHandlerCtx } from '../../src/scratch/handlers';
 import { listExportFiles, topPaths } from '../../src/scratch/export-files';
@@ -33,6 +39,8 @@ import { registerExport, exportDir } from '../../src/scratch/export-registry';
 import { ensureExportBaseUrl } from '../../src/scratch/export-tunnel';
 import { postZipDownloaded } from '../../src/scratch/api';
 import { saveToGithub } from '../../src/scratch/save-github';
+import { isScratchWorkspace } from '../../src/scratch/workspace';
+import { log } from '../../src/services/logger';
 
 const opts = { sessionId: 's1', pluginId: 'p1', pluginAuthToken: 'tok' };
 
@@ -55,6 +63,7 @@ function makeTmpExportDir(): string {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  vi.mocked(isScratchWorkspace).mockReturnValue(true);
 });
 
 afterEach(() => {
@@ -185,6 +194,8 @@ describe('scratchExportZipH', () => {
       error: "Couldn't prepare the download — try again.",
     });
     expect(fs.readdirSync(tmpExportDir)).toEqual([]);
+    // Registered only once the tunnel is up: no dangling registry entry.
+    expect(registerExport).not.toHaveBeenCalled();
   });
 
   it('a cwd that is not a git repo answers failed with a user-safe error', async () => {
@@ -210,8 +221,10 @@ describe('scratchExportZipH', () => {
     expect(registerExport).not.toHaveBeenCalled();
   });
 
-  it('a generic build failure answers failed with the underlying message', async () => {
-    vi.mocked(listExportFiles).mockRejectedValue(new Error('ENOSPC: no space left on device'));
+  it('a generic build failure answers a user-safe message and only LOGS the detail', async () => {
+    vi.mocked(listExportFiles).mockRejectedValue(
+      new Error('Command failed: git -C /home/box/secret-path ls-files\nENOSPC: no space left on device'),
+    );
     const relay = makeRelay();
     const ctx: ScratchHandlerCtx = {
       cmd: makeCmd('scratch_export_zip', { limitBytes: null }),
@@ -221,13 +234,36 @@ describe('scratchExportZipH', () => {
 
     await scratchExportZipH(ctx);
 
+    expect(relay.sendResult).toHaveBeenCalledTimes(1);
     expect(relay.sendResult).toHaveBeenCalledWith('cmd1', 'failed', {
-      error: "Couldn't build the ZIP: ENOSPC: no space left on device",
+      error: "Couldn't build the ZIP — try again.",
     });
+    expect(JSON.stringify(relay.sendResult.mock.calls)).not.toContain('/home/box');
+    expect(log.warn).toHaveBeenCalledWith('scratch', expect.stringContaining('ENOSPC'));
   });
 });
 
 describe('scratchSaveGithubH', () => {
+  it('a NON-scratch session fails SAVE_FAILED without touching git', async () => {
+    vi.mocked(isScratchWorkspace).mockReturnValue(false);
+    const relay = makeRelay();
+    const ctx: ScratchHandlerCtx = {
+      cmd: makeCmd('scratch_save_github', { repoName: 'landing', private: true, token: 'gho_x' }),
+      relay,
+      opts,
+    };
+
+    await scratchSaveGithubH(ctx);
+
+    expect(isScratchWorkspace).toHaveBeenCalledWith(process.cwd());
+    expect(saveToGithub).not.toHaveBeenCalled();
+    expect(relay.sendResult).toHaveBeenCalledTimes(1);
+    expect(relay.sendResult).toHaveBeenCalledWith('cmd1', 'failed', {
+      code: 'SAVE_FAILED',
+      error: 'Save to GitHub is only available for projects started from scratch.',
+    });
+  });
+
   it('completes with repoFullName and htmlUrl on success', async () => {
     vi.mocked(saveToGithub).mockResolvedValue({
       repoFullName: 'me/landing',

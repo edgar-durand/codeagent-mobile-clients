@@ -27,7 +27,6 @@ import { registerTerminalHandlers, closeAllTerminals } from '../services/termina
 import { killActiveSpawnAndCaptureChildren } from '../services/spawn-and-capture';
 import {
   activePreviewSessionIds,
-  killAllPreviews,
   provisionProjectDependencies,
   noteProvisionOutcome,
 } from '../services/preview';
@@ -52,6 +51,7 @@ import { isScratchWorkspace } from '../scratch/workspace';
 import { deployIdFromWorkspace } from './host/workspace';
 import { registerScratchProject } from '../scratch/api';
 import { purgeExports } from '../scratch/export-registry';
+import { reapPreviewsAndExportTunnel } from './start/shutdown-tunnels';
 import { mergeWithLocalMcpServers } from '../services/local-mcp-servers';
 import { provisionSkillsForStart } from '../skills/provision';
 import type { StartedBeads } from '../beads';
@@ -897,12 +897,7 @@ export async function start(
     // PreviewTab returns to idle without waiting for the 1 h Redis
     // TTL to expire. Both awaited — process.exit waits for them.
     const previewSessionIds = activePreviewSessionIds();
-    try {
-      await killAllPreviews();
-    } catch {
-      // best-effort — the SIGKILL safety timer inside killPreview
-      // still fires regardless of any await rejection here.
-    }
+    await reapPreviewsAndExportTunnel();
     const previewAuthToken = session?.pluginAuthToken;
     if (previewAuthToken && previewSessionIds.length > 0) {
       await Promise.allSettled(

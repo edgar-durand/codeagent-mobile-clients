@@ -3,7 +3,7 @@ import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { nonInteractiveGitEnv } from '../commands/host/workspace';
-import { SCRATCH_MARKER } from './workspace';
+import { SCRATCH_MARKER, isScratchWorkspace } from './workspace';
 
 const run = promisify(execFile);
 
@@ -22,13 +22,19 @@ export interface ExportList {
 }
 
 /**
- * Builds the export file list for a scratch project's "Save to GitHub" ZIP:
- * gitignore-aware (tracked + untracked-but-not-ignored, via `git ls-files
- * --exclude-standard`), `.git/` itself is included (the scratch history goes
- * with the export), `node_modules/` and `.env*` are hard-excluded even if
- * committed, and a `.env.example` is generated from the excluded env files'
- * KEYS ONLY (never their values) when no example/sample/template already
- * exists.
+ * Builds the export file list for the "Download ZIP" export (any git
+ * session): gitignore-aware (tracked + untracked-but-not-ignored, via `git
+ * ls-files --exclude-standard`), `node_modules/` and `.env*` are
+ * hard-excluded even if committed, symbolic links are never listed (a link
+ * could point anywhere on the box), and a `.env.example` is generated from
+ * the excluded env files' KEYS ONLY (never their values) when no
+ * example/sample/template already exists.
+ *
+ * `.git/` goes with the export ONLY for a scratch project (our own repo, its
+ * history is the user's work). A cloned repo's `.git/` holds the clone token
+ * (`configureGitCredentials` → `.git/codeam-credentials`) and whatever else
+ * the host put there, so a non-scratch export is source only. Even for
+ * scratch, the marker and any `*credentials*` file are never exported.
  */
 export async function listExportFiles(cwd: string): Promise<ExportList> {
   // `LC_ALL=C` pins git's own messages (notably "fatal: not a git
@@ -49,9 +55,11 @@ export async function listExportFiles(cwd: string): Promise<ExportList> {
   ]);
   const ignoredTracked = new Set(trackedIgnored.split('\0').filter(Boolean));
   const tracked = candidates.split('\0').filter((rel) => rel && !ignoredTracked.has(rel));
-  const gitFiles = walk(path.join(cwd, '.git'))
-    .map((abs) => path.relative(cwd, abs).split(path.sep).join('/'))
-    .filter((rel) => rel !== `.git/${SCRATCH_MARKER}`);
+  const gitFiles = isScratchWorkspace(cwd)
+    ? walk(path.join(cwd, '.git'))
+        .map((abs) => path.relative(cwd, abs).split(path.sep).join('/'))
+        .filter((rel) => rel !== `.git/${SCRATCH_MARKER}` && !/credentials/i.test(rel.slice(5)))
+    : [];
 
   const envKeys = new Set<string>();
   let hasExample = false;
@@ -62,13 +70,16 @@ export async function listExportFiles(cwd: string): Promise<ExportList> {
     seen.add(rel);
     const base = rel.split('/').pop()!;
     if (rel.startsWith('node_modules/') || rel.includes('/node_modules/')) continue;
+    // lstat, never stat: a symlink (or a tracked file deleted from the
+    // working tree) is skipped outright instead of followed.
+    const st = fs.lstatSync(path.join(cwd, rel), { throwIfNoEntry: false });
+    if (!st?.isFile()) continue;
     if (!rel.startsWith('.git/') && ENV_FILE.test(base) && !KEEP_ENV.has(base)) {
       for (const k of envKeysOf(path.join(cwd, rel))) envKeys.add(k);
       continue;
     }
     if (KEEP_ENV.has(base)) hasExample = true;
-    const st = fs.statSync(path.join(cwd, rel), { throwIfNoEntry: false });
-    if (st?.isFile()) files.push({ rel, bytes: st.size });
+    files.push({ rel, bytes: st.size });
   }
 
   const envExample =

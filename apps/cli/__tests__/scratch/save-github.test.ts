@@ -107,6 +107,9 @@ describe('saveToGithub', () => {
       'credential.helper=',
       '-c',
       expect.stringContaining('credential.helper=!f'),
+      // No repo hook (pre-push, …) ever runs while CODEAM_GH_TOKEN is in env.
+      '-c',
+      'core.hooksPath=/dev/null',
       'push',
       '-u',
       'origin',
