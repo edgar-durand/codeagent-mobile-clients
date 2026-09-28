@@ -42,6 +42,7 @@
  */
 
 import { isProcessMidTurn } from '../services/turn-marker';
+import { keepDeviceAwake, type KeepAwakeDeps } from '../services/keep-awake';
 import { spawn, type ChildProcess } from 'node:child_process';
 import * as os from 'node:os';
 import * as fs from 'node:fs';
@@ -936,6 +937,33 @@ export function needsSelfRelaunch(
 }
 
 /**
+ * True when THIS process is running inside a container — the CodeAgent Box
+ * rescue fleet runs `host-agent` in Docker (`apps/box/Dockerfile`), where the
+ * container's own lifecycle (stop/start/delete via the `fleet_*` handlers)
+ * governs uptime, not idle-sleep, so keep-awake would be pointless there.
+ * Linux-only signals (`/.dockerenv`, a docker/containerd/kubepods cgroup) —
+ * macOS/Windows never have either, so this correctly returns `false` there.
+ * Injectable so tests never touch the real filesystem.
+ */
+export function isContainerEnvironment(
+  existsSyncFn: (p: string) => boolean = fs.existsSync,
+  readFileSyncFn: (p: string) => string = (p) => fs.readFileSync(p, 'utf8'),
+): boolean {
+  try {
+    if (existsSyncFn('/.dockerenv')) return true;
+  } catch {
+    /* not present — not a container by this signal */
+  }
+  try {
+    const cgroup = readFileSyncFn('/proc/1/cgroup');
+    if (/docker|containerd|kubepods/.test(cgroup)) return true;
+  } catch {
+    /* no /proc (macOS/Windows) or unreadable — not a container by this signal */
+  }
+  return false;
+}
+
+/**
  * Start a fresh host-agent on the freshly-installed binary, detached, after a
  * 2 s pause. The pause lets THIS process exit first, so the new boot resume
  * sees this supervisor's session children re-parented to init and retires them
@@ -1058,6 +1086,25 @@ export interface HostAgentDeps {
    * tests assert the exact argv without a Docker daemon.
    */
   docker?: DockerRunner;
+  /**
+   * Holds an OS-native power assertion for this supervisor's WHOLE lifetime —
+   * self-hosted can be the user's own laptop, and the per-SESSION keep-awake
+   * in `start.ts` is gated OFF for host-agent's pair-auto children
+   * (`isLocalSession()` is false under `CODEAM_AUTO_TOKEN`/`CODEAM_ENROLL_TOKEN`),
+   * so without this an idle laptop sleeps and the self-hosted server stops
+   * answering (2026-09-28). Defaults to {@link keepDeviceAwake}. Skipped on a
+   * codespace and inside a container (see `isContainerEnv` below); injectable
+   * so tests assert the call without spawning caffeinate/systemd-inhibit.
+   */
+  keepAwake?: (deps: KeepAwakeDeps) => () => void;
+  /**
+   * Detects whether this process is running inside a container (the
+   * CodeAgent Box fleet runs host-agent in Docker) — its container lifecycle
+   * governs uptime, not idle-sleep, so keep-awake is skipped there. Defaults
+   * to {@link isContainerEnvironment}. Injectable so tests never touch the
+   * real filesystem.
+   */
+  isContainerEnv?: () => boolean;
 }
 
 /**
@@ -1101,6 +1148,12 @@ export class HostAgentSupervisor {
   private readonly disableService: () => void;
   /** Docker runner for the fleet `fleet_*` control-plane handlers. */
   private readonly docker: DockerRunner;
+  /** Holds the machine awake for this supervisor's lifetime; see `HostAgentDeps.keepAwake`. */
+  private readonly keepAwakeFn: (deps: KeepAwakeDeps) => () => void;
+  /** Container detector; see `HostAgentDeps.isContainerEnv`. */
+  private readonly isContainerEnv: () => boolean;
+  /** Disposer returned by `keepAwakeFn`, released on `stop()`. */
+  private releaseKeepAwake: (() => void) | null = null;
   /** Guards against firing the self-heal more than once. */
   private healing = false;
   /** Visible-error poster for the exhausted-resume path (injectable). */
@@ -1146,6 +1199,8 @@ export class HostAgentSupervisor {
     this.onUpdated = deps.onUpdated ?? defaultOnUpdated;
     this.isChildMidTurn = deps.isChildMidTurn ?? ((pid) => isProcessMidTurn(pid));
     this.docker = deps.docker ?? defaultDockerRunner;
+    this.keepAwakeFn = deps.keepAwake ?? keepDeviceAwake;
+    this.isContainerEnv = deps.isContainerEnv ?? (() => isContainerEnvironment());
     this.postResumeFailure = deps.postResumeFailure ?? postSessionErrorBubble;
   }
 
@@ -1165,6 +1220,24 @@ export class HostAgentSupervisor {
 
   /** Open the control channel (reusing the relay) + start heartbeats. */
   start(): void {
+    // Keep this box awake for the supervisor's WHOLE lifetime (covers its
+    // child sessions too): self-hosted can be the user's OWN laptop, and the
+    // per-session keepDeviceAwake() in start.ts is gated off for host-agent's
+    // pair-auto children (isLocalSession() is false under
+    // CODEAM_AUTO_TOKEN/CODEAM_ENROLL_TOKEN), so without this an idle laptop
+    // sleeps and the self-hosted server stops answering. Skip on a codespace
+    // (ephemeral cloud VM — no physical sleep to prevent) and inside a
+    // container (the CodeAgent Box fleet — the container's own stop/start
+    // lifecycle governs uptime); `CODEAM_NO_KEEP_AWAKE=1` still opts out
+    // (honored inside keepDeviceAwake itself).
+    if (process.env.CODESPACES === 'true') {
+      log.info('keep-awake', 'skipped (codespace — no physical sleep to prevent)');
+    } else if (this.isContainerEnv()) {
+      log.info('keep-awake', 'skipped (containerized host-agent — container lifecycle governs uptime)');
+    } else {
+      this.releaseKeepAwake = this.keepAwakeFn({ isLocal: true, pid: process.pid });
+    }
+
     const make =
       this.deps.makeRelay ??
       ((pluginId, onCommand, meta, pollSecret) =>
@@ -1225,6 +1298,8 @@ export class HostAgentSupervisor {
   /** Stop the control channel + heartbeats + kill every child. */
   stop(): void {
     this.stopped = true;
+    this.releaseKeepAwake?.();
+    this.releaseKeepAwake = null;
     for (const st of this.resumeStates.values()) {
       if (st.timer) {
         clearTimeout(st.timer);

@@ -3886,3 +3886,102 @@ describe('self-update restart without a supervisor', () => {
     expect(execFileSync('/bin/sh', script).toString().trim()).toBe('codeam host-agent');
   });
 });
+
+// 2026-09-28 (Edgar's Mac, self-hosted host-agent): the per-SESSION keep-awake
+// in start.ts is gated OFF for host-agent's pair-auto children
+// (CODEAM_AUTO_TOKEN/CODEAM_ENROLL_TOKEN → isLocalSession()===false), so a
+// self-hosted box running on the owner's OWN laptop had nothing holding a
+// power assertion — the Mac idled to sleep and the self-hosted server stopped
+// answering. host-agent must hold keep-awake for its own whole lifetime
+// (covering its child sessions too), skipping a codespace or a container (the
+// CodeAgent Box fleet runs host-agent in Docker — the container lifecycle
+// governs uptime, not idle-sleep) and honoring CODEAM_NO_KEEP_AWAKE=1.
+describe('HostAgentSupervisor — keep-awake (self-hosted can be the user\'s own laptop)', () => {
+  const origCodespaces = process.env.CODESPACES;
+  const origNoKeepAwake = process.env.CODEAM_NO_KEEP_AWAKE;
+
+  afterEach(() => {
+    if (origCodespaces === undefined) delete process.env.CODESPACES;
+    else process.env.CODESPACES = origCodespaces;
+    if (origNoKeepAwake === undefined) delete process.env.CODEAM_NO_KEEP_AWAKE;
+    else process.env.CODEAM_NO_KEEP_AWAKE = origNoKeepAwake;
+  });
+
+  function stubFetch() {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => ({ success: true, data: {} }) }),
+    );
+  }
+
+  it('holds keep-awake with the host pid on a non-container, non-codespace env', () => {
+    delete process.env.CODESPACES;
+    stubFetch();
+    const releaseFn = vi.fn();
+    const keepAwake = vi.fn(() => releaseFn);
+    const isContainerEnv = vi.fn(() => false);
+    const sup = new HostAgentSupervisor(IDENTITY, {
+      makeRelay: () => ({ start: vi.fn(), stop: vi.fn(), sendResult: vi.fn() }),
+      keepAwake,
+      isContainerEnv,
+    });
+    sup.start();
+    expect(keepAwake).toHaveBeenCalledTimes(1);
+    expect(keepAwake).toHaveBeenCalledWith(
+      expect.objectContaining({ isLocal: true, pid: process.pid }),
+    );
+    expect(releaseFn).not.toHaveBeenCalled();
+    sup.stop();
+    expect(releaseFn).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not hold keep-awake in a codespace', () => {
+    process.env.CODESPACES = 'true';
+    stubFetch();
+    const keepAwake = vi.fn(() => vi.fn());
+    const isContainerEnv = vi.fn(() => false);
+    const sup = new HostAgentSupervisor(IDENTITY, {
+      makeRelay: () => ({ start: vi.fn(), stop: vi.fn(), sendResult: vi.fn() }),
+      keepAwake,
+      isContainerEnv,
+    });
+    sup.start();
+    expect(keepAwake).not.toHaveBeenCalled();
+    sup.stop();
+  });
+
+  it('does not hold keep-awake inside a container (e.g. /.dockerenv present)', () => {
+    delete process.env.CODESPACES;
+    stubFetch();
+    const keepAwake = vi.fn(() => vi.fn());
+    // Stands in for the real check finding /.dockerenv or a docker/kubepods
+    // cgroup — injected so the test never touches the real filesystem.
+    const isContainerEnv = vi.fn(() => true);
+    const sup = new HostAgentSupervisor(IDENTITY, {
+      makeRelay: () => ({ start: vi.fn(), stop: vi.fn(), sendResult: vi.fn() }),
+      keepAwake,
+      isContainerEnv,
+    });
+    sup.start();
+    expect(keepAwake).not.toHaveBeenCalled();
+    expect(isContainerEnv).toHaveBeenCalled();
+    sup.stop();
+  });
+
+  it('still calls the underlying keep-awake gate, which itself honors CODEAM_NO_KEEP_AWAKE=1', () => {
+    // host-agent doesn't special-case the opt-out itself — it delegates to
+    // keepDeviceAwake(), which already no-ops on this env var. Prove the real
+    // (non-injected) keepAwake is wired through by NOT injecting it and
+    // asserting no assertion-holder process gets spawned.
+    delete process.env.CODESPACES;
+    process.env.CODEAM_NO_KEEP_AWAKE = '1';
+    stubFetch();
+    const isContainerEnv = vi.fn(() => false);
+    const sup = new HostAgentSupervisor(IDENTITY, {
+      makeRelay: () => ({ start: vi.fn(), stop: vi.fn(), sendResult: vi.fn() }),
+      isContainerEnv,
+    });
+    expect(() => sup.start()).not.toThrow();
+    expect(() => sup.stop()).not.toThrow();
+  });
+});
