@@ -137,4 +137,49 @@ describe('saveToGithub push — real git, hostile repo config', () => {
     expect(cfg('branch.main.remote')).toBe('origin');
     expect(cfg('branch.main.merge')).toBe('refs/heads/main');
   }, 30_000);
+
+  it("an agent-written ~/.gitconfig init.templateDir (URL-scoped proxy/sslVerify + insteadOf) never reaches the bare copy", async () => {
+    const dir = makeWorkingRepo();
+    const cloneUrl = `http://127.0.0.1:${port}/me/templated.git`;
+    const fakeHome = fs.mkdtempSync(path.join(os.tmpdir(), 'codeam-save-home-'));
+    const tpl = path.join(fakeHome, 'tpl');
+    fs.mkdirSync(tpl);
+    fs.writeFileSync(
+      path.join(tpl, 'config'),
+      [
+        `[http "${cloneUrl}"]`,
+        `\tproxy = http://127.0.0.1:${proxyPort}`,
+        '\tsslVerify = false',
+        `[http "http://127.0.0.1:${port}"]`,
+        `\tproxy = http://127.0.0.1:${proxyPort}`,
+        '[url "http://127.0.0.1:1/evil/"]',
+        `\tinsteadOf = http://127.0.0.1:${port}/`,
+        `\tpushInsteadOf = http://127.0.0.1:${port}/`,
+        '',
+      ].join('\n'),
+    );
+    fs.writeFileSync(path.join(fakeHome, '.gitconfig'), `[init]\n\ttemplateDir = ${tpl}\n`);
+    const prevHome = process.env.HOME;
+    process.env.HOME = fakeHome;
+    const before = new Set(codeamTmpDirs());
+    authHeaders.length = 0;
+    proxyHits.length = 0;
+    try {
+      const fetchImpl = vi
+        .fn()
+        .mockResolvedValueOnce(ok({ login: 'me', id: 7 }))
+        .mockResolvedValueOnce(ok({ full_name: 'me/templated', clone_url: cloneUrl, html_url: 'https://github.com/me/templated' }, 201));
+      await expect(
+        saveToGithub(dir, { repoName: 'templated', private: true, token: TOKEN }, {
+          fetchImpl: fetchImpl as unknown as typeof fetch,
+        }),
+      ).rejects.toMatchObject({ code: 'SAVE_FAILED' });
+    } finally {
+      process.env.HOME = prevHome;
+    }
+
+    expect(proxyHits).toEqual([]);
+    expect(authHeaders.map((h) => h.toLowerCase())).toContain(`basic ${B64.toLowerCase()}`);
+    expect(codeamTmpDirs().filter((n) => !before.has(n))).toEqual([]);
+  }, 30_000);
 });

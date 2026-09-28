@@ -94,24 +94,49 @@ export async function saveToGithub(
 
   // The working repo tracks the new repo (set before the push, as the repo
   // already exists on GitHub either way) so later, normal pushes just work.
-  // Plain config: no token is involved here.
+  // Plain config: no token is involved here. A detached HEAD has no branch
+  // to track, so its upstream is simply skipped.
   await git('remote', 'remove', 'origin').catch(() => undefined);
   await git('remote', 'add', 'origin', body.clone_url);
-  await git('config', 'branch.main.remote', 'origin');
-  await git('config', 'branch.main.merge', 'refs/heads/main');
+  const branch = await git('symbolic-ref', '-q', '--short', 'HEAD').then(
+    (r) => r.stdout.trim(),
+    () => '',
+  );
+  if (branch) {
+    await git('config', `branch.${branch}.remote`, 'origin');
+    await git('config', `branch.${branch}.merge`, 'refs/heads/main');
+  }
 
-  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'codeam-push-'));
-  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'codeam-push-home-'));
+  let tmp: string | undefined;
+  let home: string | undefined;
   try {
+    tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'codeam-push-'));
+    home = fs.mkdtempSync(path.join(os.tmpdir(), 'codeam-push-home-'));
     const bare = path.join(tmp, 'repo.git');
-    await exec('git', ['clone', '--bare', '--no-hardlinks', '-q', cwd, bare], { env });
-    const pushEnv = {
+    // Isolated from every config the agent could have written (system,
+    // global — hence `init.templateDir` — and HOME), and no template at all.
+    const cleanEnv = {
       ...env,
       HOME: home,
       GIT_CONFIG_NOSYSTEM: '1',
       GIT_CONFIG_GLOBAL: '/dev/null',
       GIT_TERMINAL_PROMPT: '0',
       GCM_INTERACTIVE: 'never',
+    };
+    await exec('git', ['clone', '--bare', '--no-hardlinks', '--template=', '-q', cwd, bare], {
+      env: cleanEnv,
+    });
+    // URL-scoped entries would beat the generic `-c` overrides below, so a
+    // bare copy that somehow carries any is refused rather than pushed from.
+    const { stdout: keys } = await exec('git', ['-C', bare, 'config', '--local', '--list', '--name-only'], {
+      env: cleanEnv,
+    });
+    const hostile = keys.split('\n').filter((k) => /^(http|url|credential|include|includeif)\./i.test(k));
+    if (hostile.length > 0) {
+      throw new Error(`the clean copy carries unexpected git config (${hostile.join(', ')})`);
+    }
+    const pushEnv = {
+      ...cleanEnv,
       GIT_CONFIG_COUNT: '1',
       // Scoped to this exact repo URL: the header goes nowhere else.
       GIT_CONFIG_KEY_0: `http.${body.clone_url}.extraheader`,
@@ -143,8 +168,8 @@ export async function saveToGithub(
       code: 'SAVE_FAILED',
     });
   } finally {
-    fs.rmSync(tmp, { recursive: true, force: true });
-    fs.rmSync(home, { recursive: true, force: true });
+    if (tmp) fs.rmSync(tmp, { recursive: true, force: true });
+    if (home) fs.rmSync(home, { recursive: true, force: true });
   }
 
   return { repoFullName: body.full_name, htmlUrl: body.html_url ?? `https://github.com/${body.full_name}` };

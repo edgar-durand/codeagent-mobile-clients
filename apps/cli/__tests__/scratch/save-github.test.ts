@@ -24,7 +24,12 @@ function ok(body: unknown, status = 200): { ok: boolean; status: number; json: (
  */
 function makeExec(
   calls: GitCall[],
-  opts: { statusOutput?: string; failOn?: (args: string[]) => Error | undefined } = {},
+  opts: {
+    statusOutput?: string;
+    branch?: string;
+    bareConfig?: string;
+    failOn?: (args: string[]) => Error | undefined;
+  } = {},
 ): typeof ExecFileType {
   const fn = (() => {
     throw new Error('unexpected direct call — this mock only implements util.promisify.custom');
@@ -39,6 +44,10 @@ function makeExec(
       const failure = opts.failOn?.(args);
       if (failure) throw failure;
       if (args.includes('status')) return { stdout: opts.statusOutput ?? '', stderr: '' };
+      if (args.includes('symbolic-ref')) return { stdout: `${opts.branch ?? 'main'}\n`, stderr: '' };
+      if (args.includes('--name-only')) {
+        return { stdout: opts.bareConfig ?? 'core.bare\nremote.origin.url\n', stderr: '' };
+      }
       return { stdout: '', stderr: '' };
     },
   });
@@ -108,7 +117,17 @@ describe('saveToGithub', () => {
     // repo), cloned right before it, to the new repo's URL given explicitly.
     const clone = gitCalls.find((c) => c.args.includes('clone'))!;
     const bare = push.args[1];
-    expect(clone.args).toEqual(['clone', '--bare', '--no-hardlinks', '-q', dir, bare]);
+    expect(clone.args).toEqual(['clone', '--bare', '--no-hardlinks', '--template=', '-q', dir, bare]);
+    // The clone runs in the SAME isolated env as the push, minus the token:
+    // no system/global config (so no init.templateDir), throwaway HOME.
+    expect(clone.env.GIT_CONFIG_NOSYSTEM).toBe('1');
+    expect(clone.env.GIT_CONFIG_GLOBAL).toBe('/dev/null');
+    expect(clone.env.HOME).toBe(push.env.HOME);
+    expect(clone.env.GIT_CONFIG_VALUE_0).toBeUndefined();
+    // The bare copy's config is inspected before the push.
+    const check = gitCalls.find((c) => c.args.includes('--name-only'))!;
+    expect(check.args).toEqual(['-C', bare, 'config', '--local', '--list', '--name-only']);
+    expect(gitCalls.indexOf(check)).toBeLessThan(gitCalls.indexOf(push));
     expect(bare.startsWith(os.tmpdir())).toBe(true);
     expect(bare).not.toContain(dir);
     expect(push.args).toEqual([
@@ -298,5 +317,54 @@ describe('saveToGithub', () => {
       code: 'SAVE_FAILED',
       message: 'Push failed: fatal: could not read Username',
     });
+  });
+
+  function repoCreated(fetchImpl = vi.fn()) {
+    return fetchImpl
+      .mockResolvedValueOnce(ok({ login: 'me', id: 7 }))
+      .mockResolvedValueOnce(
+        ok({ full_name: 'me/landing', clone_url: 'https://github.com/me/landing.git', html_url: 'https://github.com/me/landing' }, 201),
+      );
+  }
+
+  it.each(['http.https://github.com.proxy', 'url.http://evil/.insteadof', 'credential.helper', 'include.path', 'includeif.gitdir:/.path'])(
+    'a bare copy whose config carries %s fails SAVE_FAILED WITHOUT pushing',
+    async (key) => {
+      const gitCalls: GitCall[] = [];
+      const exec = makeExec(gitCalls, { bareConfig: `core.bare\n${key}\n` });
+      await expect(
+        saveToGithub('/tmp/fake-scratch-repo', { repoName: 'landing', private: true, token: 'gho_secret' }, {
+          fetchImpl: repoCreated() as unknown as typeof fetch,
+          exec,
+        }),
+      ).rejects.toMatchObject({ code: 'SAVE_FAILED' });
+      expect(gitCalls.some((c) => c.args.includes('push'))).toBe(false);
+    },
+  );
+
+  it('sets the upstream for the CURRENT branch (still pushes HEAD:main)', async () => {
+    const gitCalls: GitCall[] = [];
+    const exec = makeExec(gitCalls, { branch: 'feature/x' });
+    await saveToGithub('/tmp/fake-scratch-repo', { repoName: 'landing', private: true, token: 'gho_secret' }, {
+      fetchImpl: repoCreated() as unknown as typeof fetch,
+      exec,
+    });
+    const rest = gitCalls.map((c) => c.args.join(' '));
+    expect(rest).toContain('-C /tmp/fake-scratch-repo config branch.feature/x.remote origin');
+    expect(rest).toContain('-C /tmp/fake-scratch-repo config branch.feature/x.merge refs/heads/main');
+    expect(gitCalls.find((c) => c.args.includes('push'))!.args.at(-1)).toBe('HEAD:main');
+  });
+
+  it('a detached HEAD skips the upstream config instead of failing', async () => {
+    const gitCalls: GitCall[] = [];
+    const exec = makeExec(gitCalls, {
+      failOn: (args) => (args.includes('symbolic-ref') ? new Error('fatal: ref HEAD is not a symbolic ref') : undefined),
+    });
+    await saveToGithub('/tmp/fake-scratch-repo', { repoName: 'landing', private: true, token: 'gho_secret' }, {
+      fetchImpl: repoCreated() as unknown as typeof fetch,
+      exec,
+    });
+    expect(gitCalls.some((c) => c.args.join(' ').includes('config branch.'))).toBe(false);
+    expect(gitCalls.some((c) => c.args.includes('push'))).toBe(true);
   });
 });
