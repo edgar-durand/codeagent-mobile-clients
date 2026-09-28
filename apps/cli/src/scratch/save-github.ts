@@ -3,10 +3,6 @@ import { promisify } from 'node:util';
 import { nonInteractiveGitEnv } from '../commands/host/workspace';
 
 const GH = 'https://api.github.com';
-// The token is delivered ONLY via `CODEAM_GH_TOKEN` in the child's env (never
-// argv/URL) — this helper reads it back out of ITS OWN env at push time, so
-// `ps` on the box never shows the secret.
-const HELPER = '!f() { echo username=x-access-token; echo "password=${CODEAM_GH_TOKEN}"; }; f';
 
 export interface SaveToGithubResult {
   repoFullName: string;
@@ -27,8 +23,9 @@ export interface SaveToGithubDeps {
 /**
  * `scratch_save_github` — creates the GitHub repo for a "Start from scratch"
  * project, commits any pending changes with the user's own identity, and
- * pushes with the token delivered ONLY via the child process's env (never
- * argv, never a URL) so it can't leak into `.git/config` or `ps`. Throws an
+ * pushes with the token delivered ONLY as an env-configured HTTP header on
+ * the push child (never argv, never a URL, never a credential helper) so it
+ * can't leak into `.git/config`, `ps` or a helper. Throws an
  * `Error` with `.code === 'REPO_NAME_TAKEN' | 'SAVE_FAILED'` on failure.
  */
 export async function saveToGithub(
@@ -43,12 +40,13 @@ export async function saveToGithub(
     Accept: 'application/vnd.github+json',
     'User-Agent': 'codeam-cli',
   };
-  // The token is delivered ONLY to the push call's env, never to
-  // config/status/add/commit (which may run repo hooks). The push itself runs
-  // with `core.hooksPath=/dev/null` so no repo hook (pre-push, …) can execute
-  // while the token is in its env.
+  // The token reaches git ONLY as an HTTP Authorization header, set through
+  // git's env-config (GIT_CONFIG_*) in the push child's env alone: never
+  // argv, never a URL, and never the credential subsystem — so no credential
+  // helper (whatever the agent wrote into `.git/config`) can be handed it on
+  // fill/store/erase. config/status/add/commit (which may run repo hooks) get
+  // the plain env; the push itself runs no hooks at all.
   const env = { ...process.env, ...nonInteractiveGitEnv() };
-  const pushEnv = { ...env, CODEAM_GH_TOKEN: input.token };
   const git = (...args: string[]) => exec('git', ['-C', cwd, ...args], { env });
 
   const meRes = await f(`${GH}/user`, { headers });
@@ -90,15 +88,26 @@ export async function saveToGithub(
 
   await git('remote', 'remove', 'origin').catch(() => undefined);
   await git('remote', 'add', 'origin', body.clone_url);
+  const pushEnv = {
+    ...env,
+    GIT_TERMINAL_PROMPT: '0',
+    GCM_INTERACTIVE: 'never',
+    GIT_CONFIG_COUNT: '1',
+    // Scoped to this exact repo URL: the header goes nowhere else.
+    GIT_CONFIG_KEY_0: `http.${body.clone_url}.extraheader`,
+    GIT_CONFIG_VALUE_0: `AUTHORIZATION: basic ${Buffer.from(`x-access-token:${input.token}`).toString('base64')}`,
+  };
   await exec(
     'git',
     [
       '-C',
       cwd,
+      // Empties the helper list (URL-scoped entries included) and never
+      // prompts: the header is the only way this push authenticates.
       '-c',
       'credential.helper=',
       '-c',
-      `credential.helper=${HELPER}`,
+      'credential.interactive=never',
       '-c',
       'core.hooksPath=/dev/null',
       'push',

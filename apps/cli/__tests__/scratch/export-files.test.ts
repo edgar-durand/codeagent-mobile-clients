@@ -122,6 +122,17 @@ describe('listExportFiles', () => {
     expect(rels).not.toContain('.git/git-credentials');
   });
 
+  it('the scratch credentials filter only looks at TOP-LEVEL .git/ entries (a branch named feature-credentials is kept)', async () => {
+    const dir = makeRepo({ 'src/index.html': '<h1>x</h1>' }, { commitAll: true });
+    execFileSync('git', ['-C', dir, 'branch', 'feature-credentials']);
+    fs.writeFileSync(path.join(dir, '.git', 'codeam-scratch'), '');
+    fs.writeFileSync(path.join(dir, '.git', 'codeam-credentials'), 'secret');
+    const list = await listExportFiles(dir);
+    const rels = list.files.map((f) => f.rel);
+    expect(rels).toContain('.git/refs/heads/feature-credentials');
+    expect(rels).not.toContain('.git/codeam-credentials');
+  });
+
   it('never lists a symbolic link (tracked or untracked), even one pointing at a real file outside the project', async () => {
     const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'codeam-outside-'));
     fs.writeFileSync(path.join(outside, 'id_rsa'), 'PRIVATE KEY');

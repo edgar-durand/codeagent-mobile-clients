@@ -98,7 +98,9 @@ describe('saveToGithub', () => {
       ),
     ).toBe(true);
 
-    // The push carries the token ONLY in env, never in argv.
+    // The push authenticates with an HTTP header delivered through git's
+    // env-config (GIT_CONFIG_*), never argv/URL and never the credential
+    // subsystem: the generic helper list is emptied and no helper is added.
     const push = gitCalls.find((c) => c.args.includes('push'))!;
     expect(push.args).toEqual([
       '-C',
@@ -106,8 +108,8 @@ describe('saveToGithub', () => {
       '-c',
       'credential.helper=',
       '-c',
-      expect.stringContaining('credential.helper=!f'),
-      // No repo hook (pre-push, …) ever runs while CODEAM_GH_TOKEN is in env.
+      'credential.interactive=never',
+      // No repo hook (pre-push, …) ever runs while the header is in env.
       '-c',
       'core.hooksPath=/dev/null',
       'push',
@@ -115,22 +117,29 @@ describe('saveToGithub', () => {
       'origin',
       'HEAD:main',
     ]);
-    expect(push.args.join(' ')).not.toContain('gho_secret');
-    expect(push.env.CODEAM_GH_TOKEN).toBe('gho_secret');
+    expect(push.args.filter((a) => /^credential\.helper=./.test(a))).toEqual([]);
+    const b64 = Buffer.from('x-access-token:gho_secret').toString('base64');
+    expect(push.env.GIT_CONFIG_COUNT).toBe('1');
+    expect(push.env.GIT_CONFIG_KEY_0).toBe('http.https://github.com/me/landing.git.extraheader');
+    expect(push.env.GIT_CONFIG_VALUE_0).toBe(`AUTHORIZATION: basic ${b64}`);
+    expect(push.env.GIT_TERMINAL_PROMPT).toBe('0');
+    expect(push.env.GCM_INTERACTIVE).toBe('never');
+    expect(push.env.CODEAM_GH_TOKEN).toBeUndefined();
 
-    // The secret never leaks into ANY git argv, not just the push.
+    // (a) Neither the secret nor its base64 ever reaches ANY git argv.
     for (const call of gitCalls) {
       expect(call.args.join(' ')).not.toContain('gho_secret');
+      expect(call.args.join(' ')).not.toContain(b64);
     }
 
-    // ONLY the push call's env carries the token — config/status/add/commit/
-    // remote run under the plain env, since a repo hook running on `commit`
-    // (or any other non-push call) has no business seeing it.
+    // (b) ONLY the push call's env carries the header — config/status/add/
+    // commit/remote run under the plain env (repo hooks may run there).
     for (const call of gitCalls) {
       if (call.args.includes('push')) continue;
-      expect(call.env.CODEAM_GH_TOKEN).toBeUndefined();
+      expect(call.env.GIT_CONFIG_VALUE_0).toBeUndefined();
+      expect(call.env.GIT_CONFIG_COUNT).toBeUndefined();
+      expect(JSON.stringify(call.env)).not.toContain(b64);
     }
-    expect(gitCalls.filter((c) => c.env.CODEAM_GH_TOKEN === 'gho_secret')).toHaveLength(1);
   });
 
   it('a revoked/expired token (401 on GET /user) rejects SAVE_FAILED and makes NO git calls', async () => {

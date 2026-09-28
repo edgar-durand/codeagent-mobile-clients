@@ -34,7 +34,8 @@ export interface ExportList {
  * history is the user's work). A cloned repo's `.git/` holds the clone token
  * (`configureGitCredentials` → `.git/codeam-credentials`) and whatever else
  * the host put there, so a non-scratch export is source only. Even for
- * scratch, the marker and any `*credentials*` file are never exported.
+ * scratch, the marker and any top-level `.git/*credentials*` entry are never
+ * exported.
  */
 export async function listExportFiles(cwd: string): Promise<ExportList> {
   // `LC_ALL=C` pins git's own messages (notably "fatal: not a git
@@ -58,7 +59,7 @@ export async function listExportFiles(cwd: string): Promise<ExportList> {
   const gitFiles = isScratchWorkspace(cwd)
     ? walk(path.join(cwd, '.git'))
         .map((abs) => path.relative(cwd, abs).split(path.sep).join('/'))
-        .filter((rel) => rel !== `.git/${SCRATCH_MARKER}` && !/credentials/i.test(rel.slice(5)))
+        .filter((rel) => rel !== `.git/${SCRATCH_MARKER}` && !/credentials/i.test(rel.split('/')[1]))
     : [];
 
   const envKeys = new Set<string>();
