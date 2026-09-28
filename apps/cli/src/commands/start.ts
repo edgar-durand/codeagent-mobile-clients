@@ -327,6 +327,7 @@ export async function start(
       pluginAuthToken: session.pluginAuthToken ?? undefined,
       pollSecret: session.pollSecret,
       preview: previewBridge,
+      scratch: isScratchWorkspace(process.cwd()),
     }),
   );
 

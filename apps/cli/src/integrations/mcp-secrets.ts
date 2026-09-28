@@ -27,7 +27,7 @@ export function mcpSecretsDir(): string {
   return path.join(os.homedir(), '.codeam', 'mcp-secrets');
 }
 
-export type McpSecretScope = 'integrations' | 'preview';
+export type McpSecretScope = 'integrations' | 'preview' | 'scratch';
 
 export function mcpSecretsPath(scope: McpSecretScope, pid: number = process.pid): string {
   return path.join(mcpSecretsDir(), `${pid}-${scope}.json`);

@@ -51,6 +51,7 @@ import { persistIntegrationsManifest, readIntegrationsManifest } from '../../int
 import { buildMcpServersForStart } from '../../integrations/provision';
 import { mergeWithLocalMcpServers } from '../../services/local-mcp-servers';
 import { agentPreviewBridge } from '../../commands/start/agent-preview-bridge';
+import { isScratchWorkspace } from '../../scratch/workspace';
 import { detectRepoStack } from '../../integrations/detect-stack';
 import {
   SQUAD_CONFIGURE_COMMAND,
@@ -1952,6 +1953,7 @@ async function integrationsSyncH(ctx: AcpCommandContext): Promise<void> {
         pluginAuthToken: opts.pluginAuthToken,
         pollSecret: opts.pollSecret,
         preview: agentPreviewBridge.address(),
+        scratch: isScratchWorkspace(process.cwd()),
       }),
     );
     const applied = await client.reprovisionMcp(servers);
