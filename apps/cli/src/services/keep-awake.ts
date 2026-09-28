@@ -15,8 +15,12 @@
 // Best-effort EVERYWHERE: if the helper binary is absent (a stripped container,
 // a non-systemd Linux, PowerShell missing) the spawn 'error' is swallowed and the
 // session runs exactly as before — this only ever ADDS "don't sleep", never gates
-// the session. Gated to LOCAL sessions (a codespace / self-hosted box isn't the
-// user's laptop) and opt-out-able via `CODEAM_NO_KEEP_AWAKE=1`.
+// the session. Gated to LOCAL sessions by default (a codespace isn't the user's
+// laptop) and opt-out-able via `CODEAM_NO_KEEP_AWAKE=1`. A self-hosted box CAN be
+// the user's own laptop — `host-agent` (`commands/host-agent.ts`) calls this with
+// `isLocal: true` for its own whole lifetime, since its pair-auto children are
+// gated OFF of `isLocalSession()` (CODEAM_AUTO_TOKEN/CODEAM_ENROLL_TOKEN) and would
+// otherwise never trigger the per-session keep-awake in `start.ts`.
 import { spawn, type ChildProcess, type SpawnOptions } from 'node:child_process';
 import { log } from './logger';
 import { isLocalSession } from '../baton/gate';
@@ -65,7 +69,7 @@ export function keepDeviceAwake(deps: KeepAwakeDeps = {}): () => void {
     });
     // Don't let the assertion holder keep OUR event loop alive on its own.
     child.unref();
-    log.info('keep-awake', `holding a power assertion for this local session (${command.cmd})`);
+    log.info('keep-awake', `holding a power assertion (${command.cmd})`);
   } catch {
     child = null;
   }
