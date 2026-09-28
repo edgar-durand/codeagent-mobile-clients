@@ -51,6 +51,7 @@ import {
 import { isScratchWorkspace } from '../scratch/workspace';
 import { deployIdFromWorkspace } from './host/workspace';
 import { registerScratchProject } from '../scratch/api';
+import { purgeExports } from '../scratch/export-registry';
 import { mergeWithLocalMcpServers } from '../services/local-mcp-servers';
 import { provisionSkillsForStart } from '../skills/provision';
 import type { StartedBeads } from '../beads';
@@ -267,6 +268,9 @@ export async function start(
       log.info('claude', `removed retired Headroom config: ${cleaned.removed.join(', ')}`);
     }
   }
+  // Scratch ZIP exports from a previous run are unreachable: their one-shot
+  // tokens lived in that process's memory.
+  purgeExports();
   const beadsReady = provisionBeadsForStart({
     sessionId: session.id,
     pluginId,

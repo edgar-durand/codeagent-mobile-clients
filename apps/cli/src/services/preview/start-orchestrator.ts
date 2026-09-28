@@ -37,6 +37,7 @@ import {
 } from './served-address';
 import type { InspectorProxy } from './inspector-proxy';
 import { fetchNamedPreviewTunnel } from '../pairing.service';
+import { stopExportTunnel } from '../../scratch/export-tunnel';
 
 /**
  * Time budgets for the preview bring-up's blocking command steps
@@ -303,6 +304,8 @@ export function normalizeDetectionForSpawn(
  * the caller owns the safety-net `preview_error` for unexpected throws.
  */
 export async function runPreviewStart(args: PreviewStartArgs): Promise<void> {
+  // Two connectors on one named tunnel would load-balance between the preview and the export server.
+  await stopExportTunnel();
   const { sessionId, detection, emit } = args;
   const ctx: StageCtx = {
     ...args,
