@@ -51,6 +51,7 @@ import { persistIntegrationsManifest, readIntegrationsManifest } from '../../int
 import { buildMcpServersForStart } from '../../integrations/provision';
 import { mergeWithLocalMcpServers } from '../../services/local-mcp-servers';
 import { agentPreviewBridge } from '../../commands/start/agent-preview-bridge';
+import { reapPreviewsAndExportTunnel } from '../../commands/start/shutdown-tunnels';
 import { isScratchWorkspace } from '../../scratch/workspace';
 import { scratchExportZipH, scratchSaveGithubH } from '../../scratch/handlers';
 import { detectRepoStack } from '../../integrations/detect-stack';
@@ -1797,6 +1798,9 @@ async function sessionShutdownH(ctx: AcpCommandContext): Promise<void> {
   await stopRelayWithGoodbye(relay);
   closeAllTerminals();
   await client.stop();
+  // Bounded reap of previews + the scratch-export tunnel: an orphaned
+  // cloudflared would keep a connector on the box's named tunnel.
+  await reapPreviewsAndExportTunnel();
   process.exit(0);
   // NOTE: the original switch case had a trailing `return;` here — dead code
   // (process.exit never returns), flagged by TS as "Unreachable code
