@@ -252,3 +252,13 @@ describe('maybeSendOnboardingWelcome', () => {
     expect(promiseResolved).toBe(true);
   });
 });
+
+// Web replay 2026-09-27: the same welcome bubble renders on the web dashboard,
+// where "driving this agent from your phone" was simply false.
+describe('buildOnboardingWelcome — surface-neutral copy', () => {
+  it('does not claim the session is driven only from a phone', () => {
+    const text = buildOnboardingWelcome(process.cwd());
+    expect(text).toContain('from your phone or the web');
+    expect(text).not.toMatch(/from your phone —/);
+  });
+});
