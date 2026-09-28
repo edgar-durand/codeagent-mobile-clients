@@ -48,6 +48,9 @@ import {
   isHouseProxyEnv,
   houseRailWireId,
 } from './host/house-proxy-config';
+import { isScratchWorkspace } from '../scratch/workspace';
+import { deployIdFromWorkspace } from './host/workspace';
+import { registerScratchProject } from '../scratch/api';
 import { mergeWithLocalMcpServers } from '../services/local-mcp-servers';
 import { provisionSkillsForStart } from '../skills/provision';
 import type { StartedBeads } from '../beads';
@@ -326,6 +329,11 @@ export async function start(
       preview: previewBridge,
     }),
   );
+
+  if (isScratchWorkspace(process.cwd())) {
+    const deployId = deployIdFromWorkspace(process.cwd());
+    if (deployId) void registerScratchProject({ sessionId: session.id, pluginId, pluginAuthToken: session.pluginAuthToken }, deployId);
+  }
 
   // Agent Skills — materialize any curated SKILL.md the deploy attached
   // (~/.codeam/skills.json) under $HOME before the agent spawns. Claude
