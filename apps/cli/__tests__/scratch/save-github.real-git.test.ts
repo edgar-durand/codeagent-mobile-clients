@@ -158,7 +158,9 @@ describe('saveToGithub push — real git, hostile repo config', () => {
         '',
       ].join('\n'),
     );
-    fs.writeFileSync(path.join(fakeHome, '.gitconfig'), `[init]\n\ttemplateDir = ${tpl}\n`);
+    // Forward slashes: a backslash is an escape in a gitconfig value, so a raw
+    // Windows path makes the whole file unparseable (git exits 128).
+    fs.writeFileSync(path.join(fakeHome, '.gitconfig'), `[init]\n\ttemplateDir = ${tpl.split(path.sep).join('/')}\n`);
     const prevHome = process.env.HOME;
     process.env.HOME = fakeHome;
     const before = new Set(codeamTmpDirs());

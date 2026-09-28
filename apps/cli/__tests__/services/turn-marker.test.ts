@@ -12,14 +12,19 @@ import {
 // The host-agent restarts onto an update only when no session is mid-turn;
 // this marker is how a session child says so.
 let home: string;
-const origHome = process.env.HOME;
+// os.homedir() reads USERPROFILE on Windows, HOME elsewhere.
+const origEnv = { HOME: process.env.HOME, USERPROFILE: process.env.USERPROFILE };
 beforeEach(() => {
   home = fs.mkdtempSync(path.join(os.tmpdir(), 'codeam-turn-'));
   process.env.HOME = home;
+  process.env.USERPROFILE = home;
   __resetTurnMarkerDepth();
 });
 afterEach(() => {
-  process.env.HOME = origHome;
+  for (const [k, v] of Object.entries(origEnv)) {
+    if (v === undefined) delete process.env[k];
+    else process.env[k] = v;
+  }
   fs.rmSync(home, { recursive: true, force: true });
 });
 
