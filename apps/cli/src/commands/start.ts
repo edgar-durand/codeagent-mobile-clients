@@ -776,6 +776,10 @@ export async function start(
         // `claude -p` / `codex exec` headless children so they
         // don't survive the parent's hard `process.exit`.
         killActiveSpawnAndCaptureChildren();
+        // Same awaited reap as sigintHandler: an orphaned export cloudflared
+        // would keep a connector on the box's named tunnel and break the
+        // next preview.
+        await reapPreviewsAndExportTunnel();
         process.exit(code);
       },
     },
