@@ -190,6 +190,20 @@ export function describeOneShotAgentError(stderr: string): string | null {
   return `Preview detection couldn't run — the agent answered ${m[1]}: ${detail}`;
 }
 
+/**
+ * Preview-detection copy for a one-shot that failed because the user's OWN
+ * provider account is out of credits (web replay 2026-09-27: an OpenRouter
+ * 402 "requires more credits" surfaced as "Detection Failed — the agent
+ * didn't return anything", which blamed the project). Nothing about the
+ * project is wrong, so the fix it names is the provider balance or the agent.
+ */
+export function previewProviderCreditsMessage(provider: string): string {
+  return (
+    `Preview detection couldn't run — your ${provider} account has no credits left. ` +
+    'Top up at your provider, or switch this session to another agent.'
+  );
+}
+
 /** Tope del extracto. Un one-shot puede devolver miles de lineas y el log
  *  vive en la maquina del usuario: no es sitio para volcarlas enteras. */
 const RAW_EXCERPT_LIMIT = 1_000;

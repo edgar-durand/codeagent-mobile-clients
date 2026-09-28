@@ -160,7 +160,12 @@ export class CodexRuntimeStrategy implements RuntimeStrategy {
 
   async generateOneShot(
     prompt: string,
-    opts?: { cwd?: string; timeoutMs?: number; onStderr?: (chunk: string) => void },
+    opts?: {
+      cwd?: string;
+      timeoutMs?: number;
+      onStderr?: (chunk: string) => void;
+      onFailedOutput?: (stdout: string) => void;
+    },
   ): Promise<string | null> {
     // `codex exec "<prompt>"` runs Codex CLI in non-interactive mode —
     // prints the response to stdout and exits. Separate child process
@@ -171,6 +176,7 @@ export class CodexRuntimeStrategy implements RuntimeStrategy {
     const launch = this.os.buildLaunch(binary, ['exec', prompt]);
     return spawnAndCapture(launch.cmd, launch.args, {
       onStderr: opts?.onStderr,
+      onFailedOutput: opts?.onFailedOutput,
       cwd: opts?.cwd,
       timeoutMs: opts?.timeoutMs,
     });

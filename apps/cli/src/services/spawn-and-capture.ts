@@ -49,6 +49,13 @@ export interface SpawnAndCaptureOpts {
   env?: NodeJS.ProcessEnv;
   timeoutMs?: number;
   onStderr?: (chunk: string) => void;
+  /**
+   * Receives stdout when the child exits non-zero (the result is still
+   * `null`). `claude -p` prints its API error (`API Error: 402 …`) on STDOUT
+   * and exits 1, so without this the reason was dropped and Preview detection
+   * reported "the agent didn't return anything".
+   */
+  onFailedOutput?: (stdout: string) => void;
 }
 
 export async function spawnAndCapture(
@@ -104,6 +111,8 @@ export async function spawnAndCapture(
       clearTimeout(timer);
       activeChildren.delete(child);
       if (code !== 0) {
+        const failedOut = stdout.trim();
+        if (failedOut) opts.onFailedOutput?.(failedOut);
         settle(null);
         return;
       }
