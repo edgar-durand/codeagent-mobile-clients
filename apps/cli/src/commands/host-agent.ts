@@ -102,6 +102,7 @@ import {
   type SealedHostIdentity,
   type SessionBubbleAuth,
 } from './host/host-client';
+import { prepareScratchWorkspace } from '../scratch/workspace';
 import {
   deployIdFromWorkspace,
   isAbsolutePathTarget,
@@ -212,6 +213,13 @@ interface HouseProxy {
 interface DeployPayload {
   deployId: string;
   repoOrPath: string;
+  /**
+   * `'scratch'` = a repo-less "Start from scratch" project: instead of
+   * cloning `repoOrPath`, the box creates an empty git-initialised project
+   * at `~/.codeam/self-hosted/<deployId>` (see `prepareScratchWorkspace`).
+   * Absent = the normal clone-or-absolute-path flow (unchanged).
+   */
+  source?: 'scratch';
   /** Code host of `repoOrPath` when it's a repo — 'github' (default/absent)
    *  or 'gitlab'. Selects the clone URL scheme + which CLI (gh/glab) we set up. */
   repoProvider?: 'github' | 'gitlab';
@@ -320,6 +328,10 @@ function isDeployPayload(p: Record<string, unknown>): p is DeployPayload & Recor
   }
   // cloneToken is optional, but must be a string when present.
   if (p.cloneToken !== undefined && typeof p.cloneToken !== 'string') {
+    return false;
+  }
+  // source is optional (absent ⇒ clone-or-path); only 'scratch' is valid.
+  if (p.source !== undefined && p.source !== 'scratch') {
     return false;
   }
   // repoProvider is optional (absent ⇒ github) but constrained when present.
@@ -1999,16 +2011,19 @@ export class HostAgentSupervisor {
       //    private repo authenticates and a bad/missing credential fails
       //    fast instead of hanging the deploy.
       report('preparing', 'preparing workspace');
-      if (!isAbsolutePathTarget(payload.repoOrPath)) {
+      if (payload.source !== 'scratch' && !isAbsolutePathTarget(payload.repoOrPath)) {
         report('cloning', 'cloning repository');
       }
-      const cwd = await prepareWorkspace(
-        payload.repoOrPath,
-        payload.deployId,
-        payload.cloneToken,
-        payload.repoProvider ?? 'github',
-        payload.branch,
-      );
+      const cwd =
+        payload.source === 'scratch'
+          ? await prepareScratchWorkspace(payload.deployId)
+          : await prepareWorkspace(
+              payload.repoOrPath,
+              payload.deployId,
+              payload.cloneToken,
+              payload.repoProvider ?? 'github',
+              payload.branch,
+            );
 
       // Two mutually-exclusive credential shapes (see DeployPayload):
       //   - House agent ("CodeAgent Cloud"): point the underlying agent at
