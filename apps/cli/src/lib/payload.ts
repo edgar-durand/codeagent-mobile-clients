@@ -237,6 +237,15 @@ export const startCommandSchema = z.object({
   // malformed/unknown id on add/remove) sends no `skillId` or an invalid one;
   // `configureSkill` itself validates against the shared registry.
   skillId: z.string().min(1).max(128).optional(),
+  // `scratch_export_zip` — the plan's ZIP-export byte limit; `null` means PRO
+  // (unlimited — the handler never reports `tooLarge`).
+  limitBytes: z.number().int().nullable().optional(),
+  // `scratch_save_github` — target repo name/visibility and the GitHub token
+  // delivered for this one save. Never logged; the handler passes it to git
+  // only via a child-process env var, never argv.
+  repoName: z.string().min(1).max(255).optional(),
+  private: z.boolean().optional(),
+  token: z.string().min(1).max(4096).optional(),
 });
 
 export type StartCommandPayload = z.infer<typeof startCommandSchema>;

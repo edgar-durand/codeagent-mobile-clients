@@ -52,6 +52,7 @@ import { buildMcpServersForStart } from '../../integrations/provision';
 import { mergeWithLocalMcpServers } from '../../services/local-mcp-servers';
 import { agentPreviewBridge } from '../../commands/start/agent-preview-bridge';
 import { isScratchWorkspace } from '../../scratch/workspace';
+import { scratchExportZipH, scratchSaveGithubH } from '../../scratch/handlers';
 import { detectRepoStack } from '../../integrations/detect-stack';
 import {
   SQUAD_CONFIGURE_COMMAND,
@@ -2063,6 +2064,8 @@ export const ACP_COMMAND_HANDLERS: Record<string, AcpCommandHandler> = {
   pack_status: packStatusH,
   [SQUAD_CONFIGURE_COMMAND]: squadConfigureH,
   [SQUAD_STATS_COMMAND]: squadStatsH,
+  scratch_export_zip: scratchExportZipH,
+  scratch_save_github: scratchSaveGithubH,
 };
 
 /**

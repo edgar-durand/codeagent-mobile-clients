@@ -37,10 +37,21 @@ export function registerExport(
   file: string,
   sizeBytes: number,
   onComplete: () => void,
+  /**
+   * Fires when the token expires WITHOUT a download (never on a completed
+   * one — that's `onComplete`). Lets a caller holding a resource for the
+   * lifetime of the export (e.g. the export tunnel's hold) release it even
+   * when the user never downloads. Additive — defaults to a no-op so
+   * existing 3-arg callers are unaffected.
+   */
+  onExpire: () => void = () => {},
 ): { token: string; expiresAt: Date } {
   const token = randomBytes(24).toString('hex');
   const expiresAt = Date.now() + EXPORT_TTL_MS;
-  const timer = setTimeout(() => drop(token), EXPORT_TTL_MS);
+  const timer = setTimeout(() => {
+    drop(token);
+    onExpire();
+  }, EXPORT_TTL_MS);
   timer.unref();
   entries.set(token, { file, size: sizeBytes, expiresAt, timer, inFlight: false, onComplete });
   return { token, expiresAt: new Date(expiresAt) };
