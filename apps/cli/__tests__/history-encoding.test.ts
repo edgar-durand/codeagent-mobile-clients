@@ -36,4 +36,11 @@ describe('encodeCwd', () => {
     // path separators, not left intact.
     expect(encodeCwd('/Users/foo/my_project')).toBe('-Users-foo-my-project');
   });
+
+  it('encodes dots like Claude Code does — the Box workspaces live under .codeam', () => {
+    expect(encodeCwd('/home/box/.codeam/self-hosted/0e5fedde')).toBe(
+      '-home-box--codeam-self-hosted-0e5fedde',
+    );
+    expect(encodeCwd('/Users/edgar/my.app')).toBe('-Users-edgar-my-app');
+  });
 });
