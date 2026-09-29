@@ -4,6 +4,13 @@ All notable changes to `codeam-cli` are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.76.7] — 2026-09-29
+
+### Fixed
+
+- **cli:** One-shot transcripts never pose as the session's conversation
+- **cli:** Claude one-shots run with --no-session-persistence (no transcript at all)
+
 ## [2.76.6] — 2026-09-29
 
 ### Fixed
