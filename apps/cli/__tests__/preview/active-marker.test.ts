@@ -20,23 +20,36 @@ const detection = {
 
 describe('preview active marker', () => {
   let cwd: string;
+  let home: string;
   beforeEach(() => {
     cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'codeam-preview-marker-'));
+    home = fs.mkdtempSync(path.join(os.tmpdir(), 'codeam-preview-home-'));
   });
 
-  it('round-trips the detection and clears on an explicit stop', async () => {
-    expect(await readActivePreviewMarker(cwd)).toBeNull();
-    await writeActivePreviewMarker(cwd, detection);
-    expect(await readActivePreviewMarker(cwd)).toEqual(detection);
-    await clearActivePreviewMarker(cwd);
-    expect(await readActivePreviewMarker(cwd)).toBeNull();
-    await clearActivePreviewMarker(cwd); // idempotent
+  it('round-trips the detection, clears on an explicit stop, and never touches the project tree', async () => {
+    expect(await readActivePreviewMarker(cwd, home)).toBeNull();
+    await writeActivePreviewMarker(cwd, detection, home);
+    expect(await readActivePreviewMarker(cwd, home)).toEqual(detection);
+    // Machine state lives under ~/.codeam, not inside the (committable) project.
+    expect(fs.existsSync(path.join(cwd, '.codeam'))).toBe(false);
+    expect(fs.readdirSync(path.join(home, '.codeam', 'preview-active'))).toHaveLength(1);
+    await clearActivePreviewMarker(cwd, home);
+    expect(await readActivePreviewMarker(cwd, home)).toBeNull();
+    await clearActivePreviewMarker(cwd, home); // idempotent
+  });
+
+  it('two workspaces get two markers', async () => {
+    const other = fs.mkdtempSync(path.join(os.tmpdir(), 'codeam-preview-marker-'));
+    await writeActivePreviewMarker(cwd, detection, home);
+    expect(await readActivePreviewMarker(other, home)).toBeNull();
   });
 
   it('a corrupt marker reads as nothing to restore', async () => {
-    fs.mkdirSync(path.join(cwd, '.codeam'), { recursive: true });
-    fs.writeFileSync(path.join(cwd, '.codeam', 'preview-active.json'), '{not json');
-    expect(await readActivePreviewMarker(cwd)).toBeNull();
+    await writeActivePreviewMarker(cwd, detection, home);
+    const dir = path.join(home, '.codeam', 'preview-active');
+    const [file] = fs.readdirSync(dir);
+    fs.writeFileSync(path.join(dir, file), '{not json');
+    expect(await readActivePreviewMarker(cwd, home)).toBeNull();
   });
 });
 
