@@ -53,7 +53,7 @@ import { mergeWithLocalMcpServers } from '../../services/local-mcp-servers';
 import { agentPreviewBridge } from '../../commands/start/agent-preview-bridge';
 import { reapPreviewsAndExportTunnel } from '../../commands/start/shutdown-tunnels';
 import { isScratchWorkspace } from '../../scratch/workspace';
-import { scratchExportZipH, scratchSaveGithubH } from '../../scratch/handlers';
+import { scratchExportZipH, scratchSaveGithubH, scratchSaveGitlabH } from '../../scratch/handlers';
 import { detectRepoStack } from '../../integrations/detect-stack';
 import {
   SQUAD_CONFIGURE_COMMAND,
@@ -998,7 +998,9 @@ async function startTaskH(ctx: AcpCommandContext): Promise<void> {
           log.warn('acpRunner', `turnFiles.flushTurn failed: ${describeError(err)}`);
         });
         log.info('acpRunner', `start_task ← byo-provider-billing id=${cmd.id.slice(0, 8)}`);
-        await relay.sendResult(cmd.id, 'failed', { error: 'provider account has no credits (402)' });
+        await relay.sendResult(cmd.id, 'failed', {
+          error: 'provider account has no credits (402)',
+        });
         return;
       } else if (replyIsAuthFailure(finalText)) {
         // The agent COMPLETED the turn but its reply IS an auth-failure
@@ -2070,6 +2072,7 @@ export const ACP_COMMAND_HANDLERS: Record<string, AcpCommandHandler> = {
   [SQUAD_STATS_COMMAND]: squadStatsH,
   scratch_export_zip: scratchExportZipH,
   scratch_save_github: scratchSaveGithubH,
+  scratch_save_gitlab: scratchSaveGitlabH,
 };
 
 /**

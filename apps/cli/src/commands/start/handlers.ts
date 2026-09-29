@@ -44,22 +44,42 @@ import { applyFileReview } from '../../services/apply-file-review.service';
 import { buildLinkContext } from '../link';
 import { makeSerializedEmitter } from '../../services/preview/serialized-emitter';
 import { makePreviewHeartbeatReaffirm } from '../../services/preview/reaffirm';
-import { postLinkCredential, postAiResult, postPreviewEvent, postBeadsEvent, postCliUpdateEvent, postCoderabbitEvent, postAgentReviewReport, postTurnEvent, fetchProvisionCredential } from '../../services/pairing.service';
+import {
+  postLinkCredential,
+  postAiResult,
+  postPreviewEvent,
+  postBeadsEvent,
+  postCliUpdateEvent,
+  postCoderabbitEvent,
+  postAgentReviewReport,
+  postTurnEvent,
+  fetchProvisionCredential,
+} from '../../services/pairing.service';
 import { configureCoderabbit, type CoderabbitAction } from '../../agents/coderabbit/configure';
-import { deliverPendingCoderabbitCallback, type CoderabbitAuthEvent } from '../../agents/coderabbit/oauth';
+import {
+  deliverPendingCoderabbitCallback,
+  type CoderabbitAuthEvent,
+} from '../../agents/coderabbit/oauth';
 import { CoderabbitRuntimeStrategy } from '../../agents/coderabbit/runtime';
 import { reviewPullRequest, defaultRunGh } from '../../agents/coderabbit/review-pr';
 import { createOsStrategy } from '../../os';
-import { scratchExportZipH, scratchSaveGithubH } from '../../scratch/handlers';
+import { scratchExportZipH, scratchSaveGithubH, scratchSaveGitlabH } from '../../scratch/handlers';
+import { postScratchOffer } from '../../scratch/api';
+import { isScratchWorkspace } from '../../scratch/workspace';
 import { getGuardrailPolicy, setGuardrailPolicy } from '../../agents/acp/guardrail-config';
 import { byoProviderName, looksLikeByoProviderBilling } from '../../agents/acp/failure-messages';
-import { AGENT_REGISTRY, isKnownAgentId, normalizeAgentId, PREVIEW_DETECT_PROMPT, USER_EVENTS, type PreviewDetection, type PreviewOrigin } from '@codeam/shared';
+import {
+  AGENT_REGISTRY,
+  isKnownAgentId,
+  normalizeAgentId,
+  PREVIEW_DETECT_PROMPT,
+  USER_EVENTS,
+  type PreviewDetection,
+  type PreviewOrigin,
+} from '@codeam/shared';
 import * as previewSvc from '../../services/preview';
 import { runPreviewStart, type EmitPreviewEvent } from '../../services/preview/start-orchestrator';
-import {
-  restoreProjectEnvIfMissing,
-  syncProjectEnvUp,
-} from '../../services/project-env';
+import { restoreProjectEnvIfMissing, syncProjectEnvUp } from '../../services/project-env';
 import {
   activePreviews,
   killPreview,
@@ -316,7 +336,16 @@ const getContext: CommandHandler = async (ctx, cmd) => {
   const quotaPercent = ctx.historySvc.getQuotaPercent();
   const base = usage
     ? { ...usage, monthlyCost }
-    : { used: 0, total: 200000, percent: 0, model: null, outputTokens: 0, cacheReadTokens: 0, monthlyCost, error: 'No usage data found' };
+    : {
+        used: 0,
+        total: 200000,
+        percent: 0,
+        model: null,
+        outputTokens: 0,
+        cacheReadTokens: 0,
+        monthlyCost,
+        error: 'No usage data found',
+      };
   const result = {
     ...base,
     ...(rateLimitReset ? { rateLimitReset } : {}),
@@ -374,7 +403,9 @@ const changeModel: CommandHandler = async (ctx, cmd) => {
   } else if (instr.type === 'restart') {
     // Restart path — Claude doesn't use this in Phase 1, but the design
     // supports it for future agents. Defer full implementation.
-    await ctx.relay.sendResult(cmd.id, 'failed', { error: 'restart-mode change_model not supported in Phase 1' });
+    await ctx.relay.sendResult(cmd.id, 'failed', {
+      error: 'restart-mode change_model not supported in Phase 1',
+    });
     return;
   }
   await ctx.relay.sendResult(cmd.id, 'completed', {});
@@ -398,23 +429,29 @@ const setKeepAlive: CommandHandler = async (ctx, cmd) => {
   const enabled = !!cmd.payload.enabled;
   ctx.setKeepAlive(enabled);
   try {
-    await ctx.relay.sendResult(
-      cmd.id,
-      'success',
-      {
-        enabled,
-        applied: enabled && ctx.keepAliveCtx.inCodespace,
-        runtime: ctx.keepAliveCtx.inCodespace ? 'github-codespaces' : 'local',
-      },
-    );
-  } catch { /* ignore */ }
+    await ctx.relay.sendResult(cmd.id, 'success', {
+      enabled,
+      applied: enabled && ctx.keepAliveCtx.inCodespace,
+      runtime: ctx.keepAliveCtx.inCodespace ? 'github-codespaces' : 'local',
+    });
+  } catch {
+    /* ignore */
+  }
 };
 
 const sessionTerminated: CommandHandler = async (ctx, cmd) => {
   // Mobile/web "Delete session". Tear down everything and exit.
   showInfo('Session was deleted from the app — exiting.');
-  try { await ctx.relay.sendResult(cmd.id, 'success', { ok: true }); } catch { /* best-effort */ }
-  try { removeSession(ctx.sessionId); } catch { /* best-effort */ }
+  try {
+    await ctx.relay.sendResult(cmd.id, 'success', { ok: true });
+  } catch {
+    /* best-effort */
+  }
+  try {
+    removeSession(ctx.sessionId);
+  } catch {
+    /* best-effort */
+  }
   quiet(() => ctx.agent.kill());
   try {
     const proc = spawn('bash', ['-lc', 'pm2 delete codeam-pair >/dev/null 2>&1 || true'], {
@@ -422,7 +459,9 @@ const sessionTerminated: CommandHandler = async (ctx, cmd) => {
       stdio: 'ignore',
     });
     proc.unref();
-  } catch { /* pm2 may not be installed locally; ignore */ }
+  } catch {
+    /* pm2 may not be installed locally; ignore */
+  }
   ctx.outputSvc.dispose();
   // AWAITED goodbye so the backend flips this session offline immediately
   // (a fire-and-forget heartbeat never survives the process.exit below).
@@ -435,17 +474,26 @@ const shutdownSession: CommandHandler = async (ctx, cmd) => {
   // Claude + exit. Inside a Codespace, also `gh codespace stop` so
   // the workspace itself suspends and the user stops paying for
   // compute hours.
-  try { await ctx.relay.sendResult(cmd.id, 'success', { ok: true }); } catch { /* best-effort */ }
+  try {
+    await ctx.relay.sendResult(cmd.id, 'success', { ok: true });
+  } catch {
+    /* best-effort */
+  }
   quiet(() => ctx.agent.kill());
   if (ctx.keepAliveCtx.inCodespace && ctx.keepAliveCtx.codespaceName) {
     try {
       const stopProc = spawn(
         'bash',
-        ['-lc', `sleep 1; gh codespace stop -c ${JSON.stringify(ctx.keepAliveCtx.codespaceName)} >/dev/null 2>&1 || true`],
+        [
+          '-lc',
+          `sleep 1; gh codespace stop -c ${JSON.stringify(ctx.keepAliveCtx.codespaceName)} >/dev/null 2>&1 || true`,
+        ],
         { detached: true, stdio: 'ignore' },
       );
       stopProc.unref();
-    } catch { /* gh may be unavailable; ignore */ }
+    } catch {
+      /* gh may be unavailable; ignore */
+    }
   }
   try {
     const proc = spawn('bash', ['-lc', 'pm2 delete codeam-pair >/dev/null 2>&1 || true'], {
@@ -453,7 +501,9 @@ const shutdownSession: CommandHandler = async (ctx, cmd) => {
       stdio: 'ignore',
     });
     proc.unref();
-  } catch { /* ignore */ }
+  } catch {
+    /* ignore */
+  }
   ctx.outputSvc.dispose();
   // AWAITED goodbye so the backend flips this session offline immediately
   // (a fire-and-forget heartbeat never survives the process.exit below).
@@ -706,7 +756,10 @@ const coderabbitConfigureH: CommandHandler = async (ctx, cmd, parsed) => {
   // Serialized event chain so `authUrl`/phase events reach the backend (and the
   // app) strictly in emit order — the same emit-chain discipline used elsewhere.
   let emitChain: Promise<unknown> = Promise.resolve();
-  const emit = (type: 'coderabbit_progress' | 'coderabbit_status', payload: Record<string, unknown>): void => {
+  const emit = (
+    type: 'coderabbit_progress' | 'coderabbit_status',
+    payload: Record<string, unknown>,
+  ): void => {
     if (!token) return;
     emitChain = emitChain.then(() =>
       postCoderabbitEvent({
@@ -845,7 +898,10 @@ const coderabbitConfigureH: CommandHandler = async (ctx, cmd, parsed) => {
     });
     void (async () => {
       try {
-        const result = await configureCoderabbit({ action: 'link_oauth' }, { onEvent, uploadCredential });
+        const result = await configureCoderabbit(
+          { action: 'link_oauth' },
+          { onEvent, uploadCredential },
+        );
         emit('coderabbit_status', {
           installed: result.installed,
           loggedIn: result.loggedIn,
@@ -892,7 +948,11 @@ const coderabbitConfigureH: CommandHandler = async (ctx, cmd, parsed) => {
     });
   }
   await emitChain;
-  await ctx.relay.sendResult(cmd.id, result.error && action !== 'review' ? 'failed' : 'completed', result);
+  await ctx.relay.sendResult(
+    cmd.id,
+    result.error && action !== 'review' ? 'failed' : 'completed',
+    result,
+  );
 };
 
 // ─── VCS agent review (PR/MR Command Center, Phase 2) ───────────────────────
@@ -1007,7 +1067,12 @@ const beadsConfigureH: CommandHandler = async (ctx, cmd, parsed) => {
   const deps: ConfigureBeadsDeps = {
     provision: async () => {
       const r = await provisionBeads({ cwd: process.cwd(), agents: agentIds });
-      return { bdAvailable: r.bdAvailable, doltAvailable: r.doltAvailable, serverUp: r.serverUp, prefix: r.prefix };
+      return {
+        bdAvailable: r.bdAvailable,
+        doltAvailable: r.doltAvailable,
+        serverUp: r.serverUp,
+        prefix: r.prefix,
+      };
     },
     probe: async () => probeBeadsStatus(process.cwd()),
     startWatcher: async () => {
@@ -1035,7 +1100,10 @@ const beadsConfigureH: CommandHandler = async (ctx, cmd, parsed) => {
       // persist enabled:false + stop the watcher. The agent hook (CLAUDE.md
       // SessionStart `bd prime`) is left in place — it runs at zero cost when
       // Beads is off (bd prime fast-paths to empty). No-op + log is intentional.
-      log.info('beads', `revertAgentHook: bd has no --remove flag — leaving ${agent} hook in place (no-op disable path)`);
+      log.info(
+        'beads',
+        `revertAgentHook: bd has no --remove flag — leaving ${agent} hook in place (no-op disable path)`,
+      );
     },
     persist: (cfg) => persistBeadsConfig(cfg),
     readEnabled: () => readBeadsEnabled(),
@@ -1050,15 +1118,17 @@ const beadsConfigureH: CommandHandler = async (ctx, cmd, parsed) => {
           pluginId: ctx.pluginId,
           pluginAuthToken: token,
           type: USER_EVENTS.BEADS_STATUS,
-          payload: Object.fromEntries(
-            Object.entries(event).filter(([k]) => k !== 'type'),
-          ),
+          payload: Object.fromEntries(Object.entries(event).filter(([k]) => k !== 'type')),
         }),
       );
     },
   };
 
-  const result = await configureBeads(action, { agent: rawAgentId, cwd: process.cwd(), pluginAuthToken: ctx.pluginAuthToken }, deps);
+  const result = await configureBeads(
+    action,
+    { agent: rawAgentId, cwd: process.cwd(), pluginAuthToken: ctx.pluginAuthToken },
+    deps,
+  );
   await ctx.relay.sendResult(cmd.id, 'completed', result);
 };
 
@@ -1180,10 +1250,7 @@ export function buildNpmInstallInvocation(opts?: {
 
   // Prefer the npm sibling of the running node — the detached daemon may
   // have no npm on PATH at all (codespace: /tmp/codeam-node20/bin/npm).
-  const siblingNpm = p.join(
-    p.dirname(execPath),
-    platform === 'win32' ? 'npm.cmd' : 'npm',
-  );
+  const siblingNpm = p.join(p.dirname(execPath), platform === 'win32' ? 'npm.cmd' : 'npm');
   const npmCommand = exists(siblingNpm) ? siblingNpm : 'npm';
 
   const npmArgs = prefix
@@ -1316,9 +1383,7 @@ export async function runNpmInstallLatest(): Promise<{ ok: boolean; error?: stri
     // so it must be quoted for cmd.exe. (sudo never runs on win32.)
     const useShell = process.platform === 'win32';
     const command =
-      useShell && invocation.command.includes(' ')
-        ? `"${invocation.command}"`
-        : invocation.command;
+      useShell && invocation.command.includes(' ') ? `"${invocation.command}"` : invocation.command;
     const result = await new Promise<{ ok: boolean; error?: string }>((resolve) => {
       execFile(
         command,
@@ -1364,9 +1429,8 @@ export async function runNpmInstallLatest(): Promise<{ ok: boolean; error?: stri
  * The relaunch seam is injected via `deps` so tests can assert the DECISION
  * without actually killing the test process.
  */
-export const cliSelfUpdateH = (
-  deps: CliUpdateDeps = defaultCliUpdateDeps,
-): CommandHandler =>
+export const cliSelfUpdateH =
+  (deps: CliUpdateDeps = defaultCliUpdateDeps): CommandHandler =>
   async (ctx, cmd) => {
     // Best-effort progress report — never let a POST failure block the update.
     const report = async (phase: 'updating' | 'relaunching' | 'failed', error?: string) => {
@@ -1379,7 +1443,9 @@ export const cliSelfUpdateH = (
           phase,
           error,
         });
-      } catch { /* best-effort */ }
+      } catch {
+        /* best-effort */
+      }
     };
 
     await report('updating');
@@ -1433,16 +1499,28 @@ const terminalWriteH: CommandHandler = async (ctx, cmd, parsed) => {
     return;
   }
   const r = writeTerminal(parsed.sessionId, parsed.data);
-  await ctx.relay.sendResult(cmd.id, r.ok ? 'completed' : 'failed', r as unknown as Record<string, unknown>);
+  await ctx.relay.sendResult(
+    cmd.id,
+    r.ok ? 'completed' : 'failed',
+    r as unknown as Record<string, unknown>,
+  );
 };
 
 const terminalResizeH: CommandHandler = async (ctx, cmd, parsed) => {
-  if (typeof parsed.sessionId !== 'string' || typeof parsed.cols !== 'number' || typeof parsed.rows !== 'number') {
+  if (
+    typeof parsed.sessionId !== 'string' ||
+    typeof parsed.cols !== 'number' ||
+    typeof parsed.rows !== 'number'
+  ) {
     await ctx.relay.sendResult(cmd.id, 'failed', { error: 'Missing sessionId / cols / rows' });
     return;
   }
   const r = resizeTerminal(parsed.sessionId, parsed.cols, parsed.rows);
-  await ctx.relay.sendResult(cmd.id, r.ok ? 'completed' : 'failed', r as unknown as Record<string, unknown>);
+  await ctx.relay.sendResult(
+    cmd.id,
+    r.ok ? 'completed' : 'failed',
+    r as unknown as Record<string, unknown>,
+  );
 };
 
 const terminalCloseH: CommandHandler = async (ctx, cmd, parsed) => {
@@ -1528,20 +1606,15 @@ const gitResolveH: CommandHandler = async (ctx, cmd, parsed) => {
 // the rejected hunks — drawer surfaces a confirm dialog before
 // firing).
 const applyFileReviewH: CommandHandler = async (ctx, cmd, parsed) => {
-  const reviewAction = parsed.action === 'approved' || parsed.action === 'rejected'
-    ? parsed.action
-    : undefined;
+  const reviewAction =
+    parsed.action === 'approved' || parsed.action === 'rejected' ? parsed.action : undefined;
   if (!parsed.filePath || !reviewAction) {
     await ctx.relay.sendResult(cmd.id, 'failed', {
       error: 'Missing filePath or action',
     });
     return;
   }
-  const result = await applyFileReview(
-    process.cwd(),
-    parsed.filePath,
-    reviewAction,
-  );
+  const result = await applyFileReview(process.cwd(), parsed.filePath, reviewAction);
   await ctx.relay.sendResult(
     cmd.id,
     result.ok ? 'completed' : 'failed',
@@ -1659,7 +1732,10 @@ const requestAiSummaryH: CommandHandler = (ctx, _cmd, parsed) => {
       log.info('ai-summary', `generateOneShot returned null after ${tookMs}ms — skipping POST`);
       return;
     }
-    log.info('ai-summary', `generateOneShot ok turnId=${turnId} took=${tookMs}ms textLen=${text.length}`);
+    log.info(
+      'ai-summary',
+      `generateOneShot ok turnId=${turnId} took=${tookMs}ms textLen=${text.length}`,
+    );
     const result = await postAiResult({
       sessionId: ctx.sessionId,
       pluginId: ctx.pluginId,
@@ -1700,7 +1776,10 @@ const requestAiInsightH: CommandHandler = (ctx, _cmd, parsed) => {
   const fileChangeId = parsed.fileChangeId;
   const pluginAuthToken = ctx.pluginAuthToken;
   void (async () => {
-    log.info('ai-insight', `generateOneShot start fileChangeId=${fileChangeId} promptLen=${prompt.length}`);
+    log.info(
+      'ai-insight',
+      `generateOneShot start fileChangeId=${fileChangeId} promptLen=${prompt.length}`,
+    );
     const startedAt = Date.now();
     const text = await ctx.runtime.generateOneShot!(prompt).catch((err) => {
       log.info('ai-insight', `generateOneShot threw: ${String(err)}`);
@@ -1711,7 +1790,10 @@ const requestAiInsightH: CommandHandler = (ctx, _cmd, parsed) => {
       log.info('ai-insight', `generateOneShot returned null after ${tookMs}ms — skipping POST`);
       return;
     }
-    log.info('ai-insight', `generateOneShot ok fileChangeId=${fileChangeId} took=${tookMs}ms textLen=${text.length}`);
+    log.info(
+      'ai-insight',
+      `generateOneShot ok fileChangeId=${fileChangeId} took=${tookMs}ms textLen=${text.length}`,
+    );
     const { summary, reasoning, securityNote } = parseInsightText(text);
     const result = await postAiResult({
       sessionId: ctx.sessionId,
@@ -1777,8 +1859,8 @@ function parseInsightText(text: string): {
 // del ACP lo usa —, así que la referencia temprana las hacía fallar al
 // cargar. Envolverla mantiene la búsqueda en tiempo de llamada, que es
 // exactamente donde estaba antes de encauzar los emisores.
-const emitPreviewEventRaw = makeSerializedEmitter(
-  (args: Parameters<typeof postPreviewEvent>[0]) => postPreviewEvent(args),
+const emitPreviewEventRaw = makeSerializedEmitter((args: Parameters<typeof postPreviewEvent>[0]) =>
+  postPreviewEvent(args),
 );
 
 /**
@@ -2162,6 +2244,29 @@ const previewStartH: CommandHandler = (ctx, _cmd, parsed) => {
   void startPreviewFromDetection(ctx, rawDetection, ctx.pluginAuthToken);
 };
 
+/** Sessions this process already offered a scratch save for (one card per session). */
+const scratchOfferedSessions = new Set<string>();
+
+/** Test-only: forget which sessions were offered. */
+export function resetScratchOfferForTests(): void {
+  scratchOfferedSessions.clear();
+}
+
+/** Exported for its unit test; the emit path above is the only production caller. */
+export async function offerScratchSaveOnce(
+  ctx: PreviewCtx,
+  pluginAuthToken: string,
+): Promise<void> {
+  if (!isScratchWorkspace(process.cwd()) || scratchOfferedSessions.has(ctx.sessionId)) return;
+  scratchOfferedSessions.add(ctx.sessionId);
+  const offered = await postScratchOffer({
+    sessionId: ctx.sessionId,
+    pluginId: ctx.pluginId,
+    pluginAuthToken,
+  });
+  if (!offered) scratchOfferedSessions.delete(ctx.sessionId); // retry on the next ready
+}
+
 /**
  * Fire-and-forget bring-up of a preview from a detection: runs setup
  * commands, spawns the dev server, waits for readiness, opens the tunnel,
@@ -2197,6 +2302,13 @@ export function startPreviewFromDetection(
       type,
       payload: tagged,
     });
+    // Post-tool hook (owner, 2026-09-29): the FIRST time a from-scratch project
+    // serves a preview — whoever started it — the app offers to save it. The
+    // agent's `suggest_save_project` stays as the fallback for projects with
+    // nothing to preview; in the live E2E the agent previewed and never asked.
+    if (type === USER_EVENTS.PREVIEW_READY) {
+      void offerScratchSaveOnce(ctx, pluginAuthToken);
+    }
   };
   return runPreviewStart({
     sessionId: ctx.sessionId,
@@ -2384,14 +2496,33 @@ const scratchExportZip: CommandHandler = (ctx, cmd) =>
   scratchExportZipH({
     cmd,
     relay: ctx.relay,
-    opts: { sessionId: ctx.sessionId, pluginId: ctx.pluginId, pluginAuthToken: ctx.pluginAuthToken },
+    opts: {
+      sessionId: ctx.sessionId,
+      pluginId: ctx.pluginId,
+      pluginAuthToken: ctx.pluginAuthToken,
+    },
   });
 
 const scratchSaveGithub: CommandHandler = (ctx, cmd) =>
   scratchSaveGithubH({
     cmd,
     relay: ctx.relay,
-    opts: { sessionId: ctx.sessionId, pluginId: ctx.pluginId, pluginAuthToken: ctx.pluginAuthToken },
+    opts: {
+      sessionId: ctx.sessionId,
+      pluginId: ctx.pluginId,
+      pluginAuthToken: ctx.pluginAuthToken,
+    },
+  });
+
+const scratchSaveGitlab: CommandHandler = (ctx, cmd) =>
+  scratchSaveGitlabH({
+    cmd,
+    relay: ctx.relay,
+    opts: {
+      sessionId: ctx.sessionId,
+      pluginId: ctx.pluginId,
+      pluginAuthToken: ctx.pluginAuthToken,
+    },
   });
 
 export const handlers: Record<string, CommandHandler> = {
@@ -2448,6 +2579,7 @@ export const handlers: Record<string, CommandHandler> = {
   cli_self_update: cliSelfUpdateH(),
   scratch_export_zip: scratchExportZip,
   scratch_save_github: scratchSaveGithub,
+  scratch_save_gitlab: scratchSaveGitlab,
 };
 
 /**
@@ -2457,10 +2589,7 @@ export const handlers: Record<string, CommandHandler> = {
  * execute. Unknown / malformed commands are logged and dropped
  * so a misbehaving server can't crash the CLI.
  */
-export async function dispatchCommand(
-  ctx: BaseHandlerContext,
-  cmd: RemoteCommand,
-): Promise<void> {
+export async function dispatchCommand(ctx: BaseHandlerContext, cmd: RemoteCommand): Promise<void> {
   // Beads actions carry a `{action, args}` shape that intentionally
   // doesn't fit `startCommandSchema` (its `action` is the file-review
   // enum). Intercept before the generic parse and replay the action as

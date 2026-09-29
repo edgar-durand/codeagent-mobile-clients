@@ -1,9 +1,7 @@
 import { execFile } from 'node:child_process';
-import fs from 'node:fs';
-import os from 'node:os';
-import path from 'node:path';
 import { promisify } from 'node:util';
 import { nonInteractiveGitEnv } from '../commands/host/workspace';
+import { pushCleanCopy } from './push-clean';
 
 const GH = 'https://api.github.com';
 
@@ -58,10 +56,9 @@ export async function saveToGithub(
   const meRes = await f(`${GH}/user`, { headers });
   const meBody = (await meRes.json()) as { login?: unknown; id?: unknown };
   if (!meRes.ok || typeof meBody.login !== 'string' || typeof meBody.id !== 'number') {
-    throw Object.assign(
-      new Error('GitHub rejected the token — reconnect GitHub and try again.'),
-      { code: 'SAVE_FAILED' },
-    );
+    throw Object.assign(new Error('GitHub rejected the token — reconnect GitHub and try again.'), {
+      code: 'SAVE_FAILED',
+    });
   }
   const me = { login: meBody.login, id: meBody.id };
   await git('config', 'user.name', me.login);
@@ -107,70 +104,18 @@ export async function saveToGithub(
     await git('config', `branch.${branch}.merge`, 'refs/heads/main');
   }
 
-  let tmp: string | undefined;
-  let home: string | undefined;
-  try {
-    tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'codeam-push-'));
-    home = fs.mkdtempSync(path.join(os.tmpdir(), 'codeam-push-home-'));
-    const bare = path.join(tmp, 'repo.git');
-    // Isolated from every config the agent could have written (system,
-    // global — hence `init.templateDir` — and HOME), and no template at all.
-    const cleanEnv = {
-      ...env,
-      HOME: home,
-      GIT_CONFIG_NOSYSTEM: '1',
-      GIT_CONFIG_GLOBAL: '/dev/null',
-      GIT_TERMINAL_PROMPT: '0',
-      GCM_INTERACTIVE: 'never',
-    };
-    await exec('git', ['clone', '--bare', '--no-hardlinks', '--template=', '-q', cwd, bare], {
-      env: cleanEnv,
-    });
-    // URL-scoped entries would beat the generic `-c` overrides below, so a
-    // bare copy that somehow carries any is refused rather than pushed from.
-    const { stdout: keys } = await exec('git', ['-C', bare, 'config', '--local', '--list', '--name-only'], {
-      env: cleanEnv,
-    });
-    const hostile = keys.split('\n').filter((k) => /^(http|url|credential|include|includeif)\./i.test(k));
-    if (hostile.length > 0) {
-      throw new Error(`the clean copy carries unexpected git config (${hostile.join(', ')})`);
-    }
-    const pushEnv = {
-      ...cleanEnv,
-      GIT_CONFIG_COUNT: '1',
-      // Scoped to this exact repo URL: the header goes nowhere else.
-      GIT_CONFIG_KEY_0: `http.${body.clone_url}.extraheader`,
-      GIT_CONFIG_VALUE_0: `AUTHORIZATION: basic ${Buffer.from(`x-access-token:${input.token}`).toString('base64')}`,
-    };
-    await exec(
-      'git',
-      [
-        '-C',
-        bare,
-        '-c',
-        'credential.helper=',
-        '-c',
-        'credential.interactive=never',
-        '-c',
-        'core.hooksPath=/dev/null',
-        '-c',
-        'http.sslVerify=true',
-        '-c',
-        'http.proxy=',
-        'push',
-        body.clone_url,
-        'HEAD:main',
-      ],
-      { env: pushEnv },
-    );
-  } catch (err) {
-    throw Object.assign(new Error(`Push failed: ${(err as Error).message.split('\n')[0]}`), {
-      code: 'SAVE_FAILED',
-    });
-  } finally {
-    if (tmp) fs.rmSync(tmp, { recursive: true, force: true });
-    if (home) fs.rmSync(home, { recursive: true, force: true });
-  }
+  await pushCleanCopy(
+    cwd,
+    body.clone_url,
+    `basic ${Buffer.from(`x-access-token:${input.token}`).toString('base64')}`,
+    {
+      exec: deps.exec,
+      env,
+    },
+  );
 
-  return { repoFullName: body.full_name, htmlUrl: body.html_url ?? `https://github.com/${body.full_name}` };
+  return {
+    repoFullName: body.full_name,
+    htmlUrl: body.html_url ?? `https://github.com/${body.full_name}`,
+  };
 }
