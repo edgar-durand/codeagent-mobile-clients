@@ -8,6 +8,7 @@ import { registerExport, exportDir, EXPORT_PATH_PREFIX } from './export-registry
 import { ensureExportBaseUrl } from './export-tunnel';
 import { postZipDownloaded, type ScratchCtx } from './api';
 import { saveToGithub } from './save-github';
+import { saveToGitlab } from './save-gitlab';
 import { isScratchWorkspace } from './workspace';
 import { log } from '../services/logger';
 
@@ -119,12 +120,26 @@ export async function scratchExportZipH(ctx: ScratchHandlerCtx): Promise<void> {
  * pushes (`saveToGithub`). Refused outright outside a scratch project: a
  * cloned repo already has its own remote and must never be re-pointed.
  */
-export async function scratchSaveGithubH(ctx: ScratchHandlerCtx): Promise<void> {
+export function scratchSaveGithubH(ctx: ScratchHandlerCtx): Promise<void> {
+  return saveToProviderH(ctx, 'github');
+}
+
+/** `scratch_save_gitlab` — same flow on GitLab (the Agent Toolkit credential). */
+export function scratchSaveGitlabH(ctx: ScratchHandlerCtx): Promise<void> {
+  return saveToProviderH(ctx, 'gitlab');
+}
+
+const SAVE_LABEL = { github: 'GitHub', gitlab: 'GitLab' } as const;
+
+async function saveToProviderH(
+  ctx: ScratchHandlerCtx,
+  provider: 'github' | 'gitlab',
+): Promise<void> {
   const { cmd, relay } = ctx;
   if (!isScratchWorkspace(process.cwd())) {
     await relay.sendResult(cmd.id, 'failed', {
       code: 'SAVE_FAILED',
-      error: 'Save to GitHub is only available for projects started from scratch.',
+      error: `Save to ${SAVE_LABEL[provider]} is only available for projects started from scratch.`,
     });
     return;
   }
@@ -137,14 +152,15 @@ export async function scratchSaveGithubH(ctx: ScratchHandlerCtx): Promise<void> 
     return;
   }
   try {
-    const out = await saveToGithub(process.cwd(), {
-      repoName: p.repoName,
-      private: p.private !== false,
-      token: p.token,
-    });
+    const input = { repoName: p.repoName, private: p.private !== false, token: p.token };
+    const out =
+      provider === 'github'
+        ? await saveToGithub(process.cwd(), input)
+        : await saveToGitlab(process.cwd(), input);
     await relay.sendResult(cmd.id, 'completed', out);
   } catch (err) {
-    const code = (err as { code?: string }).code === 'REPO_NAME_TAKEN' ? 'REPO_NAME_TAKEN' : 'SAVE_FAILED';
+    const code =
+      (err as { code?: string }).code === 'REPO_NAME_TAKEN' ? 'REPO_NAME_TAKEN' : 'SAVE_FAILED';
     await relay.sendResult(cmd.id, 'failed', { code, error: (err as Error).message });
   }
 }

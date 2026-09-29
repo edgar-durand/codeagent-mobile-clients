@@ -11,22 +11,46 @@ export function orderDeployChoices(githubLinked: boolean): DeployChoice[] {
   return githubLinked ? order.reverse() : order;
 }
 
-export interface StarterPrompt { label: string; prompt: string }
+export interface StarterPrompt {
+  label: string;
+  prompt: string;
+}
 /** Composer starters for an empty scratch Box session (D12/§4.3). */
 export const SCRATCH_STARTER_PROMPTS: readonly StarterPrompt[] = [
-  { label: 'Landing page', prompt: 'Build a simple, good-looking landing page for my business. Ask me the business name first, then build it and open the preview.' },
-  { label: 'To-do app', prompt: 'Build a small to-do app I can use in the browser, then open the preview.' },
-  { label: 'Browser game', prompt: 'Build a small game that runs in the browser, then open the preview.' },
-  { label: 'What can you do?', prompt: 'What could you build for me in this workspace? Give me three quick ideas.' },
+  {
+    label: 'Landing page',
+    prompt:
+      'Build a simple, good-looking landing page for my business. Ask me the business name first, then build it and open the preview.',
+  },
+  {
+    label: 'To-do app',
+    prompt: 'Build a small to-do app I can use in the browser, then open the preview.',
+  },
+  {
+    label: 'Browser game',
+    prompt: 'Build a small game that runs in the browser, then open the preview.',
+  },
+  {
+    label: 'What can you do?',
+    prompt: 'What could you build for me in this workspace? Give me three quick ideas.',
+  },
 ];
 
 export const SCRATCH_ZIP_FREE_LIMIT_BYTES = 104_857_600;
 export const SCRATCH_ZIP_WIFI_HINT_BYTES = 209_715_200;
-export type ScratchSavedVia = 'github' | 'zip';
+export type ScratchSavedVia = 'github' | 'gitlab' | 'zip';
 export interface ScratchProjectState {
-  projectId: string; sessionId: string | null; savedAt: string | null;
-  savedVia: ScratchSavedVia | null; repoFullName: string | null;
+  projectId: string;
+  sessionId: string | null;
+  savedAt: string | null;
+  savedVia: ScratchSavedVia | null;
+  repoFullName: string | null;
 }
 export type ScratchExportResult =
   | { url: string; sizeBytes: number; expiresAt: string }
-  | { tooLarge: true; sizeBytes: number; limitBytes: number; topPaths: Array<{ path: string; bytes: number }> };
+  | {
+      tooLarge: true;
+      sizeBytes: number;
+      limitBytes: number;
+      topPaths: Array<{ path: string; bytes: number }>;
+    };

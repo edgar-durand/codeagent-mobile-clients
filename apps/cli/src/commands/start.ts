@@ -1,12 +1,16 @@
 import pc from 'picocolors';
 import { AGENT_REGISTRY, type AgentId, HOUSE_AGENT_ID } from '@codeam/shared';
-import { addSession, getActiveSession, getActiveSessionForAgent, ensurePluginId, loadCliConfig, type SavedSession } from '../config';
+import {
+  addSession,
+  getActiveSession,
+  getActiveSessionForAgent,
+  ensurePluginId,
+  loadCliConfig,
+  type SavedSession,
+} from '../config';
 import { acquireDaemonLock } from './pair-auto';
 import { showIntro, showInfo, showError } from '../ui/banner';
-import {
-  CommandRelayService,
-  stopRelayWithGoodbye,
-} from '../services/command-relay.service';
+import { CommandRelayService, stopRelayWithGoodbye } from '../services/command-relay.service';
 import { AgentService } from '../services/agent.service';
 import { createRuntimeStrategy } from '../agents/registry';
 import { getAcpAdapter, requiresAcp, resolveAcpAdapterWithRetry } from '../agents/acp/adapters';
@@ -22,7 +26,12 @@ import { RepoDirtyTracker } from '../services/turn-files/repo-dirty-tracker';
 import { StreamingEmitterService } from '../services/streaming-emitter.service';
 import { fetchQuotaUsage } from './start/quota-fetcher';
 import { buildKeepAlive } from './start/keep-alive';
-import { dispatchCommand, cleanupAttachmentTempFiles, type HandlerContext, makePreviewReaffirm } from './start/handlers';
+import {
+  dispatchCommand,
+  cleanupAttachmentTempFiles,
+  type HandlerContext,
+  makePreviewReaffirm,
+} from './start/handlers';
 import { registerTerminalHandlers, closeAllTerminals } from '../services/terminal-ops.service';
 import { killActiveSpawnAndCaptureChildren } from '../services/spawn-and-capture';
 import {
@@ -30,23 +39,18 @@ import {
   provisionProjectDependencies,
   noteProvisionOutcome,
 } from '../services/preview';
-import {
-  fetchCurrentPluginAuthToken,
-  postPreviewEvent,
-} from '../services/pairing.service';
+import { fetchCurrentPluginAuthToken, postPreviewEvent } from '../services/pairing.service';
 import { capture, identifyUser, shutdownTelemetry } from '../services/telemetry.service';
 import { provisionBeadsForStart } from '../beads/wiring';
 import { startClaudeCredentialSync } from '../agents/claude/credential-sync';
 import { ensureBeadsWorkflowHint } from '../beads/workflow-hint';
+import { ensureScratchWorkflowHint } from '../scratch/workflow-hint';
 import { pickPinnedSession } from './start/pick-session';
 import { sanitizeRetiredProxyConfig } from '../agents/retired-proxy-cleanup';
 import { ensureAgentStandard } from '../agents/agent-standard';
 import { buildMcpServersForStart } from '../integrations/provision';
 import { refreshIntegrationsManifest } from '../integrations/refresh-manifest';
-import {
-  isHouseProxyEnv,
-  houseRailWireId,
-} from './host/house-proxy-config';
+import { isHouseProxyEnv, houseRailWireId } from './host/house-proxy-config';
 import { isScratchWorkspace } from '../scratch/workspace';
 import { deployIdFromWorkspace } from './host/workspace';
 import { registerScratchProject } from '../scratch/api';
@@ -70,10 +74,7 @@ import { createInteractiveAgentStrategy } from '../agents/registry';
  * of behaviour beyond wiring lives in a sibling module under
  * `start/` so this file stays a readable orchestrator.
  */
-export async function start(
-  requestedAgent?: AgentId,
-  presetSession?: SavedSession,
-): Promise<void> {
+export async function start(requestedAgent?: AgentId, presetSession?: SavedSession): Promise<void> {
   // A stray unhandled rejection (a failed backend POST after `socket hang up`
   // / HTTP 404, a fire-and-forget flush) must NOT kill the relay daemon — it
   // leaves a codespace session hung forever with no supervisor to restart it.
@@ -99,9 +100,14 @@ export async function start(
   // N children would read the same `getActiveSession()` (the last-paired
   // pointer), collide on that session's daemon lock, and only one would
   // survive — the exact single-session behaviour this fixes.
-  const pinned = pickPinnedSession(process.env.CODEAM_RESUME_SESSION_ID, () => loadCliConfig().sessions);
+  const pinned = pickPinnedSession(
+    process.env.CODEAM_RESUME_SESSION_ID,
+    () => loadCliConfig().sessions,
+  );
   if (pinned.kind === 'missing') {
-    console.log(`  ${pc.dim(`Pinned session ${pinned.id.slice(0, 8)} is no longer paired — nothing to resume.`)}`);
+    console.log(
+      `  ${pc.dim(`Pinned session ${pinned.id.slice(0, 8)} is no longer paired — nothing to resume.`)}`,
+    );
     process.exit(0);
   }
   const session = presetSession
@@ -132,7 +138,9 @@ export async function start(
   // SSE (split-brain). Fail-open: any lock-infra error lets the daemon proceed.
   // Exit code 0 so the bootstrap's `setsid nohup` launch sees success.
   if (!acquireDaemonLock(session.id)) {
-    console.log(`  ${pc.dim('A codeam daemon for this session is already running — deferring to it.')}`);
+    console.log(
+      `  ${pc.dim('A codeam daemon for this session is already running — deferring to it.')}`,
+    );
     process.exit(0);
   }
 
@@ -175,11 +183,7 @@ export async function start(
   // even though the agent answered correctly. Falling back to the
   // persisted token on lookup failure keeps offline / flaky-net
   // sessions working unchanged.
-  const refreshed = await fetchCurrentPluginAuthToken(
-    session.id,
-    pluginId,
-    session.pollSecret,
-  );
+  const refreshed = await fetchCurrentPluginAuthToken(session.id, pluginId, session.pollSecret);
   if (refreshed && refreshed !== session.pluginAuthToken) {
     addSession({ ...session, pluginAuthToken: refreshed });
     session.pluginAuthToken = refreshed;
@@ -244,6 +248,9 @@ export async function start(
   // spawn, DB-independent) so the agent learns to use beads immediately even
   // though beads provisioning (below) is no longer gated. See ensureBeadsWorkflowHint.
   ensureBeadsWorkflowHint();
+  // From-scratch projects: the same static-hint mechanism tells the agent that
+  // saving is the user's choice in the app (see scratch/workflow-hint.ts).
+  if (isScratchWorkspace(process.cwd())) ensureScratchWorkflowHint();
   // Always-on Agent Standard (baseline working + safety guidance) — Claude rail:
   // append to ~/.claude/CLAUDE.md so it's always in context. MANAGED deploys only
   // (a local `codeam start` keeps the user's own global config untouched); other
@@ -337,7 +344,11 @@ export async function start(
 
   if (isScratchWorkspace(process.cwd())) {
     const deployId = deployIdFromWorkspace(process.cwd());
-    if (deployId) void registerScratchProject({ sessionId: session.id, pluginId, pluginAuthToken: session.pluginAuthToken }, deployId);
+    if (deployId)
+      void registerScratchProject(
+        { sessionId: session.id, pluginId, pluginAuthToken: session.pluginAuthToken },
+        deployId,
+      );
   }
 
   // Agent Skills — materialize any curated SKILL.md the deploy attached
@@ -647,11 +658,15 @@ export async function start(
       // streamed PTY approximation with proper ``` fences / blocks.
       if (historySvc.isQuotaStale()) fetchQuotaUsage(runtime, historySvc);
       setTimeout(() => {
-        historySvc.uploadDelta().catch(() => { /* best-effort */ });
+        historySvc.uploadDelta().catch(() => {
+          /* best-effort */
+        });
       }, 400);
       // End-of-turn file changeset — fire-and-forget. The aggregator
       // owns its own outbox + retry so this never throws.
-      turnFiles?.flushTurn().catch(() => { /* logged inside */ });
+      turnFiles?.flushTurn().catch(() => {
+        /* logged inside */
+      });
     },
     () => {
       // Terminal-initiated turn — the user typed directly in their
@@ -671,7 +686,8 @@ export async function start(
       // instead lets the next legitimate keystroke re-fire
       // detection cleanly.
       const prevCount = historySvc.getCurrentMessageCount();
-      historySvc.waitForNewUserMessage(prevCount)
+      historySvc
+        .waitForNewUserMessage(prevCount)
         .then((userText) => {
           if (userText) {
             void outputSvc.startTerminalTurn(userText);
@@ -704,9 +720,7 @@ export async function start(
         sessionId: session.id,
         pluginId,
         pluginAuthToken: session.pluginAuthToken,
-        onRepoDirty: dirtyTracker
-          ? (repoRoot) => dirtyTracker.markDirty(repoRoot)
-          : undefined,
+        onRepoDirty: dirtyTracker ? (repoRoot) => dirtyTracker.markDirty(repoRoot) : undefined,
       })
     : null;
 
@@ -743,47 +757,44 @@ export async function start(
   // provisioning above; the teardown closures (onExit / sigintHandler) and
   // `ctx.beads` below read that shared handle.
 
-  const agent = new AgentService(
-    runtime,
-    {
-      cwd,
-      onData(raw) {
-        outputSvc.push(raw);
-        streamingEmitter?.push(raw);
-      },
-      async onExit(code) {
-        process.removeListener('SIGINT', sigintHandler);
-        process.removeListener('SIGTERM', sigintHandler);
-        process.removeListener('SIGHUP', sigintHandler);
-        outputSvc.dispose();
-        // The agent exited on its own — the session is over. AWAIT the
-        // `online:false` heartbeat: fire-and-forget never survived the
-        // `process.exit` below, so mobile kept showing the session ONLINE.
-        await stopRelayWithGoodbye(relay);
-        void fileWatcher?.stop();
-        turnFiles?.stop();
-        void beads?.watcher.stop();
-        void streamingEmitter?.stop();
-        // Close every IDE terminal spawned during the session so the
-        // child shells don't get orphaned past the parent exit
-        // (audit R11 — closeAllTerminals existed but was never
-        // called).
-        closeAllTerminals();
-        // Eagerly delete in-flight attachment temp files instead of
-        // waiting on the 120 s unlink setTimeout (audit R12).
-        cleanupAttachmentTempFiles();
-        // Same reaper as the sigintHandler — reap any in-flight
-        // `claude -p` / `codex exec` headless children so they
-        // don't survive the parent's hard `process.exit`.
-        killActiveSpawnAndCaptureChildren();
-        // Same awaited reap as sigintHandler: an orphaned export cloudflared
-        // would keep a connector on the box's named tunnel and break the
-        // next preview.
-        await reapPreviewsAndExportTunnel();
-        process.exit(code);
-      },
+  const agent = new AgentService(runtime, {
+    cwd,
+    onData(raw) {
+      outputSvc.push(raw);
+      streamingEmitter?.push(raw);
     },
-  );
+    async onExit(code) {
+      process.removeListener('SIGINT', sigintHandler);
+      process.removeListener('SIGTERM', sigintHandler);
+      process.removeListener('SIGHUP', sigintHandler);
+      outputSvc.dispose();
+      // The agent exited on its own — the session is over. AWAIT the
+      // `online:false` heartbeat: fire-and-forget never survived the
+      // `process.exit` below, so mobile kept showing the session ONLINE.
+      await stopRelayWithGoodbye(relay);
+      void fileWatcher?.stop();
+      turnFiles?.stop();
+      void beads?.watcher.stop();
+      void streamingEmitter?.stop();
+      // Close every IDE terminal spawned during the session so the
+      // child shells don't get orphaned past the parent exit
+      // (audit R11 — closeAllTerminals existed but was never
+      // called).
+      closeAllTerminals();
+      // Eagerly delete in-flight attachment temp files instead of
+      // waiting on the 120 s unlink setTimeout (audit R12).
+      cleanupAttachmentTempFiles();
+      // Same reaper as the sigintHandler — reap any in-flight
+      // `claude -p` / `codex exec` headless children so they
+      // don't survive the parent's hard `process.exit`.
+      killActiveSpawnAndCaptureChildren();
+      // Same awaited reap as sigintHandler: an orphaned export cloudflared
+      // would keep a connector on the box's named tunnel and break the
+      // next preview.
+      await reapPreviewsAndExportTunnel();
+      process.exit(code);
+    },
+  });
 
   if (session.pluginAuthToken) {
     streamingEmitter = new StreamingEmitterService({
@@ -967,7 +978,9 @@ export async function start(
   // logger and silently leave the file-change pipeline disabled for
   // this session.
   if (fileWatcher) {
-    fileWatcher.start().catch(() => { /* logged inside */ });
+    fileWatcher.start().catch(() => {
+      /* logged inside */
+    });
   }
 
   // Epic C streaming producer — start after the relay so the PTY pump
