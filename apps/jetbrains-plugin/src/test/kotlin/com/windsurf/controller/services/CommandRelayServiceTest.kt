@@ -17,3 +17,16 @@ class CommandRelayServiceTest {
         assertEquals(false, arr[1].asJsonObject.get("isTerminal").asBoolean)
     }
 }
+
+class CommandAckPayloadTest {
+    @Test
+    fun `ack payload carries the plugin id and every delivered command id`() {
+        val payload = buildAckPayload("plugin-1", listOf("c1", "c2")).toString()
+        val obj = JsonParser.parseString(payload).asJsonObject
+        assertEquals("plugin-1", obj.get("pluginId").asString)
+        val ids = obj.getAsJsonArray("commandIds")
+        assertEquals(2, ids.size())
+        assertEquals("c1", ids[0].asString)
+        assertEquals("c2", ids[1].asString)
+    }
+}

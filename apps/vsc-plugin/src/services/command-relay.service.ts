@@ -253,15 +253,18 @@ export class CommandRelayService {
       const parsed = JSON.parse(data) as { commands?: unknown[] };
       const raw = parsed.commands ?? [];
       if (raw.length === 0) return;
+      const delivered: string[] = [];
       for (const obj of raw) {
         const cmd = toRemoteCommand(obj);
         if (!cmd) {
           this.log.appendLine('Skipping malformed command in SSE frame');
           continue;
         }
+        delivered.push(cmd.id);
         if (!this.markDispatched(cmd.id)) continue;
         this.listeners.forEach((l) => l.onCommandReceived(cmd));
       }
+      this.ackDelivered(delivered);
     } catch {
       /* malformed frame — wait for the next one */
     }
@@ -323,12 +326,14 @@ export class CommandRelayService {
         return;
       }
       this.pollEmptyStreak = 0;
+      const delivered: string[] = [];
       for (const obj of commands) {
         const cmd = toRemoteCommand(obj);
         if (!cmd) {
           this.log.appendLine('Skipping malformed command in polling response');
           continue;
         }
+        delivered.push(cmd.id);
         if (!this.markDispatched(cmd.id)) {
           this.log.appendLine(`Skipping duplicate command: ${cmd.type} (${cmd.id})`);
           continue;
@@ -336,10 +341,36 @@ export class CommandRelayService {
         this.log.appendLine(`Received command: ${cmd.type} (${cmd.id})`);
         this.listeners.forEach((l) => l.onCommandReceived(cmd));
       }
+      this.ackDelivered(delivered);
     } catch {
       this.pollFailures += 1;
       this.markTransportFailure();
     }
+  }
+
+  /**
+   * At-least-once delivery, the other half. The backend keeps every command
+   * queued until the plugin confirms it RECEIVED it (`POST /api/commands/ack`,
+   * PoP-gated like the delivery itself), so a relay that never acks is re-sent
+   * the same batch on every SSE reconnect and every poll for the queue's whole
+   * 10-min TTL — the 5-min dedup above only hides half of that window — and the
+   * backend counts the task as "dispatched, never picked up". The CLI has acked
+   * since 2026-08-30; this extension never did until 2026-09-29. Re-delivered
+   * duplicates are acked too: the backend drains an already-gone id as a no-op.
+   * Fire-and-forget — a lost ack costs one redundant re-delivery, never the
+   * command.
+   */
+  private ackDelivered(commandIds: string[]): void {
+    if (commandIds.length === 0) return;
+    const settings = SettingsService.getInstance();
+    void this.postJson(`${settings.apiBaseUrl}/api/commands/ack`, {
+      pluginId: settings.ensurePluginId(),
+      commandIds,
+    }).catch((err: unknown) => {
+      this.log.appendLine(
+        `Command ack failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    });
   }
 
   private startHeartbeat(): void {
@@ -443,6 +474,13 @@ export class CommandRelayService {
   authHeaders(): Record<string, string> {
     const headers: Record<string, string> = {
       'X-Codeam-Protocol-Version': PROTOCOL_VERSION,
+      // At-least-once delivery, same contract as the CLI: with this header the
+      // backend delivers NON-DESTRUCTIVELY (peek) and drains the queue only on
+      // our `POST /api/commands/ack` (see `ackDelivered`). Without it delivery
+      // is a destructive pop — a command handed to a socket that died mid-flush
+      // was simply gone (the 2026-07-15 first-prompt loss). Older backends
+      // ignore the unknown header; it's harmless on non-delivery requests.
+      'X-Codeam-Cmd-Ack': '1',
     };
     const settings = SettingsService.getInstance();
     const token = settings.getPluginAuthToken();
