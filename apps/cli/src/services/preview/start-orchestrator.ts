@@ -25,6 +25,7 @@ import { USER_EVENTS, type PreviewDetection } from '@codeam/shared';
 import { log } from '../logger';
 import { killQuiet } from '../../lib/quiet';
 import * as previewSvc from './index';
+import { writeActivePreviewMarker } from './active-marker';
 import { applyPreviewHostAllow } from './host-allow';
 import { restoreProjectEnvIfMissing } from '../project-env';
 import { resolveNamedTunnel } from './named-tunnel';
@@ -417,6 +418,8 @@ function announceReady(ctx: StageCtx, dev: DevServerUp, tun: TunnelUp): void {
     previewSvc.recordPreviewPort(detection.port, dev.devServer.pid, sessionId, Date.now());
   }
   log.info('preview', `ready: ${detection.framework} at ${tun.url}`);
+  // Survives a Box sleep/restart: the next `codeam start` restores it.
+  void writeActivePreviewMarker(ctx.cwd, detection);
   emit(USER_EVENTS.PREVIEW_READY, {
     url: tun.url,
     framework: detection.framework,

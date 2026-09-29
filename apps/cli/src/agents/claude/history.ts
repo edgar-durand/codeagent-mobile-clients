@@ -1,4 +1,5 @@
 import * as fs from 'fs';
+import { claudeConfigDir } from '../claude-memory-file';
 import * as path from 'path';
 import * as os from 'os';
 import { getContextWindow, type NormalizedMessage } from '@codeam/shared';
@@ -43,7 +44,7 @@ export function encodeCwd(cwd: string): string {
  * stable, testable API for the RuntimeStrategy pattern (C.4).
  */
 export function resolveHistoryDir(cwd: string, projectsRoot?: string): string | null {
-  const root = projectsRoot ?? path.join(os.homedir(), '.claude', 'projects');
+  const root = projectsRoot ?? path.join(claudeConfigDir(), 'projects');
   const primary = path.join(root, encodeCwd(cwd));
   if (fs.existsSync(primary)) return primary;
   // Fallback — scan and match by canonicalized name. Cheap (one
@@ -63,7 +64,9 @@ export function resolveHistoryDir(cwd: string, projectsRoot?: string): string | 
         return path.join(root, e.name);
       }
     }
-  } catch { /* projectsRoot doesn't exist yet — fall through */ }
+  } catch {
+    /* projectsRoot doesn't exist yet — fall through */
+  }
   return null;
 }
 
@@ -217,7 +220,11 @@ export function parseHistoryFile(filePath: string): NormalizedMessage[] {
   }
   for (const line of raw.split('\n').filter(Boolean)) {
     let rec: unknown;
-    try { rec = JSON.parse(line); } catch { continue; }
+    try {
+      rec = JSON.parse(line);
+    } catch {
+      continue;
+    }
     if (typeof rec !== 'object' || rec === null) continue;
     const r = rec as Record<string, unknown>;
 
@@ -393,7 +400,10 @@ export function isClearedConversationFile(filePath: string): boolean {
     }
     if (r['type'] === 'attachment') {
       const att = r['attachment'] as Record<string, unknown> | undefined;
-      if (typeof att?.['hookName'] === 'string' && att['hookName'].startsWith('SessionStart:clear')) {
+      if (
+        typeof att?.['hookName'] === 'string' &&
+        att['hookName'].startsWith('SessionStart:clear')
+      ) {
         return true;
       }
     }
@@ -484,7 +494,7 @@ export function watchConversationSwitch(
   onSwitch: (conversationId: string, info: { kind: ConversationSwitchKind }) => void,
   projectsRoot?: string,
 ): () => void {
-  const root = projectsRoot ?? path.join(os.homedir(), '.claude', 'projects');
+  const root = projectsRoot ?? path.join(claudeConfigDir(), 'projects');
   let currentId = opts.currentId;
   /** Known conversations (not current) → size when last known idle. */
   const baseline = new Map<string, number>();

@@ -66,6 +66,10 @@ import { createOsStrategy } from '../../os';
 import { scratchExportZipH, scratchSaveGithubH, scratchSaveGitlabH } from '../../scratch/handlers';
 import { postScratchOffer } from '../../scratch/api';
 import { isScratchWorkspace } from '../../scratch/workspace';
+import {
+  clearActivePreviewMarker,
+  readActivePreviewMarker,
+} from '../../services/preview/active-marker';
 import { getGuardrailPolicy, setGuardrailPolicy } from '../../agents/acp/guardrail-config';
 import { byoProviderName, looksLikeByoProviderBilling } from '../../agents/acp/failure-messages';
 import {
@@ -2244,6 +2248,33 @@ const previewStartH: CommandHandler = (ctx, _cmd, parsed) => {
   void startPreviewFromDetection(ctx, rawDetection, ctx.pluginAuthToken);
 };
 
+/**
+ * Bring back the preview that was serving in this workspace before the
+ * process died (a Box that idle-slept and was recreated on wake, a CLI
+ * restart). Reads `.codeam/preview-active.json`; no marker → no-op. The
+ * bring-up is the Preview button's own pipeline, so the app sees the usual
+ * `preview_*` events and shows the preview without another tap.
+ */
+export async function restorePreviewAfterRestart(
+  ctx: PreviewCtx,
+  pluginAuthToken: string,
+  deps: {
+    read?: typeof readActivePreviewMarker;
+    start?: typeof startPreviewFromDetection;
+  } = {},
+): Promise<boolean> {
+  const detection = await (deps.read ?? readActivePreviewMarker)(process.cwd());
+  if (!detection) return false;
+  log.info(
+    'preview',
+    `restoring the preview that was serving before the restart (${detection.framework})`,
+  );
+  void (deps.start ?? startPreviewFromDetection)(ctx, detection, pluginAuthToken, {
+    origin: 'user',
+  });
+  return true;
+}
+
 /** Sessions this process already offered a scratch save for (one card per session). */
 const scratchOfferedSessions = new Set<string>();
 
@@ -2404,6 +2435,8 @@ const previewStopH: CommandHandler = (ctx) => {
   const pluginAuthToken = ctx.pluginAuthToken;
   void (async () => {
     await killPreview(ctx.sessionId);
+    // An explicit stop: the preview must NOT come back on the next start.
+    await clearActivePreviewMarker(process.cwd());
     // A genuine user stop, not a heal-triggered restart — clear the
     // build-heal restart cap so a later fresh preview for this session
     // isn't penalized by rebuilds that happened during a previous run.
