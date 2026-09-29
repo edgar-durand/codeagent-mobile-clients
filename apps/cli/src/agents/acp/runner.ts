@@ -125,6 +125,10 @@ import {
 import { reportCredentialInvalid } from './backend-reports';
 import { agentHooks } from './agent-hooks';
 import {
+  readActiveConversationMarker,
+  writeActiveConversationMarker,
+} from '../../services/active-conversation-marker';
+import {
   assembleAcpCommandContext,
   dispatchAcpCommand,
   recoverFromFailedTurn,
@@ -604,7 +608,8 @@ export class StreamingState {
       // A new adapter message id whose delta APPENDS (a snapshot re-emit of
       // the same reply reconciles as REPLACE and is left alone) starts a new
       // paragraph — never glue it onto the previous message's last byte.
-      const newMessage = this.lastTextMessageId !== null && this.lastTextMessageId !== delta.chunkId;
+      const newMessage =
+        this.lastTextMessageId !== null && this.lastTextMessageId !== delta.chunkId;
       const appended = cumulativeContent === prior + delta.delta;
       if (newMessage && appended && /\S$/.test(prior) && !/^\s/.test(delta.delta)) {
         cumulativeContent = `${prior}\n\n${delta.delta}`;
@@ -1215,18 +1220,27 @@ export function computeAdapterExtraEnv(params: {
 }
 
 /**
- * Pick the conversation to auto-resume into on a host-agent resume boot: the
- * most-recent conversation that ISN'T the fresh session just minted by
- * client.start(). Pure so the selection is unit-tested without a live adapter.
- * Returns null when there's no prior conversation (a genuinely first-ever boot).
+ * Pick the conversation to auto-resume into on a host-agent resume boot. Pure
+ * so the selection is unit-tested without a live adapter.
+ *
+ * With a `marked` id (the conversation the runner recorded it was driving —
+ * see services/active-conversation-marker.ts) that id wins when the agent
+ * still lists it; a marked conversation the agent no longer knows (it never
+ * got a transcript — zero turns) means there is nothing to resume, so the
+ * fresh session stays: falling through to "most recent" would resume a
+ * one-shot's transcript. Without a marker (a session driven by an older CLI)
+ * the legacy rule applies: the most-recent conversation that ISN'T the fresh
+ * session just minted by client.start(). Returns null when there's nothing to
+ * resume (a genuinely first-ever boot).
  */
 export function pickLatestResumableConversation(
   sessions: Array<{ id: string; timestamp: number }> | null,
   currentId: string,
+  marked?: string | null,
 ): string | null {
-  const prior = (sessions ?? [])
-    .filter((s) => s.id !== currentId)
-    .sort((a, b) => b.timestamp - a.timestamp)[0];
+  const listed = (sessions ?? []).filter((s) => s.id !== currentId);
+  if (marked) return listed.some((s) => s.id === marked) ? marked : null;
+  const prior = listed.sort((a, b) => b.timestamp - a.timestamp)[0];
   return prior?.id ?? null;
 }
 
@@ -1495,17 +1509,33 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
   let resumedPriorConversation = false;
   if (process.env.CODEAM_RESUME_LATEST === '1') {
     try {
-      const priorId = pickLatestResumableConversation(await client.listSessions(), acpSessionId);
+      const marked = await readActiveConversationMarker(opts.cwd);
+      const priorId = pickLatestResumableConversation(
+        await client.listSessions(),
+        acpSessionId,
+        marked,
+      );
       if (priorId) {
         await client.loadSession(priorId);
         acpSessionId = priorId;
         resumedPriorConversation = true;
-        log.info('acpRunner', `auto-resumed latest conversation ${priorId.slice(0, 8)}`);
+        log.info(
+          'acpRunner',
+          `auto-resumed ${marked === priorId ? 'marked' : 'latest'} conversation ${priorId.slice(0, 8)}`,
+        );
+      } else if (marked) {
+        log.info(
+          'acpRunner',
+          `marked conversation ${marked.slice(0, 8)} has no transcript — fresh session`,
+        );
       }
     } catch (err) {
       log.trace('acpRunner', 'auto-resume-latest failed (best-effort)', err);
     }
   }
+  // Record what this runner is driving so the NEXT resume boot loads exactly
+  // it (never a one-shot's transcript). Re-written on every re-point below.
+  void writeActiveConversationMarker(opts.cwd, acpSessionId);
   showSuccess(`${opts.agent} online (ACP) — awaiting prompts from mobile.`);
   showRelayNotice();
 
@@ -1725,6 +1755,7 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
         // conversation" fix).
         (id: string) => {
           acpSessionId = id;
+          void writeActiveConversationMarker(opts.cwd, id);
         },
         switchAgentForSession,
         pendingHandoff,
@@ -1882,6 +1913,7 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
     opts.agent = nextAgent;
     opts.adapter = adapter;
     acpSessionId = hs.sessionId;
+    void writeActiveConversationMarker(opts.cwd, acpSessionId);
     agentCaps = hs.initialize.agentCapabilities;
     runtime = createInteractiveAgentStrategy(nextAgent, createOsStrategy());
     history = new AcpHistory(publisher, {
@@ -1905,7 +1937,10 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
       if (pendingHouseConfig) {
         // Scoped to THIS session's deploy (its workspace names it) so a resume
         // of another session on the box never picks this config up.
-        persistHouseProxyConfig(pendingHouseConfig, deployIdFromWorkspace(process.cwd()) ?? undefined);
+        persistHouseProxyConfig(
+          pendingHouseConfig,
+          deployIdFromWorkspace(process.cwd()) ?? undefined,
+        );
         pendingHouseConfig = null;
       }
     } else if (wasHouse) {
@@ -2086,6 +2121,7 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
         // self-load guard would no-op it otherwise).
         await client.loadSession(m.acpSessionId);
         acpSessionId = m.acpSessionId;
+        void writeActiveConversationMarker(opts.cwd, acpSessionId);
         history.switchActiveSession(m.acpSessionId);
         // Resumed its OWN memory — the cold-start handoff preamble the swap
         // prepared would be redundant (and would re-narrate work it remembers).
