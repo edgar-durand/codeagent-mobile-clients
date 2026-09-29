@@ -37,6 +37,16 @@ fun Request.Builder.withAuthHeaders(): Request.Builder {
     return this
 }
 
+/** Body of `POST /api/commands/ack` — the ids the plugin RECEIVED in one batch. */
+internal fun buildAckPayload(pluginId: String, commandIds: List<String>): JsonObject {
+    val ids = JsonArray()
+    commandIds.forEach { ids.add(it) }
+    return JsonObject().apply {
+        addProperty("pluginId", pluginId)
+        add("commandIds", ids)
+    }
+}
+
 internal fun buildAgentsPayload(agents: List<DetectedAgent>): JsonArray {
     val agentsArray = JsonArray()
     for (agent in agents) {
@@ -577,6 +587,7 @@ class CommandRelayService {
     }
 
     private fun dispatchCommands(arr: JsonArray) {
+        val delivered = ArrayList<String>(arr.size())
         for (element in arr) {
             val obj = element.asJsonObject
             try {
@@ -589,6 +600,7 @@ class CommandRelayService {
                     status = obj.get("status").asString,
                     createdAt = obj.get("createdAt").asLong
                 )
+                delivered.add(cmd.id)
                 if (!markDispatched(cmd.id)) {
                     logger.debug("Skipping duplicate command: ${cmd.type} (${cmd.id})")
                     continue
@@ -597,6 +609,37 @@ class CommandRelayService {
                 listeners.forEach { it.onCommandReceived(cmd) }
             } catch (e: Exception) {
                 logger.debug("Failed to dispatch command: ${e.message}")
+            }
+        }
+        ackDelivered(delivered)
+    }
+
+    /**
+     * At-least-once delivery, the other half. The backend keeps every command
+     * queued until the plugin confirms it RECEIVED it (`POST /api/commands/ack`,
+     * PoP-gated like the delivery itself), so a relay that never acks is re-sent
+     * the same batch on every SSE reconnect and every poll for the queue's whole
+     * 10-min TTL — the 5-min dedup above only hides half of that window — and
+     * the backend counts the task as "dispatched, never picked up". The CLI has
+     * acked since 2026-08-30; this plugin never did until 2026-09-29.
+     * Re-delivered duplicates are acked too: draining an already-gone id is a
+     * no-op server-side. Fire-and-forget off the reader thread — a lost ack costs
+     * one redundant re-delivery, never the command.
+     */
+    private fun ackDelivered(commandIds: List<String>) {
+        if (commandIds.isEmpty()) return
+        val settings = SettingsService.getInstance()
+        val payload = buildAckPayload(settings.ensurePluginId(), commandIds)
+        val request = Request.Builder()
+            .url("${settings.state.apiBaseUrl}/api/commands/ack")
+            .post(payload.toString().toRequestBody("application/json".toMediaType()))
+            .withAuthHeaders()
+            .build()
+        ApplicationManager.getApplication().executeOnPooledThread {
+            try {
+                httpClient.newCall(request).execute().close()
+            } catch (e: Exception) {
+                logger.debug("Command ack failed: ${e.message}")
             }
         }
     }
