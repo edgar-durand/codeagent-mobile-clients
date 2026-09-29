@@ -29,6 +29,13 @@ import kotlin.math.min
 fun Request.Builder.withAuthHeaders(): Request.Builder {
     val settings = SettingsService.getInstance()
     addHeader("X-Codeam-Protocol-Version", PROTOCOL_VERSION)
+    // At-least-once delivery, same contract as the CLI: with this header the
+    // backend delivers NON-DESTRUCTIVELY (peek) and drains the queue only on
+    // our `POST /api/commands/ack` (see `ackDelivered`). Without it delivery
+    // is a destructive pop — a command handed to a socket that died mid-flush
+    // was simply gone (the 2026-07-15 first-prompt loss). Older backends
+    // ignore the unknown header; it's harmless on non-delivery requests.
+    addHeader("X-Codeam-Cmd-Ack", "1")
     settings.getPluginAuthToken()?.let { addHeader("X-Plugin-Auth-Token", it) }
     // SEC crit1 (#8): the command-delivery endpoints are gated on the
     // pollSecret when enforced. Always attach it; the backend ignores it
