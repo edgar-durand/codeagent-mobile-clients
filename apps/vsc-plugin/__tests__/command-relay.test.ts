@@ -185,3 +185,65 @@ describe('CommandRelayService', () => {
     });
   });
 });
+
+/**
+ * 2026-09-29: 192 IDE-plugin sessions in September were "delivered, never
+ * acked" — neither IDE plugin called `POST /api/commands/ack`, so the backend
+ * re-sent every batch on each reconnect/poll and counted the tasks as never
+ * picked up. Every dispatch path must ack what it received.
+ */
+describe('CommandRelayService — delivery ack', () => {
+  let relay: CommandRelayService;
+  let postJson: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    _testResetCommandRelay();
+    relay = CommandRelayService.initialize(makeLog());
+    relay.addListener({ onCommandReceived: () => undefined });
+    postJson = vi.spyOn(relay, 'postJson').mockResolvedValue(null);
+  });
+
+  it('acks every command id received in an SSE frame, after dispatching it', () => {
+    relay._testHelpers.feedSseFrame(
+      sseFrame([
+        { id: 'cmd-1', sessionId: 's1', pluginId: 'plugin-test', type: 'start_task', payload: { prompt: 'hi' }, status: 'pending', createdAt: 1 },
+        { id: 'cmd-2', sessionId: 's1', pluginId: 'plugin-test', type: 'send_prompt', payload: { prompt: 'yo' }, status: 'pending', createdAt: 2 },
+      ]),
+    );
+    expect(postJson).toHaveBeenCalledTimes(1);
+    expect(postJson).toHaveBeenCalledWith('https://api.test.local/api/commands/ack', {
+      pluginId: 'plugin-test',
+      commandIds: ['cmd-1', 'cmd-2'],
+    });
+  });
+
+  it('acks a re-delivered duplicate too — the backend only drains on ack', () => {
+    const frame = sseFrame([
+      { id: 'cmd-1', sessionId: 's1', pluginId: 'plugin-test', type: 'start_task', payload: { prompt: 'hi' }, status: 'pending', createdAt: 1 },
+    ]);
+    relay._testHelpers.feedSseFrame(frame);
+    relay._testHelpers.feedSseFrame(frame);
+    expect(postJson).toHaveBeenCalledTimes(2);
+    expect(postJson.mock.calls[1][1]).toEqual({ pluginId: 'plugin-test', commandIds: ['cmd-1'] });
+  });
+
+  it('never acks an empty or malformed batch', () => {
+    relay._testHelpers.feedSseFrame(sseFrame([]));
+    relay._testHelpers.feedSseFrame(sseFrame([{ id: 'broken' }]));
+    relay._testHelpers.feedSseFrame('event: ping\ndata: {}\n');
+    expect(postJson).not.toHaveBeenCalled();
+  });
+
+  it('a failed ack is logged, never thrown into the dispatch path', async () => {
+    postJson.mockRejectedValue(new Error('Request timeout'));
+    expect(() =>
+      relay._testHelpers.feedSseFrame(
+        sseFrame([
+          { id: 'cmd-1', sessionId: 's1', pluginId: 'plugin-test', type: 'start_task', payload: { prompt: 'hi' }, status: 'pending', createdAt: 1 },
+        ]),
+      ),
+    ).not.toThrow();
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+});
