@@ -1,4 +1,8 @@
-import { describe, it, expect, vi } from 'vitest';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { describe, it, expect, vi, afterEach } from 'vitest';
+import { registerOneShotConversation } from '../../../src/services/oneshot-registry';
 import { AcpHistory, pickLatestResumableConversation } from '../../../src/agents/acp/runner';
 import { AcpClient } from '../../../src/agents/acp/client';
 import type { AcpClientOptions } from '../../../src/agents/acp/client';
@@ -109,6 +113,33 @@ describe('AcpClient.listSessions — ACP session/list, gated on capability', () 
     expect(out![0]).toMatchObject({ id: 'a', summary: 'Chat A' });
     expect(out![0].timestamp).toBe(Date.parse('2026-07-16T12:00:00.000Z'));
     expect(out![1]).toMatchObject({ id: 'b', summary: '' }); // null title → ''
+  });
+
+  describe('one-shot transcripts', () => {
+    const prevHome = process.env.HOME;
+    afterEach(() => {
+      process.env.HOME = prevHome;
+    });
+
+    it('drops conversations registered as one-shots for this cwd', async () => {
+      // `claude -p` one-shots (preview detect, AI summary) write a transcript
+      // into the session's project dir; they must not surface in RECENT.
+      process.env.HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'codeam-list-home-'));
+      registerOneShotConversation('/tmp/w', 'detect');
+      registerOneShotConversation('/tmp/elsewhere', 'a');
+      const client = makeClient();
+      const internals = client as unknown as Internals;
+      internals.supportsListSessions = true;
+      internals.connection = {
+        listSessions: vi.fn(async () => ({
+          sessions: [
+            { sessionId: 'detect', title: 'Analyze the project…', updatedAt: null },
+            { sessionId: 'a', title: 'Chat A', updatedAt: null },
+          ],
+        })),
+      };
+      expect((await client.listSessions())?.map((s) => s.id)).toEqual(['a']);
+    });
   });
 
   it('returns null when the agent does not advertise sessionCapabilities.list', async () => {

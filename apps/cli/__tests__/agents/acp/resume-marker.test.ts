@@ -44,6 +44,48 @@ describe('pickLatestResumableConversation', () => {
   });
 });
 
+describe('resume pick over a list with a registered one-shot', () => {
+  it('never picks a one-shot transcript, even when it is the newest', async () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'codeam-conv-oneshot-home-'));
+    const prevHome = process.env.HOME;
+    process.env.HOME = home;
+    try {
+      const { registerOneShotConversation } =
+        await import('../../../src/services/oneshot-registry');
+      const { AcpClient } = await import('../../../src/agents/acp/client');
+      registerOneShotConversation('/tmp/w', ONE_SHOT);
+      const client = new AcpClient({
+        adapter: {
+          command: 'x',
+          args: [],
+          requiresAgentBinary: 'x',
+          waitForBinary: async () => true,
+        },
+        cwd: '/tmp/w',
+        onSessionUpdate: () => undefined,
+        onRequestPermission: async () => ({ outcome: { outcome: 'cancelled' } }),
+      });
+      const internals = client as unknown as {
+        connection: { listSessions: () => Promise<unknown> };
+        supportsListSessions: boolean;
+      };
+      internals.supportsListSessions = true;
+      internals.connection = {
+        listSessions: async () => ({
+          sessions: listed.map((s) => ({
+            sessionId: s.id,
+            updatedAt: new Date(s.timestamp).toISOString(),
+          })),
+        }),
+      };
+      // No marker (legacy rule): the newest non-fresh row would be the one-shot.
+      expect(pickLatestResumableConversation(await client.listSessions(), FRESH, null)).toBe(USER);
+    } finally {
+      process.env.HOME = prevHome;
+    }
+  });
+});
+
 describe('active conversation marker', () => {
   let cwd: string;
   let home: string;
