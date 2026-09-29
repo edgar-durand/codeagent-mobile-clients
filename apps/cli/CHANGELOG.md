@@ -4,6 +4,15 @@ All notable changes to `codeam-cli` are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.76.8] — 2026-09-29
+
+### Fixed
+
+- **vsc-plugin:** Ack received commands so the backend drains the queue
+- **jetbrains-plugin:** Ack received commands so the backend drains the queue
+- **vsc-plugin:** Opt into at-least-once delivery with X-Codeam-Cmd-Ack
+- **jetbrains-plugin:** Opt into at-least-once delivery with X-Codeam-Cmd-Ack
+
 ## [2.76.7] — 2026-09-29
 
 ### Fixed
