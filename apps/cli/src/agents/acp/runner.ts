@@ -1233,6 +1233,19 @@ export function computeAdapterExtraEnv(params: {
  * session just minted by client.start(). Returns null when there's nothing to
  * resume (a genuinely first-ever boot).
  */
+/**
+ * Whether the boot-time marker write is safe. A legacy pick (no marker on
+ * disk — a session driven by an older CLI) is a GUESS: recording it would
+ * cement a one-shot's transcript as "the conversation" for every later wake.
+ * The user's next prompt (or a RECENT-sheet resume) records the real one.
+ */
+export function shouldRecordConversationAfterBoot(params: {
+  resumedPriorConversation: boolean;
+  marked: string | null;
+}): boolean {
+  return !(params.resumedPriorConversation && !params.marked);
+}
+
 export function pickLatestResumableConversation(
   sessions: Array<{ id: string; timestamp: number }> | null,
   currentId: string,
@@ -1507,9 +1520,10 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
   // Drives the welcome card's title: a brand-new conversation must NOT greet a
   // first-time user with "Welcome back!" (observed live on two fresh signups).
   let resumedPriorConversation = false;
+  let marked: string | null = null;
   if (process.env.CODEAM_RESUME_LATEST === '1') {
     try {
-      const marked = await readActiveConversationMarker(opts.cwd);
+      marked = await readActiveConversationMarker(opts.cwd);
       const priorId = pickLatestResumableConversation(
         await client.listSessions(),
         acpSessionId,
@@ -1534,8 +1548,11 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
     }
   }
   // Record what this runner is driving so the NEXT resume boot loads exactly
-  // it (never a one-shot's transcript). Re-written on every re-point below.
-  void writeActiveConversationMarker(opts.cwd, acpSessionId);
+  // it (never a one-shot's transcript). Re-written on every re-point below and
+  // on every prompt — NOT after a legacy (unmarked) pick, which is a guess.
+  if (shouldRecordConversationAfterBoot({ resumedPriorConversation, marked })) {
+    void writeActiveConversationMarker(opts.cwd, acpSessionId);
+  }
   showSuccess(`${opts.agent} online (ACP) — awaiting prompts from mobile.`);
   showRelayNotice();
 
@@ -1734,6 +1751,10 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
   const relay = new CommandRelayService(
     opts.pluginId,
     async (cmd) => {
+      // A prompt is the user confirming THIS conversation is theirs — the one
+      // a resume boot must come back to (covers sessions that predate the
+      // marker, whose boot-time pick was a guess).
+      if (cmd.type === 'start_task') void writeActiveConversationMarker(opts.cwd, acpSessionId);
       await handleCommand(
         cmd,
         client,

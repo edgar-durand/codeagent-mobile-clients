@@ -76,3 +76,18 @@ describe('active conversation marker', () => {
     expect(await readActiveConversationMarker(cwd, home)).toBeNull();
   });
 });
+
+describe('shouldRecordConversationAfterBoot', () => {
+  it('records a fresh session and a marked resume, never a legacy (unmarked) guess', async () => {
+    const { shouldRecordConversationAfterBoot } = await import('../../../src/agents/acp/runner');
+    expect(
+      shouldRecordConversationAfterBoot({ resumedPriorConversation: false, marked: null }),
+    ).toBe(true);
+    expect(
+      shouldRecordConversationAfterBoot({ resumedPriorConversation: true, marked: USER }),
+    ).toBe(true);
+    expect(
+      shouldRecordConversationAfterBoot({ resumedPriorConversation: true, marked: null }),
+    ).toBe(false);
+  });
+});
