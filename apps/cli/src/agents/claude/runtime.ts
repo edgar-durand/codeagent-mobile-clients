@@ -228,7 +228,13 @@ export class ClaudeRuntimeStrategy implements RuntimeStrategy {
     // detector and the resume pick skip it instead of treating it as the
     // user's conversation.
     const conversationId = randomUUID();
-    const launch = buildClaudeLaunch(['-p', prompt, '--session-id', conversationId], this.os);
+    // `--no-session-persistence` (claude ≥ 2.x): the one-shot writes NO
+    // transcript at all, so nothing can ever list or resume it. The registry
+    // below stays as the belt for a claude that ignores the flag.
+    const launch = buildClaudeLaunch(
+      ['-p', prompt, '--session-id', conversationId, '--no-session-persistence'],
+      this.os,
+    );
     if (!launch) return null;
     registerOneShotConversation(opts?.cwd ?? process.cwd(), conversationId);
     return spawnAndCapture(launch.cmd, launch.args, {

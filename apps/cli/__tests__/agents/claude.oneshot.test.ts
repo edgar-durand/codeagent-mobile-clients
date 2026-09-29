@@ -46,6 +46,8 @@ describe('ClaudeRuntimeStrategy.generateOneShot', () => {
     expect(args.slice(0, 3)).toEqual(['-p', 'hi', '--session-id']);
     const id = args[3];
     expect(id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[0-9a-f]{4}-[0-9a-f]{12}$/);
+    // No transcript at all — nothing can list or resume a one-shot.
+    expect(args[4]).toBe('--no-session-persistence');
     expect(opts?.cwd).toBe(cwd);
     expect(registeredAtSpawn).not.toBeNull();
     expect(registeredAtSpawn!.has(id)).toBe(true);
