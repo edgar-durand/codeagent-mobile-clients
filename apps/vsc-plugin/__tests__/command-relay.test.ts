@@ -22,6 +22,7 @@ vi.mock('../src/services/settings.service', () => ({
       heartbeatIntervalMs: 30_000,
       getPluginAuthToken: () => null,
       setPluginAuthToken: vi.fn(),
+      ensurePollSecret: () => 'poll-secret-test',
     }),
   },
 }));
@@ -245,5 +246,13 @@ describe('CommandRelayService — delivery ack', () => {
     ).not.toThrow();
     await Promise.resolve();
     await Promise.resolve();
+  });
+});
+
+describe('CommandRelayService — at-least-once opt-in', () => {
+  it('advertises ack mode on every request so delivery is a non-destructive peek', () => {
+    _testResetCommandRelay();
+    const relay = CommandRelayService.initialize(makeLog());
+    expect(relay.authHeaders()['X-Codeam-Cmd-Ack']).toBe('1');
   });
 });
