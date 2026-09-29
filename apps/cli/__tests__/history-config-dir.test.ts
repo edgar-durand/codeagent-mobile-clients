@@ -62,3 +62,34 @@ describe('transcripts honour CLAUDE_CONFIG_DIR', () => {
     expect(resolveHistoryDir(cwd)).toBe(dir);
   });
 });
+
+describe('detectCurrentConversation skips one-shot transcripts', () => {
+  const cwd = '/home/box/.codeam/self-hosted/deploy-2';
+  const prevCfg = process.env.CLAUDE_CONFIG_DIR;
+  const prevHome = process.env.HOME;
+  afterEach(() => {
+    if (prevCfg === undefined) delete process.env.CLAUDE_CONFIG_DIR;
+    else process.env.CLAUDE_CONFIG_DIR = prevCfg;
+    process.env.HOME = prevHome;
+  });
+
+  it('a newer registered one-shot never becomes the current conversation', async () => {
+    const { registerOneShotConversation } = await import('../src/services/oneshot-registry');
+    process.env.CLAUDE_CONFIG_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'codeam-cfg-'));
+    process.env.HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'codeam-home-'));
+    const dir = path.join(process.env.CLAUDE_CONFIG_DIR, 'projects', encodeCwd(cwd));
+    fs.mkdirSync(dir, { recursive: true });
+    const USER = 'aaaaaaaa-0000-0000-0000-000000000001';
+    const ONE_SHOT = 'bbbbbbbb-0000-0000-0000-000000000002';
+    const runtime = { id: 'claude', resolveHistoryDir: () => null } as unknown as RuntimeStrategy;
+    const svc = new HistoryService(runtime, 'plugin-1', cwd, { bootTimeMs: Date.now() });
+    fs.writeFileSync(path.join(dir, `${USER}.jsonl`), '{}\n');
+    const later = new Date(Date.now() + 10_000);
+    fs.writeFileSync(path.join(dir, `${ONE_SHOT}.jsonl`), '{}\n');
+    fs.utimesSync(path.join(dir, `${ONE_SHOT}.jsonl`), later, later);
+    registerOneShotConversation(cwd, ONE_SHOT);
+
+    svc.detectCurrentConversation();
+    expect(svc.getCurrentConversationId()).toBe(USER);
+  });
+});

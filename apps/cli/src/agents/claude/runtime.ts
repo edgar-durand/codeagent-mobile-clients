@@ -11,6 +11,7 @@ import { ensureClaudeInstalled } from './installer';
 import { claudeCredentialLocator, claudeLoginLauncher } from './link';
 import { fetchClaudeQuota } from './quota';
 import { spawnAndCapture } from '../../services/spawn-and-capture';
+import { registerOneShotConversation } from '../../services/oneshot-registry';
 import * as history from './history';
 import type { OsStrategy } from '../../os';
 import type { ChangeModelInstruction, RuntimeStrategy } from '../strategy';
@@ -166,10 +167,10 @@ export class ClaudeRuntimeStrategy implements RuntimeStrategy {
     // Mirror the Anthropic catalog. Context windows hardcoded — model registry
     // matches what the relay's listModels handler used to return inline.
     return [
-      { id: 'claude-opus-4-7',           label: 'Claude Opus 4.7',   contextWindow: 200000 },
-      { id: 'claude-opus-4-6',           label: 'Claude Opus 4.6',   contextWindow: 200000 },
-      { id: 'claude-sonnet-4-6',         label: 'Claude Sonnet 4.6', contextWindow: 200000 },
-      { id: 'claude-haiku-4-5-20251001', label: 'Claude Haiku 4.5',  contextWindow: 200000 },
+      { id: 'claude-opus-4-7', label: 'Claude Opus 4.7', contextWindow: 200000 },
+      { id: 'claude-opus-4-6', label: 'Claude Opus 4.6', contextWindow: 200000 },
+      { id: 'claude-sonnet-4-6', label: 'Claude Sonnet 4.6', contextWindow: 200000 },
+      { id: 'claude-haiku-4-5-20251001', label: 'Claude Haiku 4.5', contextWindow: 200000 },
     ];
   }
 
@@ -222,8 +223,20 @@ export class ClaudeRuntimeStrategy implements RuntimeStrategy {
     // to stdout, and exits. Safe to spawn alongside the user's primary
     // interactive session because it's a brand-new child process (no
     // shared PTY, no state mutation in the user's active conversation).
-    const launch = buildClaudeLaunch(['-p', prompt], this.os);
+    // It still writes `<id>.jsonl` into the session's project dir, so the id
+    // is pre-minted and registered BEFORE the spawn: RECENT, the history
+    // detector and the resume pick skip it instead of treating it as the
+    // user's conversation.
+    const conversationId = randomUUID();
+    // `--no-session-persistence` (claude ≥ 2.x): the one-shot writes NO
+    // transcript at all, so nothing can ever list or resume it. The registry
+    // below stays as the belt for a claude that ignores the flag.
+    const launch = buildClaudeLaunch(
+      ['-p', prompt, '--session-id', conversationId, '--no-session-persistence'],
+      this.os,
+    );
     if (!launch) return null;
+    registerOneShotConversation(opts?.cwd ?? process.cwd(), conversationId);
     return spawnAndCapture(launch.cmd, launch.args, {
       onStderr: opts?.onStderr,
       onFailedOutput: opts?.onFailedOutput,

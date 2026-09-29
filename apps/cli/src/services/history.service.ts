@@ -17,6 +17,7 @@ import { claudeConfigDir } from '../agents/claude-memory-file';
 import { stripSquadContext, isLeakedSquadContextText } from '../agents/acp/squad-context';
 import { isAgentMetaBlock } from '../agents/acp/agent-meta-blocks';
 import type { RuntimeStrategy } from '../agents/strategy';
+import { readOneShotConversations } from './oneshot-registry';
 
 /**
  * Schema for one record in a Claude Code session JSONL file. Only fields
@@ -454,10 +455,17 @@ export class HistoryService {
   detectCurrentConversation(): void {
     const dir = this.projectDir;
     const cutoff = this.bootTimeMs - HistoryService.BIRTHTIME_GRACE_MS;
+    // A one-shot (`claude -p`) created after boot is newest yet never the user's.
+    const oneShots = readOneShotConversations(this.cwd);
     try {
       const files = fs
         .readdirSync(dir, { withFileTypes: true })
-        .filter((e) => e.isFile() && e.name.endsWith('.jsonl'))
+        .filter(
+          (e) =>
+            e.isFile() &&
+            e.name.endsWith('.jsonl') &&
+            !oneShots.has(path.basename(e.name, '.jsonl')),
+        )
         .map((e) => {
           try {
             const stat = fs.statSync(path.join(dir, e.name));

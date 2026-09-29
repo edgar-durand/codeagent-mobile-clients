@@ -61,6 +61,7 @@ import { isLocalSession } from '../../baton/gate';
 import { log } from '../../services/logger';
 import { describeProviderRouting, formatProviderRouting } from '../../lib/provider-routing';
 import { killQuiet } from '../../lib/quiet';
+import { readOneShotConversations } from '../../services/oneshot-registry';
 
 /**
  * Protocol version we advertise during `initialize`. ACP v1 is the
@@ -222,7 +223,6 @@ const NEWSESSION_TIMEOUT_MS = 120_000;
  * stops a slow-but-healthy server from being declared dead in the meantime.
  */
 export const MCP_STARTUP_TIMEOUT_MS = NEWSESSION_TIMEOUT_MS - 30_000;
-
 
 /**
  * Backstop ceiling for `session/load`. It was the ONE handshake RPC with no
@@ -1370,12 +1370,17 @@ export class AcpClient {
     if (!this.connection || !this.supportsListSessions) return null;
     try {
       const res = await this.connection.listSessions({ cwd: this.opts.cwd });
-      return (res.sessions ?? []).map((s) => ({
-        id: s.sessionId,
-        summary: s.title ?? '',
-        // updatedAt is an ISO string; fall back to now on absent/unparseable.
-        timestamp: s.updatedAt ? Date.parse(s.updatedAt) || Date.now() : Date.now(),
-      }));
+      // Headless one-shots (preview detect, AI summary) write transcripts into
+      // the same project dir; they are not the user's conversations.
+      const oneShots = readOneShotConversations(this.opts.cwd);
+      return (res.sessions ?? [])
+        .filter((s) => !oneShots.has(s.sessionId))
+        .map((s) => ({
+          id: s.sessionId,
+          summary: s.title ?? '',
+          // updatedAt is an ISO string; fall back to now on absent/unparseable.
+          timestamp: s.updatedAt ? Date.parse(s.updatedAt) || Date.now() : Date.now(),
+        }));
     } catch (err) {
       log.trace('acpClient', 'listSessions failed (best-effort)', err);
       return null;
