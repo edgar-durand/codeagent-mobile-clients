@@ -13,6 +13,7 @@ import {
 import { vercelBypassHeader } from '../lib/backend-headers';
 import { log } from './logger';
 import { encodeCwd } from '../agents/claude/history';
+import { claudeConfigDir } from '../agents/claude-memory-file';
 import { stripSquadContext, isLeakedSquadContextText } from '../agents/acp/squad-context';
 import { isAgentMetaBlock } from '../agents/acp/agent-meta-blocks';
 import type { RuntimeStrategy } from '../agents/strategy';
@@ -393,7 +394,13 @@ export class HistoryService {
     // exist yet — e.g. first-ever Claude run in this cwd).
     return (
       this.runtime.resolveHistoryDir(this.cwd) ??
-      path.join(os.homedir(), '.claude', 'projects', encodeCwd(this.cwd))
+      // ⚠️ `CLAUDE_CONFIG_DIR`, not `~/.claude`: a managed / house session runs
+      // Claude with its own config dir (`~/.codeam/house-claude/<deploy>`), so a
+      // `~/.claude/projects` lookup found NO transcript for those sessions — the
+      // session-start upload answered false, the active-conversation pointer was
+      // never re-pointed after a Box wake, and the app opened an empty "New
+      // conversation" over the resumed one (QA box, 2026-09-29).
+      path.join(claudeConfigDir(), 'projects', encodeCwd(this.cwd))
     );
   }
 

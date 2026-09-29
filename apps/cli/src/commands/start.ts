@@ -65,6 +65,7 @@ import { keepDeviceAwake } from '../services/keep-awake';
 import { ensureClaudeOnboarded } from '../agents/claude/onboarding';
 import { log } from '../services/logger';
 import { agentPreviewBridge } from './start/agent-preview-bridge';
+import { restorePreviewAfterRestart } from './start/handlers';
 import { createOsStrategy } from '../os';
 import { createInteractiveAgentStrategy } from '../agents/registry';
 
@@ -331,6 +332,15 @@ export async function start(requestedAgent?: AgentId, presetSession?: SavedSessi
     pluginAuthToken: session.pluginAuthToken ?? undefined,
     getRuntime: () => createInteractiveAgentStrategy(session.agent, createOsStrategy()),
   });
+  // A preview that was serving before this process died (Box sleep → wake
+  // recreates the container, a CLI restart) comes back by itself, a few
+  // seconds after the session is up so it never races the agent spawn.
+  if (session.pluginAuthToken) {
+    const token = session.pluginAuthToken;
+    setTimeout(() => {
+      void restorePreviewAfterRestart({ sessionId: session.id, pluginId }, token);
+    }, 5_000).unref();
+  }
   const mcpServers = mergeWithLocalMcpServers(
     buildMcpServersForStart({
       sessionId: session.id,

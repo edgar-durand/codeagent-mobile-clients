@@ -13,6 +13,15 @@ import * as path from 'node:path';
  */
 export function claudeMemoryFile(homeDir?: string, env: NodeJS.ProcessEnv = process.env): string {
   if (homeDir) return path.join(homeDir, '.claude', 'CLAUDE.md');
+  return path.join(claudeConfigDir(env), 'CLAUDE.md');
+}
+
+/**
+ * Claude Code's config dir: `CLAUDE_CONFIG_DIR` when set (every managed /
+ * house session runs with its own `~/.codeam/house-claude/<deploy>`), else
+ * `~/.claude`. Transcripts live under `<configDir>/projects/<encoded cwd>/`.
+ */
+export function claudeConfigDir(env: NodeJS.ProcessEnv = process.env): string {
   const configDir = env.CLAUDE_CONFIG_DIR?.trim();
-  return configDir ? path.join(configDir, 'CLAUDE.md') : path.join(os.homedir(), '.claude', 'CLAUDE.md');
+  return configDir ? configDir : path.join(os.homedir(), '.claude');
 }
