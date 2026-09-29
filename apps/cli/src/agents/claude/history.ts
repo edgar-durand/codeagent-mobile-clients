@@ -28,7 +28,12 @@ import { getContextWindow, type NormalizedMessage } from '@codeam/shared';
  * the baton `TranscriptMirror`) silently no-op'd for those projects.
  */
 export function encodeCwd(cwd: string): string {
-  return cwd.replace(/[\\/:_]/g, '-');
+  // `.` too: Claude Code writes `/home/box/.codeam/self-hosted/<id>` as
+  // `-home-box--codeam-self-hosted-<id>`. With the dot kept, every scratch /
+  // house workspace (all under `.codeam/`) resolved to a dir that does not
+  // exist, and the transcript upload after a Box wake answered "no
+  // transcript" (2026-09-29).
+  return cwd.replace(/[\\/:_.]/g, '-');
 }
 
 /**
