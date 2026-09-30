@@ -30,5 +30,5 @@ for (const s of fs.readdirSync(path.join(root, 'skills'))) {
 fs.mkdirSync(path.resolve('dist'), { recursive: true });
 const out = path.resolve('dist', `codeagent-mobile-plugin-${manifest.version}.zip`);
 fs.rmSync(out, { force: true });
-execFileSync('zip', ['-r', '-X', out, '.', '-x', '*.DS_Store'], { cwd: root, stdio: 'inherit' });
+execFileSync('zip', ['-r', '-X', out, '.', '-x', '*.DS_Store', 'SUBMISSION.md', 'README.md'], { cwd: root, stdio: 'inherit' });
 console.log(`plugin-pack: wrote ${out}`);
