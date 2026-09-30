@@ -37,6 +37,10 @@ export default {
         // ships/versions independently (a container image, not part of the
         // npm client release line).
         'box',
+        // plugin/openai — the static ChatGPT/Codex plugin package (manifest,
+        // mcp.json, skills, assets). No TypeScript; versions independently
+        // of the npm client release line.
+        'plugin',
         // Repo-wide test infrastructure not scoped to one app (real-Docker
         // integration tests, shared fixtures, the CI wiring for a new gate).
         'test',

@@ -26,6 +26,7 @@
     "dev:cli": "cd apps/cli && npm run dev",
     "test:cli": "cd apps/cli && npm run test",
     "publish:cli": "cd apps/cli && npm publish",
+    "plugin:pack": "node scripts/plugin-pack.mjs",
     "knip": "knip",
     "commitlint": "commitlint --edit",
     "use-commit-template": "git config commit.template .gitmessage && echo 'Configured commit.template = .gitmessage for this repo. Run: git commit (without -m) to see it.'"
