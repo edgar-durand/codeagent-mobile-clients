@@ -1,0 +1,38 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "codeagent-mobile",
+  "version": "1.0.0",
+  "description": "Run and supervise AI coding agents from ChatGPT and Codex.",
+  "author": { "name": "CodeAgent Mobile", "email": "support@codeagent-mobile.com", "url": "https://www.codeagent-mobile.com" },
+  "homepage": "https://www.codeagent-mobile.com",
+  "repository": "https://github.com/edgar-durand/codeagent-mobile-clients",
+  "license": "MIT",
+  "keywords": ["coding agents", "claude code", "codex", "developer tools", "pull requests", "mobile"],
+  "extensions": {
+    "com.openai": {
+      "apps": "./.app.json",
+      "interface": {
+        "displayName": "CodeAgent Mobile",
+        "shortDescription": "Supervise your coding agents",
+        "longDescription": "CodeAgent Mobile lets you start, monitor, redirect and review long-running AI coding agents directly from ChatGPT and Codex.\n\nConnect your CodeAgent account and ask for your running sessions, send a task or a new instruction to an agent, answer the questions it asks, stop it, read the changes it made and open a pull request — without leaving the chat. Hand a session to your phone when you step away and keep supervising from the CodeAgent Mobile app.\n\nWorks with the agents you already link in CodeAgent (Claude Code, Codex, Gemini, Cursor and more) on your own accounts, or with CodeAgent managed agents billed from prepaid credits — never without your confirmation.\n\nRequires a CodeAgent Mobile account with at least one paired session (local CLI, GitHub Codespace, CodeAgent Box or self-hosted).",
+        "developerName": "CodeAgent Mobile",
+        "category": "Developer Tools",
+        "capabilities": ["Read", "Write"],
+        "websiteURL": "https://www.codeagent-mobile.com",
+        "supportURL": "https://www.codeagent-mobile.com/support",
+        "privacyPolicyURL": "https://www.codeagent-mobile.com/privacy",
+        "termsOfServiceURL": "https://www.codeagent-mobile.com/terms",
+        "defaultPrompt": [
+          "Show me my running CodeAgent sessions",
+          "Start a task on my main session: fix the failing checkout tests",
+          "What has the agent changed so far?",
+          "Create a pull request from that session",
+          "Send this session to my phone"
+        ],
+        "brandColor": "#A855F7",
+        "composerIcon": "./assets/composer-icon.png",
+        "logo": "./assets/logo.png"
+      }
+    }
+  }
+}
