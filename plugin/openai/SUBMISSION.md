@@ -22,6 +22,12 @@ Reviewer credentials are entered only in the portal's Review details, never in t
 | 4 | Review the changes | Show me what changed in that session | `get_diff` | A per-file summary of the working-tree changes: index.html, style.css and README.md. |
 | 5 | Switch agents with a credits confirmation | Switch my CodeAgent Box session to the Claude managed agent | `list_agents`, `switch_agent` | The first `switch_agent` call returns CONFIRMATION_REQUIRED with the credit balance; the model asks the user to confirm; after "yes" it calls again with confirmation and the switch is accepted. |
 
+Optional extra positive case (use it if the portal accepts more than five, or swap it in for case 3):
+
+| # | description | prompt | tools_triggered | expected_behavior |
+|---|---|---|---|---|
+| 6 | Product question answered from CodeAgent's docs | What can the CodeAgent Mobile app do that I can't do from here? | `search_codeagent_help` | A short list of app-only capabilities (e.g. live Preview, voice, deploying a Box or codespace, Take Control) with links to the CodeAgent wiki. |
+
 ## Negative test cases
 
 | # | description | prompt |
