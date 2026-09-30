@@ -11,4 +11,4 @@ description: Review the changes a CodeAgent session made, and open or review a p
 3. Summarise: intent of the change, key implementation points, risks (tests touched? migrations? config?). Do not approve or merge anything yourself.
 4. Only when the user explicitly asks, call `create_pull_request` with a concise title and a body that lists the changes. Report number, branch and URL. If the result is `PR_ALREADY_EXISTS`, give the existing URL.
 5. For "review PR #N", call `review_pull_request` with `repository` (owner/repo) and `number`; tell the user findings will appear on the PR.
-6. For "send this to my phone", call `send_session_to_mobile` with an optional one-line note.
+6. For "send this to my phone", call `send_session_to_mobile` with an optional one-line note. If the result has `sent: false` with `reason: notifications_disabled`, tell the user the push is turned off in the CodeAgent Mobile app's notification settings. If the error is `NO_MOBILE_DEVICE`, tell them to sign in to the app on their phone first.
