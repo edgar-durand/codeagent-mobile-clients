@@ -10,7 +10,7 @@ Reviewer credentials are entered only in the portal's Review details, never in t
 - Account: the dedicated review account (email + password in the portal only). Email is pre-verified, no MFA, no magic link.
 - Workspace / tenant: none.
 - Sign-in: connect the plugin, sign in with the review account on the CodeAgent Mobile page, press Allow on the consent screen.
-- Sample data: the account has one CodeAgent Box session with a small demo project and the house managed agent. It has no phone registered and no GitHub repository linked.
+- Sample data: the account has one CodeAgent Box session ("New project") running the DeepSeek V4 Flash managed agent, with a small demo web project (index.html, style.css, README.md). It has prepaid CodeAgent credits, no phone registered and no GitHub repository linked.
 
 ## Positive test cases
 
@@ -19,8 +19,8 @@ Reviewer credentials are entered only in the portal's Review details, never in t
 | 1 | List the user's coding sessions | Show me my running CodeAgent sessions | `list_sessions` | One CodeAgent Box session is listed with its agent and status (idle). |
 | 2 | Start a task on a session | Start a task on my CodeAgent Box: add a README with the project name | `list_sessions`, `start_task` | The task is accepted and the reply names the session and the command id. |
 | 3 | Check progress | What is the agent doing on my Box right now? | `get_session` | The reply gives the session status (running or idle) and a summary of the latest agent turn. |
-| 4 | Review the changes | Show me what changed in that session | `get_diff` | A per-file summary of the working-tree changes, including README.md. |
-| 5 | Switch to a managed agent with confirmation | Continue this session with a CodeAgent managed agent | `list_agents`, `get_wallet_balance`, `switch_agent` | The model shows the credit balance and asks the user to confirm before switching; after "yes" the switch is accepted. |
+| 4 | Review the changes | Show me what changed in that session | `get_diff` | A per-file summary of the working-tree changes: index.html, style.css and README.md. |
+| 5 | Switch agents with a credits confirmation | Switch my CodeAgent Box session to the Claude managed agent | `list_agents`, `switch_agent` | The first `switch_agent` call returns CONFIRMATION_REQUIRED with the credit balance; the model asks the user to confirm; after "yes" it calls again with confirmation and the switch is accepted. |
 
 ## Negative test cases
 
