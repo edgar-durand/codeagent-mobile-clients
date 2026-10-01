@@ -6,6 +6,17 @@
 // Moved VERBATIM out of host-agent.ts (Phase 3 refactor) — only the
 // import/export wiring changed. host-agent.ts re-exports the public surface.
 import { execFile } from 'node:child_process';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
+import {
+  cliVersionsRoot,
+  entryOf,
+  gcVersions,
+  pointerTarget,
+  switchCurrent,
+  versionDirContaining,
+  versionOf,
+} from '../../lib/cli-versions';
 import { log } from '../../services/logger';
 import { compareSemver } from '../../lib/updateNotifier';
 
@@ -67,9 +78,6 @@ const SELF_UPDATE_INSTALL_TIMEOUT_MS = 180_000;
 /** Timeout for `npm ls -g` — purely local, no registry round-trip. */
 const SELF_UPDATE_LS_TIMEOUT_MS = 15_000;
 
-/** Timeout for the `sudo -n true` pre-flight. Non-interactive, so it either
- *  answers immediately or is refused immediately. */
-const SUDO_PREFLIGHT_TIMEOUT_MS = 5_000;
 
 /**
  * The current running CLI version, read from the tsup-injected
@@ -116,6 +124,12 @@ export interface SelfUpdateDeps {
   /** Version of the code CURRENTLY EXECUTING (build-time constant). */
   currentVersion: () => string | null;
   isRoot: () => boolean;
+  /** Versioned-install root (`~/.codeam/cli`); see `lib/cli-versions.ts`. */
+  versionsRoot?: string;
+  /** Entry the running process executes from (`process.argv[1]`) — never GC'd. */
+  runningEntry?: string;
+  /** Node binary used to verify a freshly installed version (`process.execPath`). */
+  nodePath?: string;
 }
 
 /**
@@ -178,17 +192,20 @@ function runCmd(
  *   1. `npm view codeam-cli version` (30s) → latest published version.
  *   2. Compare to the running `__CLI_VERSION__` via `compareSemver`. If not
  *      strictly newer → `'current'` (no install).
- *   3. `npm install -g codeam-cli@latest` (180s). The systemd unit runs as
- *      root so a global install works; if it fails with EACCES AND we're
- *      not already root, retry once with a `sudo` prefix.
- *   4. On a successful install, re-resolve the installed version and return
- *      `'updated'` with it (the caller restarts so systemd relaunches new code).
+ *   3. Install side-by-side into `~/.codeam/cli/<latest>`, verify it, switch
+ *      `current` atomically ({@link installVersioned}). No global prefix, so
+ *      no EACCES / sudo.
+ *   4. Return `'updated'` (the caller restarts; the launcher redirect in
+ *      `lib/version-redirect.ts` starts the new `current`).
  */
 export async function runSelfUpdate(): Promise<SelfUpdateResult> {
   return runSelfUpdateWith({
     run: runCmd,
     currentVersion: currentCliVersion,
     isRoot: () => process.getuid?.() === 0,
+    versionsRoot: cliVersionsRoot(),
+    runningEntry: process.argv[1],
+    nodePath: process.execPath,
   });
 }
 
@@ -210,6 +227,20 @@ export async function runSelfUpdateWith(deps: SelfUpdateDeps): Promise<SelfUpdat
     // for days while `/usr/bin/codeam --version` said 2.66.0, and logged 318
     // hourly EACCES failures for an install that was never needed
     // (codeagent-53em follow-up). Local, no network, no privileges.
+    // STEP 0a — a versioned install newer than us is already `current` (a prior
+    // tick installed it while a turn deferred the restart, or another process
+    // did): just restart onto it — the launcher redirect picks it up.
+    const root = deps.versionsRoot ?? cliVersionsRoot();
+    const versionedCurrent = pointerTarget(root, 'current');
+    const versionedVersion = versionedCurrent ? versionOf(versionedCurrent) : null;
+    if (versionedVersion && entryOf(versionedCurrent as string) && compareSemver(versionedVersion, current) > 0) {
+      log.info(
+        'host-agent',
+        `self-update: ${versionedVersion} already current in ${root} (running ${current}) — restarting onto it`,
+      );
+      return { status: 'updated', version: versionedVersion };
+    }
+
     const onDisk = await installedVersion(deps);
     if (onDisk && compareSemver(onDisk, current) > 0) {
       log.info(
@@ -239,55 +270,113 @@ export async function runSelfUpdateWith(deps: SelfUpdateDeps): Promise<SelfUpdat
       return { status: 'current' };
     }
 
-    log.info('host-agent', `self-update: ${current} → ${latest} available — installing`);
-    const installArgs = ['install', '-g', `${SELF_UPDATE_PKG}@latest`];
-    let install = await deps.run('npm', installArgs, SELF_UPDATE_INSTALL_TIMEOUT_MS);
-
-    // EACCES + not-root → retry once under sudo (the global prefix needs
-    // escalation on a box where host-agent isn't root, e.g. a dev box).
-    //
-    // ⚠️ PRE-FLIGHT `sudo -n true` FIRST. A host-agent running as an
-    // unprivileged user inside a TTY-less systemd unit can never answer a
-    // password prompt, so an un-preflighted `sudo npm install` can only burn
-    // its full 180 s timeout and log a failure whose cause we already knew.
-    // (Same lesson, same fix as the bare-box package provisioning.)
-    if (install.code !== 0 && !deps.isRoot() && /EACCES/i.test(install.stderr)) {
-      const canSudo = await deps.run('sudo', ['-n', 'true'], SUDO_PREFLIGHT_TIMEOUT_MS);
-      if (canSudo.code === 0) {
-        log.info('host-agent', 'self-update: install hit EACCES — retrying with sudo');
-        install = await deps.run('sudo', ['npm', ...installArgs], SELF_UPDATE_INSTALL_TIMEOUT_MS);
-      } else {
-        log.warn(
-          'host-agent',
-          'self-update: the npm global prefix is not writable by this user and passwordless ' +
-            'sudo is unavailable — install codeam-cli under a user-writable prefix, or let a ' +
-            'privileged agent on this host install it (this box restarts onto it automatically)',
-        );
-      }
-    }
-
-    if (install.code !== 0) {
-      log.warn(
-        'host-agent',
-        `self-update: install exited ${String(install.code)} — staying on ${current}`,
-      );
-      return { status: 'skipped' };
-    }
-
-    // Confirm the install actually changed the on-disk version before we
-    // tell the supervisor to restart (guards against a no-op install).
-    const after = await deps.run(
-      'npm',
-      ['view', SELF_UPDATE_PKG, 'version'],
-      SELF_UPDATE_VIEW_TIMEOUT_MS,
-    );
-    const installed = after.code === 0 ? after.stdout.trim() || latest : latest;
-    return { status: 'updated', version: installed };
+    log.info('host-agent', `self-update: ${current} → ${latest} available — installing side-by-side`);
+    return await installVersioned(deps, root, latest, current);
   } catch (err) {
     // Defensive — runNpm never rejects, but guard so the tick never throws.
     log.warn(
       'host-agent',
       `self-update: unexpected error: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    return { status: 'skipped' };
+  }
+}
+
+/** Timeout for the `node <entry> --version` check of a fresh install. */
+const VERIFY_TIMEOUT_MS = 30_000;
+
+/**
+ * Install `latest` into its OWN directory, verify it, then switch `current` to
+ * it atomically (codeagent-siec). Replaces the old in-place `npm install -g`,
+ * which rewrote the package tree a running supervisor spawns its session
+ * children from — a child spawned mid-install could load a half-written tree.
+ *
+ *   1. `npm install --prefix <root>/<latest> codeam-cli@<latest>` — a fresh
+ *      directory nobody runs from. No global prefix, so no EACCES/sudo either
+ *      (the per-user `~/.codeam` is always writable).
+ *   2. Verify: `<node> <entry> --version` must print `latest`. Anything else
+ *      deletes the new directory and leaves `current` exactly as it was.
+ *   3. `switchCurrent` — atomic symlink swap; the old current becomes
+ *      `previous` (rollback target).
+ *   4. GC every other version except the one this process runs from.
+ *
+ * Sessions spawned at any point keep running the version they started on: the
+ * running process spawns from the real path of its own directory, which this
+ * never writes and GC never removes.
+ */
+export async function installVersioned(
+  deps: SelfUpdateDeps,
+  root: string,
+  latest: string,
+  running: string,
+): Promise<SelfUpdateResult> {
+  const node = deps.nodePath ?? process.execPath;
+  const target = path.join(root, latest);
+  try {
+    fs.mkdirSync(root, { recursive: true });
+    const runningDir = versionDirContaining(root, deps.runningEntry);
+    const reusable = entryOf(target) && versionOf(target) === latest;
+    if (!reusable) {
+      // A leftover broken directory for this version (an interrupted install)
+      // is not current, previous or running — safe to clear and retry.
+      if (runningDir && path.resolve(runningDir) === path.resolve(target)) {
+        return { status: 'skipped' };
+      }
+      fs.rmSync(target, { recursive: true, force: true });
+      const install = await deps.run(
+        'npm',
+        [
+          'install',
+          '--prefix',
+          target,
+          '--no-audit',
+          '--no-fund',
+          '--loglevel=error',
+          `${SELF_UPDATE_PKG}@${latest}`,
+        ],
+        SELF_UPDATE_INSTALL_TIMEOUT_MS,
+      );
+      if (install.code !== 0) {
+        fs.rmSync(target, { recursive: true, force: true });
+        log.warn(
+          'host-agent',
+          `self-update: versioned install exited ${String(install.code)} — staying on ${running}: ` +
+            install.stderr.slice(-300),
+        );
+        return { status: 'skipped' };
+      }
+    }
+
+    const entry = entryOf(target);
+    const check = entry
+      ? await deps.run(node, [entry, '--version'], VERIFY_TIMEOUT_MS)
+      : { code: null, stdout: '', stderr: 'no entry point' };
+    if (check.code !== 0 || !check.stdout.includes(latest)) {
+      fs.rmSync(target, { recursive: true, force: true });
+      log.warn(
+        'host-agent',
+        `self-update: ${latest} failed verification (exit ${String(check.code)}: ` +
+          `${(check.stdout + check.stderr).trim().slice(-200)}) — staying on ${running}`,
+      );
+      return { status: 'skipped' };
+    }
+
+    switchCurrent(root, target);
+    const removed = gcVersions(root, deps.runningEntry);
+    log.info(
+      'host-agent',
+      `self-update: ${latest} installed + verified at ${target}, now current` +
+        (removed.length ? ` (gc: ${removed.join(', ')})` : ''),
+    );
+    return { status: 'updated', version: latest };
+  } catch (err) {
+    // A failure before the swap leaves `current` untouched; clear our dir.
+    if (pointerTarget(root, 'current') !== path.resolve(target)) {
+      fs.rmSync(target, { recursive: true, force: true });
+    }
+    log.warn(
+      'host-agent',
+      `self-update: versioned install failed: ${err instanceof Error ? err.message : String(err)}`,
     );
     return { status: 'skipped' };
   }

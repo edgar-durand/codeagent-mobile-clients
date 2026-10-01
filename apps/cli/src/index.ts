@@ -22,6 +22,7 @@ import { version } from './commands/version';
 import { help } from './commands/help';
 import { tryShowSubcommandHelp } from './commands/subcommand-help';
 import { checkForUpdates, autoUpgradeBeforeCriticalCommand } from './lib/updateNotifier';
+import { maybeRedirectToVersioned } from './lib/version-redirect';
 import { isKnownAgentId } from '@codeam/shared';
 import {
   initTelemetry,
@@ -92,6 +93,12 @@ const [, , command, ...args] = process.argv;
  *   - `codeam completion <shell>` → emit shell-completion script.
  */
 async function main(): Promise<void> {
+  // Versioned install (codeagent-siec): when the host-agent's self-update has
+  // made a NEWER codeam-cli `current` under ~/.codeam/cli, run that instead of
+  // this binary — whichever `codeam` on PATH (or systemd ExecStart) launched us.
+  // A no-op (`'self'`) everywhere a self-update never ran.
+  if ((await maybeRedirectToVersioned()) === 'redirected') return;
+
   // Telemetry boot + update notifier — gated by isMetaCommand below
   // so `--version` / `--help` stay fast for tooling that scrapes
   // them.

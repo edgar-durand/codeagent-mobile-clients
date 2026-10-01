@@ -1,4 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import { runSelfUpdateWith, type SelfUpdateDeps } from '../../../src/commands/host/self-update';
 
 /**
@@ -32,8 +35,42 @@ function deps(over: Partial<SelfUpdateDeps> = {}): SelfUpdateDeps {
     run: vi.fn().mockResolvedValue({ code: 1, stdout: '', stderr: '' }),
     currentVersion: () => '2.65.16',
     isRoot: () => false,
+    // Never the real ~/.codeam/cli.
+    versionsRoot: fs.mkdtempSync(path.join(os.tmpdir(), 'codeam-cli-versions-')),
+    nodePath: 'node',
     ...over,
   };
+}
+
+/**
+ * Fake npm/node for the side-by-side install: `npm install --prefix <dir>
+ * codeam-cli@<v>` writes a runnable package there; `node <entry> --version`
+ * answers with the version it finds.
+ */
+function fakeInstallRun(viewVersion: string, lsVersion: string) {
+  return vi.fn(async (cmd: string, args: string[]) => {
+    if (args[0] === 'ls') return { code: 0, stdout: lsJson(lsVersion), stderr: '' };
+    if (args[0] === 'view') return { code: 0, stdout: `${viewVersion}\n`, stderr: '' };
+    if (cmd === 'npm' && args[0] === 'install') {
+      const prefix = args[args.indexOf('--prefix') + 1]!;
+      const version = args[args.length - 1]!.split('@').pop()!;
+      const pkg = path.join(prefix, 'node_modules', 'codeam-cli');
+      fs.mkdirSync(path.join(pkg, 'dist'), { recursive: true });
+      fs.writeFileSync(
+        path.join(pkg, 'package.json'),
+        JSON.stringify({ name: 'codeam-cli', version, bin: { codeam: 'dist/index.js' } }),
+      );
+      fs.writeFileSync(path.join(pkg, 'dist', 'index.js'), `// ${version}\n`);
+      return { code: 0, stdout: '', stderr: '' };
+    }
+    if (args[1] === '--version') {
+      const pkg = JSON.parse(
+        fs.readFileSync(path.join(path.dirname(path.dirname(args[0]!)), 'package.json'), 'utf8'),
+      ) as { version: string };
+      return { code: 0, stdout: `codeam-cli ${pkg.version}\n`, stderr: '' };
+    }
+    return { code: 0, stdout: '', stderr: '' };
+  });
 }
 
 /** `npm ls -g --depth=0 --json codeam-cli` output, verbatim shape. */
@@ -58,90 +95,37 @@ describe('runSelfUpdate — the version already on disk', () => {
     expect(attempted.some((c) => c.includes('view'))).toBe(false);
   });
 
-  it('still installs when the disk matches what is already running', async () => {
-    const run = vi.fn(async (cmd: string, args: string[]) => {
-      if (args[0] === 'ls') return { code: 0, stdout: lsJson('2.65.16'), stderr: '' };
-      if (args[0] === 'view') return { code: 0, stdout: '2.66.0\n', stderr: '' };
-      return { code: 0, stdout: '', stderr: '' };
-    });
+  it('still installs (side-by-side, never `-g`) when the disk matches what is already running', async () => {
+    const run = fakeInstallRun('2.66.0', '2.65.16');
 
-    const res = await runSelfUpdateWith(deps({ run, isRoot: () => true }));
+    const res = await runSelfUpdateWith(deps({ run }));
 
-    expect(res.status).toBe('updated');
+    expect(res).toEqual({ status: 'updated', version: '2.66.0' });
     const attempted = run.mock.calls.map(([cmd, args]) => `${cmd} ${args.join(' ')}`);
-    expect(attempted.some((c) => c.includes('install -g'))).toBe(true);
+    expect(attempted.some((c) => c.includes('install --prefix'))).toBe(true);
+    expect(attempted.some((c) => c.includes('install -g'))).toBe(false);
   });
 
   it('falls through to the registry path when the on-disk version is unreadable', async () => {
-    const run = vi.fn(async (cmd: string, args: string[]) => {
-      if (args[0] === 'ls') return { code: 1, stdout: 'not json', stderr: 'boom' };
-      if (args[0] === 'view') return { code: 0, stdout: '2.66.0\n', stderr: '' };
-      return { code: 0, stdout: '', stderr: '' };
-    });
+    const run = fakeInstallRun('2.66.0', '2.65.16');
+    run.mockImplementationOnce(async () => ({ code: 1, stdout: 'not json', stderr: 'boom' }));
 
-    const res = await runSelfUpdateWith(deps({ run, isRoot: () => true }));
+    const res = await runSelfUpdateWith(deps({ run }));
 
     expect(res.status).toBe('updated');
   });
 });
 
-describe('runSelfUpdate — sudo escalation', () => {
-  it('does not shell out to sudo when passwordless sudo is unavailable', async () => {
-    const run = vi.fn(async (cmd: string, args: string[]) => {
-      if (args[0] === 'ls') return { code: 0, stdout: lsJson('2.65.16'), stderr: '' };
-      if (args[0] === 'view') return { code: 0, stdout: '2.66.0\n', stderr: '' };
-      if (cmd === 'npm' && args[0] === 'install') {
-        return { code: 1, stdout: '', stderr: 'npm ERR! code EACCES' };
-      }
-      // `sudo -n true` — the pre-flight. Not in sudoers → non-zero.
-      if (cmd === 'sudo') return { code: 1, stdout: '', stderr: 'user NOT in sudoers' };
-      return { code: 0, stdout: '', stderr: '' };
-    });
-
-    const res = await runSelfUpdateWith(deps({ run }));
-
-    expect(res.status).toBe('skipped');
-    // A TTY-less systemd unit can never answer a password prompt, so the real
-    // `sudo npm install` must never be attempted — it can only burn its full
-    // 180 s timeout and log a failure whose cause is already known.
-    const sudoInstalls = run.mock.calls.filter(
-      ([cmd, args]) => cmd === 'sudo' && args.includes('install'),
-    );
-    expect(sudoInstalls).toHaveLength(0);
-  });
-
-  it('still escalates when passwordless sudo IS available', async () => {
-    const run = vi.fn(async (cmd: string, args: string[]) => {
-      if (args[0] === 'ls') return { code: 0, stdout: lsJson('2.65.16'), stderr: '' };
-      if (args[0] === 'view') return { code: 0, stdout: '2.66.0\n', stderr: '' };
-      if (cmd === 'npm' && args[0] === 'install') {
-        return { code: 1, stdout: '', stderr: 'npm ERR! code EACCES' };
-      }
-      return { code: 0, stdout: '', stderr: '' }; // `sudo -n true` + sudo install
-    });
-
-    const res = await runSelfUpdateWith(deps({ run }));
-
-    expect(res.status).toBe('updated');
-    const sudoInstalls = run.mock.calls.filter(
-      ([cmd, args]) => cmd === 'sudo' && args.includes('install'),
-    );
-    expect(sudoInstalls).toHaveLength(1);
-  });
-
-  it('never escalates as root — there is nothing to escalate to', async () => {
-    const run = vi.fn(async (cmd: string, args: string[]) => {
-      if (args[0] === 'ls') return { code: 0, stdout: lsJson('2.65.16'), stderr: '' };
-      if (args[0] === 'view') return { code: 0, stdout: '2.66.0\n', stderr: '' };
-      if (cmd === 'npm' && args[0] === 'install') {
-        return { code: 1, stdout: '', stderr: 'npm ERR! code EACCES' };
-      }
-      return { code: 0, stdout: '', stderr: '' };
-    });
-
-    const res = await runSelfUpdateWith(deps({ run, isRoot: () => true }));
-
-    expect(res.status).toBe('skipped');
-    expect(run.mock.calls.filter(([cmd]) => cmd === 'sudo')).toHaveLength(0);
+// The side-by-side install (codeagent-siec) goes into the per-user
+// ~/.codeam/cli — always writable — so the old global-prefix EACCES → sudo
+// escalation (and its 318-failures-a-day journal noise on fleet-1) is gone.
+describe('runSelfUpdate — no global prefix, no sudo', () => {
+  it('never shells out to sudo, root or not', async () => {
+    for (const isRoot of [true, false]) {
+      const run = fakeInstallRun('2.66.0', '2.65.16');
+      const res = await runSelfUpdateWith(deps({ run, isRoot: () => isRoot }));
+      expect(res.status).toBe('updated');
+      expect(run.mock.calls.filter(([cmd]) => cmd === 'sudo')).toHaveLength(0);
+    }
   });
 });

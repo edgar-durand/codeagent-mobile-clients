@@ -947,7 +947,10 @@ export function needsSelfRelaunch(
   env: NodeJS.ProcessEnv = process.env,
   pid: number = process.pid,
 ): boolean {
-  return !env.INVOCATION_ID && pid !== 1;
+  // CODEAM_LAUNCHER_IS_PID1: we were started by the versioned-install launcher
+  // (`lib/version-redirect.ts`) running as pid 1 (a Box container) — exiting
+  // ends the launcher too and the container restart brings us back.
+  return !env.INVOCATION_ID && pid !== 1 && env.CODEAM_LAUNCHER_IS_PID1 !== '1';
 }
 
 /**

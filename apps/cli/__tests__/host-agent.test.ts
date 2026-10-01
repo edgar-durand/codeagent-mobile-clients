@@ -4055,6 +4055,9 @@ describe('self-update restart without a supervisor', () => {
     expect(needsSelfRelaunch({}, 4242)).toBe(true); // codespace: setsid nohup
     expect(needsSelfRelaunch({ INVOCATION_ID: 'abc' }, 4242)).toBe(false); // systemd unit
     expect(needsSelfRelaunch({}, 1)).toBe(false); // container pid 1
+    // Started by the versioned-install launcher running as pid 1 (Box
+    // container): exiting ends the launcher and the container restarts us.
+    expect(needsSelfRelaunch({ CODEAM_LAUNCHER_IS_PID1: '1' }, 4242)).toBe(false);
   });
 
   it('re-execs the same command after a pause so this process exits first', async () => {
