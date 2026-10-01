@@ -34,6 +34,14 @@ const SELF_UPDATE_PKG = 'codeam-cli';
 export const SELF_UPDATE_INTERVAL_MS = 60 * 60 * 1000;
 
 /**
+ * Delay before the ONE startup self-update check (codeagent-siec). Short, so a
+ * codespace woken after a release converges to latest within seconds; not 0,
+ * so the boot heartbeat + session resume go first. The check is
+ * fire-and-forget and never delays start(), pairing or a deploy.
+ */
+export const SELF_UPDATE_STARTUP_DELAY_MS = 5_000;
+
+/**
  * How long a restart owed to an installed update may be deferred because a
  * child session is running, before we restart regardless.
  *

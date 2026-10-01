@@ -131,6 +131,7 @@ import {
   runSelfUpdate,
   SELF_UPDATE_INTERVAL_MS,
   SELF_UPDATE_DEFER_MAX_MS,
+  SELF_UPDATE_STARTUP_DELAY_MS,
   type SelfUpdater,
   type SelfUpdateResult,
 } from './host/self-update';
@@ -149,6 +150,7 @@ export {
 export {
   runSelfUpdate,
   SELF_UPDATE_DEFER_MAX_MS,
+  SELF_UPDATE_STARTUP_DELAY_MS,
   type SelfUpdateResult,
   type SelfUpdater,
 } from './host/self-update';
@@ -1133,6 +1135,7 @@ export class HostAgentSupervisor {
   private heartbeatTimer: NodeJS.Timeout | null = null;
   /** Periodic self-update timer (npm check + install + restart). */
   private selfUpdateTimer: NodeJS.Timeout | null = null;
+  private selfUpdateStartupTimer: NodeJS.Timeout | null = null;
   /** Self-update check + install (injectable; defaults to runSelfUpdate). */
   private readonly selfUpdate: SelfUpdater;
   private readonly now: () => number;
@@ -1301,6 +1304,18 @@ export class HostAgentSupervisor {
     // non-positive interval (env opt-out / tests) disables it entirely.
     const updateMs = this.selfUpdateIntervalMs();
     if (updateMs > 0) {
+      // ONE check shortly after boot, then hourly (codeagent-siec). Before, the
+      // first check came an HOUR after start, so a codespace woken after a CLI
+      // release ran stale code — and the backend had to reinstall in the
+      // foreground on every wake (~42 s of a 57 s wake bootstrap, 2026-10-01).
+      // Now the backend launches on what is installed and the supervisor
+      // converges to latest in the background: the tick never blocks start(),
+      // pairing or deploys, and restarts only when no turn is in flight.
+      this.selfUpdateStartupTimer = setTimeout(
+        () => void this.selfUpdateTick(),
+        SELF_UPDATE_STARTUP_DELAY_MS,
+      );
+      this.selfUpdateStartupTimer.unref?.();
       this.selfUpdateTimer = setInterval(() => void this.selfUpdateTick(), updateMs);
       this.selfUpdateTimer.unref?.();
     } else {
@@ -1328,6 +1343,10 @@ export class HostAgentSupervisor {
     if (this.selfUpdateTimer) {
       clearInterval(this.selfUpdateTimer);
       this.selfUpdateTimer = null;
+    }
+    if (this.selfUpdateStartupTimer) {
+      clearTimeout(this.selfUpdateStartupTimer);
+      this.selfUpdateStartupTimer = null;
     }
     this.relay?.stop();
     for (const child of this.children.values()) {
