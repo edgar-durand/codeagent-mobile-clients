@@ -20,7 +20,7 @@
  *      arrives after the deadline is dropped instead of resurrecting the sheet.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { PREVIEW_DETECT_PROMPT } from '@codeam/shared';
@@ -192,6 +192,26 @@ describe('request_preview_detect — headless one-shot only, always terminal', (
       expect.objectContaining({ timeoutMs: PREVIEW_DETECT_TIMEOUT_MS }),
     );
     expect(lastPosted('preview_error')).toMatchObject({ stage: 'unsupported' });
+  });
+
+  it('an untouched from-scratch project answers at once, without the one-shot', async () => {
+    // RCA 2026-09-30: two scratch users tapped Preview on the empty project and
+    // waited 6-52 s for the agent to say there was nothing to serve.
+    mkdirSync(path.join(scratch, '.git'));
+    writeFileSync(path.join(scratch, '.git', 'codeam-scratch'), '');
+    writeFileSync(path.join(scratch, '.gitignore'), 'node_modules/\n');
+    writeFileSync(path.join(scratch, 'CLAUDE.md'), '# beads\n');
+    const generateOneShot = vi.fn().mockResolvedValue(UNSUPPORTED_ANSWER);
+
+    await dispatchCommand(makeAcpCtx({ id: 'claude', generateOneShot }), cmd);
+    await vi.waitFor(() => expect(postedTypes()).toContain('preview_error'));
+
+    expect(generateOneShot).not.toHaveBeenCalled();
+    expect(postedTypes()).toEqual(['preview_error']);
+    expect(lastPosted('preview_error')).toMatchObject({
+      stage: 'unsupported',
+      message: expect.stringContaining('Nothing to preview yet'),
+    });
   });
 
   it('a runtime without a one-shot gets preview_error, not a prompt through the chat', async () => {
