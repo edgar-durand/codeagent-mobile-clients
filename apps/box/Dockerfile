@@ -73,6 +73,11 @@ RUN apt-get update \
         python3-venv \
         build-essential \
         procps \
+        # tini: pid 1 that reaps orphaned grandchildren (agent/MCP/dev-server
+        # processes re-parented when a session exits) and forwards signals. The
+        # host-agent runs as its child; needsSelfRelaunch() sees ppid 1 inside
+        # a container and lets the container restart policy handle restarts.
+        tini \
         # libglib2.0-0: React Native DevTools (`@react-native/debugger-shell`)
         # dlopens libglib-2.0.so.0 when Expo/Metro starts; without it every
         # Expo preview logs "error while loading shared libraries" (rafaelph90's
@@ -261,4 +266,4 @@ WORKDIR /home/box
 
 # The supervisor. Enrolls on first boot from CODEAM_ENROLL_TOKEN, then re-opens
 # the control channel from the sealed identity on every subsequent start.
-ENTRYPOINT ["codeam", "host-agent"]
+ENTRYPOINT ["/usr/bin/tini", "--", "codeam", "host-agent"]

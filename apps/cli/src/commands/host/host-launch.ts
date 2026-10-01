@@ -22,12 +22,17 @@
 // Nothing here runs for any other command: a local user's `codeam start`,
 // `pair`, MCP stdio servers, the TUI — all run exactly the binary launched.
 import { spawn as nodeSpawn, type ChildProcess } from 'node:child_process';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import { log } from '../../services/logger';
 import { compareSemver } from '../../lib/updateNotifier';
 import {
   cliVersionsRoot,
+  clearPreReadyFailures,
   hostEntry,
   markBad,
+  recordPreReadyFailure,
   rollbackCurrent,
   validCurrent,
   versionedModeSupported,
@@ -112,7 +117,10 @@ export async function superviseCurrent(over: Partial<SuperviseDeps> = {}): Promi
     let stopping = false;
     const child = deps.spawn(deps.execPath, [cur.entry, 'host-agent', SUPERVISED_FLAG, ...deps.args]);
     child.on('message', (m: unknown) => {
-      if (m === READY_MESSAGE) ready = true;
+      if (m === READY_MESSAGE) {
+        ready = true;
+        clearPreReadyFailures(cur.dir);
+      }
     });
     const signals: NodeJS.Signals[] = deps.stdinIsTty ? ['SIGTERM', 'SIGHUP'] : ['SIGTERM', 'SIGHUP', 'SIGINT'];
     const forward = (sig: NodeJS.Signals) => (): void => {
@@ -158,11 +166,19 @@ export async function superviseCurrent(over: Partial<SuperviseDeps> = {}): Promi
       continue;
     }
     if (!ready) {
-      // Died before it ever got its first heartbeat through: a broken release.
-      markBad(cur.dir, `host-agent exited ${String(code)} before ready`);
+      // Died before its first heartbeat got through. ONE such exit can be a
+      // transient outage at boot (network not up yet): retry once. Two in a row
+      // (within PRE_READY_WINDOW_MS) and the release is marked bad — the marker
+      // itself expires after BAD_MARKER_TTL_MS (cli-versions.ts).
+      const strikes = recordPreReadyFailure(cur.dir);
+      if (strikes < 2) {
+        deps.warn(`codeam: ${cur.version} exited ${String(code)} before ready — retrying once`);
+        continue;
+      }
+      markBad(cur.dir, `host-agent exited ${String(code)} before ready (${strikes}x)`);
       const now = rollbackCurrent(deps.root);
       deps.warn(
-        `codeam: ${cur.version} exited ${String(code)} before ready — marked bad` +
+        `codeam: ${cur.version} exited ${String(code)} before ready twice — marked bad` +
           (now ? `, rolled back to ${now}` : ''),
       );
       continue; // re-resolve: the rolled-back current, or 'self'
@@ -181,8 +197,19 @@ export async function superviseCurrent(over: Partial<SuperviseDeps> = {}): Promi
 export function needsSelfRelaunch(
   env: NodeJS.ProcessEnv = process.env,
   pid: number = process.pid,
+  ctx: { ppid?: number; inContainer?: () => boolean } = {},
 ): boolean {
-  return !env.INVOCATION_ID && pid !== 1;
+  if (env.INVOCATION_ID || pid === 1) return false;
+  // CodeAgent Box under tini: we are tini's direct child (ppid 1) inside a
+  // container — exiting ends tini and the container's restart policy brings
+  // us back, exactly like the old pid-1 case. A codespace is also a container
+  // whose orphaned host-agent is re-parented to pid 1, but nothing restarts it
+  // there, so it must keep relaunching itself (CODESPACES=true).
+  const ppid = ctx.ppid ?? process.ppid;
+  if (ppid === 1 && env.CODESPACES !== 'true' && (ctx.inContainer ?? isContainerEnvironment)()) {
+    return false;
+  }
+  return true;
 }
 
 /**
@@ -249,4 +276,67 @@ export function defaultRestartForUpdate(
     }
   }
   exit(0);
+}
+
+/**
+ * True when THIS process is running inside a container — the CodeAgent Box
+ * rescue fleet runs `host-agent` in Docker (`apps/box/Dockerfile`), where the
+ * container's own lifecycle (stop/start/delete via the `fleet_*` handlers)
+ * governs uptime, not idle-sleep, so keep-awake would be pointless there.
+ * Linux-only signals (`/.dockerenv`, a docker/containerd/kubepods cgroup) —
+ * macOS/Windows never have either, so this correctly returns `false` there.
+ * Injectable so tests never touch the real filesystem.
+ */
+export function isContainerEnvironment(
+  existsSyncFn: (p: string) => boolean = fs.existsSync,
+  readFileSyncFn: (p: string) => string = (p) => fs.readFileSync(p, 'utf8'),
+): boolean {
+  try {
+    if (existsSyncFn('/.dockerenv')) return true;
+  } catch {
+    /* not present — not a container by this signal */
+  }
+  try {
+    const cgroup = readFileSyncFn('/proc/1/cgroup');
+    if (/docker|containerd|kubepods/.test(cgroup)) return true;
+  } catch {
+    /* no /proc (macOS/Windows) or unreadable — not a container by this signal */
+  }
+  return false;
+}
+
+/** `~/.codeam/host-agent.pid` — read by the backend's in-box liveness check. */
+export function hostAgentPidFile(home: string = os.homedir()): string {
+  return path.join(home, '.codeam', 'host-agent.pid');
+}
+
+/**
+ * Record this supervisor's pid for the backend's `codeam_host_agent_alive`
+ * (pid + `kill -0` + cmdline). Removed on exit only if it is still ours.
+ */
+export function writeHostAgentPidFile(file: string = hostAgentPidFile(), pid: number = process.pid): void {
+  try {
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, String(pid));
+    process.once('exit', () => {
+      try {
+        if (fs.readFileSync(file, 'utf8').trim() === String(pid)) fs.rmSync(file, { force: true });
+      } catch {
+        /* already gone */
+      }
+    });
+  } catch {
+    /* best-effort: the backend falls back to pgrep */
+  }
+}
+
+/**
+ * A supervised host-agent exits when its hop parent's IPC channel goes away
+ * (parent SIGKILLed / OOM-killed), so no orphan host-agent outlives it.
+ */
+export function bindSupervisedLifecycle(
+  proc: Pick<NodeJS.Process, 'once'> & { connected?: boolean },
+  onOrphaned: () => void,
+): void {
+  proc.once('disconnect', onOrphaned);
 }

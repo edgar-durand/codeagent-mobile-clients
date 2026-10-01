@@ -4,15 +4,18 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { EventEmitter } from 'node:events';
 import {
+  bindSupervisedLifecycle,
   defaultRestartForUpdate,
+  needsSelfRelaunch,
   READY_MESSAGE,
   SUPERVISED_FLAG,
   superviseCurrent,
+  writeHostAgentPidFile,
   type SuperviseDeps,
 } from '../../../src/commands/host/host-launch';
 import { runSelfUpdateWith } from '../../../src/commands/host/self-update';
 import {
-  entryOf,
+  launcherOf,
   isBad,
   pointerTarget,
   switchCurrent,
@@ -39,6 +42,9 @@ function fakeVersion(version: string): string {
     JSON.stringify({ name: 'codeam-cli', version, bin: { codeam: 'dist/index.js' } }),
   );
   fs.writeFileSync(path.join(pkg, 'dist', 'index.js'), `// ${version}\n`);
+  // npm --prefix also creates node_modules/.bin/codeam -> ../codeam-cli/<bin>.
+  fs.mkdirSync(path.join(dir, 'node_modules', '.bin'), { recursive: true });
+  fs.symlinkSync('../codeam-cli/dist/index.js', path.join(dir, 'node_modules', '.bin', 'codeam'));
   return fs.realpathSync(dir);
 }
 
@@ -86,35 +92,50 @@ describe('superviseCurrent — the host-agent hops onto a newer current, once', 
     switchCurrent(root, v11);
     const h = harness('2.76.10');
     await vi.waitFor(() => expect(h.children).toHaveLength(1));
-    expect(h.spawn.mock.calls[0]![1]).toEqual([entryOf(v11), 'host-agent', SUPERVISED_FLAG]);
+    expect(h.spawn.mock.calls[0]![1]).toEqual([launcherOf(v11), 'host-agent', SUPERVISED_FLAG]);
 
     // The child self-updated to 2.76.12 and exited 0 to restart.
     const v12 = fakeVersion('2.76.12');
     switchCurrent(root, v12);
     h.children[0]!.emit('exit', 0, null);
     await vi.waitFor(() => expect(h.children).toHaveLength(2));
-    expect(h.spawn.mock.calls[1]![1]![0]).toBe(entryOf(v12));
+    expect(h.spawn.mock.calls[1]![1]![0]).toBe(launcherOf(v12));
   });
 
-  it('a release that dies BEFORE ready is marked .bad and rolled back — no oscillation', async () => {
+  it('ONE pre-ready exit retries the same release (transient boot outage); TWO mark it .bad and roll back', async () => {
     const v11 = fakeVersion('2.76.11');
     const v12 = fakeVersion('2.76.12');
     switchCurrent(root, v11);
     switchCurrent(root, v12);
     const h = harness('2.76.10');
     await vi.waitFor(() => expect(h.children).toHaveLength(1));
-    h.children[0]!.emit('exit', 1, null); // never sent READY
+    h.children[0]!.emit('exit', 1, null); // never sent READY — strike 1
 
     await vi.waitFor(() => expect(h.children).toHaveLength(2));
+    expect(isBad(v12)).toBe(false);
+    expect(h.spawn.mock.calls[1]![1]![0]).toBe(launcherOf(v12)); // same release again
+
+    h.children[1]!.emit('exit', 1, null); // strike 2
+    await vi.waitFor(() => expect(h.children).toHaveLength(3));
     expect(isBad(v12)).toBe(true);
     expect(pointerTarget(root, 'current')).toBe(v11);
-    expect(h.spawn.mock.calls[1]![1]![0]).toBe(entryOf(v11));
+    expect(h.spawn.mock.calls[2]![1]![0]).toBe(launcherOf(v11));
 
-    // v11 also dies before ready → marked bad too; nothing left → the launcher runs itself.
+    // v11 then comes up fine: READY clears its strikes.
+    h.children[2]!.emit('message', READY_MESSAGE);
+    expect(fs.existsSync(path.join(v11, '.prefail'))).toBe(false);
+  });
+
+  it('no oscillation: once both releases are bad the launcher runs itself, and a restart stays there', async () => {
+    const v11 = fakeVersion('2.76.11');
+    switchCurrent(root, v11);
+    const h = harness('2.76.10');
+    await vi.waitFor(() => expect(h.children).toHaveLength(1));
+    h.children[0]!.emit('exit', 1, null);
+    await vi.waitFor(() => expect(h.children).toHaveLength(2));
     h.children[1]!.emit('exit', 1, null);
     await expect(h.run).resolves.toBe('self');
     expect(isBad(v11)).toBe(true);
-    // A later start does NOT go back to a bad release.
     await expect(harness('2.76.10').run).resolves.toBe('self');
   });
 
@@ -158,7 +179,7 @@ describe('restart after an update — no loop across two consecutive releases', 
     const relaunch = vi.fn();
     const exit = vi.fn();
     // Running 2.76.10 from an OLD versioned dir (argv[1]); 2.76.11 just became current.
-    const stale = entryOf(fakeVersion('2.76.10'))!;
+    const stale = launcherOf(fakeVersion('2.76.10'))!;
     defaultRestartForUpdate('2.76.11', false, {
       needsRelaunch: true,
       root,
@@ -167,7 +188,7 @@ describe('restart after an update — no loop across two consecutive releases', 
       relaunch,
       exit,
     });
-    expect(relaunch.mock.calls[0]![0][1]).toBe(entryOf(v11));
+    expect(relaunch.mock.calls[0]![0][1]).toBe(launcherOf(v11));
     expect(exit).toHaveBeenCalledWith(0);
   });
 
@@ -207,5 +228,41 @@ describe('local users are unaffected', () => {
     expect(index).not.toMatch(/superviseCurrent|hostEntry|version-redirect|CODEAM_CLI_REDIRECTED/);
     const hostAgent = src('commands/host-agent.ts');
     expect(hostAgent).toMatch(/export async function hostAgent[\s\S]*superviseCurrent\(\{ args \}\)/);
+  });
+});
+
+describe('supervised child lifecycle', () => {
+  it('exits when the hop parent dies (IPC disconnect) — no orphan host-agent', () => {
+    const proc = new EventEmitter();
+    const onOrphaned = vi.fn();
+    bindSupervisedLifecycle(proc as never, onOrphaned);
+    proc.emit('disconnect');
+    expect(onOrphaned).toHaveBeenCalledTimes(1);
+  });
+
+  it('host-agent wires it only when --supervised', () => {
+    const src = fs.readFileSync(path.join(__dirname, '../../../src/commands/host-agent.ts'), 'utf8');
+    expect(src).toMatch(/if \(args\.includes\(SUPERVISED_FLAG\)\) bindSupervisedLifecycle\(process, shutdown\)/);
+  });
+});
+
+describe('host-agent pid file (backend liveness check)', () => {
+  it('writes the pid to ~/.codeam/host-agent.pid', () => {
+    const file = path.join(root, '.codeam', 'host-agent.pid');
+    writeHostAgentPidFile(file, 4242);
+    expect(fs.readFileSync(file, 'utf8')).toBe('4242');
+  });
+});
+
+describe('needsSelfRelaunch', () => {
+  it.each([
+    ['codespace (setsid nohup, re-parented to 1, CODESPACES=true)', { CODESPACES: 'true' }, 4242, 1, true, true],
+    ['codespace before re-parenting', { CODESPACES: 'true' }, 4242, 77, true, true],
+    ['systemd unit', { INVOCATION_ID: 'x' }, 4242, 1, false, false],
+    ['container pid 1 (no init)', {}, 1, 0, true, false],
+    ['Box under tini (ppid 1 in a container)', {}, 7, 1, true, false],
+    ['bare box, no supervisor', {}, 4242, 77, false, true],
+  ])('%s', (_l, env, pid, ppid, inContainer, expected) => {
+    expect(needsSelfRelaunch(env, pid, { ppid, inContainer: () => inContainer })).toBe(expected);
   });
 });

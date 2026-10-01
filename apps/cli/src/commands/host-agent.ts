@@ -129,12 +129,20 @@ import {
 } from './host/house-proxy-config';
 import { cliVersionsRoot, hostEntry } from '../lib/cli-versions';
 import {
+  bindSupervisedLifecycle,
   defaultRestartForUpdate,
+  isContainerEnvironment,
   SUPERVISED_FLAG,
   signalHostReady,
   superviseCurrent,
+  writeHostAgentPidFile,
 } from './host/host-launch';
-export { needsSelfRelaunch, relaunchArgv, defaultRestartForUpdate } from './host/host-launch';
+export {
+  needsSelfRelaunch,
+  relaunchArgv,
+  defaultRestartForUpdate,
+  isContainerEnvironment,
+} from './host/host-launch';
 import { EXIT_HOST_NOT_ENROLLED } from '../exit-codes';
 import {
   currentCliVersion,
@@ -960,32 +968,6 @@ const ORPHAN_TERM_GRACE_MS = 3_000;
 const ORPHAN_KILL_SETTLE_MS = 500;
 
 
-/**
- * True when THIS process is running inside a container — the CodeAgent Box
- * rescue fleet runs `host-agent` in Docker (`apps/box/Dockerfile`), where the
- * container's own lifecycle (stop/start/delete via the `fleet_*` handlers)
- * governs uptime, not idle-sleep, so keep-awake would be pointless there.
- * Linux-only signals (`/.dockerenv`, a docker/containerd/kubepods cgroup) —
- * macOS/Windows never have either, so this correctly returns `false` there.
- * Injectable so tests never touch the real filesystem.
- */
-export function isContainerEnvironment(
-  existsSyncFn: (p: string) => boolean = fs.existsSync,
-  readFileSyncFn: (p: string) => string = (p) => fs.readFileSync(p, 'utf8'),
-): boolean {
-  try {
-    if (existsSyncFn('/.dockerenv')) return true;
-  } catch {
-    /* not present — not a container by this signal */
-  }
-  try {
-    const cgroup = readFileSyncFn('/proc/1/cgroup');
-    if (/docker|containerd|kubepods/.test(cgroup)) return true;
-  } catch {
-    /* no /proc (macOS/Windows) or unreadable — not a container by this signal */
-  }
-  return false;
-}
 
 
 /**
@@ -1037,6 +1019,8 @@ export interface HostAgentDeps {
   resolveAgentAuth?: AgentAuthResolver;
   /** Live-metrics collector; defaults to a real one. Injectable for tests. */
   metricsCollector?: HostMetricsCollector;
+  /** Writes `~/.codeam/host-agent.pid` for the backend liveness check (injectable for tests). */
+  writePidFile?: () => void;
   /** Factory for the relay (lets tests assert subscription without HTTP). */
   makeRelay?: (
     pluginId: string,
@@ -1306,6 +1290,10 @@ export class HostAgentSupervisor {
       log.info('host-agent', 'self-update disabled (CODEAM_HOST_SELF_UPDATE_MS<=0)');
     }
 
+    // The backend's in-box liveness check reads this (pid + kill -0 + cmdline):
+    // after a versioned self-update the cmdline alone no longer matches the
+    // old `pgrep -f 'codeam host-agent'` shapes (review of #895).
+    (this.deps.writePidFile ?? writeHostAgentPidFile)();
     log.info('host-agent', `supervisor up host=${this.identity.hostId.slice(0, 8)}`);
   }
 
@@ -3204,6 +3192,10 @@ export async function hostAgent(args: string[] = []): Promise<void> {
   };
   process.once('SIGINT', shutdown);
   process.once('SIGTERM', shutdown);
+  // Supervised by a hop parent: if that parent dies (SIGKILL, OOM) the IPC
+  // channel disconnects — exit instead of lingering as an orphan host-agent
+  // that nobody restarts and the backend would double up with.
+  if (args.includes(SUPERVISED_FLAG)) bindSupervisedLifecycle(process, shutdown);
   await new Promise<void>(() => {
     /* run forever — resolved only by process exit */
   });

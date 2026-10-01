@@ -4,7 +4,9 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import {
   acquireInstallLock,
+  BAD_MARKER_TTL_MS,
   entryOf,
+  launcherOf,
   gcVersions,
   hostEntry,
   isBad,
@@ -38,6 +40,9 @@ function fakeVersion(version: string): string {
     JSON.stringify({ name: 'codeam-cli', version, bin: { codeam: 'dist/index.js' } }),
   );
   fs.writeFileSync(path.join(pkg, 'dist', 'index.js'), `// codeam-cli ${version} — complete\n`);
+  // npm --prefix also creates node_modules/.bin/codeam -> ../codeam-cli/<bin>.
+  fs.mkdirSync(path.join(dir, 'node_modules', '.bin'), { recursive: true });
+  fs.symlinkSync('../codeam-cli/dist/index.js', path.join(dir, 'node_modules', '.bin', 'codeam'));
   return fs.realpathSync(dir);
 }
 
@@ -99,7 +104,7 @@ describe('installVersioned — install, verify, atomic switch', () => {
     expect(versionOf(cur)).toBe('2.76.10');
     expect(fs.readFileSync(entryOf(cur)!, 'utf8')).toContain('complete');
     // …and the half-written new dir is never what a session would be spawned from.
-    expect(hostEntry(root, '2.76.10', '/global/codeam', 'linux')).toBe(entryOf(old));
+    expect(hostEntry(root, '2.76.10', '/global/codeam', 'linux')).toBe(launcherOf(old));
 
     release();
     await expect(pending).resolves.toEqual({ status: 'updated', version: '2.76.11' });
@@ -249,8 +254,8 @@ describe('hostEntry — what the host-agent spawns sessions from / relaunches on
   it('current when it is at least our version', () => {
     const cur = fakeVersion('2.76.11');
     switchCurrent(root, cur);
-    expect(hostEntry(root, '2.76.10', '/g', 'linux')).toBe(entryOf(cur));
-    expect(hostEntry(root, '2.76.11', '/g', 'linux')).toBe(entryOf(cur));
+    expect(hostEntry(root, '2.76.10', '/g', 'linux')).toBe(launcherOf(cur));
+    expect(hostEntry(root, '2.76.11', '/g', 'linux')).toBe(launcherOf(cur));
   });
 
   it('never downgrades: a newer running binary keeps its own entry', () => {
@@ -261,5 +266,32 @@ describe('hostEntry — what the host-agent spawns sessions from / relaunches on
   it('Windows keeps the legacy behaviour (no versioned mode)', () => {
     switchCurrent(root, fakeVersion('2.76.11'));
     expect(hostEntry(root, '2.76.10', 'C:\\codeam', 'win32')).toBe('C:\\codeam');
+  });
+});
+
+describe('launcherOf — the backend can still recognise the host-agent', () => {
+  it('spawns via node_modules/.bin/codeam so the cmdline reads ".../codeam host-agent"', () => {
+    const v = fakeVersion('2.76.11');
+    const launcher = launcherOf(v)!;
+    expect(launcher.endsWith(path.join('node_modules', '.bin', 'codeam'))).toBe(true);
+    // what `pgrep -f 'codeam host-agent'` sees for `node <launcher> host-agent`:
+    expect(`node ${launcher} host-agent --supervised`).toMatch(/codeam host-agent/);
+  });
+
+  it('falls back to the package entry when .bin/codeam is missing', () => {
+    const v = fakeVersion('2.76.11');
+    fs.rmSync(path.join(v, 'node_modules', '.bin', 'codeam'));
+    expect(launcherOf(v)).toBe(entryOf(v));
+  });
+});
+
+describe('.bad markers expire', () => {
+  it('a marker older than 24 h no longer blocks the release', () => {
+    const v = fakeVersion('2.76.11');
+    markBad(v, 'transient');
+    expect(isBad(v)).toBe(true);
+    const old = (Date.now() - BAD_MARKER_TTL_MS - 60_000) / 1000;
+    fs.utimesSync(path.join(v, '.bad'), old, old);
+    expect(isBad(v)).toBe(false);
   });
 });

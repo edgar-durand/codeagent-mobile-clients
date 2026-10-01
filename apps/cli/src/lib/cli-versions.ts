@@ -77,14 +77,70 @@ export function entryOf(versionDir: string): string | null {
   return fs.existsSync(entry) ? entry : null;
 }
 
+/**
+ * What to put on a command line to run the version under `versionDir`:
+ * `node_modules/.bin/codeam` (so the process reads `… /codeam host-agent`, the
+ * shape the backend's `pgrep -f 'codeam host-agent'` fallback matches), else the
+ * package entry. Spawned as `node <launcher> …`, so the node binary is ours.
+ */
+export function launcherOf(versionDir: string): string | null {
+  const entry = entryOf(versionDir);
+  if (!entry) return null;
+  const bin = path.join(versionDir, 'node_modules', '.bin', 'codeam');
+  try {
+    return fs.realpathSync(bin) === fs.realpathSync(entry) ? bin : entry;
+  } catch {
+    return entry;
+  }
+}
+
 /** `package.json` version of the package installed under `versionDir`. */
 export function versionOf(versionDir: string): string | null {
   const v = readPkg(versionDir)?.version;
   return typeof v === 'string' ? v : null;
 }
 
-export function isBad(versionDir: string): boolean {
-  return fs.existsSync(path.join(versionDir, '.bad'));
+/** A `.bad` marker older than this is ignored: a transient boot outage must not
+ *  ban a release forever. */
+export const BAD_MARKER_TTL_MS = 24 * 60 * 60_000;
+/** Pre-ready failures further apart than this do not add up to "two in a row". */
+export const PRE_READY_WINDOW_MS = 60 * 60_000;
+
+export function isBad(versionDir: string, now: number = Date.now()): boolean {
+  try {
+    return now - fs.statSync(path.join(versionDir, '.bad')).mtimeMs < BAD_MARKER_TTL_MS;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Count a host-agent exit BEFORE ready for this version; returns the number of
+ * such exits within PRE_READY_WINDOW_MS (the caller marks `.bad` at 2).
+ */
+export function recordPreReadyFailure(versionDir: string, now: number = Date.now()): number {
+  const file = path.join(versionDir, '.prefail');
+  let count = 0;
+  try {
+    const [n, at] = fs.readFileSync(file, 'utf8').trim().split(' ').map(Number);
+    if (Number.isFinite(n) && Number.isFinite(at) && now - (at as number) < PRE_READY_WINDOW_MS) {
+      count = n as number;
+    }
+  } catch {
+    /* first failure */
+  }
+  count += 1;
+  try {
+    fs.writeFileSync(file, `${count} ${now}`);
+  } catch {
+    /* best-effort */
+  }
+  return count;
+}
+
+/** The host reached ready on this version: forget earlier pre-ready exits. */
+export function clearPreReadyFailures(versionDir: string): void {
+  fs.rmSync(path.join(versionDir, '.prefail'), { force: true });
 }
 
 /** Mark a release as bad: the resolver and the installer skip it from now on. */
@@ -135,7 +191,7 @@ export function validCurrent(root: string): ResolvedVersion | null {
   const dir = pointerTarget(root, 'current');
   if (!dir || isBad(dir)) return null;
   const version = versionOf(dir);
-  const entry = entryOf(dir);
+  const entry = launcherOf(dir);
   return version && entry ? { dir, version, entry } : null;
 }
 
