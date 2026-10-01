@@ -203,6 +203,11 @@ suite('host-agent — real Docker integration (Phase 3 acceptance gate)', () => 
         'CODEAM_ENROLL_TOKEN=enroll-stub-token',
         '-e',
         'CODEAM_SKIP_AGENT_LAUNCH=true',
+        // The host-agent now self-updates 5 s after start (codeagent-siec): in
+        // a test of THIS tarball it would install + restart onto the published
+        // npm release and the assertions would run against that instead.
+        '-e',
+        'CODEAM_HOST_SELF_UPDATE_MS=0',
         // Make sure NODE_ENV is not "test" inside the container — otherwise
         // the relay would skip SSE. (node:20-slim leaves it unset; assert it.)
         '-e',

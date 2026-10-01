@@ -31,6 +31,7 @@ import {
 } from './services/telemetry.service';
 import { EXIT_FAILURE, EXIT_USAGE } from './exit-codes';
 import { loadCodespaceEnv } from './config';
+import { registerRunningVersion } from './lib/cli-versions';
 import * as os from 'node:os';
 
 // Guarantee $HOME is set before ANY command runs. The self-hosted
@@ -61,6 +62,11 @@ if (!process.env.HOME) {
 // local / self-hosted where the file is absent; an explicit env var always
 // wins over the file.
 loadCodespaceEnv();
+
+// A process running FROM a versioned install (~/.codeam/cli/<version>, only the
+// host-agent and the sessions it spawns ever do) records its pid there so GC
+// never deletes a version still in use. A no-op for every other `codeam`.
+registerRunningVersion();
 
 const [, , command, ...args] = process.argv;
 

@@ -26,6 +26,7 @@ import { encodeCwd } from '../src/agents/claude/history';
 import {
   HostAgentSupervisor,
   SELF_UPDATE_DEFER_MAX_MS,
+  SELF_UPDATE_STARTUP_DELAY_MS,
   resolveHostIdentity,
   defaultOnIdentityRejected,
   isContainerEnvironment,
@@ -2327,7 +2328,7 @@ describe('HostAgentSupervisor — self-heal on rejected host-token', () => {
 });
 
 describe('defaultOnIdentityRejected — disables the systemd unit before wiping/exiting', () => {
-  it('calls systemctl disable --now BEFORE deleting the sealed identity and exiting(1)', () => {
+  it('calls systemctl disable --now BEFORE deleting the sealed identity and exiting(78)', () => {
     // A box that missed the best-effort self_hosted_wipe push (it was
     // offline when the host was deleted) must not restart-loop forever on
     // an identity that can never work again — the default self-heal action
@@ -2345,13 +2346,15 @@ describe('defaultOnIdentityRejected — disables the systemd unit before wiping/
         throw new Error(`process.exit(${_code})`);
       }) as never);
 
-    expect(() => defaultOnIdentityRejected()).toThrow('process.exit(1)');
+    expect(() => defaultOnIdentityRejected()).toThrow('process.exit(78)');
 
     expect(execSpy).toHaveBeenCalledWith('systemctl', ['disable', '--now', 'codeam-host-agent'], {
       stdio: 'ignore',
     });
     expect(fs.existsSync(hostIdentityPath())).toBe(false);
-    expect(exitSpy).toHaveBeenCalledWith(1);
+    // EXIT_HOST_NOT_ENROLLED: an EXPECTED exit the versioned-install launcher
+    // must never treat as a broken release (codeagent-siec).
+    expect(exitSpy).toHaveBeenCalledWith(78);
   });
 });
 
@@ -2520,6 +2523,96 @@ describe('HostAgentSupervisor — periodic self-update', () => {
       ...(over.spawnChild ? { spawnChild: over.spawnChild } : {}),
     });
   }
+
+  // codeagent-siec: a woken codespace must converge to the latest CLI within
+  // seconds, without the backend reinstalling in the foreground (~42 s) and
+  // without delaying start()/pairing.
+  describe('startup self-update check', () => {
+    let prevEnv: string | undefined;
+    beforeEach(() => {
+      prevEnv = process.env.CODEAM_HOST_SELF_UPDATE_MS;
+      delete process.env.CODEAM_HOST_SELF_UPDATE_MS;
+      process.env.CODEAM_NO_KEEP_AWAKE = '1';
+      vi.stubGlobal(
+        'fetch',
+        vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => ({ success: true, data: {} }) }),
+      );
+      vi.useFakeTimers();
+    });
+    afterEach(() => {
+      vi.useRealTimers();
+      vi.unstubAllGlobals();
+      delete process.env.CODEAM_NO_KEEP_AWAKE;
+      if (prevEnv === undefined) delete process.env.CODEAM_HOST_SELF_UPDATE_MS;
+      else process.env.CODEAM_HOST_SELF_UPDATE_MS = prevEnv;
+    });
+
+    it('runs ONE check shortly after start — not an hour later', async () => {
+      const selfUpdate = vi
+        .fn<() => Promise<SelfUpdateResult>>()
+        .mockResolvedValue({ status: 'current' });
+      const sup = makeUpdateSupervisor({ selfUpdate, onUpdated: vi.fn() });
+      try {
+        sup.start();
+        expect(selfUpdate).not.toHaveBeenCalled();
+        await vi.advanceTimersByTimeAsync(SELF_UPDATE_STARTUP_DELAY_MS);
+        expect(selfUpdate).toHaveBeenCalledTimes(1);
+        // …and nothing more until the hourly tick.
+        await vi.advanceTimersByTimeAsync(10 * 60_000);
+        expect(selfUpdate).toHaveBeenCalledTimes(1);
+      } finally {
+        sup.stop();
+      }
+    });
+
+    it('is non-blocking: start() returns while the install is still running', async () => {
+      let finish: (r: SelfUpdateResult) => void = () => undefined;
+      const selfUpdate = vi.fn(
+        () => new Promise<SelfUpdateResult>((resolve) => (finish = resolve)),
+      );
+      const onUpdated = vi.fn();
+      const sup = makeUpdateSupervisor({ selfUpdate, onUpdated });
+      try {
+        sup.start();
+        await vi.advanceTimersByTimeAsync(SELF_UPDATE_STARTUP_DELAY_MS);
+        expect(selfUpdate).toHaveBeenCalledTimes(1);
+        // Install still in flight: no restart yet, supervisor fully up.
+        expect(onUpdated).not.toHaveBeenCalled();
+        finish({ status: 'updated', version: '9.9.9' });
+        await vi.advanceTimersByTimeAsync(0);
+        // Idle box → restart onto the new version (same path as the hourly tick).
+        expect(onUpdated).toHaveBeenCalledWith('9.9.9');
+      } finally {
+        sup.stop();
+      }
+    });
+
+    it('stop() before the delay cancels it', async () => {
+      const selfUpdate = vi
+        .fn<() => Promise<SelfUpdateResult>>()
+        .mockResolvedValue({ status: 'current' });
+      const sup = makeUpdateSupervisor({ selfUpdate, onUpdated: vi.fn() });
+      sup.start();
+      sup.stop();
+      await vi.advanceTimersByTimeAsync(SELF_UPDATE_STARTUP_DELAY_MS * 2);
+      expect(selfUpdate).not.toHaveBeenCalled();
+    });
+
+    it('honours the opt-out (CODEAM_HOST_SELF_UPDATE_MS=0): no startup check either', async () => {
+      process.env.CODEAM_HOST_SELF_UPDATE_MS = '0';
+      const selfUpdate = vi
+        .fn<() => Promise<SelfUpdateResult>>()
+        .mockResolvedValue({ status: 'current' });
+      const sup = makeUpdateSupervisor({ selfUpdate, onUpdated: vi.fn() });
+      try {
+        sup.start();
+        await vi.advanceTimersByTimeAsync(SELF_UPDATE_STARTUP_DELAY_MS * 2);
+        expect(selfUpdate).not.toHaveBeenCalled();
+      } finally {
+        sup.stop();
+      }
+    });
+  });
 
   it("installs + restarts when selfUpdate reports 'updated' (idle box)", async () => {
     const selfUpdate = vi

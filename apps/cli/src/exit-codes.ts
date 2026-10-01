@@ -9,6 +9,9 @@
  *   1   — runtime failure (network, agent crash, generic catch-all)
  *   2   — usage error (unknown command, bad flag, missing required arg)
  *   3   — needs pairing (caller can prompt the user to run `codeam pair`)
+ *   78  — host-agent has no usable identity (not enrolled / rejected by the
+ *         backend). EXPECTED: the versioned-install launcher must not read it
+ *         as a broken release (EX_CONFIG).
  *   130 — interrupted by Ctrl+C (SIGINT — 128 + signal=2)
  *   143 — terminated by SIGTERM (128 + signal=15)
  *
@@ -21,6 +24,7 @@ export const EXIT_OK = 0;
 export const EXIT_FAILURE = 1;
 export const EXIT_USAGE = 2;
 export const EXIT_NEEDS_PAIRING = 3;
+export const EXIT_HOST_NOT_ENROLLED = 78;
 export const EXIT_SIGINT = 130;
 export const EXIT_SIGTERM = 143;
 
@@ -30,6 +34,7 @@ export const EXIT_CODE_NAMES: Record<number, string> = {
   [EXIT_FAILURE]: 'failure',
   [EXIT_USAGE]: 'usage_error',
   [EXIT_NEEDS_PAIRING]: 'needs_pairing',
+  [EXIT_HOST_NOT_ENROLLED]: 'host_not_enrolled',
   [EXIT_SIGINT]: 'sigint',
   [EXIT_SIGTERM]: 'sigterm',
 };
