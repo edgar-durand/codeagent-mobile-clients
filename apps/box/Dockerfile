@@ -75,8 +75,9 @@ RUN apt-get update \
         procps \
         # tini: pid 1 that reaps orphaned grandchildren (agent/MCP/dev-server
         # processes re-parented when a session exits) and forwards signals. The
-        # host-agent runs as its child; needsSelfRelaunch() sees ppid 1 inside
-        # a container and lets the container restart policy handle restarts.
+        # host-agent runs as its child; needsSelfRelaunch() recognises pid 1 as
+        # THIS entrypoint (`tini … host-agent` in /proc/1/cmdline) and lets the
+        # container restart policy handle restarts.
         tini \
         # libglib2.0-0: React Native DevTools (`@react-native/debugger-shell`)
         # dlopens libglib-2.0.so.0 when Expo/Metro starts; without it every

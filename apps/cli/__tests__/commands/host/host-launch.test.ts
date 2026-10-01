@@ -255,14 +255,18 @@ describe('host-agent pid file (backend liveness check)', () => {
 });
 
 describe('needsSelfRelaunch', () => {
+  const tini = ['/usr/bin/tini', '--', 'codeam', 'host-agent'];
   it.each([
-    ['codespace (setsid nohup, re-parented to 1, CODESPACES=true)', { CODESPACES: 'true' }, 4242, 1, true, true],
-    ['codespace before re-parenting', { CODESPACES: 'true' }, 4242, 77, true, true],
-    ['systemd unit', { INVOCATION_ID: 'x' }, 4242, 1, false, false],
-    ['container pid 1 (no init)', {}, 1, 0, true, false],
-    ['Box under tini (ppid 1 in a container)', {}, 7, 1, true, false],
-    ['bare box, no supervisor', {}, 4242, 77, false, true],
-  ])('%s', (_l, env, pid, ppid, inContainer, expected) => {
-    expect(needsSelfRelaunch(env, pid, { ppid, inContainer: () => inContainer })).toBe(expected);
+    ['Box: pid 1 is our tini entrypoint → exit, container restarts us', {}, 7, 1, tini, false],
+    ['container with an unrelated pid 1 (sleep) → self-relaunch', {}, 7, 1, ['sleep', 'infinity'], true],
+    ['container with an unrelated pid 1 (bash) → self-relaunch', {}, 7, 1, ['/bin/bash'], true],
+    ['wrapper codespace (setsid, re-parented to 1) → self-relaunch', { CODESPACES: 'true' }, 4242, 1, ['/sbin/docker-init', '--', '/bin/sh'], true],
+    ['codespace ssh env WITHOUT CODESPACES → still self-relaunch', {}, 4242, 1, ['/bin/sh', '-c', 'sleep infinity'], true],
+    ['tini but not our entrypoint → self-relaunch', {}, 7, 1, ['/usr/bin/tini', '--', 'node', 'server.js'], true],
+    ['not a direct child of pid 1 → self-relaunch', {}, 4242, 77, tini, true],
+    ['systemd unit → exit', { INVOCATION_ID: 'x' }, 4242, 1, [], false],
+    ['pid 1 itself (no init) → exit', {}, 1, 0, [], false],
+  ])('%s', (_l, env, pid, ppid, pid1, expected) => {
+    expect(needsSelfRelaunch(env, pid, { ppid, pid1Cmdline: () => pid1 })).toBe(expected);
   });
 });

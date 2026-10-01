@@ -197,19 +197,34 @@ export async function superviseCurrent(over: Partial<SuperviseDeps> = {}): Promi
 export function needsSelfRelaunch(
   env: NodeJS.ProcessEnv = process.env,
   pid: number = process.pid,
-  ctx: { ppid?: number; inContainer?: () => boolean } = {},
+  ctx: { ppid?: number; pid1Cmdline?: () => string[] } = {},
 ): boolean {
   if (env.INVOCATION_ID || pid === 1) return false;
-  // CodeAgent Box under tini: we are tini's direct child (ppid 1) inside a
-  // container — exiting ends tini and the container's restart policy brings
-  // us back, exactly like the old pid-1 case. A codespace is also a container
-  // whose orphaned host-agent is re-parented to pid 1, but nothing restarts it
-  // there, so it must keep relaunching itself (CODESPACES=true).
+  // CodeAgent Box under tini: we are the direct child of OUR entrypoint
+  // (`tini -- codeam host-agent`) — exiting ends tini and the container's
+  // restart policy brings us back, exactly like the old pid-1 case. Keyed on
+  // pid 1 really being that entrypoint, NOT on "in a container"/CODESPACES:
+  // a wrapper codespace boots the same image as a container and re-parents the
+  // setsid'd host-agent to pid 1 too, and a self-hosted Docker host without
+  // systemd looks the same — exiting there leaves the host dead after every
+  // release (the 2026-09-27 regression). Anything else self-relaunches.
   const ppid = ctx.ppid ?? process.ppid;
-  if (ppid === 1 && env.CODESPACES !== 'true' && (ctx.inContainer ?? isContainerEnvironment)()) {
-    return false;
-  }
+  if (ppid === 1 && isOurTiniEntrypoint((ctx.pid1Cmdline ?? readPid1Cmdline)())) return false;
   return true;
+}
+
+/** pid 1's argv (NUL-split), or [] when unreadable (macOS, no /proc). */
+export function readPid1Cmdline(): string[] {
+  try {
+    return fs.readFileSync('/proc/1/cmdline', 'utf8').split('\0').filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
+/** The Box image entrypoint: `tini -- codeam host-agent`. */
+export function isOurTiniEntrypoint(argv: string[]): boolean {
+  return argv.some((a) => path.basename(a) === 'tini') && argv.includes('host-agent');
 }
 
 /**
