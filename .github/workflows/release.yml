@@ -278,12 +278,42 @@ jobs:
           fi
           git config user.name "codeam-release"
           git config user.email "release@codeagent-mobile.com"
-          if git commit -am "chore: refresh prebuild → codeam-box:latest (codeam-cli ${VERSION}) [skip ci]"; then
-            git push
-            echo "Prebuild refresh triggered on CodeAgentMobile/codeam-codespace"
-          else
+          if ! git commit -am "chore: refresh prebuild → codeam-box:latest (codeam-cli ${VERSION}) [skip ci]"; then
             echo "devcontainer.json unchanged — nothing to refresh"
+            exit 0
           fi
+          git push
+          echo "Prebuild refresh triggered on CodeAgentMobile/codeam-codespace"
+
+          # ⚠️ A pushed refresh commit is NOT a prebuild. 2026-09-30: the 2.76.8
+          # refresh (50eac85f) got ZERO prebuild runs, so for ~26 h every codespace
+          # booted off a HEAD with no prebuild, took 72–143 s to reach Available,
+          # and 8 deploys crossed the API's poll budget (CODESPACE_PROVISION_TIMEOUT).
+          # Confirm GitHub actually started a prebuild for the pushed SHA; if not,
+          # nudge once with a second config change, then fail this step loudly.
+          wait_for_prebuild() {
+            local sha="$1" n
+            for _ in $(seq 1 15); do
+              n=$(gh api "repos/CodeAgentMobile/codeam-codespace/actions/runs?head_sha=${sha}" --jq '.total_count' 2>/dev/null || echo 0)
+              if [ "${n:-0}" -gt 0 ]; then
+                echo "Prebuild run started for ${sha}"
+                return 0
+              fi
+              sleep 20
+            done
+            return 1
+          }
+          SHA=$(git rev-parse HEAD)
+          if wait_for_prebuild "$SHA"; then exit 0; fi
+          echo "::warning::No Codespaces prebuild run for ${SHA} after 5 min — nudging once"
+          sed -i -E "s|// prebuild-refresh:.*|// prebuild-refresh: codeam-cli ${VERSION} (retry)|" "$f"
+          git commit -am "chore: re-trigger prebuild (codeam-cli ${VERSION}) [skip ci]"
+          git push
+          SHA=$(git rev-parse HEAD)
+          if wait_for_prebuild "$SHA"; then exit 0; fi
+          echo "::error::No Codespaces prebuild started for CodeAgentMobile/codeam-codespace@${SHA}. Codespace deploys boot without a prebuild (~70-145 s to available) until one runs: trigger it from the repo's Codespaces settings."
+          echo "### ⚠️ Wrapper prebuild did not start for ${SHA} — codespace deploys are slow until it does" >> "$GITHUB_STEP_SUMMARY"
+          exit 1
 
   trigger-api-integration:
     # Cross-repo regression gate: as soon as codeam-cli@<version>
