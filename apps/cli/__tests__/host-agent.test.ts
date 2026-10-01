@@ -1504,6 +1504,58 @@ describe('HostAgentSupervisor — command routing', () => {
     fs.rmSync(cwdTarget, { recursive: true, force: true });
   });
 
+  // codeagent-rew3: a MANAGED deploy (e.g. managed-deepseek-flash) rides the
+  // SAME houseProxy block as the classic house agent — `houseProxy.agentKind`
+  // is only the internal runtime (`claude`), never the managed id. Without
+  // reading the deploy's PUBLIC `agentId`, the box believed it was
+  // house-codeagent-cloud (wrong current-agent on a later switch) and pinned
+  // the house's MiniMax-M3 model underneath a different provider's token
+  // (`[claude-code:unrecognized_model]` on the old client's teardown).
+  it('managed-agent deploy exports CODEAM_MANAGED_AGENT_ID and omits the MiniMax model pin', async () => {
+    const cwdTarget = fs.mkdtempSync(path.join(os.tmpdir(), 'codeam-ws-'));
+    const calls: Array<{ env: Record<string, string> }> = [];
+    const spawnChild: ChildSpawner = (env) => {
+      calls.push({ env });
+      return fakeChild();
+    };
+    const { sup } = makeSupervisor(spawnChild);
+
+    await sup.handleCommand(
+      deployCmd({
+        repoOrPath: cwdTarget,
+        agentId: 'managed-deepseek-flash',
+        sealedAgentAuth: undefined,
+        houseProxy: {
+          baseUrl: 'https://api.test/api/v1/agent-proxy',
+          token: 'proxy-token-managed',
+          agentKind: 'claude',
+        },
+      }),
+    );
+
+    expect(calls).toHaveLength(1);
+    // The CLI now knows WHICH managed agent this is — current-agent
+    // resolution (houseRailWireId) reads this env.
+    expect(calls[0].env.CODEAM_MANAGED_AGENT_ID).toBe('managed-deepseek-flash');
+    // No model string was in the wire payload — the proxy resolves the real
+    // upstream model from the token's providerId claim, so the house's
+    // MiniMax-M3 pin must NOT be forwarded to a different provider.
+    expect(calls[0].env.ANTHROPIC_MODEL).toBeUndefined();
+    expect(calls[0].env.ANTHROPIC_DEFAULT_SONNET_MODEL).toBeUndefined();
+
+    // Persisted for resume too, so a woken box keeps the right identity
+    // (persistHouseProxyConfig itself is mocked in this suite — see the
+    // module mock above — so assert on what it was CALLED with; the real
+    // persist → read round-trip is covered by house-proxy-config.test.ts).
+    const houseCfg = await import('../src/commands/host/house-proxy-config');
+    expect(houseCfg.persistHouseProxyConfig).toHaveBeenCalledWith(
+      expect.objectContaining({ managedAgentId: 'managed-deepseek-flash' }),
+      'deploy-1',
+    );
+
+    fs.rmSync(cwdTarget, { recursive: true, force: true });
+  });
+
   it('self_hosted_refresh_credentials re-provisions the agent auth file IN PLACE (no spawn)', async () => {
     const { sup, resolveAgentAuth } = makeSupervisor(() => fakeChild());
 

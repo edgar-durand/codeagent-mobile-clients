@@ -59,6 +59,18 @@ describe('hasServableProject / isEmptyScratchProject', () => {
     expect(hasServableProject(dir)).toBe(true);
   });
 
+  it('a built static site under dist/ or build/ counts (Vite/CRA output the agent never served)', () => {
+    makeScratch();
+    expect(hasServableProject(dir)).toBe(false);
+    fs.mkdirSync(path.join(dir, 'dist'));
+    fs.writeFileSync(path.join(dir, 'dist', 'index.html'), '');
+    expect(hasServableProject(dir)).toBe(true);
+    fs.rmSync(path.join(dir, 'dist'), { recursive: true, force: true });
+    fs.mkdirSync(path.join(dir, 'build'));
+    fs.writeFileSync(path.join(dir, 'build', 'index.html'), '');
+    expect(hasServableProject(dir)).toBe(true);
+  });
+
   it('a repo that is not a scratch project is never "empty"', () => {
     fs.mkdirSync(path.join(dir, '.git'));
     expect(isEmptyScratchProject(dir)).toBe(false);
@@ -105,9 +117,48 @@ describe('maybeAutoOpenScratchPreview', () => {
   it('a preview the user started (and maybe stopped) in this process is never reopened', () => {
     makeScratch();
     fs.writeFileSync(path.join(dir, 'index.html'), '');
-    notePreviewBringUp('s1');
+    notePreviewBringUp('s1', dir);
     const b = bridge();
     expect(maybeAutoOpenScratchPreview('s1', b, dir)).toBe(false);
     expect(b.start).not.toHaveBeenCalled();
+  });
+
+  // codeagent-rew3 follow-up: the in-process `bringUps` Set alone can't
+  // survive a CLI restart (sleep/wake, supervisor restart, self-update) — a
+  // preview the user explicitly stopped could auto-reopen once more on the
+  // next qualifying turn. The on-disk marker under `.codeam/` must survive
+  // `resetAutoPreviewForTests()` (which only clears the in-memory Set, same
+  // as a fresh process would start).
+  it('persists the attempt to disk so a process restart does not reopen a stopped preview', () => {
+    makeScratch();
+    fs.writeFileSync(path.join(dir, 'index.html'), '');
+    const b1 = bridge();
+    expect(maybeAutoOpenScratchPreview('s1', b1, dir)).toBe(true);
+    expect(b1.start).toHaveBeenCalledTimes(1);
+    expect(fs.existsSync(path.join(dir, '.codeam', 'auto-preview-state.json'))).toBe(true);
+
+    // Simulate a CLI restart: the in-process Set is gone, but the project
+    // directory (and its marker) persists.
+    resetAutoPreviewForTests();
+    const b2 = bridge();
+    expect(maybeAutoOpenScratchPreview('s1', b2, dir)).toBe(false);
+    expect(b2.start).not.toHaveBeenCalled();
+  });
+
+  it('notePreviewBringUp (button/restore/restart path) also persists the marker for scratch projects', () => {
+    makeScratch();
+    fs.writeFileSync(path.join(dir, 'index.html'), '');
+    notePreviewBringUp('s1', dir);
+    expect(fs.existsSync(path.join(dir, '.codeam', 'auto-preview-state.json'))).toBe(true);
+    resetAutoPreviewForTests();
+    const b = bridge();
+    expect(maybeAutoOpenScratchPreview('s1', b, dir)).toBe(false);
+    expect(b.start).not.toHaveBeenCalled();
+  });
+
+  it('does NOT write a marker for a non-scratch project (no "once per project" rule to persist)', () => {
+    fs.writeFileSync(path.join(dir, 'index.html'), '');
+    notePreviewBringUp('s1', dir);
+    expect(fs.existsSync(path.join(dir, '.codeam'))).toBe(false);
   });
 });

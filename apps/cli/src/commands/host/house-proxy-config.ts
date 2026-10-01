@@ -197,14 +197,28 @@ export function buildHouseProxyChildEnv(cfg: HouseProxyConfig): Record<string, s
     // OpenRouter routes real Claude model names; ANTHROPIC_API_KEY must be
     // empty so a stale key can't override the Bearer auth token.
     env.ANTHROPIC_API_KEY = '';
-  } else {
-    // House ⇒ MiniMax; a MANAGED provider pins its own upstream model.
-    const model = typeof cfg.model === 'string' && cfg.model ? cfg.model : 'MiniMax-M3';
-    env.ANTHROPIC_MODEL = model;
-    env.ANTHROPIC_DEFAULT_SONNET_MODEL = model;
-    env.ANTHROPIC_DEFAULT_OPUS_MODEL = model;
-    env.ANTHROPIC_DEFAULT_HAIKU_MODEL = model;
+  } else if (typeof cfg.model === 'string' && cfg.model) {
+    // Explicit model pin — the house's own MiniMax default, or a managed
+    // provider's registry model, forwarded verbatim by the caller.
+    env.ANTHROPIC_MODEL = cfg.model;
+    env.ANTHROPIC_DEFAULT_SONNET_MODEL = cfg.model;
+    env.ANTHROPIC_DEFAULT_OPUS_MODEL = cfg.model;
+    env.ANTHROPIC_DEFAULT_HAIKU_MODEL = cfg.model;
+  } else if (!isManagedProviderId(cfg.managedAgentId)) {
+    // Classic house agent (no managed id, no explicit model) ⇒ MiniMax-M3.
+    env.ANTHROPIC_MODEL = 'MiniMax-M3';
+    env.ANTHROPIC_DEFAULT_SONNET_MODEL = 'MiniMax-M3';
+    env.ANTHROPIC_DEFAULT_OPUS_MODEL = 'MiniMax-M3';
+    env.ANTHROPIC_DEFAULT_HAIKU_MODEL = 'MiniMax-M3';
   }
+  // else: a MANAGED provider with no model string supplied (the self-hosted
+  // deploy payload doesn't carry one — only the switch credential fetch
+  // does). Omit the pin entirely rather than defaulting to MiniMax-M3: the
+  // proxy resolves the real upstream model from the token's providerId claim
+  // (resolveManagedModel, apps/api-v2/src/agent-proxy/managed-providers.ts),
+  // so Claude Code's own default model string is simply ignored upstream.
+  // Pinning MiniMax-M3 here caused the old client to log
+  // `[claude-code:unrecognized_model]` on its teardown (codeagent-rew3).
   if (typeof cfg.claudeConfigDir === 'string' && cfg.claudeConfigDir) {
     env.CLAUDE_CONFIG_DIR = cfg.claudeConfigDir;
   }

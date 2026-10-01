@@ -253,6 +253,25 @@ describe('house-proxy-config — managed agents', () => {
     expect(env.CODEAM_MANAGED_AGENT_ID).toBeUndefined();
   });
 
+  // codeagent-rew3: a self-hosted managed deploy has no model string at all
+  // (only the switch-time credential fetch supplies one) — defaulting to
+  // MiniMax-M3 here pinned the HOUSE model underneath a different provider's
+  // token, and Claude Code logged `[claude-code:unrecognized_model]` on the
+  // old client's teardown. The proxy resolves the real upstream model from
+  // the token's providerId claim, so omitting the pin is correct, not a gap.
+  it('omits the model pin for a managed id with no model string — the proxy decides', () => {
+    const env = buildHouseProxyChildEnv({
+      baseUrl: 'https://api.x/api/v1/agent-proxy',
+      token: 'tok',
+      managedAgentId: 'managed-deepseek-flash',
+    });
+    expect(env.ANTHROPIC_MODEL).toBeUndefined();
+    expect(env.ANTHROPIC_DEFAULT_SONNET_MODEL).toBeUndefined();
+    expect(env.ANTHROPIC_DEFAULT_OPUS_MODEL).toBeUndefined();
+    expect(env.ANTHROPIC_DEFAULT_HAIKU_MODEL).toBeUndefined();
+    expect(env.CODEAM_MANAGED_AGENT_ID).toBe('managed-deepseek-flash');
+  });
+
   it('ignores an unknown managedAgentId (never exports garbage)', () => {
     const env = buildHouseProxyChildEnv({ baseUrl: 'u', token: 't', managedAgentId: 'managed-nope' });
     expect(env.CODEAM_MANAGED_AGENT_ID).toBeUndefined();
@@ -287,6 +306,26 @@ describe('house-proxy-config — managed agents', () => {
       const env = readHouseProxyChildEnv();
       expect(env.ANTHROPIC_MODEL).toBe('Qwen/Qwen3-Coder-Next');
       expect(env.CODEAM_MANAGED_AGENT_ID).toBe('managed-qwen-coder');
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // codeagent-rew3: the self-hosted deploy path persists a managed id with NO
+  // model string (only the switch credential fetch supplies one) — a resume
+  // must round-trip that correctly: the managed id present, no stale model.
+  it('round-trips a managed id with NO model through the persisted config (resume path)', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'house-proxy-managed-nomodel-'));
+    homeHolder.dir = dir;
+    try {
+      persistHouseProxyConfig({
+        baseUrl: 'https://api.x/api/v1/agent-proxy',
+        token: 'tok',
+        managedAgentId: 'managed-deepseek-flash',
+      });
+      const env = readHouseProxyChildEnv();
+      expect(env.CODEAM_MANAGED_AGENT_ID).toBe('managed-deepseek-flash');
+      expect(env.ANTHROPIC_MODEL).toBeUndefined();
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }
