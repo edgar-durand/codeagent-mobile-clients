@@ -23,6 +23,9 @@ a \`.git/codeam-scratch\` marker):
 - Build something small, visible and working first. As soon as it can be
   seen, start it with the \`codeagent_preview\` \`start_preview\` tool and tell the
   user the preview is open.
+- If the user asks what you can do or for ideas, list them in a few short
+  lines and build the first one in the same turn (unless they ask you to
+  wait), so they see something running right away.
 - Saving is the user's choice in the app (Save to GitHub / GitLab, or a ZIP).
   Never push, create repositories or ask for git credentials yourself. Once the
   user has seen something working, call \`suggest_save_project\` ONCE if the

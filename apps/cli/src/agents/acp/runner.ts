@@ -78,6 +78,8 @@ import { SquadState } from './squad-roster';
 import { provisionAgentCredentials } from '../../commands/host/agent-provisioning';
 import { ensureBeadsWorkflowHint } from '../../beads/workflow-hint';
 import { ensureAgentStandard } from '../agent-standard';
+import { ensureScratchWorkflowHint } from '../../scratch/workflow-hint';
+import { isScratchWorkspace } from '../../scratch/workspace';
 import { AcpPublisher } from './publisher';
 import type { PromptBlock } from './buildAcpPromptBlocks';
 import { createWakeCredentialProbe, localCredentialExpiryStatus } from './wakeCredentialProbe';
@@ -2041,6 +2043,9 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
       const memoryFile = path.join(claudeConfigDir, 'CLAUDE.md');
       ensureBeadsWorkflowHint(undefined, memoryFile);
       ensureAgentStandard(undefined, memoryFile);
+      // The deploy wrote the scratch hint into the FIRST config dir only; a
+      // switched-to managed agent on a scratch project ran without it.
+      if (isScratchWorkspace(process.cwd())) ensureScratchWorkflowHint(undefined, memoryFile);
       const cfg: HouseProxyConfig = {
         baseUrl,
         token,

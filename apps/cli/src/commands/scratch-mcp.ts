@@ -36,6 +36,7 @@ export const SCRATCH_TOOLS: ToolDef[] = [
     description: [
       "This session is a from-scratch project on the user's CodeAgent Box. It is NOT connected to GitHub, and nothing is saved outside this workspace yet.",
       'How to work here: build something small, visible and working. As soon as it can be seen, start it with the codeagent_preview start_preview tool and tell the user the preview is open.',
+      'If the user asks what you can do or for ideas, list them in a few short lines and build the first one in the same turn (unless they ask you to wait), so they see something running right away.',
       'Once the user has seen something working — or after a substantial change that is not saved yet — call this tool ONCE. It shows the user a "Save your project" card in the app (Save to GitHub or Download ZIP).',
       "Do not push, create repositories or ask for GitHub credentials yourself: saving is the user's choice in the app. Do not call this tool again unless there are substantial new unsaved changes.",
     ].join(' '),

@@ -14,6 +14,8 @@ describe('ensureScratchWorkflowHint', () => {
     expect(once.startsWith('# mine')).toBe(true);
     expect(once).toContain('suggest_save_project');
     expect(once).toContain('Never push, create repositories');
+    // "What can you do?" must still end with something running (RCA 2026-09-30).
+    expect(once).toContain('build the first one in the same turn');
     ensureScratchWorkflowHint(undefined, file);
     expect(fs.readFileSync(file, 'utf8')).toBe(once);
     // stale block (same markers, older text) is rewritten, not duplicated
