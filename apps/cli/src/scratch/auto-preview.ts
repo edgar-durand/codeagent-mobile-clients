@@ -45,7 +45,13 @@ export function hasServableProject(cwd: string): boolean {
   const entries = rootEntries(cwd);
   if (!entries) return false;
   if (entries.some((e) => SERVABLE_ROOT_FILES.has(e) || /\.html?$/i.test(e))) return true;
-  return ['public', 'src'].some((dir) => fs.existsSync(path.join(cwd, dir, 'index.html')));
+  // 'dist'/'build' are the conventional output dirs for an already-built
+  // static site (Vite/Parcel default to dist, CRA to build) — the agent ran
+  // the build but never served the result, same gap this module exists to
+  // close for a root index.html.
+  return ['public', 'src', 'dist', 'build'].some((dir) =>
+    fs.existsSync(path.join(cwd, dir, 'index.html')),
+  );
 }
 
 /**

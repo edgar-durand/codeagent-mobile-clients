@@ -59,6 +59,18 @@ describe('hasServableProject / isEmptyScratchProject', () => {
     expect(hasServableProject(dir)).toBe(true);
   });
 
+  it('a built static site under dist/ or build/ counts (Vite/CRA output the agent never served)', () => {
+    makeScratch();
+    expect(hasServableProject(dir)).toBe(false);
+    fs.mkdirSync(path.join(dir, 'dist'));
+    fs.writeFileSync(path.join(dir, 'dist', 'index.html'), '');
+    expect(hasServableProject(dir)).toBe(true);
+    fs.rmSync(path.join(dir, 'dist'), { recursive: true, force: true });
+    fs.mkdirSync(path.join(dir, 'build'));
+    fs.writeFileSync(path.join(dir, 'build', 'index.html'), '');
+    expect(hasServableProject(dir)).toBe(true);
+  });
+
   it('a repo that is not a scratch project is never "empty"', () => {
     fs.mkdirSync(path.join(dir, '.git'));
     expect(isEmptyScratchProject(dir)).toBe(false);
