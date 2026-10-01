@@ -4,6 +4,22 @@ All notable changes to the CodeAgent-Mobile JetBrains plugin are documented here
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.76.9] — 2026-10-01
+
+### Added
+
+- **plugin:** OpenAI plugin package for ChatGPT and Codex (#885)
+
+### Documentation
+
+- **plugin:** Submission sheet matches the review account's real setup (#886)
+- **plugin:** Submission case for search_codeagent_help (#887)
+
+### Fixed
+
+- **plugin:** Address directory review — no .app.json, 3 prompts, no brands or pricing (#888)
+- **cli:** Scratch projects reach their first preview (#889)
+
 ## [2.76.8] — 2026-09-29
 
 ### Fixed
