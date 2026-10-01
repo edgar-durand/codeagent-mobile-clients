@@ -249,13 +249,28 @@ jobs:
           docker push "${IMAGE}:latest"
 
       # Keep the wrapper repo's Codespaces PREBUILD in sync with the image we just
-      # pushed. The prebuild snapshots `codeam-box:latest` and only rebuilds on a
-      # devcontainer CONFIG change (not when `:latest` moves), so bump a version
-      # marker to trigger a rebuild. This is LOAD-BEARING for deploy speed: the
-      # codespace deploy skips the ~24s codeam-cli reinstall ONLY when the prebuild's
-      # baked CLI == npm latest — a stale prebuild silently brings the reinstall back.
-      # Best-effort (the image is already published); needs a PAT with `contents:write`
-      # on CodeAgentMobile/codeam-codespace (secret WRAPPER_REPO_PAT).
+      # pushed — WITHOUT ever leaving a window with no valid prebuild.
+      #
+      # ⚠️ This step used to bump a `// prebuild-refresh` marker inside
+      # `.devcontainer/devcontainer.json`. GitHub keys a prebuild to the dev
+      # container CONFIGURATION ("Prebuild ready … for a particular dev container
+      # configuration file"), so every release INVALIDATED the live prebuild until
+      # the new one finished (~19 min, e.g. deb91f49 12:01→12:20), and when GitHub
+      # never started the new one (2.76.8, 50eac85f, 2026-09-30) codespaces booted
+      # without a prebuild for ~26 h: 72–143 s to Available, 8 deploys timed out.
+      #
+      # Now: devcontainer.json is NEVER touched by a release. The release bumps the
+      # NON-config file `PREBUILD_VERSION` at the repo root. With the wrapper repo's
+      # prebuild trigger set to "Every push", that push starts a rebuild (which
+      # re-pulls `codeam-box:latest`) while the CURRENT prebuild stays valid —
+      # same configuration — until the new one replaces it. Freshness between
+      # rebuilds is covered by the host-agent's own hourly self-update.
+      #
+      # Safety net: confirm GitHub actually started a prebuild for the pushed SHA.
+      # If not (trigger not "Every push", or GitHub skipped it), nudge once, then
+      # fail this step loudly. Either way the live prebuild is never invalidated.
+      # Best-effort (the image is already published); needs a PAT with
+      # `contents:write` on CodeAgentMobile/codeam-codespace (secret WRAPPER_REPO_PAT).
       - name: Refresh the wrapper-repo Codespaces prebuild
         continue-on-error: true
         env:
@@ -263,27 +278,58 @@ jobs:
           VERSION: ${{ needs.setup.outputs.version }}
         run: |
           if [ -z "${GH_TOKEN}" ]; then
-            echo "::warning::WRAPPER_REPO_PAT not set — skipping prebuild refresh (deploy will reinstall the CLI until the prebuild is refreshed manually)"
+            echo "::warning::WRAPPER_REPO_PAT not set — skipping prebuild refresh (codespaces keep the current prebuild; the host-agent self-updates)"
             exit 0
           fi
           git clone --depth 1 \
             "https://x-access-token:${GH_TOKEN}@github.com/CodeAgentMobile/codeam-codespace.git" wrapper
           cd wrapper
-          f=.devcontainer/devcontainer.json
-          if grep -qE '// prebuild-refresh:' "$f"; then
-            sed -i -E "s|// prebuild-refresh:.*|// prebuild-refresh: codeam-cli ${VERSION}|" "$f"
-          else
-            # insert the marker right after the opening brace
-            sed -i "0,/{/s|{|{\n  // prebuild-refresh: codeam-cli ${VERSION}|" "$f"
-          fi
           git config user.name "codeam-release"
           git config user.email "release@codeagent-mobile.com"
-          if git commit -am "chore: refresh prebuild → codeam-box:latest (codeam-cli ${VERSION}) [skip ci]"; then
+
+          # 0 = a prebuild run exists for the SHA, 1 = none after 5 min,
+          # 2 = the Actions API itself failed (auth/permission) — never confuse
+          # an API error with "no prebuild", and never retry-commit on one.
+          wait_for_prebuild() {
+            local sha="$1" n out
+            for _ in $(seq 1 15); do
+              if ! out=$(gh api "repos/CodeAgentMobile/codeam-codespace/actions/runs?head_sha=${sha}" --jq '.total_count' 2>&1); then
+                echo "::error::Actions API error while checking the prebuild for ${sha} (does WRAPPER_REPO_PAT have actions:read on CodeAgentMobile/codeam-codespace?): ${out}"
+                return 2
+              fi
+              n="${out}"
+              if [ "${n:-0}" -gt 0 ]; then
+                echo "Prebuild run started for ${sha}"
+                return 0
+              fi
+              sleep 20
+            done
+            return 1
+          }
+          # ⚠️ No `[skip ci]` in these commits: prebuilds ARE Actions workflows,
+          # and with the "Every push" trigger the tag could suppress the very run
+          # this push exists to start.
+          bump() {
+            printf '%s\n' "$1" > PREBUILD_VERSION
+            git add PREBUILD_VERSION
+            git commit -m "chore: refresh prebuild → codeam-box:latest ($1)"
             git push
-            echo "Prebuild refresh triggered on CodeAgentMobile/codeam-codespace"
-          else
-            echo "devcontainer.json unchanged — nothing to refresh"
-          fi
+          }
+
+          bump "codeam-cli ${VERSION}"
+          SHA=$(git rev-parse HEAD)
+          rc=0; wait_for_prebuild "$SHA" || rc=$?
+          if [ "$rc" -eq 0 ]; then exit 0; fi
+          if [ "$rc" -eq 2 ]; then exit 1; fi
+          echo "::warning::No Codespaces prebuild run for ${SHA} after 5 min — nudging once"
+          bump "codeam-cli ${VERSION} (retry)"
+          SHA=$(git rev-parse HEAD)
+          rc=0; wait_for_prebuild "$SHA" || rc=$?
+          if [ "$rc" -eq 0 ]; then exit 0; fi
+          if [ "$rc" -eq 2 ]; then exit 1; fi
+          echo "::error::No Codespaces prebuild started for CodeAgentMobile/codeam-codespace@${SHA}. The CURRENT prebuild is still valid (devcontainer.json unchanged), so deploys stay fast, but it carries an older image. Check that the repo's prebuild trigger is \"Every push\" (Settings → Codespaces)."
+          echo "### ⚠️ Wrapper prebuild did not start for ${SHA} — current prebuild still serves; check the prebuild trigger" >> "$GITHUB_STEP_SUMMARY"
+          exit 1
 
   trigger-api-integration:
     # Cross-repo regression gate: as soon as codeam-cli@<version>
