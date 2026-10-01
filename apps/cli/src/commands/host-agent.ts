@@ -50,7 +50,7 @@ import * as path from 'node:path';
 import { CommandRelayService, type RemoteCommand } from '../services/command-relay.service';
 import { isFilesystemRoot } from '../services/file-watcher.service';
 import type { AgentMetadata, IntegrationsManifestEntry, SkillsManifestEntry } from '@codeam/shared';
-import { resolveApiBaseUrl, getPricing } from '@codeam/shared';
+import { resolveApiBaseUrl, getPricing, isManagedProviderId } from '@codeam/shared';
 import { persistIntegrationsManifest, clearIntegrationsManifest } from '../integrations/manifest';
 import { persistOrClearSkillsFromPayload } from '../skills/persist-from-payload';
 
@@ -2123,6 +2123,15 @@ export class HostAgentSupervisor {
       let extraArgs: string[] = [];
       if (payload.houseProxy) {
         const { baseUrl, token, agentKind, openRouter } = payload.houseProxy;
+        // The deploy's PUBLIC agent id (e.g. `managed-deepseek-flash`) — the
+        // only place this rail learns it's a MANAGED provider rather than the
+        // classic house agent. `houseProxy.agentKind` is only the internal
+        // runtime (`claude`), never the managed id. Without this, the box
+        // booted a managed deploy believing it was house-codeagent-cloud
+        // (wrong current-agent on a later switch) and pinned the house's
+        // MiniMax-M3 model on top of it (`[claude-code:unrecognized_model]`
+        // once the old client tore down) — codeagent-rew3.
+        const managedAgentId = isManagedProviderId(payload.agentId) ? payload.agentId : undefined;
         // ⚠️ ONE builder for the house env — this used to be a hand-copied
         // duplicate of `buildHouseProxyChildEnv`, and the two drifted: the
         // deploy path here kept setting only `CLAUDE_CODE_AUTO_COMPACT_WINDOW`
@@ -2131,7 +2140,12 @@ export class HostAgentSupervisor {
         // `CLAUDE_CODE_MAX_CONTEXT_TOKENS`. Deploy, resume and in-session switch
         // now all get the exact same env. See house-proxy-config.ts.
         childEnv = {
-          ...buildHouseProxyChildEnv({ baseUrl, token, openRouter: openRouter === true }),
+          ...buildHouseProxyChildEnv({
+            baseUrl,
+            token,
+            openRouter: openRouter === true,
+            ...(managedAgentId ? { managedAgentId } : {}),
+          }),
           CODEAM_AUTO_TOKEN: payload.autoPairToken,
         };
         // Isolate the house agent's Claude config from the box's PERSONAL one.
@@ -2172,6 +2186,7 @@ export class HostAgentSupervisor {
           token,
           openRouter: !!openRouter,
           claudeConfigDir: houseConfigDir,
+          ...(managedAgentId ? { managedAgentId } : {}),
         }, payload.deployId);
       } else {
         // Non-house path: `sealedAgentAuth` is guaranteed present by
