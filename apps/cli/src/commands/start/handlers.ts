@@ -66,6 +66,7 @@ import { createOsStrategy } from '../../os';
 import { scratchExportZipH, scratchSaveGithubH, scratchSaveGitlabH } from '../../scratch/handlers';
 import { postScratchOffer } from '../../scratch/api';
 import { isScratchWorkspace } from '../../scratch/workspace';
+import { isEmptyScratchProject, notePreviewBringUp } from '../../scratch/auto-preview';
 import {
   clearActivePreviewMarker,
   readActivePreviewMarker,
@@ -1980,6 +1981,18 @@ export async function resolvePreviewDetection(args: {
       payload: originPayload(payload, origin),
     });
   };
+  // An untouched from-scratch project has nothing to serve. Two of the first
+  // scratch users tapped Preview before asking for anything and waited 6-52 s
+  // for the one-shot to say so (one got a "detection" error card).
+  if (isEmptyScratchProject(process.cwd())) {
+    log.info('preview', 'detect: empty scratch project — nothing to preview yet');
+    emit(USER_EVENTS.PREVIEW_ERROR, {
+      stage: 'unsupported',
+      message:
+        'Nothing to preview yet — this project is empty. Ask your agent to build something and it opens the preview.',
+    });
+    return null;
+  }
   if (typeof runtime.generateOneShot !== 'function') {
     log.info('preview', `runtime ${runtime.id} has no generateOneShot — emitting unsupported`);
     emit(USER_EVENTS.PREVIEW_ERROR, {
@@ -2323,6 +2336,7 @@ export function startPreviewFromDetection(
   } = {},
 ): Promise<void> {
   previewRequestedInProcess = true;
+  notePreviewBringUp(ctx.sessionId);
   const emit: EmitPreviewEvent = (type, payload) => {
     const tagged = originPayload(payload, opts.origin) ?? {};
     opts.onEvent?.(type, tagged);

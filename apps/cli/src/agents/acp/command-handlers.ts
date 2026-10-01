@@ -53,6 +53,7 @@ import { mergeWithLocalMcpServers } from '../../services/local-mcp-servers';
 import { agentPreviewBridge } from '../../commands/start/agent-preview-bridge';
 import { reapPreviewsAndExportTunnel } from '../../commands/start/shutdown-tunnels';
 import { isScratchWorkspace } from '../../scratch/workspace';
+import { maybeAutoOpenScratchPreview } from '../../scratch/auto-preview';
 import { scratchExportZipH, scratchSaveGithubH, scratchSaveGitlabH } from '../../scratch/handlers';
 import { detectRepoStack } from '../../integrations/detect-stack';
 import {
@@ -1161,6 +1162,11 @@ async function startTaskH(ctx: AcpCommandContext): Promise<void> {
           `start_task ← done stopReason=${reply.stopReason ?? '?'} id=${cmd.id.slice(0, 8)}`,
         );
         await relay.sendResult(cmd.id, 'completed', { stopReason: reply.stopReason });
+        // From-scratch: the agent built something but did not open the
+        // Preview itself → open it (see scratch/auto-preview.ts).
+        if (reply.stopReason === 'end_turn' && maybeAutoOpenScratchPreview(opts.sessionId, agentPreviewBridge)) {
+          log.info('acpRunner', 'scratch: turn left a servable project and no preview — opening it');
+        }
         return;
       }
     } catch (err) {
