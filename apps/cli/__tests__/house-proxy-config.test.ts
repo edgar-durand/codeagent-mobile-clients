@@ -310,6 +310,26 @@ describe('house-proxy-config — managed agents', () => {
       fs.rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  // codeagent-rew3: the self-hosted deploy path persists a managed id with NO
+  // model string (only the switch credential fetch supplies one) — a resume
+  // must round-trip that correctly: the managed id present, no stale model.
+  it('round-trips a managed id with NO model through the persisted config (resume path)', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'house-proxy-managed-nomodel-'));
+    homeHolder.dir = dir;
+    try {
+      persistHouseProxyConfig({
+        baseUrl: 'https://api.x/api/v1/agent-proxy',
+        token: 'tok',
+        managedAgentId: 'managed-deepseek-flash',
+      });
+      const env = readHouseProxyChildEnv();
+      expect(env.CODEAM_MANAGED_AGENT_ID).toBe('managed-deepseek-flash');
+      expect(env.ANTHROPIC_MODEL).toBeUndefined();
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });
 
 /**

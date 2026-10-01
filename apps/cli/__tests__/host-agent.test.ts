@@ -1543,11 +1543,15 @@ describe('HostAgentSupervisor — command routing', () => {
     expect(calls[0].env.ANTHROPIC_MODEL).toBeUndefined();
     expect(calls[0].env.ANTHROPIC_DEFAULT_SONNET_MODEL).toBeUndefined();
 
-    // Persisted for resume too, so a woken box keeps the right identity.
-    const { readHouseProxyChildEnv } = await import('../src/commands/host/house-proxy-config');
-    const resumedEnv = readHouseProxyChildEnv('deploy-1');
-    expect(resumedEnv.CODEAM_MANAGED_AGENT_ID).toBe('managed-deepseek-flash');
-    expect(resumedEnv.ANTHROPIC_MODEL).toBeUndefined();
+    // Persisted for resume too, so a woken box keeps the right identity
+    // (persistHouseProxyConfig itself is mocked in this suite — see the
+    // module mock above — so assert on what it was CALLED with; the real
+    // persist → read round-trip is covered by house-proxy-config.test.ts).
+    const houseCfg = await import('../src/commands/host/house-proxy-config');
+    expect(houseCfg.persistHouseProxyConfig).toHaveBeenCalledWith(
+      expect.objectContaining({ managedAgentId: 'managed-deepseek-flash' }),
+      'deploy-1',
+    );
 
     fs.rmSync(cwdTarget, { recursive: true, force: true });
   });
