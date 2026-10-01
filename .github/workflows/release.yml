@@ -287,10 +287,17 @@ jobs:
           git config user.name "codeam-release"
           git config user.email "release@codeagent-mobile.com"
 
+          # 0 = a prebuild run exists for the SHA, 1 = none after 5 min,
+          # 2 = the Actions API itself failed (auth/permission) — never confuse
+          # an API error with "no prebuild", and never retry-commit on one.
           wait_for_prebuild() {
-            local sha="$1" n
+            local sha="$1" n out
             for _ in $(seq 1 15); do
-              n=$(gh api "repos/CodeAgentMobile/codeam-codespace/actions/runs?head_sha=${sha}" --jq '.total_count' 2>/dev/null || echo 0)
+              if ! out=$(gh api "repos/CodeAgentMobile/codeam-codespace/actions/runs?head_sha=${sha}" --jq '.total_count' 2>&1); then
+                echo "::error::Actions API error while checking the prebuild for ${sha} (does WRAPPER_REPO_PAT have actions:read on CodeAgentMobile/codeam-codespace?): ${out}"
+                return 2
+              fi
+              n="${out}"
               if [ "${n:-0}" -gt 0 ]; then
                 echo "Prebuild run started for ${sha}"
                 return 0
@@ -299,20 +306,27 @@ jobs:
             done
             return 1
           }
+          # ⚠️ No `[skip ci]` in these commits: prebuilds ARE Actions workflows,
+          # and with the "Every push" trigger the tag could suppress the very run
+          # this push exists to start.
           bump() {
             printf '%s\n' "$1" > PREBUILD_VERSION
             git add PREBUILD_VERSION
-            git commit -m "chore: refresh prebuild → codeam-box:latest ($1) [skip ci]"
+            git commit -m "chore: refresh prebuild → codeam-box:latest ($1)"
             git push
           }
 
           bump "codeam-cli ${VERSION}"
           SHA=$(git rev-parse HEAD)
-          if wait_for_prebuild "$SHA"; then exit 0; fi
+          rc=0; wait_for_prebuild "$SHA" || rc=$?
+          if [ "$rc" -eq 0 ]; then exit 0; fi
+          if [ "$rc" -eq 2 ]; then exit 1; fi
           echo "::warning::No Codespaces prebuild run for ${SHA} after 5 min — nudging once"
           bump "codeam-cli ${VERSION} (retry)"
           SHA=$(git rev-parse HEAD)
-          if wait_for_prebuild "$SHA"; then exit 0; fi
+          rc=0; wait_for_prebuild "$SHA" || rc=$?
+          if [ "$rc" -eq 0 ]; then exit 0; fi
+          if [ "$rc" -eq 2 ]; then exit 1; fi
           echo "::error::No Codespaces prebuild started for CodeAgentMobile/codeam-codespace@${SHA}. The CURRENT prebuild is still valid (devcontainer.json unchanged), so deploys stay fast, but it carries an older image. Check that the repo's prebuild trigger is \"Every push\" (Settings → Codespaces)."
           echo "### ⚠️ Wrapper prebuild did not start for ${SHA} — current prebuild still serves; check the prebuild trigger" >> "$GITHUB_STEP_SUMMARY"
           exit 1
