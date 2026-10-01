@@ -65,15 +65,55 @@ export function isEmptyScratchProject(cwd: string): boolean {
   return entries !== null && entries.every((e) => e.startsWith('.') || AGENT_NOTES.has(e));
 }
 
-/** Sessions where some preview bring-up already ran in this process. */
+/** Sessions where some preview bring-up already ran in THIS process. */
 const bringUps = new Set<string>();
 
-/** Called by every bring-up (button, agent tool, restore, restart). */
-export function notePreviewBringUp(sessionId: string): void {
-  bringUps.add(sessionId);
+/**
+ * Per-project, on-disk record that a preview bring-up already happened for
+ * this scratch project — at any point, in any process. `bringUps` alone only
+ * covers the current process: a CLI restart (sleep/wake, supervisor restart,
+ * self-update) starts it empty again, so a preview the user had explicitly
+ * STOPPED could auto-reopen once more on the next qualifying turn. This file
+ * closes that gap — same `.codeam/` marker-file convention as
+ * `preview-host-allow.json` (host-allow.ts), but never committed: it's
+ * per-machine runtime state, not project config.
+ */
+const AUTO_PREVIEW_MARKER = path.join('.codeam', 'auto-preview-state.json');
+
+function markerPath(cwd: string): string {
+  return path.join(cwd, AUTO_PREVIEW_MARKER);
 }
 
-/** Test-only. */
+/** Best-effort — a marker read failure must not block a legitimate bring-up. */
+function hasAttemptedMarker(cwd: string): boolean {
+  try {
+    return fs.existsSync(markerPath(cwd));
+  } catch {
+    return false;
+  }
+}
+
+/** Best-effort — a marker write failure degrades to in-process-only gating. */
+function writeAttemptedMarker(cwd: string): void {
+  try {
+    const file = markerPath(cwd);
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, '{"attempted":true}\n', 'utf-8');
+  } catch {
+    /* best-effort */
+  }
+}
+
+/** Called by every bring-up (button, agent tool, restore, restart). */
+export function notePreviewBringUp(sessionId: string, cwd: string = process.cwd()): void {
+  bringUps.add(sessionId);
+  // Only scratch projects use the marker — every other bring-up (a normal
+  // cloned repo) has no "once per project" rule to persist.
+  if (isScratchWorkspace(cwd)) writeAttemptedMarker(cwd);
+}
+
+/** Test-only. Clears the in-process Set; callers manage their own tmp dirs
+ *  for the on-disk marker. */
 export function resetAutoPreviewForTests(): void {
   bringUps.clear();
 }
@@ -88,8 +128,9 @@ export interface AutoPreviewBridge {
 /**
  * Call after a turn ends normally. Starts the preview when ALL hold:
  * - the cwd is a from-scratch project;
- * - no preview was ever brought up for this session in this process (so a
- *   preview the user stopped stays stopped);
+ * - no preview was ever brought up for this project, in this process OR a
+ *   prior one (so a preview the user stopped — including across a CLI
+ *   restart — stays stopped);
  * - the agent bridge is idle (no agent start in flight, no earlier failure);
  * - the project now has something servable.
  * Returns whether it started one. Never throws.
@@ -99,11 +140,12 @@ export function maybeAutoOpenScratchPreview(
   bridge: AutoPreviewBridge,
   cwd: string = process.cwd(),
 ): boolean {
-  if (!isScratchWorkspace(cwd) || bringUps.has(sessionId)) return false;
+  if (!isScratchWorkspace(cwd) || bringUps.has(sessionId) || hasAttemptedMarker(cwd)) return false;
   if (bridge.status().status !== 'idle') return false;
   if (!hasServableProject(cwd)) return false;
   // Mark now: the bring-up marks it too, but only once detection resolves.
   bringUps.add(sessionId);
+  writeAttemptedMarker(cwd);
   void bridge.start().catch(() => {
     /* the bridge reports every failure to the app itself */
   });
