@@ -127,7 +127,17 @@ import {
   readHouseProxyChildEnv,
   buildHouseProxyChildEnv,
 } from './host/house-proxy-config';
+import { cliVersionsRoot, hostEntry } from '../lib/cli-versions';
 import {
+  defaultRestartForUpdate,
+  SUPERVISED_FLAG,
+  signalHostReady,
+  superviseCurrent,
+} from './host/host-launch';
+export { needsSelfRelaunch, relaunchArgv, defaultRestartForUpdate } from './host/host-launch';
+import { EXIT_HOST_NOT_ENROLLED } from '../exit-codes';
+import {
+  currentCliVersion,
   runSelfUpdate,
   SELF_UPDATE_INTERVAL_MS,
   SELF_UPDATE_DEFER_MAX_MS,
@@ -876,8 +886,18 @@ export type ChildSpawner = (
  * stderr are PIPED (not ignored) so the supervisor can capture the tail and
  * surface it as a `failed` deploy-progress if the child dies early.
  */
+/**
+ * The entry sessions are spawned from: the versioned `current` when it is at
+ * least this supervisor's version (a self-update installed it — new sessions
+ * get the new code even while a restart is deferred), else the binary that
+ * launched us. Never a half-written tree (codeagent-siec).
+ */
+function sessionEntry(): string {
+  return hostEntry(cliVersionsRoot(), currentCliVersion(), process.argv[1]);
+}
+
 const defaultSpawner: ChildSpawner = (env, cwd, args = []) =>
-  spawn(process.execPath, [process.argv[1], 'pair-auto', ...args], {
+  spawn(process.execPath, [sessionEntry(), 'pair-auto', ...args], {
     cwd,
     env: { ...process.env, ...env },
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -893,7 +913,7 @@ const defaultSpawner: ChildSpawner = (env, cwd, args = []) =>
  * ACP-only), mirroring how a deploy child stays ACP via `CODEAM_AUTO_TOKEN`.
  */
 const defaultResumeSpawner: ChildSpawner = (env, cwd) =>
-  spawn(process.execPath, [process.argv[1]], {
+  spawn(process.execPath, [sessionEntry()], {
     cwd,
     // CODEAM_AUTO_APPROVE=1 → ACP path (baton off). CODEAM_RESUME_LATEST=1 →
     // continue the user's most-recent conversation instead of opening an empty
@@ -929,7 +949,9 @@ export const defaultOnIdentityRejected = (): void => {
     'host-agent',
     'host identity rejected by backend — disabled service + wiped sealed identity, exiting',
   );
-  process.exit(1);
+  // EXIT_HOST_NOT_ENROLLED (not 1): the versioned-install launcher must read
+  // this as "expected", never as a broken release to roll back.
+  process.exit(EXIT_HOST_NOT_ENROLLED);
 };
 
 /** How long a left-behind session daemon gets to exit on SIGTERM. */
@@ -937,21 +959,6 @@ const ORPHAN_TERM_GRACE_MS = 3_000;
 /** Pause after SIGKILL so init reaps it before the resume takes its lock. */
 const ORPHAN_KILL_SETTLE_MS = 500;
 
-/**
- * True when nothing will start this process again once it exits: not a systemd
- * unit (systemd sets `INVOCATION_ID` for every unit it runs) and not a
- * container's pid 1 (whose exit is the container's restart policy's call).
- * That is a codespace, where the host-agent is launched with `setsid nohup`.
- */
-export function needsSelfRelaunch(
-  env: NodeJS.ProcessEnv = process.env,
-  pid: number = process.pid,
-): boolean {
-  // CODEAM_LAUNCHER_IS_PID1: we were started by the versioned-install launcher
-  // (`lib/version-redirect.ts`) running as pid 1 (a Box container) — exiting
-  // ends the launcher too and the container restart brings us back.
-  return !env.INVOCATION_ID && pid !== 1 && env.CODEAM_LAUNCHER_IS_PID1 !== '1';
-}
 
 /**
  * True when THIS process is running inside a container — the CodeAgent Box
@@ -980,15 +987,6 @@ export function isContainerEnvironment(
   return false;
 }
 
-/**
- * Start a fresh host-agent on the freshly-installed binary, detached, after a
- * 2 s pause. The pause lets THIS process exit first, so the new boot resume
- * sees this supervisor's session children re-parented to init and retires them
- * (see `orphanedSupervisorDaemon`) instead of deferring to them.
- */
-export function relaunchArgv(execPath: string, argv: string[]): string[] {
-  return ['-c', 'sleep 2; exec "$0" "$@"', execPath, ...argv.slice(1)];
-}
 
 /**
  * Default restart action after a successful self-update: exit so the new
@@ -1000,26 +998,9 @@ export function relaunchArgv(execPath: string, argv: string[]): string[] {
  * assert the restart intent without killing the test runner.
  */
 const defaultOnUpdated = (version: string): void => {
-  const relaunch = needsSelfRelaunch();
-  log.info(
-    'host-agent',
-    `self-update: installed ${version}, restarting${relaunch ? ' (self-relaunch, no supervisor)' : ''}`,
-  );
-  if (relaunch) {
-    try {
-      spawn('/bin/sh', relaunchArgv(process.execPath, process.argv), {
-        cwd: process.cwd(),
-        env: process.env,
-        detached: true,
-        stdio: 'ignore',
-      }).unref();
-    } catch (err) {
-      log.error('host-agent', 'self-update: relaunch failed — staying on the old binary', err);
-      return;
-    }
-  }
-  process.exit(0);
+  defaultRestartForUpdate(version, process.argv.slice(3).includes(SUPERVISED_FLAG));
 };
+
 
 /** The slice of MetricsCollector the supervisor depends on (injectable for tests). */
 export type HostMetricsCollector = Pick<MetricsCollector, 'collect' | 'recordLatency'>;
@@ -1419,6 +1400,9 @@ export class HostAgentSupervisor {
       // First successful heartbeat means the control channel is live —
       // report 'connected' once (host-token auth). Best-effort, fire it
       // off without awaiting so it can't delay the heartbeat cadence.
+      // Ready for a supervising launcher: a release that gets this far is
+      // not "broken" — later exits must never roll it back.
+      signalHostReady();
       if (!this.reportedConnected) {
         this.reportedConnected = true;
         void reportProgress(
@@ -3184,6 +3168,11 @@ export async function hostAgent(args: string[] = []): Promise<void> {
   // by systemd into the same failure (part of the P0 crash-loop). Idempotent.
   installRelayCrashGuards();
 
+  // Started from a binary OLDER than a valid versioned `current` (systemd
+  // unit, Box image entrypoint, codespace wake — all launch the global
+  // `codeam`): hop once and supervise `current` (codeagent-siec).
+  if ((await superviseCurrent({ args })) === 'supervised') return;
+
   const tokenArg = args.find((a) => a.startsWith('--token='));
   const enrollToken =
     (tokenArg ? tokenArg.slice('--token='.length).trim() : '') ||
@@ -3192,10 +3181,16 @@ export async function hostAgent(args: string[] = []): Promise<void> {
 
   const identity = await resolveHostIdentity(enrollToken);
   if (!identity) {
-    throw new Error(
-      'host-agent: no sealed host identity and no enroll token. ' +
+    log.error(
+      'host-agent',
+      'no sealed host identity and no enroll token. ' +
         'Re-run the installer from the app (tokens expire after 15 min).',
     );
+    process.stderr.write(
+      'host-agent: no sealed host identity and no enroll token. ' +
+        'Re-run the installer from the app (tokens expire after 15 min).\n',
+    );
+    process.exit(EXIT_HOST_NOT_ENROLLED);
   }
 
   const supervisor = new HostAgentSupervisor(identity);

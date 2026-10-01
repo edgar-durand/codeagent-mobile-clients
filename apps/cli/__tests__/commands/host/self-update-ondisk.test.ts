@@ -129,3 +129,16 @@ describe('runSelfUpdate — no global prefix, no sudo', () => {
     }
   });
 });
+
+describe('runSelfUpdate — Windows keeps the legacy global install', () => {
+  it('uses `npm install -g` and never creates a versioned directory on win32', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'codeam-cli-versions-'));
+    const run = fakeInstallRun('2.66.0', '2.65.16');
+    const res = await runSelfUpdateWith(deps({ run, platform: 'win32', versionsRoot: root }));
+    expect(res).toEqual({ status: 'updated', version: '2.66.0' });
+    const attempted = run.mock.calls.map(([cmd, args]) => `${cmd} ${args.join(' ')}`);
+    expect(attempted.some((c) => c.includes('install -g'))).toBe(true);
+    expect(attempted.some((c) => c.includes('--prefix'))).toBe(false);
+    expect(fs.readdirSync(root)).toEqual([]);
+  });
+});

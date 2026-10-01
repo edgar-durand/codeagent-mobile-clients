@@ -2328,7 +2328,7 @@ describe('HostAgentSupervisor — self-heal on rejected host-token', () => {
 });
 
 describe('defaultOnIdentityRejected — disables the systemd unit before wiping/exiting', () => {
-  it('calls systemctl disable --now BEFORE deleting the sealed identity and exiting(1)', () => {
+  it('calls systemctl disable --now BEFORE deleting the sealed identity and exiting(78)', () => {
     // A box that missed the best-effort self_hosted_wipe push (it was
     // offline when the host was deleted) must not restart-loop forever on
     // an identity that can never work again — the default self-heal action
@@ -2346,13 +2346,15 @@ describe('defaultOnIdentityRejected — disables the systemd unit before wiping/
         throw new Error(`process.exit(${_code})`);
       }) as never);
 
-    expect(() => defaultOnIdentityRejected()).toThrow('process.exit(1)');
+    expect(() => defaultOnIdentityRejected()).toThrow('process.exit(78)');
 
     expect(execSpy).toHaveBeenCalledWith('systemctl', ['disable', '--now', 'codeam-host-agent'], {
       stdio: 'ignore',
     });
     expect(fs.existsSync(hostIdentityPath())).toBe(false);
-    expect(exitSpy).toHaveBeenCalledWith(1);
+    // EXIT_HOST_NOT_ENROLLED: an EXPECTED exit the versioned-install launcher
+    // must never treat as a broken release (codeagent-siec).
+    expect(exitSpy).toHaveBeenCalledWith(78);
   });
 });
 
@@ -4055,9 +4057,6 @@ describe('self-update restart without a supervisor', () => {
     expect(needsSelfRelaunch({}, 4242)).toBe(true); // codespace: setsid nohup
     expect(needsSelfRelaunch({ INVOCATION_ID: 'abc' }, 4242)).toBe(false); // systemd unit
     expect(needsSelfRelaunch({}, 1)).toBe(false); // container pid 1
-    // Started by the versioned-install launcher running as pid 1 (Box
-    // container): exiting ends the launcher and the container restarts us.
-    expect(needsSelfRelaunch({ CODEAM_LAUNCHER_IS_PID1: '1' }, 4242)).toBe(false);
   });
 
   it('re-execs the same command after a pause so this process exits first', async () => {

@@ -2,22 +2,20 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { EventEmitter } from 'node:events';
 import {
+  acquireInstallLock,
   entryOf,
   gcVersions,
+  hostEntry,
+  isBad,
+  markBad,
   pointerTarget,
-  redirectTarget,
   rollbackCurrent,
   switchCurrent,
+  validCurrent,
   versionOf,
 } from '../../src/lib/cli-versions';
 import { installVersioned, type SelfUpdateDeps } from '../../src/commands/host/self-update';
-import {
-  maybeRedirectToVersioned,
-  CRASH_WINDOW_MS,
-  type RedirectDeps,
-} from '../../src/lib/version-redirect';
 
 /**
  * Side-by-side codeam-cli installs (codeagent-siec). The old self-update ran
@@ -100,8 +98,8 @@ describe('installVersioned — install, verify, atomic switch', () => {
     const cur = pointerTarget(root, 'current')!;
     expect(versionOf(cur)).toBe('2.76.10');
     expect(fs.readFileSync(entryOf(cur)!, 'utf8')).toContain('complete');
-    // …and the half-written new dir is never what `current` or a redirect points at.
-    expect(redirectTarget(root, '2.76.10')).toBeNull();
+    // …and the half-written new dir is never what a session would be spawned from.
+    expect(hostEntry(root, '2.76.10', '/global/codeam', 'linux')).toBe(entryOf(old));
 
     release();
     await expect(pending).resolves.toEqual({ status: 'updated', version: '2.76.11' });
@@ -166,116 +164,102 @@ describe('rollbackCurrent', () => {
 });
 
 describe('gcVersions', () => {
-  it('keeps current, previous and the RUNNING version; removes the rest + stale staging', () => {
-    const running = fakeVersion('2.76.8');
+  it('keeps current, previous, the 3 newest and any version with a LIVE pid; removes the rest', () => {
+    const live = fakeVersion('2.76.5'); // an old version a session still runs from
+    fakeVersion('2.76.6');
+    const prev = fakeVersion('2.76.7');
+    fakeVersion('2.76.8');
     fakeVersion('2.76.9');
-    const prev = fakeVersion('2.76.10');
-    const cur = fakeVersion('2.76.11');
+    const cur = fakeVersion('2.76.10');
     switchCurrent(root, prev);
     switchCurrent(root, cur);
-    fs.mkdirSync(path.join(root, '.staging-2.76.7-99999-1'));
+    fs.mkdirSync(path.join(live, '.pids'), { recursive: true });
+    fs.writeFileSync(path.join(live, '.pids', String(process.pid)), ''); // alive
+    const dead = fakeVersion('2.76.4');
+    fs.mkdirSync(path.join(dead, '.pids'), { recursive: true });
+    fs.writeFileSync(path.join(dead, '.pids', '999999'), ''); // stale pid file
 
-    const removed = gcVersions(root, entryOf(running)!);
+    const removed = gcVersions(root);
 
-    expect(removed.sort()).toEqual(['.staging-2.76.7-99999-1', '2.76.9']);
-    for (const kept of [running, prev, cur]) expect(fs.existsSync(kept)).toBe(true);
+    expect(removed.sort()).toEqual(['2.76.4', '2.76.6']);
+    for (const kept of [live, prev, cur]) expect(fs.existsSync(kept)).toBe(true);
+    // 3 newest: 2.76.10, 2.76.9, 2.76.8
+    expect(fs.existsSync(path.join(root, '2.76.8'))).toBe(true);
   });
 });
 
-describe('maybeRedirectToVersioned — any entry point lands on current', () => {
-  type FakeChild = EventEmitter & { kill: ReturnType<typeof vi.fn> };
-  function fakeChild(): FakeChild {
-    return Object.assign(new EventEmitter(), { kill: vi.fn() });
-  }
-
-  it('runs a strictly newer current instead of itself, with the child exit code', async () => {
-    switchCurrent(root, fakeVersion('2.76.11'));
-    const child = fakeChild();
-    const spawn = vi.fn<RedirectDeps['spawn']>(() => child as never);
-    const exit = vi.fn();
-
-    const p = maybeRedirectToVersioned({
-      ownVersion: '2.76.10',
-      root,
-      argv: ['node', '/usr/local/bin/codeam', 'host-agent'],
-      env: {},
-      spawn,
-      exit,
-      now: () => 0,
-    });
-    await vi.waitFor(() => expect(spawn).toHaveBeenCalled());
-    child.emit('exit', 0, null);
-
-    await expect(p).resolves.toBe('redirected');
-    const [, args, env] = spawn.mock.calls[0]!;
-    expect(args[0]).toBe(entryOf(path.join(root, '2.76.11')));
-    expect(args.slice(1)).toEqual(['host-agent']);
-    expect(env.CODEAM_CLI_REDIRECTED).toBe('1');
-    expect(exit).toHaveBeenCalledWith(0);
-  });
-
-  it.each([
-    ['equal', '2.76.11'],
-    ['older current than us (a newer global install wins)', '2.76.12'],
-  ])('runs itself when current is %s', async (_l, own) => {
-    switchCurrent(root, fakeVersion('2.76.11'));
-    const spawn = vi.fn<RedirectDeps['spawn']>();
-    await expect(
-      maybeRedirectToVersioned({ ownVersion: own, root, argv: ['n', 'c'], env: {}, spawn }),
-    ).resolves.toBe('self');
-    expect(spawn).not.toHaveBeenCalled();
-  });
-
-  it('never redirects twice (loop guard)', async () => {
-    switchCurrent(root, fakeVersion('2.76.11'));
-    const spawn = vi.fn<RedirectDeps['spawn']>();
-    await expect(
-      maybeRedirectToVersioned({
-        ownVersion: '2.76.10',
-        root,
-        argv: ['n', 'c'],
-        env: { CODEAM_CLI_REDIRECTED: '1' },
-        spawn,
-      }),
-    ).resolves.toBe('self');
-    expect(spawn).not.toHaveBeenCalled();
-  });
-
-  it('a host-agent that crashes right after start is rolled back ONCE, then the launcher runs itself', async () => {
-    const good = fakeVersion('2.76.11');
-    const bad = fakeVersion('2.76.12');
+describe('bad releases', () => {
+  it('a release marked .bad is never resolved as current, nor reinstalled', async () => {
+    const good = fakeVersion('2.76.10');
+    const bad = fakeVersion('2.76.11');
     switchCurrent(root, good);
     switchCurrent(root, bad);
-    const children: FakeChild[] = [];
-    const spawn = vi.fn<RedirectDeps['spawn']>(() => {
-      const c = fakeChild();
-      children.push(c);
-      return c as never;
-    });
-    const exit = vi.fn();
-    const warn = vi.fn();
+    markBad(bad, 'crashed before ready');
 
-    const p = maybeRedirectToVersioned({
-      ownVersion: '2.76.10',
-      root,
-      argv: ['n', 'c', 'host-agent'],
-      env: {},
-      spawn,
-      exit,
-      warn,
-      now: () => 1_000, // every exit lands inside the crash window
-    });
-    // 2.76.12 crashes → rolled back to 2.76.11.
-    await vi.waitFor(() => expect(children).toHaveLength(1));
-    children[0]!.emit('exit', 1, null);
-    await vi.waitFor(() => expect(children).toHaveLength(2));
-    expect(pointerTarget(root, 'current')).toBe(good);
-    // 2.76.11 crashes too → no second rollback, run the launcher's own version.
-    children[1]!.emit('exit', 1, null);
+    expect(validCurrent(root)).toBeNull();
+    expect(hostEntry(root, '2.76.10', '/global/codeam', 'linux')).toBe('/global/codeam');
 
-    await expect(p).resolves.toBe('self');
-    expect(exit).not.toHaveBeenCalled();
-    expect(warn).toHaveBeenCalledTimes(2);
-    expect(CRASH_WINDOW_MS).toBeGreaterThan(0);
+    const run = fakeRun();
+    const res = await installVersioned(deps(run), root, '2.76.11', '2.76.10');
+    expect(res.status).toBe('skipped');
+    expect(run).not.toHaveBeenCalled();
+    expect(isBad(bad)).toBe(true);
+  });
+
+  it('rollback never targets a bad previous', () => {
+    const a = fakeVersion('2.76.10');
+    const b = fakeVersion('2.76.11');
+    switchCurrent(root, a);
+    switchCurrent(root, b);
+    markBad(a, 'x');
+    expect(rollbackCurrent(root)).toBeNull();
+  });
+});
+
+describe('install lock (O_EXCL)', () => {
+  it('a second installer cannot take the lock while the first holds it', async () => {
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((r) => (release = r));
+    const first = fakeRun({ gate });
+    const second = fakeRun();
+
+    const p1 = installVersioned(deps(first), root, '2.76.11', '2.76.10');
+    await vi.waitFor(() => expect(first).toHaveBeenCalled());
+    const r2 = await installVersioned(deps(second), root, '2.76.11', '2.76.10');
+
+    expect(r2.status).toBe('skipped');
+    expect(second).not.toHaveBeenCalled();
+    release();
+    await expect(p1).resolves.toEqual({ status: 'updated', version: '2.76.11' });
+    // released → available again
+    const again = acquireInstallLock(root);
+    expect(again).not.toBeNull();
+    again?.();
+  });
+
+  it('takes over a lock whose owner is dead', () => {
+    fs.writeFileSync(path.join(root, '.install.lock'), '999999');
+    const r = acquireInstallLock(root);
+    expect(r).not.toBeNull();
+    r?.();
+  });
+});
+
+describe('hostEntry — what the host-agent spawns sessions from / relaunches onto', () => {
+  it('current when it is at least our version', () => {
+    const cur = fakeVersion('2.76.11');
+    switchCurrent(root, cur);
+    expect(hostEntry(root, '2.76.10', '/g', 'linux')).toBe(entryOf(cur));
+    expect(hostEntry(root, '2.76.11', '/g', 'linux')).toBe(entryOf(cur));
+  });
+
+  it('never downgrades: a newer running binary keeps its own entry', () => {
+    switchCurrent(root, fakeVersion('2.76.11'));
+    expect(hostEntry(root, '2.76.12', '/g', 'linux')).toBe('/g');
+  });
+
+  it('Windows keeps the legacy behaviour (no versioned mode)', () => {
+    switchCurrent(root, fakeVersion('2.76.11'));
+    expect(hostEntry(root, '2.76.10', 'C:\\codeam', 'win32')).toBe('C:\\codeam');
   });
 });

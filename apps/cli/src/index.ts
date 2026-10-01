@@ -22,7 +22,6 @@ import { version } from './commands/version';
 import { help } from './commands/help';
 import { tryShowSubcommandHelp } from './commands/subcommand-help';
 import { checkForUpdates, autoUpgradeBeforeCriticalCommand } from './lib/updateNotifier';
-import { maybeRedirectToVersioned } from './lib/version-redirect';
 import { isKnownAgentId } from '@codeam/shared';
 import {
   initTelemetry,
@@ -32,6 +31,7 @@ import {
 } from './services/telemetry.service';
 import { EXIT_FAILURE, EXIT_USAGE } from './exit-codes';
 import { loadCodespaceEnv } from './config';
+import { registerRunningVersion } from './lib/cli-versions';
 import * as os from 'node:os';
 
 // Guarantee $HOME is set before ANY command runs. The self-hosted
@@ -63,6 +63,11 @@ if (!process.env.HOME) {
 // wins over the file.
 loadCodespaceEnv();
 
+// A process running FROM a versioned install (~/.codeam/cli/<version>, only the
+// host-agent and the sessions it spawns ever do) records its pid there so GC
+// never deletes a version still in use. A no-op for every other `codeam`.
+registerRunningVersion();
+
 const [, , command, ...args] = process.argv;
 
 /**
@@ -93,12 +98,6 @@ const [, , command, ...args] = process.argv;
  *   - `codeam completion <shell>` → emit shell-completion script.
  */
 async function main(): Promise<void> {
-  // Versioned install (codeagent-siec): when the host-agent's self-update has
-  // made a NEWER codeam-cli `current` under ~/.codeam/cli, run that instead of
-  // this binary — whichever `codeam` on PATH (or systemd ExecStart) launched us.
-  // A no-op (`'self'`) everywhere a self-update never ran.
-  if ((await maybeRedirectToVersioned()) === 'redirected') return;
-
   // Telemetry boot + update notifier — gated by isMetaCommand below
   // so `--version` / `--help` stay fast for tooling that scrapes
   // them.

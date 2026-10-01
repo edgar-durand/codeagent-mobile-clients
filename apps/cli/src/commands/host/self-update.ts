@@ -9,13 +9,17 @@ import { execFile } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import {
+  acquireInstallLock,
   cliVersionsRoot,
   entryOf,
   gcVersions,
+  isBad,
   pointerTarget,
   switchCurrent,
+  validCurrent,
   versionDirContaining,
   versionOf,
+  versionedModeSupported,
 } from '../../lib/cli-versions';
 import { log } from '../../services/logger';
 import { compareSemver } from '../../lib/updateNotifier';
@@ -85,7 +89,7 @@ const SELF_UPDATE_LS_TIMEOUT_MS = 15_000;
  * `version.ts` uses). Returns `null` when the define wasn't applied (dev
  * tests via tsx) so the self-update compare treats it as "never newer".
  */
-function currentCliVersion(): string | null {
+export function currentCliVersion(): string | null {
   return typeof __CLI_VERSION__ !== 'undefined' ? __CLI_VERSION__ : null;
 }
 
@@ -130,6 +134,8 @@ export interface SelfUpdateDeps {
   runningEntry?: string;
   /** Node binary used to verify a freshly installed version (`process.execPath`). */
   nodePath?: string;
+  /** Windows keeps the legacy in-place global install (`versionedModeSupported`). */
+  platform?: NodeJS.Platform;
 }
 
 /**
@@ -206,6 +212,7 @@ export async function runSelfUpdate(): Promise<SelfUpdateResult> {
     versionsRoot: cliVersionsRoot(),
     runningEntry: process.argv[1],
     nodePath: process.execPath,
+    platform: process.platform,
   });
 }
 
@@ -227,18 +234,18 @@ export async function runSelfUpdateWith(deps: SelfUpdateDeps): Promise<SelfUpdat
     // for days while `/usr/bin/codeam --version` said 2.66.0, and logged 318
     // hourly EACCES failures for an install that was never needed
     // (codeagent-53em follow-up). Local, no network, no privileges.
-    // STEP 0a — a versioned install newer than us is already `current` (a prior
-    // tick installed it while a turn deferred the restart, or another process
-    // did): just restart onto it — the launcher redirect picks it up.
+    // STEP 0a — a valid versioned `current` newer than us already exists (a
+    // prior tick installed it while a turn deferred the restart): just restart
+    // onto it. The restart targets `current` itself (defaultRestartForUpdate),
+    // so the relaunched process is never older than `current` again.
     const root = deps.versionsRoot ?? cliVersionsRoot();
-    const versionedCurrent = pointerTarget(root, 'current');
-    const versionedVersion = versionedCurrent ? versionOf(versionedCurrent) : null;
-    if (versionedVersion && entryOf(versionedCurrent as string) && compareSemver(versionedVersion, current) > 0) {
+    const versioned = versionedModeSupported(deps.platform) ? validCurrent(root) : null;
+    if (versioned && compareSemver(versioned.version, current) > 0) {
       log.info(
         'host-agent',
-        `self-update: ${versionedVersion} already current in ${root} (running ${current}) — restarting onto it`,
+        `self-update: ${versioned.version} already current in ${root} (running ${current}) — restarting onto it`,
       );
-      return { status: 'updated', version: versionedVersion };
+      return { status: 'updated', version: versioned.version };
     }
 
     const onDisk = await installedVersion(deps);
@@ -270,6 +277,10 @@ export async function runSelfUpdateWith(deps: SelfUpdateDeps): Promise<SelfUpdat
       return { status: 'current' };
     }
 
+    if (!versionedModeSupported(deps.platform)) {
+      log.info('host-agent', `self-update: ${current} → ${latest} available — installing (global)`);
+      return await installGlobalLegacy(deps, latest, current);
+    }
     log.info('host-agent', `self-update: ${current} → ${latest} available — installing side-by-side`);
     return await installVersioned(deps, root, latest, current);
   } catch (err) {
@@ -291,6 +302,8 @@ const VERIFY_TIMEOUT_MS = 30_000;
  * which rewrote the package tree a running supervisor spawns its session
  * children from — a child spawned mid-install could load a half-written tree.
  *
+ *   0. Skip a release marked `.bad` (it crashed before ready once); take the
+ *      O_EXCL install lock so two installers never write the same target.
  *   1. `npm install --prefix <root>/<latest> codeam-cli@<latest>` — a fresh
  *      directory nobody runs from. No global prefix, so no EACCES/sudo either
  *      (the per-user `~/.codeam` is always writable).
@@ -298,11 +311,12 @@ const VERIFY_TIMEOUT_MS = 30_000;
  *      deletes the new directory and leaves `current` exactly as it was.
  *   3. `switchCurrent` — atomic symlink swap; the old current becomes
  *      `previous` (rollback target).
- *   4. GC every other version except the one this process runs from.
+ *   4. GC: keep current, previous, the 3 newest, and any version a live process
+ *      runs from (`<version>/.pids`).
  *
- * Sessions spawned at any point keep running the version they started on: the
- * running process spawns from the real path of its own directory, which this
- * never writes and GC never removes.
+ * Sessions spawned at any point keep running the version they started on: they
+ * run from the real path of their own version directory, which this never
+ * writes and GC never removes while a pid in it is alive.
  */
 export async function installVersioned(
   deps: SelfUpdateDeps,
@@ -314,6 +328,21 @@ export async function installVersioned(
   const target = path.join(root, latest);
   try {
     fs.mkdirSync(root, { recursive: true });
+  } catch {
+    return { status: 'skipped' };
+  }
+  if (isBad(target)) {
+    log.warn('host-agent', `self-update: ${latest} is marked bad (crashed before ready) — not reinstalling`);
+    return { status: 'skipped' };
+  }
+  // ONE installer at a time (O_EXCL): two host-agents of the same user, or an
+  // overlapping tick, must never write the same target concurrently.
+  const release = acquireInstallLock(root);
+  if (!release) {
+    log.info('host-agent', 'self-update: another install holds the lock — skipping this tick');
+    return { status: 'skipped' };
+  }
+  try {
     const runningDir = versionDirContaining(root, deps.runningEntry);
     const reusable = entryOf(target) && versionOf(target) === latest;
     if (!reusable) {
@@ -362,7 +391,7 @@ export async function installVersioned(
     }
 
     switchCurrent(root, target);
-    const removed = gcVersions(root, deps.runningEntry);
+    const removed = gcVersions(root);
     log.info(
       'host-agent',
       `self-update: ${latest} installed + verified at ${target}, now current` +
@@ -371,13 +400,36 @@ export async function installVersioned(
     return { status: 'updated', version: latest };
   } catch (err) {
     // A failure before the swap leaves `current` untouched; clear our dir.
-    if (pointerTarget(root, 'current') !== path.resolve(target)) {
-      fs.rmSync(target, { recursive: true, force: true });
-    }
+    const cur = pointerTarget(root, 'current');
+    if (!cur || path.basename(cur) !== latest) fs.rmSync(target, { recursive: true, force: true });
     log.warn(
       'host-agent',
       `self-update: versioned install failed: ${err instanceof Error ? err.message : String(err)}`,
     );
     return { status: 'skipped' };
+  } finally {
+    release();
   }
+}
+
+/**
+ * Windows: the legacy in-place `npm install -g` (directory symlink pointers
+ * there need junctions + absolute paths and the relaunch story differs; no
+ * Windows host-agent ships today, so it keeps the pre-siec behaviour).
+ */
+async function installGlobalLegacy(
+  deps: SelfUpdateDeps,
+  latest: string,
+  running: string,
+): Promise<SelfUpdateResult> {
+  const install = await deps.run(
+    'npm',
+    ['install', '-g', `${SELF_UPDATE_PKG}@latest`],
+    SELF_UPDATE_INSTALL_TIMEOUT_MS,
+  );
+  if (install.code !== 0) {
+    log.warn('host-agent', `self-update: install exited ${String(install.code)} — staying on ${running}`);
+    return { status: 'skipped' };
+  }
+  return { status: 'updated', version: latest };
 }
