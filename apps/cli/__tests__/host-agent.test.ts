@@ -3494,20 +3494,143 @@ describe('HostAgentSupervisor — fleet control plane', () => {
   //
   // These tests exist for the SCOPE, which is the dangerous part: this handler
   // runs as root on a host holding every rescued user's data.
-  it('fleet_prune_host prunes dangling images and the build cache', async () => {
-    const { docker, calls } = makeDockerMock({ stdout: 'Total reclaimed space: 93.8GB' });
+  // A docker fake that answers the box-image GC queries from a fixture, so the
+  // whole `fleet_prune_host` argv sequence can be asserted.
+  const BOX = 'ghcr.io/edgar-durand/codeam-box';
+  const BASE = 'sha256:base';
+  function img(id: string, created: string, tags: string[], firstLayer = BASE): string {
+    return `${id}|${created}|${tags.join(',')}|${firstLayer},sha256:${id.slice(7)}-top`;
+  }
+  // fleet-1 on 2026-10-02: current, two newer dangling releases, one pinned by
+  // the protected 24/7 box, the hand-built `:fix`, and unrelated images.
+  const FLEET1_IMAGES = [
+    img('sha256:cur', '2026-10-01T18:12:49Z', [`${BOX}:latest`]),
+    img('sha256:prev1', '2026-10-01T11:59:20Z', []),
+    img('sha256:prev2', '2026-10-01T01:42:46Z', []),
+    img('sha256:pinned', '2026-09-29T23:48:02Z', []),
+    img('sha256:fix', '2026-07-24T15:31:31Z', ['codeam-box:fix'], 'sha256:oldbase'),
+    img('sha256:node', '2026-07-14T01:48:37Z', ['node:22-slim'], 'sha256:oldbase'),
+    img('sha256:alp', '2026-06-16T00:01:29Z', ['alpine:latest'], 'sha256:alpine'),
+  ];
+  function makeGcDocker(
+    over: { images?: string[]; refs?: string[]; fail?: (args: string[]) => string | null } = {},
+  ) {
+    const calls: string[][] = [];
+    const opts: Array<{ timeoutMs?: number } | undefined> = [];
+    const images = over.images ?? FLEET1_IMAGES;
+    const refs = over.refs ?? ['sha256:cur', 'sha256:cur', 'sha256:pinned', 'sha256:alp'];
+    const docker: DockerRunner = {
+      run: vi.fn(async (args: string[], runOpts) => {
+        calls.push(args);
+        opts.push(runOpts);
+        const err = over.fail?.(args);
+        if (err !== undefined && err !== null) return { code: 1, stdout: '', stderr: err };
+        const j = args.join(' ');
+        if (j === `image inspect --format {{.Id}} ${BOX}:latest`) {
+          return { code: 0, stdout: 'sha256:cur\n', stderr: '' };
+        }
+        if (j === 'image ls -aq --no-trunc') {
+          return { code: 0, stdout: images.map((l) => l.split('|')[0]).join('\n'), stderr: '' };
+        }
+        if (args[0] === 'image' && args[1] === 'inspect') {
+          return { code: 0, stdout: images.join('\n'), stderr: '' };
+        }
+        if (j === 'ps -aq --no-trunc') {
+          return { code: 0, stdout: refs.map((_, i) => `c${i}`).join('\n'), stderr: '' };
+        }
+        if (args[0] === 'inspect') return { code: 0, stdout: refs.join('\n'), stderr: '' };
+        return { code: 0, stdout: 'Total reclaimed space: 1GB', stderr: '' };
+      }),
+    };
+    return { docker, calls, opts };
+  }
+  const mutating = (calls: string[][]): string[] =>
+    calls
+      .filter((c) => ['tag', 'rmi', 'image prune', 'builder prune'].some((k) => c.join(' ').startsWith(k)))
+      .map((c) => c.join(' '));
+
+  it('fleet_prune_host keeps current + one rollback, removes superseded Box tags, then prunes', async () => {
+    const { docker, calls } = makeGcDocker();
     const sup = new HostAgentSupervisor(IDENTITY, { docker });
 
     await sup.handleCommand(fleetPruneCmd());
 
-    expect(calls).toEqual([
-      ['image', 'prune', '-f'],
-      ['builder', 'prune', '-f'],
+    expect(mutating(calls)).toEqual([
+      // The newest previous release is untagged, so it is pinned BEFORE the
+      // dangling prune (which would otherwise delete it).
+      `tag sha256:prev1 ${BOX}:rollback`,
+      'rmi codeam-box:fix',
+      'image prune -f',
+      'builder prune -f --all --filter until=72h',
     ]);
   });
 
+  it('every prune step runs on the long bound (the 120 s one killed it daily on fleet-1)', async () => {
+    const { docker, calls, opts } = makeGcDocker();
+    const sup = new HostAgentSupervisor(IDENTITY, { docker });
+    await sup.handleCommand(fleetPruneCmd());
+    calls.forEach((_, i) => expect(opts[i]?.timeoutMs).toBe(600_000));
+  });
+
+  it('"a prune operation is already running" is not a failure — the co-located agent is pruning', async () => {
+    const { docker } = makeGcDocker({
+      fail: (a) =>
+        a[0] === 'image' && a[1] === 'prune'
+          ? 'Error response from daemon: a prune operation is already running'
+          : null,
+    });
+    const sup = new HostAgentSupervisor(IDENTITY, { docker });
+    const warnSpy = vi.spyOn(log, 'warn');
+    await sup.handleCommand(fleetPruneCmd());
+    expect(warnSpy).not.toHaveBeenCalled();
+  });
+
+  it('never removes an image a container references, nor a non-Box tag', async () => {
+    const { docker, calls } = makeGcDocker();
+    const sup = new HostAgentSupervisor(IDENTITY, { docker });
+    await sup.handleCommand(fleetPruneCmd());
+    const rmis = calls.filter((c) => c[0] === 'rmi').map((c) => c[1]);
+    for (const r of rmis) {
+      expect(r).not.toMatch(/sha256:(cur|pinned|alp)/);
+      expect(r).not.toMatch(/^(node|alpine)/);
+      expect(r).not.toBe(`${BOX}:latest`);
+    }
+    for (const c of calls.filter((x) => x[0] === 'rmi')) expect(c).not.toContain('-f');
+  });
+
+  it('fail-safe: removes nothing when the container references cannot be read', async () => {
+    const { docker, calls } = makeGcDocker({ fail: (a) => (a[0] === 'ps' ? 'daemon hiccup' : null) });
+    const sup = new HostAgentSupervisor(IDENTITY, { docker });
+    await sup.handleCommand(fleetPruneCmd());
+    expect(calls.some((c) => c[0] === 'rmi' || c[0] === 'tag')).toBe(false);
+    // The dangling prune stays: Docker itself refuses referenced images there.
+    expect(mutating(calls)).toContain('image prune -f');
+  });
+
+  it('fail-safe: removes nothing when the rollback cannot be tagged', async () => {
+    const { docker, calls } = makeGcDocker({ fail: (a) => (a[0] === 'tag' ? 'boom' : null) });
+    const sup = new HostAgentSupervisor(IDENTITY, { docker });
+    await sup.handleCommand(fleetPruneCmd());
+    expect(calls.some((c) => c[0] === 'rmi')).toBe(false);
+  });
+
+  it('skips the Box-image GC under a local CODEAM_FLEET_BOX_IMAGE override', async () => {
+    process.env.CODEAM_FLEET_BOX_IMAGE = 'codeam-box:int-test';
+    try {
+      const { docker, calls } = makeGcDocker();
+      const sup = new HostAgentSupervisor(IDENTITY, { docker });
+      await sup.handleCommand(fleetPruneCmd());
+      expect(calls.map((c) => c.join(' '))).toEqual([
+        'image prune -f',
+        'builder prune -f --all --filter until=72h',
+      ]);
+    } finally {
+      delete process.env.CODEAM_FLEET_BOX_IMAGE;
+    }
+  });
+
   it('NEVER prunes containers or volumes — a stopped fleet container is a sleeping box', async () => {
-    const { docker, calls } = makeDockerMock();
+    const { docker, calls } = makeGcDocker();
     const sup = new HostAgentSupervisor(IDENTITY, { docker });
 
     // Even if the wire tries to widen the scope, the handler must not comply.
@@ -3519,26 +3642,41 @@ describe('HostAgentSupervisor — fleet control plane', () => {
     expect(flat).not.toContain('container prune -f');
     expect(flat).not.toContain('volume prune -f');
     expect(flat).not.toContain('system prune -f');
-    // `-a` would delete images no RUNNING container uses, which includes the
-    // image a SLEEPING box needs to be recreated from.
-    for (const c of calls) expect(c).not.toContain('-a');
+    // `image prune -a` would delete images no RUNNING container uses, which
+    // includes the image a SLEEPING box needs to be recreated from.
+    const imagePrune = calls.find((c) => c[0] === 'image' && c[1] === 'prune');
+    expect(imagePrune).toEqual(['image', 'prune', '-f']);
     for (const c of calls) expect(c[0]).not.toBe('container');
     for (const c of calls) expect(c[0]).not.toBe('volume');
     for (const c of calls) expect(c[0]).not.toBe('system');
+    for (const c of calls) expect(c[0]).not.toBe('rm');
   });
 
   it('honours the flags — buildCache:false prunes images only', async () => {
-    const { docker, calls } = makeDockerMock();
+    const { docker, calls } = makeGcDocker();
     const sup = new HostAgentSupervisor(IDENTITY, { docker });
     await sup.handleCommand(fleetPruneCmd({ buildCache: false }));
-    expect(calls).toEqual([['image', 'prune', '-f']]);
+    expect(mutating(calls).some((c) => c.startsWith('builder'))).toBe(false);
+    expect(mutating(calls)).toContain('image prune -f');
+  });
+
+  it('honours the flags — images:false touches no image at all', async () => {
+    const { docker, calls } = makeGcDocker();
+    const sup = new HostAgentSupervisor(IDENTITY, { docker });
+    await sup.handleCommand(fleetPruneCmd({ images: false }));
+    expect(calls.map((c) => c.join(' '))).toEqual(['builder prune -f --all --filter until=72h']);
   });
 
   it('a failing prune step does not stop the next one (best-effort housekeeping)', async () => {
     const { docker, calls } = makeDockerMock({ code: 1, stderr: 'daemon not reachable' });
     const sup = new HostAgentSupervisor(IDENTITY, { docker });
     await expect(sup.handleCommand(fleetPruneCmd())).resolves.toBeUndefined();
-    expect(calls).toHaveLength(2);
+    // The GC bails on its first failed read; both prune steps still run.
+    expect(calls.map((c) => c.slice(0, 2).join(' '))).toEqual([
+      'image inspect',
+      'image prune',
+      'builder prune',
+    ]);
   });
 
   it('ignores a malformed fleet_prune_host instead of running docker', async () => {
