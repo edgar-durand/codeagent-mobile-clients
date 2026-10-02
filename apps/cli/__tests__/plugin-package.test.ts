@@ -35,7 +35,8 @@ describe('plugin/openai package', () => {
     for (const s of skills) {
       const md = read(`skills/${s}/SKILL.md`);
       expect(md.length).toBeLessThan(256 * 1024);
-      const fm = md.match(/^---\n([\s\S]*?)\n---/)?.[1] ?? '';
+      // A Windows checkout (core.autocrlf) turns the files CRLF; the frontmatter is the same.
+      const fm = md.replace(/\r\n/g, '\n').match(/^---\n([\s\S]*?)\n---/)?.[1] ?? '';
       expect(fm).toMatch(new RegExp(`^name: ${s}$`, 'm'));
       expect(fm).toMatch(/^description: .+/m);
     }

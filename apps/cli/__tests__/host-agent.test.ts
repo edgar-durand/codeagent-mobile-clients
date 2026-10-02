@@ -4203,7 +4203,8 @@ describe('self-update restart without a supervisor', () => {
     expect(argv).toEqual(['-c', 'sleep 2; exec "$0" "$@"', '/usr/local/bin/node', '/usr/local/bin/codeam', 'host-agent']);
   });
 
-  it('the relaunch command really runs the same argv after the pause', async () => {
+  // `/bin/sh` does not exist on Windows (and the relaunch is POSIX-only there too).
+  it.skipIf(process.platform === 'win32')('the relaunch command really runs the same argv after the pause', async () => {
     const { relaunchArgv } = await import('../src/commands/host-agent');
     const { execFileSync } = await import('node:child_process');
     const script = relaunchArgv('/bin/echo', ['/bin/echo', 'codeam', 'host-agent']).map((a) =>

@@ -19,6 +19,12 @@ import {
 } from '../../src/lib/cli-versions';
 import { installVersioned, type SelfUpdateDeps } from '../../src/commands/host/self-update';
 
+// Versioned installs are POSIX-only by design (`versionedModeSupported`: no
+// Windows host-agent ships, and directory symlinks there need junctions), so
+// the tests that build real `current`/`previous` symlinks skip on win32 rather
+// than exercising a code path production never takes there.
+const posixOnly = process.platform === 'win32';
+
 /**
  * Side-by-side codeam-cli installs (codeagent-siec). The old self-update ran
  * `npm install -g` over the very tree the running supervisor spawns session
@@ -90,7 +96,7 @@ function deps(run: Run, runningEntry?: string): SelfUpdateDeps {
 }
 
 describe('installVersioned — install, verify, atomic switch', () => {
-  it('a spawn DURING the install still resolves the old, COMPLETE version', async () => {
+  it.skipIf(posixOnly)('a spawn DURING the install still resolves the old, COMPLETE version', async () => {
     const old = fakeVersion('2.76.10');
     switchCurrent(root, old);
     let release: () => void = () => undefined;
@@ -114,7 +120,7 @@ describe('installVersioned — install, verify, atomic switch', () => {
     expect(fs.readFileSync(entryOf(old)!, 'utf8')).toContain('complete');
   });
 
-  it('a FAILED install leaves current untouched and removes the partial dir', async () => {
+  it.skipIf(posixOnly)('a FAILED install leaves current untouched and removes the partial dir', async () => {
     const old = fakeVersion('2.76.10');
     switchCurrent(root, old);
 
@@ -125,7 +131,7 @@ describe('installVersioned — install, verify, atomic switch', () => {
     expect(fs.existsSync(path.join(root, '2.76.11'))).toBe(false);
   });
 
-  it('a FAILED verification (binary reports another version) never becomes current', async () => {
+  it.skipIf(posixOnly)('a FAILED verification (binary reports another version) never becomes current', async () => {
     const old = fakeVersion('2.76.10');
     switchCurrent(root, old);
 
@@ -141,7 +147,7 @@ describe('installVersioned — install, verify, atomic switch', () => {
     expect(fs.existsSync(path.join(root, '2.76.11'))).toBe(false);
   });
 
-  it('works from scratch (no current yet: Box / codespace running the image global)', async () => {
+  it.skipIf(posixOnly)('works from scratch (no current yet: Box / codespace running the image global)', async () => {
     const res = await installVersioned(deps(fakeRun()), root, '2.76.11', '2.76.10');
     expect(res).toEqual({ status: 'updated', version: '2.76.11' });
     expect(versionOf(pointerTarget(root, 'current')!)).toBe('2.76.11');
@@ -150,7 +156,7 @@ describe('installVersioned — install, verify, atomic switch', () => {
 });
 
 describe('rollbackCurrent', () => {
-  it('swaps current and previous atomically', () => {
+  it.skipIf(posixOnly)('swaps current and previous atomically', () => {
     const a = fakeVersion('2.76.10');
     const b = fakeVersion('2.76.11');
     switchCurrent(root, a);
@@ -161,15 +167,46 @@ describe('rollbackCurrent', () => {
     expect(pointerTarget(root, 'previous')).toBe(b);
   });
 
-  it('refuses when there is no runnable previous', () => {
+  it.skipIf(posixOnly)('refuses when there is no runnable previous', () => {
     switchCurrent(root, fakeVersion('2.76.11'));
     expect(rollbackCurrent(root)).toBeNull();
     expect(versionOf(pointerTarget(root, 'current')!)).toBe('2.76.11');
   });
 });
 
+/**
+ * The versions root reached through a symlink.
+ *
+ * WHY — main CI, 2026-10-02 (run 37033993985): every macOS test that switched
+ * `current` twice failed with `pointerTarget(...) === null`. `os.tmpdir()` is
+ * `/var/folders/…`, a symlink to `/private/var/folders/…`, and the relative link
+ * target was computed between the two spellings, so it climbed one directory
+ * too few and dangled. A Linux host whose HOME sits behind a symlink (e.g.
+ * `/home` → `/var/home`) builds the same broken `previous`. This reproduces it
+ * on any POSIX OS by putting the root behind a symlink on purpose.
+ */
+describe('a versions root reached through a symlink', () => {
+  it.skipIf(posixOnly)('current and previous stay resolvable, and rollback works', () => {
+    const realRoot = root;
+    const linkRoot = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'codeam-cli-link-')), 'deep', 'cli');
+    fs.mkdirSync(path.dirname(linkRoot), { recursive: true });
+    fs.symlinkSync(realRoot, linkRoot, 'dir');
+    const a = fakeVersion('2.76.10'); // realpath spelling
+    fakeVersion('2.76.11');
+    switchCurrent(linkRoot, a);
+    switchCurrent(linkRoot, path.join(linkRoot, '2.76.11')); // symlinked spelling
+
+    expect(versionOf(pointerTarget(linkRoot, 'current')!)).toBe('2.76.11');
+    expect(pointerTarget(linkRoot, 'previous')).toBe(a);
+    expect(validCurrent(linkRoot)?.version).toBe('2.76.11');
+    expect(rollbackCurrent(linkRoot)).toBe('2.76.10');
+    expect(pointerTarget(realRoot, 'current')).toBe(a);
+    expect(versionOf(pointerTarget(realRoot, 'previous')!)).toBe('2.76.11');
+  });
+});
+
 describe('gcVersions', () => {
-  it('keeps current, previous, the 3 newest and any version with a LIVE pid; removes the rest', () => {
+  it.skipIf(posixOnly)('keeps current, previous, the 3 newest and any version with a LIVE pid; removes the rest', () => {
     const live = fakeVersion('2.76.5'); // an old version a session still runs from
     fakeVersion('2.76.6');
     const prev = fakeVersion('2.76.7');
@@ -194,7 +231,7 @@ describe('gcVersions', () => {
 });
 
 describe('bad releases', () => {
-  it('a release marked .bad is never resolved as current, nor reinstalled', async () => {
+  it.skipIf(posixOnly)('a release marked .bad is never resolved as current, nor reinstalled', async () => {
     const good = fakeVersion('2.76.10');
     const bad = fakeVersion('2.76.11');
     switchCurrent(root, good);
@@ -211,7 +248,7 @@ describe('bad releases', () => {
     expect(isBad(bad)).toBe(true);
   });
 
-  it('rollback never targets a bad previous', () => {
+  it.skipIf(posixOnly)('rollback never targets a bad previous', () => {
     const a = fakeVersion('2.76.10');
     const b = fakeVersion('2.76.11');
     switchCurrent(root, a);
@@ -251,7 +288,7 @@ describe('install lock (O_EXCL)', () => {
 });
 
 describe('hostEntry — what the host-agent spawns sessions from / relaunches onto', () => {
-  it('current when it is at least our version', () => {
+  it.skipIf(posixOnly)('current when it is at least our version', () => {
     const cur = fakeVersion('2.76.11');
     switchCurrent(root, cur);
     expect(hostEntry(root, '2.76.10', '/g', 'linux')).toBe(launcherOf(cur));
