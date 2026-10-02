@@ -547,6 +547,13 @@ and `.github/workflows/release.yml` does the rest:
 
 **JetBrains Marketplace** is fully automated alongside npm + VS Code Marketplace + Open VSX. Tagging `vX.Y.Z` publishes the plugin to the **stable** channel via `./gradlew publishPlugin` in CI. Pre-release tags (`vX.Y.Z-rc.N`) skip the marketplace push — the build still runs and the `.zip` is attached to the GitHub Release for manual upload to a non-stable channel if needed.
 
+**⚠️ A tag is NOT "in prod" when npm serves it (owner rule, 2026-10-02).** Every tag also rebuilds the **CodeAgent Box image** (~8 min) and triggers the **Codespaces prebuild** on `CodeAgentMobile/codeam-codespace` (~20–24 min after the image), about **35–40 min from tag to new deploys**. Until both finish, a NEW scratch Box or codespace boots the CLI baked into the previous image. Only the host-agent startup self-update moves it forward, and that was found not applying on 2026-10-02. So:
+- **batch fixes into ONE release**; don't tag every PR (2.76.12 → .13 → .14 in one afternoon meant three full rebuilds);
+- **call a release shipped only when** the Box image job is green, the wrapper prebuild run after the tag succeeded, and a fresh deploy reports the new version;
+- **when measuring a fix,** check `codeam --version` inside the workspace first.
+
+Detail: `codeagent-mobile/RUNBOOK.md` and the root `RUNBOOK.md`, section "A CLI tag is NOT in prod when npm serves it".
+
 **Versions in git lag behind the latest tag.** The release workflow patches `apps/cli/package.json`, `apps/vsc-plugin/package.json`, `apps/jetbrains-plugin/build.gradle.kts`, and `apps/jetbrains-plugin/src/main/resources/META-INF/plugin.xml` during the build and only commits back `chore(changelog): notes for vX.Y.Z [skip ci]` — the version-bump commits are NOT pushed. So `git show HEAD:apps/cli/package.json | grep version` may show an older number than what's actually published on npm. Don't be fooled — `git describe --tags --abbrev=0` is the source of truth for what's live.
 
 ## CI
