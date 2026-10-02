@@ -117,6 +117,34 @@ describe('provisionBeadsForStart — composition-root entry', () => {
     expect(signal.mock.calls[0][0].status).toBe('failed');
   });
 
+  // codeagent-w683: provisioning raced the agent's ACP handshake and a cold
+  // Dolt start starved `session/new` (20–31 s instead of 3–6 s).
+  it('holds startBeads until deferUntil settles, but exports the agent env synchronously', async () => {
+    const spy = vi.spyOn(orchestrator, 'startBeads').mockResolvedValue(fakeStarted());
+    vi.spyOn(pairing, 'postBeadsProvisioning').mockResolvedValue({ ok: true });
+    delete process.env.BEADS_DOLT_SHARED_SERVER;
+    let release!: () => void;
+    const handshake = new Promise<void>((r) => (release = r));
+    const pending = provisionBeadsForStart({ ...baseCtx, deferUntil: handshake });
+    expect(process.env.BEADS_DOLT_SHARED_SERVER).toBe('1');
+    await new Promise((r) => setTimeout(r, 10));
+    expect(spy).not.toHaveBeenCalled();
+    release();
+    await pending;
+    expect(spy).toHaveBeenCalledTimes(1);
+  });
+
+  it('still provisions when deferUntil rejects', async () => {
+    const spy = vi.spyOn(orchestrator, 'startBeads').mockResolvedValue(fakeStarted());
+    vi.spyOn(pairing, 'postBeadsProvisioning').mockResolvedValue({ ok: true });
+    const res = await provisionBeadsForStart({
+      ...baseCtx,
+      deferUntil: Promise.reject(new Error('handshake failed')),
+    });
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(res).not.toBeNull();
+  });
+
   it('a non-ok provisioning signal POST does not throw (strictly non-fatal)', async () => {
     vi.spyOn(orchestrator, 'startBeads').mockResolvedValue(fakeStarted());
     vi.spyOn(pairing, 'postBeadsProvisioning').mockResolvedValue({

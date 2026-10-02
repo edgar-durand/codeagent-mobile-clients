@@ -14,7 +14,12 @@ import { CommandRelayService, stopRelayWithGoodbye } from '../services/command-r
 import { AgentService } from '../services/agent.service';
 import { createRuntimeStrategy } from '../agents/registry';
 import { getAcpAdapter, requiresAcp, resolveAcpAdapterWithRetry } from '../agents/acp/adapters';
-import { waitForAdapterModuleGraph } from '../agents/acp/agent-binary';
+import {
+  prefetchIntoPageCache,
+  resolveClaudeNativeBinary,
+  waitForAdapterModuleGraph,
+} from '../agents/acp/agent-binary';
+import { markAgentStarting, waitForNoAgentStarting } from './start/agent-startup-marks';
 import { runAcpSession, surfaceStartupFailure } from '../agents/acp/runner';
 import { AcpPublisher } from '../agents/acp/publisher';
 import { installRelayCrashGuards } from '../lib/process-guards';
@@ -68,6 +73,13 @@ import { agentPreviewBridge } from './start/agent-preview-bridge';
 import { restorePreviewAfterRestart } from './start/handlers';
 import { createOsStrategy } from '../os';
 import { createInteractiveAgentStrategy } from '../agents/registry';
+
+/**
+ * Longest beads provisioning waits for agent startups. A healthy handshake
+ * settles in 3–6 s; this only matters when one hangs (the runner's own
+ * `session/new` ceiling is 120 s), so beads still comes up.
+ */
+export const BEADS_AFTER_HANDSHAKE_CAP_MS = 60_000;
 
 /**
  * Wires the long-running services (PTY ↔ output relay ↔ command
@@ -147,6 +159,15 @@ export async function start(requestedAgent?: AgentId, presetSession?: SavedSessi
 
   if (!session.agent) {
     throw new Error('Active session has no agent — re-pair with `codeam pair`.');
+  }
+
+  // Warm the agent's ~215 MB launch binary NOW, seconds before the spawn: on a
+  // cold codespace disk the exec otherwise pages it in by faults (~10 s inside
+  // `session/new`, codeagent-w683). Managed surfaces run the claude runtime
+  // for claude, the house agent and every managed agent.
+  if (!isLocalSession() && session.agent === 'claude') {
+    const claudeBinary = resolveClaudeNativeBinary();
+    if (claudeBinary) prefetchIntoPageCache(claudeBinary);
   }
 
   // Use the per-session pluginId (set since v1.4.6); fall back to the
@@ -279,6 +300,30 @@ export async function start(requestedAgent?: AgentId, presetSession?: SavedSessi
   // Scratch ZIP exports from a previous run are unreachable: their one-shot
   // tokens lived in that process's memory.
   purgeExports();
+  // Beads provisioning waits until no agent on this machine is still starting
+  // (codeagent-w683). Racing the agent spawn, `bd init` + a cold
+  // `dolt sql-server` start held `session/new` at 20–31 s instead of 3–6 s on
+  // a 1-vCPU Box / a cold codespace disk, and the user's first message waited
+  // the whole time. This session's own wait ends when the runner reports the
+  // handshake settled, at once on the paths without one (baton, PTY); then it
+  // waits for the other sessions' marks. The cap bounds the whole thing, so
+  // beads always provisions.
+  const releaseStartupMark = markAgentStarting();
+  process.once('exit', releaseStartupMark);
+  let settleOwnHandshake: () => void = () => undefined;
+  const ownHandshakeSettled = new Promise<void>((resolve) => {
+    settleOwnHandshake = resolve;
+  });
+  const releaseBeads = (): void => {
+    releaseStartupMark();
+    settleOwnHandshake();
+  };
+  const agentHandshakeSettled = Promise.race([
+    ownHandshakeSettled.then(() =>
+      waitForNoAgentStarting({ timeoutMs: BEADS_AFTER_HANDSHAKE_CAP_MS }),
+    ),
+    new Promise<void>((resolve) => setTimeout(resolve, BEADS_AFTER_HANDSHAKE_CAP_MS).unref()),
+  ]);
   const beadsReady = provisionBeadsForStart({
     sessionId: session.id,
     pluginId,
@@ -287,6 +332,7 @@ export async function start(requestedAgent?: AgentId, presetSession?: SavedSessi
     // Wire this session's agent natively via `bd setup <recipe> --global` so
     // the agent actually uses bd (D12 — REVISED). Covers BOTH ACP and PTY.
     agents: [session.agent],
+    deferUntil: agentHandshakeSettled,
   }).then((started) => {
     beads = started;
     return started;
@@ -476,7 +522,7 @@ export async function start(requestedAgent?: AgentId, presetSession?: SavedSessi
     if (gateTimer) clearTimeout(gateTimer);
     log.info(
       'beads',
-      `agent-spawn gate released (beads ungated, ${beads ? 'already ready' : 'still provisioning in background'}); project deps provisioned`,
+      'agent-spawn gate released (beads waits for the agent handshake); project deps provisioned',
     );
   }
 
@@ -514,6 +560,7 @@ export async function start(requestedAgent?: AgentId, presetSession?: SavedSessi
   // The baton owns its own lifecycle and never returns, exactly like
   // `runAcpSession` below.
   if (isLocalSession() && requiresAcp(session.agent)) {
+    releaseBeads();
     // Resolve via the SAME bounded retry the main ACP fork uses — a
     // transient `getAcpAdapter` null (npm reinstall race) would otherwise
     // silently drop Take Control to the plain ACP path below instead of
@@ -606,6 +653,7 @@ export async function start(requestedAgent?: AgentId, presetSession?: SavedSessi
       adapter,
       cwd,
       getBeads,
+      onHandshakeSettled: releaseBeads,
       pollSecret: session.pollSecret,
       mcpServers,
       // AUTO mode for headless, mobile-driven sessions: no human at the box
@@ -628,6 +676,7 @@ export async function start(requestedAgent?: AgentId, presetSession?: SavedSessi
   if (requiresAcp(session.agent)) {
     log.error('acp', `[anomaly] acp-required agent on PTY runtime (agent=${session.agent})`);
   }
+  releaseBeads();
   const runtime = createRuntimeStrategy(session.agent);
   // SEC crit1 (#819): pass the per-pairing token so conversation-history
   // writes carry X-Plugin-Auth-Token for the backend to authorize.

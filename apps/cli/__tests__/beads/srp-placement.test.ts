@@ -36,6 +36,18 @@ describe('Beads provisioning placement (SRP / D10)', () => {
     expect(start).toContain('provisionBeadsForStart');
   });
 
+  // codeagent-w683: beads must not compete with the agent's startup.
+  it('start() holds beads until the ACP handshake settles, released on every path', () => {
+    const start = read('commands/start.ts');
+    expect(start).toContain('deferUntil: agentHandshakeSettled');
+    expect(start).toContain('onHandshakeSettled: releaseBeads');
+    // baton (local) + PTY have no ACP handshake to wait for.
+    expect(start.match(/releaseBeads\(\);/g)?.length).toBe(2);
+    const runner = read('agents/acp/runner.ts');
+    // success AND failure of client.start() both release it.
+    expect(runner.match(/opts\.onHandshakeSettled\?\.\(\);/g)?.length).toBe(2);
+  });
+
   it('startInfraOnly() provisions beads from the composition root', () => {
     const infra = read('commands/start-infra-only.ts');
     expect(infra).toContain('provisionBeadsForStart');

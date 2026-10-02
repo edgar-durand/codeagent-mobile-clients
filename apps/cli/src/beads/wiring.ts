@@ -4,6 +4,7 @@ import { deriveProjectIdentity } from './project-key';
 import { postBeadsProvisioning } from '../services/pairing.service';
 import { log } from '../services/logger';
 import { readBeadsEnabled } from './config-store';
+import { withBeadsProvisionLock } from './provision-lock';
 
 /**
  * Composition-root entry for Beads (SRP decision D10). Invoked by the CLI's
@@ -44,6 +45,18 @@ export interface BeadsSessionContext {
    * `startInfraOnly()` path passes none, so the setup step is a no-op there.
    */
   agents?: AgentId[];
+  /**
+   * Hold the heavy provisioning (`bd init` → `dolt sql-server` start → DB
+   * probe → `bd setup`) until this settles. The env export above it still
+   * happens synchronously, so the agent spawned meanwhile inherits it.
+   *
+   * ⚠️ Why (codeagent-w683): provisioning used to race the agent's ACP
+   * handshake, and a cold `dolt sql-server` start saturates a 1-vCPU Box / a
+   * 2-core codespace for ~20 s. `session/new` then took 20–31 s instead of
+   * 3–6 s, every time a workspace started cold. `start()` passes "the agent
+   * finished its handshake (or a cap elapsed)".
+   */
+  deferUntil?: Promise<unknown>;
 }
 
 /**
@@ -91,15 +104,19 @@ export async function provisionBeadsForStart(
   }
   const pluginAuthToken = ctx.pluginAuthToken;
 
+  if (ctx.deferUntil) await ctx.deferUntil.catch(() => undefined);
+
   let started: StartedBeads | null = null;
   try {
-    started = await startBeads({
-      sessionId: ctx.sessionId,
-      pluginId: ctx.pluginId,
-      pluginAuthToken,
-      cwd: ctx.cwd,
-      agents: ctx.agents,
-    });
+    started = await withBeadsProvisionLock(() =>
+      startBeads({
+        sessionId: ctx.sessionId,
+        pluginId: ctx.pluginId,
+        pluginAuthToken,
+        cwd: ctx.cwd,
+        agents: ctx.agents,
+      }),
+    );
   } catch (err) {
     // Strictly non-fatal — a provisioning failure must never break the agent
     // run or pairing.
