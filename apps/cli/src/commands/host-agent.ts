@@ -154,6 +154,11 @@ import {
   type SelfUpdateResult,
 } from './host/self-update';
 import { defaultDisableService } from './host/teardown';
+import {
+  FLEET_IMAGE_INSPECT_FORMAT,
+  parseFleetImageInspect,
+  planFleetBoxImageGc,
+} from './host/fleet-image-gc';
 
 // ── Re-exports (Phase 3 refactor) ──────────────────────────────────────────
 // The implementations moved into commands/host/* modules; every symbol that
@@ -585,12 +590,19 @@ function isMissingContainerError(stderr: string): boolean {
  * 93.8 GB.
  *
  * ⚠️ THE SCOPE IS THE SAFETY PROPERTY. This handler runs as root on a host that
- * holds every rescued user's data, so it does exactly two things and refuses to
- * be steered anywhere else:
+ * holds every rescued user's data, so it does exactly three things and refuses
+ * to be steered anywhere else:
+ *   - superseded BOX images, by tag (`images`): keep the current `:latest` plus
+ *     one previous release (tagged `:rollback`), `docker rmi` the other Box tags
+ *     no container references. Never `-f`, never a non-Box name. See
+ *     `host/fleet-image-gc.ts`.
  *   - `docker image prune` — DANGLING ONLY, never `-a`. Safe because Docker
  *     refuses to delete an image any container references, INCLUDING stopped
  *     ones.
- *   - `docker builder prune` — pure derived data.
+ *   - `docker builder prune --all --filter until=72h` — pure derived data. The
+ *     host pulls its images and builds nothing, and a bare `builder prune` only
+ *     drops DANGLING cache: fleet-1 kept 9.97 GB of two-month-old cache through
+ *     a month of daily "builder ok" runs (2026-10-02).
  * It must NEVER prune containers or volumes, no matter what the wire says:
  *   - a STOPPED fleet container IS A SLEEPING BOX (the wake path `docker start`s
  *     it), so `docker container prune` would destroy every sleeping user's box;
@@ -768,6 +780,13 @@ const DOCKER_RUN_TIMEOUT_MS = 120_000;
  * pull); rm/stop/start stay on the fast bound.
  */
 const DOCKER_RUN_WITH_PULL_TIMEOUT_MS = 600_000;
+
+/**
+ * Bound for the `fleet_prune_host` steps. Deleting multi-GB images under the
+ * containerd snapshotter outlasts the 120 s fast bound, and a killed prune
+ * reclaims nothing (fleet-1, 2026-10-02: code=143 every day).
+ */
+const DOCKER_PRUNE_TIMEOUT_MS = 600_000;
 
 /** Default runner: spawn the real `docker` binary (argv only, no shell). */
 export const defaultDockerRunner: DockerRunner = {
@@ -1986,24 +2005,47 @@ export class HostAgentSupervisor {
    * `fleet_prune_host` — reclaim Docker residue. Best-effort and idempotent: a
    * prune with nothing to collect exits 0 with "Total reclaimed space: 0B".
    *
-   * ⚠️ Only ever `image prune` (dangling) and `builder prune`. NEVER
-   * `container prune` (a stopped fleet container is a SLEEPING BOX) and NEVER
-   * `volume prune` (a box's volume is the user's workspace and outlives its
-   * container by design). See `FleetPruneHostPayload`.
+   * ⚠️ Only superseded Box images, `image prune` (dangling) and `builder prune`.
+   * NEVER `container prune` (a stopped fleet container is a SLEEPING BOX) and
+   * NEVER `volume prune` (a box's volume is the user's workspace and outlives
+   * its container by design). See `FleetPruneHostPayload`.
+   *
+   * ⚠️ Every step runs on the LONG docker bound. Under the 120 s one the dangling
+   * prune never finished on fleet-1: the prod and dev host-agents share one
+   * daemon and both get this command at 15:45 UTC; dev's prune was SIGTERM'd at
+   * 120 s (code=143) and prod's was refused with "a prune operation is already
+   * running" — every day, so 17 GB of dangling Box images stayed (2026-10-02).
+   * That refusal now means the other agent is doing the work, not a failure.
    */
   private async fleetPruneHost(payload: FleetPruneHostPayload): Promise<void> {
     log.info(
       'host-agent',
       `fleet_prune_host images=${payload.images} buildCache=${payload.buildCache}`,
     );
+    // Before the dangling prune: it tags the rollback image, which would
+    // otherwise be dangling and collected by the very next step.
+    if (payload.images) await this.fleetCollectSupersededBoxImages();
+
     // `-f` only skips the interactive confirmation; it does not widen scope.
     const steps: Array<{ label: string; args: string[] }> = [];
     if (payload.images) steps.push({ label: 'image', args: ['image', 'prune', '-f'] });
-    if (payload.buildCache) steps.push({ label: 'builder', args: ['builder', 'prune', '-f'] });
+    if (payload.buildCache) {
+      steps.push({
+        label: 'builder',
+        args: ['builder', 'prune', '-f', '--all', '--filter', 'until=72h'],
+      });
+    }
 
     for (const step of steps) {
-      const res = await this.docker.run(step.args);
+      const res = await this.docker.run(step.args, { timeoutMs: DOCKER_PRUNE_TIMEOUT_MS });
       if (res.code !== 0) {
+        if (/prune operation is already running/i.test(res.stderr)) {
+          log.info(
+            'host-agent',
+            `fleet_prune_host ${step.label} skipped: another prune is running on this daemon`,
+          );
+          continue;
+        }
         log.warn(
           'host-agent',
           `fleet_prune_host ${step.label} failed (code=${res.code}): ${res.stderr.trim().slice(-300)}`,
@@ -2018,6 +2060,115 @@ export class HostAgentSupervisor {
         `fleet_prune_host ${step.label} ok${reclaimed ? ` reclaimed=${reclaimed[1].trim()}` : ''}`,
       );
     }
+  }
+
+  /**
+   * Remove superseded Box images by tag: everything but the current `:latest`,
+   * one previous release (kept, tagged `:rollback`) and any image a container
+   * uses. Fail-SAFE: if the current image, the image list or the container
+   * references cannot be read, it removes nothing.
+   */
+  private async fleetCollectSupersededBoxImages(): Promise<void> {
+    // A local override tag (int test / operator) has no release history to
+    // reason about — same carve-out as `fleetBoxImageStale`.
+    if (process.env.CODEAM_FLEET_BOX_IMAGE) return;
+    const currentRef = resolveFleetBoxImage();
+    const opts = { timeoutMs: DOCKER_PRUNE_TIMEOUT_MS };
+    const lines = (out: string): string[] =>
+      [...new Set(out.split('\n').map((l) => l.trim()).filter(Boolean))];
+
+    const cur = await this.docker.run(
+      ['image', 'inspect', '--format', '{{.Id}}', currentRef],
+      opts,
+    );
+    const currentId = cur.stdout.trim();
+    if (cur.code !== 0 || !currentId) {
+      log.warn('host-agent', `fleet_prune_host box-images skipped: ${currentRef} not present`);
+      return;
+    }
+    const ids = await this.docker.run(['image', 'ls', '-aq', '--no-trunc'], opts);
+    if (ids.code !== 0) {
+      log.warn(
+        'host-agent',
+        `fleet_prune_host box-images skipped: image ls failed (code=${ids.code})`,
+      );
+      return;
+    }
+    const imageIds = lines(ids.stdout);
+    if (imageIds.length === 0) return;
+    const inspect = await this.docker.run(
+      ['image', 'inspect', '--format', FLEET_IMAGE_INSPECT_FORMAT, ...imageIds],
+      opts,
+    );
+    if (inspect.code !== 0) {
+      log.warn(
+        'host-agent',
+        `fleet_prune_host box-images skipped: image inspect failed (code=${inspect.code})`,
+      );
+      return;
+    }
+    const containers = await this.docker.run(['ps', '-aq', '--no-trunc'], opts);
+    if (containers.code !== 0) {
+      log.warn(
+        'host-agent',
+        `fleet_prune_host box-images skipped: ps failed (code=${containers.code})`,
+      );
+      return;
+    }
+    const containerIds = lines(containers.stdout);
+    const referenced = new Set<string>();
+    if (containerIds.length > 0) {
+      const refs = await this.docker.run(
+        ['inspect', '--format', '{{.Image}}', ...containerIds],
+        opts,
+      );
+      // A container removed between `ps` and `inspect` fails the whole call;
+      // without the full reference set nothing is provably unused.
+      if (refs.code !== 0) {
+        log.warn(
+          'host-agent',
+          `fleet_prune_host box-images skipped: container inspect failed (code=${refs.code})`,
+        );
+        return;
+      }
+      for (const id of lines(refs.stdout)) referenced.add(id);
+    }
+
+    const plan = planFleetBoxImageGc({
+      images: parseFleetImageInspect(inspect.stdout),
+      referenced,
+      currentId,
+      currentRef,
+    });
+    if (plan.rollback?.tagAs) {
+      const tag = await this.docker.run(['tag', plan.rollback.id, plan.rollback.tagAs], opts);
+      if (tag.code !== 0) {
+        // Without the tag the rollback image is dangling and the next step
+        // would collect it; keep the old tags too rather than lose both.
+        log.warn(
+          'host-agent',
+          `fleet_prune_host box-images: tagging rollback failed (code=${tag.code}), removing nothing`,
+        );
+        return;
+      }
+    }
+    for (const ref of plan.removeTags) {
+      // Never `-f`: Docker then refuses any image a container uses.
+      const res = await this.docker.run(['rmi', ref], opts);
+      if (res.code === 0 || /no such image/i.test(res.stderr)) {
+        log.info('host-agent', `fleet_prune_host box-images removed ${ref}`);
+      } else {
+        log.warn(
+          'host-agent',
+          `fleet_prune_host box-images rmi ${ref} failed (code=${res.code}): ${res.stderr.trim().slice(-300)}`,
+        );
+      }
+    }
+    log.info(
+      'host-agent',
+      `fleet_prune_host box-images current=${currentId.slice(7, 19)} ` +
+        `rollback=${plan.rollback ? plan.rollback.id.slice(7, 19) : 'none'} removed=${plan.removeTags.length}`,
+    );
   }
 
   private async fleetStopBox(payload: FleetBoxRefPayload): Promise<void> {
