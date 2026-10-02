@@ -19,6 +19,7 @@ import {
   resolveClaudeNativeBinary,
   waitForAdapterModuleGraph,
 } from '../agents/acp/agent-binary';
+import { markAgentStarting, waitForNoAgentStarting } from './start/agent-startup-marks';
 import { runAcpSession, surfaceStartupFailure } from '../agents/acp/runner';
 import { AcpPublisher } from '../agents/acp/publisher';
 import { installRelayCrashGuards } from '../lib/process-guards';
@@ -74,9 +75,9 @@ import { createOsStrategy } from '../os';
 import { createInteractiveAgentStrategy } from '../agents/registry';
 
 /**
- * Longest beads provisioning waits for the agent's handshake. A healthy one
- * settles in 3–6 s; this only matters when it hangs (the runner's own
- * `session/new` ceiling is 120 s), so beads still comes up for that session.
+ * Longest beads provisioning waits for agent startups. A healthy handshake
+ * settles in 3–6 s; this only matters when one hangs (the runner's own
+ * `session/new` ceiling is 120 s), so beads still comes up.
  */
 export const BEADS_AFTER_HANDSHAKE_CAP_MS = 60_000;
 
@@ -299,17 +300,30 @@ export async function start(requestedAgent?: AgentId, presetSession?: SavedSessi
   // Scratch ZIP exports from a previous run are unreachable: their one-shot
   // tokens lived in that process's memory.
   purgeExports();
-  // Beads provisioning waits for the agent's ACP handshake (codeagent-w683):
-  // racing it, a cold `dolt sql-server` start starved `session/new` on a
-  // 1-vCPU Box / 2-core codespace — 20–31 s instead of 3–6 s, and the user's
-  // first message waited the whole time. Resolved by the runner once the
-  // handshake settles, immediately on the paths without one (baton, PTY), and
-  // by the cap if the handshake never settles, so beads always provisions.
-  let releaseBeads: () => void = () => undefined;
-  const agentHandshakeSettled = new Promise<void>((resolve) => {
-    releaseBeads = resolve;
-    setTimeout(resolve, BEADS_AFTER_HANDSHAKE_CAP_MS).unref();
+  // Beads provisioning waits until no agent on this machine is still starting
+  // (codeagent-w683). Racing the agent spawn, `bd init` + a cold
+  // `dolt sql-server` start held `session/new` at 20–31 s instead of 3–6 s on
+  // a 1-vCPU Box / a cold codespace disk, and the user's first message waited
+  // the whole time. This session's own wait ends when the runner reports the
+  // handshake settled, at once on the paths without one (baton, PTY); then it
+  // waits for the other sessions' marks. The cap bounds the whole thing, so
+  // beads always provisions.
+  const releaseStartupMark = markAgentStarting();
+  process.once('exit', releaseStartupMark);
+  let settleOwnHandshake: () => void = () => undefined;
+  const ownHandshakeSettled = new Promise<void>((resolve) => {
+    settleOwnHandshake = resolve;
   });
+  const releaseBeads = (): void => {
+    releaseStartupMark();
+    settleOwnHandshake();
+  };
+  const agentHandshakeSettled = Promise.race([
+    ownHandshakeSettled.then(() =>
+      waitForNoAgentStarting({ timeoutMs: BEADS_AFTER_HANDSHAKE_CAP_MS }),
+    ),
+    new Promise<void>((resolve) => setTimeout(resolve, BEADS_AFTER_HANDSHAKE_CAP_MS).unref()),
+  ]);
   const beadsReady = provisionBeadsForStart({
     sessionId: session.id,
     pluginId,
