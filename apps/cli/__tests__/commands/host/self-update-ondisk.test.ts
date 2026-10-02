@@ -3,6 +3,14 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { runSelfUpdateWith, type SelfUpdateDeps } from '../../../src/commands/host/self-update';
+import { switchCurrent } from '../../../src/lib/cli-versions';
+import { log } from '../../../src/services/logger';
+
+// Versioned installs are POSIX-only by design (`versionedModeSupported`: no
+// Windows host-agent ships, and directory symlinks there need junctions), so
+// the tests that build real `current`/`previous` symlinks skip on win32 rather
+// than exercising a code path production never takes there.
+const posixOnly = process.platform === 'win32';
 
 /**
  * The self-update assumed it was the only thing that could update the package.
@@ -95,7 +103,7 @@ describe('runSelfUpdate — the version already on disk', () => {
     expect(attempted.some((c) => c.includes('view'))).toBe(false);
   });
 
-  it('still installs (side-by-side, never `-g`) when the disk matches what is already running', async () => {
+  it.skipIf(posixOnly)('still installs (side-by-side, never `-g`) when the disk matches what is already running', async () => {
     const run = fakeInstallRun('2.66.0', '2.65.16');
 
     const res = await runSelfUpdateWith(deps({ run }));
@@ -140,5 +148,84 @@ describe('runSelfUpdate — Windows keeps the legacy global install', () => {
     expect(attempted.some((c) => c.includes('install -g'))).toBe(true);
     expect(attempted.some((c) => c.includes('--prefix'))).toBe(false);
     expect(fs.readdirSync(root)).toEqual([]);
+  });
+});
+
+/**
+ * Every decision leaves a line in the debug log.
+ *
+ * WHY — 2026-10-02. After codeam-cli 2.76.13 shipped, the QA Box and the QA warm
+ * codespace were restarted and `grep self-update ~/.codeam/debug-*.log` came
+ * back empty, which read as "the startup self-update did not fire". It had
+ * nothing to do: both had already been hand-upgraded to 2.76.13 before any
+ * restart, so every boot's check found itself up to date, and "up to date" was
+ * the one outcome that logged nothing (an `npm view` failure was trace-only, so
+ * equally invisible). The hand upgrade that followed broke the Box's CLI.
+ */
+describe('runSelfUpdate — every outcome is logged', () => {
+  it('up to date: says so at info, with both versions', async () => {
+    const info = vi.spyOn(log, 'info').mockImplementation(() => {});
+    const run = fakeInstallRun('2.65.16', '2.65.16');
+
+    const res = await runSelfUpdateWith(deps({ run }));
+
+    expect(res).toEqual({ status: 'current' });
+    expect(info.mock.calls.map((c) => String(c[1]))).toContain(
+      'self-update: running 2.65.16, npm latest 2.65.16 — up to date',
+    );
+    info.mockRestore();
+  });
+
+  it('a failed registry lookup is a warning with npm’s own error, not a silent skip', async () => {
+    const warn = vi.spyOn(log, 'warn').mockImplementation(() => {});
+    const run = vi.fn(async (_cmd: string, args: string[]) => {
+      if (args[0] === 'view') return { code: 1, stdout: '', stderr: 'npm ERR! code E401\nnpm ERR! Unable to authenticate' };
+      return { code: 1, stdout: '', stderr: '' };
+    });
+
+    const res = await runSelfUpdateWith(deps({ run }));
+
+    expect(res).toEqual({ status: 'skipped' });
+    const msg = warn.mock.calls.map((c) => String(c[1])).find((m) => m.includes('npm view'));
+    expect(msg).toContain('exited 1');
+    expect(msg).toContain('E401');
+    warn.mockRestore();
+  });
+});
+
+/**
+ * No restart loop when the running code already IS `current`.
+ *
+ * WHY — 2026-10-02, QA warm codespace: a dist copied by hand into
+ * `~/.codeam/cli/2.76.12` reported `__CLI_VERSION__` 2.39.18 while that dir's
+ * package.json said 2.76.12. Every startup check concluded "2.76.12 already
+ * current (running 2.39.18) — restarting onto it"; the hop parent respawned the
+ * same code, which said the same thing 5 s later: 9 restarts in 70 s, each one
+ * killing and resuming both sessions. Restarting onto yourself can never help.
+ */
+describe.skipIf(posixOnly)('runSelfUpdate — running from current itself', () => {
+  it('does not restart onto the directory it is already running from', async () => {
+    const warn = vi.spyOn(log, 'warn').mockImplementation(() => {});
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'codeam-cli-versions-'));
+    const dir = path.join(root, '2.76.12');
+    const pkg = path.join(dir, 'node_modules', 'codeam-cli');
+    fs.mkdirSync(path.join(pkg, 'dist'), { recursive: true });
+    fs.writeFileSync(path.join(pkg, 'package.json'), JSON.stringify({ name: 'codeam-cli', version: '2.76.12', bin: { codeam: 'dist/index.js' } }));
+    fs.writeFileSync(path.join(pkg, 'dist', 'index.js'), '// hand-copied dist\n');
+    switchCurrent(root, dir);
+    // Even an older-than-current but newer-than-us global must not trigger the on-disk shortcut.
+    const run = fakeInstallRun('2.76.12', '2.76.11');
+
+    const res = await runSelfUpdateWith(
+      deps({ run, versionsRoot: root, currentVersion: () => '2.39.18', runningEntry: path.join(pkg, 'dist', 'index.js'), platform: 'linux' }),
+    );
+
+    expect(res).toEqual({ status: 'skipped' });
+    // The directory it runs from survives (a failed verification used to rm it).
+    expect(fs.existsSync(path.join(pkg, 'dist', 'index.js'))).toBe(true);
+    const attempted = run.mock.calls.map(([cmd, args]) => `${cmd} ${args.join(' ')}`);
+    expect(attempted.some((c) => c.includes(' ls '))).toBe(false);
+    expect(warn.mock.calls.map((c) => String(c[1])).some((m) => m.includes('it is this same code'))).toBe(true);
+    warn.mockRestore();
   });
 });
