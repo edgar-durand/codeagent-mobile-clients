@@ -4,6 +4,7 @@ import { deriveProjectIdentity } from './project-key';
 import { postBeadsProvisioning } from '../services/pairing.service';
 import { log } from '../services/logger';
 import { readBeadsEnabled } from './config-store';
+import { withBeadsProvisionLock } from './provision-lock';
 
 /**
  * Composition-root entry for Beads (SRP decision D10). Invoked by the CLI's
@@ -107,13 +108,15 @@ export async function provisionBeadsForStart(
 
   let started: StartedBeads | null = null;
   try {
-    started = await startBeads({
-      sessionId: ctx.sessionId,
-      pluginId: ctx.pluginId,
-      pluginAuthToken,
-      cwd: ctx.cwd,
-      agents: ctx.agents,
-    });
+    started = await withBeadsProvisionLock(() =>
+      startBeads({
+        sessionId: ctx.sessionId,
+        pluginId: ctx.pluginId,
+        pluginAuthToken,
+        cwd: ctx.cwd,
+        agents: ctx.agents,
+      }),
+    );
   } catch (err) {
     // Strictly non-fatal — a provisioning failure must never break the agent
     // run or pairing.
