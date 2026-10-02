@@ -38,6 +38,14 @@ describe('agent startup marks', () => {
     expect(fs.readdirSync(dir)).toEqual([]);
   });
 
+  it('ignores a mark whose pid now belongs to a different process (container restart)', () => {
+    markAgentStarting({ dir, pid: 22, startTimeOf: () => '5000' });
+    expect(
+      otherAgentsStarting({ dir, pid: 1, isAlive: () => true, startTimeOf: () => '9000' }),
+    ).toEqual([]);
+    expect(fs.readdirSync(dir)).toEqual([]);
+  });
+
   it('waits while another agent is starting and resolves once it releases', async () => {
     const release = markAgentStarting({ dir, pid: 101 });
     let polls = 0;
