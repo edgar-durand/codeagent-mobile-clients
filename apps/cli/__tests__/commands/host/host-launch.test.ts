@@ -22,6 +22,12 @@ import {
   versionOf,
 } from '../../../src/lib/cli-versions';
 
+// Versioned installs are POSIX-only by design (`versionedModeSupported`: no
+// Windows host-agent ships, and directory symlinks there need junctions), so
+// the tests that build real `current`/`previous` symlinks skip on win32 rather
+// than exercising a code path production never takes there.
+const posixOnly = process.platform === 'win32';
+
 /**
  * Host-agent-only launch onto the versioned install (codeagent-siec, review
  * round 2). The first design redirected EVERY command and re-exec'd a stale
@@ -87,7 +93,7 @@ describe('superviseCurrent — the host-agent hops onto a newer current, once', 
     await expect(harness('2.76.10', { args: [SUPERVISED_FLAG] }).run).resolves.toBe('self');
   });
 
-  it('spawns `node <current entry> host-agent --supervised` and respawns the new current after an update (exit 0)', async () => {
+  it.skipIf(posixOnly)('spawns `node <current entry> host-agent --supervised` and respawns the new current after an update (exit 0)', async () => {
     const v11 = fakeVersion('2.76.11');
     switchCurrent(root, v11);
     const h = harness('2.76.10');
@@ -102,7 +108,7 @@ describe('superviseCurrent — the host-agent hops onto a newer current, once', 
     expect(h.spawn.mock.calls[1]![1]![0]).toBe(launcherOf(v12));
   });
 
-  it('ONE pre-ready exit retries the same release (transient boot outage); TWO mark it .bad and roll back', async () => {
+  it.skipIf(posixOnly)('ONE pre-ready exit retries the same release (transient boot outage); TWO mark it .bad and roll back', async () => {
     const v11 = fakeVersion('2.76.11');
     const v12 = fakeVersion('2.76.12');
     switchCurrent(root, v11);
@@ -126,7 +132,7 @@ describe('superviseCurrent — the host-agent hops onto a newer current, once', 
     expect(fs.existsSync(path.join(v11, '.prefail'))).toBe(false);
   });
 
-  it('no oscillation: once both releases are bad the launcher runs itself, and a restart stays there', async () => {
+  it.skipIf(posixOnly)('no oscillation: once both releases are bad the launcher runs itself, and a restart stays there', async () => {
     const v11 = fakeVersion('2.76.11');
     switchCurrent(root, v11);
     const h = harness('2.76.10');
@@ -139,7 +145,7 @@ describe('superviseCurrent — the host-agent hops onto a newer current, once', 
     await expect(harness('2.76.10').run).resolves.toBe('self');
   });
 
-  it('identity rejection / not enrolled (exit 78) is EXPECTED: no .bad, no rollback, exit 78', async () => {
+  it.skipIf(posixOnly)('identity rejection / not enrolled (exit 78) is EXPECTED: no .bad, no rollback, exit 78', async () => {
     const v11 = fakeVersion('2.76.11');
     switchCurrent(root, v11);
     const h = harness('2.76.10');
@@ -150,7 +156,7 @@ describe('superviseCurrent — the host-agent hops onto a newer current, once', 
     expect(isBad(v11)).toBe(false);
   });
 
-  it('a crash AFTER ready is not a bad release: exit code passed through', async () => {
+  it.skipIf(posixOnly)('a crash AFTER ready is not a bad release: exit code passed through', async () => {
     const v11 = fakeVersion('2.76.11');
     switchCurrent(root, v11);
     const h = harness('2.76.10');
@@ -162,7 +168,7 @@ describe('superviseCurrent — the host-agent hops onto a newer current, once', 
     expect(isBad(v11)).toBe(false);
   });
 
-  it('a signal-killed child re-raises the same signal (exit code semantics kept)', async () => {
+  it.skipIf(posixOnly)('a signal-killed child re-raises the same signal (exit code semantics kept)', async () => {
     switchCurrent(root, fakeVersion('2.76.11'));
     const h = harness('2.76.10');
     await vi.waitFor(() => expect(h.children).toHaveLength(1));
@@ -173,7 +179,7 @@ describe('superviseCurrent — the host-agent hops onto a newer current, once', 
 });
 
 describe('restart after an update — no loop across two consecutive releases', () => {
-  it('codespace (no supervisor): relaunches onto the CURRENT entry, never a stale argv[1]', () => {
+  it.skipIf(posixOnly)('codespace (no supervisor): relaunches onto the CURRENT entry, never a stale argv[1]', () => {
     const v11 = fakeVersion('2.76.11');
     switchCurrent(root, v11);
     const relaunch = vi.fn();
@@ -200,7 +206,7 @@ describe('restart after an update — no loop across two consecutive releases', 
     expect(exit).toHaveBeenCalledWith(0);
   });
 
-  it('release 1 then release 2: the relaunched process IS current, so its startup check does not restart again', async () => {
+  it.skipIf(posixOnly)('release 1 then release 2: the relaunched process IS current, so its startup check does not restart again', async () => {
     for (const v of ['2.76.11', '2.76.12']) {
       switchCurrent(root, fakeVersion(v));
       // The relaunched host-agent runs `current` → its own version == current.

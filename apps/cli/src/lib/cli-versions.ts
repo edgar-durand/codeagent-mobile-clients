@@ -161,22 +161,50 @@ export function pointerTarget(root: string, name: 'current' | 'previous'): strin
   }
 }
 
-/** Atomically point `root/<name>` at `targetDir` (temp symlink + rename). */
+/**
+ * Atomically point `root/<name>` at `targetDir` (temp symlink + rename).
+ *
+ * The link is relative, and the kernel resolves it from the link's REAL
+ * directory, so both ends are canonicalised first. Callers mix spellings:
+ * `pointerTarget` hands back a realpath while `root` comes from
+ * `os.homedir()`. When the root is reached through a symlink (macOS
+ * `/var` → `/private/var`, a Linux HOME on `/var/home`), `path.relative` of
+ * the two spellings climbs the wrong number of levels, so `previous` (and
+ * `current` after a rollback) dangled, `validCurrent` returned null and
+ * rollback and GC stopped seeing those versions. Caught by the macOS CI leg.
+ */
 function atomicPoint(root: string, name: 'current' | 'previous', targetDir: string): void {
-  const tmp = path.join(root, `.${name}.tmp-${process.pid}-${Date.now()}`);
-  fs.symlinkSync(path.relative(root, targetDir), tmp, 'dir');
+  const realRoot = fs.realpathSync(root);
+  const tmp = path.join(realRoot, `.${name}.tmp-${process.pid}-${Date.now()}`);
+  fs.symlinkSync(path.relative(realRoot, fs.realpathSync(targetDir)), tmp, 'dir');
   try {
-    fs.renameSync(tmp, path.join(root, name));
+    fs.renameSync(tmp, path.join(realRoot, name));
   } catch (err) {
     fs.rmSync(tmp, { force: true });
     throw err;
   }
 }
 
+/**
+ * Whether two paths name the same directory, whatever the spelling: a realpath
+ * (`pointerTarget`, `versionDirContaining`) compared with a `path.join(root, …)`
+ * spelling differs as strings when `root` sits behind a symlink.
+ */
+export function samePath(a: string, b: string): boolean {
+  const canon = (p: string): string => {
+    try {
+      return fs.realpathSync(p);
+    } catch {
+      return path.resolve(p);
+    }
+  };
+  return canon(a) === canon(b);
+}
+
 /** Make `versionDir` current; the old current becomes `previous`. */
 export function switchCurrent(root: string, versionDir: string): void {
   const old = pointerTarget(root, 'current');
-  if (old && path.resolve(old) !== path.resolve(versionDir)) atomicPoint(root, 'previous', old);
+  if (old && !samePath(old, versionDir)) atomicPoint(root, 'previous', old);
   atomicPoint(root, 'current', versionDir);
 }
 
@@ -203,7 +231,7 @@ export function rollbackCurrent(root: string): string | null {
   const prev = pointerTarget(root, 'previous');
   if (!prev || isBad(prev) || !entryOf(prev)) return null;
   const cur = pointerTarget(root, 'current');
-  if (cur && path.resolve(cur) !== path.resolve(prev)) atomicPoint(root, 'previous', cur);
+  if (cur && !samePath(cur, prev)) atomicPoint(root, 'previous', cur);
   atomicPoint(root, 'current', prev);
   return versionOf(prev);
 }

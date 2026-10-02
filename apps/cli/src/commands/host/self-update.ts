@@ -15,6 +15,7 @@ import {
   gcVersions,
   isBad,
   pointerTarget,
+  samePath,
   switchCurrent,
   validCurrent,
   versionDirContaining,
@@ -240,7 +241,25 @@ export async function runSelfUpdateWith(deps: SelfUpdateDeps): Promise<SelfUpdat
     // so the relaunched process is never older than `current` again.
     const root = deps.versionsRoot ?? cliVersionsRoot();
     const versioned = versionedModeSupported(deps.platform) ? validCurrent(root) : null;
-    if (versioned && compareSemver(versioned.version, current) > 0) {
+    // ⚠️ When THIS process already runs from `current`'s directory, "restart
+    // onto what is on disk" relaunches the very same code: the respawned child
+    // reports the same version and restarts again, every ~5 s, killing and
+    // resuming every session each time. It happens when the code in a version
+    // dir does not match its package.json (a dist copied over it by hand):
+    // the QA codespace looped 9× in 70 s on 2026-10-02 ("2.76.12 already
+    // current … (running 2.39.18)"). Restarting cannot fix that, so skip the
+    // on-disk shortcuts and let the registry path decide.
+    const runningDir = versioned ? versionDirContaining(root, deps.runningEntry) : null;
+    const runningIsCurrent =
+      versioned !== null && runningDir !== null && samePath(runningDir, versioned.dir);
+    if (runningIsCurrent && versioned && versioned.version !== current) {
+      log.warn(
+        'host-agent',
+        `self-update: running ${current} from ${versioned.dir}, whose package.json says ` +
+          `${versioned.version} — not restarting onto it (it is this same code)`,
+      );
+    }
+    if (versioned && !runningIsCurrent && compareSemver(versioned.version, current) > 0) {
       log.info(
         'host-agent',
         `self-update: ${versioned.version} already current in ${root} (running ${current}) — restarting onto it`,
@@ -248,7 +267,7 @@ export async function runSelfUpdateWith(deps: SelfUpdateDeps): Promise<SelfUpdat
       return { status: 'updated', version: versioned.version };
     }
 
-    const onDisk = await installedVersion(deps);
+    const onDisk = runningIsCurrent ? null : await installedVersion(deps);
     if (onDisk && compareSemver(onDisk, current) > 0) {
       log.info(
         'host-agent',
@@ -262,18 +281,29 @@ export async function runSelfUpdateWith(deps: SelfUpdateDeps): Promise<SelfUpdat
       ['view', SELF_UPDATE_PKG, 'version'],
       SELF_UPDATE_VIEW_TIMEOUT_MS,
     );
+    // Every outcome below is logged at info/warn. These used to be trace-level
+    // or silent, so a check that ran and found nothing left NO line in the
+    // debug log, and "grep self-update" could not tell "up to date" from
+    // "never ran" or "npm failed". On 2026-10-02 that silence read as
+    // "the startup self-update is broken" and led to a hand install that
+    // broke a Box's CLI.
     if (view.code !== 0) {
-      log.trace('host-agent', `self-update: npm view exited ${String(view.code)} — skipping`);
+      log.warn(
+        'host-agent',
+        `self-update: npm view ${SELF_UPDATE_PKG} exited ${String(view.code)} — cannot check, staying on ${current}: ` +
+          view.stderr.trim().slice(-300),
+      );
       return { status: 'skipped' };
     }
     const latest = view.stdout.trim();
     if (!latest) {
-      log.trace('host-agent', 'self-update: empty npm view output — skipping');
+      log.warn('host-agent', `self-update: npm view returned nothing — cannot check, staying on ${current}`);
       return { status: 'skipped' };
     }
 
     // Only update on a strictly-newer published version.
     if (compareSemver(latest, current) <= 0) {
+      log.info('host-agent', `self-update: running ${current}, npm latest ${latest} — up to date`);
       return { status: 'current' };
     }
 
@@ -343,14 +373,22 @@ export async function installVersioned(
     return { status: 'skipped' };
   }
   try {
+    // We already run from `<root>/<latest>` yet report another version: that
+    // directory's code was replaced in place. Never "reuse" it (that answers
+    // 'updated' and restarts onto ourselves) and never let a failed
+    // verification below delete the directory this process runs from.
     const runningDir = versionDirContaining(root, deps.runningEntry);
+    if (runningDir && samePath(runningDir, target)) {
+      log.warn(
+        'host-agent',
+        `self-update: already running from ${target} (reports ${running}) — leaving it alone`,
+      );
+      return { status: 'skipped' };
+    }
     const reusable = entryOf(target) && versionOf(target) === latest;
     if (!reusable) {
       // A leftover broken directory for this version (an interrupted install)
       // is not current, previous or running — safe to clear and retry.
-      if (runningDir && path.resolve(runningDir) === path.resolve(target)) {
-        return { status: 'skipped' };
-      }
       fs.rmSync(target, { recursive: true, force: true });
       const install = await deps.run(
         'npm',
