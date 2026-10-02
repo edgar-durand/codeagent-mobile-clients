@@ -13,32 +13,22 @@
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
+import { ownerIsAlive, ownerRecord, type ProcessIdentityDeps } from '../../lib/process-identity';
 
 /** A mark older than this is ignored: no handshake takes this long (the
  *  runner gives up on `session/new` at 120 s), so its owner died or its pid
  *  was recycled. */
 const STALE_MARK_MS = 180_000;
 
-export interface StartupMarkDeps {
+export interface StartupMarkDeps extends ProcessIdentityDeps {
   dir?: string;
   pid?: number;
   now?: () => number;
-  isAlive?: (pid: number) => boolean;
   sleep?: (ms: number) => Promise<void>;
 }
 
 function marksDir(deps: StartupMarkDeps): string {
   return deps.dir ?? path.join(os.homedir(), '.codeam', 'agent-startups');
-}
-
-function pidIsAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (err) {
-    // EPERM: the pid exists but belongs to someone else, so it is alive.
-    return (err as NodeJS.ErrnoException).code === 'EPERM';
-  }
 }
 
 /**
@@ -47,10 +37,11 @@ function pidIsAlive(pid: number): boolean {
  * the release is a no-op and nothing waits on it.
  */
 export function markAgentStarting(deps: StartupMarkDeps = {}): () => void {
-  const file = path.join(marksDir(deps), String(deps.pid ?? process.pid));
+  const pid = deps.pid ?? process.pid;
+  const file = path.join(marksDir(deps), String(pid));
   try {
     fs.mkdirSync(path.dirname(file), { recursive: true });
-    fs.writeFileSync(file, '');
+    fs.writeFileSync(file, ownerRecord(pid, deps));
   } catch {
     return () => undefined;
   }
@@ -72,7 +63,6 @@ export function otherAgentsStarting(deps: StartupMarkDeps = {}): number[] {
   const dir = marksDir(deps);
   const self = deps.pid ?? process.pid;
   const now = (deps.now ?? Date.now)();
-  const isAlive = deps.isAlive ?? pidIsAlive;
   let names: string[];
   try {
     names = fs.readdirSync(dir);
@@ -84,7 +74,14 @@ export function otherAgentsStarting(deps: StartupMarkDeps = {}): number[] {
     const pid = Number(name);
     if (!Number.isInteger(pid) || pid <= 0 || pid === self) continue;
     const file = path.join(dir, name);
-    let stale = !isAlive(pid);
+    let record = '';
+    try {
+      record = fs.readFileSync(file, 'utf8');
+    } catch {
+      continue;
+    }
+    // Marks written before the start time was recorded hold just ''.
+    let stale = !ownerIsAlive(record.trim() || String(pid), deps);
     if (!stale) {
       try {
         stale = now - fs.statSync(file).mtimeMs > STALE_MARK_MS;

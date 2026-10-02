@@ -11,28 +11,19 @@
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
+import { ownerIsAlive, ownerRecord, type ProcessIdentityDeps } from '../lib/process-identity';
 
 /** A holder older than this is presumed dead: a full provisioning (bd init +
  *  server start + DB self-heal + bd setup) stays well under it. */
 const STALE_LOCK_MS = 5 * 60_000;
 
-export interface ProvisionLockDeps {
+export interface ProvisionLockDeps extends ProcessIdentityDeps {
   dir?: string;
   pid?: number;
   now?: () => number;
-  isAlive?: (pid: number) => boolean;
   sleep?: (ms: number) => Promise<void>;
   /** Stop waiting and run anyway after this long. Default 3 min. */
   timeoutMs?: number;
-}
-
-function pidIsAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (err) {
-    return (err as NodeJS.ErrnoException).code === 'EPERM';
-  }
 }
 
 /** Atomically take the lock (mkdir), clearing it first when its holder is gone. */
@@ -41,7 +32,7 @@ function tryAcquire(lockDir: string, deps: ProvisionLockDeps): boolean {
   try {
     fs.mkdirSync(path.dirname(lockDir), { recursive: true });
     fs.mkdirSync(lockDir);
-    fs.writeFileSync(path.join(lockDir, 'pid'), String(pid));
+    fs.writeFileSync(path.join(lockDir, 'pid'), ownerRecord(pid, deps));
     return true;
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code !== 'EEXIST') return true; // can't lock → don't block
@@ -52,15 +43,15 @@ function tryAcquire(lockDir: string, deps: ProvisionLockDeps): boolean {
   } catch {
     return tryAcquireOnce(lockDir, deps); // released meanwhile
   }
-  let holder = NaN;
+  let holder = '';
   try {
-    holder = Number(fs.readFileSync(path.join(lockDir, 'pid'), 'utf8'));
+    holder = fs.readFileSync(path.join(lockDir, 'pid'), 'utf8');
   } catch {
     // A fresh holder writes its pid right after the mkdir; a lock that has
     // had no pid for 10 s belongs to a process that died in between.
     if (age <= 10_000) return false;
   }
-  const alive = Number.isInteger(holder) && (deps.isAlive ?? pidIsAlive)(holder);
+  const alive = holder !== '' && ownerIsAlive(holder, deps);
   if (alive && age <= STALE_LOCK_MS) return false;
   try {
     fs.rmSync(lockDir, { recursive: true, force: true });
@@ -74,7 +65,7 @@ function tryAcquire(lockDir: string, deps: ProvisionLockDeps): boolean {
 function tryAcquireOnce(lockDir: string, deps: ProvisionLockDeps): boolean {
   try {
     fs.mkdirSync(lockDir);
-    fs.writeFileSync(path.join(lockDir, 'pid'), String(deps.pid ?? process.pid));
+    fs.writeFileSync(path.join(lockDir, 'pid'), ownerRecord(deps.pid ?? process.pid, deps));
     return true;
   } catch {
     return false;
@@ -104,7 +95,7 @@ export async function withBeadsProvisionLock<T>(
   } finally {
     if (held) {
       try {
-        const owner = Number(fs.readFileSync(path.join(lockDir, 'pid'), 'utf8'));
+        const owner = Number(fs.readFileSync(path.join(lockDir, 'pid'), 'utf8').trim().split(/\s+/)[0]);
         if (owner === (deps.pid ?? process.pid)) fs.rmSync(lockDir, { recursive: true, force: true });
       } catch {
         // already gone
