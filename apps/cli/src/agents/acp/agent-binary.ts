@@ -165,6 +165,32 @@ export async function waitForClaudeNativeBinary(
   return resolveClaudeNativeBinary(deps);
 }
 
+/**
+ * Read a file start to end once, into nothing, so its pages are in the page
+ * cache before something executes it. Fire-and-forget; every failure is
+ * ignored (the exec just pages it in itself, as before).
+ *
+ * ⚠️ Why (codeagent-w683): after a codespace wake the disk is cold, and the
+ * kernel pages the 215 MB `claude` binary in by FAULTS as it runs. Measured on
+ * a cold wake: `claude` sat in D state (`folio_wait_bit_common`) for 9.7 s
+ * before printing a single debug line, while a plain sequential read of a
+ * 127 MB binary on the same disk took 2.0 s. Started before the agent spawns,
+ * this read pulls the pages ahead of the faults.
+ */
+export function prefetchIntoPageCache(
+  file: string,
+  deps: { createReadStream?: typeof fs.createReadStream } = {},
+): void {
+  const createReadStream = deps.createReadStream ?? fs.createReadStream;
+  try {
+    const stream = createReadStream(file, { highWaterMark: 4 * 1024 * 1024 });
+    stream.on('error', () => undefined);
+    stream.resume();
+  } catch {
+    // best-effort
+  }
+}
+
 // ─────────────────────────── PATH binaries ───────────────────────────
 // codex (`npm install -g @openai/codex`), cursor-agent, and gemini are
 // launched by bare command name resolved from PATH — their readiness is

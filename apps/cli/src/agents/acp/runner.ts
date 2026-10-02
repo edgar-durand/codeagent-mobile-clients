@@ -873,6 +873,10 @@ export interface AcpRunnerOptions {
    *  no bd / failed). Used only to route relayed `beads_action` commands;
    *  the runner never provisions or tears down beads. */
   getBeads?: () => StartedBeads | null;
+  /** Called once the initial handshake (`initialize` + `session/new`) settles,
+   *  ok or not. The composition root holds beads provisioning until then so a
+   *  cold Dolt start never competes with the agent's startup (codeagent-w683). */
+  onHandshakeSettled?: () => void;
   /**
    * AUTO mode: auto-approve every `session/request_permission` instead of
    * round-tripping to a human. Set in headless contexts (a GitHub Codespace
@@ -1483,6 +1487,7 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
   try {
     handshake = await client.start();
   } catch (startErr) {
+    opts.onHandshakeSettled?.();
     // The agent never created a session (e.g. Gemini's Code Assist onboarding
     // rejecting the account post-2026-06-18). Without this the session sat on
     // "STILL LOADING SESSION HISTORY / offline" forever — pair-auto exited and
@@ -1502,6 +1507,7 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
     });
     return;
   }
+  opts.onHandshakeSettled?.();
   let acpSessionId = handshake.sessionId;
   const { initialize, model: handshakeModel, tier: handshakeTier } = handshake;
   // Swappable on agent switch — the new adapter's handshake replaces them.
