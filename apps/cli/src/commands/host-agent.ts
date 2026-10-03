@@ -613,6 +613,19 @@ function isMissingContainerError(stderr: string): boolean {
  *     data we keep on purpose.
  * The flags are read but can only ever SUBTRACT from that fixed set.
  */
+/**
+ * The lane a fleet command runs on: its container, so one box's ops stay in
+ * order, or the host itself for a prune. `null` for anything that is not a
+ * fleet command. A malformed payload still gets a lane (keyed by type) so the
+ * handler can reject it the usual way.
+ */
+export function fleetLaneKey(cmd: RemoteCommand): string | null {
+  if (!cmd.type.startsWith('fleet_')) return null;
+  if (cmd.type === 'fleet_prune_host') return 'host';
+  const payload = cmd.payload as { containerName?: unknown } | undefined;
+  return typeof payload?.containerName === 'string' ? payload.containerName : cmd.type;
+}
+
 interface FleetPruneHostPayload {
   images: boolean;
   buildCache: boolean;
@@ -1254,7 +1267,7 @@ export class HostAgentSupervisor {
     // pre-secret CLI (see the redeem note above).
     this.relay = make(
       this.identity.controlPluginId,
-      (cmd) => this.handleCommand(cmd),
+      (cmd) => this.dispatchRelayCommand(cmd),
       CONTROL_AGENT_META,
       this.identity.controlPollSecret,
     );
@@ -1513,7 +1526,11 @@ export class HostAgentSupervisor {
     // An open session is NOT a reason to wait — the boot resume brings it back
     // in seconds. Only a turn actually running is (see services/turn-marker.ts).
     const midTurn = [...this.children.values()].some((c) => this.isChildMidTurn(c.proc.pid));
-    if (midTurn) {
+    // A restart kills fleet ops that were already acked, so nothing would ever
+    // redeliver them (see `dispatchRelayCommand`). `runInFleetLane` retries the
+    // restart the moment the last lane drains.
+    const fleetBusy = this.fleetLanes.size > 0;
+    if (midTurn || fleetBusy) {
       // ⚠️ `children` holds long-lived SESSION processes, not turns in flight
       // (a `ChildSession` carries no activity state at all), so on a paired
       // box this branch is the permanent state, not a transient one. Without a
@@ -1524,14 +1541,14 @@ export class HostAgentSupervisor {
       if (waited < SELF_UPDATE_DEFER_MAX_MS) {
         log.info(
           'host-agent',
-          `self-update: ${version} installed but a session is mid-turn — deferring restart`,
+          `self-update: ${version} installed but ${fleetBusy ? `${this.fleetLanes.size} fleet op(s) are in flight` : 'a session is mid-turn'} — deferring restart`,
         );
         return false;
       }
       log.warn(
         'host-agent',
         `self-update: ${version} has been owed for ${Math.round(waited / 3_600_000)}h with ` +
-          `a session still mid-turn — restarting anyway rather than ` +
+          `${fleetBusy ? 'fleet ops still in flight' : 'a session still mid-turn'} — restarting anyway rather than ` +
           'staying on old code',
       );
     }
@@ -1569,7 +1586,65 @@ export class HostAgentSupervisor {
   async handleCommand(cmd: RemoteCommand): Promise<void> {
     // Fleet control plane (additive, CodeAgent Box rescue fleet). A normal
     // self-hosted box never receives these — they're only ever pushed to the
-    // ONE host enrolled as the fleet host.
+    // ONE host enrolled as the fleet host. Each one runs on its container's
+    // lane: see `runInFleetLane`.
+    const lane = fleetLaneKey(cmd);
+    if (lane !== null) return this.runInFleetLane(lane, () => this.handleFleetCommand(cmd));
+    await this.handleNonFleetCommand(cmd);
+  }
+
+  /**
+   * The relay's entry point. A fleet command is NOT awaited here.
+   *
+   * The relay acks a batch the moment it arrives, then awaits each command of
+   * the batch in order. Awaiting a fleet op there let one slow op hold every
+   * command queued behind it: on 2026-10-02 the hourly sweep's
+   * `fleet_migrate_box_image` commands were each pulling the freshly released
+   * 7.7 GB image (up to 10 min apiece), a new user's scratch `fleet_create_box`
+   * sat behind three of them in the same batch (received 18:04:07, never
+   * started), the 18:06 self-update restart dropped it, and since it was already
+   * acked nothing ever redelivered it — the box failed at the 18:30
+   * provisioning sweep. Per-container lanes keep each box's ops in order; ops on
+   * different boxes no longer wait for each other.
+   */
+  private dispatchRelayCommand(cmd: RemoteCommand): Promise<void> {
+    const work = this.handleCommand(cmd);
+    if (fleetLaneKey(cmd) === null) return work;
+    void work;
+    return Promise.resolve();
+  }
+
+  /** Fleet ops queued or running, keyed by container (or the host for a prune). */
+  private readonly fleetLanes = new Map<string, Promise<void>>();
+
+  /** Number of fleet lanes with work queued or running — for tests + the restart gate. */
+  fleetOpsInFlight(): number {
+    return this.fleetLanes.size;
+  }
+
+  /**
+   * Run `op` after every earlier op on the same lane. Never rejects: a failed op
+   * is logged and the lane moves on. When the last lane drains and a self-update
+   * restart is owed, take it now instead of waiting for the next hourly tick.
+   */
+  private runInFleetLane(key: string, op: () => Promise<void>): Promise<void> {
+    const prev = this.fleetLanes.get(key) ?? Promise.resolve();
+    const next = prev.then(op).catch((err: unknown) => {
+      log.warn(
+        'host-agent',
+        `fleet op on ${key} failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    });
+    this.fleetLanes.set(key, next);
+    return next.then(() => {
+      if (this.fleetLanes.get(key) === next) this.fleetLanes.delete(key);
+      if (this.fleetLanes.size === 0 && this.pendingRestartVersion !== null) {
+        this.maybeRestartForUpdate(this.pendingRestartVersion);
+      }
+    });
+  }
+
+  private async handleFleetCommand(cmd: RemoteCommand): Promise<void> {
     if (cmd.type === 'fleet_create_box') {
       if (!isFleetCreateBoxPayload(cmd.payload)) {
         log.warn('host-agent', `ignoring malformed fleet_create_box id=${cmd.id}`);
@@ -1618,6 +1693,9 @@ export class HostAgentSupervisor {
       await this.fleetPruneHost(cmd.payload);
       return;
     }
+  }
+
+  private async handleNonFleetCommand(cmd: RemoteCommand): Promise<void> {
     if (cmd.type === 'self_hosted_deploy') {
       if (!isDeployPayload(cmd.payload)) {
         log.warn('host-agent', `ignoring malformed self_hosted_deploy id=${cmd.id}`);

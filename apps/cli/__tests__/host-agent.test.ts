@@ -4377,3 +4377,191 @@ describe('isContainerEnvironment — /.dockerenv + cgroup probes (fleet Box dete
     expect(isContainerEnvironment(existsSyncFn, readFileSyncFn)).toBe(false);
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Fleet ops never hold the relay's batch (2026-10-02, scratch box lost)
+//
+// The relay acks a batch on arrival, then awaits each command in order. A
+// `fleet_create_box` queued behind the hourly sweep's `fleet_migrate_box_image`
+// (each pulling a 7.7 GB image) never started; the self-update restart then
+// dropped it, and being already acked it was never redelivered.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('HostAgentSupervisor — fleet lanes', () => {
+  const migrateA: RemoteCommand = {
+    id: 'mig-a',
+    sessionId: 'sh-plugin-1',
+    type: 'fleet_migrate_box_image',
+    payload: {
+      boxId: 'box-a',
+      containerName: 'codeam-box-aaaaaaaa',
+      apiOrigin: 'https://api.codeagent-mobile.com',
+      limits: { memoryMb: 1536, cpus: 1, pidsLimit: 512, diskGb: 5 },
+    },
+  };
+  const createB: RemoteCommand = {
+    id: 'create-b',
+    sessionId: 'sh-plugin-1',
+    type: 'fleet_create_box',
+    payload: {
+      boxId: 'box-b',
+      containerName: 'codeam-box-bbbbbbbb',
+      enrollToken: 'tok',
+      apiOrigin: 'https://api.codeagent-mobile.com',
+      limits: { memoryMb: 1536, cpus: 1, pidsLimit: 512, diskGb: 10 },
+    },
+  };
+  const startA: RemoteCommand = {
+    id: 'start-a',
+    sessionId: 'sh-plugin-1',
+    type: 'fleet_start_box',
+    payload: { boxId: 'box-a', containerName: 'codeam-box-aaaaaaaa' },
+  };
+
+  /** Docker whose `pull` hangs until released — the slow step of a migrate. */
+  function makeHangingPullDocker() {
+    const calls: string[][] = [];
+    let releasePull: () => void = () => undefined;
+    const pullGate = new Promise<void>((resolve) => (releasePull = resolve));
+    const docker: DockerRunner = {
+      run: vi.fn(async (args: string[]) => {
+        calls.push(args);
+        if (args[0] === 'pull') {
+          await pullGate;
+          return { code: 0, stdout: '', stderr: '' };
+        }
+        if (args[0] === 'inspect' && args.includes('{{.State.Running}}')) {
+          return { code: 0, stdout: 'false', stderr: '' };
+        }
+        if (args[0] === 'inspect' && args.includes('{{.Image}}')) {
+          return { code: 0, stdout: 'sha256:old', stderr: '' };
+        }
+        if (args[0] === 'inspect' && args.includes('{{.Id}}')) {
+          return { code: 0, stdout: 'sha256:new', stderr: '' };
+        }
+        return { code: 0, stdout: 'abcdef123456', stderr: '' };
+      }),
+    };
+    return { docker, calls, releasePull: () => releasePull() };
+  }
+
+  /** Start a supervisor and capture the onCommand it hands the relay. */
+  function startWithRelay(deps: ConstructorParameters<typeof HostAgentSupervisor>[1]) {
+    let onCommand: (cmd: RemoteCommand) => void | Promise<void> = () => undefined;
+    const sup = new HostAgentSupervisor(IDENTITY, {
+      ...deps,
+      makeRelay: (_pluginId, cb) => {
+        onCommand = cb;
+        return { start: vi.fn(), stop: vi.fn(), sendResult: vi.fn() };
+      },
+    });
+    sup.start();
+    return { sup, onCommand: (cmd: RemoteCommand) => onCommand(cmd) };
+  }
+
+  beforeEach(() => {
+    process.env.CODEAM_NO_KEEP_AWAKE = '1';
+    delete process.env.CODEAM_FLEET_BOX_IMAGE;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => ({ success: true, data: {} }) }),
+    );
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    delete process.env.CODEAM_NO_KEEP_AWAKE;
+  });
+
+  it('a create in the same relay batch runs while a migrate on another box is still pulling', async () => {
+    const { docker, calls, releasePull } = makeHangingPullDocker();
+    const { sup, onCommand } = startWithRelay({ docker });
+    try {
+      // Exactly the relay's dispatch loop: await each command of the batch in order.
+      for (const cmd of [migrateA, createB]) await onCommand(cmd);
+
+      // The loop finished although the migrate is parked on its pull …
+      await vi.waitFor(() => expect(calls.some((c) => c[0] === 'pull')).toBe(true));
+      // … and the create behind it ran anyway.
+      await vi.waitFor(() => expect(calls.some((c) => c[0] === 'run')).toBe(true));
+      expect(calls.find((c) => c[0] === 'run')).toContain('codeam-box-bbbbbbbb');
+      expect(sup.fleetOpsInFlight()).toBe(1); // only the migrate, still pulling
+
+      releasePull();
+      await vi.waitFor(() => expect(sup.fleetOpsInFlight()).toBe(0));
+    } finally {
+      releasePull();
+      sup.stop();
+    }
+  });
+
+  it('keeps ops on the SAME box in order: a start waits for that box’s migrate', async () => {
+    const { docker, calls, releasePull } = makeHangingPullDocker();
+    const { sup, onCommand } = startWithRelay({ docker });
+    try {
+      await onCommand(migrateA);
+      await onCommand(startA);
+      // The migrate is parked on its pull, so the start has not touched docker.
+      await vi.waitFor(() => expect(calls.filter((c) => c[0] === 'pull')).toHaveLength(1));
+      expect(calls.some((c) => c[0] === 'start')).toBe(false);
+      const beforeRelease = calls.length;
+
+      releasePull();
+      await vi.waitFor(() => expect(sup.fleetOpsInFlight()).toBe(0));
+      // The start ran only after the migrate's rm + create.
+      const after = calls.slice(beforeRelease).map((c) => c[0]);
+      expect(after.indexOf('create')).toBeGreaterThanOrEqual(0);
+      expect(after.lastIndexOf('start')).toBeGreaterThan(after.indexOf('create'));
+    } finally {
+      releasePull();
+      sup.stop();
+    }
+  });
+
+  it('a failing op does not wedge its lane', async () => {
+    let first = true;
+    const docker: DockerRunner = {
+      run: vi.fn(async (args: string[]) => {
+        if (first && args[0] === 'rm') {
+          first = false;
+          throw new Error('daemon gone');
+        }
+        return { code: 0, stdout: 'abcdef123456', stderr: '' };
+      }),
+    };
+    const sup = new HostAgentSupervisor(IDENTITY, { docker });
+    await sup.handleCommand(createB);
+    await sup.handleCommand(createB);
+    expect(vi.mocked(docker.run).mock.calls.some((c) => c[0][0] === 'run')).toBe(true);
+    expect(sup.fleetOpsInFlight()).toBe(0);
+  });
+
+  it('defers a self-update restart while a fleet op is in flight, then restarts when it drains', async () => {
+    const { docker, releasePull } = makeHangingPullDocker();
+    const onUpdated = vi.fn();
+    const sup = new HostAgentSupervisor(IDENTITY, {
+      docker,
+      makeRelay: () => ({ start: vi.fn(), stop: vi.fn(), sendResult: vi.fn() }),
+      metricsCollector: {
+        collect: () => {
+          throw new Error('no metrics');
+        },
+        recordLatency: vi.fn(),
+      },
+      selfUpdate: async () => ({ status: 'updated', version: '9.9.9' }),
+      onUpdated,
+    });
+    try {
+      const migrating = sup.handleCommand(migrateA);
+      await vi.waitFor(() => expect(sup.fleetOpsInFlight()).toBe(1));
+
+      await sup.selfUpdateTick();
+      expect(onUpdated).not.toHaveBeenCalled();
+
+      releasePull();
+      await migrating;
+      expect(onUpdated).toHaveBeenCalledWith('9.9.9');
+    } finally {
+      releasePull();
+    }
+  });
+});
