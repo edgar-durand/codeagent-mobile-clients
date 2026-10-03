@@ -4,6 +4,17 @@ All notable changes to the CodeAgent-Mobile JetBrains plugin are documented here
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.76.15] — 2026-10-03
+
+### Documentation
+
+- CLI release lag — batch releases; in prod only after Box image + prebuild (#902)
+
+### Fixed
+
+- **cli:** Self-update logs every outcome, never restarts onto its own folder, canonical links (#905)
+- **cli:** Fleet ops on per-container lanes — a slow migrate no longer swallows a scratch create (#906)
+
 ## [2.76.14] — 2026-10-02
 
 ### Fixed
