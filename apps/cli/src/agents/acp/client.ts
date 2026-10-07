@@ -51,6 +51,7 @@ import {
 import { tryGetContextWindow, type AgentModel, type AgentMode } from '@codeam/shared';
 import type { AdapterSpec } from './adapters';
 import { ADAPTER_MODULE_LOAD_ERROR_RE, agentInstallBinDirs } from './agent-binary';
+import { CODEX_STATE_RUNTIME_RACE_RE } from '../codex/state-runtime-race';
 import type { PromptBlock } from './buildAcpPromptBlocks';
 import { createIdleTimeout, type IdleTimeout } from './idleTimeout';
 import { pathIsInternal, INTERNAL_BLOCK_REASON } from './internal-paths';
@@ -516,7 +517,11 @@ export class AcpClient {
       ADAPTER_MODULE_LOAD_ERROR_RE.test(joined) ||
       // The transport dying mid-handshake = the adapter crashed starting up,
       // even when the child-exit handler lost the race (see the RE's doc).
-      TRANSPORT_DOWN_DURING_START_RE.test(joined)
+      TRANSPORT_DOWN_DURING_START_RE.test(joined) ||
+      // codex-acp stays up but its `codex app-server` child lost the first-run
+      // ~/.codex SQLite migration race to another codex process; a respawn
+      // opens the DBs the winner migrated (see state-runtime-race.ts).
+      CODEX_STATE_RUNTIME_RACE_RE.test(joined)
     );
   }
 
