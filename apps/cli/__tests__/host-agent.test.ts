@@ -920,6 +920,38 @@ describe('HostAgentSupervisor — control channel reuse', () => {
     }
   });
 
+  it('never resumes a cwd-less session into the codespace wrapper checkout', async () => {
+    const config = await import('../src/config');
+    vi.mocked(config.getActiveSession).mockReturnValueOnce({
+      id: 'sess-1',
+      pluginId: 'plug-1',
+      pollSecret: 'sec',
+      agent: 'claude',
+      userName: 'u',
+      userEmail: 'e',
+      plan: 'pro',
+      pairedAt: 0,
+      pluginAuthToken: 't',
+    } as never);
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => ({ success: true, data: {} }) }),
+    );
+    const cwdSpy = vi.spyOn(process, 'cwd').mockReturnValue('/workspaces/codeam-codespace');
+    const resumeSpawner = vi.fn();
+    const sup = new HostAgentSupervisor(IDENTITY, {
+      makeRelay: () => ({ start: vi.fn(), stop: vi.fn(), sendResult: vi.fn() }),
+      resumeSpawner,
+    });
+    try {
+      sup.start();
+      expect(resumeSpawner).not.toHaveBeenCalled();
+    } finally {
+      sup.stop();
+      cwdSpy.mockRestore();
+    }
+  });
+
   // 2026-07-29: a warm-codespace wake resumed in the host-agent's own cwd (the
   // wrapper repo root) → CODEAM_RESUME_LATEST found no prior conversation → a
   // fresh empty session. The persisted session cwd (the deploy workspace) must
@@ -3780,6 +3812,29 @@ describe('HostAgentSupervisor — multi-session boot resume (codeagent-v07a)', (
       .filter((c) => String(c[0]).endsWith('/api/self-hosted/session-event'))
       .map((c) => JSON.parse((c[1] as { body: string }).body) as Record<string, unknown>);
   }
+
+  // 2026-10-05 (bead codeagent-khbg): on a warm codespace the host-agent's cwd
+  // is the wrapper checkout. A resume whose workspace is gone fell back to it,
+  // and the user's agent answered "the repository here is codeam-codespace".
+  it('never resumes into the codespace wrapper checkout when the saved workspace is gone', () => {
+    const gone = path.join(tmpRoot, 'deleted-workspace');
+    const { store } = memoryStore([{ deployId: 'dep-a', cwd: gone, agent: 'claude', startedAt: 1_000 }]);
+    const cwdSpy = vi.spyOn(process, 'cwd').mockReturnValue('/workspaces/codeam-codespace');
+    const resumeSpawner = vi.fn(() => fakeProc() as never);
+    const sup = new HostAgentSupervisor(IDENTITY, {
+      makeRelay: () => ({ start: vi.fn(), stop: vi.fn(), sendResult: vi.fn() }),
+      resumeSpawner,
+      sessionStore: store,
+      listSavedSessions: () => [saved('sess-a', gone, 1)] as never,
+    });
+    try {
+      sup.start();
+      expect(resumeSpawner).not.toHaveBeenCalled();
+    } finally {
+      sup.stop();
+      cwdSpy.mockRestore();
+    }
+  });
 
   it('resumes EVERY persisted session (not just the last active one), each pinned to its own session', () => {
     const a = ws('dep-a');

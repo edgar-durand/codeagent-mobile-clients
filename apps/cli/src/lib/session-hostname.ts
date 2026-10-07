@@ -12,6 +12,17 @@ import { execFileSync, type ExecFileSyncOptions } from 'child_process';
 const WRAPPER_REPO_NAME = 'codeam-codespace';
 
 /**
+ * True when `dir` is the codespace WRAPPER checkout (`/workspaces/codeam-codespace`),
+ * never the user's project. A warm codespace's host-agent runs there, so any
+ * "fall back to process.cwd()" path would otherwise run the user's agent in
+ * the wrapper repo ("the repository here is codeam-codespace", 2026-10-05).
+ */
+export function isWrapperCheckout(dir: string): boolean {
+  const resolved = path.posix.normalize(dir.replace(/\\/g, '/')).replace(/\/+$/, '');
+  return resolved === `/workspaces/${WRAPPER_REPO_NAME}`;
+}
+
+/**
  * Hostname/label the CLI reports to the backend for a paired session.
  *
  * On a local or self-hosted box this is `os.hostname()` — the machine name

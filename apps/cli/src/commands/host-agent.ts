@@ -49,6 +49,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { CommandRelayService, type RemoteCommand } from '../services/command-relay.service';
 import { isFilesystemRoot } from '../services/file-watcher.service';
+import { isWrapperCheckout } from '../lib/session-hostname';
 import type { AgentMetadata, IntegrationsManifestEntry, SkillsManifestEntry } from '@codeam/shared';
 import { resolveApiBaseUrl, getPricing, isManagedProviderId } from '@codeam/shared';
 import { persistIntegrationsManifest, clearIntegrationsManifest } from '../integrations/manifest';
@@ -2783,6 +2784,13 @@ export class HostAgentSupervisor {
       );
       return null;
     }
+    if (isWrapperCheckout(cwd)) {
+      log.warn(
+        'host-agent',
+        `resume: skipping session ${session.id.slice(0, 8)} — it has no saved workspace and the fallback is the codespace wrapper checkout (${cwd}), not the user's repo`,
+      );
+      return null;
+    }
     // ⚠️ The child MUST be registered under its DEPLOY id, never the
     // paired-session id. `deployId` is the key every upward signal is matched
     // against server-side: the boot reconcile reports it, and
@@ -2947,6 +2955,21 @@ export class HostAgentSupervisor {
     const st = this.resumeStateFor(target);
     try {
       const cwd = fs.existsSync(target.cwd) ? target.cwd : process.cwd();
+      // ⚠️ Never run a user's agent in the codespace wrapper checkout — the
+      // host-agent's own cwd on a warm codespace (2026-10-05: the agent said
+      // "the repository here is codeam-codespace").
+      if (isWrapperCheckout(cwd)) {
+        log.warn(
+          'host-agent',
+          `resume: skipping session ${session.id.slice(0, 8)} deploy=${deployId.slice(0, 8)} — ` +
+            `resolved cwd ${cwd} is the codespace wrapper checkout, not the user's repo`,
+        );
+        return;
+      }
+      log.info(
+        'host-agent',
+        `resume: session ${session.id.slice(0, 8)} deploy=${deployId.slice(0, 8)} cwd=${cwd}`,
+      );
       // Re-inject the house-proxy env
       // (ANTHROPIC_BASE_URL + AUTH_TOKEN + model pins + CLAUDE_CONFIG_DIR). The
       // resume is a bare `codeam` that does NOT re-process the deploy, so
