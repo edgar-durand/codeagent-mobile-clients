@@ -4,6 +4,21 @@ All notable changes to `codeam-cli` are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.76.16] — 2026-10-07
+
+### Added
+
+- **shared:** Optional `locale` on the start_task payload
+- **cli:** Tell the agent to reply in the user's device language
+
+### Fixed
+
+- **cli:** Retry Codex start when it loses the first-run ~/.codex SQLite race
+- **cli:** Keep `bd setup` from writing CLAUDE.md into the user's project
+- **shared:** Scratch starters build on the first turn instead of asking
+- **cli:** Offer quick-reply chips only when they answer the turn
+- **cli:** Never resume a session into the codespace wrapper checkout
+
 ## [2.76.15] — 2026-10-03
 
 ### Documentation
