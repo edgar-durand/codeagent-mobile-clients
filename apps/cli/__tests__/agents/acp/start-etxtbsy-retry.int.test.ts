@@ -106,6 +106,14 @@ rl.on('line', (line) => {
     send({ jsonrpc: '2.0', id: msg.id, error: { code: -32000, message: 'Authentication required' } });
     return;
   }
+  if (mode === 'codex-state-race-then-ok' && n === 1) {
+    // codex-acp 1.1.4 stays alive when its \`codex app-server\` child loses the
+    // first-run ~/.codex SQLite migration race (codex-cli 0.143.0) — it wraps
+    // the child's exit as RequestError 1001 with the child's stderr appended.
+    send({ jsonrpc: '2.0', id: msg.id, error: { code: 1001, message:
+      'Codex process has exited with code 1:\\nError: failed to initialize sqlite state runtime under /home/box/.codex: failed to initialize state runtime at /home/box/.codex' } });
+    return;
+  }
   if (n === 1) {
     // The real adapter logs the internal cause to stderr while returning a
     // generic -32603 — reproduce BOTH signals the detector keys on.
@@ -220,6 +228,22 @@ describe('AcpClient.start — transient adapter ETXTBSY retry (real subprocess)'
     // what guarantees the NEXT unknown install-race variant self-heals too.
     const counter = path.join(dir, `c-${Date.now()}-uk`);
     const client = makeClient(counter, 'unknown-crash-then-ok');
+    try {
+      const res = await client.start();
+      expect(res.sessionId).toMatch(/^sess-ok-/);
+      expect(fs.readFileSync(counter, 'utf8')).toBe('2');
+    } finally {
+      await client.stop().catch(() => undefined);
+    }
+  });
+
+  it('retries Codex losing the first-run ~/.codex SQLite race and starts on the next spawn', async () => {
+    // Replays 2026-10-05 (info.notifikasi.transaksi f124, jefrigt11 f077): the
+    // first managed deploy of a new account showed "The codex agent failed to
+    // start … failed to initialize sqlite state runtime under /home/box/.codex";
+    // the second deploy on the same (now migrated) home worked.
+    const counter = path.join(dir, `c-${Date.now()}-cx`);
+    const client = makeClient(counter, 'codex-state-race-then-ok');
     try {
       const res = await client.start();
       expect(res.sessionId).toMatch(/^sess-ok-/);

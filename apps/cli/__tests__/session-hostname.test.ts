@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 import * as sessionHostname from '../src/lib/session-hostname';
 import {
+  isWrapperCheckout,
   normalizeRepoIdentifier,
   resolveSessionHostname,
   _execSeam,
@@ -169,5 +170,15 @@ describe('resolveSessionHostname — host label', () => {
     delete process.env.CODESPACES;
     vi.spyOn(_osSeam, 'hostname').mockReturnValue('edgar-mbp');
     expect(resolveSessionHostname('/tmp')).toBe('edgar-mbp');
+  });
+});
+
+describe('isWrapperCheckout', () => {
+  it('matches only the codespace wrapper checkout', () => {
+    expect(isWrapperCheckout('/workspaces/codeam-codespace')).toBe(true);
+    expect(isWrapperCheckout('/workspaces/codeam-codespace/')).toBe(true);
+    expect(isWrapperCheckout('/workspaces/my-app')).toBe(false);
+    expect(isWrapperCheckout('/home/box/codeam-codespace')).toBe(false);
+    expect(isWrapperCheckout('/workspaces/codeam-codespace/src')).toBe(false);
   });
 });

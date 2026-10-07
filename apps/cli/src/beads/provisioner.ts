@@ -42,9 +42,10 @@ import { log } from '../services/logger';
  *      agent in the session, `bd setup <recipe> --global`. This is the step
  *      that makes the agent actually USE bd — it registers the SessionStart
  *      hook globally in the agent's user-level settings (e.g.
- *      `~/.claude/settings.json`, runs `bd prime` each session) and appends a
- *      marked beads block to the cwd's CLAUDE.md NON-destructively (spike-
- *      verified against `@beads/bd@1.0.5`: pre-existing content is preserved).
+ *      `~/.claude/settings.json`, runs `bd prime` each session). bd ALSO
+ *      writes a beads block into its cwd's CLAUDE.md / GEMINI.md, so the
+ *      user-level-only recipes run in a throwaway dir (GLOBAL_ONLY_RECIPES) —
+ *      that block showed up as the user's first "change to review".
  *      Without it the agent never runs `bd create`/`bd ready`, the graph stays
  *      empty, and the P0 mirror shows nothing. The earlier decision to skip it
  *      (the original D12) was wrong and is reverted here.
@@ -139,6 +140,15 @@ export const _provisionSeam = {
   setGitBeadsRole,
   /** Does the project's git remote carry Dolt data (`refs/dolt/data`)? */
   remoteHasDoltData,
+  /** Throwaway cwd for a user-level-only `bd setup` (see GLOBAL_ONLY_RECIPES). */
+  makeSetupCwd: (): string => fs.mkdtempSync(path.join(os.tmpdir(), 'codeam-bd-setup-')),
+  removeSetupCwd: (dir: string): void => {
+    try {
+      fs.rmSync(dir, { recursive: true, force: true });
+    } catch {
+      /* best-effort — a leftover temp dir is harmless */
+    }
+  },
 };
 
 /**
@@ -572,9 +582,11 @@ async function setupAgents(bd: BdAdapter, agents: AgentId[]): Promise<string[]> 
   const wired: string[] = [];
   // De-dupe so a repeated agent doesn't run setup twice in one pass.
   for (const recipe of dedupeRecipes(agents)) {
+    const scratchCwd = GLOBAL_ONLY_RECIPES.has(recipe) ? _provisionSeam.makeSetupCwd() : null;
+    const runOpts = scratchCwd ? { cwd: scratchCwd } : {};
     try {
       // `--check` reports install status: exit 0 → already wired, skip.
-      const check = await bd.run(['setup', recipe, '--global', '--check']);
+      const check = await bd.run(['setup', recipe, '--global', '--check'], runOpts);
       if (check.code === 0) {
         log.trace('beads', `bd setup ${recipe} --global already installed — skipping`);
         wired.push(recipe);
@@ -584,7 +596,7 @@ async function setupAgents(bd: BdAdapter, agents: AgentId[]): Promise<string[]> 
       // Transient spawn ENOENT (the bundled bd native binary's postinstall
       // rename window) is retried at the adapter level (BdAdapter.run), so it
       // covers every bd call — init, dolt start, setup — not just this one.
-      const setup = await bd.run(['setup', recipe, '--global']);
+      const setup = await bd.run(['setup', recipe, '--global'], runOpts);
       if (setup.code === 0) {
         wired.push(recipe);
       } else {
@@ -597,10 +609,29 @@ async function setupAgents(bd: BdAdapter, agents: AgentId[]): Promise<string[]> 
       // Strictly non-fatal — a setup throw must never abort provisioning or
       // the agent run.
       log.warn('beads', `bd setup ${recipe} --global threw (non-fatal)`, err);
+    } finally {
+      if (scratchCwd) _provisionSeam.removeSetupCwd(scratchCwd);
     }
   }
   return wired;
 }
+
+/**
+ * Recipes whose `--global` wiring is complete at the USER level, so the file
+ * `bd setup` ALSO drops into its cwd is redundant. Verified on bd 1.2.2 (and
+ * the 1.0.5 spike notes above): `bd setup claude --global` writes the
+ * SessionStart hook to `~/.claude/settings.json` AND a 77-line beads block into
+ * `<cwd>/CLAUDE.md`; `gemini` likewise writes `<cwd>/GEMINI.md`; `codex` is
+ * user-level only. Run in the project, that file became the user's first
+ * "change to review" (CLAUDE.md +77, replays 2026-10-05, shokhanahmadi61) and
+ * edited a user-authored CLAUDE.md in place. The agent already gets the bd
+ * instruction from the user-level `ensureBeadsWorkflowHint`, so these run in
+ * a throwaway dir and the project is never touched.
+ *
+ * cursor / copilot / aider are NOT here: bd 1.2.2 wires them ONLY through
+ * project files (`.cursor/rules/beads.mdc`, `.copilot-plugin/`, `.aider*`).
+ */
+const GLOBAL_ONLY_RECIPES: ReadonlySet<string> = new Set(['claude', 'codex', 'gemini']);
 
 /**
  * Map the session's agent ids to their de-duplicated `bd setup` recipe ids,

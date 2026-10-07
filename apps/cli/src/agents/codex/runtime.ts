@@ -6,6 +6,12 @@ import * as history from './history';
 import { codexCredentialLocator, codexLoginLauncher } from './link';
 import { spawnAndCapture } from '../../services/spawn-and-capture';
 import type { ChangeModelInstruction, RuntimeStrategy } from '../strategy';
+import { CODEX_STATE_RUNTIME_RACE_RE } from './state-runtime-race';
+
+/** Backoff seam so the one-shot state-race retry is instant under test. */
+export const _codexOneShotSeam = {
+  sleep: (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms)),
+};
 
 const CODEX_CONTEXT_WINDOW = 272_000;
 
@@ -174,12 +180,25 @@ export class CodexRuntimeStrategy implements RuntimeStrategy {
     const binary = this.os.findInPath('codex');
     if (!binary) return null;
     const launch = this.os.buildLaunch(binary, ['exec', prompt]);
-    return spawnAndCapture(launch.cmd, launch.args, {
-      onStderr: opts?.onStderr,
-      onFailedOutput: opts?.onFailedOutput,
-      cwd: opts?.cwd,
-      timeoutMs: opts?.timeoutMs,
-    });
+    const runOnce = (): Promise<{ text: string | null; stderr: string }> => {
+      let stderr = '';
+      return spawnAndCapture(launch.cmd, launch.args, {
+        onStderr: (chunk) => {
+          stderr += chunk;
+          opts?.onStderr?.(chunk);
+        },
+        onFailedOutput: opts?.onFailedOutput,
+        cwd: opts?.cwd,
+        timeoutMs: opts?.timeoutMs,
+      }).then((text) => ({ text, stderr }));
+    };
+    const first = await runOnce();
+    // A one-shot that starts while the session's own codex is still migrating
+    // a FRESH ~/.codex loses the SQLite race and exits 1 — retry once, by then
+    // the DBs exist (see state-runtime-race.ts).
+    if (first.text !== null || !CODEX_STATE_RUNTIME_RACE_RE.test(first.stderr)) return first.text;
+    await _codexOneShotSeam.sleep(1_000);
+    return (await runOnce()).text;
   }
 }
 

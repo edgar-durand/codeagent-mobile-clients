@@ -220,7 +220,7 @@ export class BdAdapter {
    * exit codes — note bd exits 0 even for some error states (e.g. "no beads
    * database found"), so JSON-parsing callers must also inspect the payload.
    */
-  async run(args: string[]): Promise<BdRunResult> {
+  async run(args: string[], runOpts: { cwd?: string } = {}): Promise<BdRunResult> {
     const binary = this.resolveBinary();
     if (!binary) {
       return { code: -1, stdout: '', stderr: 'bd binary not resolved' };
@@ -255,11 +255,9 @@ export class BdAdapter {
     // BEADS_DIR (an older provisioning run / the agent shell) so it can't
     // override cwd resolution.
     delete env.BEADS_DIR;
-    log.trace(
-      'beads',
-      `bd ${args.join(' ')} (cwd=${this.opts.cwd ?? process.cwd()}, shared-server)`,
-    );
-    let res = await _spawnSeam.run(binary, args, { cwd: this.opts.cwd, env });
+    const cwd = runOpts.cwd ?? this.opts.cwd;
+    log.trace('beads', `bd ${args.join(' ')} (cwd=${cwd ?? process.cwd()}, shared-server)`);
+    let res = await _spawnSeam.run(binary, args, { cwd, env });
     // Retry on a transient spawn race: the bundled @beads/bd native binary
     // (and the `dolt` binary it execs) are fetched/installed via postinstall
     // + atomic rename, so mid-provision the resolved path can momentarily 404
@@ -279,7 +277,7 @@ export class BdAdapter {
     ) {
       log.info('beads', `bd ${args[0]} transient spawn failure (binary busy) — retry ${attempt}/5`);
       await _adapterSeam.sleep(750 * attempt);
-      res = await _spawnSeam.run(binary, args, { cwd: this.opts.cwd, env });
+      res = await _spawnSeam.run(binary, args, { cwd, env });
     }
     return res;
   }

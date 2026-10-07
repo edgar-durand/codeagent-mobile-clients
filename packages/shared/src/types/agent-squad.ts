@@ -12,6 +12,12 @@ export interface StartTaskPayload {
   files?: Array<{ filename: string; base64?: string; mimeType?: string }>;
   /** Internal runtime id. Present + ≠ active agent → the runner swaps before running. */
   agentId?: string;
+  /**
+   * The app's device locale (BCP-47, e.g. `es-CO`, `id-ID`). Optional — older
+   * apps omit it. The CLI tells the agent to reply in that language on its
+   * first turn, so the user doesn't spend a task stating it.
+   */
+  locale?: string;
 }
 
 /**

@@ -1,18 +1,11 @@
 /**
  * acp.quickReplies.test.ts
  *
- * Verifies that the ACP runner emits a static `input_suggestion` chunk with
- * `content: ACP_QUICK_REPLIES` on a NORMAL (happy-path) turn end, and does
- * NOT emit it when the reply terminates via a select_prompt (interactive
- * detection path).
- *
- * Invariants:
- *  1. Normal turn end → publishOutput called with
- *     { type: 'input_suggestion', content: ['Continue','Yes, go ahead','Explain'], done: true }
- *  2. select_prompt detected at turn end → `closeTurnWithInteractiveDetection` emits
- *     the select_prompt; no additional `input_suggestion` chip is emitted on the
- *     happy path (the interactive path replaces the tap gesture).
- *  3. ACP_QUICK_REPLIES constant has exactly the 3 expected labels.
+ * Verifies that the ACP runner emits CONTEXT-RELEVANT `input_suggestion` chips
+ * on a normal turn end (quickRepliesForTurn): a chip only when it is a complete
+ * answer to where the turn stopped. Generic "Continue / Yes, go ahead / Explain"
+ * after every turn burned FREE tasks on non-building turns (replays 2026-10-05,
+ * shokhanahmadi61).
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
@@ -20,7 +13,7 @@ import { AcpPublisher } from '../../src/agents/acp/publisher';
 import {
   StreamingState,
   handleCommand,
-  ACP_QUICK_REPLIES,
+  quickRepliesForTurn,
 } from '../../src/agents/acp/runner';
 
 // Stub network calls that handleCommand would otherwise make.
@@ -41,6 +34,8 @@ function makeHarness(opts: {
   /** Simulate a trailing "1. foo\n2. bar" in the reply so closeTurnWithInteractiveDetection
    *  emits a select_prompt instead of a text chip. */
   hasSelectPromptInReply?: boolean;
+  replyText?: string;
+  stopReason?: string;
 }) {
   const publisher = new AcpPublisher({
     sessionId: 'sess-quick',
@@ -58,15 +53,15 @@ function makeHarness(opts: {
 
   const streaming = new StreamingState(publisher);
 
-  const replyText = opts.hasSelectPromptInReply
-    ? 'Do you want to continue?\n❯ 1. Yes\n2. No'
-    : 'Here is your answer.';
+  const replyText =
+    opts.replyText ??
+    (opts.hasSelectPromptInReply ? 'Do you want to continue?\n❯ 1. Yes\n2. No' : 'Here is your answer.');
 
   const client = {
     prompt: vi.fn(async () => {
       // Stream a text delta so finalText is non-empty.
       streaming.append({ chunkId: 'msg-1', kind: 'text', delta: replyText });
-      return { stopReason: 'end_turn' as const };
+      return { stopReason: opts.stopReason ?? 'end_turn' };
     }),
     cancel: vi.fn(async () => undefined),
   };
@@ -115,14 +110,33 @@ function makeHarness(opts: {
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
-describe('ACP_QUICK_REPLIES constant', () => {
-  it('contains exactly the 3 expected chip labels', () => {
-    expect(ACP_QUICK_REPLIES).toEqual(['Continue', 'Yes, go ahead', 'Explain']);
+describe('quickRepliesForTurn', () => {
+  it('a reply ending in a yes/no question offers Yes / No', () => {
+    expect(quickRepliesForTurn('I sketched the layout. Want me to build it?')).toEqual([
+      'Yes, go ahead',
+      'No',
+    ]);
+    expect(quickRepliesForTurn('Done with the plan.\n\n**Should I start now?**')).toEqual([
+      'Yes, go ahead',
+      'No',
+    ]);
   });
 
-  it('is a non-empty array', () => {
-    expect(Array.isArray(ACP_QUICK_REPLIES)).toBe(true);
-    expect(ACP_QUICK_REPLIES.length).toBe(3);
+  it('an open or multiple-choice question offers nothing (a Yes chip answers nothing)', () => {
+    // The exact reply that ate a FREE task via "Continue" (shokhanahmadi61).
+    expect(quickRepliesForTurn('1. Notes app\n2. Habit tracker\n3. Quiz game\n\nWhich one?')).toEqual([]);
+    expect(quickRepliesForTurn("Which one? Or say 'pick one' and I'll build it.")).toEqual([]);
+    expect(quickRepliesForTurn('Do you want the blue theme or the dark one?')).toEqual([]);
+    expect(quickRepliesForTurn("What's your business name?")).toEqual([]);
+  });
+
+  it('a finished build or explanation offers nothing — no Continue / Explain', () => {
+    expect(quickRepliesForTurn('Built the to-do app and opened the preview.')).toEqual([]);
+  });
+
+  it('a reply cut short offers Continue', () => {
+    expect(quickRepliesForTurn('Halfway through the refactor', 'max_tokens')).toEqual(['Continue']);
+    expect(quickRepliesForTurn('Still going', 'max_turn_requests')).toEqual(['Continue']);
   });
 });
 
@@ -131,25 +145,27 @@ describe('ACP runner — input_suggestion on normal turn end', () => {
     vi.restoreAllMocks();
   });
 
-  it('emits input_suggestion with content = ACP_QUICK_REPLIES after a normal turn', async () => {
+  it('emits an EMPTY chip list after a turn that ends with a statement (clears stale chips)', async () => {
     const { run, inputSuggestionCalls } = makeHarness({});
     await run();
 
     const chips = inputSuggestionCalls();
     expect(chips).toHaveLength(1);
-    expect(chips[0]).toEqual({
-      type: 'input_suggestion',
-      content: ['Continue', 'Yes, go ahead', 'Explain'],
-      done: true,
-    });
+    expect(chips[0]).toEqual({ type: 'input_suggestion', content: [], done: true });
   });
 
-  it('emits input_suggestion as an array (not a string) — ACP path', async () => {
-    const { run, inputSuggestionCalls } = makeHarness({});
+  it('emits Yes / No when the reply ends with a yes/no question', async () => {
+    const { run, inputSuggestionCalls } = makeHarness({ replyText: 'Want me to build it?' });
     await run();
 
-    const chips = inputSuggestionCalls();
-    expect(Array.isArray(chips[0].content)).toBe(true);
+    expect(inputSuggestionCalls()[0].content).toEqual(['Yes, go ahead', 'No']);
+  });
+
+  it('emits Continue when the turn was cut short', async () => {
+    const { run, inputSuggestionCalls } = makeHarness({ stopReason: 'max_tokens' });
+    await run();
+
+    expect(inputSuggestionCalls()[0].content).toEqual(['Continue']);
   });
 
   it('the turn completes successfully (sendResult called with "completed")', async () => {

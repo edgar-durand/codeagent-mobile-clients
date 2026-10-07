@@ -90,6 +90,15 @@ describe('BdAdapter shared-server wiring (cwd-resolved, no BEADS_DIR, no --globa
     delete process.env.BEADS_DIR;
   });
 
+  it('a per-call cwd overrides the project cwd (user-level-only `bd setup`)', async () => {
+    const spy = vi.spyOn(_spawnSeam, 'run').mockResolvedValue(ok(''));
+    const a = new BdAdapter({ binaryPath: '/bd', cwd: '/workspaces/repo' });
+    await a.run(['setup', 'claude', '--global'], { cwd: '/tmp/bd-setup-x' });
+    await a.run(['ready', '--json']);
+    expect(spy.mock.calls[0][2].cwd).toBe('/tmp/bd-setup-x');
+    expect(spy.mock.calls[1][2].cwd).toBe('/workspaces/repo');
+  });
+
   it('backfills HOME from os.homedir() when the process env has none (detached self-hosted agent)', async () => {
     // The self-hosted host-agent runs detached (PPID 1, no login shell) with
     // $HOME unset; bd then aborts init/shared-server with "cannot determine
