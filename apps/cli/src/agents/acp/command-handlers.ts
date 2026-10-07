@@ -94,6 +94,7 @@ import type { AcpClient } from './client';
 import type { AcpPublisher } from './publisher';
 import { buildAcpPromptBlocks, type PromptBlock } from './buildAcpPromptBlocks';
 import { maybePrefaceAgentStandard } from '../agent-standard';
+import { replyLanguageContextOnce } from './reply-language';
 import { shouldOfferOneMRecovery } from './oneMContextRecovery';
 import { formatPromptEchoLine, formatAgentReplyLine } from './promptEcho';
 import {
@@ -942,6 +943,8 @@ async function startTaskH(ctx: AcpCommandContext): Promise<void> {
   // cold (one-shot). Delivered as a resource (not text) so it never lands in
   // the agent's JSONL as user words — see `squad-context.ts`.
   const squadContext = collectSquadContext(ctx);
+  const languageContext = replyLanguageContextOnce(payload?.locale, opts.sessionId, opts.agent);
+  if (languageContext) squadContext.push(languageContext);
   applySquadContext(blocks, squadContext, squadContextMode(ctx));
   // A USER-initiated prompt always re-arms the autonomous-handoff chain: it
   // interrupts whatever chain was running and gives the new work a full budget.
