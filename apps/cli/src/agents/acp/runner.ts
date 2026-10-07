@@ -167,12 +167,12 @@ export {
 } from './failure-messages';
 export { reportCredentialInvalid } from './backend-reports';
 export {
-  ACP_QUICK_REPLIES,
   assembleAcpCommandContext,
   buildLegacyContextForACP,
   cancelStuckTurn,
   dispatchAcpCommand,
   handleGetConversation,
+  quickRepliesForTurn,
   recoverFromFailedTurn,
   type AcpCommandContext,
   type AcpCommandHandler,

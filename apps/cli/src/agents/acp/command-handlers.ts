@@ -243,17 +243,47 @@ export function assembleAcpCommandContext(
 export type AcpCommandHandler = (ctx: AcpCommandContext) => Promise<void>;
 
 /**
- * Static quick-reply chips emitted after every normal ACP turn end.
+ * Quick-reply chips emitted after a normal ACP turn end. Tapping one fills the
+ * mobile composer and the user presses Send — and on FREE every send is a task.
  *
- * PTY agents surface an agent-specific ghost-text suggestion from the
- * terminal's input area (via `OutputService.tick()`). ACP agents have no
- * idle-prompt detector, so we emit a fixed, broadly-useful set instead.
- *
- * These labels are intentionally generic -- they work across agent types
- * (Claude, Codex, Cursor, Gemini) and prompt styles. Tapping one fills
- * the mobile composer and the user presses Send.
+ * They used to be a fixed `['Continue', 'Yes, go ahead', 'Explain']` after
+ * EVERY turn, so a chip was offered even when it answered nothing: after
+ * "Which one?" (Continue / Yes, go ahead don't pick one) or after a finished
+ * build (nothing to continue). On FREE that burned 2 of 3 daily tasks before
+ * the first build finished (replays 2026-10-05, shokhanahmadi61 f036/f044).
+ * Now a chip appears only when it is a complete answer to where the turn
+ * stopped:
+ *   - the reply was CUT SHORT (`max_tokens` / `max_turn_requests`) → "Continue";
+ *   - the reply ENDS with a yes/no question ("Want me to build it?") →
+ *     "Yes, go ahead" / "No";
+ *   - anything else (a finished build, an explanation, an open or
+ *     multiple-choice question) → no chips; `[]` also clears the previous
+ *     turn's chips on mobile.
+ * Whether a chip send counts toward the quota is a backend rule — untouched.
  */
-export const ACP_QUICK_REPLIES: string[] = ['Continue', 'Yes, go ahead', 'Explain'];
+export function quickRepliesForTurn(replyText: string, stopReason?: string): string[] {
+  if (stopReason === 'max_tokens' || stopReason === 'max_turn_requests') return ['Continue'];
+  return endsWithYesNoQuestion(replyText) ? ['Yes, go ahead', 'No'] : [];
+}
+
+/** Leading words of an English yes/no question ("Should I…?", "Want me to…?"). */
+const YES_NO_LEAD_RE =
+  /^(?:so|ok(?:ay)?|great|alright|then|now)?[,\s]*(?:shall|should|do|does|did|would|will|can|could|may|is|are|was|want|ready|sound|sounds|ok(?:ay)?|proceed|go ahead)\b/i;
+
+/**
+ * True when the reply's LAST sentence is a yes/no question. A question that
+ * offers alternatives ("A or B?") or asks for an open answer ("Which one?",
+ * "What name?") is not — a "Yes" chip doesn't answer it.
+ */
+export function endsWithYesNoQuestion(replyText: string): boolean {
+  const text = replyText.replace(/[*_`]/g, '').trimEnd();
+  if (!text.endsWith('?')) return false;
+  const body = text.slice(0, -1);
+  const start = Math.max(body.lastIndexOf('\n'), body.lastIndexOf('. '), body.lastIndexOf('! '), body.lastIndexOf('? '));
+  const question = body.slice(start + 1).trim();
+  if (/\bor\b/i.test(question)) return false;
+  return YES_NO_LEAD_RE.test(question);
+}
 
 /**
  * Recover the ACP session after a turn fails, then flush the chat out
@@ -1144,17 +1174,13 @@ async function startTaskH(ctx: AcpCommandContext): Promise<void> {
             `squad: auto-handoff to ${autoHop.toAgentId} failed: ${routed.error}`,
           );
         }
-        // Emit static quick-reply chips so the mobile UI has
-        // one-tap continuation prompts after every ACP turn.
-        // PTY agents emit a single-string `input_suggestion` via
-        // OutputService.tick(); ACP has no idle-prompt detector so
-        // we emit a fixed array instead. The mobile store normalises
-        // both shapes to string[] before rendering.
-        // Only emitted on a normal (non-select-prompt) turn end --
-        // select_prompt is handled by closeTurnWithInteractiveDetection.
+        // Context-relevant quick-reply chips (see quickRepliesForTurn). PTY
+        // agents emit a single-string `input_suggestion` via
+        // OutputService.tick(); the mobile store normalises both shapes to
+        // string[], and an empty array clears the previous turn's chips.
         void publisher.publishOutput({
           type: 'input_suggestion',
-          content: ACP_QUICK_REPLIES,
+          content: quickRepliesForTurn(cleanText, reply.stopReason),
           done: true,
         });
         log.info(
