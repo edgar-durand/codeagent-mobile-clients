@@ -10,6 +10,8 @@ import type { BdRunResult } from '../../src/beads/bd-adapter';
  */
 class FakeBd {
   calls: string[][] = [];
+  /** cwd override passed with each call (index-aligned with `calls`). */
+  cwds: Array<string | undefined> = [];
   available = true;
   binary: string | null = '/pkg/@beads/bd/bin/bd';
   private codes: Record<string, number> = {};
@@ -23,8 +25,9 @@ class FakeBd {
   setCode(prefix: string, code: number): void {
     this.codes[prefix] = code;
   }
-  async run(args: string[]): Promise<BdRunResult> {
+  async run(args: string[], runOpts: { cwd?: string } = {}): Promise<BdRunResult> {
     this.calls.push(args);
+    this.cwds.push(runOpts.cwd);
     const joined = args.join(' ');
     let best = '';
     for (const p of Object.keys(this.codes)) {
@@ -255,6 +258,39 @@ describe('provisionBeads', () => {
     const setupIdx = fake.calls.findIndex((c) => c[0] === 'setup');
     expect(initIdx).toBeGreaterThanOrEqual(0);
     expect(setupIdx).toBeGreaterThan(initIdx);
+  });
+
+  it('runs user-level-only recipes in a throwaway cwd so the project gets no CLAUDE.md block', async () => {
+    // Replays 2026-10-05 (shokhanahmadi61 f052/f075): `bd setup claude --global`
+    // run in the project wrote a 77-line beads block into <cwd>/CLAUDE.md, which
+    // became the user's first "change to review".
+    fake.setCode('setup claude --global --check', 1);
+    fake.setCode('setup cursor --global --check', 1);
+    const made: string[] = [];
+    const removed: string[] = [];
+    vi.spyOn(_provisionSeam, 'makeSetupCwd').mockImplementation(() => {
+      const dir = `/tmp/bd-setup-${made.length}`;
+      made.push(dir);
+      return dir;
+    });
+    vi.spyOn(_provisionSeam, 'removeSetupCwd').mockImplementation((dir) => {
+      removed.push(dir);
+    });
+
+    await provisionBeads({
+      adapter: fake as never,
+      beadsDir: '/tmp/hb',
+      cwd: '/work/user-repo',
+      agents: ['claude', 'cursor'],
+    });
+
+    const cwdOf = (cmd: string) => fake.cwds[fake.calls.findIndex((c) => c.join(' ') === cmd)];
+    expect(cwdOf('setup claude --global --check')).toBe('/tmp/bd-setup-0');
+    expect(cwdOf('setup claude --global')).toBe('/tmp/bd-setup-0');
+    // cursor is wired ONLY through project files — it keeps the project cwd.
+    expect(cwdOf('setup cursor --global')).toBeUndefined();
+    expect(made).toEqual(['/tmp/bd-setup-0']);
+    expect(removed).toEqual(['/tmp/bd-setup-0']);
   });
 
   it('idempotent: when `--check` reports installed (exit 0), it does NOT re-run setup', async () => {
