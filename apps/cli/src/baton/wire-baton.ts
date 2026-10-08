@@ -11,6 +11,9 @@ import { AcpClient } from '../agents/acp/client';
 import type { AdapterSpec } from '../agents/acp/adapters';
 import { AcpPublisher } from '../agents/acp/publisher';
 import { StreamingState, type AcpRunnerOptions } from '../agents/acp/runner';
+import { maybeSendOnboardingWelcome } from '../agents/acp/onboarding';
+import { startupFailureMessage } from '../agents/acp/failure-messages';
+import type { LocalAuthState } from '../agents/strategy';
 import { mapSessionUpdate, mapPermissionRequest } from '../agents/acp/mappers';
 import { fetchCurrentPluginAuthToken, postBatonEvent } from '../services/pairing.service';
 import { showInfo, showSuccess, showRelayNotice } from '../ui/banner';
@@ -86,16 +89,168 @@ export const buildBaton = {
 };
 
 /**
+ * Commands that need the agent itself (its TUI or its ACP session). Everything
+ * else — files, git, terminal, env, history — is served by the CLI and works
+ * while the agent is still starting, or after it failed to start.
+ */
+const AGENT_BOUND_COMMANDS: ReadonlySet<string> = new Set([
+  'start_task',
+  'provide_input',
+  'select_option',
+  'escape_key',
+  'stop_task',
+  'resume_session',
+  'change_model',
+  'take_control',
+  'handback',
+]);
+
+export function startingNotice(agentName: string): string {
+  return [
+    `⏳ **${agentName} is still starting on your computer.**`,
+    '',
+    `Your message goes through as soon as it is ready. If this takes more than a minute, look at the terminal where you ran \`codeam\`: it may be waiting for you there (for example, to install ${agentName}).`,
+  ].join('\n');
+}
+
+export function notSignedInNotice(agentName: string): string {
+  return [
+    `🔑 **${agentName} isn't signed in on your computer.** Your message was not sent.`,
+    '',
+    `Sign in from the terminal where you ran \`codeam\` (${agentName} is showing its sign-in screen there), then send your message again.`,
+    '',
+    `Away from that computer? Start a cloud session from the app and use CodeAgent credits instead.`,
+  ].join('\n');
+}
+
+/**
+ * Wraps the baton's command router so the relay can run BEFORE the agent is up
+ * (codeagent-04jp). The relay used to start only after `controller.begin()`
+ * resolved, and `begin()` spawns the native TUI — which can wait forever on an
+ * install prompt in the terminal, or end the process when the agent can't be
+ * installed. Meanwhile the phone saw its prompts "delivered" and never acked,
+ * and showed "the host isn't responding". With the relay first, this gate
+ * decides what an agent-bound command gets while the agent is not usable:
+ *
+ *  - **starting**: one chat notice, then the command waits for the agent;
+ *  - **failed**: the startup failure in chat + a `failed` result, every time;
+ *  - **ready but signed out** (`start_task` only, agents with a probe): a
+ *    sign-in notice + a `failed` result, instead of typing the prompt into
+ *    the agent's login screen. Re-probed on each prompt until it is signed in.
+ *
+ * Commands that don't need the agent pass straight through.
+ */
+export function makeStartupGate(deps: {
+  handle: (cmd: RemoteCommand) => Promise<void>;
+  /** Resolves when the agent is usable; rejects with why it never will be. */
+  startup: Promise<void>;
+  agentName: string;
+  failureMessage: (err: unknown) => string;
+  probeAuth?: () => Promise<LocalAuthState>;
+  /** Publish one agent-authored chat message. Must not throw. */
+  notify: (text: string) => Promise<void>;
+  ack: (id: string, status: string, result: unknown) => Promise<void>;
+}): (cmd: RemoteCommand) => Promise<void> {
+  let phase: 'starting' | 'ready' | 'failed' = 'starting';
+  let failure = '';
+  let startingNoticeSent = false;
+  let signedIn = false;
+  let authProbe: Promise<LocalAuthState> | null = null;
+  const probe = (): Promise<LocalAuthState> | null =>
+    deps.probeAuth ? deps.probeAuth().catch((): LocalAuthState => 'unknown') : null;
+  // Registered before any command can await `startup`, so `phase` is already
+  // updated when a waiting command resumes.
+  const settled = deps.startup.then(
+    () => {
+      phase = 'ready';
+      // Warm the probe so the first prompt rarely waits on it.
+      authProbe = probe();
+    },
+    (err: unknown) => {
+      phase = 'failed';
+      failure = deps.failureMessage(err);
+    },
+  );
+  const proceed = async (cmd: RemoteCommand): Promise<void> => {
+    if (phase === 'failed') {
+      await deps.notify(failure);
+      await deps.ack(cmd.id, 'failed', {
+        code: 'AGENT_UNAVAILABLE',
+        error: `${deps.agentName} could not start on this computer — see the message in chat.`,
+      });
+      return;
+    }
+    if (cmd.type === 'start_task' && !signedIn && deps.probeAuth) {
+      const state = await (authProbe ?? probe() ?? Promise.resolve<LocalAuthState>('unknown'));
+      authProbe = null; // a signed-out answer is re-asked on the next prompt
+      if (state === 'not_signed_in') {
+        await deps.notify(notSignedInNotice(deps.agentName));
+        await deps.ack(cmd.id, 'failed', {
+          code: 'AGENT_NOT_SIGNED_IN',
+          error: `${deps.agentName} isn't signed in on this computer.`,
+        });
+        return;
+      }
+      // 'unknown' fails open: a probe we can't read must never block a prompt.
+      signedIn = true;
+    }
+    await deps.handle(cmd);
+  };
+  // Commands that arrive while the agent starts wait here, in arrival order —
+  // NOT inside the relay's dispatch: the relay awaits each command, so holding
+  // it would stall every later command (files, history) and the polling
+  // fallback for as long as the start takes, which may be forever.
+  let waiting: Promise<void> = Promise.resolve();
+  let queued = 0;
+  return async (cmd: RemoteCommand): Promise<void> => {
+    if (!AGENT_BOUND_COMMANDS.has(cmd.type)) {
+      await deps.handle(cmd);
+      return;
+    }
+    // Once up, run inline — unless earlier commands are still queued, which
+    // a later one must not overtake.
+    if (phase !== 'starting' && queued === 0) {
+      await proceed(cmd);
+      return;
+    }
+    if (phase === 'starting' && !startingNoticeSent) {
+      startingNoticeSent = true;
+      void deps.notify(startingNotice(deps.agentName));
+    }
+    queued += 1;
+    waiting = waiting
+      .then(() => settled)
+      .then(() => proceed(cmd))
+      .catch((err: unknown) => {
+        log.warn(
+          'wireBaton',
+          `deferred ${cmd.type} failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      })
+      .finally(() => {
+        queued -= 1;
+      });
+  };
+}
+
+/**
  * Publisher surface {@link makeMirrorOnNewMessages} needs — a subset of
  * {@link AcpPublisher} so tests can pass a fake without constructing a real
  * one (no HTTP, no plugin-auth token).
  */
+export interface MirrorMessage {
+  id: string;
+  role: 'user' | 'agent';
+  text: string;
+  timestamp: number;
+}
+
 export interface MirrorLivePublisher {
   publishOutput: (body: Record<string, unknown>) => Promise<void>;
   pushConversation: (args: {
     agentId: AgentId;
     sessionId: string;
-    messages: Array<{ id: string; role: 'user' | 'agent'; text: string; timestamp: number }>;
+    messages: MirrorMessage[];
   }) => Promise<void>;
 }
 
@@ -184,16 +339,15 @@ export function makeMirrorOnNewMessages(deps: {
   publisher: MirrorLivePublisher;
   agentId: AgentId;
   conversationId: string;
+  /** Messages that are part of this conversation but not of the agent's
+   *  transcript (the onboarding welcome); kept at the head of every snapshot so
+   *  the replace-mode push never drops them. Read on each push. */
+  seed?: () => MirrorMessage[];
 }): (messages: NormalizedMessage[], meta?: { preexisting: boolean }) => void {
   let publishChain: Promise<void> = Promise.resolve();
   // Full running conversation the mirror has seen, so the snapshot is always
   // the COMPLETE history (the mirror only ever hands us the newest delta).
-  const conversation: Array<{
-    id: string;
-    role: 'user' | 'agent';
-    text: string;
-    timestamp: number;
-  }> = [];
+  const conversation: MirrorMessage[] = [];
   return (messages: NormalizedMessage[], meta?: { preexisting: boolean }): void => {
     const relevant = messages.filter((m) => m.role !== 'system');
     if (relevant.length === 0) return;
@@ -207,7 +361,7 @@ export function makeMirrorOnNewMessages(deps: {
     void deps.publisher.pushConversation({
       agentId: deps.agentId,
       sessionId: deps.conversationId,
-      messages: conversation.slice(),
+      messages: [...(deps.seed?.() ?? []), ...conversation],
     });
     // Live-publish every batch EXCEPT the mirror's pre-existing catch-up read.
     if (meta?.preexisting !== true) {
@@ -523,6 +677,11 @@ export async function runBatonSession(opts: BatonSessionOptions): Promise<void> 
   // and rewrite the phone's conversation message by message. See
   // `makeMirrorOnNewMessages`.
   let lastPublished: BatonState | null = null;
+  // The onboarding welcome belongs to the conversation the session opened
+  // with, but it is not in the agent's transcript, so the mirror (which
+  // replace-pushes the transcript) carries it at the head of that
+  // conversation's snapshots.
+  let welcome: { conversationId: string; message: MirrorMessage } | null = null;
   const startMirror = (conversationId: string): void => {
     mirror?.stop();
     mirror = new TranscriptMirror({
@@ -533,6 +692,8 @@ export async function runBatonSession(opts: BatonSessionOptions): Promise<void> 
         publisher,
         agentId: opts.agent,
         conversationId,
+        seed: () =>
+          welcome && welcome.conversationId === conversationId ? [welcome.message] : [],
       }),
     });
     mirror.start();
@@ -593,12 +754,34 @@ export async function runBatonSession(opts: BatonSessionOptions): Promise<void> 
   // Redis for 1 h, and mobile renders no BatonBar when that snapshot is gone,
   // so a live session that hasn't switched drivers in over an hour would lose
   // Take Control entirely. Riding the existing 20 s tick keeps it to ONE timer.
+  // The relay starts BEFORE the agent (see makeStartupGate); `startup`
+  // settles once `begin()` (+ the welcome) is done or has failed.
+  let resolveStartup!: () => void;
+  let rejectStartup!: (err: unknown) => void;
+  const startup = new Promise<void>((resolve, reject) => {
+    resolveStartup = resolve;
+    rejectStartup = reject;
+  });
+  const ack = (id: string, status: string, result: unknown): Promise<void> =>
+    relay.sendResult(id, status, result);
   relay = new CommandRelayService(
     opts.pluginId,
-    makeOnCommand({
-      controller,
-      dispatchActive,
-      ack: (id, status, result) => relay.sendResult(id, status, result),
+    makeStartupGate({
+      handle: makeOnCommand({ controller, dispatchActive, ack }),
+      startup,
+      agentName: runtime.meta.displayName,
+      failureMessage: (err) =>
+        startupFailureMessage(opts.agent, err instanceof Error ? err.message : String(err), ''),
+      probeAuth: runtime.probeLocalAuth?.bind(runtime),
+      notify: async (text) => {
+        try {
+          await publisher.publishOutput({ type: 'new_turn', done: false });
+          await publisher.publishOutput({ type: 'text', content: text, done: true });
+        } catch {
+          /* best-effort — a notice must never break command handling */
+        }
+      },
+      ack,
     }),
     runtime.meta,
     undefined,
@@ -649,9 +832,52 @@ export async function runBatonSession(opts: BatonSessionOptions): Promise<void> 
   // down like a signal so a local baton never outlives its session (2026-09-23).
   relay.setOnSessionGone(onSignal);
 
-  showInfo(`Starting ${opts.agent} baton (local) — native TUI + mobile take-control…`);
-  await controller.begin(); // LOCAL_DRIVE: spawns the native TUI, publishes state
+  // Relay FIRST (codeagent-04jp): heartbeat + acks are live while the agent
+  // starts, so a slow or failed start is reported to the phone instead of
+  // leaving its prompts delivered-but-never-acked.
   relay.start();
+  showInfo(`Starting ${opts.agent} baton (local) — native TUI + mobile take-control…`);
+  try {
+    await controller.begin(); // LOCAL_DRIVE: spawns the native TUI, publishes state
+    // First-pair welcome, like the ACP runner sends (codeagent-1qhj). Awaited
+    // before `startup` resolves: it streams on the same StreamingState a
+    // MOBILE_DRIVE turn would use, and agent-bound commands wait for `startup`.
+    const welcomeConversationId = controller.conversationId;
+    await maybeSendOnboardingWelcome({
+      streaming,
+      sessionId: opts.sessionId,
+      cwd: opts.cwd,
+      history: {
+        appendAgentInitiatedReply: (text: string) => {
+          if (!welcomeConversationId) return;
+          welcome = {
+            conversationId: welcomeConversationId,
+            message: { id: 'onboarding-welcome', role: 'agent', text, timestamp: Date.now() },
+          };
+        },
+        // The session opened on a fresh conversation, so the welcome is its
+        // whole content until the first turn — the mirror takes over from there.
+        flush: async () => {
+          if (!welcome) return;
+          await publisher.pushConversation({
+            agentId: opts.agent,
+            sessionId: welcome.conversationId,
+            messages: [welcome.message],
+          });
+        },
+      },
+    });
+    resolveStartup();
+  } catch (err) {
+    rejectStartup(err);
+    const detail = err instanceof Error ? err.message : String(err);
+    log.warn('wireBaton', `agent failed to start: ${detail}`);
+    console.error(
+      `\n  ✗ ${detail}\n    Your phone shows this too. Press Ctrl+C to exit.\n`,
+    );
+    // Stay up: the relay keeps the session online so the phone can show why.
+    await new Promise<void>(() => {});
+  }
   showSuccess(`${opts.agent} baton online — you're driving locally; mobile can take control.`);
   showRelayNotice();
 

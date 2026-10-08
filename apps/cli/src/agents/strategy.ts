@@ -196,6 +196,9 @@ export interface BaseAgentStrategy {
 
 // ─── Interactive agents (PTY REPL) ───────────────────────────────────
 
+/** What {@link InteractiveAgentStrategy.probeLocalAuth} learned. */
+export type LocalAuthState = 'signed_in' | 'not_signed_in' | 'unknown';
+
 export interface InteractiveAgentStrategy extends BaseAgentStrategy {
   readonly mode: 'interactive';
 
@@ -346,6 +349,16 @@ export interface InteractiveAgentStrategy extends BaseAgentStrategy {
    */
   syncTranscriptForAcpResume?(cwd: string, sessionId: string): Promise<void>;
   syncTranscriptForNativeResume?(cwd: string, sessionId: string): Promise<void>;
+
+  /**
+   * Is the agent signed in on THIS machine? Asked by the local baton before it
+   * types a phone prompt into the native TUI: a signed-out agent shows its own
+   * login screen there, so the prompt would land in that screen and never be
+   * answered (codeagent-04jp). Must ask the agent itself (Claude:
+   * `claude auth status`) and answer `'unknown'` whenever it cannot tell, so a
+   * failed probe never blocks a signed-in user. Undefined = never probed.
+   */
+  probeLocalAuth?(): Promise<LocalAuthState>;
   getCurrentUsage(historyDir: string): { used: number; total: number; percent: number; model?: string } | null;
 
   /**
