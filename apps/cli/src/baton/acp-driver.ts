@@ -100,9 +100,12 @@ export class AcpDriver implements SessionDriver {
         // and would open a streaming tail that never closes — pinning mobile's
         // "Thinking…" indicator after Take Control. Mobile already has this
         // history (pushConversation), so swallow the replay for the load only.
+        // `preferResume` skips that replay outright on agents with
+        // `session/resume` (claude/codex), so Take Control doesn't wait for it
+        // either (codeagent-2238); the bracket stays for agents without it.
         this.deps.streaming.beginLoadReplay();
         try {
-          await this.deps.client.loadSession(resumeId);
+          await this.deps.client.loadSession(resumeId, { preferResume: true });
         } finally {
           this.deps.streaming.endLoadReplay();
         }

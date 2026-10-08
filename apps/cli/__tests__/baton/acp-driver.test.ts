@@ -75,7 +75,7 @@ describe('AcpDriver', () => {
     const d = new AcpDriver(makeDeps(client).deps);
     const id = await d.start('conv-42');
     expect(client.start).toHaveBeenCalledTimes(1);
-    expect(client.loadSession).toHaveBeenCalledWith('conv-42');
+    expect(client.loadSession).toHaveBeenCalledWith('conv-42', { preferResume: true });
     expect(id).toBe('conv-42');
     expect(d.kind).toBe('mobile_acp');
   });
@@ -140,7 +140,7 @@ describe('AcpDriver', () => {
 
     const id = await new AcpDriver(deps).start('conv-42');
 
-    expect(client.loadSession).toHaveBeenCalledWith('conv-42');
+    expect(client.loadSession).toHaveBeenCalledWith('conv-42', { preferResume: true });
     expect(id).toBe('conv-42');
   });
 
