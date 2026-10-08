@@ -22,7 +22,9 @@ describe('prefetchIntoPageCache', () => {
       }) as typeof fs.createReadStream,
     });
     expect(stream).toBeDefined();
-    await new Promise<void>((resolve) => stream!.on('end', () => resolve()));
+    // 'close', not 'end': the fd is released after 'end', and Windows refuses
+    // to remove a directory that still holds an open file (ENOTEMPTY).
+    await new Promise<void>((resolve) => stream!.on('close', () => resolve()));
     expect(stream!.bytesRead).toBe(9 * 1024 * 1024);
     fs.rmSync(dir, { recursive: true, force: true });
   });
