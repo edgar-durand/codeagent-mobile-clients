@@ -193,7 +193,7 @@ jobs:
           npm publish --access public
 
       - name: Upload CLI tarball artifact
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@v6
         with:
           name: cli-tgz
           path: apps/cli/codeam-cli-${{ needs.setup.outputs.version }}.tgz
@@ -458,7 +458,7 @@ jobs:
           OVSX_TOKEN: ${{ secrets.OVSX_TOKEN }}
 
       - name: Upload VSIX artifact
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@v6
         with:
           name: vsc-vsix
           path: apps/vsc-plugin/codeagent-mobile-${{ needs.setup.outputs.version }}.vsix
@@ -582,7 +582,7 @@ jobs:
           echo "zip=$ZIP" >> "$GITHUB_OUTPUT"
 
       - name: Upload JetBrains plugin archive
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@v6
         with:
           name: jb-zip
           path: ${{ steps.jb.outputs.zip }}
