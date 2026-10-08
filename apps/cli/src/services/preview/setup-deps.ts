@@ -55,7 +55,9 @@ export function detectMissingNodeDeps(cwd: string): { cmd: string; args: string[
   if (fs.existsSync(path.join(cwd, 'yarn.lock'))) {
     return { cmd: 'yarn', args: ['install'] };
   }
-  return { cmd: 'npm', args: ['install', '--legacy-peer-deps'] };
+  // --no-audit/--no-fund: the audit round-trip is pure latency on a throwaway
+  // preview install, and npm's advisories endpoint has stalled ~5 min/request.
+  return { cmd: 'npm', args: ['install', '--legacy-peer-deps', '--no-audit', '--no-fund'] };
 }
 
 /**
