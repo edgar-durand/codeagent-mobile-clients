@@ -75,7 +75,7 @@ import {
   isSquadContextBlock,
   looksLikeUnsupportedPromptShape,
 } from './squad-context';
-import { extractHandoffProposal } from './handoff-protocol';
+import { extractHandoffProposal, stripHandoffFences } from './handoff-protocol';
 import {
   CODERABBIT_AGENT_ID,
   composeReviewOutput,
@@ -1410,7 +1410,10 @@ async function groupMentionTaskH(ctx: AcpCommandContext): Promise<void> {
   let status: 'completed' | 'failed' = 'completed';
   try {
     await client.prompt(promptText);
-    response = streaming.getCurrentText();
+    // Durable + group round-trip text is the FENCE-STRIPPED reply: the raw
+    // buffer keeps a trailing ```codeam-handoff fence (protocol litter the
+    // live frames already hide) that would otherwise resurface on reload.
+    response = stripHandoffFences(streaming.getCurrentText());
     await streaming.closeTurnWithInteractiveDetection();
     history.appendAgentReply(response);
     void history.flush();
@@ -1622,7 +1625,7 @@ async function selectOptionH(ctx: AcpCommandContext): Promise<void> {
         // Detect chained interactive prompts (agent asks again
         // after the first answer) so multi-step flows render as
         // buttons all the way down.
-        const finalText = streaming.getCurrentText();
+        const finalText = stripHandoffFences(streaming.getCurrentText());
         await streaming.closeTurnWithInteractiveDetection();
         history.appendAgentReply(finalText);
         void history.flush();
@@ -1667,7 +1670,7 @@ async function provideInputH(ctx: AcpCommandContext): Promise<void> {
   history.appendUserPrompt(input);
   try {
     const reply = await client.prompt(input);
-    const finalText = streaming.getCurrentText();
+    const finalText = stripHandoffFences(streaming.getCurrentText());
     await streaming.closeTurnWithInteractiveDetection();
     history.appendAgentReply(finalText);
     void history.flush();
@@ -1784,7 +1787,7 @@ async function summarizeH(ctx: AcpCommandContext): Promise<void> {
   history.appendUserPrompt(slash);
   try {
     const reply = await client.prompt(slash);
-    const finalText = streaming.getCurrentText();
+    const finalText = stripHandoffFences(streaming.getCurrentText());
     await streaming.closeTurnWithInteractiveDetection();
     history.appendAgentReply(finalText);
     void history.flush();
