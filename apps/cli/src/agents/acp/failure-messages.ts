@@ -19,6 +19,7 @@ import {
   isKnownAgentId,
   isManagedProviderId,
   type AgentId,
+  type SessionBlocker,
 } from '@codeam/shared';
 import { looksLike1mContextCreditsError } from './oneMContextRecovery';
 import { isHouseProxyEnv } from '../../commands/host/house-proxy-config';
@@ -269,9 +270,19 @@ export function byoProviderName(opts: { env?: NodeJS.ProcessEnv; agent?: string 
   return (opts.agent && AGENT_DEFAULT_PROVIDER[opts.agent]) || 'provider';
 }
 
+// Lead sentences of the CLI's own blocker bubbles. The builders below compose
+// from these and {@link failureBlocker} recognises them, so the two can never
+// disagree (the apps' regex copies of this wording already had).
+const BYO_BILLING_LEAD = '💳 **Your ';
+const BYO_BILLING_MID = ' account has no credits left.** ';
+const HOUSE_UNAVAILABLE_LEAD =
+  '⏳ **Our agent service is temporarily unavailable — this one’s on us, not your account.**';
+const HOUSE_LIMIT_LEAD = '📊 **You’ve reached today’s agent usage limit.**';
+const STARTUP_FAILED_RE = /^⚠️ The (.{1,64}?) agent failed to start\./;
+
 export function byoProviderBillingMessage(provider: string): string {
   return (
-    `💳 **Your ${provider} account has no credits left.** ` +
+    `${BYO_BILLING_LEAD}${provider}${BYO_BILLING_MID}` +
     'Top up at your provider, or switch this session to another agent.'
   );
 }
@@ -312,7 +323,7 @@ export function houseAgentLimitMessage(text: string): string {
     // no internal mechanism), and never route this to an upgrade — nothing the
     // user buys fixes an outage on our side.
     return (
-      '⏳ **Our agent service is temporarily unavailable — this one’s on us, not your account.**\n\n' +
+      `${HOUSE_UNAVAILABLE_LEAD}\n\n` +
       'There’s nothing to buy and nothing owed, and it isn’t a problem with your login, so ' +
       're-authenticating won’t help. Send your message again in a bit, or connect your own ' +
       'agent (Claude Code, Codex, Cursor, Gemini) in **Profile › Agents** to keep going now.'
@@ -320,7 +331,7 @@ export function houseAgentLimitMessage(text: string): string {
   }
   const canUpgrade = /upgrade to pro/i.test(text);
   return (
-    '📊 **You’ve reached today’s agent usage limit.**\n\n' +
+    `${HOUSE_LIMIT_LEAD}\n\n` +
     'The free agent has a daily usage ceiling that resets at midnight UTC. ' +
     'This is a usage limit, not a problem with your login — re-authenticating won’t change it. ' +
     (canUpgrade
@@ -329,6 +340,32 @@ export function houseAgentLimitMessage(text: string): string {
       : 'To keep going now, connect your own agent (Claude, Codex, …) in **Profile › Agents** ' +
         'to run without this limit, or wait for the reset.')
   );
+}
+
+/**
+ * The typed blocker tag for one of the CLI's OWN terminal bubbles, or
+ * `undefined` for any other text (a normal reply, a generic retry, an outage).
+ * Published next to the bubble as `blocker` (see `StreamingState.closeWithBubble`)
+ * so the apps attach the escape-route buttons from the kind, not from regex
+ * over this wording (codeagent-gfip).
+ */
+export function failureBlocker(bubble: string): SessionBlocker | undefined {
+  if (bubble === AUTH_FAILURE_MESSAGE) return { kind: 'agent_auth_failed' };
+  if (bubble === CURSOR_UPGRADE_MESSAGE) return { kind: 'agent_plan_required', agentId: 'cursor' };
+  if (bubble.startsWith(HOUSE_UNAVAILABLE_LEAD)) return { kind: 'house_agent_unavailable' };
+  if (bubble.startsWith(HOUSE_LIMIT_LEAD)) return { kind: 'house_agent_limit' };
+  if (bubble.startsWith(BYO_BILLING_LEAD)) {
+    const mid = bubble.indexOf(BYO_BILLING_MID);
+    if (mid > BYO_BILLING_LEAD.length) {
+      return {
+        kind: 'provider_credits_exhausted',
+        provider: bubble.slice(BYO_BILLING_LEAD.length, mid),
+      };
+    }
+  }
+  const startup = STARTUP_FAILED_RE.exec(bubble);
+  if (startup) return { kind: 'agent_startup_failed', agentId: startup[1] };
+  return undefined;
 }
 
 /**
