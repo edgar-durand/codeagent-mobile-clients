@@ -45,8 +45,11 @@
 #
 # Build (the release pipeline pins CODEAM_CLI_VERSION to the tag being cut):
 #   docker build --build-arg CODEAM_CLI_VERSION=2.61.33 -t codeam-box:2.61.33 apps/box
+#
+# The base comes from Google's Docker Hub mirror, not docker.io: anonymous Docker Hub
+# pulls from GitHub runners hit 429 and blocked the v2.76.17 Box image (2026-10-09).
 
-FROM node:22-slim
+FROM mirror.gcr.io/library/node:22-slim
 
 # System deps:
 # git/ca-certificates: prepareWorkspace clones the rescued user's repo.
