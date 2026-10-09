@@ -4,6 +4,33 @@ All notable changes to `codeam-cli` are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.76.17] — 2026-10-09
+
+### Added
+
+- **shared:** PluginAgentStatus on the agents report (codeagent-04jp.2) (#912)
+
+### Changed
+
+- **cli:** Extract the fleet docker layer out of host-agent.ts (#918)
+
+### Fixed
+
+- **cli:** Local baton relay-first + startup/sign-in status, onboarding welcome, resume without replay (#913)
+- **cli:** Send the poll secret on /api/plugin/heartbeat + /api/plugin/agents (#914)
+- **cli:** Identify telemetry by the backend user id, never the email (#915)
+- **cli:** Run every automatic npm install with audit + fund off (#916)
+- **cli:** Permission toggle regression + pure-node integration specs (coverage-xl) (#917)
+- **cli:** Relay zod guard, fence strip, chat throttle, ACP cli_turn, plan-mode history (#925)
+- **cli:** Cli-misc beads — .beads tree, push hardening, Windows relaunch, per-session integrations, blocker tag (#920)
+- **jetbrains-plugin:** Heartbeat parity with CLI 2.75.8 + clear 2026.2 Plugin Verifier findings (#921)
+- **cli:** Cli-agents bead group (8as, ikuj, qrk1, oyic, 6je7, bt7x) (#922)
+- **cli:** One anon id per host, none baked into the Box image (#924)
+
+### Tests
+
+- **cli:** Wait for 'close' before removing the prefetch temp dir (#911)
+
 ## [2.76.16] — 2026-10-07
 
 ### Added
