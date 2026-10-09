@@ -74,8 +74,13 @@ export function guardrailBlockNotice(
 }
 
 export interface PermissionGateDeps {
-  /** AUTO mode (headless / codespace): auto-pick an allow option. */
-  autoApprovePermissions: boolean;
+  /**
+   * AUTO mode (headless / codespace): auto-pick an allow option. Read on EVERY
+   * request, never snapshotted: `set_mode` flips the session's flag mid-session
+   * (ask-mode → relay to mobile, bypass → auto), and a captured boolean made the
+   * mobile manual/auto toggle a no-op again from v2.65.14 on.
+   */
+  isAutoApprove: () => boolean;
   /** Local session ⇒ neither internals guard nor guardrails apply. */
   isLocal: () => boolean;
   /** The session's guardrail policy (read per request — it's user-editable). */
@@ -144,7 +149,7 @@ export function createOnRequestPermission(
     // the broadest grant available (allow_always > allow_once). If the agent
     // somehow offers no allow option, fall through to the interactive flow.
     // A guardrail `confirm` overrides AUTO — the user must tap.
-    if (deps.autoApprovePermissions && !guardrailConfirm) {
+    if (deps.isAutoApprove() && !guardrailConfirm) {
       const allow = pickAllowOption(request.options);
       if (allow) {
         log.info(

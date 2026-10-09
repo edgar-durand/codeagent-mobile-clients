@@ -1264,6 +1264,27 @@ export function pickLatestResumableConversation(
 }
 
 /**
+ * The runner's `session/request_permission` handler. `opts` is the SAME object
+ * every command context carries, so `set_mode` (command-handlers `setModeH`)
+ * flipping `opts.autoApprovePermissions` must reach the very next request —
+ * hence the live getter. Exported so the ACP permission integration spec drives
+ * this exact wiring rather than a re-implementation of it.
+ */
+export function createRunnerPermissionGate(
+  opts: AcpRunnerOptions,
+  publisher: AcpPublisher,
+  streaming: StreamingState,
+): ReturnType<typeof createOnRequestPermission> {
+  return createOnRequestPermission({
+    isAutoApprove: () => opts.autoApprovePermissions === true,
+    isLocal: isLocalSession,
+    getPolicy: getGuardrailPolicy,
+    publisher,
+    registerPermission: (args) => streaming.registerPermission(args),
+  });
+}
+
+/**
  * The host-agent RESUME boot's auto-resume: reopen the marked (or latest)
  * prior conversation in place of the fresh session `client.start()` minted.
  * Best-effort — any failure keeps the fresh session.
@@ -1427,13 +1448,7 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
     // HARD RULE enforced there: every auto-REJECT publishes a visible chat
     // line — a guard must never silently answer for the user (the 2026-08-19
     // ExitPlanMode silent-rejection P0).
-    onRequestPermission: createOnRequestPermission({
-      autoApprovePermissions: opts.autoApprovePermissions === true,
-      isLocal: isLocalSession,
-      getPolicy: getGuardrailPolicy,
-      publisher,
-      registerPermission: (args) => streaming.registerPermission(args),
-    }),
+    onRequestPermission: createRunnerPermissionGate(opts, publisher, streaming),
     onStderr: (line) => {
       // AcpClient.start() already mirrors stderr to `log.info('acpAdapter')`
       // for CODEAM_DEBUG smoke tests. We ALSO keep a small ring of recent
