@@ -93,6 +93,7 @@ describe('ACP start_task — cli_turn funnel (codeagent-wj4n)', () => {
     ]);
     for (const [arg] of postTurnEventMock.mock.calls) {
       expect(arg).toMatchObject({
+        sessionId: 'sess-1',
         commandId: 'cmd-turn-1',
         pluginId: 'plugin-1',
         pluginAuthToken: 'tok-1',

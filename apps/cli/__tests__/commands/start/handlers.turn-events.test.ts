@@ -55,6 +55,7 @@ describe('start_task — reporte de fases', () => {
     await handlers.start_task(makeCtx(), cmd, { prompt: 'hola' } as StartCommandPayload);
     expect(phases()).toEqual(['received', 'started']);
     expect(postTurnEventMock.mock.calls[0][0]).toMatchObject({
+      sessionId: 'sess-1',
       commandId: 'cmd-42',
       agentId: 'claude',
     });
