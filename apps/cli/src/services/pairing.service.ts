@@ -564,6 +564,10 @@ export async function postBatonEvent(
  * al turno que describe.
  */
 export async function postTurnEvent(input: {
+  /** Required: the route is PluginAuthGuard, which verifies the HMAC over
+   *  sessionId + pluginId read from the body. Without it every report was a
+   *  401 PLUGIN_TOKEN_REQUIRED (codeagent-wj4n). */
+  sessionId: string;
   pluginId: string;
   pluginAuthToken: string;
   commandId: string;
@@ -575,6 +579,7 @@ export async function postTurnEvent(input: {
     await _transport.postJsonAuthed(
       `${API_BASE}/api/commands/turn-events`,
       {
+        sessionId: input.sessionId,
         pluginId: input.pluginId,
         commandId: input.commandId,
         phase: input.phase,

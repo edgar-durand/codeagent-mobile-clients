@@ -884,8 +884,9 @@ function reportTurn(
   errorCode?: TurnFailureCode,
 ): void {
   const { opts, cmd } = ctx;
-  if (!opts.pluginId || !opts.pluginAuthToken) return;
+  if (!opts.sessionId || !opts.pluginId || !opts.pluginAuthToken) return;
   void postTurnEvent({
+    sessionId: opts.sessionId,
     pluginId: opts.pluginId,
     pluginAuthToken: opts.pluginAuthToken,
     commandId: cmd.id,

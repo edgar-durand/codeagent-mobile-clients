@@ -288,13 +288,14 @@ const startTask: CommandHandler = async (ctx, cmd, parsed) => {
 
 /** Fire-and-forget: un reporte perdido nunca puede afectar al turno. */
 function reportTurn(
-  ctx: { pluginId?: string; pluginAuthToken?: string; agentId?: string },
+  ctx: { sessionId?: string; pluginId?: string; pluginAuthToken?: string; agentId?: string },
   commandId: string,
   phase: 'received' | 'started' | 'completed' | 'failed',
   errorCode?: string,
 ): void {
-  if (!ctx.pluginId || !ctx.pluginAuthToken) return;
+  if (!ctx.sessionId || !ctx.pluginId || !ctx.pluginAuthToken) return;
   void postTurnEvent({
+    sessionId: ctx.sessionId,
     pluginId: ctx.pluginId,
     pluginAuthToken: ctx.pluginAuthToken,
     commandId,
