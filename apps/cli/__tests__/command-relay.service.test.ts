@@ -202,7 +202,7 @@ describe('CommandRelayService', () => {
 
   it('invokes onCommand callback when server returns commands', async () => {
     vi.mocked(pairing._getJson).mockResolvedValue({
-      data: [{ id: 'cmd1', sessionId: 's1', type: 'start_task', payload: { prompt: 'hi' } }],
+      data: [{ id: 'cmd1', sessionId: 's1', pluginId: 'plugin-1', type: 'start_task', payload: { prompt: 'hi' }, status: 'pending', createdAt: 1 }],
     });
     const onCmd = vi.fn();
     const relay = new CommandRelayService('plugin-1', onCmd, META);
@@ -218,7 +218,7 @@ describe('CommandRelayService', () => {
     // The backend now delivers non-destructively (peek) and redelivers until
     // acked — so the SAME command can arrive on two consecutive polls. It must
     // run exactly once, and we must POST /api/commands/ack to drain the queue.
-    const dup = [{ id: 'cmd-dup', sessionId: 's1', type: 'start_task', payload: { prompt: 'hi' } }];
+    const dup = [{ id: 'cmd-dup', sessionId: 's1', pluginId: 'plugin-1', type: 'start_task', payload: { prompt: 'hi' }, status: 'pending', createdAt: 1 }];
     vi.mocked(pairing._getJson).mockResolvedValue({ data: dup });
     const onCmd = vi.fn();
     const relay = new CommandRelayService('plugin-1', onCmd, META);
@@ -233,6 +233,43 @@ describe('CommandRelayService', () => {
       expect.objectContaining({ pluginId: 'plugin-1', commandIds: ['cmd-dup'] }),
       expect.anything(),
     );
+    relay.stop();
+  });
+
+  it('drops a malformed polled command (zod guard) without throwing, acks it, and still dispatches the valid ones', async () => {
+    const valid = { id: 'ok-1', sessionId: 's1', pluginId: 'plugin-1', type: 'start_task', payload: { prompt: 'hi' }, status: 'pending', createdAt: 1 };
+    vi.mocked(pairing._getJson).mockResolvedValue({
+      data: [
+        { id: 'bad-1', sessionId: 's1' }, // missing type/pluginId/status/createdAt
+        { type: 'start_task' }, // no id at all
+        'garbage',
+        valid,
+      ],
+    });
+    const onCmd = vi.fn();
+    const relay = new CommandRelayService('plugin-1', onCmd, META);
+    relay.start();
+    await vi.advanceTimersByTimeAsync(2100);
+    expect(onCmd).toHaveBeenCalledTimes(1);
+    expect(onCmd).toHaveBeenCalledWith(expect.objectContaining({ id: 'ok-1', type: 'start_task', payload: { prompt: 'hi' } }));
+    // The malformed one that carries an id is acked so it is not redelivered forever.
+    expect(pairing._postJson).toHaveBeenCalledWith(
+      expect.stringContaining('/api/commands/ack'),
+      expect.objectContaining({ commandIds: ['bad-1'] }),
+      expect.anything(),
+    );
+    relay.stop();
+  });
+
+  it('normalizes a null payload to {} on a polled command', async () => {
+    vi.mocked(pairing._getJson).mockResolvedValue({
+      data: [{ id: 'np-1', sessionId: 's1', pluginId: 'plugin-1', type: 'get_conversation', payload: null, status: 'pending', createdAt: 1 }],
+    });
+    const onCmd = vi.fn();
+    const relay = new CommandRelayService('plugin-1', onCmd, META);
+    relay.start();
+    await vi.advanceTimersByTimeAsync(2100);
+    expect(onCmd).toHaveBeenCalledWith(expect.objectContaining({ id: 'np-1', payload: {} }));
     relay.stop();
   });
 
