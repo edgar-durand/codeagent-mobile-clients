@@ -19,7 +19,15 @@ const PROJECT_IGNORE = new Set([
   'ios', 'android', '.gradle', '.cxx', '.intellijPlatform', '.kotlin',
   'tmp', 'target', 'venv', '.venv', '.mypy_cache', '.pytest_cache',
   '__pycache__', '.DS_Store',
+  // CodeAgent's own bookkeeping in the user's project: the beads issue
+  // tracker. Listed until 2026-10 because this set predated beads.
+  '.beads',
 ]);
+
+/** `.beads.gate.lock` and friends: beads' sibling lock files, never the user's code. */
+function isProjectIgnored(name: string): boolean {
+  return PROJECT_IGNORE.has(name) || name.startsWith('.beads.');
+}
 
 // Upper bound on entries returned from `listProjectFiles`. Sized
 // against the api-v2 body-parser limit (10 MB) and the average
@@ -72,7 +80,7 @@ export async function listProjectFiles(opts: ListFilesOpts = {}): Promise<{
         truncated = true;
         return;
       }
-      if (PROJECT_IGNORE.has(e.name)) continue;
+      if (isProjectIgnored(e.name)) continue;
       const full = path.join(dir, e.name);
       if (e.isDirectory()) {
         if (depth >= 12) continue;

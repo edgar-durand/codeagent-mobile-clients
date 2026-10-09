@@ -63,7 +63,7 @@ export function buildMcpServersForStart(ctx: ProvisionCtx): McpServer[] {
  * this must never block agent start.
  */
 function buildIntegrationMcpServers(ctx: ProvisionCtx): McpServer[] {
-  const manifest = readIntegrationsManifest();
+  const manifest = readIntegrationsManifest(ctx.sessionId);
   if (!manifest || manifest.integrations.length === 0) return [];
   if (!ctx.pluginAuthToken) {
     log.warn('integrations', 'manifest present but no plugin auth token — skipping MCP injection');

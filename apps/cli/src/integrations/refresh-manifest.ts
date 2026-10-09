@@ -20,7 +20,11 @@
 // hiccup at boot falls back to the file on disk exactly as before — a session
 // with a stale manifest beats no session.
 import { resolveApiBaseUrl, type IntegrationsManifest } from '@codeam/shared';
-import { readIntegrationsManifest, persistIntegrationsManifest } from './manifest';
+import {
+  hasSessionIntegrationsManifest,
+  persistIntegrationsManifest,
+  readIntegrationsManifest,
+} from './manifest';
 import { log } from '../services/logger';
 
 export interface RefreshManifestCtx {
@@ -51,13 +55,30 @@ function fingerprint(m: IntegrationsManifest): string {
 }
 
 /**
- * Fetch the backend's current manifest for this session and persist it if it
- * differs from the file on disk. Never throws.
+ * Fetch the backend's current manifest for this session and persist it as the
+ * session's OWN file (see manifest.ts) if it differs from what the session
+ * reads today. Never throws.
  */
 export async function refreshIntegrationsManifest(
   ctx: RefreshManifestCtx,
   fetchImpl: typeof fetch = fetch,
   timeoutMs = 8_000,
+): Promise<RefreshManifestResult> {
+  const result = await fetchAndPersist(ctx, fetchImpl, timeoutMs);
+  // The backend could not answer: the session still takes its own copy of the
+  // deploy hand-off, so a later deploy on the same box (which rewrites or
+  // deletes the shared file) cannot change this session's integrations.
+  if (result.status === 'skipped' && !hasSessionIntegrationsManifest(ctx.sessionId)) {
+    const handOff = readIntegrationsManifest();
+    if (handOff) persistIntegrationsManifest(handOff, ctx.sessionId);
+  }
+  return result;
+}
+
+async function fetchAndPersist(
+  ctx: RefreshManifestCtx,
+  fetchImpl: typeof fetch,
+  timeoutMs: number,
 ): Promise<RefreshManifestResult> {
   const url = `${resolveApiBaseUrl()}/api/plugin/integrations/manifest`;
   const ac = new AbortController();
@@ -83,10 +104,14 @@ export async function refreshIntegrationsManifest(
     if (!json.success || !fresh || !Array.isArray(fresh.integrations)) {
       return { status: 'skipped', reason: 'malformed response' };
     }
-    const onDisk = readIntegrationsManifest();
-    if (onDisk && fingerprint(onDisk) === fingerprint(fresh)) return { status: 'unchanged' };
+    const onDisk = readIntegrationsManifest(ctx.sessionId);
+    const unchanged = onDisk !== null && fingerprint(onDisk) === fingerprint(fresh);
+    // Equal to the shared hand-off is still "unchanged" — but the session
+    // keeps its own copy from now on.
+    if (unchanged && hasSessionIntegrationsManifest(ctx.sessionId)) return { status: 'unchanged' };
+    persistIntegrationsManifest(fresh, ctx.sessionId);
+    if (unchanged) return { status: 'unchanged' };
 
-    persistIntegrationsManifest(fresh);
     const result: RefreshManifestResult = {
       status: 'rewritten',
       before: onDisk?.integrations.length ?? 0,

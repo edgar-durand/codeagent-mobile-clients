@@ -149,7 +149,7 @@ class SettingsService : PersistentStateComponent<SettingsService.State> {
         PasswordSafe.instance.get(authTokenAttributes)?.getPasswordAsString()
 
     private val authTokenAttributes: CredentialAttributes =
-        CredentialAttributes(generateServiceName("CodeAgent Mobile", "pluginAuthToken"))
+        CredentialAttributesCompat.of(generateServiceName("CodeAgent Mobile", "pluginAuthToken"))
 
     companion object {
         fun getInstance(): SettingsService =

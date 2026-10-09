@@ -1,8 +1,6 @@
 package com.windsurf.controller.services.strategies
 
-import com.intellij.ide.DataManager
 import com.intellij.openapi.actionSystem.ActionManager
-import com.intellij.openapi.actionSystem.ex.ActionUtil
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.command.WriteCommandAction
 import com.intellij.openapi.components.ComponentManager
@@ -43,7 +41,7 @@ internal object AIAssistantBridge {
 
     private fun pluginClassLoader(): ClassLoader? {
         val plugin = PluginDescriptors.findById(PLUGIN_ID) ?: return null
-        if (!plugin.isEnabled) return null
+        if (!PluginDescriptors.isEnabled(plugin)) return null
         return plugin.pluginClassLoader
     }
 
@@ -116,8 +114,8 @@ internal object AIAssistantBridge {
             if (!replaced) return false
 
             // Invoke the registered Send action by id, anchored at the
-            // input component. Asking DataManager for the context
-            // anchored at that Swing component fills in PROJECT,
+            // input component. Executing it anchored at that Swing
+            // component fills in PROJECT,
             // EDITOR, and everything else the action's `update()`
             // method reads at the `AIAssistantChatInputRight` place.
             // Passing `DataContext { null }` (the previous attempt)
@@ -130,17 +128,14 @@ internal object AIAssistantBridge {
                         log.warn("AIAssistantBridge: action AIAssistant.Chat.SendActions.Send not found")
                         return@invokeLater
                     }
-                    val component = input as? java.awt.Component
-                    val dataContext = if (component != null) {
-                        DataManager.getInstance().getDataContext(component)
-                    } else {
-                        DataManager.getInstance().getDataContextFromFocus().resultSync
-                    }
                     val place = "AIAssistantChatInputRight"
-                    ActionUtil.invokeAction(action, dataContext, place, null, null)
+                    // tryToExecute builds the DataContext from the input component (or the
+                    // focused one when null), replacing ActionUtil.invokeAction and
+                    // getDataContextFromFocus, both deprecated in 2026.2.
+                    ActionManager.getInstance().tryToExecute(action, null, input as? java.awt.Component, place, true)
                     log.info("AIAssistantBridge: invoked AIAssistant.Chat.SendActions.Send at $place")
                 } catch (e: Exception) {
-                    log.warn("AIAssistantBridge: invokeAction failed: ${e.message}")
+                    log.warn("AIAssistantBridge: tryToExecute failed: ${e.message}")
                 }
             }
             true

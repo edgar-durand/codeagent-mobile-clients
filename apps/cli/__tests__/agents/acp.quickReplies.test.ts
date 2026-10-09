@@ -18,6 +18,7 @@ import {
 
 // Stub network calls that handleCommand would otherwise make.
 vi.mock('../../src/services/pairing.service', () => ({
+  postTurnEvent: vi.fn().mockResolvedValue(undefined),
   fetchCurrentPluginAuthToken: vi.fn(),
   _postJsonAuthed: vi.fn(),
 }));

@@ -16,6 +16,7 @@ import { SQUAD_CONTEXT_URI } from '../../src/agents/acp/squad-context';
 import type { PromptBlock } from '../../src/agents/acp/buildAcpPromptBlocks';
 
 vi.mock('../../src/services/pairing.service', () => ({
+  postTurnEvent: vi.fn().mockResolvedValue(undefined),
   fetchCurrentPluginAuthToken: vi.fn(),
   _postJsonAuthed: vi.fn(),
 }));

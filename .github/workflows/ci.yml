@@ -476,6 +476,15 @@ jobs:
         working-directory: apps/jetbrains-plugin
         run: ./gradlew buildPlugin
 
+      # Plugin Verifier against the newest IDE only (one ~1 GB download):
+      # the 2024.1 builds predate the deprecated / scheduled-for-removal
+      # markers, so only this run catches an API the platform is about to
+      # delete (codeagent-20r: createLocalShellWidget). Internal and
+      # scheduled-for-removal usages fail the job (build.gradle.kts failureLevel).
+      - name: Plugin Verifier (latest IDE)
+        working-directory: apps/jetbrains-plugin
+        run: ./gradlew verifyPlugin -PverifyLatestOnly=true
+
   # ── CI results → Discord #ci_notifications ───────────────────────────────
   # Posts a per-job summary of this run. Always for main pushes / the weekly
   # cross-OS run / manual dispatch; for PRs only when something failed (so a

@@ -1,8 +1,6 @@
 package com.windsurf.controller.services.strategies
 
 import com.intellij.openapi.actionSystem.ActionManager
-import com.intellij.openapi.actionSystem.DataContext
-import com.intellij.openapi.actionSystem.ex.ActionUtil
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.diagnostic.Logger
 import com.intellij.openapi.ide.CopyPasteManager
@@ -32,7 +30,7 @@ import javax.swing.text.JTextComponent
  * Both live above the Compose surface that renders the bubbles, so
  * Swing-direct injection works for input even though output capture
  * needs the Compose path. As a last resort we invoke the action by id
- * (`AIAssistant.Chat.SendActions.Send`) via `ActionUtil.invokeAction`,
+ * (`AIAssistant.Chat.SendActions.Send`) via `ActionManager.tryToExecute`,
  * which works even if the button hasn't materialised yet.
  *
  * **Receiving side ({@link AIAssistantMessageExtractor}):** recent
@@ -284,7 +282,7 @@ class JetBrainsAIAssistantStrategy : AgentStrategy {
         // (works across AI Assistant versions, including when the send
         // widget is rendered by Compose Desktop and therefore absent
         // from the Swing tree).
-        if (invokeAIAssistantSendAction()) {
+        if (invokeAIAssistantSendAction(input)) {
             logger.info("AI Assistant Swing injection: setText + invoked AIAssistant.Chat.SendActions.Send")
             return true to input
         }
@@ -298,21 +296,18 @@ class JetBrainsAIAssistantStrategy : AgentStrategy {
         return true to input
     }
 
-    private fun invokeAIAssistantSendAction(): Boolean {
+    private fun invokeAIAssistantSendAction(input: Component): Boolean {
         return try {
             val mgr = ActionManager.getInstance()
             val action = mgr.getAction("AIAssistant.Chat.SendActions.Send") ?: return false
-            val dataContext = DataContext { _ -> null }
-            ActionUtil.invokeAction(
-                action,
-                dataContext,
-                "CodeAgentMobile.AIAssistantSend",
-                null,
-                null,
-            )
+            // tryToExecute replaces ActionUtil.invokeAction (deprecated in 2026.2; its
+            // performAction successor does not exist on 2024.1, our sinceBuild). Anchoring
+            // at the input fills PROJECT/EDITOR for the action's update(), which the old
+            // empty DataContext never did.
+            mgr.tryToExecute(action, null, input, "CodeAgentMobile.AIAssistantSend", true)
             true
         } catch (e: Exception) {
-            logger.debug("ActionUtil.invokeAction(AIAssistant.Chat.SendActions.Send) failed: ${e.message}")
+            logger.debug("tryToExecute(AIAssistant.Chat.SendActions.Send) failed: ${e.message}")
             false
         }
     }

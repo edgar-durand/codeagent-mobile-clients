@@ -11,6 +11,21 @@ interface LaunchSpec {
   env?: Record<string, string>;
 }
 
+/**
+ * The agent's runtime could not produce a launch (binary missing and its
+ * installer declined/failed, …). `detail` is the runtime's own message — it
+ * already says what to do (e.g. the manual install command).
+ */
+export class AgentLaunchError extends Error {
+  constructor(
+    readonly displayName: string,
+    readonly detail: string,
+  ) {
+    super(`${displayName} could not be launched. ${detail}`);
+    this.name = 'AgentLaunchError';
+  }
+}
+
 export interface ClaudeServiceOptions {
   cwd: string;
   onData?: (data: string) => void;
@@ -190,15 +205,20 @@ export class AgentService {
     // a strategy throws here, it has already exhausted its install
     // path — there is nothing generic this layer can do beyond
     // surfacing the agent-specific error to the user and exiting.
+    //
+    // It THROWS ({@link AgentLaunchError}) rather than exiting: the caller owns
+    // what a dead agent means. The legacy PTY path still prints + exits; the
+    // local baton keeps its relay up and tells the phone WHY (codeagent-04jp —
+    // an in-place `process.exit(1)` here left a paired session with no relay,
+    // so mobile saw its prompts delivered and never answered).
     let launch: LaunchSpec;
     try {
       launch = await this.runtime.prepareLaunch();
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      console.error(
-        `\n  ✗ ${this.runtime.meta.displayName} could not be launched.\n    ${msg}\n`,
+      throw new AgentLaunchError(
+        this.runtime.meta.displayName,
+        err instanceof Error ? err.message : String(err),
       );
-      process.exit(1);
     }
     this.initialLaunch = launch;
 

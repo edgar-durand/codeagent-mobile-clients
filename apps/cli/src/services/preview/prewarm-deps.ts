@@ -38,7 +38,7 @@ export function prewarmNodeDeps(cwd: string): Promise<void> {
       const ensured = await ensureYarnInstalled({
         hasYarn: async () => Boolean(await which('yarn', { nothrow: true })),
         installYarn: async () => {
-          const r = await runSetupCommand('npm', ['install', '-g', 'yarn'], cwd, undefined, {
+          const r = await runSetupCommand('npm', ['install', '-g', '--no-audit', '--no-fund', 'yarn'], cwd, undefined, {
             timeoutMs: PREWARM_INSTALL_TIMEOUT_MS,
           });
           return { ok: r.status === 'ok', code: r.code };

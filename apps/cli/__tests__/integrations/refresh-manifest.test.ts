@@ -67,8 +67,12 @@ function writeOnDisk(m: IntegrationsManifest): void {
   mkdirSync(join(home, '.codeam'), { recursive: true });
   writeFileSync(manifestFile(), JSON.stringify(m));
 }
+/** The session's OWN manifest (codeagent-sjk b) — what its shims read. */
+function sessionFile(): string {
+  return join(home, '.codeam', 'integrations-sess-1.json');
+}
 function onDisk(): IntegrationsManifest | null {
-  return existsSync(manifestFile()) ? (JSON.parse(readFileSync(manifestFile(), 'utf8')) as IntegrationsManifest) : null;
+  return existsSync(sessionFile()) ? (JSON.parse(readFileSync(sessionFile(), 'utf8')) as IntegrationsManifest) : null;
 }
 
 /** A real backend stand-in: answers POST /api/plugin/integrations/manifest. */
@@ -148,6 +152,26 @@ describe('refreshIntegrationsManifest — the on-disk manifest stops being trust
 
     expect(await refreshIntegrationsManifest(CTX)).toEqual({ status: 'unchanged' });
     expect(readFileSync(manifestFile(), 'utf8')).toBe(before);
+    // The session still takes its own copy of the hand-off.
+    expect(onDisk()).toEqual(NEW);
+  });
+
+  it("keeps each session's manifest its own: another deploy on the box cannot change it", async () => {
+    writeOnDisk(OLD);
+    process.env.CODEAM_API_URL = await serve(() => ({ status: 200, body: { success: true, data: NEW } }));
+    const { refreshIntegrationsManifest } = await import('../../src/integrations/refresh-manifest');
+    const { readIntegrationsManifest, clearIntegrationsManifest, persistIntegrationsManifest } =
+      await import('../../src/integrations/manifest');
+    await refreshIntegrationsManifest(CTX);
+
+    // A second deploy with no integrations clears the shared hand-off file…
+    clearIntegrationsManifest();
+    expect(readIntegrationsManifest('sess-1')).toEqual(NEW);
+    // …and a third one writes a different set: still not this session's.
+    persistIntegrationsManifest(OLD);
+    expect(readIntegrationsManifest('sess-1')).toEqual(NEW);
+    // A session with no file of its own reads the hand-off.
+    expect(readIntegrationsManifest('sess-2')).toEqual(OLD);
   });
 
   it('falls back to the file on disk when the backend predates the endpoint (404) or is down', async () => {
@@ -156,8 +180,10 @@ describe('refreshIntegrationsManifest — the on-disk manifest stops being trust
     const { refreshIntegrationsManifest } = await import('../../src/integrations/refresh-manifest');
 
     expect(await refreshIntegrationsManifest(CTX)).toEqual({ status: 'skipped', reason: 'HTTP 404' });
-    // The stale file is still there — a stale manifest beats no session.
+    // The stale file is still there — a stale manifest beats no session — and
+    // the session adopted it as its own copy.
     expect(onDisk()!.integrations[0].delivery.mcp!.args).toContain('@taazkareem/clickup-mcp-server@0.14.4');
+    expect(existsSync(manifestFile())).toBe(true);
 
     // Backend unreachable: same outcome, and it must not throw.
     await new Promise<void>((ok) => server!.close(() => ok()));

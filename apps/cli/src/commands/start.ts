@@ -11,7 +11,7 @@ import {
 import { acquireDaemonLock } from './pair-auto';
 import { showIntro, showInfo, showError } from '../ui/banner';
 import { CommandRelayService, stopRelayWithGoodbye } from '../services/command-relay.service';
-import { AgentService } from '../services/agent.service';
+import { AgentLaunchError, AgentService } from '../services/agent.service';
 import { createRuntimeStrategy } from '../agents/registry';
 import {
   getAcpAdapter,
@@ -190,24 +190,6 @@ export async function start(requestedAgent?: AgentId, presetSession?: SavedSessi
   showInfo(`${session.userName}  ·  ${pc.cyan(session.plan)}`);
   showInfo(`Launching ${AGENT_REGISTRY[session.agent].displayName}...\n`);
 
-  // Telemetry: identify from the persisted session + capture the
-  // agent-spawn event. Returning users (already paired) hit this
-  // path on every `codeam` invocation; the identify is idempotent.
-  identifyUser({
-    userId: session.userEmail,
-    email: session.userEmail,
-    name: session.userName,
-    plan: session.plan,
-    preferredAgent: session.agent,
-    pairedSessionCount: loadCliConfig().sessions.length,
-  });
-  capture('agent_used', {
-    sessionId: session.id,
-    pluginId,
-    agentId: session.agent,
-    requestedAgent: requestedAgent ?? null,
-  });
-
   const cwd = process.cwd();
 
   // Refresh pluginAuthToken on every boot. The token is HMAC-derived
@@ -218,7 +200,15 @@ export async function start(requestedAgent?: AgentId, presetSession?: SavedSessi
   // even though the agent answered correctly. Falling back to the
   // persisted token on lookup failure keeps offline / flaky-net
   // sessions working unchanged.
-  const refreshed = await fetchCurrentPluginAuthToken(session.id, pluginId, session.pollSecret);
+  let reconnectUserId: string | undefined;
+  const refreshed = await fetchCurrentPluginAuthToken(
+    session.id,
+    pluginId,
+    session.pollSecret,
+    (userId) => {
+      reconnectUserId = userId;
+    },
+  );
   if (refreshed && refreshed !== session.pluginAuthToken) {
     addSession({ ...session, pluginAuthToken: refreshed });
     session.pluginAuthToken = refreshed;
@@ -229,6 +219,34 @@ export async function start(requestedAgent?: AgentId, presetSession?: SavedSessi
     // mobile dashboard un-greys without waiting for the next heartbeat.
     showInfo('Reconnected previous session.');
   }
+  // Backfill the telemetry id on a session paired before it was persisted.
+  if (reconnectUserId && reconnectUserId !== session.userId) {
+    session.userId = reconnectUserId;
+    addSession({ ...session });
+  }
+
+  // Telemetry: identify + capture the agent-spawn event. Returning users hit
+  // this on every `codeam` invocation; the identify is idempotent.
+  // ⚠️ By the BACKEND user id only — this used `userEmail` as the distinct id,
+  // which made every CLI user a second PostHog person beside the app's
+  // (codeagent-tach). Without an id (offline, old backend) stay anonymous: the
+  // next boot that reaches /reconnect aliases the anon id over.
+  if (session.userId) {
+    identifyUser({
+      userId: session.userId,
+      email: session.userEmail,
+      name: session.userName,
+      plan: session.plan,
+      preferredAgent: session.agent,
+      pairedSessionCount: loadCliConfig().sessions.length,
+    });
+  }
+  capture('agent_used', {
+    sessionId: session.id,
+    pluginId,
+    agentId: session.agent,
+    requestedAgent: requestedAgent ?? null,
+  });
   // Diagnostic for token-mismatch reports: prints the exact triple
   // the publisher will send so we can compare against the server-side
   // mint. Trace-only (CODEAM_DEBUG=1).
@@ -1020,7 +1038,13 @@ export async function start(requestedAgent?: AgentId, presetSession?: SavedSessi
   process.once('SIGHUP', sigintHandler);
   // Spawn Claude FIRST so its strategy is set + the PTY is launching
   // before the relay starts dispatching remote commands.
-  await agent.spawn();
+  try {
+    await agent.spawn();
+  } catch (err) {
+    if (!(err instanceof AgentLaunchError)) throw err;
+    console.error(`\n  ✗ ${err.displayName} could not be launched.\n    ${err.detail}\n`);
+    process.exit(1);
+  }
   // Bind the conversation id now if the runtime pre-assigned it via
   // `prepareLaunch` (Claude: `--session-id <uuid>`). Deterministic
   // across every OS — we never have to inspect the filesystem to
