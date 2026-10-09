@@ -1415,6 +1415,29 @@ describe('HostAgentSupervisor — command routing', () => {
     fs.rmSync(cwdTarget, { recursive: true, force: true });
   });
 
+  // codeagent-sjk (a): the deploy hands the integrations set to the pair-auto
+  // child through the shared manifest file — written when the payload carries
+  // integrations, removed when it carries none.
+  it('self_hosted_deploy persists the integrations manifest, and clears it on a deploy without any', async () => {
+    const cwdTarget = fs.mkdtempSync(path.join(os.tmpdir(), 'codeam-ws-'));
+    const { sup } = makeSupervisor(() => fakeChild());
+    const manifestFile = path.join(tmpHome, '.codeam', 'integrations.json');
+    const integrations = [
+      {
+        id: 'jira',
+        delivery: { mcp: { command: 'uvx', args: ['mcp-atlassian==0.22.1'], envMapping: {} } },
+      },
+    ];
+
+    await sup.handleCommand(deployCmd({ repoOrPath: cwdTarget, integrations }));
+    expect(JSON.parse(fs.readFileSync(manifestFile, 'utf8'))).toEqual({ integrations });
+    expect(isOwnerOnly(manifestFile)).toBe(true);
+
+    await sup.handleCommand(deployCmd({ repoOrPath: cwdTarget, deployId: 'deploy-2' }));
+    expect(fs.existsSync(manifestFile)).toBe(false);
+    fs.rmSync(cwdTarget, { recursive: true, force: true });
+  });
+
   // Conversation continuity across a warm reconnect (Rafael/Stefano, 2026-08-06):
   // with the backend now deriving a STABLE deployId per (host, repo, branch), a
   // re-launch lands back in the SAME workspace cwd. The CLI must RESUME the prior
@@ -4258,7 +4281,7 @@ describe('self-update restart without a supervisor', () => {
     expect(argv).toEqual(['-c', 'sleep 2; exec "$0" "$@"', '/usr/local/bin/node', '/usr/local/bin/codeam', 'host-agent']);
   });
 
-  // `/bin/sh` does not exist on Windows (and the relaunch is POSIX-only there too).
+  // `/bin/sh` does not exist on Windows; the Windows launcher is covered below.
   it.skipIf(process.platform === 'win32')('the relaunch command really runs the same argv after the pause', async () => {
     const { relaunchArgv } = await import('../src/commands/host-agent');
     const { execFileSync } = await import('node:child_process');
@@ -4266,6 +4289,40 @@ describe('self-update restart without a supervisor', () => {
       a.replace('sleep 2', 'sleep 0'),
     );
     expect(execFileSync('/bin/sh', script).toString().trim()).toBe('codeam host-agent');
+  });
+
+  // codeagent-404d: Windows has no /bin/sh — the relaunch spawn failed ENOENT
+  // and the host stayed down after every auto-update.
+  it('on Windows the relaunch is node itself, never /bin/sh', async () => {
+    const { relaunchCommand } = await import('../src/commands/host-agent');
+    const { command, args } = relaunchCommand(
+      'C:\\node\\node.exe',
+      ['C:\\node\\node.exe', 'C:\\codeam\\index.js', 'host-agent'],
+      'win32',
+    );
+    expect(command).toBe('C:\\node\\node.exe');
+    expect(args[0]).toBe('-e');
+    expect(args[1]).toContain('2000');
+    expect(args.slice(2)).toEqual(['--', 'C:\\node\\node.exe', 'C:\\codeam\\index.js', 'host-agent']);
+    expect(relaunchCommand('/usr/bin/node', ['/usr/bin/node', '/c/index.js'], 'linux').command).toBe('/bin/sh');
+  });
+
+  it('the Windows launcher really starts the same argv detached after the pause (any OS)', async () => {
+    const { relaunchCommand } = await import('../src/commands/host-agent');
+    const { execFileSync } = await import('node:child_process');
+    const marker = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'codeam-relaunch-')), 'ran.txt');
+    const target = [
+      process.execPath,
+      '-e',
+      'require("fs").writeFileSync(process.argv[1], process.argv.slice(2).join(" "))',
+      marker,
+      'host-agent',
+    ];
+    const { command, args } = relaunchCommand(process.execPath, target, 'win32', 0);
+    execFileSync(command, args);
+    await vi.waitFor(() => expect(fs.readFileSync(marker, 'utf8')).toBe('host-agent'), {
+      timeout: 10_000,
+    });
   });
 });
 

@@ -1,14 +1,24 @@
 # CLI integration tests
 
-These are **gated, real-world** integration tests. Each self-skips unless its
-`RUN_*_INT` gate is set, so the default `npm test` (and normal CI) never runs
-them — they need real binaries / network / live credentials.
+Two kinds live here.
+
+**Pure-node (always on).** Real modules with only the outer boundary faked —
+no docker, network or credentials — so they run in the default `npm test` and
+therefore in every `ci.yml` CLI job:
+
+| File | What it exercises |
+|---|---|
+| `beads-configure.int.test.ts` | `configureBeads` status → enable → disable over the real config-store on a temp home. (Was behind a `RUN_BEADS_INT` gate nothing ever set; it never needed bd.) |
+| `beads-provision.int.test.ts` | The real `provisionBeads` against a fake `bd` sh script + fake `dolt` on PATH: `BEADS_DOLT_SHARED_SERVER=1` and no `BEADS_DIR` on every call, `bd init` before `bd dolt start`, the `~/.local/bin/bd` symlink, `bd setup claude --global` run outside the project, and the real-spawn ENOENT / ETXTBSY retry (ETXTBSY is probed on the kernel; macOS skips it) + HOME backfill. POSIX only. |
+| `../agents/acp/permission-relay.int.test.ts` | A real `AcpClient` against a fake stdio ACP agent: bypass mode auto-answers `session/request_permission`, `set_mode` to an ask mode relays it to mobile (`publishAwaitingAnswer`) and the agent gets the user's `select_option` pick. |
+
+**Gated (real world).** Each self-skips unless its `RUN_*_INT` gate is set —
+they need real binaries / network / live credentials.
 
 | File | Gate | What it exercises |
 |---|---|---|
 | `acp-provision-smoke.int.test.ts` | `RUN_ACP_INT=1` | **Every ACP agent** — provisions the credential, spawns `<agent> acp`, drives a real handshake, asserts it AUTHENTICATES + answers. |
 | `kimi-acp-provision.int.test.ts` | `RUN_KIMI_INT=1` | Kimi-specific POSITIVE/NEGATIVE regression (credential slot). |
-| `beads-configure.int.test.ts` | `RUN_BEADS_INT=1` | Real beads/Dolt config store. |
 | `baton-loop.int.test.ts` | `RUN_BATON_INT=1` | Cross-mode resume: a natively-created claude session resumes through the baton's ACP path. |
 | `baton-local.int.test.ts` | `RUN_BATON_INT=1` | **Whole local baton, real claude** — take-control BEFORE the first TUI turn → `MOBILE_DRIVE`, a real ACP turn, handback → `LOCAL_DRIVE`, take-control AGAIN over an on-disk transcript (`session/load`), zero TUI chrome in the chat pipe, the `online:false` goodbye heartbeat on SIGINT, and the mobile FOLLOWING the TUI through `/clear` (new conversation id), `/rename` and `/resume <id>`. **Runs as a real gate in `ci.yml`** — see below. |
 

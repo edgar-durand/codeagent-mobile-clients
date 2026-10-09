@@ -119,6 +119,7 @@ import {
   AUTH_FAILURE_MESSAGE,
   adapterExitMessage,
   describeError,
+  failureBlocker,
   looksLikeAuthFailure,
   looksLikeProviderOutage,
   startupCredentialInvalidReason,
@@ -228,6 +229,9 @@ type PendingInteractive =
       /** Ordered like the ACP `options[]` we put on the wire —
        *  `select_option` resolves by `optionId` first, `index` second. */
       options: PermissionOption[];
+      /** The plan an ExitPlanMode approval asks the user to accept — carried
+       *  to the answer so both are recorded in the durable history. */
+      planText?: string;
       resolve: (response: RequestPermissionResponse) => void;
       /** Auto-cancel after this ms; matches the upstream Redis TTL. */
       timeoutTimer: NodeJS.Timeout;
@@ -238,6 +242,26 @@ type PendingInteractive =
        *  and sends the picked text as the next prompt. */
       options: string[];
     };
+
+/**
+ * Minimum gap between two non-final chat-pipe (`/api/commands/output`)
+ * `text` frames. Every frame carries the CUMULATIVE reply, and a true-delta
+ * adapter streams a few characters per `agent_message_chunk` — so publishing
+ * per delta was ~one POST (+ Redis RPUSH/PUBLISH + one SSE frame per viewer)
+ * per 8 characters: 7,724 frames for one 64 KB reply in the 2026-08-22 Redis
+ * OOM (codeagent-gsk1). ~10 frames/s is indistinguishable on screen. The
+ * terminal `done:true` frame is never throttled and supersedes a pending one.
+ */
+export const CHAT_TEXT_PUBLISH_INTERVAL_MS = 100;
+
+/**
+ * Upload budget for non-final text frames, in characters per second. Each
+ * frame carries the WHOLE reply so far, so a fixed interval still scales the
+ * bytes with the reply: on 2026-10-09 one long Box turn re-posted ~200 KB
+ * frames ~3×/s for 40 min and pushed prod non-SSE p99 to 9 s. The interval
+ * stretches so a long reply refreshes every few seconds instead.
+ */
+export const CHAT_TEXT_PUBLISH_CHARS_PER_SEC = 64 * 1024;
 
 export class StreamingState {
   /**
@@ -253,6 +277,11 @@ export class StreamingState {
    * intra-reply duplication bug).
    */
   private text = '';
+  /** Trailing-edge throttle state for the non-final chat-pipe text frame
+   *  (see {@link CHAT_TEXT_PUBLISH_INTERVAL_MS}). */
+  private lastPartialTextAt = 0;
+  private pendingPartialText: string | null = null;
+  private partialTextTimer: ReturnType<typeof setTimeout> | null = null;
   private pending: PendingInteractive | null = null;
   /** Observer for "is a question pending?" flips. The Agent Packs runner marks
    *  its stage `awaitingUser` while a permission prompt waits on the user
@@ -373,7 +402,18 @@ export class StreamingState {
    */
   private turnSeq = 0;
 
-  constructor(private readonly publisher: AcpPublisher) {}
+  private readonly chatTextPublishIntervalMs: number;
+
+  constructor(
+    private readonly publisher: AcpPublisher,
+    opts: {
+      /** Override {@link CHAT_TEXT_PUBLISH_INTERVAL_MS}; `0` publishes every
+       *  delta (tests that pin per-delta frame CONTENT, not cadence). */
+      chatTextPublishIntervalMs?: number;
+    } = {},
+  ) {
+    this.chatTextPublishIntervalMs = opts.chatTextPublishIntervalMs ?? CHAT_TEXT_PUBLISH_INTERVAL_MS;
+  }
 
   /**
    * Register a permission Promise. The Promise stays pending until
@@ -392,6 +432,7 @@ export class StreamingState {
   registerPermission(args: {
     questionId: string;
     options: PermissionOption[];
+    planText?: string;
   }): Promise<RequestPermissionResponse> {
     return new Promise<RequestPermissionResponse>((resolve) => {
       const timeoutTimer = setTimeout(() => {
@@ -415,6 +456,7 @@ export class StreamingState {
         kind: 'permission',
         questionId: args.questionId,
         options: args.options,
+        ...(args.planText !== undefined ? { planText: args.planText } : {}),
         resolve,
         timeoutTimer,
       });
@@ -452,7 +494,7 @@ export class StreamingState {
     index: number,
     optionId?: string,
   ):
-    | { kind: 'resolved'; optionId: string | null }
+    | { kind: 'resolved'; optionId: string | null; label?: string; planText?: string }
     | { kind: 'reprompt'; text: string }
     | { kind: 'none' } {
     if (!this.pending) return { kind: 'none' };
@@ -461,16 +503,17 @@ export class StreamingState {
       const picked = byId ?? this.pending.options[index];
       clearTimeout(this.pending.timeoutTimer);
       const resolve = this.pending.resolve;
+      const planText = this.pending.planText;
       this.setPending(null);
       if (!picked) {
         // Index out of range and no id match — the option list on the
         // client drifted from what we registered. Cancel, never guess.
         log.warn('acpRunner', `select_option index=${index} out of bounds — cancel`);
         resolve({ outcome: { outcome: 'cancelled' } });
-        return { kind: 'resolved', optionId: null };
+        return { kind: 'resolved', optionId: null, planText };
       }
       resolve({ outcome: { outcome: 'selected', optionId: picked.optionId } });
-      return { kind: 'resolved', optionId: picked.optionId };
+      return { kind: 'resolved', optionId: picked.optionId, label: picked.label, planText };
     }
     // Free-form path
     const text = this.pending.options[index];
@@ -526,6 +569,8 @@ export class StreamingState {
 
   async beginTurn(opts?: { clear?: boolean }): Promise<void> {
     this.text = '';
+    this.cancelPendingPartialText();
+    this.lastPartialTextAt = 0;
     this.streamingChunks.clear();
     this.turnTextChunkId = null;
     this.lastTextMessageId = null;
@@ -655,7 +700,7 @@ export class StreamingState {
         fenceCut === -1
           ? withholdTrailingPartialFenceMarker(this.text)
           : this.text.slice(0, fenceCut).trimEnd();
-      void this.publisher.publishOutput({ type: 'text', content: textVisible, done: false });
+      this.publishPartialText(textVisible);
     }
     // 2) Epic C streaming-chunk feed (`/api/sessions/:id/streaming-chunk`)
     //    — all four kinds (text, thinking, tool_use, tool_result),
@@ -673,6 +718,49 @@ export class StreamingState {
       content: visibleChunkContent,
       isFinal: false,
     });
+  }
+
+  /**
+   * Publish a non-final chat-pipe text frame, at most once per
+   * {@link CHAT_TEXT_PUBLISH_INTERVAL_MS} (longer for a long reply, see
+   * {@link CHAT_TEXT_PUBLISH_CHARS_PER_SEC}): the first delta after a quiet
+   * window goes out at once (no added first-token latency); later ones inside
+   * the window collapse into ONE trailing frame carrying the latest cumulative
+   * text. Every close path calls {@link cancelPendingPartialText} before its
+   * `done:true`, so a stale partial can never land after the terminal frame.
+   */
+  private publishPartialText(content: string): void {
+    const interval =
+      this.chatTextPublishIntervalMs > 0
+        ? Math.max(
+            this.chatTextPublishIntervalMs,
+            (content.length / CHAT_TEXT_PUBLISH_CHARS_PER_SEC) * 1000,
+          )
+        : 0;
+    const wait = interval - (Date.now() - this.lastPartialTextAt);
+    if (wait <= 0 && this.partialTextTimer === null) {
+      this.lastPartialTextAt = Date.now();
+      void this.publisher.publishOutput({ type: 'text', content, done: false });
+      return;
+    }
+    this.pendingPartialText = content;
+    if (this.partialTextTimer !== null) return;
+    this.partialTextTimer = setTimeout(() => {
+      this.partialTextTimer = null;
+      const latest = this.pendingPartialText;
+      this.pendingPartialText = null;
+      if (latest === null) return;
+      this.lastPartialTextAt = Date.now();
+      void this.publisher.publishOutput({ type: 'text', content: latest, done: false });
+    }, Math.max(wait, 0));
+  }
+
+  /** Drop a throttled partial frame — the caller is about to publish the
+   *  terminal frame (or a new turn), which supersedes it. */
+  private cancelPendingPartialText(): void {
+    if (this.partialTextTimer !== null) clearTimeout(this.partialTextTimer);
+    this.partialTextTimer = null;
+    this.pendingPartialText = null;
   }
 
   /**
@@ -726,6 +814,7 @@ export class StreamingState {
   async closeAll(): Promise<void> {
     const finalText = this.visible(this.text);
     this.text = '';
+    this.cancelPendingPartialText();
     await Promise.all([
       this.publisher.publishOutput({ type: 'text', content: finalText, done: true }),
       this.flushStreamingChunks(),
@@ -742,7 +831,11 @@ export class StreamingState {
    * actionable re-auth bubble.
    */
   async closeWithBubble(bubble: string): Promise<void> {
+    // The typed tag for the apps' escape-route buttons, when this bubble is
+    // one of our blocker notices (`failureBlocker`, codeagent-gfip).
+    const blocker = failureBlocker(bubble);
     this.text = '';
+    this.cancelPendingPartialText();
     // Neutralise any open `text` streaming-chunk buffer so the raw streamed
     // reply (e.g. the agent's own "…401 Invalid authentication credentials")
     // is NOT finalised verbatim on the Epic C feed — replace its content with
@@ -755,7 +848,12 @@ export class StreamingState {
       }
     }
     await Promise.all([
-      this.publisher.publishOutput({ type: 'text', content: bubble, done: true }),
+      this.publisher.publishOutput({
+        type: 'text',
+        content: bubble,
+        done: true,
+        ...(blocker ? { blocker } : {}),
+      }),
       this.flushStreamingChunks(),
     ]);
   }
@@ -808,6 +906,7 @@ export class StreamingState {
   async closeTurnWithInteractiveDetection(): Promise<boolean> {
     const finalText = this.visible(this.text);
     this.text = '';
+    this.cancelPendingPartialText();
     // Streaming-chunk feed always flushes regardless of interactive
     // detection — those bubbles live in SessionDetailScreen on their
     // own coalescence key (chunkId) independent of the chat pipe.
@@ -1163,7 +1262,13 @@ export async function surfaceStartupFailure(opts: {
   const publish = async (): Promise<void> => {
     try {
       await opts.publisher.publishOutput({ type: 'new_turn', done: false });
-      await opts.publisher.publishOutput({ type: 'text', content: msg, done: true });
+      const blocker = failureBlocker(msg);
+      await opts.publisher.publishOutput({
+        type: 'text',
+        content: msg,
+        done: true,
+        ...(blocker ? { blocker } : {}),
+      });
     } catch {
       /* best-effort — never throw out of the failure path */
     }
@@ -1261,6 +1366,70 @@ export function pickLatestResumableConversation(
   if (marked) return listed.some((s) => s.id === marked) ? marked : null;
   const prior = listed.sort((a, b) => b.timestamp - a.timestamp)[0];
   return prior?.id ?? null;
+}
+
+/**
+ * The runner's `session/request_permission` handler. `opts` is the SAME object
+ * every command context carries, so `set_mode` (command-handlers `setModeH`)
+ * flipping `opts.autoApprovePermissions` must reach the very next request —
+ * hence the live getter. Exported so the ACP permission integration spec drives
+ * this exact wiring rather than a re-implementation of it.
+ */
+export function createRunnerPermissionGate(
+  opts: AcpRunnerOptions,
+  publisher: AcpPublisher,
+  streaming: StreamingState,
+): ReturnType<typeof createOnRequestPermission> {
+  return createOnRequestPermission({
+    isAutoApprove: () => opts.autoApprovePermissions === true,
+    isLocal: isLocalSession,
+    getPolicy: getGuardrailPolicy,
+    publisher,
+    registerPermission: (args) => streaming.registerPermission(args),
+  });
+}
+
+/**
+ * The host-agent RESUME boot's auto-resume: reopen the marked (or latest)
+ * prior conversation in place of the fresh session `client.start()` minted.
+ * Best-effort — any failure keeps the fresh session.
+ *
+ * `preferResume`: the relay only starts once this returns, so a prompt queued
+ * during the wake waited for the whole `session/load` replay — which the
+ * runner discards anyway — 14 s measured on the QA Box (codeagent-2238).
+ * Agents advertising `session/resume` now reopen without it.
+ */
+export async function autoResumeLatestConversation(
+  client: Pick<AcpClient, 'listSessions' | 'loadSession'>,
+  cwd: string,
+  freshSessionId: string,
+): Promise<{ acpSessionId: string; resumedPriorConversation: boolean; marked: string | null }> {
+  let marked: string | null = null;
+  try {
+    marked = await readActiveConversationMarker(cwd);
+    const priorId = pickLatestResumableConversation(
+      await client.listSessions(),
+      freshSessionId,
+      marked,
+    );
+    if (priorId) {
+      await client.loadSession(priorId, { preferResume: true });
+      log.info(
+        'acpRunner',
+        `auto-resumed ${marked === priorId ? 'marked' : 'latest'} conversation ${priorId.slice(0, 8)}`,
+      );
+      return { acpSessionId: priorId, resumedPriorConversation: true, marked };
+    }
+    if (marked) {
+      log.info(
+        'acpRunner',
+        `marked conversation ${marked.slice(0, 8)} has no transcript — fresh session`,
+      );
+    }
+  } catch (err) {
+    log.trace('acpRunner', 'auto-resume-latest failed (best-effort)', err);
+  }
+  return { acpSessionId: freshSessionId, resumedPriorConversation: false, marked };
 }
 
 export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
@@ -1384,13 +1553,7 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
     // HARD RULE enforced there: every auto-REJECT publishes a visible chat
     // line — a guard must never silently answer for the user (the 2026-08-19
     // ExitPlanMode silent-rejection P0).
-    onRequestPermission: createOnRequestPermission({
-      autoApprovePermissions: opts.autoApprovePermissions === true,
-      isLocal: isLocalSession,
-      getPolicy: getGuardrailPolicy,
-      publisher,
-      registerPermission: (args) => streaming.registerPermission(args),
-    }),
+    onRequestPermission: createRunnerPermissionGate(opts, publisher, streaming),
     onStderr: (line) => {
       // AcpClient.start() already mirrors stderr to `log.info('acpAdapter')`
       // for CODEAM_DEBUG smoke tests. We ALSO keep a small ring of recent
@@ -1530,30 +1693,10 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
   let resumedPriorConversation = false;
   let marked: string | null = null;
   if (process.env.CODEAM_RESUME_LATEST === '1') {
-    try {
-      marked = await readActiveConversationMarker(opts.cwd);
-      const priorId = pickLatestResumableConversation(
-        await client.listSessions(),
-        acpSessionId,
-        marked,
-      );
-      if (priorId) {
-        await client.loadSession(priorId);
-        acpSessionId = priorId;
-        resumedPriorConversation = true;
-        log.info(
-          'acpRunner',
-          `auto-resumed ${marked === priorId ? 'marked' : 'latest'} conversation ${priorId.slice(0, 8)}`,
-        );
-      } else if (marked) {
-        log.info(
-          'acpRunner',
-          `marked conversation ${marked.slice(0, 8)} has no transcript — fresh session`,
-        );
-      }
-    } catch (err) {
-      log.trace('acpRunner', 'auto-resume-latest failed (best-effort)', err);
-    }
+    const resumed = await autoResumeLatestConversation(client, opts.cwd, acpSessionId);
+    acpSessionId = resumed.acpSessionId;
+    resumedPriorConversation = resumed.resumedPriorConversation;
+    marked = resumed.marked;
   }
   // Record what this runner is driving so the NEXT resume boot loads exactly
   // it (never a one-shot's transcript). Re-written on every re-point below and

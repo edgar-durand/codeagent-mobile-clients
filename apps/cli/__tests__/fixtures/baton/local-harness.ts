@@ -244,7 +244,9 @@ export async function startStubBackend(): Promise<StubBackend> {
     rec,
     url,
     enqueue: (cmd) => {
-      pending.push(cmd);
+      // Full envelope, as the real backend's pushCommand emits it — the CLI
+      // relay validates it with the shared zod guard (toRemoteCommand).
+      pending.push({ pluginId: 'stub-plugin', status: 'pending', createdAt: Date.now(), ...cmd });
     },
     lastBaton: () => rec.batonEvents[rec.batonEvents.length - 1],
     lastState: () => rec.batonEvents[rec.batonEvents.length - 1]?.state,

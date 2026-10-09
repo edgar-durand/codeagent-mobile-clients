@@ -6,12 +6,30 @@
 // `backend-reports.ts` fetch + single 401/403 retry pattern, plus an
 // in-memory refresh-ahead cache so repeated calls within the TTL don't
 // re-hit the network.
+import { z } from 'zod';
 import { resolveApiBaseUrl } from '@codeam/shared';
 import type { BrokeredIntegrationToken } from '@codeam/shared';
 import { fetchCurrentPluginAuthToken } from '../services/pairing.service';
 
 /** Refresh a cached token this far ahead of its expiry rather than risk a stale-token 401 mid-turn. */
 const REFRESH_AHEAD_MS = 5 * 60 * 1000;
+
+/**
+ * The broker's 200 body. Validated because the token feeds straight into a
+ * spawned server's env and the refresh schedule: a malformed body used to be
+ * cached as-is, and `childEnvFor` / `expiresAt` math then failed far from the
+ * cause (codeagent-sjk d). Only the fields every integration needs are
+ * required; the per-vendor extras (`cloudId`, `host`, …) pass through.
+ */
+const BrokeredTokenResponseSchema = z.object({
+  success: z.literal(true),
+  data: z
+    .object({
+      accessToken: z.string().min(1),
+      expiresAt: z.string().refine((s) => !Number.isNaN(Date.parse(s)), 'not a date'),
+    })
+    .catchall(z.unknown()),
+});
 
 export interface BrokerCtx {
   sessionId: string;
@@ -70,8 +88,14 @@ export class IntegrationTokenClient {
       throw new Error(`INTEGRATION_TOKEN_FAILED status=${resp.status} ${detail.slice(0, 200)}`.trim());
     }
 
-    const parsed = (await resp.json()) as { success: boolean; data: BrokeredIntegrationToken };
-    this.cache.set(integrationId, parsed.data);
-    return parsed.data;
+    const parsed = BrokeredTokenResponseSchema.safeParse(await resp.json().catch(() => null));
+    if (!parsed.success) {
+      throw new Error(`INTEGRATION_TOKEN_MALFORMED ${parsed.error.issues[0]?.message ?? ''}`.trim());
+    }
+    // Validated boundary: the required fields are checked above, the optional
+    // per-vendor ones are carried through as the broker sent them.
+    const token = parsed.data.data as BrokeredIntegrationToken;
+    this.cache.set(integrationId, token);
+    return token;
   }
 }

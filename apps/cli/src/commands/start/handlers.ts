@@ -1258,9 +1258,11 @@ export function buildNpmInstallInvocation(opts?: {
   const siblingNpm = p.join(p.dirname(execPath), platform === 'win32' ? 'npm.cmd' : 'npm');
   const npmCommand = exists(siblingNpm) ? siblingNpm : 'npm';
 
+  // --no-audit/--no-fund: npm's advisories endpoint degraded to ~270-300 s
+  // per request (2026-09-03/04) and a global install pays it on every update.
   const npmArgs = prefix
-    ? ['install', '-g', '--prefix', prefix, 'codeam-cli@latest']
-    : ['install', '-g', 'codeam-cli@latest'];
+    ? ['install', '-g', '--no-audit', '--no-fund', '--prefix', prefix, 'codeam-cli@latest']
+    : ['install', '-g', '--no-audit', '--no-fund', 'codeam-cli@latest'];
 
   // sudo runs npm from root's PATH, which may not include the sibling node's
   // bin — pass the resolved npm path through explicitly so the right npm runs.

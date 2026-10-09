@@ -115,9 +115,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     PairingService.getInstance().addListener({
       onPaired: () => {
         const u = PairingService.getInstance().pairedUser;
-        if (u) {
+        // By the backend user id ONLY: an email distinct id is a second
+        // PostHog person beside the app's (codeagent-tach).
+        if (u?.id) {
           identifyUser({
-            userId: u.email, // backend userId not yet exposed to the plugin
+            userId: u.id,
             email: u.email,
             name: u.name,
             plan: u.plan,

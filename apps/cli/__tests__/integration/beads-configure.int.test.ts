@@ -1,36 +1,24 @@
 /**
- * beads_configure — gated integration smoke test.
+ * beads_configure — config-store integration test (runs in the default suite).
  *
- * Gating ─────────────────────────────────────────────────────────────────────
- * Skipped UNLESS `RUN_BEADS_INT=1` is set. The default `npm run test` never
- * requires real bd/dolt, network access, or a live dolt sql-server; the gate
- * only fires for explicit integration runs.
+ * Until 2026-10 this sat behind a `RUN_BEADS_INT=1` gate that no job ever set,
+ * although nothing here needs bd, dolt, docker or the network: the heavy
+ * provisioner / watcher / hook slots are stubbed and only the config-store is
+ * real. The gate made it dead code (codeagent-fyas item 5). The real bd
+ * process boundary is covered by `beads-provision.int.test.ts`.
  *
- * What this test proves (when enabled) ───────────────────────────────────────
- * The test exercises the full `configureBeads` round-trip end-to-end through
- * the real config-store (a temp HOME), wiring real dep implementations for all
- * side-effectful slots except the heavy bd/dolt provisioner (which needs a live
- * dolt sql-server and is covered by the Docker E2E suite).  The real file-system
- * primitives exercised here are:
+ * What it proves ─────────────────────────────────────────────────────────────
+ * The full `configureBeads` round-trip through the REAL config-store on a temp
+ * home dir:
  *
- *   · `persistBeadsConfig` / `readBeadsEnabled` (the real config-store on a
- *     temp dir, not mocked — proves the JSON round-trip under the HOME redirect)
- *   · The three `configureBeads` action branches ('status' → 'enable' → 'disable')
+ *   · `persistBeadsConfig` / `readBeadsEnabled` (real JSON round-trip)
+ *   · the three `configureBeads` actions ('status' → 'enable' → 'disable')
  *     wired through the same dependency interface as the production handler
  *   · status: calls probe, returns running=true when bdAvailable+serverUp
  *   · enable: persists enabled:true, calls provision, starts watcher, emits enabled
  *   · disable: persists enabled:false, stops watcher, reverts hook, emits disabled
- *
- * The parts deliberately skipped (need real bd/dolt) ─────────────────────────
- *   · The actual `provisionBeads` function (heavy: installs bd, starts dolt sql-server)
- *   · The actual `BeadsWatcher` chokidar loop (needs a real `.beads/` feed file)
- *   · `revertAgentHook` against a live agent config (e.g. ~/.claude/settings.json)
- * Those remain as clearly annotated stubs with `TODO: exercise real bd binary`.
- *
- * Shape ─────────────────────────────────────────────────────────────────────
- * The skip gate, logging pattern and phase structure follow the same shape as
- * the other Docker integration tests in this directory; keep them in sync as
- * they are extended.
+ *   · status after disable short-circuits (probe NOT called) — the soft-disable
+ *     invariant (the dolt server stays up, so a raw probe would lie)
  */
 
 import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
@@ -38,21 +26,8 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 
-// ── Gate ─────────────────────────────────────────────────────────────────────
-// Probed synchronously (same pattern as host-agent.docker.e2e.test.ts) — no
-// top-level await.
-const RUN_BEADS_INT = process.env.RUN_BEADS_INT === '1';
-
-if (!RUN_BEADS_INT) {
-  // eslint-disable-next-line no-console
-  console.log(
-    '[beads-configure] SKIPPED — set RUN_BEADS_INT=1 to run the real config-store integration gate.',
-  );
-}
-
 // ── Imports ───────────────────────────────────────────────────────────────────
-// Imported unconditionally so the module graph is type-checked even when the
-// suite is skipped.  The heavy provisioner is not imported here — tests stub it.
+// The heavy provisioner is not imported here — tests stub it.
 import { configureBeads, type ConfigureBeadsDeps, type ConfigureBeadsCtx } from '../../src/beads/configure';
 import { persistBeadsConfig, readBeadsEnabled, beadsConfigPath } from '../../src/beads/config-store';
 
@@ -87,26 +62,16 @@ function makeDeps(overrides: Partial<ConfigureBeadsDeps> = {}): ConfigureBeadsDe
       doltAvailable: true,
       serverUp: true,
       prefix: 'inttest_proj',
-      // TODO: replace stub with real provisionBeads() + BEADS_DIR temp redirect
-      //       once the Docker-based bd+dolt layer is available (RUN_BEADS_INT
-      //       gates that heavier path).
     }),
-    startWatcher: async () => {
-      // TODO: wire real BeadsWatcher once a live feed file is available.
-    },
-    stopWatcher: async () => {
-      // TODO: wire real BeadsWatcher.stop() here.
-    },
+    startWatcher: async () => undefined,
+    stopWatcher: async () => undefined,
     probe: async () => ({
       bdAvailable: true,
       doltAvailable: true,
       serverUp: true,
       prefix: 'inttest_proj',
-      // TODO: replace stub with real BdAdapter probe once bd binary is present.
     }),
-    revertAgentHook: async (_agent: string) => {
-      // TODO: wire real wiring.removeBeadsHook() once agent config exists.
-    },
+    revertAgentHook: async (_agent: string) => undefined,
     // Real config-store — the key integration assertion of this suite.
     persist: (cfg) => persistBeadsConfig(cfg),
     readEnabled: () => readBeadsEnabled(),
@@ -120,24 +85,28 @@ function makeDeps(overrides: Partial<ConfigureBeadsDeps> = {}): ConfigureBeadsDe
 
 // ── Suite ─────────────────────────────────────────────────────────────────────
 
-const suite = RUN_BEADS_INT ? describe : describe.skip;
-
-suite('beads_configure integration — real config-store round-trip', () => {
+describe('beads_configure integration — real config-store round-trip', () => {
   let tempHome: ReturnType<typeof makeTempHome>;
   let originalHome: string | undefined;
+  let originalUserProfile: string | undefined;
 
   beforeAll(() => {
     tempHome = makeTempHome();
     // Redirect HOME so persistBeadsConfig / readBeadsEnabled write/read the
     // temp dir instead of the developer's real ~/.codeam/beads-config.json.
+    // os.homedir() reads HOME on POSIX and USERPROFILE on Windows.
     originalHome = process.env.HOME;
+    originalUserProfile = process.env.USERPROFILE;
     process.env.HOME = tempHome.home;
-    // eslint-disable-next-line no-console
-    console.log(`[beads-configure] temp HOME: ${tempHome.home}`);
+    process.env.USERPROFILE = tempHome.home;
+    expect(os.homedir()).toBe(tempHome.home);
   });
 
   afterAll(() => {
-    process.env.HOME = originalHome;
+    if (originalHome === undefined) delete process.env.HOME;
+    else process.env.HOME = originalHome;
+    if (originalUserProfile === undefined) delete process.env.USERPROFILE;
+    else process.env.USERPROFILE = originalUserProfile;
     tempHome.cleanup();
   });
 

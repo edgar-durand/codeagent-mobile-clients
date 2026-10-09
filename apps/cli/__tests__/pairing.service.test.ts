@@ -123,6 +123,28 @@ describe('fetchCurrentPluginAuthToken', () => {
     expect(token).toBe('v1.the-real-token');
   });
 
+  // codeagent-tach: a session paired before `userId` was persisted learns its
+  // telemetry id here, instead of being identified by email.
+  it('hands the backend userId to onUserId', async () => {
+    vi.spyOn(pairing._transport, 'postJson').mockResolvedValue({
+      data: { paired: true, userId: 'usr_42', pluginAuthToken: 'v1.t' },
+    } as never);
+    const onUserId = vi.fn();
+
+    await pairing.fetchCurrentPluginAuthToken('sess-1', 'plugin-1', undefined, onUserId);
+    expect(onUserId).toHaveBeenCalledWith('usr_42');
+  });
+
+  it('does not call onUserId when the backend omits userId', async () => {
+    vi.spyOn(pairing._transport, 'postJson').mockResolvedValue({
+      data: { paired: true, pluginAuthToken: 'v1.t' },
+    } as never);
+    const onUserId = vi.fn();
+
+    await pairing.fetchCurrentPluginAuthToken('sess-1', 'plugin-1', undefined, onUserId);
+    expect(onUserId).not.toHaveBeenCalled();
+  });
+
   it('returns null when paired is false in the response', async () => {
     vi.spyOn(pairing._transport, 'postJson').mockResolvedValue({
       data: { paired: false },

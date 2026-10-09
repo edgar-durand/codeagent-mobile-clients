@@ -72,7 +72,7 @@ describe('command-relay SSE primary path (integration, real socket)', () => {
 
     // Wait for the stream to be established, then push a real command frame.
     await vi.waitFor(() => expect(streamRes).not.toBeNull(), { timeout: 3000 });
-    streamRes!.write(commandsFrame([{ id: 'c1', type: 'start_task', payload: {} }]));
+    streamRes!.write(commandsFrame([{ id: 'c1', sessionId: 's1', pluginId: 'p1', type: 'start_task', payload: {}, status: 'pending', createdAt: 1 }]));
 
     await vi.waitFor(() => expect(onCmd).toHaveBeenCalledTimes(1), { timeout: 3000 });
     expect(onCmd.mock.calls[0][0]).toMatchObject({ id: 'c1', type: 'start_task' });
@@ -84,10 +84,34 @@ describe('command-relay SSE primary path (integration, real socket)', () => {
     );
 
     // REDELIVERY of the same id (reconnect / publish re-fire) must NOT re-run it.
-    streamRes!.write(commandsFrame([{ id: 'c1', type: 'start_task', payload: {} }]));
+    streamRes!.write(commandsFrame([{ id: 'c1', sessionId: 's1', pluginId: 'p1', type: 'start_task', payload: {}, status: 'pending', createdAt: 1 }]));
     await new Promise((r) => setTimeout(r, 200));
     expect(onCmd).toHaveBeenCalledTimes(1);
 
+    relay.stop();
+    await srv.close();
+  });
+
+  it('drops a malformed SSE command (zod guard) and still dispatches the valid one in the same frame', async () => {
+    let streamRes: http.ServerResponse | null = null;
+    const srv = await startServer((_req, res) => {
+      res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache' });
+      streamRes = res;
+    });
+    const onCmd = vi.fn();
+    const relay = await connectedRelay(srv.port, onCmd);
+    relay.connectSSE();
+    await vi.waitFor(() => expect(streamRes).not.toBeNull(), { timeout: 3000 });
+    streamRes!.write(
+      commandsFrame([
+        { id: 'bad', type: 42 },
+        { id: 'good', sessionId: 's1', pluginId: 'p1', type: 'select_option', payload: { index: 0 }, status: 'pending', createdAt: 1 },
+      ]),
+    );
+    await vi.waitFor(() => expect(onCmd).toHaveBeenCalledTimes(1), { timeout: 3000 });
+    expect(onCmd.mock.calls[0][0]).toMatchObject({ id: 'good', type: 'select_option' });
+    await new Promise((r) => setTimeout(r, 100));
+    expect(onCmd).toHaveBeenCalledTimes(1);
     relay.stop();
     await srv.close();
   });

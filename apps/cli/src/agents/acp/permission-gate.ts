@@ -74,8 +74,13 @@ export function guardrailBlockNotice(
 }
 
 export interface PermissionGateDeps {
-  /** AUTO mode (headless / codespace): auto-pick an allow option. */
-  autoApprovePermissions: boolean;
+  /**
+   * AUTO mode (headless / codespace): auto-pick an allow option. Read on EVERY
+   * request, never snapshotted: `set_mode` flips the session's flag mid-session
+   * (ask-mode → relay to mobile, bypass → auto), and a captured boolean made the
+   * mobile manual/auto toggle a no-op again from v2.65.14 on.
+   */
+  isAutoApprove: () => boolean;
   /** Local session ⇒ neither internals guard nor guardrails apply. */
   isLocal: () => boolean;
   /** The session's guardrail policy (read per request — it's user-editable). */
@@ -90,6 +95,7 @@ export interface PermissionGateDeps {
   registerPermission(args: {
     questionId: string;
     options: PermissionOption[];
+    planText?: string;
   }): Promise<RequestPermissionResponse>;
 }
 
@@ -144,7 +150,7 @@ export function createOnRequestPermission(
     // the broadest grant available (allow_always > allow_once). If the agent
     // somehow offers no allow option, fall through to the interactive flow.
     // A guardrail `confirm` overrides AUTO — the user must tap.
-    if (deps.autoApprovePermissions && !guardrailConfirm) {
+    if (deps.isAutoApprove() && !guardrailConfirm) {
       const allow = pickAllowOption(request.options);
       if (allow) {
         log.info(
@@ -163,6 +169,25 @@ export function createOnRequestPermission(
     // (`/api/commands/pending/stream`); the `handleCommand` switch
     // routes it back here through `streaming.resolveSelection()`.
     // No polling.
-    return deps.registerPermission({ questionId: event.questionId, options });
+    const planText = exitPlanModePlan(request.toolCall);
+    return deps.registerPermission({
+      questionId: event.questionId,
+      options,
+      ...(planText !== undefined ? { planText } : {}),
+    });
   };
+}
+
+/**
+ * The plan text of an ExitPlanMode approval request, or undefined for any
+ * other tool. claude-agent-acp sends it as `rawInput.plan` (kind `switch_mode`).
+ * Carried to the user's answer so the plan AND the approval land in the
+ * durable conversation — interactive plan turns were live-only and vanished
+ * from the chat on re-entry (codeagent-x3ly).
+ */
+export function exitPlanModePlan(toolCall: RequestPermissionRequest['toolCall']): string | undefined {
+  const raw = toolCall.rawInput;
+  if (!raw || typeof raw !== 'object') return undefined;
+  const plan = (raw as { plan?: unknown }).plan;
+  return typeof plan === 'string' && plan.trim().length > 0 ? plan : undefined;
 }

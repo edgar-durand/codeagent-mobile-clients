@@ -21,10 +21,13 @@ import type { BrokeredIntegrationToken, IntegrationMcpDelivery } from '@codeam/s
 
 const RESTART_AHEAD_MS = 5 * 60 * 1000;
 
-export function resolveDelivery(id: string): IntegrationMcpDelivery | null {
+export function resolveDelivery(
+  id: string,
+  sessionId: string | undefined = process.env.CODEAM_MCP_SESSION_ID,
+): IntegrationMcpDelivery | null {
   // Manifest first (data-driven — backend-resolved spec wins), bundled registry fallback.
   const fromRegistry = isKnownIntegrationId(id) ? (getIntegration(id).delivery.mcp ?? null) : null;
-  const fromManifest = readIntegrationsManifest()?.integrations.find((e) => e.id === id)?.delivery
+  const fromManifest = readIntegrationsManifest(sessionId)?.integrations.find((e) => e.id === id)?.delivery
     .mcp;
   if (fromManifest) {
     // Rollout defense: a backend still pinned to a pre-staticEnv @codeam/shared
@@ -160,7 +163,7 @@ export async function mcpRun(args: string[]): Promise<void> {
     process.stderr.write('[codeam mcp-run] missing integration id or session credentials in env\n');
     process.exit(1);
   }
-  const delivery = resolveDelivery(id);
+  const delivery = resolveDelivery(id, sessionId);
   if (!delivery) {
     process.stderr.write(`[codeam mcp-run] no mcp delivery for '${id}'\n`);
     process.exit(1);
