@@ -11,7 +11,7 @@ import {
 import { acquireDaemonLock } from './pair-auto';
 import { showIntro, showInfo, showError } from '../ui/banner';
 import { CommandRelayService, stopRelayWithGoodbye } from '../services/command-relay.service';
-import { AgentService } from '../services/agent.service';
+import { AgentLaunchError, AgentService } from '../services/agent.service';
 import { createRuntimeStrategy } from '../agents/registry';
 import { getAcpAdapter, requiresAcp, resolveAcpAdapterWithRetry } from '../agents/acp/adapters';
 import {
@@ -1025,7 +1025,13 @@ export async function start(requestedAgent?: AgentId, presetSession?: SavedSessi
   process.once('SIGHUP', sigintHandler);
   // Spawn Claude FIRST so its strategy is set + the PTY is launching
   // before the relay starts dispatching remote commands.
-  await agent.spawn();
+  try {
+    await agent.spawn();
+  } catch (err) {
+    if (!(err instanceof AgentLaunchError)) throw err;
+    console.error(`\n  ✗ ${err.displayName} could not be launched.\n    ${err.detail}\n`);
+    process.exit(1);
+  }
   // Bind the conversation id now if the runtime pre-assigned it via
   // `prepareLaunch` (Claude: `--session-id <uuid>`). Deterministic
   // across every OS — we never have to inspect the filesystem to

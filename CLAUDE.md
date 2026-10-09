@@ -264,6 +264,17 @@ over ACP. It is a purely ADDITIVE branch — codespace / self-hosted paths are u
   re-publishes LOCAL_DRIVE on the new id (LOCAL_DRIVE→LOCAL_DRIVE = a switch, so `wire-baton` arms the mirror
   FRESH), and `parseHistoryFile` drops the slash-command echoes so `<command-name>…` never renders as a user bubble.
   `/rename` only appends `custom-title` records — no switch. (2026-08-19)
+- **The relay starts BEFORE the agent** (`runBatonSession` → `relay.start()` then `controller.begin()`,
+  gated by `makeStartupGate`): `begin()` spawns the native TUI, which can wait forever on the Claude
+  install prompt or fail when the agent can't be installed. With the relay after it, the phone saw its
+  prompts delivered and never acked ("the host isn't responding", two new users lost 2026-10-02). While
+  the agent starts, agent-bound commands get one "still starting" chat notice and wait (OFF the relay's
+  dispatch loop — it awaits each command); a failed start answers each one with the reason + `failed`
+  (`AGENT_UNAVAILABLE`) and the process STAYS UP (`AgentService.spawn` throws `AgentLaunchError`, it
+  no longer `process.exit`s); a signed-out agent (`RuntimeStrategy.probeLocalAuth`, Claude:
+  `claude auth status`) answers `start_task` with a sign-in notice (`AGENT_NOT_SIGNED_IN`) instead of
+  typing it into the login screen. The first-pair onboarding welcome is sent here too, once `begin()`
+  is up. (codeagent-04jp.1 / codeagent-1qhj)
 - **Goodbye heartbeat is AWAITED** (`CommandRelayService.stopAndFlush` / `stopRelayWithGoodbye`):
   `stop()` fired `online:false` fire-and-forget and every shutdown path called `process.exit()`
   immediately, so the POST never left the process and mobile kept showing the session ONLINE (nothing

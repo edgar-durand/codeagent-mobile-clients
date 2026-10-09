@@ -1263,6 +1263,49 @@ export function pickLatestResumableConversation(
   return prior?.id ?? null;
 }
 
+/**
+ * The host-agent RESUME boot's auto-resume: reopen the marked (or latest)
+ * prior conversation in place of the fresh session `client.start()` minted.
+ * Best-effort — any failure keeps the fresh session.
+ *
+ * `preferResume`: the relay only starts once this returns, so a prompt queued
+ * during the wake waited for the whole `session/load` replay — which the
+ * runner discards anyway — 14 s measured on the QA Box (codeagent-2238).
+ * Agents advertising `session/resume` now reopen without it.
+ */
+export async function autoResumeLatestConversation(
+  client: Pick<AcpClient, 'listSessions' | 'loadSession'>,
+  cwd: string,
+  freshSessionId: string,
+): Promise<{ acpSessionId: string; resumedPriorConversation: boolean; marked: string | null }> {
+  let marked: string | null = null;
+  try {
+    marked = await readActiveConversationMarker(cwd);
+    const priorId = pickLatestResumableConversation(
+      await client.listSessions(),
+      freshSessionId,
+      marked,
+    );
+    if (priorId) {
+      await client.loadSession(priorId, { preferResume: true });
+      log.info(
+        'acpRunner',
+        `auto-resumed ${marked === priorId ? 'marked' : 'latest'} conversation ${priorId.slice(0, 8)}`,
+      );
+      return { acpSessionId: priorId, resumedPriorConversation: true, marked };
+    }
+    if (marked) {
+      log.info(
+        'acpRunner',
+        `marked conversation ${marked.slice(0, 8)} has no transcript — fresh session`,
+      );
+    }
+  } catch (err) {
+    log.trace('acpRunner', 'auto-resume-latest failed (best-effort)', err);
+  }
+  return { acpSessionId: freshSessionId, resumedPriorConversation: false, marked };
+}
+
 export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
   const publisher = new AcpPublisher({
     sessionId: opts.sessionId,
@@ -1530,30 +1573,10 @@ export async function runAcpSession(opts: AcpRunnerOptions): Promise<void> {
   let resumedPriorConversation = false;
   let marked: string | null = null;
   if (process.env.CODEAM_RESUME_LATEST === '1') {
-    try {
-      marked = await readActiveConversationMarker(opts.cwd);
-      const priorId = pickLatestResumableConversation(
-        await client.listSessions(),
-        acpSessionId,
-        marked,
-      );
-      if (priorId) {
-        await client.loadSession(priorId);
-        acpSessionId = priorId;
-        resumedPriorConversation = true;
-        log.info(
-          'acpRunner',
-          `auto-resumed ${marked === priorId ? 'marked' : 'latest'} conversation ${priorId.slice(0, 8)}`,
-        );
-      } else if (marked) {
-        log.info(
-          'acpRunner',
-          `marked conversation ${marked.slice(0, 8)} has no transcript — fresh session`,
-        );
-      }
-    } catch (err) {
-      log.trace('acpRunner', 'auto-resume-latest failed (best-effort)', err);
-    }
+    const resumed = await autoResumeLatestConversation(client, opts.cwd, acpSessionId);
+    acpSessionId = resumed.acpSessionId;
+    resumedPriorConversation = resumed.resumedPriorConversation;
+    marked = resumed.marked;
   }
   // Record what this runner is driving so the NEXT resume boot loads exactly
   // it (never a one-shot's transcript). Re-written on every re-point below and
