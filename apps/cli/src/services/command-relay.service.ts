@@ -798,7 +798,11 @@ export class CommandRelayService {
         : {}),
     };
     try {
-      const res = await _postJson(`${API_BASE}/api/plugin/heartbeat`, body);
+      // The poll secret proves this process owns the pluginId (codeagent-x5t):
+      // the backend latches a plugin that presents it, and from then on
+      // refuses a heartbeat for that pluginId without it — so nobody who
+      // merely learns the pluginId can flip this session offline.
+      const res = await _postJson(`${API_BASE}/api/plugin/heartbeat`, body, this.pollSecretHeader());
       this.heartbeatFailStreak = 0;
       log.trace('relay', `heartbeat ok online=${online}`);
       // Backends ≥ 2026-09-23 say whether this pluginId still has a live
@@ -891,12 +895,17 @@ export class CommandRelayService {
           },
         ];
     const linkedAgentId = this.linkedAgentIdProvider?.() ?? null;
-    _postJson(`${API_BASE}/api/plugin/agents`, {
-      pluginId: this.pluginId,
-      agents,
-      capabilities: { squad: true },
-      ...(linkedAgentId ? { linkedAgentId } : {}),
-    })
+    _postJson(
+      `${API_BASE}/api/plugin/agents`,
+      {
+        pluginId: this.pluginId,
+        agents,
+        capabilities: { squad: true },
+        ...(linkedAgentId ? { linkedAgentId } : {}),
+      },
+      // Same proof of ownership as the heartbeat (codeagent-x5t).
+      this.pollSecretHeader(),
+    )
       .then(() => { this.agentsRegistered = true; })
       .catch(() => { /* retry via agentsTimer */ });
   }

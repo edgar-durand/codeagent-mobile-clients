@@ -1,12 +1,11 @@
 /**
- * The agent's OWN exit (start.ts PTY path, `AgentService` `onExit`) must reap
- * the previews AND the standalone scratch-export tunnel before
- * `process.exit`, exactly like the SIGINT handler: an orphaned export
- * cloudflared keeps a connector on the box's named tunnel and breaks the next
- * preview. Drives the real `start()` down the PTY path (aider), captures the
- * `onExit` it hands `AgentService`, then fires it.
+ * codeagent-tach: `start` identified the CLI user by EMAIL, so every CLI user
+ * became a second PostHog person beside the app's user-id person (the first
+ * paying subscriber was counted twice, and PostHog will not merge two
+ * identified persons). The distinct id must be the backend user id — persisted
+ * on the session, or backfilled from /reconnect — and never the email.
  */
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 const fakeSessionBase = {
   id: 'sess-1',
@@ -38,7 +37,7 @@ vi.mock('../../../src/ui/banner', () => ({
 }));
 
 vi.mock('../../../src/services/pairing.service', () => ({
-  fetchCurrentPluginAuthToken: vi.fn(async () => undefined),
+  fetchCurrentPluginAuthToken: vi.fn(async () => null),
   postPreviewEvent: vi.fn(),
 }));
 
@@ -92,11 +91,9 @@ vi.mock('../../../src/services/output.service', () => ({
   }),
 }));
 
-const captured: { onExit?: (code: number) => Promise<void> } = {};
 vi.mock('../../../src/services/agent.service', () => ({
   AgentLaunchError: class AgentLaunchError extends Error {},
-  AgentService: vi.fn(function (_runtime: unknown, opts: { onExit: (c: number) => Promise<void> }) {
-    captured.onExit = opts.onExit;
+  AgentService: vi.fn(function () {
     return {
       kill: vi.fn(),
       spawn: vi.fn(async () => {
@@ -127,34 +124,49 @@ vi.mock('../../../src/commands/start/shutdown-tunnels', () => ({
 }));
 
 import { start } from '../../../src/commands/start';
-import { getActiveSession, getActiveSessionForAgent } from '../../../src/config';
-import { reapPreviewsAndExportTunnel } from '../../../src/commands/start/shutdown-tunnels';
+import { addSession, getActiveSession, getActiveSessionForAgent } from '../../../src/config';
+import { fetchCurrentPluginAuthToken } from '../../../src/services/pairing.service';
+import { capture, identifyUser } from '../../../src/services/telemetry.service';
 
-describe('start() PTY path — the agent exits on its own', () => {
-  it('awaits the preview + export-tunnel reap BEFORE process.exit', async () => {
-    delete process.env.CODESPACES;
-    const session = { ...fakeSessionBase, agent: 'aider' as const, pluginAuthToken: undefined };
-    vi.mocked(getActiveSession).mockReturnValue(session as never);
-    vi.mocked(getActiveSessionForAgent).mockReturnValue(session as never);
+function boot(session: Record<string, unknown>) {
+  delete process.env.CODESPACES;
+  const s = { ...fakeSessionBase, agent: 'aider' as const, ...session };
+  vi.mocked(getActiveSession).mockReturnValue(s as never);
+  vi.mocked(getActiveSessionForAgent).mockReturnValue(s as never);
+  return start();
+}
 
-    await expect(start()).rejects.toThrow('SENTINEL_SPAWN');
-    expect(captured.onExit).toBeTypeOf('function');
+describe('start() telemetry identity', () => {
+  beforeEach(() => {
+    vi.mocked(identifyUser).mockClear();
+    vi.mocked(capture).mockClear();
+    vi.mocked(addSession).mockClear();
+    vi.mocked(fetchCurrentPluginAuthToken).mockResolvedValue(null);
+  });
 
-    const order: string[] = [];
-    vi.mocked(reapPreviewsAndExportTunnel).mockImplementation(async () => {
-      await new Promise((r) => setTimeout(r, 5));
-      order.push('reaped');
+  it('identifies by the persisted backend user id, never the email', async () => {
+    await expect(boot({ userId: 'usr_1' })).rejects.toThrow('SENTINEL_SPAWN');
+    expect(identifyUser).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(identifyUser).mock.calls[0][0]).toMatchObject({
+      userId: 'usr_1',
+      email: 'test@example.com',
     });
-    const exitSpy = vi.spyOn(process, 'exit').mockImplementation(((code?: number) => {
-      order.push(`exit:${code}`);
-    }) as never);
-    try {
-      await captured.onExit!(3);
-    } finally {
-      exitSpy.mockRestore();
-    }
+    expect(capture).toHaveBeenCalledWith('agent_used', expect.objectContaining({ sessionId: 'sess-1' }));
+  }, 30_000);
 
-    expect(reapPreviewsAndExportTunnel).toHaveBeenCalledTimes(1);
-    expect(order).toEqual(['reaped', 'exit:3']);
+  it('backfills the id from /reconnect on a session paired before it was persisted', async () => {
+    vi.mocked(fetchCurrentPluginAuthToken).mockImplementation(async (_s, _p, _sec, onUserId) => {
+      onUserId?.('usr_from_reconnect');
+      return null;
+    });
+    await expect(boot({})).rejects.toThrow('SENTINEL_SPAWN');
+    expect(vi.mocked(identifyUser).mock.calls[0][0]).toMatchObject({ userId: 'usr_from_reconnect' });
+    expect(addSession).toHaveBeenCalledWith(expect.objectContaining({ userId: 'usr_from_reconnect' }));
+  }, 30_000);
+
+  it('stays anonymous (no identify) when no user id is known — never falls back to the email', async () => {
+    await expect(boot({})).rejects.toThrow('SENTINEL_SPAWN');
+    expect(identifyUser).not.toHaveBeenCalled();
+    expect(capture).toHaveBeenCalledWith('agent_used', expect.anything());
   }, 30_000);
 });

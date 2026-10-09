@@ -83,7 +83,7 @@ function makeGate(overrides: Partial<PermissionGateDeps> = {}): GateHarness {
       return Promise.resolve({ outcome: { outcome: 'selected', optionId: firstOptionId } });
     });
   const gate = createOnRequestPermission({
-    autoApprovePermissions: false,
+    isAutoApprove: () => false,
     isLocal: () => false,
     getPolicy: () => DEFAULT_GUARDRAIL_POLICY,
     publisher: { publishAwaitingAnswer, publishOutput },
@@ -118,7 +118,7 @@ describe('permission gate — plan approvals SURFACE even when the plan text men
   });
 
   it('AUTO mode auto-approves a clean ExitPlanMode (no human at the phone)', async () => {
-    const h = makeGate({ autoApprovePermissions: true });
+    const h = makeGate({ isAutoApprove: () => true });
     const res = await h.gate(exitPlanRequest('Plan: refactor the parser, then run the tests.'));
     expect(res).toEqual({ outcome: { outcome: 'selected', optionId: 'auto' } });
     expect(h.publishAwaitingAnswer).not.toHaveBeenCalled();
@@ -143,7 +143,7 @@ describe('permission gate — REAL internal file access is still denied, now VIS
   });
 
   it('denies even in AUTO mode (guard runs before auto-approve), still visibly', async () => {
-    const h = makeGate({ autoApprovePermissions: true });
+    const h = makeGate({ isAutoApprove: () => true });
     const res = await h.gate(bashRequest('ls ~/.codeam/house-claude/'));
     expect(res).toEqual({ outcome: { outcome: 'selected', optionId: 'reject' } });
     expect(h.publishOutput).toHaveBeenCalledTimes(1);
@@ -161,7 +161,7 @@ describe('permission gate — REAL internal file access is still denied, now VIS
   });
 
   it('a guardrail Confirm routes to the interactive prompt even in AUTO mode', async () => {
-    const h = makeGate({ autoApprovePermissions: true });
+    const h = makeGate({ isAutoApprove: () => true });
     await h.gate(bashRequest('git push --force origin main'));
     expect(h.publishAwaitingAnswer).toHaveBeenCalledTimes(1);
     expect(h.publishOutput).not.toHaveBeenCalled();
@@ -177,7 +177,7 @@ describe('permission gate — ordinary flow is untouched', () => {
   });
 
   it('a normal request auto-approves with the broadest allow in AUTO mode', async () => {
-    const h = makeGate({ autoApprovePermissions: true });
+    const h = makeGate({ isAutoApprove: () => true });
     const res = await h.gate(bashRequest('npm run build'));
     expect(res).toEqual({ outcome: { outcome: 'selected', optionId: 'allow_always' } });
   });
@@ -194,5 +194,20 @@ describe('pickAllowOption (moved from runner — import surface preserved)', () 
   it('prefers allow_always over allow_once, null when no allow', () => {
     expect(pickAllowOption(BASH_OPTIONS)?.optionId).toBe('allow_always');
     expect(pickAllowOption([{ optionId: 'r', kind: 'reject_once' }])).toBeNull();
+  });
+});
+
+describe('permission gate — AUTO mode is read per request, never snapshotted', () => {
+  it('a mid-session flip (set_mode → ask mode) relays the very next request', async () => {
+    let auto = true;
+    const h = makeGate({ isAutoApprove: () => auto });
+    expect(await h.gate(bashRequest('ls'))).toEqual({
+      outcome: { outcome: 'selected', optionId: 'allow_always' },
+    });
+    expect(h.publishAwaitingAnswer).not.toHaveBeenCalled();
+    auto = false;
+    await h.gate(bashRequest('ls'));
+    expect(h.publishAwaitingAnswer).toHaveBeenCalledTimes(1);
+    expect(h.registerPermission).toHaveBeenCalledTimes(1);
   });
 });

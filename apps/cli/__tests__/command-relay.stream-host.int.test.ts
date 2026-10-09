@@ -140,6 +140,7 @@ describe('command relay on the stream host (integration, real sockets)', () => {
       expect(pairing._postJson).toHaveBeenCalledWith(
         `${api.base}/api/plugin/heartbeat`,
         expect.objectContaining({ online: false }),
+        expect.any(Object), // poll-secret headers (codeagent-x5t)
       ),
     );
     for (const [url] of (pairing._postJson as ReturnType<typeof vi.fn>).mock.calls) {

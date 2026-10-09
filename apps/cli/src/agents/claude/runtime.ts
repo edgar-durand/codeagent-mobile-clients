@@ -8,13 +8,14 @@ import {
 import { randomUUID } from 'node:crypto';
 import { buildClaudeLaunch } from './resolver';
 import { ensureClaudeInstalled } from './installer';
+import { probeClaudeLocalAuth } from './local-auth';
 import { claudeCredentialLocator, claudeLoginLauncher } from './link';
 import { fetchClaudeQuota } from './quota';
 import { spawnAndCapture } from '../../services/spawn-and-capture';
 import { registerOneShotConversation } from '../../services/oneshot-registry';
 import * as history from './history';
 import type { OsStrategy } from '../../os';
-import type { ChangeModelInstruction, RuntimeStrategy } from '../strategy';
+import type { ChangeModelInstruction, LocalAuthState, RuntimeStrategy } from '../strategy';
 
 export class ClaudeRuntimeStrategy implements RuntimeStrategy {
   readonly id: AgentId = 'claude';
@@ -24,6 +25,10 @@ export class ClaudeRuntimeStrategy implements RuntimeStrategy {
 
   constructor(os: OsStrategy) {
     this.os = os;
+  }
+
+  probeLocalAuth(): Promise<LocalAuthState> {
+    return probeClaudeLocalAuth(this.os);
   }
 
   /**

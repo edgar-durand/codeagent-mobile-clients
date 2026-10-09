@@ -264,6 +264,17 @@ over ACP. It is a purely ADDITIVE branch — codespace / self-hosted paths are u
   re-publishes LOCAL_DRIVE on the new id (LOCAL_DRIVE→LOCAL_DRIVE = a switch, so `wire-baton` arms the mirror
   FRESH), and `parseHistoryFile` drops the slash-command echoes so `<command-name>…` never renders as a user bubble.
   `/rename` only appends `custom-title` records — no switch. (2026-08-19)
+- **The relay starts BEFORE the agent** (`runBatonSession` → `relay.start()` then `controller.begin()`,
+  gated by `makeStartupGate`): `begin()` spawns the native TUI, which can wait forever on the Claude
+  install prompt or fail when the agent can't be installed. With the relay after it, the phone saw its
+  prompts delivered and never acked ("the host isn't responding", two new users lost 2026-10-02). While
+  the agent starts, agent-bound commands get one "still starting" chat notice and wait (OFF the relay's
+  dispatch loop — it awaits each command); a failed start answers each one with the reason + `failed`
+  (`AGENT_UNAVAILABLE`) and the process STAYS UP (`AgentService.spawn` throws `AgentLaunchError`, it
+  no longer `process.exit`s); a signed-out agent (`RuntimeStrategy.probeLocalAuth`, Claude:
+  `claude auth status`) answers `start_task` with a sign-in notice (`AGENT_NOT_SIGNED_IN`) instead of
+  typing it into the login screen. The first-pair onboarding welcome is sent here too, once `begin()`
+  is up. (codeagent-04jp.1 / codeagent-1qhj)
 - **Goodbye heartbeat is AWAITED** (`CommandRelayService.stopAndFlush` / `stopRelayWithGoodbye`):
   `stop()` fired `online:false` fire-and-forget and every shutdown path called `process.exit()`
   immediately, so the POST never left the process and mobile kept showing the session ONLINE (nothing
@@ -281,9 +292,11 @@ runs for REAL (native claude TUI + ACP adapter + relay vs. a stub backend) in
 
 **One line:** the fleet host (`fleet-1`, an ordinary self-hosted `codeam host-agent` enrolled once
 as a host of the system account — see `codeagent-mobile/CLAUDE.md` for the api-v2 `fleet` module
-that dispatches these) receives four ADDITIVE relay command types, handled entirely in
+that dispatches these) receives four ADDITIVE relay command types, handled in
 `apps/cli/src/commands/host-agent.ts`: `fleet_create_box` / `fleet_start_box` / `fleet_stop_box` /
-`fleet_delete_box`. A normal self-hosted box never receives them — they're pushed only to the ONE
+`fleet_delete_box` (the pure half — payload guards, the `docker run` template and the
+`DockerRunner` — lives in `apps/cli/src/commands/host/fleet-docker.ts`, re-exported from
+`host-agent.ts`). A normal self-hosted box never receives them — they're pushed only to the ONE
 host the backend addresses as `FLEET_HOST_ID`. Spec: `docs/superpowers/specs/2026-07-15-fleet-inhouse-selfhosted-rescue-design.md`
 (container repo). Plan: `docs/superpowers/plans/2026-07-15-fleet-p2-clients.md` (this repo's slice —
 CLI handlers + box image; `…-fleet-p1-infra-backend.md` covers the backend `fleet` module).
@@ -296,7 +309,7 @@ since the backend derives `codeam-box-<userId>` (cuid, already docker-name-safe)
 string also names the box's named volume, refusing anything else means these handlers can never be
 steered into touching a non-fleet container/volume on the shared host.
 
-**`DockerRunner` abstraction** (exported from `host-agent.ts`, injected on `HostAgentDeps.docker`,
+**`DockerRunner` abstraction** (defined in `host/fleet-docker.ts`, re-exported from `host-agent.ts`, injected on `HostAgentDeps.docker`,
 defaults to `defaultDockerRunner`) — `run(args, opts)` spawns the
 real `docker` binary with **argv only, never `sh -c`**, and *resolves* (never rejects) with
 `{code, stderr, stdout}`. `opts.env` is merged OVER `process.env` for the `docker` CLI process's OWN

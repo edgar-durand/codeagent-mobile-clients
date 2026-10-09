@@ -214,7 +214,7 @@ function resolveNpm(os: OsStrategy): string {
 
 async function installCodexViaNpm(os: OsStrategy): Promise<void> {
   return new Promise((resolve, reject) => {
-    const proc = spawn(resolveNpm(os), ['install', '-g', '@openai/codex'], {
+    const proc = spawn(resolveNpm(os), ['install', '-g', '--no-audit', '--no-fund', '@openai/codex'], {
       stdio: 'inherit',
     });
     proc.on('close', (code) => {

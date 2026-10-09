@@ -394,6 +394,9 @@ export class AcpClient {
    *  `session/new`. Set once during {@link startOnce}. */
   private supportsLoadSession = false;
   private supportsListSessions = false;
+  /** `sessionCapabilities.resume`: the agent can reopen a session WITHOUT
+   *  replaying it (`session/resume`) — see {@link loadSession}'s `preferResume`. */
+  private supportsResumeSession = false;
   /** Idle watchdog for the in-flight prompt. The `Client` handlers
    *  (`sessionUpdate` / `requestPermission`) reach for this to keep
    *  the turn alive while the adapter is demonstrably working. Null
@@ -726,6 +729,7 @@ export class AcpClient {
       this.supportsListSessions = !!(
         initialize.agentCapabilities as { sessionCapabilities?: { list?: unknown } } | undefined
       )?.sessionCapabilities?.list;
+      this.supportsResumeSession = !!initialize.agentCapabilities?.sessionCapabilities?.resume;
 
       log.info('acpClient', 'newSession → sending');
       // Race the RPC against (a) a fatal stderr line (auth / tier ineligibility),
@@ -1128,8 +1132,16 @@ export class AcpClient {
    * Side-effect: replaces the active sessionId with the loaded one
    * so subsequent prompts target the loaded conversation, not the
    * fresh-on-spawn `newSession` one.
+   *
+   * `preferResume`: when the agent advertises `sessionCapabilities.resume`,
+   * reopen with `session/resume` instead — same session, but the agent does
+   * NOT replay the whole conversation first. Callers that pass it discard the
+   * replay anyway (mobile already holds the history), and the replay is what
+   * a prompt queued during a box wake sat behind: 14 s on a mid-size
+   * conversation (codeagent-2238). Agents without the capability fall back
+   * to `session/load`.
    */
-  async loadSession(sessionId: string): Promise<void> {
+  async loadSession(sessionId: string, opts?: { preferResume?: boolean }): Promise<void> {
     if (!this.connection) {
       throw new Error('AcpClient.loadSession called before start()');
     }
@@ -1149,7 +1161,13 @@ export class AcpClient {
       );
       return;
     }
-    log.info('acpClient', `loadSession → sessionId=${sessionId.slice(0, 8)}`);
+    const viaResume = opts?.preferResume === true && this.supportsResumeSession;
+    const connection = this.connection;
+    const params = { sessionId, cwd: this.opts.cwd, mcpServers: this.opts.mcpServers ?? [] };
+    log.info(
+      'acpClient',
+      `loadSession → sessionId=${sessionId.slice(0, 8)}${viaResume ? ' (session/resume, no replay)' : ''}`,
+    );
     // Swallow the load replay. `session/load` makes Claude replay the ENTIRE
     // prior conversation as `session/update` notifications before it resolves;
     // without this bracket those land as OPEN (`done:false`) streaming chunks
@@ -1159,18 +1177,17 @@ export class AcpClient {
     // session/load; the happy path (fresh session/new at spawn) never calls this,
     // so live streaming for non-resuming users is untouched.
     this.opts.beginLoadReplay?.();
-    let loaded: Awaited<ReturnType<ClientSideConnection['loadSession']>> | undefined;
+    let loaded:
+      | Awaited<ReturnType<ClientSideConnection['loadSession']>>
+      | Awaited<ReturnType<ClientSideConnection['resumeSession']>>
+      | undefined;
     // Bounded: an adapter that answers neither ok nor error must not hang the
     // caller forever (see LOADSESSION_TIMEOUT_MS). The reject surfaces as a
     // normal thrown error, so every caller's existing failure path runs.
     let loadTimer: ReturnType<typeof setTimeout> | undefined;
     try {
       loaded = await Promise.race([
-        this.connection.loadSession({
-          sessionId,
-          cwd: this.opts.cwd,
-          mcpServers: this.opts.mcpServers ?? [],
-        }),
+        viaResume ? connection.resumeSession(params) : connection.loadSession(params),
         new Promise<never>((_, reject) => {
           loadTimer = setTimeout(() => {
             const tail = this.recentStderr.slice(-4).join(' | ');

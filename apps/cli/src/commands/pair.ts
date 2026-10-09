@@ -128,6 +128,7 @@ export async function pair(args: string[] = []): Promise<void> {
         addSession({
           id: info.sessionId,
           pluginId,
+          ...(info.userId ? { userId: info.userId } : {}),
           userName: info.userName,
           userEmail: info.userEmail,
           plan: info.plan,
@@ -142,16 +143,19 @@ export async function pair(args: string[] = []): Promise<void> {
         saveCliConfig({ ...loadCliConfig(), preferredAgent: agentId });
 
         // Telemetry: identify the user + attach session context to
-        // every subsequent capture. Falls back to email when the
-        // backend response omits user.id (older backends).
-        identifyUser({
-          userId: info.userId ?? info.userEmail,
-          email: info.userEmail,
-          name: info.userName,
-          plan: info.plan,
-          preferredAgent: agentId,
-          pairedSessionCount: loadCliConfig().sessions.length,
-        });
+        // every subsequent capture — by the backend user id ONLY. An email
+        // distinct id is a second PostHog person (codeagent-tach); an old
+        // backend without `userId` leaves the session anonymous instead.
+        if (info.userId) {
+          identifyUser({
+            userId: info.userId,
+            email: info.userEmail,
+            name: info.userName,
+            plan: info.plan,
+            preferredAgent: agentId,
+            pairedSessionCount: loadCliConfig().sessions.length,
+          });
+        }
         capture('pair_succeeded', {
           sessionId: info.sessionId,
           pluginId,

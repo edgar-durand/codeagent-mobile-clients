@@ -474,7 +474,7 @@ async function provisionDeps(ctx: StageCtx): Promise<boolean> {
           emitProgress('SETUP_RUN', 'installing yarn (not found on PATH) — npm install -g yarn');
           const r = await previewSvc.runSetupCommand(
             'npm',
-            ['install', '-g', 'yarn'],
+            ['install', '-g', '--no-audit', '--no-fund', 'yarn'],
             cwd,
             detection.env,
             { timeoutMs: INSTALL_TIMEOUT_MS },

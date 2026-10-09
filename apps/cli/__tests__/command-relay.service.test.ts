@@ -40,6 +40,7 @@ describe('CommandRelayService', () => {
     expect(pairing._postJson).toHaveBeenCalledWith(
       expect.stringContaining('/api/plugin/heartbeat'),
       expect.objectContaining({ pluginId: 'plugin-1', online: true }),
+      expect.any(Object),
     );
     relay.stop();
   });
@@ -65,7 +66,8 @@ describe('CommandRelayService', () => {
     expect(syncCallsAfterStart).toBeGreaterThanOrEqual(1); // seeded once
     expect(pairing._postJson).toHaveBeenCalledWith(
       expect.stringContaining('/api/plugin/heartbeat'),
-      expect.objectContaining({ branch: 'main' }), // first beat = sync seed
+      expect.objectContaining({ branch: 'main' }), // first beat = sync seed,
+      expect.any(Object),
     );
 
     await vi.advanceTimersByTimeAsync(20_000 * 3 + 100); // 3 recurring ticks
@@ -78,8 +80,33 @@ describe('CommandRelayService', () => {
     expect(pairing._postJson).toHaveBeenCalledWith(
       expect.stringContaining('/api/plugin/heartbeat'),
       expect.objectContaining({ branch: 'feature/x' }),
+      expect.any(Object),
     );
     relay.stop();
+  });
+
+  // codeagent-x5t: /api/plugin/heartbeat + /api/plugin/agents are keyed by the
+  // non-secret pluginId; the backend now latches a plugin that proves its poll
+  // secret there and refuses those calls without it. The relay must send it.
+  it('heartbeat and agents report carry the poll secret that proves the pluginId', async () => {
+    const relay = new CommandRelayService('plugin-pop', vi.fn(), META, undefined, 'secret-x');
+    relay.start();
+    await vi.advanceTimersByTimeAsync(10);
+    for (const path of ['/api/plugin/heartbeat', '/api/plugin/agents']) {
+      expect(pairing._postJson).toHaveBeenCalledWith(
+        expect.stringContaining(path),
+        expect.objectContaining({ pluginId: 'plugin-pop' }),
+        expect.objectContaining({ 'X-Plugin-Poll-Secret': 'secret-x' }),
+      );
+    }
+    relay.stop();
+    await vi.advanceTimersByTimeAsync(10);
+    // ...including the goodbye beat, which a latched plugin would otherwise lose.
+    expect(pairing._postJson).toHaveBeenCalledWith(
+      expect.stringContaining('/api/plugin/heartbeat'),
+      expect.objectContaining({ pluginId: 'plugin-pop', online: false }),
+      expect.objectContaining({ 'X-Plugin-Poll-Secret': 'secret-x' }),
+    );
   });
 
   it('reportAgents POST body includes capabilities.squad === true', async () => {
@@ -93,6 +120,7 @@ describe('CommandRelayService', () => {
         agents: [expect.objectContaining({ id: 'claude' })],
         capabilities: { squad: true },
       }),
+      expect.any(Object),
     );
     relay.stop();
   });
@@ -114,6 +142,7 @@ describe('CommandRelayService', () => {
     expect(pairing._postJson).toHaveBeenCalledWith(
       expect.stringContaining('/api/plugin/agents'),
       expect.objectContaining({ pluginId: 'plugin-linked', linkedAgentId: 'managed-codex' }),
+      expect.any(Object),
     );
     relay.stop();
   });
@@ -132,6 +161,7 @@ describe('CommandRelayService', () => {
         agents: [expect.objectContaining({ id: 'claude' })],
         capabilities: { squad: true },
       }),
+      expect.any(Object),
     );
     vi.mocked(pairing._postJson).mockClear();
 
@@ -145,12 +175,14 @@ describe('CommandRelayService', () => {
         agents: [expect.objectContaining({ id: 'codex', name: 'Codex CLI' })],
         capabilities: { squad: true },
       }),
+      expect.any(Object),
     );
     // The next heartbeat carries the new agent id too.
     await vi.advanceTimersByTimeAsync(20_000 + 100);
     expect(pairing._postJson).toHaveBeenCalledWith(
       expect.stringContaining('/api/plugin/heartbeat'),
       expect.objectContaining({ agentId: 'codex' }),
+      expect.any(Object),
     );
     relay.stop();
   });
@@ -325,6 +357,7 @@ describe('CommandRelayService', () => {
     expect(pairing._postJson).toHaveBeenCalledWith(
       expect.stringContaining('/api/plugin/heartbeat'),
       expect.objectContaining({ online: false }),
+      expect.any(Object),
     );
   });
 });
@@ -575,6 +608,7 @@ describe('CommandRelayService — goodbye heartbeat', () => {
     expect(pairing._postJson).toHaveBeenCalledWith(
       expect.stringContaining('/api/plugin/heartbeat'),
       expect.objectContaining({ pluginId: 'plugin-bye', online: false }),
+      expect.any(Object),
     );
 
     goodbye.open();
