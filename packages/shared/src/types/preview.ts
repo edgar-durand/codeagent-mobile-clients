@@ -64,6 +64,33 @@ export type PreviewErrorStage =
   | 'unsupported';
 
 /**
+ * Machine-readable code on a `preview_error`, for errors the apps route to a
+ * specific action instead of "Try again". `CREDITS_EXHAUSTED` = the managed
+ * agent's detect one-shot was refused by our agent-proxy with a 402 (prepaid
+ * wallet at 0) — the apps open top-up; a retry would hit the same 402.
+ * Additive: older CLIs omit it.
+ */
+export type PreviewErrorCode = 'CREDITS_EXHAUSTED';
+
+/**
+ * WHY a `stage: 'detection'` / `'unsupported'` preview_error happened —
+ * telemetry only (`preview_lifecycle.error_reason`), never user copy, never
+ * the agent's raw output. Each value has a different fix, which is the point:
+ * five unexplained detection failures in a row (codeagent-qrk1) could not be
+ * told apart.
+ */
+export type PreviewErrorReason =
+  | 'empty_project'
+  | 'no_oneshot'
+  | 'timeout'
+  | 'no_output'
+  | 'no_json'
+  | 'missing_fields'
+  | 'provider_credits'
+  | 'credits_exhausted'
+  | 'unsupported';
+
+/**
  * Un servicio que el proyecto necesita y que NO pudimos levantarle.
  *
  * `envVar` es la variable que el usuario tendria que rellenar para apuntar a
@@ -104,7 +131,7 @@ export interface PreviewStatus {
   url?: string;
   framework?: string;
   detection?: PreviewDetection;
-  error?: { stage: PreviewErrorStage; message: string };
+  error?: { stage: PreviewErrorStage; message: string; code?: PreviewErrorCode };
   /**
    * Servicios que el proyecto pide y no estan sirviendo.
    *

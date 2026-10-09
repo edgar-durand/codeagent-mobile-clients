@@ -34,6 +34,11 @@ import {
   pickHouseProxyEnv,
   HOUSE_PROXY_ENV_KEYS,
   HOUSE_MODEL_CONTEXT_TOKENS,
+  houseProxyTokenExpiring,
+  houseProxyTokenNeedingRefresh,
+  rewriteHouseProxyToken,
+  deployHouseProxyConfigPath,
+  HOUSE_PROXY_REFRESH_WINDOW_SEC,
 } from '../src/commands/host/house-proxy-config';
 
 let tmpHome: string;
@@ -370,5 +375,70 @@ describe('house-proxy-config — per deploy', () => {
     persistHouseProxyConfig({ baseUrl: 'https://p', token: 'tok' }, '../../evil');
     expect(fs.existsSync(path.join(tmpHome, '.codeam', 'evil.json'))).toBe(false);
     expect(fs.existsSync(path.join(tmpHome, 'evil.json'))).toBe(false);
+  });
+});
+
+/** A JWT-shaped token with the given `exp` (signature irrelevant client-side). */
+function jwtWithExp(exp: unknown): string {
+  const b64 = (o: unknown) => Buffer.from(JSON.stringify(o)).toString('base64url');
+  return `${b64({ alg: 'HS256', typ: 'JWT' })}.${b64({ sub: 'u', exp })}.sig`;
+}
+
+// codeagent-bt7x: the persisted 30-day proxy token is refreshed on resume when
+// it has < 2 days left, so a box kept alive past the TTL never wakes into 401s.
+describe('houseProxyTokenExpiring — the refresh boundary', () => {
+  const NOW = 1_800_000_000;
+  it('is false with more than the window left, true at/inside it and once expired', () => {
+    expect(houseProxyTokenExpiring(jwtWithExp(NOW + HOUSE_PROXY_REFRESH_WINDOW_SEC + 1), NOW)).toBe(false);
+    expect(houseProxyTokenExpiring(jwtWithExp(NOW + HOUSE_PROXY_REFRESH_WINDOW_SEC), NOW)).toBe(false);
+    expect(houseProxyTokenExpiring(jwtWithExp(NOW + HOUSE_PROXY_REFRESH_WINDOW_SEC - 1), NOW)).toBe(true);
+    expect(houseProxyTokenExpiring(jwtWithExp(NOW - 10), NOW)).toBe(true);
+  });
+  it('is false for anything that is not one of our JWTs (OpenRouter key, garbage, no exp)', () => {
+    expect(houseProxyTokenExpiring('sk-or-v1-abcdef', NOW)).toBe(false);
+    expect(houseProxyTokenExpiring('a.b.c', NOW)).toBe(false);
+    expect(houseProxyTokenExpiring(jwtWithExp('soon'), NOW)).toBe(false);
+  });
+});
+
+describe('houseProxyTokenNeedingRefresh / rewriteHouseProxyToken', () => {
+  const NOW = 1_800_000_000;
+  beforeEach(() => {
+    tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'house-proxy-bt7x-'));
+    homeHolder.dir = tmpHome;
+  });
+  afterEach(() => fs.rmSync(tmpHome, { recursive: true, force: true }));
+
+  it('returns the stale token of THIS deploy, then rewrites only the token', () => {
+    const stale = jwtWithExp(NOW + 60);
+    persistHouseProxyConfig(
+      { baseUrl: 'https://api/api/v1/agent-proxy', token: stale, managedAgentId: 'managed-deepseek', model: 'm1' },
+      'dep-1',
+    );
+    expect(houseProxyTokenNeedingRefresh('dep-1', NOW)).toBe(stale);
+    expect(rewriteHouseProxyToken('dep-1', 'fresh-tok')).toBe(true);
+    const onDisk = JSON.parse(fs.readFileSync(deployHouseProxyConfigPath('dep-1') as string, 'utf8'));
+    expect(onDisk).toEqual({
+      baseUrl: 'https://api/api/v1/agent-proxy',
+      token: 'fresh-tok',
+      managedAgentId: 'managed-deepseek',
+      model: 'm1',
+    });
+    if (process.platform !== 'win32') {
+      expect(fs.statSync(deployHouseProxyConfigPath('dep-1') as string).mode & 0o777).toBe(0o600);
+    }
+    expect(readHouseProxyChildEnv('dep-1').ANTHROPIC_AUTH_TOKEN).toBe('fresh-tok');
+  });
+
+  it('null for a fresh token, an OpenRouter gateway, a BYO marker, or no config', () => {
+    persistHouseProxyConfig({ baseUrl: 'https://api/x', token: jwtWithExp(NOW + 20 * 86400) }, 'fresh');
+    expect(houseProxyTokenNeedingRefresh('fresh', NOW)).toBeNull();
+    persistHouseProxyConfig({ baseUrl: 'https://openrouter.ai/api', token: jwtWithExp(NOW), openRouter: true }, 'or');
+    expect(houseProxyTokenNeedingRefresh('or', NOW)).toBeNull();
+    clearHouseProxyConfig('byo');
+    expect(houseProxyTokenNeedingRefresh('byo', NOW)).toBeNull();
+    fs.rmSync(path.join(tmpHome, '.codeam'), { recursive: true, force: true });
+    expect(houseProxyTokenNeedingRefresh('none', NOW)).toBeNull();
+    expect(rewriteHouseProxyToken('none', 'x')).toBe(false);
   });
 });

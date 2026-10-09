@@ -550,6 +550,27 @@ export async function unsealAgentAuth(
   return data;
 }
 
+/**
+ * Trade the box's persisted house/managed agent-proxy token for a fresh one of
+ * the same scope (`POST /api/self-hosted/house-proxy/refresh`,
+ * host-token-authenticated). Called on resume when the token is near its
+ * 30-day TTL (codeagent-bt7x).
+ */
+export async function refreshHouseProxyToken(
+  identity: SealedHostIdentity,
+  token: string,
+): Promise<string> {
+  const data = await postJson<{ token?: unknown }>('/api/self-hosted/house-proxy/refresh', {
+    hostId: identity.hostId,
+    hostToken: identity.hostToken,
+    token,
+  });
+  if (typeof data.token !== 'string' || !data.token) {
+    throw new Error('house-proxy/refresh returned an unexpected shape');
+  }
+  return data.token;
+}
+
 /** A function that turns the sealed blob into plaintext `AgentAuth`. */
 export type AgentAuthResolver = (
   identity: SealedHostIdentity,

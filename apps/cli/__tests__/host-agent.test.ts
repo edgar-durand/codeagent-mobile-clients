@@ -96,6 +96,10 @@ vi.mock('../src/commands/host/house-proxy-config', async (importActual) => {
     readHouseProxyChildEnv: vi.fn(() => ({})),
     persistHouseProxyConfig: vi.fn(),
     clearHouseProxyConfig: vi.fn(),
+    // No persisted token needs a refresh unless a test opts in (the real one
+    // would read this machine's ~/.codeam).
+    houseProxyTokenNeedingRefresh: vi.fn(() => null),
+    rewriteHouseProxyToken: vi.fn(() => true),
   };
 });
 
@@ -759,6 +763,69 @@ describe('HostAgentSupervisor — control channel reuse', () => {
     sup.start();
     expect(resumeSpawner).toHaveBeenCalledTimes(1);
     sup.stop();
+  });
+
+  // codeagent-bt7x: a box kept alive past the 30-day proxy-token TTL woke into
+  // a 401 on every turn. A near-expiry persisted token is refreshed BEFORE the
+  // resume child spawns, and a failed refresh never blocks the resume.
+  describe('resume refreshes a near-expiry house-proxy token first', () => {
+    async function bootWith(refresh: (identity: unknown, token: string) => Promise<string>) {
+      const config = await import('../src/config');
+      const hp = await import('../src/commands/host/house-proxy-config');
+      vi.mocked(config.getActiveSession).mockReturnValueOnce({
+        id: 'sess-bt7x',
+        pluginId: 'plug-bt7x',
+        pollSecret: 'sec',
+        agent: 'claude',
+        userName: 'u',
+        userEmail: 'e',
+        plan: 'pro',
+        pairedAt: 0,
+        pluginAuthToken: 't',
+      } as never);
+      vi.mocked(hp.houseProxyTokenNeedingRefresh).mockReturnValueOnce('old-tok');
+      vi.mocked(hp.rewriteHouseProxyToken).mockClear();
+      vi.stubGlobal(
+        'fetch',
+        vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => ({ success: true, data: {} }) }),
+      );
+      const fakeProc = { stdout: { on: vi.fn() }, stderr: { on: vi.fn() }, once: vi.fn(), kill: vi.fn() };
+      const order: string[] = [];
+      const resumeSpawner = vi.fn(() => {
+        order.push('spawn');
+        return fakeProc as never;
+      });
+      const refreshHouseProxyToken = vi.fn(async (identity: unknown, token: string) => {
+        order.push('refresh');
+        return refresh(identity, token);
+      });
+      const sup = new HostAgentSupervisor(IDENTITY, {
+        makeRelay: () => ({ start: vi.fn(), stop: vi.fn(), sendResult: vi.fn() }),
+        resumeSpawner,
+        refreshHouseProxyToken,
+      });
+      sup.start();
+      return { sup, resumeSpawner, refreshHouseProxyToken, order, hp };
+    }
+
+    it('refreshes, rewrites the persisted token, THEN spawns', async () => {
+      const { sup, resumeSpawner, refreshHouseProxyToken, order, hp } = await bootWith(async () => 'new-tok');
+      expect(resumeSpawner).not.toHaveBeenCalled(); // waits on the refresh
+      await vi.waitFor(() => expect(resumeSpawner).toHaveBeenCalledTimes(1));
+      expect(refreshHouseProxyToken).toHaveBeenCalledWith(IDENTITY, 'old-tok');
+      expect(vi.mocked(hp.rewriteHouseProxyToken).mock.calls[0][1]).toBe('new-tok');
+      expect(order).toEqual(['refresh', 'spawn']);
+      sup.stop();
+    });
+
+    it('a failed refresh keeps the old token and still spawns the resume', async () => {
+      const { sup, resumeSpawner, hp } = await bootWith(async () => {
+        throw new Error('HTTP_503');
+      });
+      await vi.waitFor(() => expect(resumeSpawner).toHaveBeenCalledTimes(1));
+      expect(hp.rewriteHouseProxyToken).not.toHaveBeenCalled();
+      sup.stop();
+    });
   });
 
   // 2026-09-27 (QA codespace): the self-update exit left the resume child

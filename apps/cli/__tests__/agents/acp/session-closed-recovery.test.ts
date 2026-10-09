@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { AcpClient } from '../../../src/agents/acp/client';
+import { AcpClient, REESTABLISH_TIMEOUT_MS } from '../../../src/agents/acp/client';
 import type { AcpClientOptions } from '../../../src/agents/acp/client';
 import { StreamingState } from '../../../src/agents/acp/runner';
 import { AcpPublisher } from '../../../src/agents/acp/publisher';
@@ -325,5 +325,84 @@ describe('AcpClient — recovery session/load history replay is swallowed', () =
     await expect(client.prompt('hi')).rejects.toBe(loadErr);
     // finally ran → streaming can't get wedged with the guard stuck ON.
     expect(endLoadReplay).toHaveBeenCalledTimes(1);
+  });
+});
+
+/**
+ * codeagent-8as hardenings: (1) the re-establish RPCs are bounded — the idle
+ * watchdog is disarmed between the rejected attempt and the retry, so a hung
+ * `session/load` used to leave the turn on "Thinking…" forever; (3) the
+ * `-32602 Unknown sessionId` flavour of the same close also triggers recovery.
+ */
+describe('AcpClient — session-closed recovery hardenings (codeagent-8as)', () => {
+  it('rejects when the recovery session/load never resolves (bounded, not Thinking-forever)', async () => {
+    vi.useFakeTimers();
+    try {
+      const client = makeClient();
+      const prompt = vi.fn().mockRejectedValueOnce(SESSION_CLOSED);
+      const loadSession = vi.fn().mockReturnValue(new Promise(() => undefined)); // hangs
+      const internals = client as unknown as Internals;
+      internals.connection = { prompt, loadSession, newSession: vi.fn() };
+      internals.sessionId = 'sess-closed';
+      internals.supportsLoadSession = true;
+
+      const p = client.prompt('hi');
+      const settled = expect(p).rejects.toThrow(/session\/load timed out/);
+      await vi.advanceTimersByTimeAsync(REESTABLISH_TIMEOUT_MS + 1);
+      await settled;
+      // No retry was sent after the failed recovery.
+      expect(prompt).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('rejects when the recovery session/new never resolves', async () => {
+    vi.useFakeTimers();
+    try {
+      const client = makeClient();
+      const prompt = vi.fn().mockRejectedValueOnce(SESSION_CLOSED);
+      const newSession = vi.fn().mockReturnValue(new Promise(() => undefined));
+      const internals = client as unknown as Internals;
+      internals.connection = { prompt, loadSession: vi.fn(), newSession };
+      internals.sessionId = 'sess-closed';
+      internals.supportsLoadSession = false;
+
+      const p = client.prompt('hi');
+      const settled = expect(p).rejects.toThrow(/session\/new timed out/);
+      await vi.advanceTimersByTimeAsync(REESTABLISH_TIMEOUT_MS + 1);
+      await settled;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('re-establishes once and retries on -32602 "Unknown sessionId"', async () => {
+    const client = makeClient();
+    const unknown = { code: -32602, message: 'Invalid params', data: { details: 'Unknown sessionId: sess-closed' } };
+    const prompt = vi.fn().mockRejectedValueOnce(unknown).mockResolvedValueOnce({ stopReason: 'end_turn' });
+    const loadSession = vi.fn().mockResolvedValue(undefined);
+    const internals = client as unknown as Internals;
+    internals.connection = { prompt, loadSession, newSession: vi.fn() };
+    internals.sessionId = 'sess-closed';
+    internals.supportsLoadSession = true;
+
+    await expect(client.prompt('hi')).resolves.toEqual({ stopReason: 'end_turn' });
+    expect(loadSession).toHaveBeenCalledTimes(1);
+    expect(prompt).toHaveBeenCalledTimes(2);
+  });
+
+  it('does NOT recover an "Unknown sessionId" phrase carried by a bare -32603', async () => {
+    const client = makeClient();
+    const err = { code: -32603, message: 'Internal error', data: { details: 'Unknown sessionId' } };
+    const prompt = vi.fn().mockRejectedValue(err);
+    const loadSession = vi.fn();
+    const internals = client as unknown as Internals;
+    internals.connection = { prompt, loadSession, newSession: vi.fn() };
+    internals.sessionId = 'sess-1';
+    internals.supportsLoadSession = true;
+
+    await expect(client.prompt('hi')).rejects.toBe(err);
+    expect(loadSession).not.toHaveBeenCalled();
   });
 });

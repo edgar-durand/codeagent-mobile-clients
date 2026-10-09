@@ -80,6 +80,9 @@ import {
   PREVIEW_DETECT_PROMPT,
   USER_EVENTS,
   type PreviewDetection,
+  type PreviewErrorCode,
+  type PreviewErrorReason,
+  type PreviewErrorStage,
   type PreviewOrigin,
 } from '@codeam/shared';
 import * as previewSvc from '../../services/preview';
@@ -98,6 +101,7 @@ import {
   listScriptCandidates,
   prewarmNodeDeps,
   describeOneShotAgentError,
+  looksLikeManagedCreditsExhausted,
   previewProviderCreditsMessage,
   writePreviewConfig,
 } from '../../services/preview';
@@ -1983,13 +1987,25 @@ export async function resolvePreviewDetection(args: {
       payload: originPayload(payload, origin),
     });
   };
+  // Every detection failure carries WHY (`reason`, telemetry-only) and which
+  // agent ran it — five unexplained failures in a row for one user could not
+  // be diagnosed from our side (codeagent-qrk1). Never the raw agent output.
+  const emitError = (payload: {
+    stage: PreviewErrorStage;
+    message: string;
+    reason: PreviewErrorReason;
+    code?: PreviewErrorCode;
+  }): void => {
+    emit(USER_EVENTS.PREVIEW_ERROR, { ...payload, agent: runtime.id });
+  };
   // An untouched from-scratch project has nothing to serve. Two of the first
   // scratch users tapped Preview before asking for anything and waited 6-52 s
   // for the one-shot to say so (one got a "detection" error card).
   if (isEmptyScratchProject(process.cwd())) {
     log.info('preview', 'detect: empty scratch project — nothing to preview yet');
-    emit(USER_EVENTS.PREVIEW_ERROR, {
+    emitError({
       stage: 'unsupported',
+      reason: 'empty_project',
       message:
         'Nothing to preview yet — this project is empty. Ask your agent to build something and it opens the preview.',
     });
@@ -1997,8 +2013,9 @@ export async function resolvePreviewDetection(args: {
   }
   if (typeof runtime.generateOneShot !== 'function') {
     log.info('preview', `runtime ${runtime.id} has no generateOneShot — emitting unsupported`);
-    emit(USER_EVENTS.PREVIEW_ERROR, {
+    emitError({
       stage: 'detection',
+      reason: 'no_oneshot',
       message: `Preview detection isn't available on ${runtime.id} sessions yet — link a Claude or Codex agent.`,
     });
     return null;
@@ -2021,8 +2038,9 @@ export async function resolvePreviewDetection(args: {
   const tookMs = Date.now() - startedAt;
   if (timedOut) {
     log.info('preview', `detect: timed out after ${tookMs}ms — emitting preview_error`);
-    emit(USER_EVENTS.PREVIEW_ERROR, {
+    emitError({
       stage: 'detection',
+      reason: 'timeout',
       message:
         `Project detection timed out after ${Math.round(PREVIEW_DETECT_TIMEOUT_MS / 1000)} s — ` +
         'the agent did not answer. Try again, or add a .codeam/preview.json override.',
@@ -2047,16 +2065,34 @@ export async function resolvePreviewDetection(args: {
     // The user's own provider is out of credits (OpenRouter 402 "requires
     // more credits", web replay 2026-09-27). Say so, instead of blaming the
     // project with a detection error. Same classifier as the chat bubble.
-    if (looksLikeByoProviderBilling(`${raw ?? ''}\n${stderr}`)) {
-      log.info('preview', 'detect: provider out of credits — emitting preview_error');
-      emit(USER_EVENTS.PREVIEW_ERROR, {
+    const agentSaid = `${raw ?? ''}\n${stderr}`;
+    // OUR managed proxy refused the hop (prepaid wallet at 0 → 402
+    // CREDITS_EXHAUSTED). Typed so the apps open top-up instead of "Try
+    // again" — a retry hits the same 402 (codeagent-oyic, RCA 2026-10-04).
+    if (looksLikeManagedCreditsExhausted(agentSaid)) {
+      log.info('preview', 'detect: managed wallet out of credits — emitting preview_error CREDITS_EXHAUSTED');
+      emitError({
         stage: 'detection',
+        reason: 'credits_exhausted',
+        code: 'CREDITS_EXHAUSTED',
+        message:
+          describeOneShotAgentError(stderr) ??
+          "Preview detection couldn't run — you're out of credits. Top up to keep this agent running.",
+      });
+      return null;
+    }
+    if (looksLikeByoProviderBilling(agentSaid)) {
+      log.info('preview', 'detect: provider out of credits — emitting preview_error');
+      emitError({
+        stage: 'detection',
+        reason: 'provider_credits',
         message: previewProviderCreditsMessage(byoProviderName({ agent: runtime.id })),
       });
       return null;
     }
-    emit(USER_EVENTS.PREVIEW_ERROR, {
+    emitError({
       stage: 'detection',
+      reason: failure?.reason ?? 'no_json',
       // El mensaje sale del diagnostico: decir "JSON invalido" cuando el
       // agente no contesto manda al usuario a mirar un JSON que no existe.
       message:
@@ -2068,8 +2104,9 @@ export async function resolvePreviewDetection(args: {
   }
   if (isUnsupportedDetection(detection)) {
     log.info('preview', 'detect: framework=unsupported');
-    emit(USER_EVENTS.PREVIEW_ERROR, {
+    emitError({
       stage: 'unsupported',
+      reason: 'unsupported',
       message: detection.notes ?? 'No dev server applies to this project.',
     });
     return null;

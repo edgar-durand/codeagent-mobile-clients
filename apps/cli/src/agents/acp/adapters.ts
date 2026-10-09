@@ -94,6 +94,30 @@ function resolveBin(pkgName: string, binName?: string): string | null {
   }
 }
 
+/** npm packages of the adapters that run as `node <bin>` (the rest are native
+ *  agent CLIs speaking ACP themselves, nothing for node to load). */
+const CLAUDE_ACP_PKG = '@agentclientprotocol/claude-agent-acp';
+const CODEX_ACP_PKG = '@agentclientprotocol/codex-acp';
+const NPM_ADAPTER_PACKAGES: Partial<Record<AgentId, string>> = {
+  claude: CLAUDE_ACP_PKG,
+  codex: CODEX_ACP_PKG,
+};
+
+/**
+ * Directory of `agent`'s npm ACP adapter package, or null for agents whose
+ * adapter is a native binary (or when it isn't installed). Used to warm the
+ * adapter's module graph before the spawn (codeagent-6je7).
+ */
+export function npmAdapterPackageDir(agent: AgentId): string | null {
+  const pkg = NPM_ADAPTER_PACKAGES[agent];
+  if (!pkg) return null;
+  try {
+    return path.dirname(require_.resolve(`${pkg}/package.json`));
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Internal registry — exported through {@link getAcpAdapter} so
  * callers get a `null` for un-registered agents instead of an
@@ -101,7 +125,7 @@ function resolveBin(pkgName: string, binName?: string): string | null {
  */
 const REGISTRY: Partial<Record<AgentId, () => AdapterSpec | null>> = {
   claude: () => {
-    const bin = resolveBin('@agentclientprotocol/claude-agent-acp', 'claude-agent-acp');
+    const bin = resolveBin(CLAUDE_ACP_PKG, 'claude-agent-acp');
     if (!bin) return null;
     return {
       command: process.execPath,
@@ -111,7 +135,7 @@ const REGISTRY: Partial<Record<AgentId, () => AdapterSpec | null>> = {
     };
   },
   codex: () => {
-    const bin = resolveBin('@agentclientprotocol/codex-acp', 'codex-acp');
+    const bin = resolveBin(CODEX_ACP_PKG, 'codex-acp');
     if (!bin) return null;
     return {
       command: process.execPath,

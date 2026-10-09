@@ -110,6 +110,87 @@ export function clearHouseProxyConfig(deployId?: string): void {
   }
 }
 
+/** Refresh when the persisted token has less than this left (or is expired). */
+export const HOUSE_PROXY_REFRESH_WINDOW_SEC = 2 * 24 * 60 * 60;
+
+/**
+ * True when `token` is one of OUR agent-proxy JWTs whose `exp` is within
+ * `windowSec` of `nowSec` (or already past). Anything that is not a decodable
+ * JWT with a numeric `exp` — an OpenRouter key, a corrupt value — is NOT ours to
+ * refresh and answers false (codeagent-bt7x).
+ */
+export function houseProxyTokenExpiring(
+  token: string,
+  nowSec: number,
+  windowSec: number = HOUSE_PROXY_REFRESH_WINDOW_SEC,
+): boolean {
+  const parts = token.split('.');
+  if (parts.length !== 3) return false;
+  try {
+    const json = Buffer.from(parts[1].replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString('utf8');
+    const payload: unknown = JSON.parse(json);
+    if (typeof payload !== 'object' || payload === null) return false;
+    const exp = (payload as { exp?: unknown }).exp;
+    if (typeof exp !== 'number' || !Number.isFinite(exp)) return false;
+    return exp - nowSec < windowSec;
+  } catch {
+    return false;
+  }
+}
+
+/** The file `readHouseProxyChildEnv(deployId)` would read, or null. */
+function persistedConfigFile(deployId?: string): string | null {
+  const perDeploy = deployId ? deployHouseProxyConfigPath(deployId) : null;
+  const file = perDeploy && fs.existsSync(perDeploy) ? perDeploy : houseProxyConfigPath();
+  return fs.existsSync(file) ? file : null;
+}
+
+function readConfigObject(file: string): Record<string, unknown> | null {
+  try {
+    const parsed: unknown = JSON.parse(fs.readFileSync(file, 'utf8'));
+    return typeof parsed === 'object' && parsed !== null ? (parsed as Record<string, unknown>) : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The persisted house-proxy token for `deployId` when it is OUR proxy token
+ * (not an OpenRouter key) and close to expiry — i.e. a resume must refresh it
+ * before re-injecting it. Null otherwise. Sync and cheap: the common case
+ * (fresh token, BYO deploy) keeps the resume spawn synchronous.
+ */
+export function houseProxyTokenNeedingRefresh(deployId: string | undefined, nowSec: number): string | null {
+  const file = persistedConfigFile(deployId);
+  if (!file) return null;
+  const o = readConfigObject(file);
+  if (!o || o.none === true || o.openRouter === true) return null;
+  if (typeof o.token !== 'string' || !o.token) return null;
+  return houseProxyTokenExpiring(o.token, nowSec) ? o.token : null;
+}
+
+/**
+ * Swap the persisted token for `deployId` with `freshToken`, keeping every
+ * other field. Writes the same file the resume reads (atomic temp + rename,
+ * 0600). Returns false when there is nothing to update or the write failed.
+ */
+export function rewriteHouseProxyToken(deployId: string | undefined, freshToken: string): boolean {
+  try {
+    const file = persistedConfigFile(deployId);
+    if (!file) return false;
+    const o = readConfigObject(file);
+    if (!o || typeof o.token !== 'string') return false;
+    writeJson0600(file, { ...o, token: freshToken });
+    return true;
+  } catch (err) {
+    log.warn(
+      'host-agent',
+      `failed to rewrite the refreshed house-proxy token (best-effort): ${err instanceof Error ? err.message : String(err)}`,
+    );
+    return false;
+  }
+}
+
 /**
  * Build the child env from the persisted house-proxy config — re-injected on
  * every resume spawn so the house agent authenticates through the proxy after a

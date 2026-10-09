@@ -129,6 +129,24 @@ const TRANSPORT_DOWN_DURING_START_RE =
 const SESSION_CLOSED_RE = /session is closed/i;
 
 /**
+ * The SAME between-turns close surfaced as an invalid-params rejection instead:
+ * `-32602 … "Unknown sessionId"` (the ACP SDK's own wording when the agent no
+ * longer knows the id). Matched ONLY together with code `-32602` — the phrase
+ * alone is not enough, and a bare `-32603` never is.
+ */
+const UNKNOWN_SESSION_RE = /unknown session/i;
+const INVALID_PARAMS_CODE = -32602;
+
+/**
+ * Upper bound for the session re-establish RPCs (`session/load` /
+ * `session/new`). Between the rejected attempt and the retry the prompt idle
+ * watchdog is NOT armed, so an unbounded hung load would leave the turn on
+ * "Thinking…" forever. On expiry the recovery rejects and the normal turn-error
+ * path runs. 30 s is well above a healthy kimi resume (sub-second live).
+ */
+export const REESTABLISH_TIMEOUT_MS = 30_000;
+
+/**
  * The adapter process EXITED during the initial handshake (before `initialize`
  * resolved). This is the STRUCTURAL signal of a fresh-install startup race: a
  * healthy adapter loads its whole module graph then blocks reading the ACP
@@ -1013,7 +1031,7 @@ export class AcpClient {
    */
   private isSessionClosedError(err: unknown): boolean {
     if (!err || typeof err !== 'object') return false;
-    const e = err as { message?: unknown; details?: unknown; data?: unknown };
+    const e = err as { code?: unknown; message?: unknown; details?: unknown; data?: unknown };
     const parts: string[] = [];
     if (typeof e.message === 'string') parts.push(e.message);
     if (typeof e.details === 'string') parts.push(e.details);
@@ -1024,7 +1042,21 @@ export class AcpClient {
         /* circular / non-serialisable — ignore */
       }
     }
-    return SESSION_CLOSED_RE.test(parts.join(' '));
+    const text = parts.join(' ');
+    if (SESSION_CLOSED_RE.test(text)) return true;
+    return e.code === INVALID_PARAMS_CODE && UNKNOWN_SESSION_RE.test(text);
+  }
+
+  /** Reject with a timeout error if `p` has not settled within REESTABLISH_TIMEOUT_MS. */
+  private boundReestablish<T>(p: Promise<T>, what: string): Promise<T> {
+    let timer: NodeJS.Timeout | undefined;
+    const deadline = new Promise<never>((_, reject) => {
+      timer = setTimeout(
+        () => reject(new Error(`AcpClient.reestablishSession: ${what} timed out after ${REESTABLISH_TIMEOUT_MS} ms`)),
+        REESTABLISH_TIMEOUT_MS,
+      );
+    });
+    return Promise.race([p, deadline]).finally(() => clearTimeout(timer));
   }
 
   /**
@@ -1109,7 +1141,10 @@ export class AcpClient {
       log.info('acpClient', `reestablish → loadSession(resume) sid=${closedSid.slice(0, 8)}`);
       this.opts.beginLoadReplay?.();
       try {
-        await this.connection.loadSession({ sessionId: closedSid, cwd, mcpServers });
+        await this.boundReestablish(
+          this.connection.loadSession({ sessionId: closedSid, cwd, mcpServers }),
+          'session/load',
+        );
       } finally {
         this.opts.endLoadReplay?.();
       }
@@ -1118,7 +1153,7 @@ export class AcpClient {
       return;
     }
     log.info('acpClient', 'reestablish → newSession (agent has no loadSession capability)');
-    const ns = await this.connection.newSession({ cwd, mcpServers });
+    const ns = await this.boundReestablish(this.connection.newSession({ cwd, mcpServers }), 'session/new');
     this.sessionId = ns.sessionId;
     log.info('acpClient', `reestablish ← newSession ok sid=${ns.sessionId.slice(0, 8)}`);
   }

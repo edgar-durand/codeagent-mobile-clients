@@ -98,6 +98,7 @@ import {
   saveHostIdentity,
   sendHostHeartbeat,
   unsealAgentAuth,
+  refreshHouseProxyToken,
   type AgentAuthResolver,
   type HostMetrics,
   type HostSession,
@@ -127,6 +128,8 @@ import {
   clearHouseProxyConfig,
   readHouseProxyChildEnv,
   buildHouseProxyChildEnv,
+  houseProxyTokenNeedingRefresh,
+  rewriteHouseProxyToken,
 } from './host/house-proxy-config';
 import { cliVersionsRoot, hostEntry } from '../lib/cli-versions';
 import {
@@ -639,6 +642,12 @@ export interface HostAgentDeps {
    */
   postResumeFailure?: (auth: SessionBubbleAuth, message: string) => Promise<void>;
   resolveAgentAuth?: AgentAuthResolver;
+  /**
+   * Trades a near-expiry persisted house-proxy token for a fresh one before a
+   * resume re-injects it (codeagent-bt7x). Defaults to the host-token-
+   * authenticated `POST /api/self-hosted/house-proxy/refresh`.
+   */
+  refreshHouseProxyToken?: (identity: SealedHostIdentity, token: string) => Promise<string>;
   /** Live-metrics collector; defaults to a real one. Injectable for tests. */
   metricsCollector?: HostMetricsCollector;
   /** Writes `~/.codeam/host-agent.pid` for the backend liveness check (injectable for tests). */
@@ -721,6 +730,9 @@ export class HostAgentSupervisor {
   private readonly spawnChild: ChildSpawner;
   private readonly resumeSpawner: ChildSpawner;
   private readonly resolveAgentAuth: AgentAuthResolver;
+  private readonly refreshProxyToken: (identity: SealedHostIdentity, token: string) => Promise<string>;
+  /** Deploys whose resume is waiting on a house-proxy token refresh. */
+  private readonly refreshingProxyFor = new Set<string>();
   private relay: Pick<CommandRelayService, 'start' | 'stop' | 'sendResult'> | null = null;
   private heartbeatTimer: NodeJS.Timeout | null = null;
   /** Periodic self-update timer (npm check + install + restart). */
@@ -796,6 +808,7 @@ export class HostAgentSupervisor {
     this.snapshotTree = deps.snapshotProcessTree ?? snapshotProcessTree;
     this.signalTree = deps.signalProcessTree ?? signalProcessTree;
     this.resolveAgentAuth = deps.resolveAgentAuth ?? unsealAgentAuth;
+    this.refreshProxyToken = deps.refreshHouseProxyToken ?? refreshHouseProxyToken;
     this.metrics = deps.metricsCollector ?? new MetricsCollector();
     this.onIdentityRejected = deps.onIdentityRejected ?? defaultOnIdentityRejected;
     this.disableService = deps.disableService ?? defaultDisableService;
@@ -2509,6 +2522,7 @@ export class HostAgentSupervisor {
   private resumeOne(target: ResumeTarget): void {
     if (this.children.has(target.deployId)) return; // already live
     if (this.replacingOrphanFor.has(target.deployId)) return; // replacement in flight
+    if (this.refreshingProxyFor.has(target.deployId)) return; // token refresh in flight
     const orphan = this.orphanedDaemonFor(target.session.id);
     if (orphan === undefined) {
       this.spawnResume(target);
@@ -2537,8 +2551,44 @@ export class HostAgentSupervisor {
     }, ORPHAN_TERM_GRACE_MS);
   }
 
-  /** Spawn ONE resume child for `target`. Callers go through {@link resumeOne}. */
+  /**
+   * Spawn ONE resume child for `target`. Callers go through {@link resumeOne}.
+   *
+   * ⚠️ A house/managed deploy re-injects its PERSISTED proxy token, minted with
+   * a 30-day TTL at deploy time. A box kept alive past that woke into a 401 on
+   * every turn. When the token is within 2 days of expiry (or past it) it is
+   * refreshed FIRST, then the child spawns (codeagent-bt7x). On a refresh
+   * failure the old token is kept — the resume never waits on it to fail.
+   */
   private spawnResume(target: ResumeTarget): void {
+    const { deployId } = target;
+    if (this.children.has(deployId) || this.refreshingProxyFor.has(deployId)) return;
+    const stale = houseProxyTokenNeedingRefresh(deployId, Math.floor(this.now() / 1000));
+    if (!stale) {
+      this.spawnResumeNow(target);
+      return;
+    }
+    this.refreshingProxyFor.add(deployId);
+    log.info('host-agent', `resume: refreshing near-expiry house-proxy token deploy=${deployId.slice(0, 8)}`);
+    void this.refreshProxyToken(this.identity, stale)
+      .then((fresh) => {
+        if (rewriteHouseProxyToken(deployId, fresh)) {
+          log.info('host-agent', `resume: house-proxy token refreshed deploy=${deployId.slice(0, 8)}`);
+        }
+      })
+      .catch((err: unknown) => {
+        log.warn(
+          'host-agent',
+          `resume: house-proxy token refresh failed deploy=${deployId.slice(0, 8)} — keeping the old token: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      })
+      .finally(() => {
+        this.refreshingProxyFor.delete(deployId);
+        if (!this.stopped) this.spawnResumeNow(target);
+      });
+  }
+
+  private spawnResumeNow(target: ResumeTarget): void {
     const { session, deployId } = target;
     if (this.children.has(deployId)) return; // already live
     const st = this.resumeStateFor(target);
