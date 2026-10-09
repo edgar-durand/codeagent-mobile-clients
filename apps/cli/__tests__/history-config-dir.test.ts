@@ -93,3 +93,59 @@ describe('detectCurrentConversation skips one-shot transcripts', () => {
     expect(svc.getCurrentConversationId()).toBe(USER);
   });
 });
+
+/**
+ * codeagent-ikuj: an in-session switch_agent to a managed/house agent spawns
+ * Claude with `~/.codeam/house-claude/switch-<pluginId>` as CLAUDE_CONFIG_DIR
+ * ONLY in the adapter's extraEnv (recorded via setCurrentAgentEnv); the CLI's
+ * process.env keeps the deploy-time dir. Transcript resolution must follow the
+ * agent that is actually running.
+ */
+describe('transcripts follow the CURRENT agent env after an in-session switch', () => {
+  const cwd = '/home/box/.codeam/self-hosted/deploy-3';
+  const prev = process.env.CLAUDE_CONFIG_DIR;
+  let deployDir: string;
+  let switchDir: string;
+  beforeEach(async () => {
+    deployDir = fs.mkdtempSync(path.join(os.tmpdir(), 'codeam-deploy-cfg-'));
+    switchDir = fs.mkdtempSync(path.join(os.tmpdir(), 'codeam-switch-cfg-'));
+    process.env.CLAUDE_CONFIG_DIR = deployDir;
+    fs.mkdirSync(path.join(deployDir, 'projects', encodeCwd(cwd)), { recursive: true });
+    fs.mkdirSync(path.join(switchDir, 'projects', encodeCwd(cwd)), { recursive: true });
+  });
+  afterEach(async () => {
+    const { resetCurrentAgentEnvForTests } = await import('../src/agents/current-agent-env');
+    resetCurrentAgentEnvForTests();
+    if (prev === undefined) delete process.env.CLAUDE_CONFIG_DIR;
+    else process.env.CLAUDE_CONFIG_DIR = prev;
+    fs.rmSync(deployDir, { recursive: true, force: true });
+    fs.rmSync(switchDir, { recursive: true, force: true });
+  });
+
+  it('resolves under the switched agent config dir, and back after a revert', async () => {
+    const { setCurrentAgentEnv } = await import('../src/agents/current-agent-env');
+    setCurrentAgentEnv({ CLAUDE_CONFIG_DIR: switchDir });
+    expect(claudeConfigDir()).toBe(switchDir);
+    expect(resolveHistoryDir(cwd)).toBe(path.join(switchDir, 'projects', encodeCwd(cwd)));
+
+    const SID = 'dddddddd-0000-0000-0000-000000000004';
+    fs.writeFileSync(path.join(switchDir, 'projects', encodeCwd(cwd), `${SID}.jsonl`), '{}\n');
+    const runtime = { id: 'claude', resolveHistoryDir: () => null } as unknown as RuntimeStrategy;
+    const svc = new HistoryService(runtime, 'plugin-1', cwd);
+    const resolved = (
+      svc as unknown as { resolveConversationFile: (id: string) => string | null }
+    ).resolveConversationFile(SID);
+    expect(resolved).toBe(path.join(switchDir, 'projects', encodeCwd(cwd), `${SID}.jsonl`));
+
+    // Revert / switch back to a BYO agent: the relaunch records an overlay with
+    // no config-dir override → the deploy-time dir again.
+    setCurrentAgentEnv({});
+    expect(claudeConfigDir()).toBe(deployDir);
+  });
+
+  it('a switch AWAY from a house deploy (CLAUDE_CONFIG_DIR cleared) resolves ~/.claude', async () => {
+    const { setCurrentAgentEnv } = await import('../src/agents/current-agent-env');
+    setCurrentAgentEnv({ CLAUDE_CONFIG_DIR: undefined });
+    expect(claudeConfigDir()).toBe(path.join(os.homedir(), '.claude'));
+  });
+});
