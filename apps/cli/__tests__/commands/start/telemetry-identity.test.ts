@@ -92,6 +92,7 @@ vi.mock('../../../src/services/output.service', () => ({
 }));
 
 vi.mock('../../../src/services/agent.service', () => ({
+  AgentLaunchError: class AgentLaunchError extends Error {},
   AgentService: vi.fn(function () {
     return {
       kill: vi.fn(),
