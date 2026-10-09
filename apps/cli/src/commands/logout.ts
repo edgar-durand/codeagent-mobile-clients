@@ -23,15 +23,22 @@ async function notifyBackendOffline(): Promise<void> {
     cfg.pluginId,
     ...cfg.sessions.map((s) => s.pluginId).filter((id): id is string => Boolean(id)),
   ]);
+  // A plugin that has proven its poll secret is refused a heartbeat without
+  // it (codeagent-x5t), so the goodbye carries the secret whenever we hold one.
+  const secretByPlugin = new Map<string, string>();
+  for (const s of cfg.sessions) {
+    if (s.pluginId && s.pollSecret) secretByPlugin.set(s.pluginId, s.pollSecret);
+  }
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 3000);
   try {
     await Promise.all(
       Array.from(pluginIds).map((pluginId) =>
-        _postJson(`${API_BASE}/api/plugin/heartbeat`, {
-          pluginId,
-          online: false,
-        }).catch((err: unknown) => {
+        _postJson(
+          `${API_BASE}/api/plugin/heartbeat`,
+          { pluginId, online: false },
+          pollSecretHeaderFor(secretByPlugin.get(pluginId)),
+        ).catch((err: unknown) => {
           log.trace('logout', `heartbeat-offline failed pluginId=${pluginId}`, err);
         }),
       ),
@@ -39,6 +46,10 @@ async function notifyBackendOffline(): Promise<void> {
   } finally {
     clearTimeout(timer);
   }
+}
+
+function pollSecretHeaderFor(secret: string | undefined): Record<string, string> {
+  return secret ? { 'X-Plugin-Poll-Secret': secret } : {};
 }
 
 export async function logout(): Promise<void> {

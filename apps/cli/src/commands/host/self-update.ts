@@ -462,7 +462,7 @@ async function installGlobalLegacy(
 ): Promise<SelfUpdateResult> {
   const install = await deps.run(
     'npm',
-    ['install', '-g', `${SELF_UPDATE_PKG}@latest`],
+    ['install', '-g', '--no-audit', '--no-fund', `${SELF_UPDATE_PKG}@latest`],
     SELF_UPDATE_INSTALL_TIMEOUT_MS,
   );
   if (install.code !== 0) {
