@@ -30,7 +30,7 @@ export async function pushCleanCopy(
     home = fs.mkdtempSync(path.join(os.tmpdir(), 'codeam-push-home-'));
     const bare = path.join(tmp, 'repo.git');
     const cleanEnv = {
-      ...deps.env,
+      ...withoutInheritedGitConfig(deps.env),
       HOME: home,
       GIT_CONFIG_NOSYSTEM: '1',
       GIT_CONFIG_GLOBAL: '/dev/null',
@@ -74,6 +74,13 @@ export async function pushCleanCopy(
         'http.sslVerify=true',
         '-c',
         'http.proxy=',
+        // git ranks a URL-matched http.<url>.* key above the generic one, so a
+        // key written into the bare config after the check above would still
+        // win without these exact-URL overrides (command line is read last).
+        '-c',
+        `http.${cloneUrl}.sslVerify=true`,
+        '-c',
+        `http.${cloneUrl}.proxy=`,
         'push',
         cloneUrl,
         'HEAD:main',
@@ -88,4 +95,23 @@ export async function pushCleanCopy(
     if (tmp) fs.rmSync(tmp, { recursive: true, force: true });
     if (home) fs.rmSync(home, { recursive: true, force: true });
   }
+}
+
+/**
+ * The CLI's own env minus anything that injects git config or weakens TLS:
+ * GIT_CONFIG_PARAMETERS / GIT_CONFIG_COUNT / GIT_CONFIG_KEY_n / GIT_CONFIG_VALUE_n
+ * (an inherited `http.<url>.proxy` there would route the AUTHORIZATION header
+ * through a proxy), GIT_SSL_NO_VERIFY (git reads it AFTER config, so
+ * `-c http.sslVerify=true` cannot undo it), GIT_TRACE* (with
+ * GIT_TRACE_REDACT=0 a curl trace writes the header to a file), and
+ * GIT_DIR / GIT_WORK_TREE (would point git away from the bare copy).
+ */
+function withoutInheritedGitConfig(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const out: NodeJS.ProcessEnv = {};
+  for (const [key, value] of Object.entries(env)) {
+    if (/^GIT_(CONFIG|TRACE)/i.test(key)) continue;
+    if (/^GIT_(SSL_NO_VERIFY|DIR|WORK_TREE)$/i.test(key)) continue;
+    out[key] = value;
+  }
+  return out;
 }
