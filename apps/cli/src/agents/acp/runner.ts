@@ -119,6 +119,7 @@ import {
   AUTH_FAILURE_MESSAGE,
   adapterExitMessage,
   describeError,
+  failureBlocker,
   looksLikeAuthFailure,
   looksLikeProviderOutage,
   startupCredentialInvalidReason,
@@ -830,6 +831,9 @@ export class StreamingState {
    * actionable re-auth bubble.
    */
   async closeWithBubble(bubble: string): Promise<void> {
+    // The typed tag for the apps' escape-route buttons, when this bubble is
+    // one of our blocker notices (`failureBlocker`, codeagent-gfip).
+    const blocker = failureBlocker(bubble);
     this.text = '';
     this.cancelPendingPartialText();
     // Neutralise any open `text` streaming-chunk buffer so the raw streamed
@@ -844,7 +848,12 @@ export class StreamingState {
       }
     }
     await Promise.all([
-      this.publisher.publishOutput({ type: 'text', content: bubble, done: true }),
+      this.publisher.publishOutput({
+        type: 'text',
+        content: bubble,
+        done: true,
+        ...(blocker ? { blocker } : {}),
+      }),
       this.flushStreamingChunks(),
     ]);
   }
@@ -1253,7 +1262,13 @@ export async function surfaceStartupFailure(opts: {
   const publish = async (): Promise<void> => {
     try {
       await opts.publisher.publishOutput({ type: 'new_turn', done: false });
-      await opts.publisher.publishOutput({ type: 'text', content: msg, done: true });
+      const blocker = failureBlocker(msg);
+      await opts.publisher.publishOutput({
+        type: 'text',
+        content: msg,
+        done: true,
+        ...(blocker ? { blocker } : {}),
+      });
     } catch {
       /* best-effort — never throw out of the failure path */
     }

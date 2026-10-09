@@ -141,6 +141,7 @@ import {
 export {
   needsSelfRelaunch,
   relaunchArgv,
+  relaunchCommand,
   defaultRestartForUpdate,
   isContainerEnvironment,
 } from './host/host-launch';

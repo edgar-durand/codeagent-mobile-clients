@@ -210,7 +210,8 @@ export async function startChild(id: string, env: NodeJS.ProcessEnv, sdk: Router
  * shims. Never returns while the agent holds our stdin open.
  */
 export async function mcpRouter(): Promise<void> {
-  const manifest = readIntegrationsManifest();
+  // Same session id the shims get — this session's own manifest (manifest.ts).
+  const manifest = readIntegrationsManifest(process.env.CODEAM_MCP_SESSION_ID);
   const ids = (manifest?.integrations ?? []).filter((e) => e.delivery?.mcp).map((e) => e.id);
 
   const { Server } = await import('@modelcontextprotocol/sdk/server/index.js');
