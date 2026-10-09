@@ -20,6 +20,7 @@ import {
 import * as pairing from '../../../src/services/pairing.service';
 
 vi.mock('../../../src/services/pairing.service', () => ({
+  postTurnEvent: vi.fn().mockResolvedValue(undefined),
   fetchCurrentPluginAuthToken: vi.fn(),
   _postJsonAuthed: vi.fn().mockResolvedValue({}),
 }));

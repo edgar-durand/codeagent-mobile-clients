@@ -18,7 +18,11 @@
 import { withTurnMarker } from '../../services/turn-marker';
 import { log } from '../../services/logger';
 import { noteProviderBillingSignal } from './provider-billing-signal';
-import { _postJsonAuthed, fetchProvisionCredential } from '../../services/pairing.service';
+import {
+  _postJsonAuthed,
+  fetchProvisionCredential,
+  postTurnEvent,
+} from '../../services/pairing.service';
 import {
   HOUSE_AGENT_ID,
   MANAGED_PROVIDER_DISPLAY_NAMES,
@@ -786,7 +790,8 @@ function resolveAutoHandoff(ctx: AcpCommandContext, record: HandoffProposal): vo
  *
  * FREE: a mention is not a handoff, so no PRO gate applies here.
  */
-async function runCoderabbitMention(ctx: AcpCommandContext, promptText: string): Promise<void> {
+/** @returns whether the review succeeded (feeds the `cli_turn` funnel). */
+async function runCoderabbitMention(ctx: AcpCommandContext, promptText: string): Promise<boolean> {
   const { cmd, relay, streaming, opts, turnFiles } = ctx;
   // A BARE `@coderabbit` arrives with an empty prompt (mobile lifts the mention
   // out of the text). Recording '' would render a blank user bubble AND latch
@@ -816,7 +821,7 @@ async function runCoderabbitMention(ctx: AcpCommandContext, promptText: string):
     ctx.history.appendAgentReply(review.error, CODERABBIT_AGENT_ID);
     void ctx.history.flush();
     await relay.sendResult(cmd.id, 'failed', { error: review.error });
-    return;
+    return false;
   }
 
   const output = composeReviewOutput(review.markdown, hasCustomInstructions(promptText));
@@ -831,6 +836,7 @@ async function runCoderabbitMention(ctx: AcpCommandContext, promptText: string):
   });
   recordCoderabbitTurn(ctx, userText, output);
   await relay.sendResult(cmd.id, 'completed', { agentId: CODERABBIT_AGENT_ID });
+  return true;
 }
 
 /**
@@ -848,6 +854,47 @@ function recordCoderabbitTurn(ctx: AcpCommandContext, prompt: string, replySumma
   });
 }
 
+/** Error codes a failed ACP `start_task` reports on `cli_turn` — a CODE, never
+ *  the agent's text (it is telemetry and the text can carry user content). */
+type TurnFailureCode =
+  | 'EMPTY_PROMPT'
+  | 'AGENT_ROUTING_FAILED'
+  | 'PLAN_UPGRADE_REQUIRED'
+  | 'HOUSE_AGENT_LIMIT'
+  | 'PROVIDER_BILLING'
+  | 'AUTH_FAILED'
+  | 'ONE_M_CREDITS'
+  | 'EMPTY_REPLY'
+  | 'TURN_ERROR'
+  | 'TURN_ERROR_PARTIAL'
+  | 'CODERABBIT_FAILED';
+
+/**
+ * Report a `start_task` phase to `POST /api/commands/turn-events` (the
+ * backend's `cli_turn` event) — the same received → started → completed |
+ * failed funnel the PTY `startTask` reports. Every managed/cloud session runs
+ * this ACP path, which reported nothing, so `cli_turn` had zero events and a
+ * lost turn was indistinguishable from one the CLI never saw (codeagent-wj4n).
+ * Fire-and-forget: `postTurnEvent` never throws and a lost report must never
+ * affect the turn it describes.
+ */
+function reportTurn(
+  ctx: AcpCommandContext,
+  phase: 'received' | 'started' | 'completed' | 'failed',
+  errorCode?: TurnFailureCode,
+): void {
+  const { opts, cmd } = ctx;
+  if (!opts.pluginId || !opts.pluginAuthToken) return;
+  void postTurnEvent({
+    pluginId: opts.pluginId,
+    pluginAuthToken: opts.pluginAuthToken,
+    commandId: cmd.id,
+    phase,
+    agentId: opts.agent,
+    errorCode,
+  });
+}
+
 async function startTaskH(ctx: AcpCommandContext): Promise<void> {
   // Only the handles a swap can NEVER replace are destructured up front —
   // `relaunchWith` reassigns client / history / jsonlHistory / agentCaps /
@@ -856,6 +903,7 @@ async function startTaskH(ctx: AcpCommandContext): Promise<void> {
   // turn to the adapter the swap just stopped.
   const { cmd, relay, streaming, opts, turnFiles, publisher, recentStderr } = ctx;
   const payload = cmd.payload as StartTaskPayload | undefined;
+  reportTurn(ctx, 'received');
   // Agent Squad @-mention routing: the task carries the MENTIONED agent's id.
   // Swap onto it BEFORE anything else runs — a failed swap fails the TASK
   // (never silently answers with the agent the user didn't mention). An id
@@ -872,7 +920,9 @@ async function startTaskH(ctx: AcpCommandContext): Promise<void> {
   // to use it, and mobile lifts the mention out of the text, so the prompt
   // legitimately arrives empty. There is nothing to send an agent here.
   if (requestedAgentId === CODERABBIT_AGENT_ID) {
-    await runCoderabbitMention(ctx, (payload?.prompt ?? '').trim());
+    reportTurn(ctx, 'started');
+    const ok = await runCoderabbitMention(ctx, (payload?.prompt ?? '').trim());
+    reportTurn(ctx, ok ? 'completed' : 'failed', ok ? undefined : 'CODERABBIT_FAILED');
     return;
   }
   const blocks = buildAcpPromptBlocks(payload ?? {});
@@ -881,6 +931,7 @@ async function startTaskH(ctx: AcpCommandContext): Promise<void> {
     // DECLINES and clears any open proposal — intentional: the user acted, so
     // the proposal is stale and must not outlive the turn that followed it.
     log.warn('acpRunner', 'start_task with empty prompt + no attachments; ignoring');
+    reportTurn(ctx, 'failed', 'EMPTY_PROMPT');
     await relay.sendResult(cmd.id, 'failed', { error: 'empty prompt' });
     return;
   }
@@ -896,6 +947,7 @@ async function startTaskH(ctx: AcpCommandContext): Promise<void> {
     const routed = await routeSquadTask(ctx, requestedAgentId);
     if (!routed.ok) {
       log.warn('acpRunner', `start_task routing to ${requestedAgentId} failed: ${routed.error}`);
+      reportTurn(ctx, 'failed', 'AGENT_ROUTING_FAILED');
       await relay.sendResult(cmd.id, 'failed', { error: routed.error });
       return;
     }
@@ -954,6 +1006,9 @@ async function startTaskH(ctx: AcpCommandContext): Promise<void> {
   // budget left) routes to the target and loops with the proposal's prompt as
   // the next turn; everything else acks and returns. The hop budget is the hard
   // bound — there is no other exit condition on the chain.
+  // The prompt is about to reach the agent: from here on a silence is the
+  // AGENT's, not the relay's. Reported once per user task, not per auto hop.
+  reportTurn(ctx, 'started');
   let turnBlocks = blocks;
   let turnPieces = squadContext;
   let turnPrompt = promptText;
@@ -993,6 +1048,7 @@ async function startTaskH(ctx: AcpCommandContext): Promise<void> {
         history.appendAgentReply(CURSOR_UPGRADE_MESSAGE);
         void history.flush();
         log.info('acpRunner', `start_task ← cursor-plan-upgrade-required id=${cmd.id.slice(0, 8)}`);
+        reportTurn(ctx, 'failed', 'PLAN_UPGRADE_REQUIRED');
         await relay.sendResult(cmd.id, 'failed', { error: 'cursor plan upgrade required' });
         return;
       } else if (replyIsHouseAgentLimit(finalText)) {
@@ -1013,6 +1069,7 @@ async function startTaskH(ctx: AcpCommandContext): Promise<void> {
           log.warn('acpRunner', `turnFiles.flushTurn failed: ${describeError(err)}`);
         });
         log.info('acpRunner', `start_task ← house-agent-limit id=${cmd.id.slice(0, 8)}`);
+        reportTurn(ctx, 'failed', 'HOUSE_AGENT_LIMIT');
         await relay.sendResult(cmd.id, 'failed', {
           error: 'house agent usage ceiling / temporarily unavailable',
         });
@@ -1032,6 +1089,7 @@ async function startTaskH(ctx: AcpCommandContext): Promise<void> {
           log.warn('acpRunner', `turnFiles.flushTurn failed: ${describeError(err)}`);
         });
         log.info('acpRunner', `start_task ← byo-provider-billing id=${cmd.id.slice(0, 8)}`);
+        reportTurn(ctx, 'failed', 'PROVIDER_BILLING');
         await relay.sendResult(cmd.id, 'failed', {
           error: 'provider account has no credits (402)',
         });
@@ -1056,6 +1114,7 @@ async function startTaskH(ctx: AcpCommandContext): Promise<void> {
         });
         void reportCredentialInvalid(opts);
         log.info('acpRunner', `start_task ← auth-failure-in-reply id=${cmd.id.slice(0, 8)}`);
+        reportTurn(ctx, 'failed', 'AUTH_FAILED');
         await relay.sendResult(cmd.id, 'failed', { error: 'agent reply reported auth failure' });
         return;
       } else if (
@@ -1076,6 +1135,7 @@ async function startTaskH(ctx: AcpCommandContext): Promise<void> {
         });
         void reportCredentialInvalid(opts);
         log.info('acpRunner', `start_task ← 1m-credits-reconnect id=${cmd.id.slice(0, 8)}`);
+        reportTurn(ctx, 'failed', 'ONE_M_CREDITS');
         await relay.sendResult(cmd.id, 'failed', {
           error: 'agent reply reported 1M-context usage-credits gate',
         });
@@ -1108,6 +1168,7 @@ async function startTaskH(ctx: AcpCommandContext): Promise<void> {
           log.warn('acpRunner', `turnFiles.flushTurn failed: ${describeError(err)}`);
         });
         log.info('acpRunner', `start_task ← empty-reply id=${cmd.id.slice(0, 8)}`);
+        reportTurn(ctx, 'failed', 'EMPTY_REPLY');
         await relay.sendResult(cmd.id, 'failed', { error: 'agent turn ended with an empty reply' });
         return;
       } else {
@@ -1190,6 +1251,9 @@ async function startTaskH(ctx: AcpCommandContext): Promise<void> {
           'acpRunner',
           `start_task ← done stopReason=${reply.stopReason ?? '?'} id=${cmd.id.slice(0, 8)}`,
         );
+        // Before the ack: a post-close ack 404 (long turn, expired command
+        // record) must not cost the funnel its `completed`.
+        reportTurn(ctx, 'completed');
         await relay.sendResult(cmd.id, 'completed', { stopReason: reply.stopReason });
         // From-scratch: the agent built something but did not open the
         // Preview itself → open it (see scratch/auto-preview.ts).
@@ -1307,6 +1371,17 @@ async function startTaskH(ctx: AcpCommandContext): Promise<void> {
         // branch sets it — the bubble paths above replaced whatever streamed.
         failed.partialReplyKept = true;
       }
+      reportTurn(
+        ctx,
+        'failed',
+        bubble === AUTH_FAILURE_MESSAGE
+          ? 'AUTH_FAILED'
+          : bubble === ONE_M_CREDITS_MESSAGE
+            ? 'ONE_M_CREDITS'
+            : failed.partialReplyKept
+              ? 'TURN_ERROR_PARTIAL'
+              : 'TURN_ERROR',
+      );
       if (bubble === AUTH_FAILURE_MESSAGE || bubble === ONE_M_CREDITS_MESSAGE) {
         // Same durable flag as onUnexpectedExit — covers the case where the
         // adapter 401s mid-turn (stalls → idle timeout) instead of exiting,
@@ -1614,6 +1689,14 @@ async function selectOptionH(ctx: AcpCommandContext): Promise<void> {
         'acpRunner',
         `select_option index=${index} → permission resolved optionId=${result.optionId ?? 'cancelled'}`,
       );
+      // An ExitPlanMode approval is a conversation turn, not a tool prompt:
+      // record the plan and the user's answer in the durable history so they
+      // survive a re-entry (they were live-only — codeagent-x3ly). The turn's
+      // own close flushes it; ordinary tool permissions stay out of the chat.
+      if (result.planText !== undefined) {
+        history.appendAgentReply(result.planText);
+        if (result.label) history.appendUserPrompt(result.label);
+      }
       await relay.sendResult(cmd.id, 'completed', {});
       return;
     case 'reprompt': {
