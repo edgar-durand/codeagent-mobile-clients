@@ -34,7 +34,7 @@ describe('detectMissingNodeDeps', () => {
     fs.writeFileSync(path.join(dir, 'package.json'), '{}');
     expect(detectMissingNodeDeps(dir)).toEqual({
       cmd: 'npm',
-      args: ['install', '--legacy-peer-deps'],
+      args: ['install', '--legacy-peer-deps', '--no-audit', '--no-fund'],
     });
   });
 
@@ -43,7 +43,7 @@ describe('detectMissingNodeDeps', () => {
     fs.writeFileSync(path.join(dir, 'package-lock.json'), '{}');
     expect(detectMissingNodeDeps(dir)).toEqual({
       cmd: 'npm',
-      args: ['install', '--legacy-peer-deps'],
+      args: ['install', '--legacy-peer-deps', '--no-audit', '--no-fund'],
     });
   });
 
@@ -56,7 +56,7 @@ describe('detectMissingNodeDeps', () => {
     fs.writeFileSync(path.join(dir, 'pnpm-lock.yaml'), '');
     expect(detectMissingNodeDeps(dir)).toEqual({
       cmd: 'npm',
-      args: ['install', '--legacy-peer-deps'],
+      args: ['install', '--legacy-peer-deps', '--no-audit', '--no-fund'],
     });
   });
 
@@ -71,7 +71,7 @@ describe('detectMissingNodeDeps', () => {
     fs.writeFileSync(path.join(dir, 'bun.lockb'), '');
     expect(detectMissingNodeDeps(dir)).toEqual({
       cmd: 'npm',
-      args: ['install', '--legacy-peer-deps'],
+      args: ['install', '--legacy-peer-deps', '--no-audit', '--no-fund'],
     });
   });
 

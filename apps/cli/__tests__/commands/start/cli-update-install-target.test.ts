@@ -45,6 +45,8 @@ describe('buildNpmInstallInvocation — install target (POSIX)', () => {
     expect(inv.args).toEqual([
       'install',
       '-g',
+      '--no-audit',
+      '--no-fund',
       '--prefix',
       '/tmp/codeam-node20',
       'codeam-cli@latest',
@@ -84,7 +86,7 @@ describe('buildNpmInstallInvocation — install target (POSIX)', () => {
       platform: 'linux',
     });
     expect(inv.command).toBe('npm');
-    expect(inv.args).toEqual(['install', '-g', 'codeam-cli@latest']);
+    expect(inv.args).toEqual(['install', '-g', '--no-audit', '--no-fund', 'codeam-cli@latest']);
   });
 });
 
@@ -108,7 +110,7 @@ describe('buildNpmInstallInvocation — win32-native behavior', () => {
       platform: 'win32',
     });
     expect(inv.command).toBe(path.win32.join(nodeDir, 'npm.cmd'));
-    expect(inv.args).toEqual(['install', '-g', 'codeam-cli@latest']);
+    expect(inv.args).toEqual(['install', '-g', '--no-audit', '--no-fund', 'codeam-cli@latest']);
   });
 
   it('nvm-windows layout: npm.cmd sibling of the running node version, no --prefix', () => {
@@ -120,7 +122,7 @@ describe('buildNpmInstallInvocation — win32-native behavior', () => {
       platform: 'win32',
     });
     expect(inv.command).toBe(path.win32.join(versionDir, 'npm.cmd'));
-    expect(inv.args).toEqual(['install', '-g', 'codeam-cli@latest']);
+    expect(inv.args).toEqual(['install', '-g', '--no-audit', '--no-fund', 'codeam-cli@latest']);
   });
 
   it('no npm.cmd sibling: falls back to bare npm', () => {
@@ -132,7 +134,7 @@ describe('buildNpmInstallInvocation — win32-native behavior', () => {
       platform: 'win32',
     });
     expect(inv.command).toBe('npm');
-    expect(inv.args).toEqual(['install', '-g', 'codeam-cli@latest']);
+    expect(inv.args).toEqual(['install', '-g', '--no-audit', '--no-fund', 'codeam-cli@latest']);
   });
 });
 
@@ -146,7 +148,7 @@ describe('buildNpmInstallInvocation — sudo escalation (self-hosted root-owned 
       platform: 'linux',
     });
     expect(inv.command).toBe('sudo');
-    expect(inv.args).toEqual(['-n', '/usr/bin/npm', 'install', '-g', '--prefix', '/usr', 'codeam-cli@latest']);
+    expect(inv.args).toEqual(['-n', '/usr/bin/npm', 'install', '-g', '--no-audit', '--no-fund', '--prefix', '/usr', 'codeam-cli@latest']);
   });
   it('without sudo runs npm directly (unchanged)', () => {
     const inv = buildNpmInstallInvocation({

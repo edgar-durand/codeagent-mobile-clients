@@ -18,3 +18,4 @@ export * from './types/agent-squad';
 export * from './types/events';
 export * from './types/scratch';
 export * from './preview-prompts';
+export * from './types/plugin-agents';
