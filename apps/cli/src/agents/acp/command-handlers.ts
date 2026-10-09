@@ -1981,8 +1981,11 @@ async function integrationsSyncH(ctx: AcpCommandContext): Promise<void> {
     return;
   }
   try {
-    const previousIds = new Set((readIntegrationsManifest()?.integrations ?? []).map((e) => e.id));
-    persistIntegrationsManifest(manifest);
+    const previousIds = new Set(
+      (readIntegrationsManifest(opts.sessionId)?.integrations ?? []).map((e) => e.id),
+    );
+    // This session's own file — never the box-wide one other deploys share.
+    persistIntegrationsManifest(manifest, opts.sessionId);
     await prewarmNewMcpEntries(manifest, previousIds);
     // Same merge policy as session start (`commands/start.ts`) — the respawn
     // this triggers rebuilds `mcpServers` from scratch, so box-local servers

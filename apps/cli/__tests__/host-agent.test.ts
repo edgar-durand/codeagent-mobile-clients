@@ -1415,6 +1415,29 @@ describe('HostAgentSupervisor — command routing', () => {
     fs.rmSync(cwdTarget, { recursive: true, force: true });
   });
 
+  // codeagent-sjk (a): the deploy hands the integrations set to the pair-auto
+  // child through the shared manifest file — written when the payload carries
+  // integrations, removed when it carries none.
+  it('self_hosted_deploy persists the integrations manifest, and clears it on a deploy without any', async () => {
+    const cwdTarget = fs.mkdtempSync(path.join(os.tmpdir(), 'codeam-ws-'));
+    const { sup } = makeSupervisor(() => fakeChild());
+    const manifestFile = path.join(tmpHome, '.codeam', 'integrations.json');
+    const integrations = [
+      {
+        id: 'jira',
+        delivery: { mcp: { command: 'uvx', args: ['mcp-atlassian==0.22.1'], envMapping: {} } },
+      },
+    ];
+
+    await sup.handleCommand(deployCmd({ repoOrPath: cwdTarget, integrations }));
+    expect(JSON.parse(fs.readFileSync(manifestFile, 'utf8'))).toEqual({ integrations });
+    expect(isOwnerOnly(manifestFile)).toBe(true);
+
+    await sup.handleCommand(deployCmd({ repoOrPath: cwdTarget, deployId: 'deploy-2' }));
+    expect(fs.existsSync(manifestFile)).toBe(false);
+    fs.rmSync(cwdTarget, { recursive: true, force: true });
+  });
+
   // Conversation continuity across a warm reconnect (Rafael/Stefano, 2026-08-06):
   // with the backend now deriving a STABLE deployId per (host, repo, branch), a
   // re-launch lands back in the SAME workspace cwd. The CLI must RESUME the prior

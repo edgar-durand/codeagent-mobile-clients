@@ -452,7 +452,8 @@ export async function runBatonSession(opts: BatonSessionOptions): Promise<void> 
     cwd: opts.cwd,
     getBeads: opts.getBeads,
     pollSecret: opts.pollSecret,
-    mcpServers: opts.mcpServers,
+    // No `mcpServers` here: the AcpClient above already advertises them, and
+    // nothing reads them off these runner options (codeagent-sjk f).
   };
   const mobileDriver = new AcpDriver({
     client,
