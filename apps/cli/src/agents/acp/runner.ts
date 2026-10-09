@@ -228,6 +228,9 @@ type PendingInteractive =
       /** Ordered like the ACP `options[]` we put on the wire —
        *  `select_option` resolves by `optionId` first, `index` second. */
       options: PermissionOption[];
+      /** The plan an ExitPlanMode approval asks the user to accept — carried
+       *  to the answer so both are recorded in the durable history. */
+      planText?: string;
       resolve: (response: RequestPermissionResponse) => void;
       /** Auto-cancel after this ms; matches the upstream Redis TTL. */
       timeoutTimer: NodeJS.Timeout;
@@ -238,6 +241,26 @@ type PendingInteractive =
        *  and sends the picked text as the next prompt. */
       options: string[];
     };
+
+/**
+ * Minimum gap between two non-final chat-pipe (`/api/commands/output`)
+ * `text` frames. Every frame carries the CUMULATIVE reply, and a true-delta
+ * adapter streams a few characters per `agent_message_chunk` — so publishing
+ * per delta was ~one POST (+ Redis RPUSH/PUBLISH + one SSE frame per viewer)
+ * per 8 characters: 7,724 frames for one 64 KB reply in the 2026-08-22 Redis
+ * OOM (codeagent-gsk1). ~10 frames/s is indistinguishable on screen. The
+ * terminal `done:true` frame is never throttled and supersedes a pending one.
+ */
+export const CHAT_TEXT_PUBLISH_INTERVAL_MS = 100;
+
+/**
+ * Upload budget for non-final text frames, in characters per second. Each
+ * frame carries the WHOLE reply so far, so a fixed interval still scales the
+ * bytes with the reply: on 2026-10-09 one long Box turn re-posted ~200 KB
+ * frames ~3×/s for 40 min and pushed prod non-SSE p99 to 9 s. The interval
+ * stretches so a long reply refreshes every few seconds instead.
+ */
+export const CHAT_TEXT_PUBLISH_CHARS_PER_SEC = 64 * 1024;
 
 export class StreamingState {
   /**
@@ -253,6 +276,11 @@ export class StreamingState {
    * intra-reply duplication bug).
    */
   private text = '';
+  /** Trailing-edge throttle state for the non-final chat-pipe text frame
+   *  (see {@link CHAT_TEXT_PUBLISH_INTERVAL_MS}). */
+  private lastPartialTextAt = 0;
+  private pendingPartialText: string | null = null;
+  private partialTextTimer: ReturnType<typeof setTimeout> | null = null;
   private pending: PendingInteractive | null = null;
   /** Observer for "is a question pending?" flips. The Agent Packs runner marks
    *  its stage `awaitingUser` while a permission prompt waits on the user
@@ -373,7 +401,18 @@ export class StreamingState {
    */
   private turnSeq = 0;
 
-  constructor(private readonly publisher: AcpPublisher) {}
+  private readonly chatTextPublishIntervalMs: number;
+
+  constructor(
+    private readonly publisher: AcpPublisher,
+    opts: {
+      /** Override {@link CHAT_TEXT_PUBLISH_INTERVAL_MS}; `0` publishes every
+       *  delta (tests that pin per-delta frame CONTENT, not cadence). */
+      chatTextPublishIntervalMs?: number;
+    } = {},
+  ) {
+    this.chatTextPublishIntervalMs = opts.chatTextPublishIntervalMs ?? CHAT_TEXT_PUBLISH_INTERVAL_MS;
+  }
 
   /**
    * Register a permission Promise. The Promise stays pending until
@@ -392,6 +431,7 @@ export class StreamingState {
   registerPermission(args: {
     questionId: string;
     options: PermissionOption[];
+    planText?: string;
   }): Promise<RequestPermissionResponse> {
     return new Promise<RequestPermissionResponse>((resolve) => {
       const timeoutTimer = setTimeout(() => {
@@ -415,6 +455,7 @@ export class StreamingState {
         kind: 'permission',
         questionId: args.questionId,
         options: args.options,
+        ...(args.planText !== undefined ? { planText: args.planText } : {}),
         resolve,
         timeoutTimer,
       });
@@ -452,7 +493,7 @@ export class StreamingState {
     index: number,
     optionId?: string,
   ):
-    | { kind: 'resolved'; optionId: string | null }
+    | { kind: 'resolved'; optionId: string | null; label?: string; planText?: string }
     | { kind: 'reprompt'; text: string }
     | { kind: 'none' } {
     if (!this.pending) return { kind: 'none' };
@@ -461,16 +502,17 @@ export class StreamingState {
       const picked = byId ?? this.pending.options[index];
       clearTimeout(this.pending.timeoutTimer);
       const resolve = this.pending.resolve;
+      const planText = this.pending.planText;
       this.setPending(null);
       if (!picked) {
         // Index out of range and no id match — the option list on the
         // client drifted from what we registered. Cancel, never guess.
         log.warn('acpRunner', `select_option index=${index} out of bounds — cancel`);
         resolve({ outcome: { outcome: 'cancelled' } });
-        return { kind: 'resolved', optionId: null };
+        return { kind: 'resolved', optionId: null, planText };
       }
       resolve({ outcome: { outcome: 'selected', optionId: picked.optionId } });
-      return { kind: 'resolved', optionId: picked.optionId };
+      return { kind: 'resolved', optionId: picked.optionId, label: picked.label, planText };
     }
     // Free-form path
     const text = this.pending.options[index];
@@ -526,6 +568,8 @@ export class StreamingState {
 
   async beginTurn(opts?: { clear?: boolean }): Promise<void> {
     this.text = '';
+    this.cancelPendingPartialText();
+    this.lastPartialTextAt = 0;
     this.streamingChunks.clear();
     this.turnTextChunkId = null;
     this.lastTextMessageId = null;
@@ -655,7 +699,7 @@ export class StreamingState {
         fenceCut === -1
           ? withholdTrailingPartialFenceMarker(this.text)
           : this.text.slice(0, fenceCut).trimEnd();
-      void this.publisher.publishOutput({ type: 'text', content: textVisible, done: false });
+      this.publishPartialText(textVisible);
     }
     // 2) Epic C streaming-chunk feed (`/api/sessions/:id/streaming-chunk`)
     //    — all four kinds (text, thinking, tool_use, tool_result),
@@ -673,6 +717,49 @@ export class StreamingState {
       content: visibleChunkContent,
       isFinal: false,
     });
+  }
+
+  /**
+   * Publish a non-final chat-pipe text frame, at most once per
+   * {@link CHAT_TEXT_PUBLISH_INTERVAL_MS} (longer for a long reply, see
+   * {@link CHAT_TEXT_PUBLISH_CHARS_PER_SEC}): the first delta after a quiet
+   * window goes out at once (no added first-token latency); later ones inside
+   * the window collapse into ONE trailing frame carrying the latest cumulative
+   * text. Every close path calls {@link cancelPendingPartialText} before its
+   * `done:true`, so a stale partial can never land after the terminal frame.
+   */
+  private publishPartialText(content: string): void {
+    const interval =
+      this.chatTextPublishIntervalMs > 0
+        ? Math.max(
+            this.chatTextPublishIntervalMs,
+            (content.length / CHAT_TEXT_PUBLISH_CHARS_PER_SEC) * 1000,
+          )
+        : 0;
+    const wait = interval - (Date.now() - this.lastPartialTextAt);
+    if (wait <= 0 && this.partialTextTimer === null) {
+      this.lastPartialTextAt = Date.now();
+      void this.publisher.publishOutput({ type: 'text', content, done: false });
+      return;
+    }
+    this.pendingPartialText = content;
+    if (this.partialTextTimer !== null) return;
+    this.partialTextTimer = setTimeout(() => {
+      this.partialTextTimer = null;
+      const latest = this.pendingPartialText;
+      this.pendingPartialText = null;
+      if (latest === null) return;
+      this.lastPartialTextAt = Date.now();
+      void this.publisher.publishOutput({ type: 'text', content: latest, done: false });
+    }, Math.max(wait, 0));
+  }
+
+  /** Drop a throttled partial frame — the caller is about to publish the
+   *  terminal frame (or a new turn), which supersedes it. */
+  private cancelPendingPartialText(): void {
+    if (this.partialTextTimer !== null) clearTimeout(this.partialTextTimer);
+    this.partialTextTimer = null;
+    this.pendingPartialText = null;
   }
 
   /**
@@ -726,6 +813,7 @@ export class StreamingState {
   async closeAll(): Promise<void> {
     const finalText = this.visible(this.text);
     this.text = '';
+    this.cancelPendingPartialText();
     await Promise.all([
       this.publisher.publishOutput({ type: 'text', content: finalText, done: true }),
       this.flushStreamingChunks(),
@@ -743,6 +831,7 @@ export class StreamingState {
    */
   async closeWithBubble(bubble: string): Promise<void> {
     this.text = '';
+    this.cancelPendingPartialText();
     // Neutralise any open `text` streaming-chunk buffer so the raw streamed
     // reply (e.g. the agent's own "…401 Invalid authentication credentials")
     // is NOT finalised verbatim on the Epic C feed — replace its content with
@@ -808,6 +897,7 @@ export class StreamingState {
   async closeTurnWithInteractiveDetection(): Promise<boolean> {
     const finalText = this.visible(this.text);
     this.text = '';
+    this.cancelPendingPartialText();
     // Streaming-chunk feed always flushes regardless of interactive
     // detection — those bubbles live in SessionDetailScreen on their
     // own coalescence key (chunkId) independent of the chat pipe.

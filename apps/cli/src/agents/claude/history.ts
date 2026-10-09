@@ -204,6 +204,50 @@ function extractText(content: unknown): string {
   return '';
 }
 
+/** The user bubble rendered for an accepted ExitPlanMode approval. */
+export const PLAN_APPROVED_TEXT = 'Approved the plan.';
+
+/**
+ * Conversation text of one record, ExitPlanMode-aware. Plain `text` blocks as
+ * before, PLUS:
+ *   - an assistant `tool_use` named `ExitPlanMode` renders its `input.plan`
+ *     (Claude often writes the plan ONLY there, so the turn had no text block
+ *     and was dropped whole), and its id is remembered;
+ *   - a user `tool_result` answering a remembered ExitPlanMode id (not an
+ *     error = the user approved) renders as {@link PLAN_APPROVED_TEXT}.
+ * Without this an interactive plan turn — the plan and the user's approval —
+ * vanished from the chat on re-entry (codeagent-x3ly).
+ */
+function conversationText(
+  type: 'user' | 'assistant',
+  content: unknown,
+  exitPlanIds: Set<string>,
+): string {
+  const text = extractText(content).trim();
+  if (!Array.isArray(content)) return text;
+  const blocks = content as Record<string, unknown>[];
+  if (type === 'assistant') {
+    const plans: string[] = [];
+    for (const b of blocks) {
+      if (b['type'] !== 'tool_use' || b['name'] !== 'ExitPlanMode') continue;
+      if (typeof b['id'] === 'string') exitPlanIds.add(b['id']);
+      const input = b['input'] as Record<string, unknown> | undefined;
+      const plan = input?.['plan'];
+      if (typeof plan === 'string' && plan.trim().length > 0) plans.push(plan.trim());
+    }
+    return [text, ...plans].filter((t) => t.length > 0).join('\n\n');
+  }
+  if (text) return text;
+  const approved = blocks.some(
+    (b) =>
+      b['type'] === 'tool_result' &&
+      typeof b['tool_use_id'] === 'string' &&
+      exitPlanIds.has(b['tool_use_id']) &&
+      b['is_error'] !== true,
+  );
+  return approved ? PLAN_APPROVED_TEXT : '';
+}
+
 /**
  * Parse a Claude Code JSONL session file into an array of NormalizedMessage
  * objects (user + assistant turns only). isMeta records are skipped.
@@ -217,6 +261,7 @@ function extractText(content: unknown): string {
  */
 export function parseHistoryFile(filePath: string): NormalizedMessage[] {
   const out: NormalizedMessage[] = [];
+  const exitPlanIds = new Set<string>();
   let raw: string;
   try {
     raw = fs.readFileSync(filePath, 'utf8');
@@ -242,7 +287,7 @@ export function parseHistoryFile(filePath: string): NormalizedMessage[] {
     const msg = r['message'] as Record<string, unknown> | undefined;
     if (!msg) continue;
 
-    const text = extractText(msg['content']).trim();
+    const text = conversationText(type, msg['content'], exitPlanIds);
     if (!text) continue;
     // A local slash command (`/clear`, `/rename`, …) is echoed into the
     // transcript as a `user` record wrapping `<command-name>…</command-name>`.

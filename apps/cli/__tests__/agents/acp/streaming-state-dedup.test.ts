@@ -43,7 +43,9 @@ function makeState(): {
   });
   const publishOutput = vi.spyOn(publisher, 'publishOutput').mockResolvedValue(undefined);
   vi.spyOn(publisher, 'publishStreamingChunk').mockResolvedValue(undefined);
-  return { state: new StreamingState(publisher), publishOutput };
+  // Pins per-delta live-frame CONTENT, so disable the chat-pipe throttle
+  // (cadence is covered by streaming-text-throttle.test.ts).
+  return { state: new StreamingState(publisher, { chatTextPublishIntervalMs: 0 }), publishOutput };
 }
 
 describe('reconcileCumulative', () => {
