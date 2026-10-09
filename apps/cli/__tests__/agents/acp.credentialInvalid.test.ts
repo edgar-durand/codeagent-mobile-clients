@@ -2,6 +2,7 @@ import { describe, it, expect, vi } from 'vitest';
 import { reportCredentialInvalid } from '../../src/agents/acp/runner';
 
 vi.mock('../../src/services/pairing.service', () => ({
+  postTurnEvent: vi.fn().mockResolvedValue(undefined),
   fetchCurrentPluginAuthToken: vi.fn(),
   _postJsonAuthed: vi.fn(),
 }));
