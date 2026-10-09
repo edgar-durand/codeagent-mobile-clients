@@ -8,7 +8,11 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { AcpPublisher } from '../../../src/agents/acp/publisher';
-import { StreamingState, CHAT_TEXT_PUBLISH_INTERVAL_MS } from '../../../src/agents/acp/runner';
+import {
+  StreamingState,
+  CHAT_TEXT_PUBLISH_INTERVAL_MS,
+  CHAT_TEXT_PUBLISH_CHARS_PER_SEC,
+} from '../../../src/agents/acp/runner';
 
 type OutputBody = { type: string; content?: string; done?: boolean };
 
@@ -56,6 +60,28 @@ describe('StreamingState chat-pipe text throttle (codeagent-gsk1)', () => {
     const finals = frames.filter((f) => f.done === true);
     expect(finals).toHaveLength(1);
     expect(frames.at(-1)).toEqual({ type: 'text', content: expected, done: true });
+  });
+
+  it('a long reply stretches the interval so the upload rate stays bounded (2026-10-09 p99 incident)', async () => {
+    const { state, textFrames } = makeState();
+    await state.beginTurn();
+    // ~200 KB already streamed, then 10 s more of deltas: the incident's shape
+    // (cumulative ~200 KB frames re-posted ~3×/s for 40 min).
+    state.append({ chunkId: 'msg-1', kind: 'text', delta: 'x'.repeat(200_000) });
+    for (let i = 0; i < 1000; i += 1) {
+      state.append({ chunkId: 'msg-1', kind: 'text', delta: 'yy' });
+      await vi.advanceTimersByTimeAsync(10); // 1000 × 10 ms = 10 s
+    }
+    const partials = textFrames().filter((f) => f.done === false);
+    const sentChars = partials.reduce((n, f) => n + (f.content?.length ?? 0), 0);
+    // Without the stretch: ~100 frames × 200 KB = ~20 MB in 10 s.
+    expect(sentChars).toBeLessThanOrEqual(CHAT_TEXT_PUBLISH_CHARS_PER_SEC * 10 + 210_000);
+    expect(partials.length).toBeGreaterThanOrEqual(2);
+
+    await state.closeAll();
+    const frames = textFrames();
+    expect(frames.at(-1)?.done).toBe(true);
+    expect(frames.at(-1)?.content?.length).toBe(202_000);
   });
 
   it('the first delta after a quiet window publishes immediately (no added first-token latency)', async () => {

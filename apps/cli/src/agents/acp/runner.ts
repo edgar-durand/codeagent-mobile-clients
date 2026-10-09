@@ -253,6 +253,15 @@ type PendingInteractive =
  */
 export const CHAT_TEXT_PUBLISH_INTERVAL_MS = 100;
 
+/**
+ * Upload budget for non-final text frames, in characters per second. Each
+ * frame carries the WHOLE reply so far, so a fixed interval still scales the
+ * bytes with the reply: on 2026-10-09 one long Box turn re-posted ~200 KB
+ * frames ~3×/s for 40 min and pushed prod non-SSE p99 to 9 s. The interval
+ * stretches so a long reply refreshes every few seconds instead.
+ */
+export const CHAT_TEXT_PUBLISH_CHARS_PER_SEC = 64 * 1024;
+
 export class StreamingState {
   /**
    * Cumulative agent reply for the in-progress turn — the body of the
@@ -712,14 +721,22 @@ export class StreamingState {
 
   /**
    * Publish a non-final chat-pipe text frame, at most once per
-   * {@link CHAT_TEXT_PUBLISH_INTERVAL_MS}: the first delta after a quiet
+   * {@link CHAT_TEXT_PUBLISH_INTERVAL_MS} (longer for a long reply, see
+   * {@link CHAT_TEXT_PUBLISH_CHARS_PER_SEC}): the first delta after a quiet
    * window goes out at once (no added first-token latency); later ones inside
    * the window collapse into ONE trailing frame carrying the latest cumulative
    * text. Every close path calls {@link cancelPendingPartialText} before its
    * `done:true`, so a stale partial can never land after the terminal frame.
    */
   private publishPartialText(content: string): void {
-    const wait = this.chatTextPublishIntervalMs - (Date.now() - this.lastPartialTextAt);
+    const interval =
+      this.chatTextPublishIntervalMs > 0
+        ? Math.max(
+            this.chatTextPublishIntervalMs,
+            (content.length / CHAT_TEXT_PUBLISH_CHARS_PER_SEC) * 1000,
+          )
+        : 0;
+    const wait = interval - (Date.now() - this.lastPartialTextAt);
     if (wait <= 0 && this.partialTextTimer === null) {
       this.lastPartialTextAt = Date.now();
       void this.publisher.publishOutput({ type: 'text', content, done: false });
