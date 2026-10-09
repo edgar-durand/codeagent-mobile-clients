@@ -94,6 +94,7 @@ vi.mock('../../../src/services/output.service', () => ({
 
 const captured: { onExit?: (code: number) => Promise<void> } = {};
 vi.mock('../../../src/services/agent.service', () => ({
+  AgentLaunchError: class AgentLaunchError extends Error {},
   AgentService: vi.fn(function (_runtime: unknown, opts: { onExit: (c: number) => Promise<void> }) {
     captured.onExit = opts.onExit;
     return {
