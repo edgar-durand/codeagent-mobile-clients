@@ -259,8 +259,12 @@ ENV PATH="/opt/agents/.local/bin:/opt/agents/.kimi-code/bin:/opt/agents/bin:${PA
 # note) so the box's sealed identity lands in /home/box/.codeam. `chown -R
 # /home/box` guarantees `box` owns its entire home even if a build step left a
 # root-owned dotdir there; it's a tiny tree (skeleton + telemetry), no COW bloat.
+# Build-time CLI runs (codeam --version, mcp-warm) leave an anon telemetry id
+# and debug logs in /home/box/.codeam; Docker copies the image home into every
+# new box volume, so a baked anon.json would be shared by all boxes.
 ENV HOME=/home/box
-RUN chown -R box:box /home/box
+RUN rm -f /home/box/.codeam/anon.json /home/box/.codeam/debug-*.log \
+    && chown -R box:box /home/box
 
 USER box
 WORKDIR /home/box
