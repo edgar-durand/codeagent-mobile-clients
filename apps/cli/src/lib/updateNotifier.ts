@@ -187,7 +187,7 @@ function maybeAutoUpdate(currentVersion: string, latest: string): void {
     `\n  ${pc.yellow('●')} ${pc.bold('Updating codeam-cli')} ${pc.dim(currentVersion)} ${pc.dim('→')} ${pc.green(latest)}...\n\n`,
   );
 
-  const install = spawnSync('npm', ['install', '-g', `${PKG_NAME}@latest`], {
+  const install = spawnSync('npm', ['install', '-g', '--no-audit', '--no-fund', `${PKG_NAME}@latest`], {
     stdio: 'inherit',
     env: process.env,
   });
