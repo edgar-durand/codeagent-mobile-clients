@@ -29,6 +29,8 @@ import { installRelayCrashGuards } from '../lib/process-guards';
 
 interface ClaimSuccess {
   sessionId: string;
+  /** Backend user id — the telemetry distinct id. Older backends omit it. */
+  userId?: string;
   pluginAuthToken?: string;
   agent: string;
   user: { name: string; email: string; plan: string };
@@ -595,6 +597,7 @@ export async function pairAuto(args: string[]): Promise<void> {
   const claimedSession: SavedSession = {
     id: claimed.sessionId,
     pluginId,
+    ...(claimed.userId ? { userId: claimed.userId } : {}),
     userName: claimed.user.name,
     userEmail: claimed.user.email,
     plan: claimed.user.plan,
@@ -611,14 +614,20 @@ export async function pairAuto(args: string[]): Promise<void> {
   };
   addSession(claimedSession);
 
-  identifyUser({
-    userId: claimed.user.email,
-    email: claimed.user.email,
-    name: claimed.user.name,
-    plan: claimed.user.plan,
-    preferredAgent: claimed.agent,
-    pairedSessionCount: loadCliConfig().sessions.length,
-  });
+  // By the backend user id ONLY — this used the email, which made every
+  // codespace / Box user a second PostHog person (codeagent-tach). An older
+  // backend that omits `userId` leaves this run anonymous; `start` backfills
+  // the id from /reconnect.
+  if (claimed.userId) {
+    identifyUser({
+      userId: claimed.userId,
+      email: claimed.user.email,
+      name: claimed.user.name,
+      plan: claimed.user.plan,
+      preferredAgent: claimed.agent,
+      pairedSessionCount: loadCliConfig().sessions.length,
+    });
+  }
   capture('pair_auto_succeeded', {
     sessionId: claimed.sessionId,
     pluginId,

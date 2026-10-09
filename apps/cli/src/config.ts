@@ -8,6 +8,15 @@ import { rmIfExistsQuiet } from './lib/quiet';
 export interface SavedSession {
   id: string;
   pluginId?: string; // unique per pairing (undefined on pre-existing sessions → falls back to global)
+  /**
+   * Backend user id — the PostHog distinct id. Optional: sessions paired
+   * before it was persisted lack it; `start` backfills it from /reconnect.
+   * ⚠️ Never identify by `userEmail`: an email distinct id is a SECOND person
+   * next to the app's user-id person, and PostHog will not merge two
+   * identified persons (the 1st paying subscriber was split this way,
+   * codeagent-tach).
+   */
+  userId?: string;
   userName: string;
   userEmail: string;
   plan: string;
