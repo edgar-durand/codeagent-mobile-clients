@@ -13,7 +13,13 @@ import { showIntro, showInfo, showError } from '../ui/banner';
 import { CommandRelayService, stopRelayWithGoodbye } from '../services/command-relay.service';
 import { AgentService } from '../services/agent.service';
 import { createRuntimeStrategy } from '../agents/registry';
-import { getAcpAdapter, requiresAcp, resolveAcpAdapterWithRetry } from '../agents/acp/adapters';
+import {
+  getAcpAdapter,
+  npmAdapterPackageDir,
+  requiresAcp,
+  resolveAcpAdapterWithRetry,
+} from '../agents/acp/adapters';
+import { prefetchModuleGraph } from '../agents/acp/prefetch-module-graph';
 import {
   prefetchIntoPageCache,
   resolveClaudeNativeBinary,
@@ -168,6 +174,13 @@ export async function start(requestedAgent?: AgentId, presetSession?: SavedSessi
   if (!isLocalSession() && session.agent === 'claude') {
     const claudeBinary = resolveClaudeNativeBinary();
     if (claudeBinary) prefetchIntoPageCache(claudeBinary);
+  }
+  // Same reason for the ACP adapter node loads at `initialize`: its dist plus
+  // its dependencies' files, read in parallel instead of one cold `require`
+  // at a time (8-18 s `initialize` on a cold disk, codeagent-6je7).
+  if (!isLocalSession()) {
+    const adapterDir = npmAdapterPackageDir(session.agent);
+    if (adapterDir) void prefetchModuleGraph(adapterDir);
   }
 
   // Use the per-session pluginId (set since v1.4.6); fall back to the
