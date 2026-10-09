@@ -48,7 +48,7 @@ function makeHarness() {
   vi.spyOn(publisher, 'publishAwaitingAnswer').mockResolvedValue(undefined);
   const streaming = new StreamingState(publisher);
   const gate = createOnRequestPermission({
-    autoApprovePermissions: false,
+    isAutoApprove: () => false,
     isLocal: () => true,
     getPolicy: () => DEFAULT_GUARDRAIL_POLICY,
     publisher,
