@@ -191,6 +191,21 @@ export function describeOneShotAgentError(stderr: string): string | null {
 }
 
 /**
+ * Our agent-proxy refused the one-shot because the user's prepaid wallet is at
+ * 0: `402 {"code":"CREDITS_EXHAUSTED","message":"You're out of credits — top up
+ * to keep this agent running."}` (`managed-debit.service.ts`), which the agent
+ * relays as `API Error: 402 …`. Keyed on OUR code / canonical sentence (the
+ * same clause the apps' `CREDITS_EXHAUSTED_RE` matches), never on a generic
+ * "credits" wording — a BYO provider's 402 is `looksLikeByoProviderBilling`.
+ */
+const MANAGED_CREDITS_EXHAUSTED_RE =
+  /\bCREDITS_EXHAUSTED\b|(?:you(?:'|\u2019)?re|you are) out of credits|top up to keep this agent running/i;
+
+export function looksLikeManagedCreditsExhausted(text: string): boolean {
+  return MANAGED_CREDITS_EXHAUSTED_RE.test(text);
+}
+
+/**
  * Preview-detection copy for a one-shot that failed because the user's OWN
  * provider account is out of credits (web replay 2026-09-27: an OpenRouter
  * 402 "requires more credits" surfaced as "Detection Failed — the agent
