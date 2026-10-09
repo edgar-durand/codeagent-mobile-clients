@@ -54,7 +54,7 @@ describe('ACP adapter ↔ node-engine compatibility', () => {
       join(__dirname, '../../../../box/Dockerfile'),
       'utf8',
     );
-    const m = dockerfile.match(/^FROM\s+node:(\d+)-/m);
+    const m = dockerfile.match(/^FROM\s+(?:[^\s:]+\/)?node:(\d+)-/m);
     expect(m, 'Dockerfile must pin a node:<major>-* base image').not.toBeNull();
     const boxMajor = Number(m![1]);
     expect(boxMajor).toBeGreaterThanOrEqual(OUR_MIN_MAJOR);
