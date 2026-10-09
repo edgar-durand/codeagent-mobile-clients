@@ -144,6 +144,11 @@ describe('saveToGithub', () => {
       'http.sslVerify=true',
       '-c',
       'http.proxy=',
+      // Exact-URL overrides: a URL-matched key outranks the generic one.
+      '-c',
+      'http.https://github.com/me/landing.git.sslVerify=true',
+      '-c',
+      'http.https://github.com/me/landing.git.proxy=',
       'push',
       'https://github.com/me/landing.git',
       'HEAD:main',
@@ -184,6 +189,56 @@ describe('saveToGithub', () => {
       expect(call.env.GIT_CONFIG_VALUE_0).toBeUndefined();
       expect(call.env.GIT_CONFIG_COUNT).toBeUndefined();
       expect(JSON.stringify(call.env)).not.toContain(b64);
+    }
+  });
+
+  it('strips inherited git-config env (GIT_CONFIG_PARAMETERS, KEY_n/VALUE_n, SSL_NO_VERIFY) from every clean-copy git child', async () => {
+    const inherited = {
+      GIT_CONFIG_PARAMETERS: "'http.https://github.com/me/landing.git.proxy=http://127.0.0.1:9'",
+      GIT_CONFIG_COUNT: '2',
+      GIT_CONFIG_KEY_1: 'http.proxy',
+      GIT_CONFIG_VALUE_1: 'http://127.0.0.1:9',
+      GIT_SSL_NO_VERIFY: '1',
+      GIT_TRACE_CURL: '/tmp/trace',
+      GIT_DIR: '/elsewhere',
+    };
+    const saved = Object.fromEntries(Object.keys(inherited).map((k) => [k, process.env[k]]));
+    Object.assign(process.env, inherited);
+    try {
+      const gitCalls: GitCall[] = [];
+      const exec = makeExec(gitCalls);
+      const fetchImpl = vi
+        .fn()
+        .mockResolvedValueOnce(ok({ login: 'me', id: 7 }))
+        .mockResolvedValueOnce(
+          ok({ full_name: 'me/landing', clone_url: 'https://github.com/me/landing.git' }, 201),
+        );
+      await saveToGithub(
+        '/tmp/fake-scratch-repo',
+        { repoName: 'landing', private: true, token: 'gho_secret' },
+        { fetchImpl: fetchImpl as unknown as typeof fetch, exec },
+      );
+      const bareCalls = gitCalls.filter((c) => c.args.includes('clone') || c.args.includes('--name-only') || c.args.includes('push'));
+      expect(bareCalls).toHaveLength(3);
+      for (const call of bareCalls) {
+        expect(call.env.GIT_CONFIG_PARAMETERS).toBeUndefined();
+        expect(call.env.GIT_CONFIG_KEY_1).toBeUndefined();
+        expect(call.env.GIT_CONFIG_VALUE_1).toBeUndefined();
+        expect(call.env.GIT_SSL_NO_VERIFY).toBeUndefined();
+        expect(call.env.GIT_TRACE_CURL).toBeUndefined();
+        expect(call.env.GIT_DIR).toBeUndefined();
+      }
+      const push = bareCalls.find((c) => c.args.includes('push'))!;
+      // The push's own header config is still there — and only it.
+      expect(push.env.GIT_CONFIG_COUNT).toBe('1');
+      expect(push.env.GIT_CONFIG_KEY_0).toBe('http.https://github.com/me/landing.git.extraheader');
+      expect(push.env.GIT_CONFIG_NOSYSTEM).toBe('1');
+      expect(push.env.GIT_CONFIG_GLOBAL).toBe('/dev/null');
+    } finally {
+      for (const [k, v] of Object.entries(saved)) {
+        if (v === undefined) delete process.env[k];
+        else process.env[k] = v;
+      }
     }
   });
 

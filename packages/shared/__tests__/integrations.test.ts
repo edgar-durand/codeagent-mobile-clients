@@ -42,7 +42,8 @@ describe('integrations registry', () => {
     expect(mcp.args).toHaveLength(1);
     // Unpinned `mcp-atlassian` would drift under us between deploys; the pin
     // is bumped deliberately and re-verified by mcp-shim.int.test.ts.
-    expect(mcp.args[0]).toMatch(/^mcp-atlassian==\d+\.\d+(\.\d+)?$/);
+    // Full X.Y.Z: `==0.22` would let pip float to any 0.22.x (codeagent-sjk g).
+    expect(mcp.args[0]).toMatch(/^mcp-atlassian==\d+\.\d+\.\d+$/);
   });
 
   it('jira staticEnv enables BYO-token mode and carries no secret-looking material', () => {

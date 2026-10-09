@@ -96,6 +96,10 @@ vi.mock('../src/commands/host/house-proxy-config', async (importActual) => {
     readHouseProxyChildEnv: vi.fn(() => ({})),
     persistHouseProxyConfig: vi.fn(),
     clearHouseProxyConfig: vi.fn(),
+    // No persisted token needs a refresh unless a test opts in (the real one
+    // would read this machine's ~/.codeam).
+    houseProxyTokenNeedingRefresh: vi.fn(() => null),
+    rewriteHouseProxyToken: vi.fn(() => true),
   };
 });
 
@@ -761,6 +765,69 @@ describe('HostAgentSupervisor — control channel reuse', () => {
     sup.stop();
   });
 
+  // codeagent-bt7x: a box kept alive past the 30-day proxy-token TTL woke into
+  // a 401 on every turn. A near-expiry persisted token is refreshed BEFORE the
+  // resume child spawns, and a failed refresh never blocks the resume.
+  describe('resume refreshes a near-expiry house-proxy token first', () => {
+    async function bootWith(refresh: (identity: unknown, token: string) => Promise<string>) {
+      const config = await import('../src/config');
+      const hp = await import('../src/commands/host/house-proxy-config');
+      vi.mocked(config.getActiveSession).mockReturnValueOnce({
+        id: 'sess-bt7x',
+        pluginId: 'plug-bt7x',
+        pollSecret: 'sec',
+        agent: 'claude',
+        userName: 'u',
+        userEmail: 'e',
+        plan: 'pro',
+        pairedAt: 0,
+        pluginAuthToken: 't',
+      } as never);
+      vi.mocked(hp.houseProxyTokenNeedingRefresh).mockReturnValueOnce('old-tok');
+      vi.mocked(hp.rewriteHouseProxyToken).mockClear();
+      vi.stubGlobal(
+        'fetch',
+        vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => ({ success: true, data: {} }) }),
+      );
+      const fakeProc = { stdout: { on: vi.fn() }, stderr: { on: vi.fn() }, once: vi.fn(), kill: vi.fn() };
+      const order: string[] = [];
+      const resumeSpawner = vi.fn(() => {
+        order.push('spawn');
+        return fakeProc as never;
+      });
+      const refreshHouseProxyToken = vi.fn(async (identity: unknown, token: string) => {
+        order.push('refresh');
+        return refresh(identity, token);
+      });
+      const sup = new HostAgentSupervisor(IDENTITY, {
+        makeRelay: () => ({ start: vi.fn(), stop: vi.fn(), sendResult: vi.fn() }),
+        resumeSpawner,
+        refreshHouseProxyToken,
+      });
+      sup.start();
+      return { sup, resumeSpawner, refreshHouseProxyToken, order, hp };
+    }
+
+    it('refreshes, rewrites the persisted token, THEN spawns', async () => {
+      const { sup, resumeSpawner, refreshHouseProxyToken, order, hp } = await bootWith(async () => 'new-tok');
+      expect(resumeSpawner).not.toHaveBeenCalled(); // waits on the refresh
+      await vi.waitFor(() => expect(resumeSpawner).toHaveBeenCalledTimes(1));
+      expect(refreshHouseProxyToken).toHaveBeenCalledWith(IDENTITY, 'old-tok');
+      expect(vi.mocked(hp.rewriteHouseProxyToken).mock.calls[0][1]).toBe('new-tok');
+      expect(order).toEqual(['refresh', 'spawn']);
+      sup.stop();
+    });
+
+    it('a failed refresh keeps the old token and still spawns the resume', async () => {
+      const { sup, resumeSpawner, hp } = await bootWith(async () => {
+        throw new Error('HTTP_503');
+      });
+      await vi.waitFor(() => expect(resumeSpawner).toHaveBeenCalledTimes(1));
+      expect(hp.rewriteHouseProxyToken).not.toHaveBeenCalled();
+      sup.stop();
+    });
+  });
+
   // 2026-09-27 (QA codespace): the self-update exit left the resume child
   // re-parented to init; the new host-agent's resume deferred to it and the
   // session stayed offline. The orphan is retired first, then resumed fresh.
@@ -1412,6 +1479,29 @@ describe('HostAgentSupervisor — command routing', () => {
     expect(fs.existsSync(credFile)).toBe(true);
     expect(isOwnerOnly(credFile)).toBe(true);
 
+    fs.rmSync(cwdTarget, { recursive: true, force: true });
+  });
+
+  // codeagent-sjk (a): the deploy hands the integrations set to the pair-auto
+  // child through the shared manifest file — written when the payload carries
+  // integrations, removed when it carries none.
+  it('self_hosted_deploy persists the integrations manifest, and clears it on a deploy without any', async () => {
+    const cwdTarget = fs.mkdtempSync(path.join(os.tmpdir(), 'codeam-ws-'));
+    const { sup } = makeSupervisor(() => fakeChild());
+    const manifestFile = path.join(tmpHome, '.codeam', 'integrations.json');
+    const integrations = [
+      {
+        id: 'jira',
+        delivery: { mcp: { command: 'uvx', args: ['mcp-atlassian==0.22.1'], envMapping: {} } },
+      },
+    ];
+
+    await sup.handleCommand(deployCmd({ repoOrPath: cwdTarget, integrations }));
+    expect(JSON.parse(fs.readFileSync(manifestFile, 'utf8'))).toEqual({ integrations });
+    expect(isOwnerOnly(manifestFile)).toBe(true);
+
+    await sup.handleCommand(deployCmd({ repoOrPath: cwdTarget, deployId: 'deploy-2' }));
+    expect(fs.existsSync(manifestFile)).toBe(false);
     fs.rmSync(cwdTarget, { recursive: true, force: true });
   });
 
@@ -4258,7 +4348,7 @@ describe('self-update restart without a supervisor', () => {
     expect(argv).toEqual(['-c', 'sleep 2; exec "$0" "$@"', '/usr/local/bin/node', '/usr/local/bin/codeam', 'host-agent']);
   });
 
-  // `/bin/sh` does not exist on Windows (and the relaunch is POSIX-only there too).
+  // `/bin/sh` does not exist on Windows; the Windows launcher is covered below.
   it.skipIf(process.platform === 'win32')('the relaunch command really runs the same argv after the pause', async () => {
     const { relaunchArgv } = await import('../src/commands/host-agent');
     const { execFileSync } = await import('node:child_process');
@@ -4266,6 +4356,40 @@ describe('self-update restart without a supervisor', () => {
       a.replace('sleep 2', 'sleep 0'),
     );
     expect(execFileSync('/bin/sh', script).toString().trim()).toBe('codeam host-agent');
+  });
+
+  // codeagent-404d: Windows has no /bin/sh — the relaunch spawn failed ENOENT
+  // and the host stayed down after every auto-update.
+  it('on Windows the relaunch is node itself, never /bin/sh', async () => {
+    const { relaunchCommand } = await import('../src/commands/host-agent');
+    const { command, args } = relaunchCommand(
+      'C:\\node\\node.exe',
+      ['C:\\node\\node.exe', 'C:\\codeam\\index.js', 'host-agent'],
+      'win32',
+    );
+    expect(command).toBe('C:\\node\\node.exe');
+    expect(args[0]).toBe('-e');
+    expect(args[1]).toContain('2000');
+    expect(args.slice(2)).toEqual(['--', 'C:\\node\\node.exe', 'C:\\codeam\\index.js', 'host-agent']);
+    expect(relaunchCommand('/usr/bin/node', ['/usr/bin/node', '/c/index.js'], 'linux').command).toBe('/bin/sh');
+  });
+
+  it('the Windows launcher really starts the same argv detached after the pause (any OS)', async () => {
+    const { relaunchCommand } = await import('../src/commands/host-agent');
+    const { execFileSync } = await import('node:child_process');
+    const marker = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'codeam-relaunch-')), 'ran.txt');
+    const target = [
+      process.execPath,
+      '-e',
+      'require("fs").writeFileSync(process.argv[1], process.argv.slice(2).join(" "))',
+      marker,
+      'host-agent',
+    ];
+    const { command, args } = relaunchCommand(process.execPath, target, 'win32', 0);
+    execFileSync(command, args);
+    await vi.waitFor(() => expect(fs.readFileSync(marker, 'utf8')).toBe('host-agent'), {
+      timeout: 10_000,
+    });
   });
 });
 

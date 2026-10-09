@@ -108,6 +108,29 @@ describe('IntegrationTokenClient', () => {
     expect(fakeFetch).toHaveBeenCalledTimes(2);
   });
 
+  // codeagent-sjk (d): a malformed 200 used to be cached and returned as-is.
+  it.each([
+    ['no data', { success: true }],
+    ['empty accessToken', { success: true, data: { accessToken: '', expiresAt: new Date().toISOString() } }],
+    ['unparseable expiresAt', { success: true, data: { accessToken: 'a', expiresAt: 'soon' } }],
+    ['success:false', { success: false, data: { accessToken: 'a', expiresAt: new Date().toISOString() } }],
+  ])('rejects a malformed 200 body (%s) and caches nothing', async (_label, body) => {
+    const fakeFetch = vi.fn().mockResolvedValue(jsonResponse(200, body));
+    const client = new IntegrationTokenClient(makeCtx(), fakeFetch as unknown as typeof fetch);
+    await expect(client.getToken('jira')).rejects.toThrow(/INTEGRATION_TOKEN_MALFORMED/);
+    await expect(client.getToken('jira')).rejects.toThrow(/INTEGRATION_TOKEN_MALFORMED/);
+    expect(fakeFetch).toHaveBeenCalledTimes(2);
+  });
+
+  it('carries the per-vendor extras through validation', async () => {
+    const fakeFetch = vi
+      .fn()
+      .mockResolvedValue(jsonResponse(200, tokenPayload({ cloudId: 'cloud-1', host: 'sentry.io' })));
+    const client = new IntegrationTokenClient(makeCtx(), fakeFetch as unknown as typeof fetch);
+    const token = await client.getToken('jira');
+    expect(token).toMatchObject({ accessToken: 'acc-tok', cloudId: 'cloud-1', host: 'sentry.io' });
+  });
+
   it('sends body {sessionId, pluginId} and the X-Plugin-Auth-Token header', async () => {
     const fakeFetch = vi.fn().mockResolvedValue(jsonResponse(200, tokenPayload()));
     const ctx = makeCtx({ sessionId: 'sess-42', pluginId: 'plugin-42', pluginAuthToken: 'tok-42' });

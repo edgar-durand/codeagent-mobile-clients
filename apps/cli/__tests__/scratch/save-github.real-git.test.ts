@@ -138,6 +138,32 @@ describe('saveToGithub push — real git, hostile repo config', () => {
     expect(cfg('branch.main.merge')).toBe('refs/heads/main');
   }, 30_000);
 
+  it('an inherited GIT_CONFIG_PARAMETERS URL-scoped proxy in the CLI env never sees the push', async () => {
+    const dir = makeWorkingRepo();
+    const cloneUrl = `http://127.0.0.1:${port}/me/envproxied.git`;
+    const prev = process.env.GIT_CONFIG_PARAMETERS;
+    process.env.GIT_CONFIG_PARAMETERS = `'http.${cloneUrl}.proxy=http://127.0.0.1:${proxyPort}'`;
+    authHeaders.length = 0;
+    proxyHits.length = 0;
+    try {
+      const fetchImpl = vi
+        .fn()
+        .mockResolvedValueOnce(ok({ login: 'me', id: 7 }))
+        .mockResolvedValueOnce(ok({ full_name: 'me/envproxied', clone_url: cloneUrl, html_url: 'https://github.com/me/envproxied' }, 201));
+      await expect(
+        saveToGithub(dir, { repoName: 'envproxied', private: true, token: TOKEN }, {
+          fetchImpl: fetchImpl as unknown as typeof fetch,
+        }),
+      ).rejects.toMatchObject({ code: 'SAVE_FAILED' });
+    } finally {
+      if (prev === undefined) delete process.env.GIT_CONFIG_PARAMETERS;
+      else process.env.GIT_CONFIG_PARAMETERS = prev;
+    }
+
+    expect(proxyHits).toEqual([]);
+    expect(authHeaders.map((h) => h.toLowerCase())).toContain(`basic ${B64.toLowerCase()}`);
+  }, 30_000);
+
   it("an agent-written ~/.gitconfig init.templateDir (URL-scoped proxy/sslVerify + insteadOf) never reaches the bare copy", async () => {
     const dir = makeWorkingRepo();
     const cloneUrl = `http://127.0.0.1:${port}/me/templated.git`;

@@ -292,9 +292,11 @@ runs for REAL (native claude TUI + ACP adapter + relay vs. a stub backend) in
 
 **One line:** the fleet host (`fleet-1`, an ordinary self-hosted `codeam host-agent` enrolled once
 as a host of the system account — see `codeagent-mobile/CLAUDE.md` for the api-v2 `fleet` module
-that dispatches these) receives four ADDITIVE relay command types, handled entirely in
+that dispatches these) receives four ADDITIVE relay command types, handled in
 `apps/cli/src/commands/host-agent.ts`: `fleet_create_box` / `fleet_start_box` / `fleet_stop_box` /
-`fleet_delete_box`. A normal self-hosted box never receives them — they're pushed only to the ONE
+`fleet_delete_box` (the pure half — payload guards, the `docker run` template and the
+`DockerRunner` — lives in `apps/cli/src/commands/host/fleet-docker.ts`, re-exported from
+`host-agent.ts`). A normal self-hosted box never receives them — they're pushed only to the ONE
 host the backend addresses as `FLEET_HOST_ID`. Spec: `docs/superpowers/specs/2026-07-15-fleet-inhouse-selfhosted-rescue-design.md`
 (container repo). Plan: `docs/superpowers/plans/2026-07-15-fleet-p2-clients.md` (this repo's slice —
 CLI handlers + box image; `…-fleet-p1-infra-backend.md` covers the backend `fleet` module).
@@ -307,7 +309,7 @@ since the backend derives `codeam-box-<userId>` (cuid, already docker-name-safe)
 string also names the box's named volume, refusing anything else means these handlers can never be
 steered into touching a non-fleet container/volume on the shared host.
 
-**`DockerRunner` abstraction** (exported from `host-agent.ts`, injected on `HostAgentDeps.docker`,
+**`DockerRunner` abstraction** (defined in `host/fleet-docker.ts`, re-exported from `host-agent.ts`, injected on `HostAgentDeps.docker`,
 defaults to `defaultDockerRunner`) — `run(args, opts)` spawns the
 real `docker` binary with **argv only, never `sh -c`**, and *resolves* (never rejects) with
 `{code, stderr, stdout}`. `opts.env` is merged OVER `process.env` for the `docker` CLI process's OWN
@@ -438,7 +440,7 @@ Mobile sends `install_cli_and_pair`. Both plugins open a local terminal and run:
 npm install -g codeam-cli@latest && codeam pair || npx -y codeam-cli@latest pair
 ```
 
-The `&&` ensures pair only runs on successful install; the `||` falls back to `npx` when `npm -g` would need sudo. Behavior is identical across VS Code (`vscode.window.createTerminal`) and JetBrains (`TerminalToolWindowManager.createLocalShellWidget`).
+The `&&` ensures pair only runs on successful install; the `||` falls back to `npx` when `npm -g` would need sudo. Behavior is identical across VS Code (`vscode.window.createTerminal`) and JetBrains (`TerminalToolWindowManager.createShellWidget` + `sendCommandToExecute`).
 
 ## Cuestiona lo que se te pide cuando veas algo mejor
 

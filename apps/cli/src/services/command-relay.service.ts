@@ -1,6 +1,6 @@
 import * as https from 'https';
 import * as http from 'http';
-import { resolveApiBaseUrl } from '@codeam/shared';
+import { resolveApiBaseUrl, toRemoteCommand } from '@codeam/shared';
 import type { AgentMetadata } from '@codeam/shared';
 import { _postJson, _getJson } from './pairing.service';
 import { loadCliConfig } from '../config';
@@ -553,8 +553,8 @@ export class CommandRelayService {
     }
     if (event !== 'commands' || !data) return;
     try {
-      const parsed = JSON.parse(data) as { commands?: RemoteCommand[] };
-      const commands = parsed.commands ?? [];
+      const parsed = JSON.parse(data) as { commands?: unknown };
+      const commands = this.validateCommands(parsed.commands, 'sse');
       if (commands.length === 0) return;
       log.info(
         'relay',
@@ -634,9 +634,9 @@ export class CommandRelayService {
         `${API_BASE}/api/commands/pending?pluginId=${this.pluginId}`,
         this.pollSecretHeader(),
       );
-      const commands = data?.data as RemoteCommand[] | undefined;
       this.pollFailures = 0;
-      if (!Array.isArray(commands) || commands.length === 0) {
+      const commands = this.validateCommands(data?.data, 'poll');
+      if (commands.length === 0) {
         this.pollEmptyStreak += 1;
         return;
       }
@@ -649,6 +649,30 @@ export class CommandRelayService {
       this.pollFailures += 1;
       log.trace('relay', `poll failed (failures=${this.pollFailures})`, err);
     }
+  }
+
+  /**
+   * Validate a raw SSE/poll command batch through the shared zod guard
+   * instead of blind-casting it. A malformed envelope is dropped on its own
+   * (the rest of the batch still dispatches) and, when it carries an id, acked
+   * so the backend stops redelivering a command we will never be able to run.
+   */
+  private validateCommands(raw: unknown, source: 'sse' | 'poll'): RemoteCommand[] {
+    if (!Array.isArray(raw)) return [];
+    const valid: RemoteCommand[] = [];
+    const droppedIds: string[] = [];
+    for (const obj of raw) {
+      const cmd = toRemoteCommand(obj);
+      if (cmd) {
+        valid.push(cmd);
+        continue;
+      }
+      const id = isRecord(obj) && typeof obj.id === 'string' ? obj.id : null;
+      if (id) droppedIds.push(id);
+      log.warn('relay', `${source} dropped malformed command id=${id ?? '?'}`);
+    }
+    if (droppedIds.length > 0) this.ackCommands(droppedIds);
+    return valid;
   }
 
   private async dispatchCommands(commands: RemoteCommand[]): Promise<void> {

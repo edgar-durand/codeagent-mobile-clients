@@ -95,6 +95,7 @@ export interface PermissionGateDeps {
   registerPermission(args: {
     questionId: string;
     options: PermissionOption[];
+    planText?: string;
   }): Promise<RequestPermissionResponse>;
 }
 
@@ -168,6 +169,25 @@ export function createOnRequestPermission(
     // (`/api/commands/pending/stream`); the `handleCommand` switch
     // routes it back here through `streaming.resolveSelection()`.
     // No polling.
-    return deps.registerPermission({ questionId: event.questionId, options });
+    const planText = exitPlanModePlan(request.toolCall);
+    return deps.registerPermission({
+      questionId: event.questionId,
+      options,
+      ...(planText !== undefined ? { planText } : {}),
+    });
   };
+}
+
+/**
+ * The plan text of an ExitPlanMode approval request, or undefined for any
+ * other tool. claude-agent-acp sends it as `rawInput.plan` (kind `switch_mode`).
+ * Carried to the user's answer so the plan AND the approval land in the
+ * durable conversation — interactive plan turns were live-only and vanished
+ * from the chat on re-entry (codeagent-x3ly).
+ */
+export function exitPlanModePlan(toolCall: RequestPermissionRequest['toolCall']): string | undefined {
+  const raw = toolCall.rawInput;
+  if (!raw || typeof raw !== 'object') return undefined;
+  const plan = (raw as { plan?: unknown }).plan;
+  return typeof plan === 'string' && plan.trim().length > 0 ? plan : undefined;
 }

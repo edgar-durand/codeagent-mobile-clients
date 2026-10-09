@@ -71,6 +71,9 @@ export class RestartableStdioProxy {
   private stdout: NodeJS.WritableStream | null = null;
   private swapping = false;
   private pendingClientLines: string[] = [];
+  /** The agent closed our stdin, or the current child exited: the session is
+   *  over and a token swap still in flight must not spawn a new child. */
+  private finished = false;
   private ended: (code: number) => void = () => undefined;
 
   constructor(private readonly opts: Opts) {}
@@ -83,7 +86,10 @@ export class RestartableStdioProxy {
 
     const rl = readline.createInterface({ input: stdin, crlfDelay: Infinity });
     rl.on('line', (line) => this.onClientLine(line));
-    rl.on('close', () => this.child?.stdin?.end());
+    rl.on('close', () => {
+      this.finished = true;
+      this.child?.stdin?.end();
+    });
 
     const timer = setInterval(() => this.checkRestart(stdout), RESTART_CHECK_INTERVAL_MS);
     timer.unref();
@@ -136,10 +142,18 @@ export class RestartableStdioProxy {
 
   private onChildLine(line: string, stdout: NodeJS.WritableStream): void {
     try {
-      const msg = JSON.parse(line) as { id?: string | number; method?: string };
+      const msg = JSON.parse(line) as { id?: string | number; method?: string; error?: unknown };
       if (msg.id !== undefined && msg.method === undefined) {
         if (msg.id === REPLAY_INIT_ID) {
-          return; // response to OUR replayed initialize: the client already has one
+          // Response to OUR replayed initialize: the client already has one.
+          // A rejection is still swallowed (the client never asked), but it
+          // means the restarted server is not serving — say so.
+          if (msg.error !== undefined) {
+            process.stderr.write(
+              `[codeam mcp-run] the restarted server rejected the replayed initialize: ${JSON.stringify(msg.error).slice(0, 300)}\n`,
+            );
+          }
+          return;
         }
         this.inflight.delete(msg.id);
         this.clearToolTimeout(msg.id);
@@ -228,6 +242,13 @@ export class RestartableStdioProxy {
       for (const l of this.pendingClientLines.splice(0)) this.onClientLine(l);
       return;
     }
+    // The token fetch takes seconds; the agent may have hung up meanwhile.
+    // Spawning now would leave a child nobody ever closes, keeping this shim
+    // alive forever (codeagent-sjk e).
+    if (this.finished || !this.child) {
+      this.swapping = false;
+      return;
+    }
     const old = this.child;
     const oldRl = this.childRl;
     this.child = null;
@@ -283,6 +304,7 @@ export class RestartableStdioProxy {
       // ignored — while a freshly-spawned child dying mid-swap IS current
       // and must fail fast rather than hang the session.
       if (child !== this.child) return;
+      this.finished = true;
       this.clearAllToolTimeouts();
       this.ended(code ?? 1);
     });

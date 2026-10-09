@@ -97,4 +97,25 @@ describe('integrations manifest store', () => {
   it('clearIntegrationsManifest() is a no-op (does not throw) when the file is already absent', () => {
     expect(() => clearIntegrationsManifest()).not.toThrow();
   });
+
+  // codeagent-sjk (b): several deploys on one self-hosted box used to share one
+  // file, so the last writer decided every session's MCP servers.
+  it('keys the manifest by session and falls back to the shared hand-off', () => {
+    const OTHER: IntegrationsManifest = { integrations: [] };
+    persistIntegrationsManifest(SAMPLE, 'sessA');
+    persistIntegrationsManifest(OTHER, 'sessB');
+    expect(integrationsManifestPath('sessA')).toBe(
+      path.join(FAKE_HOME, '.codeam', 'integrations-sessA.json'),
+    );
+    expect(readIntegrationsManifest('sessA')).toEqual(SAMPLE);
+    expect(readIntegrationsManifest('sessB')).toEqual(OTHER);
+    // No file of its own → the shared hand-off (absent here → null).
+    expect(readIntegrationsManifest('sessC')).toBeNull();
+    persistIntegrationsManifest(SAMPLE);
+    expect(readIntegrationsManifest('sessC')).toEqual(SAMPLE);
+    // A path-like id is never used as a file name.
+    expect(integrationsManifestPath('../evil')).toBe(integrationsManifestPath());
+    clearIntegrationsManifest('sessA');
+    clearIntegrationsManifest('sessB');
+  });
 });

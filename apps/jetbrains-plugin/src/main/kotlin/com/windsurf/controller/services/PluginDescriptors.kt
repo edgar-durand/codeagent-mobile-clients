@@ -4,6 +4,7 @@ package com.windsurf.controller.services
 // comments only in this file.
 
 import com.intellij.ide.plugins.IdeaPluginDescriptor
+import com.intellij.ide.plugins.PluginManagerCore
 import com.intellij.openapi.diagnostic.Logger
 import com.intellij.openapi.extensions.PluginId
 
@@ -55,4 +56,9 @@ internal object PluginDescriptors {
         logger.warn("plugin enumeration failed: ${t.message}")
         emptyList()
     }
+
+    // Replaces PluginDescriptor.isEnabled(), deprecated in 2026.2. The public
+    // PluginManagerCore.isDisabled is the same check the detectors already use.
+    fun isEnabled(descriptor: IdeaPluginDescriptor): Boolean =
+        !PluginManagerCore.isDisabled(descriptor.pluginId)
 }

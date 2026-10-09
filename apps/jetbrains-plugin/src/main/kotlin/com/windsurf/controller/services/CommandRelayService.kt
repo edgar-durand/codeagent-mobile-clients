@@ -114,6 +114,11 @@ class CommandRelayService {
 
     private var heartbeatTimer: Timer? = null
     private var agentsTimer: Timer? = null
+    private val heartbeatMonitor = HeartbeatMonitor()
+
+    /** Set once the backend answered a heartbeat with `paired:false`; cleared by the next start. */
+    @Volatile
+    private var sessionGone = false
 
     /** True once `/api/plugin/agents` has accepted at least one report. */
     @Volatile
@@ -253,6 +258,7 @@ class CommandRelayService {
         stopPolling()
         isRunning = true
         agentsRegistered = false
+        sessionGone = false
         startHeartbeat()
         startAgentsRetry()
 
@@ -729,7 +735,12 @@ class CommandRelayService {
         agentsTimer = null
     }
 
-    private fun reportOnline() {
+    /**
+     * ONLINE heartbeat, ported from the CLI 2.75.8 contract (see [HeartbeatMonitor]).
+     * [attempt] is 0 for the timer's beat and 1 for the single 3 s retry.
+     */
+    private fun reportOnline(attempt: Int = 0) {
+        if (sessionGone) return
         val settings = SettingsService.getInstance()
         val pluginId = settings.ensurePluginId()
         val body = JsonObject().apply {
@@ -741,10 +752,73 @@ class CommandRelayService {
             .post(gson.toJson(body).toRequestBody("application/json".toMediaType()))
             .withAuthHeaders()
             .build()
-        try {
-            httpClient.newCall(request).execute().close()
+        val action = try {
+            httpClient.newCall(request).execute().use { response ->
+                if (response.isSuccessful) {
+                    heartbeatMonitor.onSuccess(response.body.string())
+                } else {
+                    heartbeatMonitor.onFailure(
+                        heartbeatFailureReason(response.code, null), attempt, isRunning, System.currentTimeMillis(),
+                    )
+                }
+            }
         } catch (e: Exception) {
-            logger.debug("Failed to send heartbeat: ${e.message}")
+            heartbeatMonitor.onFailure(
+                heartbeatFailureReason(null, e), attempt, isRunning, System.currentTimeMillis(),
+            )
+        }
+        applyHeartbeatAction(action, pluginId)
+    }
+
+    private fun applyHeartbeatAction(action: HeartbeatAction, pluginId: String) {
+        if (action.sessionGone) {
+            handleSessionGone(pluginId)
+            return
+        }
+        action.warnReason?.let { reason ->
+            logger.warn(
+                "Heartbeat failed ($reason, streak=${action.streak}): two misses in a row and the app " +
+                    "shows this session OFFLINE even though the IDE is running",
+            )
+            runCatching {
+                TelemetryService.getInstance().capture(
+                    "heartbeat_failed",
+                    mapOf("surface" to "jetbrains", "pluginId" to pluginId, "reason" to reason, "streak" to action.streak),
+                )
+            }
+        }
+        action.retryInMs?.let { delay ->
+            runCatching {
+                scheduler.schedule({ if (isRunning) reportOnline(attempt = 1) }, delay, TimeUnit.MILLISECONDS)
+            }
+        }
+    }
+
+    /**
+     * The backend says this pluginId no longer has a live session (deleted or
+     * disconnected from the app). Same teardown as the `session_terminated`
+     * command in RemoteCommandRouter: that command can be missed (consumed by a
+     * sibling, or lost while the stream was down), and without this the plugin
+     * kept its SSE open and heartbeated a dead session.
+     */
+    private fun handleSessionGone(pluginId: String) {
+        if (sessionGone) return
+        sessionGone = true
+        logger.warn("Backend reports this session no longer exists (paired:false), stopping the relay")
+        runCatching {
+            TelemetryService.getInstance().capture(
+                "session_gone_detected",
+                mapOf("surface" to "jetbrains", "pluginId" to pluginId),
+            )
+        }
+        runCatching { AgentOutputMonitor.getInstance().stopMonitoring() }
+        runCatching { PairingService.getInstance().clearCurrentSession() }
+        stopPolling()
+        ApplicationManager.getApplication().invokeLater {
+            NotificationGroupManager.getInstance()
+                .getNotificationGroup("CodeAgent-Mobile")
+                .createNotification(BrandMessages.SessionExpired, NotificationType.WARNING)
+                .notify(null)
         }
     }
 

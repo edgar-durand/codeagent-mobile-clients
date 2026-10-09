@@ -238,6 +238,28 @@ export function relaunchArgv(execPath: string, argv: string[]): string[] {
 }
 
 /**
+ * The delayed relaunch as a spawnable command. POSIX goes through `/bin/sh`
+ * ({@link relaunchArgv}); Windows has no `/bin/sh` (the spawn failed ENOENT and
+ * the host stayed down after every auto-update), so there Node itself is the
+ * launcher: `node -e <wait, then spawn argv detached>` — `-e` hands the extra
+ * arguments to the script as `process.argv[1..]`.
+ */
+export function relaunchCommand(
+  execPath: string,
+  argv: string[],
+  platform: NodeJS.Platform = process.platform,
+  /** Windows launcher pause; POSIX always sleeps 2 s. Tests pass 0. */
+  delayMs = 2000,
+): { command: string; args: string[] } {
+  if (platform !== 'win32') return { command: '/bin/sh', args: relaunchArgv(execPath, argv) };
+  const launcher =
+    `setTimeout(()=>{require('child_process').spawn(process.argv[1],process.argv.slice(2),` +
+    `{detached:true,stdio:'ignore',windowsHide:true}).unref()},${delayMs})`;
+  // `--`: the relaunched argv's own flags are never parsed as node options.
+  return { command: execPath, args: ['-e', launcher, '--', execPath, ...argv.slice(1)] };
+}
+
+/**
  * Restart after a self-update.
  * - Supervised (`--supervised`, a parent from `superviseCurrent` owns us): just
  *   exit 0 — the parent respawns the new `current`.
@@ -278,13 +300,16 @@ export function defaultRestartForUpdate(
     const argv = [process.argv[0] ?? process.execPath, entry, ...process.argv.slice(2)];
     try {
       (io.relaunch ??
-        ((a: string[]) =>
-          nodeSpawn('/bin/sh', relaunchArgv(process.execPath, a), {
+        ((a: string[]) => {
+          const { command, args } = relaunchCommand(process.execPath, a);
+          nodeSpawn(command, args, {
             cwd: process.cwd(),
             env: process.env,
             detached: true,
             stdio: 'ignore',
-          }).unref()))(argv);
+            windowsHide: true,
+          }).unref();
+        }))(argv);
     } catch (err) {
       log.error('host-agent', 'self-update: relaunch failed — staying on the old binary', err);
       return;

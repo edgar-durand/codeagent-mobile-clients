@@ -124,7 +124,7 @@ describe('command relay on the stream host (integration, real sockets)', () => {
     relay.connectSSE();
 
     await vi.waitFor(() => expect(streamRes).not.toBeNull(), { timeout: 3000 });
-    streamRes!.write(commandsFrame([{ id: 'c1', type: 'start_task', payload: {} }]));
+    streamRes!.write(commandsFrame([{ id: 'c1', sessionId: 's1', pluginId: 'p1', type: 'start_task', payload: {}, status: 'pending', createdAt: 1 }]));
     await vi.waitFor(() => expect(onCmd).toHaveBeenCalledTimes(1), { timeout: 3000 });
 
     expect(streamHits(stream)).toHaveLength(1);
@@ -162,7 +162,7 @@ describe('command relay on the stream host (integration, real sockets)', () => {
     relay.connectSSE();
 
     await vi.waitFor(() => expect(apiStreamRes).not.toBeNull(), { timeout: 3000 });
-    apiStreamRes!.write(commandsFrame([{ id: 'c2', type: 'start_task', payload: {} }]));
+    apiStreamRes!.write(commandsFrame([{ id: 'c2', sessionId: 's1', pluginId: 'p1', type: 'start_task', payload: {}, status: 'pending', createdAt: 1 }]));
     await vi.waitFor(() => expect(onCmd).toHaveBeenCalledTimes(1), { timeout: 3000 });
 
     expect(streamHits(stream)).toHaveLength(1);
