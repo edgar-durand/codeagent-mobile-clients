@@ -33,7 +33,7 @@ describe('prewarmNodeDeps', () => {
     await prewarmNodeDeps(dir);
     expect(runSetupCommand).toHaveBeenCalledWith(
       'npm',
-      ['install', '--legacy-peer-deps'],
+      ['install', '--legacy-peer-deps', '--no-audit', '--no-fund'],
       dir,
       undefined,
       expect.objectContaining({ timeoutMs: expect.any(Number) }),
@@ -77,7 +77,7 @@ describe('prewarmNodeDeps', () => {
     runSetupCommand.mockResolvedValue({ status: 'ok', code: 0 });
     await prewarmNodeDeps(dir);
     expect(runSetupCommand.mock.calls.map((c) => [c[0], c[1]])).toEqual([
-      ['npm', ['install', '-g', 'yarn']],
+      ['npm', ['install', '-g', '--no-audit', '--no-fund', 'yarn']],
       ['yarn', ['install']],
     ]);
   });
@@ -89,7 +89,7 @@ describe('prewarmNodeDeps', () => {
     runSetupCommand.mockResolvedValue({ status: 'failed', code: 1 });
     await prewarmNodeDeps(dir);
     expect(runSetupCommand).toHaveBeenCalledTimes(1);
-    expect(runSetupCommand.mock.calls[0][1]).toEqual(['install', '-g', 'yarn']);
+    expect(runSetupCommand.mock.calls[0][1]).toEqual(['install', '-g', '--no-audit', '--no-fund', 'yarn']);
   });
 
   it('does nothing for a non-Node project', async () => {

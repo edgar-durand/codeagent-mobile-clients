@@ -228,7 +228,9 @@ describe.each(VARIANTS)('handoff pipeline — $name', (variant) => {
     const publishStreamingChunk = vi
       .spyOn(publisher, 'publishStreamingChunk')
       .mockResolvedValue(undefined);
-    const state = new StreamingState(publisher);
+    // Pins per-delta live-frame CONTENT, so disable the chat-pipe throttle
+    // (cadence is covered by streaming-text-throttle.test.ts).
+    const state = new StreamingState(publisher, { chatTextPublishIntervalMs: 0 });
 
     // Stream the reply as several fixed-size deltas — mirrors real
     // token-by-token arrival rather than one atomic chunk. (Plain slicing,

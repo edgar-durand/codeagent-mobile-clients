@@ -193,7 +193,7 @@ export async function startStubBackend(opts: StubBackendOptions): Promise<StubBa
         };
         const frame =
           `event: commands\n` +
-          `data: ${JSON.stringify({ commands: [{ id: `cmd-${randomUUID()}`, sessionId: pluginId, type: 'self_hosted_deploy', payload: deploy }] })}\n\n`;
+          `data: ${JSON.stringify({ commands: [{ id: `cmd-${randomUUID()}`, sessionId: pluginId, pluginId, type: 'self_hosted_deploy', payload: deploy, status: 'pending', createdAt: Date.now() }] })}\n\n`;
         res.write(frame);
         pushedDeploy = true;
       }

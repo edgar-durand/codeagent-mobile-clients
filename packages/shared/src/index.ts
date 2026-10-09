@@ -19,3 +19,4 @@ export * from './types/events';
 export * from './types/scratch';
 export * from './types/session-blocker';
 export * from './preview-prompts';
+export * from './types/plugin-agents';

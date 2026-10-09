@@ -33,7 +33,9 @@ function makeState(): {
   const publishStreamingChunk = vi
     .spyOn(publisher, 'publishStreamingChunk')
     .mockResolvedValue(undefined);
-  return { state: new StreamingState(publisher), publishOutput, publishStreamingChunk };
+  // Pins per-delta live-frame CONTENT, so disable the chat-pipe throttle
+  // (cadence is covered by streaming-text-throttle.test.ts).
+  return { state: new StreamingState(publisher, { chatTextPublishIntervalMs: 0 }), publishOutput, publishStreamingChunk };
 }
 
 /** Every `content` string posted on a spied publish method. */

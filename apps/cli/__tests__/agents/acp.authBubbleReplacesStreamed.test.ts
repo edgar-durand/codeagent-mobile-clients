@@ -36,6 +36,7 @@ import {
 // reportCredentialInvalid resolves a fresh token via this service on a 401;
 // stub it so no network call is attempted for token refresh.
 vi.mock('../../src/services/pairing.service', () => ({
+  postTurnEvent: vi.fn().mockResolvedValue(undefined),
   fetchCurrentPluginAuthToken: vi.fn(),
   _postJsonAuthed: vi.fn(),
 }));

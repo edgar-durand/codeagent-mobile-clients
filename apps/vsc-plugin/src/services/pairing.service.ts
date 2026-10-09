@@ -12,6 +12,8 @@ import { OutputChannel } from 'vscode';
 export type PairingCodeResult = { code: string; expiresAt: number } | { blocked: true } | null;
 
 export interface PairedUserInfo {
+  /** Backend user id — the telemetry distinct id. Older backends omit it. */
+  id?: string;
   name: string;
   email: string;
   plan: string;
@@ -143,6 +145,7 @@ export class PairingService {
 
           if (userObj) {
             this.pairedUser = {
+              ...(typeof data.userId === 'string' && data.userId ? { id: data.userId } : {}),
               name: (userObj.name as string) || '',
               email: (userObj.email as string) || '',
               plan: (userObj.plan as string) || 'FREE',
@@ -243,6 +246,7 @@ export class PairingService {
 
       const userObj = data?.user as Record<string, unknown> | undefined;
       this.onReconnected(sessionId, {
+        ...(typeof data?.userId === 'string' && data.userId ? { id: data.userId } : {}),
         name: (userObj?.name as string) || cached?.userName || '',
         email: (userObj?.email as string) || cached?.userEmail || '',
         plan: (userObj?.plan as string) || cached?.userPlan || 'FREE',

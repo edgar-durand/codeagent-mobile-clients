@@ -21,8 +21,8 @@ export interface PairedUserInfo {
   /**
    * Backend user id (`user.id` from the pair response). Stable across
    * sessions / re-pairs. Used as the PostHog distinct id when telemetry
-   * is on. Optional because older backends didn't emit it; identify
-   * falls back to email in that case.
+   * is on. Optional because older backends didn't emit it; identify is
+   * then skipped — never done by email (codeagent-tach).
    */
   userId?: string;
   userName: string;
@@ -161,6 +161,9 @@ export async function fetchCurrentPluginAuthToken(
   sessionId: string,
   pluginId: string,
   pollSecret?: string,
+  /** Receives the backend user id the reconnect answers with — how a session
+   *  paired before `SavedSession.userId` existed learns its telemetry id. */
+  onUserId?: (userId: string) => void,
 ): Promise<string | null> {
   try {
     const result = await _transport.postJson(
@@ -186,6 +189,9 @@ export async function fetchCurrentPluginAuthToken(
     );
     const data = result?.data as Record<string, unknown> | undefined;
     if (!data?.paired) return null;
+    if (onUserId && typeof data.userId === 'string' && data.userId.length > 0) {
+      onUserId(data.userId);
+    }
     const token = data.pluginAuthToken;
     return typeof token === 'string' && token.length > 0 ? token : null;
   } catch {
