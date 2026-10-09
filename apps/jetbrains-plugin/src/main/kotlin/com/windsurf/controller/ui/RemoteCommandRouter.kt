@@ -594,9 +594,17 @@ class RemoteCommandRouter(private val project: Project) {
                         val terminalName = if (pairAgent != null) "codeam pair $pairAgent" else "codeam pair"
                         val terminalView = org.jetbrains.plugins.terminal.TerminalToolWindowManager
                             .getInstance(project)
-                        val widget = terminalView.createLocalShellWidget(
+                        // createShellWidget + sendCommandToExecute replace
+                        // createLocalShellWidget/executeCommand: that one is
+                        // @Deprecated(forRemoval) in 2026.2 and throws when the
+                        // reworked terminal backs the tab. Both new members exist
+                        // since 2024.1 (our sinceBuild); the tabs-manager API that
+                        // supersedes them does not.
+                        val widget = terminalView.createShellWidget(
                             project.basePath,
                             terminalName,
+                            true,
+                            true,
                         )
                         // Always install/upgrade codeam-cli to
                         // latest, THEN pair. `npm install -g
@@ -605,7 +613,7 @@ class RemoteCommandRouter(private val project: Project) {
                         // `&&` so pair only fires after install
                         // succeeds; final `|| npx` fallback handles
                         // sudo-restricted environments.
-                        widget.executeCommand(
+                        widget.sendCommandToExecute(
                             BuildInstallCommand.forSubcommand(
                                 subcommand,
                                 System.getProperty("os.name"),
@@ -656,11 +664,13 @@ class RemoteCommandRouter(private val project: Project) {
                         }
                         val terminalView = org.jetbrains.plugins.terminal.TerminalToolWindowManager
                             .getInstance(project)
-                        val widget = terminalView.createLocalShellWidget(
+                        val widget = terminalView.createShellWidget(
                             project.basePath,
                             "codeam link $safeAgent",
+                            true,
+                            true,
                         )
-                        widget.executeCommand(
+                        widget.sendCommandToExecute(
                             BuildInstallCommand.forSubcommand(
                                 "link $safeAgent",
                                 System.getProperty("os.name"),

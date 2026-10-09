@@ -51,7 +51,7 @@ internal object CopilotChatMetadataBridge {
 
     private fun copilotClassLoader(): ClassLoader? {
         val plugin = PluginDescriptors.findById(COPILOT_PLUGIN_ID) ?: return null
-        if (!plugin.isEnabled) return null
+        if (!PluginDescriptors.isEnabled(plugin)) return null
         return plugin.pluginClassLoader
     }
 

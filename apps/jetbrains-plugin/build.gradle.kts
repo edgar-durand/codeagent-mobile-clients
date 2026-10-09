@@ -76,12 +76,20 @@ intellijPlatform {
             // products with the smallest bundled-API surface so a missing
             // dependency is caught before a marketplace listing claims
             // false compatibility.
-            create(org.jetbrains.intellij.platform.gradle.IntelliJPlatformType.IntellijIdeaUltimate, "2024.1")
-            create(org.jetbrains.intellij.platform.gradle.IntelliJPlatformType.IntellijIdeaCommunity, "2024.1")
-            create(org.jetbrains.intellij.platform.gradle.IntelliJPlatformType.WebStorm, "2024.1")
-            create(org.jetbrains.intellij.platform.gradle.IntelliJPlatformType.PyCharmProfessional, "2024.1")
-            create(org.jetbrains.intellij.platform.gradle.IntelliJPlatformType.PyCharmCommunity, "2024.1")
-            create(org.jetbrains.intellij.platform.gradle.IntelliJPlatformType.GoLand, "2024.1")
+            //
+            // The newest IDE is what surfaces deprecated / scheduled-for-removal
+            // API (the 2024.1 builds predate those markers): codeagent-20r found
+            // createLocalShellWidget (forRemoval) only in a 2026.2 report. CI runs
+            // `verifyPlugin -PverifyLatestOnly=true` against that one IDE per PR.
+            if (!providers.gradleProperty("verifyLatestOnly").isPresent) {
+                create(org.jetbrains.intellij.platform.gradle.IntelliJPlatformType.IntellijIdeaUltimate, "2024.1")
+                create(org.jetbrains.intellij.platform.gradle.IntelliJPlatformType.IntellijIdeaCommunity, "2024.1")
+                create(org.jetbrains.intellij.platform.gradle.IntelliJPlatformType.WebStorm, "2024.1")
+                create(org.jetbrains.intellij.platform.gradle.IntelliJPlatformType.PyCharmProfessional, "2024.1")
+                create(org.jetbrains.intellij.platform.gradle.IntelliJPlatformType.PyCharmCommunity, "2024.1")
+                create(org.jetbrains.intellij.platform.gradle.IntelliJPlatformType.GoLand, "2024.1")
+            }
+            create(org.jetbrains.intellij.platform.gradle.IntelliJPlatformType.IntellijIdeaUltimate, "2026.2")
         }
 
         // The default failure-level set in IntelliJ Platform Gradle plugin
@@ -98,6 +106,13 @@ intellijPlatform {
             org.jetbrains.intellij.platform.gradle.tasks.VerifyPluginTask.FailureLevel.INVALID_PLUGIN,
             org.jetbrains.intellij.platform.gradle.tasks.VerifyPluginTask.FailureLevel.MISSING_DEPENDENCIES,
             org.jetbrains.intellij.platform.gradle.tasks.VerifyPluginTask.FailureLevel.PLUGIN_STRUCTURE_WARNINGS,
+            // A call the platform is about to delete breaks the plugin on the
+            // next major (codeagent-20r).
+            org.jetbrains.intellij.platform.gradle.tasks.VerifyPluginTask.FailureLevel.SCHEDULED_FOR_REMOVAL_API_USAGES,
+            // Back in now that the jvmDefault setting below stopped the
+            // ToolWindowFactory bridges and PluginDescriptors removed the last
+            // internal lookups: the 2026.2 report has 0 internal usages.
+            org.jetbrains.intellij.platform.gradle.tasks.VerifyPluginTask.FailureLevel.INTERNAL_API_USAGES,
         )
     }
 }
@@ -111,6 +126,14 @@ changelog {
 
 kotlin {
     jvmToolchain(17)
+    compilerOptions {
+        // Without this, every ToolWindowFactory default the class does not
+        // override (isApplicable, isDoNotActivateOnStart, getAnchor, getIcon,
+        // manage) got a compiler-generated bridge in our bytecode, which the
+        // 2026.2 verifier reports as 4 deprecated + 6 experimental usages of
+        // ours (codeagent-20r).
+        jvmDefault.set(org.jetbrains.kotlin.gradle.dsl.JvmDefaultMode.NO_COMPATIBILITY)
+    }
 }
 
 // ─── Build-time PostHog config injection ─────────────────────────
