@@ -146,14 +146,22 @@ describe('preview detection — every error carries a reason + agent (codeagent-
   it('timeout — the one-shot never answers', async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
     try {
+      // The deadline timer is armed right before the one-shot is invoked, after
+      // real fs reads — advance only once the one-shot has actually started.
+      let started!: () => void;
+      const oneShotStarted = new Promise<void>((r) => (started = r));
       const pending = resolvePreviewDetection({
         ctx: { sessionId: 'sess-1', pluginId: 'plug-1' },
         runtime: {
           id: 'claude',
-          generateOneShot: () => new Promise<string | null>(() => undefined),
+          generateOneShot: () => {
+            started();
+            return new Promise<string | null>(() => undefined);
+          },
         } as unknown as Runtime,
         pluginAuthToken: 'tok-1',
       });
+      await oneShotStarted;
       await vi.advanceTimersByTimeAsync(PREVIEW_DETECT_TIMEOUT_MS + 1);
       expect(await pending).toBeNull();
     } finally {
