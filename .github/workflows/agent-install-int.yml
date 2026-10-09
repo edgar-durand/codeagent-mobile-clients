@@ -84,7 +84,7 @@ jobs:
       # Only the apt layer is expensive; agent installs deliberately happen at
       # TEST time (they are the thing under test and must never be baked).
       - name: Set up Docker Buildx (for layer cache)
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       - name: Pre-build the test image
         env:
