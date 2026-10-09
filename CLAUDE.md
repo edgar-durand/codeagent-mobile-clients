@@ -427,7 +427,7 @@ Mobile sends `install_cli_and_pair`. Both plugins open a local terminal and run:
 npm install -g codeam-cli@latest && codeam pair || npx -y codeam-cli@latest pair
 ```
 
-The `&&` ensures pair only runs on successful install; the `||` falls back to `npx` when `npm -g` would need sudo. Behavior is identical across VS Code (`vscode.window.createTerminal`) and JetBrains (`TerminalToolWindowManager.createLocalShellWidget`).
+The `&&` ensures pair only runs on successful install; the `||` falls back to `npx` when `npm -g` would need sudo. Behavior is identical across VS Code (`vscode.window.createTerminal`) and JetBrains (`TerminalToolWindowManager.createShellWidget` + `sendCommandToExecute`).
 
 ## Cuestiona lo que se te pide cuando veas algo mejor
 

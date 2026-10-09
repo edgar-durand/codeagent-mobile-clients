@@ -123,7 +123,7 @@ internal object CopilotChatBridge {
             log.info("CopilotChatBridge: com.github.copilot plugin not installed")
             return false
         }
-        if (!plugin.isEnabled) {
+        if (!PluginDescriptors.isEnabled(plugin)) {
             log.info("CopilotChatBridge: com.github.copilot plugin is disabled")
             return false
         }
