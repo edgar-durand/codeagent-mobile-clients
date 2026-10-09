@@ -62,16 +62,23 @@ function isOptedOut(): boolean {
   return false;
 }
 
-function readAnonId(): string {
+export function readAnonId(): string {
   // Stable per-install id. Mirrors PostHog's anonymous-distinct-id
   // pattern from the web SDK — the CLI doesn't have cookies so we
   // persist a tiny JSON blob in ~/.codeam/anon.json that survives
   // across CLI invocations + maps to the same user when they
   // eventually pair.
+  //
+  // The id is bound to the hostname: an anon.json baked into an image (the
+  // Box image runs the CLI at build time) is copied into every box and
+  // codespace home, and one shared id aliased to each user merged unrelated
+  // users into a single PostHog person. Each container has its own hostname,
+  // so it mints its own id.
+  const host = os.hostname();
   try {
     if (fs.existsSync(ANON_FILE)) {
-      const raw = JSON.parse(fs.readFileSync(ANON_FILE, 'utf8')) as { id?: string };
-      if (typeof raw.id === 'string' && raw.id.length > 0) return raw.id;
+      const raw = JSON.parse(fs.readFileSync(ANON_FILE, 'utf8')) as { id?: string; host?: string };
+      if (typeof raw.id === 'string' && raw.id.length > 0 && raw.host === host) return raw.id;
     }
   } catch {
     /* corrupt or unreadable — regenerate below */
@@ -79,7 +86,7 @@ function readAnonId(): string {
   const id = `anon-${randomUUID()}`;
   try {
     fs.mkdirSync(path.dirname(ANON_FILE), { recursive: true, mode: 0o700 });
-    fs.writeFileSync(ANON_FILE, JSON.stringify({ id }), { mode: 0o600 });
+    fs.writeFileSync(ANON_FILE, JSON.stringify({ id, host }), { mode: 0o600 });
   } catch {
     /* unwritable home — distinctId still works for THIS process */
   }
