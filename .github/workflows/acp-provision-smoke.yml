@@ -14,8 +14,11 @@ name: ACP provision smoke
 #
 # A row with no credential SKIPS (green), so this is safe on forks and before
 # every secret is set. Credentials (repo secrets — never echoed, never argv):
-#   claude → CLAUDE_TEST_CREDENTIAL_JSON (oauth blob) — falls back to the
-#            existing ANTHROPIC_API_KEY as an api_key credential
+#   claude → CLAUDE_TEST_CREDENTIAL_JSON (oauth blob, or an api key with
+#            CLAUDE_TEST_AUTH_KIND=api_key as a repo variable). NOT the repo's
+#            ANTHROPIC_API_KEY: that account authenticates but has no credit
+#            ("Credit balance is too low", first run on PR #931), which would
+#            make every night red for a billing reason, not a provisioning one.
 #   codex  → CODEX_TEST_CREDENTIAL_JSON  (oauth blob) — falls back to the
 #            existing OPENAI_API_KEY as an api_key credential (exercises the
 #            ~/.codex/auth.json api-key write, the 2026-09-08 incident)
@@ -74,8 +77,8 @@ jobs:
         working-directory: apps/cli
         env:
           RUN_ACP_INT: '1'
-          CLAUDE_TEST_CREDENTIAL_JSON: ${{ secrets.CLAUDE_TEST_CREDENTIAL_JSON || secrets.ANTHROPIC_API_KEY }}
-          CLAUDE_TEST_AUTH_KIND: ${{ secrets.CLAUDE_TEST_CREDENTIAL_JSON && 'oauth_token' || 'api_key' }}
+          CLAUDE_TEST_CREDENTIAL_JSON: ${{ secrets.CLAUDE_TEST_CREDENTIAL_JSON }}
+          CLAUDE_TEST_AUTH_KIND: ${{ vars.CLAUDE_TEST_AUTH_KIND || 'oauth_token' }}
           CODEX_TEST_CREDENTIAL_JSON: ${{ secrets.CODEX_TEST_CREDENTIAL_JSON || secrets.OPENAI_API_KEY }}
           CODEX_TEST_AUTH_KIND: ${{ secrets.CODEX_TEST_CREDENTIAL_JSON && 'oauth_token' || 'api_key' }}
           GEMINI_TEST_CREDENTIAL_JSON: ${{ secrets.GEMINI_TEST_CREDENTIAL_JSON }}
