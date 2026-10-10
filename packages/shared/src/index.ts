@@ -20,3 +20,6 @@ export * from './types/scratch';
 export * from './types/session-blocker';
 export * from './preview-prompts';
 export * from './types/plugin-agents';
+export * from './types/composer';
+export * from './types/feature-gates';
+export * from './types/compression-savings';
