@@ -59,6 +59,7 @@ import {
   isManagedProviderId,
   type AgentId,
   type HandoffProposal,
+  type SessionBlocker,
   type StreamingChunkKind,
   type SwitchAgentResult,
 } from '@codeam/shared';
@@ -1039,6 +1040,9 @@ export class AcpHistory {
      *  session that swapped agents keeps per-turn attribution when mobile
      *  reloads the history (codeagent-egai). */
     agentId: AgentId;
+    /** Typed blocker tag when this reply is one of our failure bubbles, so a
+     *  reloaded history keeps its escape-route buttons (codeagent-gfip). */
+    blocker?: SessionBlocker;
   }> = [];
   private summary: string | null = null;
 
@@ -1124,12 +1128,14 @@ export class AcpHistory {
    */
   appendAgentReply(text: string, agentId: AgentId = this.opts.agent): void {
     if (text.length === 0) return;
+    const blocker = failureBlocker(text);
     this.messages.push({
       id: randomUUID(),
       role: 'agent',
       text,
       timestamp: Date.now(),
       agentId,
+      ...(blocker ? { blocker } : {}),
     });
   }
 
