@@ -4199,12 +4199,16 @@ describe('HostAgentSupervisor — re-link of an env-delivered credential', () =>
 
   let tmpRoot: string;
   let prevHome: string | undefined;
+  let prevUserProfile: string | undefined;
   let prevSelfUpdate: string | undefined;
   beforeEach(() => {
     tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), '5m12-'));
     // provisionAgentCredentials writes under the real home — keep it in tmp.
+    // os.homedir() reads USERPROFILE on Windows, HOME elsewhere.
     prevHome = process.env.HOME;
+    prevUserProfile = process.env.USERPROFILE;
     process.env.HOME = tmpRoot;
+    process.env.USERPROFILE = tmpRoot;
     prevSelfUpdate = process.env.CODEAM_HOST_SELF_UPDATE_MS;
     process.env.CODEAM_HOST_SELF_UPDATE_MS = '0';
     vi.stubGlobal(
@@ -4216,6 +4220,8 @@ describe('HostAgentSupervisor — re-link of an env-delivered credential', () =>
     vi.useRealTimers();
     if (prevHome === undefined) delete process.env.HOME;
     else process.env.HOME = prevHome;
+    if (prevUserProfile === undefined) delete process.env.USERPROFILE;
+    else process.env.USERPROFILE = prevUserProfile;
     if (prevSelfUpdate === undefined) delete process.env.CODEAM_HOST_SELF_UPDATE_MS;
     else process.env.CODEAM_HOST_SELF_UPDATE_MS = prevSelfUpdate;
     fs.rmSync(tmpRoot, { recursive: true, force: true });
