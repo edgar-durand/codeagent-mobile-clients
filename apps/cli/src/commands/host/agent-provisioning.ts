@@ -414,11 +414,14 @@ const coderabbitProvisioner: AgentProvisioner = {
   },
 };
 
-const opencodeProvisioner: AgentProvisioner = {
+/**
+ * aider and opencode are model-agnostic and AUTO-DETECT the provider key from
+ * env vars. The credential is the user's provider key — detect the provider by
+ * prefix and export the matching var (same prefixes as api-v2
+ * `AiderProvisioningStrategy.getAuthSnippet`).
+ */
+const providerKeyProvisioner: AgentProvisioner = {
   write(auth): Record<string, string> {
-    // opencode is model-agnostic and AUTO-DETECTS provider keys from env vars
-    // (like aider). The credential is the user's provider key — detect the
-    // provider by prefix and export the matching var; opencode picks it up.
     const key = auth.value.trim();
     const envName = key.startsWith('sk-ant-')
       ? 'ANTHROPIC_API_KEY'
@@ -436,7 +439,11 @@ const PROVISIONERS: Partial<Record<AgentId, AgentProvisioner>> = {
   gemini: geminiProvisioner,
   cursor: cursorProvisioner,
   coderabbit: coderabbitProvisioner,
-  opencode: opencodeProvisioner,
+  opencode: providerKeyProvisioner,
+  // ⚠️ Was missing: every self-hosted / fleet-Box aider deploy failed with
+  // "Self-hosted provisioning is not implemented for agent "aider"" (23 in
+  // prod Cloud Run, 2026-09-10..10-08).
+  aider: providerKeyProvisioner,
 };
 
 /** Raised when a deploy targets an agent we can't provision on the box. */
