@@ -4,6 +4,20 @@ All notable changes to the CodeAgent Mobile VS Code extension are documented her
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.76.20] — 2026-10-10
+
+### Added
+
+- **shared:** Own the Composer, feature-gate and compression-savings wire types (#934)
+
+### Fixed
+
+- **cli:** Wake recreates a fleet box whose container is gone but volume remains (#933)
+- **cli:** Provision aider credentials on self-hosted and Box deploys (#935)
+- **both-plugins:** Open the command SSE on the stream host, not apiBaseUrl (#936)
+- **cli:** Keep the typed blocker tag on failure bubbles in pushed history (#937)
+- **cli:** Point USERPROFILE at the tmp home in the re-link credential test (#938)
+
 ## [2.76.19] — 2026-10-09
 
 ### Fixed
