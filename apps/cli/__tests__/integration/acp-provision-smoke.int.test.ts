@@ -259,8 +259,9 @@ if (!RUN_ACP_INT) {
     cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'acp-smoke-cwd-'));
   });
   afterEach(() => {
-    fs.rmSync(home, { recursive: true, force: true });
-    fs.rmSync(cwd, { recursive: true, force: true });
+    // Retries cover a write that was in flight when the agent tree was killed.
+    fs.rmSync(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+    fs.rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
   });
 
   for (const row of AGENTS) {

@@ -97,10 +97,16 @@ export function acpSmokeDrive(spec: AcpSpawnSpec, opts: AcpSmokeOptions = {}): P
     };
     let settled = false;
 
+    // Own process group (POSIX) so teardown can reap the WHOLE tree: codex-acp
+    // spawns codex, which clones plugins into $HOME/.codex/.tmp in the
+    // background. Killing only the adapter left that clone writing while the
+    // test removed $HOME → ENOTEMPTY on rmdir (PR #931, first nightly-lane run).
+    const detached = process.platform !== 'win32';
     const child = spawn(spec.command, spec.args, {
       cwd: spec.cwd,
       env: spec.env,
       stdio: ['pipe', 'pipe', 'pipe'],
+      detached,
     });
 
     const done = (outcome: AcpOutcome): void => {
@@ -109,9 +115,10 @@ export function acpSmokeDrive(spec: AcpSpawnSpec, opts: AcpSmokeOptions = {}): P
       report.outcome = outcome;
       clearTimeout(timer);
       try {
-        child.kill('SIGKILL');
+        if (detached && child.pid) process.kill(-child.pid, 'SIGKILL');
+        else child.kill('SIGKILL');
       } catch {
-        /* noop */
+        /* noop — already gone */
       }
       resolve(report);
     };

@@ -792,6 +792,15 @@ export class HostAgentSupervisor {
    * one session's crash-loop must not spend another's retry budget).
    */
   private readonly resumeStates = new Map<string, ResumeState>();
+  /**
+   * Env-delivered agent credentials per deploy (the `api_key` path:
+   * ANTHROPIC_API_KEY / GEMINI_API_KEY / CURSOR_API_KEY / OPENAI_API_KEY).
+   * Such a key lives ONLY in the child's spawn env — nothing on disk carries
+   * it — so every re-spawn of the session (crash respawn, resume, a re-link
+   * restart) must re-inject it. Memory only: credential plaintext is never
+   * persisted by the host-agent (codeagent-5m12).
+   */
+  private readonly credentialEnvByDeploy = new Map<string, Record<string, string>>();
   /** Set once the bounded retries exhaust → heartbeat-ridden slow re-probe. */
   /** True after stop() — no resume retries may be scheduled past teardown. */
   private stopped = false;
@@ -2019,6 +2028,8 @@ export class HostAgentSupervisor {
         // isDeployPayload (exactly one of houseProxy / sealedAgentAuth).
         const auth = await this.resolveAgentAuth(this.identity, payload.sealedAgentAuth!);
         const credEnv = provisionAgentCredentials(payload.agentId, auth, undefined);
+        if (Object.keys(credEnv).length > 0) this.credentialEnvByDeploy.set(payload.deployId, credEnv);
+        else this.credentialEnvByDeploy.delete(payload.deployId);
         childEnv = {
           ...credEnv,
           CODEAM_AUTO_TOKEN: payload.autoPairToken,
@@ -2617,7 +2628,11 @@ export class HostAgentSupervisor {
       // Returns `{}` when the box has no persisted house config (BYO deploy →
       // its own credential path is used instead).
       const proc = this.resumeSpawner(
-        { ...readHouseProxyChildEnv(deployId), CODEAM_RESUME_SESSION_ID: session.id },
+        {
+          ...readHouseProxyChildEnv(deployId),
+          ...(this.credentialEnvByDeploy.get(deployId) ?? {}),
+          CODEAM_RESUME_SESSION_ID: session.id,
+        },
         cwd,
       );
       const child: ChildSession = {
@@ -2868,6 +2883,7 @@ export class HostAgentSupervisor {
    */
   private cleanupWorkspace(deployId: string): void {
     const short = deployId.slice(0, 8);
+    this.credentialEnvByDeploy.delete(deployId);
     // Stop the child if it's somehow still tracked (its own session_terminated
     // usually already exited it) so nothing holds the dir open mid-remove.
     const child = this.children.get(deployId);
@@ -2898,22 +2914,43 @@ export class HostAgentSupervisor {
 
   /**
    * Handle `self_hosted_refresh_credentials` (the user re-linked the agent).
-   * Unseal the fresh credential and re-provision the agent's on-disk auth IN
-   * PLACE (`provisionAgentCredentials` rewrites `~/.claude/.credentials.json`
-   * etc.). The running pair-auto child re-reads its auth file on the next API
-   * call, so a 401'd session recovers WITHOUT a restart — the self-hosted
-   * parallel to the codespace `refreshAgentCredentialsOnly` sweep. Best-effort:
-   * a failure is logged, never throws (the relay dispatch must not crash).
+   * Unseal the fresh credential and re-provision the agent's auth IN PLACE.
+   *
+   * Two delivery shapes, two outcomes (codeagent-5m12):
+   *  - **Login-state FILE** (`oauth_token`; `provisionAgentCredentials`
+   *    returns `{}`): the file is rewritten and running children are left
+   *    alone. Claude Code and Codex re-read their auth file on a 401 (Claude's
+   *    `oauth_401_recovered_from_disk`, Codex's `UnauthorizedRecovery` Reload
+   *    step), so a 401'd session recovers without losing its turn.
+   *  - **Env var** (`api_key`; it returns e.g. `{ ANTHROPIC_API_KEY }`): the
+   *    key exists only in each child's spawn env, which a rewrite cannot reach
+   *    — the old key keeps 401ing until the process is replaced. Every running
+   *    child of THIS agent is restarted through the resume path with the new
+   *    env (same conversation, `CODEAM_RESUME_SESSION_ID`).
+   *
+   * Best-effort: a failure is logged, never throws (the relay dispatch must
+   * not crash).
    */
   private async refreshCredentials(payload: RefreshCredentialsPayload): Promise<void> {
     try {
       const auth = await this.resolveAgentAuth(this.identity, payload.sealedAgentAuth);
-      // Rewrites the agent's auth file (and returns env we don't need here —
-      // the child reads the file, not our process env).
-      provisionAgentCredentials(payload.agentId, auth, undefined);
+      const credEnv = provisionAgentCredentials(payload.agentId, auth, undefined);
+      const affected = [...this.children.values()].filter((c) => c.agent === payload.agentId);
+      if (Object.keys(credEnv).length === 0) {
+        for (const c of affected) this.credentialEnvByDeploy.delete(c.deployId);
+        log.info(
+          'host-agent',
+          `refreshed credentials in place for agent=${payload.agentId} (${this.children.size} active child(ren))`,
+        );
+        return;
+      }
+      for (const child of affected) {
+        this.credentialEnvByDeploy.set(child.deployId, credEnv);
+        this.restartWithFreshCredentials(child);
+      }
       log.info(
         'host-agent',
-        `refreshed credentials in place for agent=${payload.agentId} (${this.children.size} active child(ren))`,
+        `refreshed env credential for agent=${payload.agentId}; restarted ${affected.length} child(ren)`,
       );
     } catch (err) {
       log.warn(
@@ -2921,6 +2958,31 @@ export class HostAgentSupervisor {
         `credential refresh failed (best-effort): ${err instanceof Error ? err.message : String(err)}`,
       );
     }
+  }
+
+  /**
+   * Replace one session child so it picks up a re-linked env credential.
+   * Kill THEN untrack (an intentional stop, so its exit handler neither
+   * reports `ended` nor crash-respawns), then resume the same conversation;
+   * `resumeOne` waits out the dying daemon if it still holds the session.
+   */
+  private restartWithFreshCredentials(child: ChildSession): void {
+    const session = pickSavedSessionForWorkspace(this.listSavedSessions(), child.cwd, child.deployId);
+    if (!session) {
+      log.warn(
+        'host-agent',
+        `credential refresh: no saved pairing for deploy=${child.deployId.slice(0, 8)} — ` +
+          'it keeps the old key until its next restart',
+      );
+      return;
+    }
+    try {
+      child.proc.kill('SIGTERM');
+    } catch {
+      /* already gone */
+    }
+    this.untrackChild(child.deployId);
+    this.resumeOne({ deployId: child.deployId, cwd: child.cwd, session, agent: child.agent });
   }
 }
 
