@@ -12,6 +12,7 @@ import { PairingService } from './pairing.service';
 import { OutputChannel } from 'vscode';
 import { capture } from './telemetry.service';
 import { Messages } from '../ui/messages';
+import { StreamHostSelector, type StreamHostFailure } from './stream-base-url';
 
 // The command-envelope shape now lives in @codeam/shared
 // (protocol/remote-command.ts) next to its zod schema; re-export it so
@@ -39,6 +40,9 @@ export class CommandRelayService {
   private sseRequest: http.ClientRequest | null = null;
   private sseReconnectTimer: NodeJS.Timeout | null = null;
   private sseFailures = 0;
+  // Stream host (stream.) vs api host latch for the SSE subscription — see
+  // stream-base-url.ts. Instance-scoped so a relay reset starts fresh.
+  private readonly streamHost = new StreamHostSelector();
   private heartbeatInterval: NodeJS.Timeout | null = null;
   private listeners: CommandListener[] = [];
   private log: OutputChannel;
@@ -160,9 +164,12 @@ export class CommandRelayService {
     const settings = SettingsService.getInstance();
     const pluginId = settings.ensurePluginId();
     const apiBase = settings.apiBaseUrl;
-    const url = new URL(`${apiBase}/api/commands/pending/stream`);
+    const url = new URL(`${this.streamHost.currentFor(apiBase)}/api/commands/pending/stream`);
     url.searchParams.set('pluginId', pluginId);
     const transport = url.protocol === 'https:' ? https : http;
+    // First byte on a 200 flips this; a failure before it means the stream
+    // host never answered, which is what the host fallback keys on.
+    let delivered = false;
 
     const req = transport.request(
       {
@@ -185,6 +192,10 @@ export class CommandRelayService {
         }
         if (res.statusCode !== 200) {
           res.resume();
+          if (this.fallBackToApiHost(apiBase, { kind: 'status', status: res.statusCode ?? 0 }, delivered)) {
+            this.connectSSE();
+            return;
+          }
           this.sseFailures += 1;
           if (this.sseFailures >= 2) {
             this.log.appendLine(`SSE unavailable (status=${res.statusCode}); falling back to polling`);
@@ -200,6 +211,7 @@ export class CommandRelayService {
         let buffer = '';
         res.setEncoding('utf8');
         res.on('data', (chunk: string) => {
+          delivered = true;
           buffer += chunk;
           let frameEnd: number;
           while ((frameEnd = buffer.indexOf('\n\n')) !== -1) {
@@ -226,6 +238,12 @@ export class CommandRelayService {
     );
 
     req.on('error', () => {
+      // stop() destroys the request too — a teardown must never latch the
+      // relay onto the api host, so only a live relay may fall back.
+      if (this._running && this.fallBackToApiHost(apiBase, { kind: 'network' }, delivered)) {
+        this.connectSSE();
+        return;
+      }
       this.sseFailures += 1;
       if (this.sseFailures >= 2) {
         this.log.appendLine('SSE request error; falling back to polling');
@@ -239,6 +257,21 @@ export class CommandRelayService {
     req.end();
 
     this.sseRequest = req;
+  }
+
+  /**
+   * Stream-host → api-host fallback, tried BEFORE the SSE → polling one.
+   * True when this failure just moved the relay onto the api host: the
+   * caller reconnects at once and the failure does not count against the
+   * 2-strike polling budget (the api host has not been tried yet).
+   */
+  private fallBackToApiHost(apiBase: string, failure: StreamHostFailure, delivered: boolean): boolean {
+    const host = this.streamHost.currentFor(apiBase);
+    if (!this.streamHost.fallBackToApiHost(apiBase, failure, delivered)) return false;
+    const reason = failure.kind === 'network' ? 'network' : `status_${failure.status}`;
+    this.log.appendLine(`SSE stream host ${host} failed (${reason}); using ${apiBase}`);
+    capture('sse_stream_host_fallback', { host, reason, surface: 'vscode' });
+    return true;
   }
 
   private handleSseFrame(frame: string): void {
@@ -837,6 +870,11 @@ export class CommandRelayService {
     markTransportFailure: (): void => this.markTransportFailure(),
     isAuthFailureSurfaced: (): boolean => this.authFailureSurfaced,
     recentCommandIdCount: (): number => this.recentCommandIds.size,
+    connectSSEForTest: (): void => {
+      this._running = true;
+      this.connectSSE();
+    },
+    sseFailures: (): number => this.sseFailures,
     resetForTest: (): void => {
       this.recentCommandIds.clear();
       this.connectionListeners = [];

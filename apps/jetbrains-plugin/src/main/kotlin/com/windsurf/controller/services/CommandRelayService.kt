@@ -129,6 +129,7 @@ class CommandRelayService {
     private var sseCall: Call? = null
     private var sseReconnectTask: ScheduledFuture<*>? = null
     private var sseFailures: Int = 0
+    private val streamHost = StreamHostSelector()
 
     // ─── Polling fallback state ──────────────────────────────────────
     private var pollTask: ScheduledFuture<*>? = null
@@ -297,9 +298,10 @@ class CommandRelayService {
         if (!isRunning) return
         val settings = SettingsService.getInstance()
         val pluginId = settings.ensurePluginId()
+        val apiBase = settings.state.apiBaseUrl
 
         val request = Request.Builder()
-            .url("${settings.state.apiBaseUrl}/api/commands/pending/stream?pluginId=$pluginId")
+            .url("${streamHost.currentFor(apiBase)}/api/commands/pending/stream?pluginId=$pluginId")
             .addHeader("Accept", "text/event-stream")
             .addHeader("Cache-Control", "no-cache")
             .get()
@@ -309,12 +311,15 @@ class CommandRelayService {
         val call = sseClient.newCall(request)
         sseCall = call
 
-        val t = Thread({ runSseLoop(call) }, "command-relay-sse").apply { isDaemon = true }
+        val t = Thread({ runSseLoop(call, apiBase) }, "command-relay-sse").apply { isDaemon = true }
         sseThread = t
         t.start()
     }
 
-    private fun runSseLoop(call: Call) {
+    private fun runSseLoop(call: Call, apiBase: String) {
+        // First line on a 200 flips this; a failure before it means the stream
+        // host never answered, which is what the host fallback keys on.
+        var delivered = false
         try {
             val response = call.execute()
             try {
@@ -324,6 +329,10 @@ class CommandRelayService {
                     return
                 }
                 if (response.code != 200) {
+                    if (fallBackToApiHost(apiBase, response.code, delivered)) {
+                        connectSSE()
+                        return
+                    }
                     logger.debug("SSE status=${response.code}, will retry/fallback")
                     setConnectionState(ConnectionState.RECONNECTING)
                     onSseFailure()
@@ -340,6 +349,7 @@ class CommandRelayService {
                         if (isRunning) onSseFailure()
                         return
                     } ?: break
+                    delivered = true
                     if (line.isEmpty()) {
                         if (buffer.isNotEmpty()) {
                             handleSseFrame(buffer.toString())
@@ -356,11 +366,28 @@ class CommandRelayService {
             }
         } catch (e: Exception) {
             logger.debug("SSE connection error: ${e.message}")
+            if (isRunning && fallBackToApiHost(apiBase, null, delivered)) {
+                connectSSE()
+                return
+            }
             if (isRunning) {
                 markTransportFailure()
                 onSseFailure()
             }
         }
+    }
+
+    /**
+     * Stream-host -> api-host fallback, tried BEFORE the SSE -> polling one
+     * (see StreamHost.kt). True when this failure just moved the relay onto
+     * the api host: the caller reconnects at once and the failure does not
+     * count against the 2-strike polling budget.
+     */
+    private fun fallBackToApiHost(apiBase: String, status: Int?, delivered: Boolean): Boolean {
+        val host = streamHost.currentFor(apiBase)
+        if (!streamHost.fallBackToApiHost(apiBase, status, delivered)) return false
+        logger.info("SSE stream host $host failed (${status?.let { "status_$it" } ?: "network"}); using $apiBase")
+        return true
     }
 
     private fun onSseFailure() {
