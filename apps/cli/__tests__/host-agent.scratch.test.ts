@@ -53,6 +53,16 @@ let origHome: string | undefined;
 let origUserProfile: string | undefined;
 
 beforeEach(() => {
+  // Best-effort deploy-progress POSTs: answered locally so they never reach the
+  // production API with the fake IDENTITY (codeagent-1rhl).
+  vi.stubGlobal(
+    'fetch',
+    vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ success: true, data: { ok: true } }),
+    }),
+  );
   tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'codeam-host-scratch-'));
   origHome = process.env.HOME;
   origUserProfile = process.env.USERPROFILE;

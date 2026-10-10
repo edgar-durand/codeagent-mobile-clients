@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { listExportFiles, topPaths } from '../../src/scratch/export-files';
 import { configureGitCredentials } from '../../src/commands/host/workspace';
 
@@ -99,7 +99,10 @@ describe('listExportFiles', () => {
 
   it('a NON-scratch repo (clone prepared with configureGitCredentials) exports source only: no .git/ at all, never the credentials file', async () => {
     const dir = makeRepo({ 'src/index.html': '<h1>x</h1>' }, { commitAll: true });
+    // The GitHub identity lookup is best-effort; answer it locally (codeagent-1rhl).
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: false, status: 401 }));
     await configureGitCredentials(dir, 'me/repo', 'ghs_supersecret');
+    vi.unstubAllGlobals();
     // Precondition: the credentials file really is on disk.
     expect(fs.readFileSync(path.join(dir, '.git', 'codeam-credentials'), 'utf8')).toContain('ghs_supersecret');
     const list = await listExportFiles(dir);

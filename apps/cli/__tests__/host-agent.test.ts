@@ -350,6 +350,22 @@ describe('reportProgress — best-effort enrollment telemetry', () => {
   });
 });
 
+/**
+ * Best-effort backend calls (deploy-progress, session-event) answered locally,
+ * for describes that don't assert them. Unmocked, they reached the production
+ * API with the fake IDENTITY on every run (codeagent-1rhl).
+ */
+function stubBestEffortFetch(): void {
+  vi.stubGlobal(
+    'fetch',
+    vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ success: true, data: { ok: true } }),
+    }),
+  );
+}
+
 /** A fetch mock that succeeds for redeem and any best-effort progress POST. */
 function redeemFetchMock(redeemData: {
   hostId: string;
@@ -1437,6 +1453,8 @@ describe('HostAgentSupervisor — control channel reuse', () => {
 });
 
 describe('HostAgentSupervisor — command routing', () => {
+  beforeEach(stubBestEffortFetch);
+
   function makeSupervisor(spawnChild: ChildSpawner) {
     const resolveAgentAuth = vi
       .fn<(i: SealedHostIdentity, s: string) => Promise<AgentAuth>>()
@@ -2527,6 +2545,8 @@ describe('HostAgentSupervisor — self_hosted_wipe control command', () => {
 // ─────────────────────────────────────────────────────────────────────────────
 
 describe('isDeployPayload — suppressOnboardingWelcome back-compat + env injection', () => {
+  beforeEach(stubBestEffortFetch);
+
   async function deployAndCaptureEnv(
     overrides: Record<string, unknown>,
   ): Promise<Record<string, string>> {
@@ -2621,6 +2641,8 @@ describe('detectPackageManager — coverage across distros', () => {
 // ─────────────────────────────────────────────────────────────────────────────
 
 describe('HostAgentSupervisor — periodic self-update', () => {
+  beforeEach(stubBestEffortFetch);
+
   /**
    * Build a supervisor with a stubbed relay (no HTTP) and an injected
    * `selfUpdate` + `onUpdated`, so the update logic is exercised without
