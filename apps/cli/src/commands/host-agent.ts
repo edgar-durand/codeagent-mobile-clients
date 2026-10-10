@@ -1502,8 +1502,10 @@ export class HostAgentSupervisor {
   private async fleetMigrateBoxImage(payload: FleetMigrateBoxImagePayload): Promise<void> {
     const { containerName } = payload;
 
-    // Authority check: the daemon, not the payload.
+    // Authority check: the daemon, not the payload. `container inspect`, never
+    // the bare `inspect` (see fleetBoxImageStale: the box's same-named volume).
     const state = await this.docker.run([
+      'container',
       'inspect',
       '--format',
       '{{.State.Running}}',
@@ -1651,7 +1653,22 @@ export class HostAgentSupervisor {
     if (process.env.CODEAM_FLEET_BOX_IMAGE) return false;
     const image = resolveFleetBoxImage();
     // The image id the container currently runs.
-    const cur = await this.docker.run(['inspect', '--format', '{{.Image}}', containerName]);
+    //
+    // ⚠️ `container inspect`, NEVER the bare `inspect`: the box's named volume
+    // has the SAME name as its container. With the container gone, a bare
+    // `docker inspect codeam-box-<id>` resolves the VOLUME and fails with
+    // "template parsing error … map has no entry for key \"Image\"" instead of
+    // "No such container" — read as "not stale", so the wake fell through to
+    // `docker start`, whose "No such container" counts as success, and the box
+    // never came back (fleet-1 2026-10-09, box cmuqqa74j…: SLEEPING with only
+    // its volume after a migrate `rm` was SIGTERM'd at 120 s, codeagent-by5u).
+    const cur = await this.docker.run([
+      'container',
+      'inspect',
+      '--format',
+      '{{.Image}}',
+      containerName,
+    ]);
     if (cur.code !== 0) {
       // Missing container → recreate; any other inspect error → play it safe.
       return isMissingContainerError(cur.stderr);

@@ -20,8 +20,16 @@ import * as os from 'node:os';
  * absolute boundary: an agent that reads fully in-process (no permission request,
  * no fs delegation) can slip through, and a PTY agent (aider) bypasses ACP
  * entirely. That's acceptable because the REAL secrets are server-side and each
- * user runs in their own per-user container (the box holds only short-lived,
- * per-user-scoped, revocable tokens). Do NOT rely on this to protect a secret.
+ * user runs in their own per-user container. Audit (codeagent-904y, 2026-10-09):
+ * the box holds NO platform-wide secret (no upstream model keys, no JWT secret;
+ * the enroll token is single-use and only ever in env). What it does hold is
+ * per-user and NOT short-lived — `host-agent.json` hostToken + controlPollSecret
+ * (valid until the host is de-enrolled), and per session `pluginAuthToken` +
+ * `pollSecret` (HMAC of session+plugin, valid while the session exists), the
+ * same two in `mcp-secrets/` plus the loopback preview IPC token. Integration
+ * OAuth tokens are NOT on disk (`integrations*.json` is `{id, delivery}` only).
+ * Every one of them reaches only the same user's own resources. Do NOT rely on
+ * this guard to protect a secret.
  *
  * Applied on MANAGED deploys only (the caller gates on `!isLocalSession()`) — on
  * a user's own local machine `~/.codeam` is the user's own config, not ours.
