@@ -27,7 +27,7 @@
 
 import { _transport } from '../../services/streaming/transport';
 import { resolveApiBaseUrl } from '@codeam/shared';
-import type { AwaitingAnswerEvent, StreamingChunkEvent } from '@codeam/shared';
+import type { AwaitingAnswerEvent, SessionBlocker, StreamingChunkEvent } from '@codeam/shared';
 import { log } from '../../services/logger';
 
 export interface AcpPublisherOptions {
@@ -375,6 +375,9 @@ export class AcpPublisher {
       text: string;
       timestamp: number;
       agentId?: string;
+      /** Typed blocker tag on a failure bubble (codeagent-gfip). The backend
+       *  stores messages verbatim, so a reloaded history keeps it. */
+      blocker?: SessionBlocker;
     }>;
   }): Promise<void> {
     const url = `${this.apiBase}/api/sessions/conversation`;
