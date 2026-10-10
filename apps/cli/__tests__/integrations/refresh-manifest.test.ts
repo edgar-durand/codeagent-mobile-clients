@@ -156,6 +156,29 @@ describe('refreshIntegrationsManifest — the on-disk manifest stops being trust
     expect(onDisk()).toEqual(NEW);
   });
 
+  it('REWRITES when only toolRouter changed: same integrations, new routing reaches the session', async () => {
+    // A box whose manifest predates the router rollout has the same
+    // integrations as the backend's answer and no `toolRouter`. Comparing the
+    // integrations alone called that "unchanged", so the session kept direct
+    // MCP servers until the user next linked or unlinked something.
+    writeOnDisk(NEW);
+    process.env.CODEAM_API_URL = await serve(() => ({
+      status: 200,
+      body: { success: true, data: { ...NEW, toolRouter: true } },
+    }));
+    const { refreshIntegrationsManifest } = await import('../../src/integrations/refresh-manifest');
+
+    expect(await refreshIntegrationsManifest(CTX)).toEqual({ status: 'rewritten', before: 1, after: 1 });
+    expect(onDisk()!.toolRouter).toBe(true);
+
+    // And back off: the backend can revert the router without a client release.
+    writeOnDisk({ ...NEW, toolRouter: true });
+    await new Promise<void>((ok) => server!.close(() => ok()));
+    process.env.CODEAM_API_URL = await serve(() => ({ status: 200, body: { success: true, data: NEW } }));
+    expect(await refreshIntegrationsManifest(CTX)).toEqual({ status: 'rewritten', before: 1, after: 1 });
+    expect(onDisk()!.toolRouter).toBeUndefined();
+  });
+
   it("keeps each session's manifest its own: another deploy on the box cannot change it", async () => {
     writeOnDisk(OLD);
     process.env.CODEAM_API_URL = await serve(() => ({ status: 200, body: { success: true, data: NEW } }));
