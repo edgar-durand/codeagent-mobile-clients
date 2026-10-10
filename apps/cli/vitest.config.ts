@@ -20,6 +20,9 @@ export default defineConfig({
     globals: true,
     environment: 'node',
     include: ['__tests__/**/*.ts'],
+    // Fails any test whose fetch reaches a real (non-loopback) host, e.g. the
+    // prod API with a fake session (codeagent-1rhl). See the file header.
+    setupFiles: ['./__tests__/fixtures/prod-api-guard.ts'],
     // Shared test fixtures (no `describe`/`it`) live under
     // __tests__/fixtures and are imported by the real specs. Keep
     // them out of the test glob so vitest doesn't treat them as empty
