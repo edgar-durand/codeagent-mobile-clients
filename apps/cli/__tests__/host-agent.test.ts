@@ -3236,10 +3236,10 @@ describe('HostAgentSupervisor — fleet control plane', () => {
     const docker: DockerRunner = {
       run: vi.fn(async (args: string[]) => {
         calls.push(args);
-        if (args[0] === 'inspect' && args.includes('{{.State.Running}}')) {
+        if (args[0] === 'container' && args[1] === 'inspect' && args.includes('{{.State.Running}}')) {
           return { code: 0, stdout: opts.running, stderr: '' };
         }
-        if (args[0] === 'inspect' && args.includes('{{.Image}}')) {
+        if (args[0] === 'container' && args[1] === 'inspect' && args.includes('{{.Image}}')) {
           return { code: 0, stdout: opts.containerImageId, stderr: '' };
         }
         if (args[0] === 'inspect' && args.includes('{{.Id}}')) {
@@ -3358,10 +3358,10 @@ describe('HostAgentSupervisor — fleet control plane', () => {
     const docker: DockerRunner = {
       run: vi.fn(async (args: string[], opts?: { timeoutMs?: number }) => {
         seen.push({ args, timeoutMs: opts?.timeoutMs });
-        if (args[0] === 'inspect' && args.includes('{{.State.Running}}')) {
+        if (args[0] === 'container' && args[1] === 'inspect' && args.includes('{{.State.Running}}')) {
           return { code: 0, stdout: 'false', stderr: '' };
         }
-        if (args[0] === 'inspect' && args.includes('{{.Image}}')) {
+        if (args[0] === 'container' && args[1] === 'inspect' && args.includes('{{.Image}}')) {
           return { code: 0, stdout: 'sha256:old', stderr: '' };
         }
         if (args[0] === 'inspect' && args.includes('{{.Id}}')) {
@@ -3393,10 +3393,10 @@ describe('HostAgentSupervisor — fleet control plane', () => {
     (docker.run as ReturnType<typeof vi.fn>).mockImplementation(async (args: string[]) => {
       calls.push(args);
       if (args[0] === 'pull') return { code: 124, stdout: '', stderr: 'timed out' };
-      if (args[0] === 'inspect' && args.includes('{{.State.Running}}')) {
+      if (args[0] === 'container' && args[1] === 'inspect' && args.includes('{{.State.Running}}')) {
         return { code: 0, stdout: 'false', stderr: '' };
       }
-      if (args[0] === 'inspect' && args.includes('{{.Image}}')) {
+      if (args[0] === 'container' && args[1] === 'inspect' && args.includes('{{.Image}}')) {
         return { code: 0, stdout: 'sha256:old', stderr: '' };
       }
       return { code: 0, stdout: '', stderr: '' };
@@ -3463,7 +3463,7 @@ describe('HostAgentSupervisor — fleet control plane', () => {
       run: vi.fn(async (args: string[], runOpts) => {
         calls.push(args);
         opts.push(runOpts as { env?: Record<string, string> } | undefined);
-        if (args[0] === 'inspect' && args.includes('{{.Image}}')) {
+        if (args[0] === 'container' && args[1] === 'inspect' && args.includes('{{.Image}}')) {
           return { code: 0, stdout: containerImageId, stderr: '' };
         }
         if (args[0] === 'inspect' && args.includes('{{.Id}}')) {
@@ -3480,6 +3480,43 @@ describe('HostAgentSupervisor — fleet control plane', () => {
     apiOrigin: 'https://api.codeagent-mobile.com',
     limits: { memoryMb: 1536, cpus: 1, pidsLimit: 512, diskGb: 5 },
   };
+
+  it('fleet_start_box WITH recreate creds + container GONE (only its same-named volume left) → recreates (codeagent-by5u)', async () => {
+    // Real docker 29 on fleet-1: with the container gone but its volume (same
+    // name) still there, a BARE `docker inspect <name>` resolves the volume and
+    // fails on the template; only `docker container inspect` says "No such
+    // container". The wake must read that as "missing → recreate", not fall
+    // through to a `docker start` whose "No such container" counts as success.
+    const name = 'codeam-box-clu1a2b3c';
+    const calls: string[][] = [];
+    const docker: DockerRunner = {
+      run: vi.fn(async (args: string[]) => {
+        calls.push(args);
+        if (args[0] === 'inspect' && args.includes(name)) {
+          return {
+            code: 1,
+            stdout: '',
+            stderr: 'template parsing error: template: :1:2: executing "" at <.Image>: map has no entry for key "Image"',
+          };
+        }
+        if (args[0] === 'container' && args[1] === 'inspect') {
+          return { code: 1, stdout: '', stderr: `Error response from daemon: No such container: ${name}` };
+        }
+        if (args[0] === 'start') {
+          return { code: 1, stdout: '', stderr: `Error response from daemon: No such container: ${name}` };
+        }
+        return { code: 0, stdout: 'newcontainerid', stderr: '' };
+      }),
+    };
+    const sup = new HostAgentSupervisor(IDENTITY, { docker });
+
+    await sup.handleCommand(fleetRefCmd('fleet_start_box', recreateCreds));
+
+    const run = calls.find((c) => c[0] === 'run');
+    expect(run).toBeDefined();
+    expect(run).toContain(name);
+    expect(calls.some((c) => c[0] === 'start')).toBe(false);
+  });
 
   it('fleet_start_box WITH recreate creds + STALE image → rm + full run (self-heal, volume preserved)', async () => {
     const { docker, calls, opts } = makeImageRouterDocker('sha256:OLD', 'sha256:NEW');
@@ -4755,10 +4792,10 @@ describe('HostAgentSupervisor — fleet lanes', () => {
           await pullGate;
           return { code: 0, stdout: '', stderr: '' };
         }
-        if (args[0] === 'inspect' && args.includes('{{.State.Running}}')) {
+        if (args[0] === 'container' && args[1] === 'inspect' && args.includes('{{.State.Running}}')) {
           return { code: 0, stdout: 'false', stderr: '' };
         }
-        if (args[0] === 'inspect' && args.includes('{{.Image}}')) {
+        if (args[0] === 'container' && args[1] === 'inspect' && args.includes('{{.Image}}')) {
           return { code: 0, stdout: 'sha256:old', stderr: '' };
         }
         if (args[0] === 'inspect' && args.includes('{{.Id}}')) {
