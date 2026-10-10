@@ -4127,6 +4127,152 @@ describe('HostAgentSupervisor — multi-session boot resume (codeagent-v07a)', (
 });
 
 /**
+ * codeagent-5m12: a re-link (`self_hosted_refresh_credentials`) used to only
+ * rewrite the auth file. An `api_key` credential is delivered as an ENV var
+ * (ANTHROPIC_API_KEY, GEMINI_API_KEY, CURSOR_API_KEY) that exists only in the
+ * child's spawn env, so the running session kept the revoked key and 401'd
+ * until something restarted it — and every crash-respawn/resume came back with
+ * no key at all.
+ */
+describe('HostAgentSupervisor — re-link of an env-delivered credential', () => {
+  type Rec = import('../src/commands/host/session-state').PersistedSessionChild;
+  function fakeProc() {
+    const proc = new EventEmitter() as EventEmitter & {
+      stdout: EventEmitter;
+      stderr: EventEmitter;
+      kill: ReturnType<typeof vi.fn>;
+    };
+    proc.stdout = new EventEmitter();
+    proc.stderr = new EventEmitter();
+    proc.kill = vi.fn();
+    return proc;
+  }
+  const saved = (id: string, cwd: string) => ({
+    id,
+    pluginId: `plug-${id}`,
+    pollSecret: 'sec',
+    pluginAuthToken: `auth-${id}`,
+    agent: 'claude',
+    userName: 'u',
+    userEmail: 'e',
+    plan: 'pro',
+    pairedAt: 0,
+    cwd,
+  });
+
+  let tmpRoot: string;
+  let prevHome: string | undefined;
+  let prevSelfUpdate: string | undefined;
+  beforeEach(() => {
+    tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), '5m12-'));
+    // provisionAgentCredentials writes under the real home — keep it in tmp.
+    prevHome = process.env.HOME;
+    process.env.HOME = tmpRoot;
+    prevSelfUpdate = process.env.CODEAM_HOST_SELF_UPDATE_MS;
+    process.env.CODEAM_HOST_SELF_UPDATE_MS = '0';
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => ({ success: true, data: {} }) }),
+    );
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+    if (prevHome === undefined) delete process.env.HOME;
+    else process.env.HOME = prevHome;
+    if (prevSelfUpdate === undefined) delete process.env.CODEAM_HOST_SELF_UPDATE_MS;
+    else process.env.CODEAM_HOST_SELF_UPDATE_MS = prevSelfUpdate;
+    fs.rmSync(tmpRoot, { recursive: true, force: true });
+  });
+
+  function boot(auth: AgentAuth) {
+    const a = path.join(tmpRoot, 'dep-a');
+    const b = path.join(tmpRoot, 'dep-b');
+    fs.mkdirSync(a, { recursive: true });
+    fs.mkdirSync(b, { recursive: true });
+    let list: Rec[] = [
+      { deployId: 'dep-a', cwd: a, agent: 'claude_code', startedAt: 1 },
+      { deployId: 'dep-b', cwd: b, agent: 'codex', startedAt: 2 },
+    ];
+    const spawned: Array<{ env: Record<string, string>; proc: ReturnType<typeof fakeProc> }> = [];
+    const resumeSpawner = vi.fn((env: Record<string, string>) => {
+      const proc = fakeProc();
+      spawned.push({ env, proc });
+      return proc as never;
+    });
+    const sup = new HostAgentSupervisor(IDENTITY, {
+      makeRelay: () => ({ start: vi.fn(), stop: vi.fn(), sendResult: vi.fn() }),
+      resumeSpawner,
+      sessionStore: { load: () => [...list], save: (n: Rec[]) => void (list = [...n]), clear: () => void (list = []) },
+      listSavedSessions: () => [saved('sess-a', a), saved('sess-b', b)] as never,
+      orphanedDaemonFor: () => undefined,
+      resolveAgentAuth: vi.fn(async () => auth),
+    });
+    sup.start();
+    const refresh = () =>
+      sup.handleCommand({
+        id: 'cmd-refresh',
+        sessionId: 'sh-plugin-1',
+        type: 'self_hosted_refresh_credentials',
+        payload: { agentId: 'claude_code', sealedAgentAuth: 'sealed-fresh' },
+      });
+    return { sup, spawned, refresh };
+  }
+
+  const bySession = <T extends { env: Record<string, string> }>(spawned: T[], id: string): T[] =>
+    spawned.filter((s) => s.env.CODEAM_RESUME_SESSION_ID === id);
+
+  it('api_key: restarts ONLY that agent\'s children, resuming the same conversation with the new key', async () => {
+    const { sup, spawned, refresh } = boot({ kind: 'api_key', value: 'sk-fresh' });
+    try {
+      expect(spawned).toHaveLength(2);
+      const oldA = bySession(spawned, 'sess-a')[0].proc;
+      const oldB = bySession(spawned, 'sess-b')[0].proc;
+
+      await refresh();
+
+      expect(oldA.kill).toHaveBeenCalledWith('SIGTERM');
+      const a = bySession(spawned, 'sess-a');
+      expect(a).toHaveLength(2);
+      expect(a[1].env.ANTHROPIC_API_KEY).toBe('sk-fresh');
+      // The codex session is another agent — untouched.
+      expect(oldB.kill).not.toHaveBeenCalled();
+      expect(bySession(spawned, 'sess-b')).toHaveLength(1);
+      expect(sup.childCount()).toBe(2);
+    } finally {
+      sup.stop();
+    }
+  });
+
+  it('api_key: a crash-respawn after the re-link keeps the key (it lives only in the spawn env)', async () => {
+    vi.useFakeTimers();
+    const { sup, spawned, refresh } = boot({ kind: 'api_key', value: 'sk-fresh' });
+    try {
+      await refresh();
+      const restarted = bySession(spawned, 'sess-a')[1];
+      restarted.proc.emit('exit', 1, null);
+      vi.advanceTimersByTime(RESUME_RETRY_BACKOFF_MS[0]);
+      const a = bySession(spawned, 'sess-a');
+      expect(a).toHaveLength(3);
+      expect(a[2].env.ANTHROPIC_API_KEY).toBe('sk-fresh');
+    } finally {
+      sup.stop();
+    }
+  });
+
+  it('oauth_token: rewrites the login file and leaves running children alone (the agent re-reads it on a 401)', async () => {
+    const { sup, spawned, refresh } = boot({ kind: 'oauth_token', value: '{"claudeAiOauth":{}}' });
+    try {
+      await refresh();
+      expect(fs.existsSync(path.join(tmpRoot, '.claude', '.credentials.json'))).toBe(true);
+      expect(spawned).toHaveLength(2);
+      for (const s of spawned) expect(s.proc.kill).not.toHaveBeenCalled();
+    } finally {
+      sup.stop();
+    }
+  });
+});
+
+/**
  * codeagent-o7lm / codeagent-bbou (QA box 2026-09-25): a boot resumes only the
  * children that were live when the box went down, so opening any OTHER saved
  * session after a wake was a dead card ("waking up… your message is queued",
