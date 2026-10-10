@@ -1,0 +1,86 @@
+name: ACP provision smoke
+
+# Runs the ACP-provision smoke harness (codeagent-zjx) for real:
+#   apps/cli/__tests__/integration/acp-provision-smoke.int.test.ts
+#
+# For every agent whose credential is present it provisions the credential
+# with the SAME code prod ships (`provisionAgentCredentials`), spawns the
+# agent's ACP server the same way the CLI does, and drives
+# initialize → session/new → session/prompt. It fails on the class unit tests
+# cannot see: "provisioned but not authenticated over ACP" (-32000
+# Authentication required, empty turns, wrong agent). Before this workflow the
+# harness existed but nothing ran it, so that class was still only caught by a
+# user in prod.
+#
+# A row with no credential SKIPS (green), so this is safe on forks and before
+# every secret is set. Credentials (repo secrets — never echoed, never argv):
+#   claude → CLAUDE_TEST_CREDENTIAL_JSON (oauth blob) — falls back to the
+#            existing ANTHROPIC_API_KEY as an api_key credential
+#   codex  → CODEX_TEST_CREDENTIAL_JSON  (oauth blob) — falls back to the
+#            existing OPENAI_API_KEY as an api_key credential (exercises the
+#            ~/.codex/auth.json api-key write, the 2026-09-08 incident)
+#   house  → MINIMAX_API_KEY (the managed MiniMax proxy, same as the canary)
+#   gemini → GEMINI_TEST_CREDENTIAL_JSON, cursor → CURSOR_TEST_CREDENTIAL_JSON,
+#   kimi   → KIMI_TEST_CREDENTIAL_JSON   (owner-provided; skipped until set)
+#
+# ⚠️ Not a required check: it talks to live vendor APIs, so an upstream outage
+# must show up as red here, not block unrelated merges.
+
+on:
+  pull_request:
+    paths:
+      - 'apps/cli/src/agents/acp/**'
+      - 'apps/cli/src/commands/host/agent-provisioning.ts'
+      - 'apps/cli/__tests__/integration/acp-provision-smoke.int.test.ts'
+      - 'apps/cli/__tests__/fixtures/acp-smoke-driver.ts'
+      - 'packages/shared/src/agents/**'
+      - '.github/workflows/acp-provision-smoke.yml'
+  schedule:
+    # Nightly 04:00 UTC — catches an UPSTREAM agent/adapter release that breaks
+    # authenticated ACP with no commit of ours involved.
+    - cron: '0 4 * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: acp-provision-smoke-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    name: Authenticated ACP turn per agent
+    runs-on: ubuntu-latest
+    if: ${{ github.repository == 'edgar-durand/codeagent-mobile-clients' }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '20'
+          cache: npm
+
+      - name: Install workspaces
+        run: npm ci
+
+      # codex is a PATH binary in prod (`npm install -g @openai/codex`, the
+      # canonical install snippet); the codex ACP adapter is a workspace dep.
+      - name: Install the codex CLI
+        run: npm install -g @openai/codex >/dev/null
+
+      - name: ACP provision smoke
+        working-directory: apps/cli
+        env:
+          RUN_ACP_INT: '1'
+          CLAUDE_TEST_CREDENTIAL_JSON: ${{ secrets.CLAUDE_TEST_CREDENTIAL_JSON || secrets.ANTHROPIC_API_KEY }}
+          CLAUDE_TEST_AUTH_KIND: ${{ secrets.CLAUDE_TEST_CREDENTIAL_JSON && 'oauth_token' || 'api_key' }}
+          CODEX_TEST_CREDENTIAL_JSON: ${{ secrets.CODEX_TEST_CREDENTIAL_JSON || secrets.OPENAI_API_KEY }}
+          CODEX_TEST_AUTH_KIND: ${{ secrets.CODEX_TEST_CREDENTIAL_JSON && 'oauth_token' || 'api_key' }}
+          GEMINI_TEST_CREDENTIAL_JSON: ${{ secrets.GEMINI_TEST_CREDENTIAL_JSON }}
+          CURSOR_TEST_CREDENTIAL_JSON: ${{ secrets.CURSOR_TEST_CREDENTIAL_JSON }}
+          KIMI_TEST_CREDENTIAL_JSON: ${{ secrets.KIMI_TEST_CREDENTIAL_JSON }}
+          HOUSE_TEST_BASE_URL: ${{ secrets.MINIMAX_API_KEY && 'https://api.minimax.io/anthropic' || '' }}
+          HOUSE_TEST_TOKEN: ${{ secrets.MINIMAX_API_KEY }}
+        run: npx vitest run acp-provision-smoke --reporter=verbose
