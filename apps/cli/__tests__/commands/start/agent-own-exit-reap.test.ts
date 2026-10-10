@@ -19,6 +19,10 @@ const fakeSessionBase = {
   pollSecret: 'poll-secret',
 };
 
+import { guardProdApi } from '../../fixtures/prod-api-guard';
+
+guardProdApi();
+
 vi.mock('../../../src/config', () => ({
   addSession: vi.fn(),
   getActiveSession: vi.fn(),
@@ -56,6 +60,14 @@ vi.mock('../../../src/beads/wiring', () => ({
   provisionBeadsForStart: vi.fn(async () => null),
 }));
 
+// Best-effort backend calls on the start path: unmocked, they reached the
+// production API on every run (see fixtures/prod-api-guard.ts).
+vi.mock('../../../src/integrations/refresh-manifest', () => ({
+  refreshIntegrationsManifest: vi.fn(async () => ({ status: 'skipped', reason: 'test' })),
+}));
+vi.mock('../../../src/agents/claude/credential-sync', () => ({
+  startClaudeCredentialSync: vi.fn(() => ({ stop: vi.fn(async () => undefined) })),
+}));
 vi.mock('../../../src/integrations/provision', () => ({
   buildMcpServersForStart: vi.fn(() => []),
 }));

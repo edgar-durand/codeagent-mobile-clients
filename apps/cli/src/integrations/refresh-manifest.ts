@@ -46,12 +46,17 @@ export type RefreshManifestResult =
   | { status: 'rewritten'; before: number; after: number }
   | { status: 'skipped'; reason: string };
 
-/** Stable serialization so an equal manifest with different key order is equal. */
+/**
+ * Stable serialization so an equal manifest with different key order is equal.
+ * `toolRouter` is part of it: leaving it out kept a running box on its old
+ * routing until its integrations changed, so a router rollout or revert never
+ * reached existing sessions.
+ */
 function fingerprint(m: IntegrationsManifest): string {
   const norm = [...m.integrations]
     .map((e) => ({ id: e.id, delivery: e.delivery }))
     .sort((a, b) => a.id.localeCompare(b.id));
-  return JSON.stringify(norm);
+  return JSON.stringify({ integrations: norm, toolRouter: m.toolRouter === true });
 }
 
 /**
