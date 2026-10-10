@@ -14,6 +14,10 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { AcpHistory } from '../../../src/agents/acp/runner';
+import {
+  AUTH_FAILURE_MESSAGE,
+  byoProviderBillingMessage,
+} from '../../../src/agents/acp/failure-messages';
 import { HistoryService } from '../../../src/services/history.service';
 import type { AcpPublisher } from '../../../src/agents/acp/publisher';
 import type { RuntimeStrategy } from '../../../src/agents/strategy';
@@ -24,6 +28,7 @@ interface PushedMessage {
   text: string;
   timestamp: number;
   agentId?: string;
+  blocker?: unknown;
 }
 
 describe('AcpHistory — per-turn agentId', () => {
@@ -46,6 +51,34 @@ describe('AcpHistory — per-turn agentId', () => {
       ['user', 'codex'],
       ['agent', 'codex'],
     ]);
+  });
+});
+
+describe('AcpHistory — blocker tag survives a history reload (codeagent-gfip)', () => {
+  it('tags a recorded failure bubble and leaves a normal reply untagged', async () => {
+    const pushConversation = vi.fn(
+      async (_args: { agentId: string; messages: PushedMessage[] }) => undefined,
+    );
+    const publisher = {
+      pushConversation,
+      pushSessionList: vi.fn(async () => undefined),
+    } as unknown as AcpPublisher;
+    const history = new AcpHistory(publisher, { agent: 'claude', acpSessionId: 'conv-2' });
+    history.appendUserPrompt('hi');
+    history.appendAgentReply(AUTH_FAILURE_MESSAGE);
+    history.appendAgentReply(byoProviderBillingMessage('OpenRouter'));
+    history.appendAgentReply('All good.');
+    await history.flush();
+
+    const agentMessages = pushConversation.mock.calls[0][0].messages.filter(
+      (m) => m.role === 'agent',
+    );
+    expect(agentMessages.map((m) => m.blocker)).toEqual([
+      { kind: 'agent_auth_failed' },
+      { kind: 'provider_credits_exhausted', provider: 'OpenRouter' },
+      undefined,
+    ]);
+    expect('blocker' in agentMessages[2]).toBe(false);
   });
 });
 

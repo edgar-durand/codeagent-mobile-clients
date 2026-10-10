@@ -414,19 +414,32 @@ const coderabbitProvisioner: AgentProvisioner = {
   },
 };
 
+/**
+ * The env var a model-agnostic agent (aider, opencode) reads the user's own
+ * provider key from, detected by the key's prefix — the same mapping as the
+ * codespace auth snippets in api-v2 (`AiderProvisioningStrategy`).
+ */
+function providerKeyEnv(auth: AgentAuth): Record<string, string> {
+  const key = auth.value.trim();
+  const envName = key.startsWith('sk-ant-')
+    ? 'ANTHROPIC_API_KEY'
+    : key.startsWith('AIza')
+      ? 'GEMINI_API_KEY'
+      : 'OPENAI_API_KEY';
+  return { [envName]: key };
+}
+
+// opencode is model-agnostic and AUTO-DETECTS provider keys from env vars.
 const opencodeProvisioner: AgentProvisioner = {
-  write(auth): Record<string, string> {
-    // opencode is model-agnostic and AUTO-DETECTS provider keys from env vars
-    // (like aider). The credential is the user's provider key — detect the
-    // provider by prefix and export the matching var; opencode picks it up.
-    const key = auth.value.trim();
-    const envName = key.startsWith('sk-ant-')
-      ? 'ANTHROPIC_API_KEY'
-      : key.startsWith('AIza')
-        ? 'GEMINI_API_KEY'
-        : 'OPENAI_API_KEY';
-    return { [envName]: key };
-  },
+  write: (auth) => providerKeyEnv(auth),
+};
+
+// Aider (PTY runtime) reads the provider key from env at startup; the pair-auto
+// child's PTY inherits it. It had no entry here, so every self-hosted aider
+// deploy died with UnsupportedAgentError — 23 of the 27 self-hosted `failed`
+// steps from 2026-09-10 to 10-08 (codeagent-wd3l).
+const aiderProvisioner: AgentProvisioner = {
+  write: (auth) => providerKeyEnv(auth),
 };
 
 const PROVISIONERS: Partial<Record<AgentId, AgentProvisioner>> = {
@@ -437,6 +450,7 @@ const PROVISIONERS: Partial<Record<AgentId, AgentProvisioner>> = {
   cursor: cursorProvisioner,
   coderabbit: coderabbitProvisioner,
   opencode: opencodeProvisioner,
+  aider: aiderProvisioner,
 };
 
 /** Raised when a deploy targets an agent we can't provision on the box. */

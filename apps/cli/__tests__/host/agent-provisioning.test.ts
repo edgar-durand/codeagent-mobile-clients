@@ -347,3 +347,18 @@ describe('provisionAgentCredentials — coderabbit (reviewer add-on)', () => {
     expect(fs.existsSync(path.join(tmpHome, 'evil.json'))).toBe(false);
   });
 });
+
+describe('provisionAgentCredentials — aider (provider key by prefix)', () => {
+  // Every self-hosted aider deploy failed with UnsupportedAgentError before
+  // aider had a provisioner (23 of 27 self-hosted `failed` steps, 2026-09-10 →
+  // 10-08, codeagent-wd3l). The PTY child inherits these env vars.
+  it.each([
+    ['sk-ant-abc', 'ANTHROPIC_API_KEY'],
+    ['AIzaXYZ', 'GEMINI_API_KEY'],
+    ['sk-proj-123', 'OPENAI_API_KEY'],
+  ])('exports %s as %s and writes no file', (key, envName) => {
+    const env = provisionAgentCredentials('aider', { kind: 'api_key', value: `  ${key}\n` }, tmpHome);
+    expect(env).toEqual({ [envName]: key });
+    expect(fs.readdirSync(tmpHome)).toEqual([]);
+  });
+});
